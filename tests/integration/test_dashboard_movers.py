@@ -43,6 +43,7 @@ from brutex.dashboard.movers_snapshot import (
     _read_daily_bars,
     _read_session_bars,
     filter_to_ist_minute,
+    resolve_prev_close,
     run_movers_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -419,6 +420,139 @@ class TestPrevDayClose:
         )
 
 
+# ── resolve_prev_close: the CE/PE 1-minute-native gate ────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as
+# relayed via the coordinator — ADR-0021 RULING B, draft PR #1555): option
+# contracts never receive derived-timeframe prebuild any more, so a STORED
+# option ``1day`` partition is frozen at retirement eve. Reading it FIRST
+# would serve a stale prev-close (and a wrong %CHNG) forever — the resolver
+# must skip the 1day read entirely for CE/PE and go straight to the bounded
+# 1-minute prior-session walk-back. SPOT + FUT stay byte-identical
+# (1day-first), pinned below.
+
+
+_CE_SYMBOL = "NSE-NIFTY-27Jun24-20000-CE"
+_FUT_SYMBOL = "NSE-NIFTY-27Jun24-FUT"
+
+
+def _write_fno(tmp_path: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange=_EXCHANGE, segment="FNO", symbol=symbol, interval=interval, bars=bars
+    )
+
+
+class TestOptionPrevCloseOneMinuteNative:
+    def _seed_stale_1day_fresh_minute(self, tmp_path: Path, symbol: str) -> None:
+        """A FROZEN (stale) stored ``1day`` beside a FRESH 1-minute prior session.
+
+        The retirement-eve shape: the stored 1day's 2024-06-12 close (100 —
+        derived before later 06-12 minutes were pulled) diverges from the TRUE
+        06-12 last 1-minute close (123.45).
+        """
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                _min_bar(hour=9, minute=15, close="120", volume=5, day=date(2024, 6, 12)),
+                _min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12)),
+            ],
+        )
+
+    def test_option_prev_close_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the resolver read the frozen option
+        1day FIRST and served the stale close 100; the gate must serve the
+        TRUE 1-minute prior-session close 123.45."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_option_prev_close_never_opens_the_1day_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read spy: the CE baseline resolve performs ZERO 1day-partition reads."""
+        from brutex.dashboard import movers_snapshot as ms
+
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        calls: list[str] = []
+        real = ms._read_daily_partition
+
+        def _spy(lake_root: Path, **kwargs: Any) -> Any:
+            calls.append(str(kwargs.get("symbol")))
+            return real(lake_root, **kwargs)
+
+        monkeypatch.setattr(ms, "_read_daily_partition", _spy)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert calls == []  # the option 1day is never opened
+
+    def test_fut_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so the FUT baseline still reads the stored 1day FIRST even
+        when a diverging 1-minute prior session exists."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _FUT_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_FUT_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("100")  # the stored 1day close — 1day-first
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_spot_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """SPOT byte-identity pin: the gate is CE/PE-only — a spot symbol with a
+        diverging 1-minute prior session still serves the stored 1day close."""
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        )
+        assert got.value == Decimal("100")
+
+    def test_option_prev_close_equal_when_both_sources_fresh(self, tmp_path: Path) -> None:
+        """Equivalence pin: when the stored option 1day IS fresh (its close ==
+        the session's last 1-minute close, the derive law) the gate changes
+        nothing — the walk-back recovers the byte-equal value."""
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="120", close="123.45", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
+
+
 # ── run_movers_snapshot (direct, every branch) ────────────────────────────
 
 
@@ -594,6 +728,30 @@ class TestMoversApi:
         assert resp.status_code == 400
         assert "malformed time" in resp.json()["detail"]
 
+    def test_date_min_derived_tf_serves_200_not_500(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # REFUTER ROUND 3 defect R3-N1 (r3_attack_overflow.py port): ?date=0001-01-01
+        # is WELL-FORMED per parse_snapshot_date (only malformed dates 400), yet the
+        # round-2 month-edge probe's `day - timedelta(days=1)` raised OverflowError
+        # for date.min — neither a PolarsError nor an OSError, so it escaped the
+        # per-symbol movers_read_skip_errors() isolation and 500'd the route on any
+        # DERIVED TF (pre-probe code served the honest empty 200). The `day >
+        # date.min` probe gate restores the 200: date.min has no prior day at all,
+        # hence no prior-month file to probe. Fails pre-fix (HTTP 500) with the
+        # gate reverted.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store),
+            raise_server_exceptions=False,
+        )
+        resp = client.get("/api/v1/movers", params={"interval": "5minute", "date": "0001-01-01"})
+        assert resp.status_code == 200
+        body = resp.json()
+        # Honest empty ranking — no bars exist on a year-1 date; never a 500.
+        assert body["price_gainers"] == []
+        assert body["price_losers"] == []
+
     def test_unknown_asset_is_pending_not_500(self, store: InstrumentStore) -> None:
         # Spot / Futures / Options are all wired now; an UNKNOWN asset still gets
         # an honest "ships after Spot" pending payload (never a 500). The wired
@@ -690,8 +848,16 @@ class TestMoversApi:
         partition was served (``stored_reads == 1``) even when it predated the
         fresh 1-minute data, so this test's pull-active arm FAILED. Now the
         route passes ``prefer_resample=_pull_live()``: pull running → the
-        1-minute resample serves (fresh, ``resampled_reads == 1``); idle →
-        stored-first byte-identical."""
+        1-minute resample serves (fresh, ``resampled_reads == 1``) WITHOUT ever
+        opening the stored partition (zero stale warns — the threading proof).
+
+        IDLE arm FLIPPED (DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1): the
+        idle read still goes stored-FIRST (it opens the stored partition — hence
+        the ONE stale WARN, which the pull-active arm never emits), but the
+        VERIFY-EQUALITY freshness guard refuses the value-poisoned partition and
+        serves the fresh resample. Pre-guard this arm pinned the stale ₹99,999
+        close being served ("mid-pull is the only switch window" — no longer
+        true: the freshness guard is the second switch)."""
         # Fresh 1-minute session 09:15–09:19 + a STALE stored 5minute partition
         # whose poisoned close the resample can never produce.
         writer = ParquetWriter(lake_root=tmp_path)
@@ -718,22 +884,28 @@ class TestMoversApi:
             "date": "2024-06-13",
             "time": "09:19",
         }
-        # A pull IS running (injected probe) → the always-fresh resample serves.
+        # A pull IS running (injected probe) → the always-fresh resample serves,
+        # and the stored partition is never even opened (no stale warn).
         pulling = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: True)
         )
-        body = pulling.get("/api/v1/movers", params=params).json()
+        with capture_logs() as pull_logs:
+            body = pulling.get("/api/v1/movers", params=params).json()
         assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
         # No prior-day 1day baseline → the row ranks under volume (no % change).
         assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
-        # No pull → the stored-first read is byte-identical to before (the
-        # stale stored close is served — mid-pull is the only switch window).
+        assert [e for e in pull_logs if e["event"] == "movers.stored_stale_fallback"] == []
+        # No pull → the read goes stored-FIRST, opens the stale partition, and
+        # the freshness guard refuses it: fresh values + ONE stale WARN
+        # (REFUTER ROUND 1 flip — this arm previously served ₹99,999.00).
         idle = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: False)
         )
-        body2 = idle.get("/api/v1/movers", params=params).json()
-        assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
-        assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        with capture_logs() as idle_logs:
+            body2 = idle.get("/api/v1/movers", params=params).json()
+        assert (body2["stored_reads"], body2["resampled_reads"]) == (0, 1)
+        assert body2["volume"][0]["ltp"] == "₹22,040.00"  # never the stale bar
+        assert len([e for e in idle_logs if e["event"] == "movers.stored_stale_fallback"]) == 1
 
     def test_raising_pull_probe_is_swallowed_to_idle_read(
         self, store: InstrumentStore, tmp_path: Path
@@ -742,10 +914,16 @@ class TestMoversApi:
         an injected pull-active probe that RAISES is swallowed to ``False``
         (the documented "a raising probe is swallowed" except-arm), so the
         movers read serves the byte-identical IDLE stored-first path — a 200
-        with ``stored_reads == 1``, never a 500, never a resample switch."""
-        # Same lake shape as the pin above: fresh 1-minute session + a stale
-        # aligned stored 5minute partition whose poisoned close identifies
-        # which read path served the row.
+        with ``stored_reads == 1``, never a 500, never a resample switch.
+
+        Reworked for DEC-MOVERS-STORED-FRESHNESS-001 (REFUTER ROUND 1): the
+        stored 5minute partition is now a REAL prebuild (fresh — the freshness
+        guard verifies it against the base and serves it), because the previous
+        hand-poisoned stale partition is refused by the guard on EVERY idle read
+        and could no longer discriminate the swallowed-probe path. A True probe
+        would flip the provenance to ``resampled_reads == 1``, so ``(1, 0)``
+        still proves the raise was swallowed to ``False``."""
+        # Fresh 1-minute session + the REAL prebuilt (fresh) 5minute partition.
         writer = ParquetWriter(lake_root=tmp_path)
         writer.write(
             exchange=_EXCHANGE,
@@ -757,13 +935,20 @@ class TestMoversApi:
                 for i in range(5)
             ],
         )
-        writer.write(
+        from brutex.data.timeframe_materialize import (
+            PrebuildKind,
+            materialize_lake_timeframes,
+        )
+
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
             exchange=_EXCHANGE,
             segment=_SEGMENT,
             symbol="NIFTY",
-            interval="5minute",
-            bars=[_min_bar(hour=9, minute=15, close="99999", volume=1)],
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
         )
+        assert result.total_bars > 0
 
         def _wedged_probe() -> bool:
             raise RuntimeError("pull-job probe wedged")
@@ -782,10 +967,10 @@ class TestMoversApi:
         )
         assert resp.status_code == 200  # the probe error never breaks the read
         body = resp.json()
-        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
-        # byte-identical to the idle arm of the pin above.
+        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves the
+        # verified-fresh prebuilt partition (a True probe would read (0, 1)).
         assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
-        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        assert body["volume"][0]["ltp"] == "₹22,040.00"  # the prebuilt bucket close
 
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path
@@ -916,30 +1101,68 @@ class TestMoversAsofLatestDefault:
     def test_teeth_old_per_tf_default_slot_would_differ(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
-        # The bug reproduction: the OLD per-TF default pinned 3minute to its last
-        # grid slot 15:27 → the 15:27 partial-bucket close 21800, DIFFERENT from
-        # the new default's 15:29 latest close 22000. Explicit times still cut honestly.
+        # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 UPDATE: an explicit bucket-anchor pick
+        # now resolves FORWARD to the COMPLETED bucket, so 3minute @ 15:27 reads the
+        # completed 15:27–15:29 bucket close (22000 — the broker's), NOT the old
+        # partial 15:27 close (21800). That partial close is still observable on
+        # 1minute @ 15:27 (identity). DEC-MOVERS-ASOF-LATEST-DEFAULT-001's invariant
+        # (the no-time DEFAULT reaches the latest minute 22000 on every TF) holds.
         _seed_finalized_day_lake(tmp_path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        at_1527 = client.get(
+        at_1527_3m = client.get(
             "/api/v1/movers",
             params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        at_0915 = client.get(
+        at_1527_1m = client.get(
             "/api/v1/movers",
-            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "09:15"},
+            params={"asset": "spot", "interval": "1minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        # Read the LTP from the volume category (always includes the row — at 09:15
-        # the pct change is 0% so it is not a gainer/loser).
-        assert at_1527["volume"][0]["ltp"] == "₹21,800.00"
-        assert at_0915["volume"][0]["ltp"] == "₹20,000.00"
-        # The per-TF slots DIFFER from each other AND from the new default's 22000 —
-        # exactly the operator-reported divergence the default fix removes.
-        assert at_1527["volume"][0]["ltp"] != at_0915["volume"][0]["ltp"]
+        # Read the LTP from the volume category (always includes the row).
+        # 3minute @ 15:27 = the completed bucket close 22000; 1minute @ 15:27 = the
+        # partial 15:27 close 21800 (the value the OLD 3minute default wrongly froze).
+        assert at_1527_3m["volume"][0]["ltp"] == "₹22,000.00"
+        assert at_1527_1m["volume"][0]["ltp"] == "₹21,800.00"
+        assert at_1527_3m["volume"][0]["ltp"] != at_1527_1m["volume"][0]["ltp"]
+        # Provenance is honest: the 3minute pick echoes its resolved bucket end.
+        assert at_1527_3m["asof_through"] == "15:29"
+        assert "15:27 bucket · through 15:29" in at_1527_3m["note"]
+        # The no-time DEFAULT reaches the latest minute (22000) — the completed bucket.
         default = client.get(
             "/api/v1/movers", params={"asset": "spot", "interval": "3minute"}
         ).json()
         assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
+        assert default["asof_through"] is None  # no explicit pick → no bucket provenance
+
+    def test_default_latest_close_identical_with_stale_stored_tf(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """DEC-MOVERS-STORED-FRESHNESS-001: the invariant holds on a STALE-stored lake.
+
+        The DEC-MOVERS-ASOF-LATEST-DEFAULT-001 pin above runs on a lake with no
+        stored TF partitions, so it could never see the stale-stored divergence: a
+        stale prebuilt 3minute partition (one 09:15 bucket, close 21111 — a crashed
+        / partial prebuild) previously SERVED that stale close on the whole-day
+        default while 1minute read 22000. The freshness guard falls back to the
+        1-minute resample, so the no-time default reads the IDENTICAL latest close
+        across every timeframe again. Fail-before: pre-guard, 3minute reads
+        ₹21,111.00.
+        """
+        _seed_finalized_day_lake(tmp_path)
+        # A STALE stored 3minute partition: one bucket-open 09:15 bar (555);
+        # 555 + 3 = 558 ≤ 929 (the base's 15:29) → stale by the day-scoped guard.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "3minute",
+            [_min_bar(hour=9, minute=15, close="21111", volume=50)],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        ltps: set[str] = set()
+        for tf in ("1minute", "3minute", "5minute"):
+            body = client.get("/api/v1/movers", params={"asset": "spot", "interval": tf}).json()
+            assert body["date"] == "2024-06-13"
+            ltps.add(body["price_gainers"][0]["ltp"])
+        assert ltps == {"₹22,000.00"}, ltps  # ONE value — the stale partition never serves
 
     def test_default_intraday_echoes_latest_time_and_null_time(
         self, store: InstrumentStore, tmp_path: Path

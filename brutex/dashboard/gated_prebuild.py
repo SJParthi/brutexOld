@@ -18,16 +18,21 @@ pre-builds the selected underlyings' derived timeframes in ORDERED PHASES —
 The SPOT phase materialises each selected UNDERLYING's spot timeframes. The
 FUTURES phase, per underlying, DISCOVERS its FUT contracts in the F&O candle
 lake (:func:`discover_futures_contracts`, bounded — a handful of serial-month
-futures) and materialises each contract OI-aware. The OPTIONS phase does the
-SAME for the underlying's CE/PE contracts (:func:`discover_option_contracts`)
-when the options callables are injected — DEC-PIPELINE-AUTOPREBUILD-001
-supersedes the earlier "options stay on-demand" no-op; honest cost (Golden
-Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): a fully-materialised lake costs a
-MEASURED multiple of its 1-minute footprint (observed multiplier persisted to
-``schema_meta``; conservative 6.5× fallback — the retired "~2-3×" guess ignored
-the Greeks-enriched 17-column 1-minute rewrite), operator-accepted. When the
-options callables are NOT injected the phase is an explicit, REPORTED no-op
-(never a silent skip).
+futures) and materialises each contract OI-aware. The OPTIONS phase is
+RETIRED in production (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling
+of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B, draft
+PR #1555: option data stays 1-minute-native; fills resolve on the next
+1-minute bar worst-case, so derived option TFs are pure cost — the
+DEC-LAKE-FOOTPRINT-MEASURED-001 measured multiple of the 1-minute footprint,
+dominated by the option chain): NO production caller injects the options
+callables any more, so the phase is the explicit, REPORTED by-design no-op
+(:data:`OPTIONS_PREBUILD_SKIPPED_NOTE` — never a silent skip, never a fake
+"0 contracts found"). The injected options arm (:func:`discover_option_contracts`
++ the CE/PE contract loop, DEC-PIPELINE-AUTOPREBUILD-001) is RETAINED
+STRUCTURAL — direct-unit-covered, unreachable from the pipeline (the
+DEC-CROSSVERIFY-SPOT-ONLY-001 retained-structural precedent); already-stored
+derived option TFs stay INERT on disk (never deleted — disk reclaim is an
+optional operator action).
 
 Pure orchestration — the spot materialise, the contract discovery, and the
 contract materialise are all INJECTED callables, so the whole control flow
@@ -41,12 +46,12 @@ for the futures/options discovery + materialise — NOT an O(1)-total claim
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from brutex.data.errors import ResampleInputError, parquet_read_skip_errors
-from brutex.data.timeframe_materialize import PrebuildKind
+from brutex.data.timeframe_materialize import NoStored1mBarsError, PrebuildKind
 from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
@@ -63,7 +68,8 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     """The per-symbol DATA-fault quarantine set, resolved LAZILY at except time.
 
     (DEC-PREBUILD-SELECT-001; widened by DEC-LAKE-WRITE-UNIQUE-001 +
-    DEC-PREBUILD-CORRUPT-SKIP-001.) ``ValueError`` is the materialise core's
+    DEC-PREBUILD-CORRUPT-SKIP-001 + DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001.)
+    ``ValueError`` is the materialise core's
     historical data-error surface; :class:`~brutex.data.errors.ResampleInputError`
     is the canonical resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) —
     raised when ONE symbol's stored 1-minute partition is POISONED (duplicate /
@@ -75,11 +81,28 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     DEC-FETCH-PARSER-HARDENING-001 #1038). A quarantined symbol is reported in
     ``failed`` and every other symbol still runs.
 
+    ``ArithmeticError`` (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001) covers
+    ``decimal.InvalidOperation`` from the per-symbol Decimal price
+    conversion — a NaN-bearing stored partition previously raised a raw
+    ``InvalidOperation`` out of the ``CandleBar`` construction
+    (``frame_to_candle_bars`` / the engine read boundary's re-wrap belt),
+    which is NOT a ``ValueError``, so it ESCAPED this set and aborted the
+    WHOLE prebuild instead of quarantining the ONE symbol. Consumed ONLY at
+    the per-symbol data-fault boundaries (this module's three ``except``
+    sites + the parallel worker) — never wrapped around arbitrary code (the
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-18 escape-error discipline).
+    DISCLOSED breadth: an arithmetic fault (``ZeroDivisionError`` /
+    ``OverflowError``) inside ONE symbol's read→resample→write span now
+    quarantines-and-NAMES that symbol instead of aborting the run — at this
+    boundary such faults are overwhelmingly data-VALUE-driven (NaN/inf in
+    stored bytes), and the symbol is always reported in ``failed`` with the
+    error text, never silently.
+
     DELIBERATELY narrow, NOT ``DataLakeError`` broadly:
     :class:`~brutex.data.errors.LakeWriteHalt` (a sibling ``DataLakeError`` —
     disk-full / OOM, a pull-wide global stop) must STILL propagate, never be
-    miscounted as a per-symbol failure; a genuine code bug (``KeyError`` /
-    ``TypeError`` / …) propagates too.
+    miscounted as a per-symbol failure; a genuine non-arithmetic code bug
+    (``KeyError`` / ``TypeError`` / …) propagates too.
 
     A FUNCTION, not a module constant, because ``parquet_read_skip_errors``
     imports ``polars`` inside its call: the tuple is built only when an
@@ -96,7 +119,7 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
         skip: tuple[type[BaseException], ...] = parquet_read_skip_errors()
     except ModuleNotFoundError:
         skip = (OSError,)
-    return (ValueError, ResampleInputError, *skip)
+    return (ValueError, ArithmeticError, ResampleInputError, *skip)
 
 
 #: Public alias of :func:`_per_symbol_data_errors` (CLAUDE.md §11 COMMON) — the
@@ -213,6 +236,27 @@ PREBUILD_PHASE_ORDER: tuple[PrebuildKind, ...] = (
     PrebuildKind.OPTIONS,
 )
 
+#: The reported-no-op SPOT phase note (DEC-PULL-SCOPED-ALL-ONECLICK-001
+#: round-6 two-button split): rendered when NO ``materialize_spot`` is
+#: injected — the fno-only pipeline's spot-exclusion arm, the structural
+#: mirror of the options not-injected no-op. ONE constant shared with the
+#: parallel path in :mod:`brutex.dashboard.pipeline_prebuild` (§11 COMMON).
+SPOT_PREBUILD_SKIPPED_NOTE: Final[str] = (
+    "spot materialisation not injected — skipped by design (F&O-only scope)"
+)
+
+#: The reported-no-op OPTIONS phase note (DEC-OPTIONS-PREBUILD-RETIRE-001 —
+#: the operator ruling of 2026-07-15 as relayed via the coordinator, ADR-0021
+#: RULING B, draft PR #1555): rendered whenever the options callables are NOT
+#: injected — the PRODUCTION shape since the retirement. Option data is
+#: 1-minute-native; the skip is BY DESIGN, never a fake "0 contracts found".
+#: ONE constant shared with the parallel path in
+#: :mod:`brutex.dashboard.pipeline_prebuild` (§11 COMMON).
+OPTIONS_PREBUILD_SKIPPED_NOTE: Final[str] = (
+    "options prebuild retired — option data is 1-minute-native, derived "
+    "timeframes skipped by design (DEC-OPTIONS-PREBUILD-RETIRE-001)"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PhasePrebuildReport:
@@ -238,6 +282,14 @@ class PhasePrebuildReport:
         The sum of bars written across this phase's successful symbols.
     note
         A short human note (e.g. the options-not-injected explanation), or ``""``.
+    no_source
+        SPOT targets with ZERO stored 1-minute bars — nothing to derive
+        (vendor-empty or never pulled;
+        :class:`~brutex.data.timeframe_materialize.NoStored1mBarsError`). NOT
+        failures — ``ok`` is unaffected, so the movers-warm gate stays open
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001). Always ``()`` for the
+        contract phases (a contract discovered-with-files whose partition
+        vanished by read time stays a FAILURE — the deliberate spot scope).
     """
 
     phase: str
@@ -246,15 +298,21 @@ class PhasePrebuildReport:
     failed: tuple[tuple[str, str], ...]
     total_bars: int
     note: str = ""
+    no_source: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
-        """``True`` iff every attempted symbol succeeded (no failures)."""
+        """``True`` iff every attempted symbol succeeded (no failures).
+
+        A ``no_source`` symbol (zero stored 1-minute bars — nothing to
+        derive) is NOT a failure and never flips this
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001).
+        """
         return not self.failed
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the pipeline report + panel."""
-        return {
+        payload = {
             "phase": self.phase,
             "ok": self.ok,
             "attempted": list(self.attempted),
@@ -263,6 +321,11 @@ class PhasePrebuildReport:
             "total_bars": self.total_bars,
             "note": self.note,
         }
+        if self.no_source:
+            # EMIT-ON-NONEMPTY (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — the
+            # default all-stored-data payload stays byte-identical.
+            payload["no_source"] = list(self.no_source)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,10 +385,26 @@ def _run_spot_phase(
     failures are named); a genuine bug (``KeyError`` / ``TypeError`` / …) or a
     pull-wide :class:`~brutex.data.errors.LakeWriteHalt` PROPAGATES (never
     miscounted as a per-symbol data failure).
+
+    A whole-partition zero-stored-bars read
+    (:class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` — the
+    vendor-empty / never-pulled shape) is caught FIRST and classified
+    ``no_source`` instead of a failure
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive — and
+    structurally absent from movers-warm discovery when NO timeframe holds
+    parquet (a surviving previously stored DERIVED timeframe legitimately
+    keeps it discoverable, serving genuine stored bars; refuter round 2,
+    MIGRATION.md #1792) — so it must never withhold the warm run-wide.
+    The clause ORDER is load-bearing — ``NoStored1mBarsError`` is a
+    ``ValueError``, a member of :func:`_per_symbol_data_errors`. INFO not
+    WARN: a delisted symbol recurs every daily pull — expected healthy vendor
+    behavior (the #1630 log posture); the completion note + report carry the
+    operator surfacing.
     """
     attempted = tuple(inst.symbol_name for inst in underlyings)
     succeeded: list[str] = []
     failed: list[tuple[str, str]] = []
+    no_source: list[str] = []
     total_bars = 0
     for inst in underlyings:
         # Liveness beat per underlying (DEC-PIPELINE-STALL-HEARTBEAT-001): the prebuild
@@ -335,6 +414,14 @@ def _run_spot_phase(
         emit_progress_beat()
         try:
             result = materialize_spot(inst)
+        except NoStored1mBarsError as exc:
+            _LOG.info(
+                "universe.prebuild.spot_no_source",
+                symbol=inst.symbol_name,
+                detail=str(exc),
+            )
+            no_source.append(inst.symbol_name)
+            continue
         except _per_symbol_data_errors() as exc:
             _LOG.warning(
                 "universe.prebuild.spot_failed",
@@ -352,6 +439,7 @@ def _run_spot_phase(
         succeeded=tuple(succeeded),
         failed=tuple(failed),
         total_bars=total_bars,
+        no_source=tuple(no_source),
     )
 
 
@@ -376,6 +464,14 @@ def _run_contract_phase(
     data error (:func:`_per_symbol_data_errors`) in discovery OR materialise is
     recorded as a failure and the loop CONTINUES; a genuine bug (and a pull-wide
     :class:`~brutex.data.errors.LakeWriteHalt`) propagates.
+
+    DELIBERATELY no ``no_source`` classification here
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 is SPOT-scoped): a
+    :class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` from a
+    contract materialise still lands in :func:`_per_symbol_data_errors` → a
+    FAILURE — a contract was DISCOVERED from its stored files, so a
+    zero-stored-bars read is a heal/TOCTOU anomaly worth a red prebuild, not
+    vendor-empty-by-design.
     """
     attempted: list[str] = []
     succeeded: list[str] = []
@@ -424,28 +520,52 @@ def _run_contract_phase(
     )
 
 
-def _run_options_noop_phase(underlyings: Sequence[Instrument]) -> PhasePrebuildReport:
-    """OPTIONS phase when the options callables are NOT injected: a reported no-op.
+def _run_spot_noop_phase() -> PhasePrebuildReport:
+    """SPOT phase when NO ``materialize_spot`` is injected: a reported no-op.
 
-    Honest (Golden Rule #10): with no ``options_contracts_for`` /
-    ``materialize_option`` injected the phase can materialise nothing — it
-    records the attempted underlyings, succeeds with zero work, and carries the
-    not-injected note so the skip is visible, never silent.
+    The fno-only spot-exclusion arm (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6
+    two-button split), mirroring :func:`_run_options_noop_phase`'s honesty
+    posture: nothing is attempted BY DESIGN, zero work, and the by-design
+    note keeps the skip visible — never silent, never mistakable for a real
+    empty spot prebuild.
     """
     return PhasePrebuildReport(
-        phase=PrebuildKind.OPTIONS.value,
-        attempted=tuple(inst.symbol_name for inst in underlyings),
+        phase=PrebuildKind.SPOT.value,
+        attempted=(),
         succeeded=(),
         failed=(),
         total_bars=0,
-        note="options materialisation not injected — skipped (no-op)",
+        note=SPOT_PREBUILD_SKIPPED_NOTE,
+    )
+
+
+def _run_options_noop_phase() -> PhasePrebuildReport:
+    """OPTIONS phase when the options callables are NOT injected: a reported no-op.
+
+    The PRODUCTION shape since DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator
+    ruling of 2026-07-15 as relayed via the coordinator — ADR-0021 RULING B,
+    draft PR #1555): option data is 1-minute-native, so NOTHING is attempted
+    BY DESIGN — zero discovery, zero work — and the by-design note
+    (:data:`OPTIONS_PREBUILD_SKIPPED_NOTE`) keeps the skip visible: never
+    silent, never a fake "0 option contracts found" (Golden Rule #10). The
+    exact structural mirror of :func:`_run_spot_noop_phase`, so the
+    sequential and parallel pipeline paths report an IDENTICAL options
+    phase shape.
+    """
+    return PhasePrebuildReport(
+        phase=PrebuildKind.OPTIONS.value,
+        attempted=(),
+        succeeded=(),
+        failed=(),
+        total_bars=0,
+        note=OPTIONS_PREBUILD_SKIPPED_NOTE,
     )
 
 
 def run_gated_prebuild(
     *,
     underlyings: Sequence[Instrument],
-    materialize_spot: Callable[[Instrument], MaterializeResult],
+    materialize_spot: Callable[[Instrument], MaterializeResult] | None,
     futures_contracts_for: Callable[[Instrument], Sequence[str]],
     materialize_future: Callable[[str], MaterializeResult],
     options_contracts_for: Callable[[Instrument], Sequence[str]] | None = None,
@@ -468,15 +588,16 @@ def run_gated_prebuild(
     * **FUTURES** — for each underlying, *futures_contracts_for* DISCOVERS its
       FUT contracts in the F&O candle lake and *materialize_future* materialises
       each contract OI-aware. Keyed by contract symbol.
-    * **OPTIONS** — the SAME per-contract loop over the underlying's CE/PE
-      contracts (*options_contracts_for* + *materialize_option*,
-      DEC-PIPELINE-AUTOPREBUILD-001 — supersedes the on-demand-only no-op;
-      honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED multiple of
-      the 1-minute footprint once fully materialised — observed ``schema_meta``
-      multiplier, conservative 6.5× fallback; the retired "~2-3×" guess
-      ignored the Greeks-enriched 1-minute rewrite).
-      When EITHER options callable is ``None`` the phase is an explicit,
-      REPORTED no-op (back-compat — never a silent skip).
+    * **OPTIONS** — RETIRED in production (DEC-OPTIONS-PREBUILD-RETIRE-001,
+      the operator ruling of 2026-07-15 as relayed via the coordinator —
+      ADR-0021 RULING B, draft PR #1555: option data is 1-minute-native).
+      When EITHER options callable is ``None`` (the production shape — no
+      pipeline caller injects them any more) the phase is the explicit,
+      REPORTED by-design no-op (:data:`OPTIONS_PREBUILD_SKIPPED_NOTE` —
+      never a silent skip). The injected arm — the SAME per-contract loop
+      over the underlying's CE/PE contracts (*options_contracts_for* +
+      *materialize_option*, DEC-PIPELINE-AUTOPREBUILD-001) — is RETAINED
+      STRUCTURAL: direct-unit-covered, unreachable from the pipeline.
 
     Pure orchestration — all I/O is injected, so the whole control flow is
     offline-testable (CLAUDE.md §4 / §11). O(underlyings) for spot +
@@ -489,7 +610,10 @@ def run_gated_prebuild(
         The resolved underlying instruments to pre-build.
     materialize_spot
         ``instrument -> MaterializeResult`` — pre-builds ONE underlying's SPOT
-        timeframes; raises on a per-symbol data error.
+        timeframes; raises on a per-symbol data error. ``None`` makes the
+        SPOT phase an explicit, REPORTED no-op (the fno-only spot-exclusion
+        arm, DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 — the options-no-op
+        posture: never a silent skip).
     futures_contracts_for
         ``instrument -> Sequence[contract_symbol]`` — the underlying's futures
         contract symbols discovered in the F&O candle lake (bounded).
@@ -499,10 +623,12 @@ def run_gated_prebuild(
     options_contracts_for
         ``instrument -> Sequence[contract_symbol]`` — the underlying's CE/PE
         contract symbols discovered in the F&O candle lake, or ``None`` (the
-        options phase becomes a reported no-op).
+        options phase becomes the reported by-design no-op — the PRODUCTION
+        shape since DEC-OPTIONS-PREBUILD-RETIRE-001).
     materialize_option
         ``contract_symbol -> MaterializeResult`` — pre-builds ONE option
-        contract's OI-aware timeframes, or ``None`` (reported no-op).
+        contract's OI-aware timeframes, or ``None`` (reported by-design
+        no-op; the retained-structural injected arm).
     source
         The selection source label for the report (e.g. ``"pipeline"``).
 
@@ -529,10 +655,21 @@ def run_gated_prebuild(
     else:
 
         def _options_phase() -> PhasePrebuildReport:
-            return _run_options_noop_phase(underlyings)
+            return _run_options_noop_phase()
+
+    if materialize_spot is not None:
+        # Bind the narrowed callable so the closure below is statically non-None.
+        materialize_spt = materialize_spot
+
+        def _spot_phase() -> PhasePrebuildReport:
+            return _run_spot_phase(underlyings, materialize_spt)
+    else:
+
+        def _spot_phase() -> PhasePrebuildReport:
+            return _run_spot_noop_phase()
 
     runners: tuple[tuple[PrebuildKind, Callable[[], PhasePrebuildReport]], ...] = (
-        (PrebuildKind.SPOT, lambda: _run_spot_phase(underlyings, materialize_spot)),
+        (PrebuildKind.SPOT, _spot_phase),
         (
             PrebuildKind.FUTURES,
             lambda: _run_contract_phase(
@@ -569,6 +706,7 @@ def run_gated_prebuild(
 
 __all__ = [
     "PREBUILD_PHASE_ORDER",
+    "SPOT_PREBUILD_SKIPPED_NOTE",
     "GatedPrebuildReport",
     "PhasePrebuildReport",
     "discover_futures_contracts",

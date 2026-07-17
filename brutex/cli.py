@@ -367,6 +367,22 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--price-source-cells",
+        default="hlc3:close",
+        dest="price_source_cells",
+        help=(
+            "Comma-separated VWAP/EMA price-source cells '<vwap>:<ema>' — "
+            "open/high/low/close/hlc3 (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Default "
+            "'hlc3:close' (byte-identical to the pre-axis sweep — the axis is "
+            "dormant at cardinality 1). The 5-cell OFAT lattice is "
+            "'hlc3:close,open:close,close:close,hlc3:open,hlc3:hlc3'. HONEST BUDGET "
+            "(Golden Rule #10): a combined 5-cell run does NOT fit the ≤2-day bar "
+            "(≈2.3-7.4 M4-days); run each non-default cell as a SEPARATE "
+            "cardinality-1 invocation (≈baseline ≤2 days each). VWAP-source cells "
+            "are only meaningful on NIFTY futures (spot indices carry no volume)"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -958,6 +974,64 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── pull-all-spot (DEC-PULL-SCOPED-ALL-ONECLICK-001) — the scoped-ALL
+    #    spot pull: whole universe, spot-only, over the headless pipeline ──
+    pull_all_spot = sub.add_parser(
+        "pull-all-spot",
+        help=(
+            "Pull the whole SPOT universe (indices + ~750 stocks, 1-minute, "
+            "2020→prev day, incremental) then prebuild + cross-verify tail. "
+            "Deliberately NO --start/--end: full-range convergence is the "
+            "promise; date-scoped pulls stay on `brutex fetch`"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root dir (default: $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    pull_all_spot.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "UNATTENDED (cron/launchd) mode: pull only on an NSE trading day, "
+            "only after the post-close settle time (operator override "
+            "BRUTEX_PULL_ALL_SETTLE_IST > committed probe evidence "
+            "docs/groww/probe/settle_evidence.json when valid > the "
+            "conservative 17:30 IST default — UNMEASURED until the #1775 "
+            "probe evidence lands), never on a Muhurat day; every deferral "
+            "prints one line and exits 0 (cron-green)"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Offline synthetic pass (no Groww creds, no locks, no cross-verify "
+            "tail) — proves the chain shape only"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--settle-ist",
+        type=str,
+        default=None,
+        help=(
+            "One-shot HH:MM override of BRUTEX_PULL_ALL_SETTLE_IST for this "
+            "invocation (strict, fail-loud, structurally >= 15:35)"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--strict-exit",
+        action="store_true",
+        help=(
+            "Exit 2 when the pull left quarantined symbols or the cross-verify "
+            "tail's verdict is in the alert-status family (TAIL_ALERT_STATUSES) "
+            "— default keeps those exit 0 (printed, re-attempted next run). "
+            "Still-failing windows exit 2 regardless (they stop the chain)"
+        ),
+    )
+
     # ── enrich-greeks (DEC-CLI-GREEKS-ENRICH-001) — bulk Greeks re-enrich ──
     enrich = sub.add_parser(
         "enrich-greeks",
@@ -1418,6 +1492,16 @@ def build_parser() -> argparse.ArgumentParser:
             "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY or the module default; raise it "
             "when a >capacity resume is refused FAIL_CLOSED with "
             "SweepCacheCapacityError)"
+        ),
+    )
+    sweep_all.add_argument(
+        "--detach",
+        action="store_true",
+        dest="detach",
+        help=(
+            "Re-exec this exact sweep-all as a DETACHED session leader "
+            "(survives terminal/dashboard death — DEC-SWEEP-UNKILLABLE-CORE-001 R7) "
+            "and return immediately; progress/exit-status/Telegram are child-owned"
         ),
     )
     sweep_all.add_argument(
@@ -1993,6 +2077,118 @@ def build_parser() -> argparse.ArgumentParser:
     )
     n_status.add_argument("--label", default="com.brutex.nightly", help="launchd label")
     n_status.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
+    # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) ──
+    # The daily TickVault cross-verification producer: post-close priority
+    # pull → completeness gate → day-scoped prebuild → CSV export → idempotent
+    # S3 publish, all through the 100%-tested brutex.crossverify runner.
+    crossverify = sub.add_parser(
+        "crossverify",
+        help=(
+            "Daily TickVault cross-verify producer (pull → gate → prebuild → "
+            "CSV export → S3 publish) + launchd scheduling "
+            "(DEC-CROSSVERIFY-PRODUCER-001)"
+        ),
+    )
+    crossverify_sub = crossverify.add_subparsers(dest="crossverify_command", required=True)
+
+    cv_run = crossverify_sub.add_parser(
+        "run",
+        help=(
+            "Run the producer once (launchd/cron entry point). Exit 0 on "
+            "published/staged/skips, 1 on lock refusal / gate absent / junk "
+            "config, 2 on halts/blocked/withheld/publish-failed (cron-red)"
+        ),
+    )
+    cv_run.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_run.add_argument(
+        "--day",
+        default=None,
+        help="Export day YYYY-MM-DD (default: today IST — the post-close run's day)",
+    )
+    cv_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Render in memory ONLY — no locks, no pulls, no derives, no staging, no S3",
+    )
+    cv_run.add_argument(
+        "--skip-pull",
+        action="store_true",
+        dest="skip_pull",
+        help="Export/stage/publish from the EXISTING lake only (no vendor calls)",
+    )
+    cv_run.add_argument(
+        "--no-publish",
+        action="store_true",
+        dest="no_publish",
+        help="Render + stage only — the bring-up mode (no S3 puts)",
+    )
+
+    cv_install = crossverify_sub.add_parser(
+        "install",
+        help=(
+            "One-time launchd bootstrap (macOS): write + load the LaunchAgent "
+            "and VERIFY launchctl lists it. --at is REQUIRED (probe-decided "
+            "operator config — no default fire time ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--at",
+        default=None,
+        help=(
+            "Local fire time HH:MM — REQUIRED; choose it from the 5-day "
+            "post-close settle probe (no default ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--label",
+        default="com.brutex.crossverify",
+        help="launchd label (default com.brutex.crossverify)",
+    )
+    cv_install.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+    cv_install.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Baked into the plist EnvironmentVariables when set",
+    )
+
+    cv_uninstall = crossverify_sub.add_parser(
+        "uninstall", help="Unload + remove the LaunchAgent, verifying it is no longer listed"
+    )
+    cv_uninstall.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_uninstall.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
+    cv_status = crossverify_sub.add_parser(
+        "status",
+        help=(
+            "Schedule presence, launchctl listing, newest publish journal, "
+            "trading-day-aware dead-man verdict — honest lines even when "
+            "nothing ran"
+        ),
+    )
+    cv_status.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_status.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_status.add_argument(
         "--plist-dir",
         type=Path,
         default=None,
@@ -3350,6 +3546,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
+    # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
+    # heavy setup (the house env-law; default absent/off = byte-identical
+    # single-process behaviour, no brutexd process spawned). The mechanism
+    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
+    # line+branch gate); this function only threads the decision.
+    from brutex.dashboard.rust_front import (
+        RustFrontError,
+        resolve_rust_front,
+        run_with_rust_front,
+    )
+
+    try:
+        _rust_front_on = resolve_rust_front()
+    except RustFrontError as exc:
+        raise CliUserError(str(exc)) from exc
+
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
@@ -3498,6 +3711,85 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    # Self-arming post-market auto-pull scheduler (DEC-PULL-SCOPED-ALL-
+    # ONECLICK-001 round-5 fold): built for THIS lake root so the ▶ Pull
+    # EVERYTHING (spot only) button's first click arms a durable daily
+    # ticker (state sidecar `.pull_all_spot_auto.json`; the boot lifespan
+    # resumes it when armed). The tick-cadence env parse is DELIBERATELY
+    # outside the best-effort guard (junk BRUTEX_AUTO_PULL_TICK_S aborts
+    # startup with a clean one-liner — the loop_watchdog pattern; a typo
+    # must never silently change the cadence), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds —
+    # the button then runs without the auto-arm surface).
+    from brutex.calendars.auto_pull_gate import resolve_settle_time
+    from brutex.calendars.settle_evidence import evidence_settle
+    from brutex.dashboard.auto_pull_scheduler import (
+        AutoPullScheduler,
+        AutoPullStateStore,
+        resolve_tick_seconds,
+    )
+
+    try:
+        auto_pull_tick_s = resolve_tick_seconds()
+        # Eager settle-env validation (refuter round 6 M-2): a junk
+        # BRUTEX_PULL_ALL_SETTLE_IST previously passed boot and surfaced only
+        # as per-tick gate errors on an ARMED dashboard (the scheduler never
+        # fired) — fail loud HERE like the tick env, the same clean one-liner.
+        resolve_settle_time()
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with BRUTEX_PULL_ALL_SETTLE_IST set, resolve_settle_time's
+        # tier-1 short-circuit never reads the evidence, so a junk EXPLICIT
+        # BRUTEX_SETTLE_EVIDENCE_PATH would otherwise pass boot and detonate
+        # later as per-poll "unknown" text once the operator unsets the settle
+        # env. A default-path corrupt file WARNs + proceeds (never a boot
+        # failure — the r6/r7 posture).
+        evidence_settle()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    auto_pull_scheduler: Any = None
+    try:
+        auto_pull_scheduler = AutoPullScheduler(
+            AutoPullStateStore(_resolve_lake_root(lake_root)),
+            tick_seconds=auto_pull_tick_s,
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("auto_pull.build_failed", error=str(exc))
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): default ON behind the fail-loud BRUTEX_LOOP_WATCHDOG kill switch —
+    # the env parse is DELIBERATELY outside the best-effort guard (a junk value
+    # aborts startup with a clean one-liner, the resolve_* house convention:
+    # a typo must never SILENTLY disable the watchdog), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds).
+    from brutex.observability.loop_watchdog import LoopWatchdog, resolve_loop_watchdog_enabled
+
+    try:
+        loop_watchdog_enabled = resolve_loop_watchdog_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    loop_watchdog: Any = None
+    if loop_watchdog_enabled:
+        try:
+            from brutex.notifications.sweep_alerts import SweepAlerter
+            from brutex.observability.metrics import get_registry
+
+            loop_watchdog = LoopWatchdog(alerter=SweepAlerter(), registry=get_registry())
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("loop_watchdog.build_failed", error=str(exc))
+    # Revision-probe TTL memo env (DEC-O1-GUARANTEE-HARDEN-001 H2, review
+    # round 2): validate BRUTEX_REVISION_PROBE_TTL_S eagerly HERE so a junk
+    # value refuses with the SAME clean [brutex] one-liner + EXIT_USER_ERROR
+    # as the loop-watchdog sibling above (main() does not catch ValueError,
+    # so build_app's own eager raise would surface as a raw traceback on the
+    # CLI path). build_app KEEPS its eager raise for non-CLI embedders.
+    from brutex.dashboard.lake_revision import resolve_revision_probe_ttl
+
+    try:
+        resolve_revision_probe_ttl()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     app = build_app(
         state,
         instrument_store=store,
@@ -3505,6 +3797,8 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
+        loop_watchdog=loop_watchdog,
+        auto_pull_scheduler=auto_pull_scheduler,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
@@ -3559,6 +3853,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # root handlers (console + rotating JSON file) instead of uvicorn's own
     # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    if _rust_front_on:
+        # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
+        # operator port; uvicorn binds a private loopback port picked inside
+        # run_with_rust_front. A launch refusal (missing binary /
+        # non-loopback host) is a loud CliUserError exit 1, never a
+        # half-started topology.
+        try:
+            run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
+        except RustFrontError as exc:
+            raise CliUserError(str(exc)) from exc
+        return EXIT_OK
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
@@ -5040,6 +5345,17 @@ def cmd_fetch(
         # path. The pull OWNS their lifetime + MUST drain them in the `finally` below BEFORE
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE, fail-loud on junk at pull start (the
+        # existing loud CLI failure), never mid-run — and BEFORE the
+        # thread-owning write consumer / fetch pipeline are built, mirroring
+        # the dashboard sites (round-1 R3-MAJOR-1 uniformity hoist; the CLI's
+        # threads are daemons + one-shot, so this is hygiene, not a live
+        # leak). ``--dry-run`` / ``--inspect`` short-circuit to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` pattern).
+        from brutex.data.today_completeness import resolve_today_completeness_enabled
+
+        today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -5093,6 +5409,9 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=today_gate,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                     # Learned-floor clamp + in-pull depth learner
@@ -5968,6 +6287,525 @@ def cmd_nightly_status(
     return EXIT_OK
 
 
+# ────────────────────────────────────────────────────────────────────────
+# pull-all-spot (DEC-PULL-SCOPED-ALL-ONECLICK-001) — the scoped-ALL spot
+# pull over the headless pipeline binding (NOT cmd_fetch, which drives the
+# lower-level spot ingest spine over the 3 indices only).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_pull_all_spot(
+    *,
+    lake_root: Path | None,
+    auto: bool = False,
+    dry_run: bool = False,
+    settle_ist: str | None = None,
+    strict_exit: bool = False,
+    now: Callable[[], Any] | None = None,
+    pipeline_builder: Callable[..., Any] | None = None,
+    pipeline_executor: Callable[[Any], Any] | None = None,
+    lock_factory: Callable[..., Any] | None = None,
+    lease_factory: Callable[[Path], Any] | None = None,
+    crossverify_tail: Callable[[], Any] | None = None,
+) -> int:
+    """``brutex pull-all-spot`` — the one-command scoped-ALL SPOT pull.
+
+    DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): every admitted
+    index + stock, 1-minute, 2020-01-01 → previous day, auto-incremental via
+    the durable window ledger (settled windows are skipped — re-runs converge),
+    chained spot → prebuild → crossverify tail THROUGH the unchanged
+    ``run_full_pipeline`` (the ``build_headless_pipeline(scope="spot-only")``
+    binding — no F&O metadata, no F&O candles, no Greeks; movers are NOT
+    warmed headlessly — the dashboard's caches re-key on their next poll via
+    the ledger revision token, and the stdout says so). Mid-pull ledger
+    checkpointing is INTERNAL to ``pull_all_spot`` (the throttled
+    ``make_live_ledger_flush`` per processed window), so a crash/interrupt
+    keeps every settled window durable — verified by the e2e checkpoint test.
+
+    ``--auto`` (cron/launchd): the :mod:`brutex.calendars.auto_pull_gate`
+    verdict runs BEFORE any lock/vendor work — non-trading day / Muhurat day /
+    before the post-close settle time each print one ``deferred:`` line and
+    exit 0 (cron-green). A manual (non ``--auto``) run skips the gate — the
+    click IS the authorization; the untouched market-hours guard still
+    defers/halts in-window either way.
+
+    CROSSVERIFY TAIL (fail-soft, ruling 8b): ``run_crossverify`` is invoked
+    strictly AFTER the pull single-flight/lease with-block exits (the runner
+    acquires the SAME account→lake→lease trio itself — nesting would be
+    guaranteed contention), sharing this run's ONE ``SessionRateController``
+    and still INSIDE the command-wide ``keep_awake`` span (hostile-review
+    r1 #4 — the machine never sleeps mid-crossverify). A junk
+    ``BRUTEX_CROSSVERIFY_*`` env reads ``not configured`` and never blocks
+    the pull; ``BRUTEX_CROSSVERIFY=off`` reads ``disabled``; a tail
+    ``LakeWriteHalt`` fires ONE CRITICAL alert then re-raises (the cmd_fetch
+    halt convention — hostile-review r1 #3).
+
+    Exit law (hostile-review r1 #1 — prose follows code): 0 = clean OR
+    quarantine residuals OR ANY deferral (auto gate, contention under
+    ``--auto``, market-hours); 1 = junk flags/env, missing lake / instrument
+    master, manual contention refusal; 2 = the chain stopped/halted
+    (``report.ok`` False, market-hours deferral excepted) — and STILL-FAILING
+    spot windows are exactly that class (they fail the spot gate, the chain
+    stops), so they exit 2 by DEFAULT, no ``--strict-exit`` needed. Under
+    ``--strict-exit``, quarantined symbols or the crossverify alert-status
+    verdict family via ``TAIL_ALERT_STATUSES`` (named by alert STATUS, not by
+    exit code; ``refused`` carries a variable exit code on the direct
+    crossverify surface) ALSO escalate to 2. A tail failure NEVER changes the
+    default exit (the fail-soft decree) — it is printed only.
+
+    Every heavy dependency is injected for tests (builders, locks, tail,
+    clock); production defaults are the real machinery.
+    """
+    import structlog
+
+    from brutex.calendars.auto_pull_gate import (
+        PULL_ALL_SETTLE_ENV,
+        auto_pull_allowed,
+        resolve_settle_time,
+    )
+    from brutex.calendars.settle_evidence import evidence_settle
+    from brutex.dashboard.pipeline_pull import (
+        PHASE_MARKET_HOURS,
+        format_capped_names,
+        strict_gate_enabled,
+    )
+    from brutex.dashboard.pull_scope import (
+        SCOPE_SPOT_ONLY,
+        SPOT_ONLY_SESSION_RESUME_HINT,
+        TAIL_ALERT_STATUSES,
+        CrossverifyTailOutcome,
+        build_spot_only_note,
+        rewrite_market_hours_note,
+        run_crossverify_tail,
+    )
+
+    log = structlog.get_logger("brutex.cli")
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="pull-all-spot")
+    # EAGER validation — junk flags/env fail loud BEFORE any lock/vendor work
+    # (the DEC-RAM-BUDGETS-001 convention). The --settle-ist one-shot override
+    # rides the SAME strict resolver as the env knob.
+    env_map: Mapping[str, str] = os.environ
+    if settle_ist is not None:
+        env_map = {**os.environ, PULL_ALL_SETTLE_ENV: settle_ist}
+    try:
+        resolve_settle_time(env_map)
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with --settle-ist / the settle env set, the tier-1
+        # short-circuit means resolve_settle_time never reads the evidence —
+        # a junk EXPLICIT BRUTEX_SETTLE_EVIDENCE_PATH must still fail loud
+        # HERE, pre-lock (a default-path corrupt file WARNs + proceeds).
+        evidence_settle(env_map)
+        # Probe only — the binding re-resolves (the cmd_nightly precedent,
+        # cli.py `strict_gate_enabled()` in its pre-chain fail-loud try):
+        # junk BRUTEX_PIPELINE_STRICT_GATE previously escaped as a raw
+        # traceback from inside the held flock (refuter round 1, r2 MINOR-3).
+        strict_gate_enabled()
+        if not dry_run:
+            from brutex.calendars.market_hours import resolve_market_closed
+
+            # Probe only — the binding re-resolves; junk env is a clean exit 1.
+            resolve_market_closed()
+    except ValueError as exc:
+        raise CliUserError(str(exc)) from exc
+
+    if auto:
+        verdict = auto_pull_allowed(now=None if now is None else now(), env=env_map)
+        if not verdict.allowed:
+            print(f"[brutex] pull-all-spot deferred: {verdict.detail}")
+            log.info("pull_all_spot.auto_deferred", reason=verdict.reason)
+            return EXIT_OK
+
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_lease_guard,
+        pull_singleflight_lock,
+    )
+    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
+    from brutex.nightly.pipeline_binding import (
+        NightlyCapabilityError,
+        build_headless_pipeline,
+        execute_headless_pipeline,
+    )
+    from brutex.observability.power_keepawake import keep_awake
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+    locks = pull_singleflight_lock if lock_factory is None else lock_factory
+    lease = pull_lease_guard if lease_factory is None else lease_factory
+    builder = build_headless_pipeline if pipeline_builder is None else pipeline_builder
+    executor = execute_headless_pipeline if pipeline_executor is None else pipeline_executor
+    # ONE SessionRateController spans the pull AND the crossverify tail — one
+    # account rate budget (§2 Rule 6), never a second ceiling.
+    session_rate = SessionRateController()
+
+    with contextlib.ExitStack() as awake:
+        # keep_awake spans the WHOLE command — the pull AND the crossverify
+        # tail (hostile-review r1 #4: the tail is a real vendor pull + publish
+        # leg; the machine must not sleep mid-crossverify). The LOCK stack
+        # below still exits strictly BEFORE the tail (the lock-ordering law —
+        # keep_awake is lock-independent, so widening its span moves no lock).
+        awake.enter_context(keep_awake("brutex pull all spot"))
+        with contextlib.ExitStack() as stack:
+            if not dry_run:
+                # The nightly rail stack: lake single-flight (holder-noted) + the
+                # cross-host lease. A --dry-run is lock-free (zero vendor calls,
+                # zero real lake writes — the cmd_fetch posture).
+                try:
+                    stack.enter_context(locks(resolved, holder_note=f"pull-all-spot:{os.getpid()}"))
+                    stack.enter_context(lease(resolved))
+                except PullAlreadyRunningError as exc:
+                    print(
+                        f"[brutex] pull-all-spot refused: a pull is already running — {exc}",
+                        file=sys.stderr,
+                    )
+                    log.warning("pull_all_spot.refused_contention", error=str(exc))
+                    # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
+                    return EXIT_OK if auto else EXIT_USER_ERROR
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the pull is COMMITTED
+                # (locks held, real run) — write the durable owed marker
+                # BEFORE the chain runs, so a death anywhere downstream
+                # (mid-pull / mid-prebuild / pre-tail) leaves the sentinel
+                # the next run's step-D3 owed catchup completes. Best-effort
+                # + kill-switch coherent (marks nothing under
+                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
+                # failed pull); the tail's run_crossverify clears it at the
+                # day's completed material verdict. The day law mirrors the
+                # --auto gate's clock contract (IST wall clock; the injected
+                # `now` seam wins).
+                from brutex.calendars.nse import now_ist as _now_ist
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                launch_day = (now() if now is not None else _now_ist()).date()
+                mark_owed_for_pull(resolved, launch_day, source="cli-pull-all-spot")
+            try:
+                hp = builder(
+                    lake_root=resolved,
+                    dry_run=dry_run,
+                    scope=SCOPE_SPOT_ONLY,
+                    session_rate=session_rate,
+                )
+            except NightlyCapabilityError as exc:
+                raise CliUserError(str(exc)) from exc
+            try:
+                report = executor(hp)
+            except MarketHoursHalt as exc:
+                # Mid-run market-hours halt (the #1692 cmd_fetch posture): the
+                # durable ledger keeps PLANNED/FAILED windows resumable — a
+                # deferral, never a failure. The resume hint is the BOTH-ARMS
+                # wording (refuter round 1, r2 MINOR-1): on the spot-only
+                # composed belt the halt can also mean an EVENING Muhurat
+                # session, where "the next out-of-hours run" is
+                # self-contradictory.
+                print(
+                    f"[brutex] pull-all-spot deferred: {exc} — committed windows persisted; "
+                    f"{SPOT_ONLY_SESSION_RESUME_HINT}"
+                )
+                log.warning("pull_all_spot.deferred_market_hours", error=str(exc))
+                return EXIT_OK
+            except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError) as exc:
+                # Pull-wide HALT: CRITICAL Telegram then a loud nonzero exit (the
+                # cmd_fetch #888 pattern).
+                _emit_pull_halt_alert(exc)
+                print(f"[brutex] pull-all-spot HALTED: {exc}", file=sys.stderr)
+                return EXIT_INTERNAL_ERROR
+            finally:
+                hp.close()
+
+        # ← the pull single-flight + lease are RELEASED here (the inner stack
+        # exited); keep_awake is still HELD across the crossverify tail below.
+
+        # The whole-chain market-hours deferral (the sequencer's own belts).
+        # The note rides the spot-only surgery (refuter round 1, r2 MINOR-1):
+        # the sequencer's ONE deferral note hard-claims "inside 08:45-15:35
+        # IST", which is FALSE when the composed belt fired during an evening
+        # Muhurat session — the rewrite is the honest both-arms wording.
+        if report.stopped_after == PHASE_MARKET_HOURS:
+            deferral_note = rewrite_market_hours_note(report.note)
+            print(f"[brutex] pull-all-spot deferred: {deferral_note}")
+            log.info("pull_all_spot.deferred_market_hours", note=deferral_note)
+            return EXIT_OK
+
+        def _production_tail() -> CrossverifyTailOutcome:
+            """The REAL crossverify run — strictly AFTER the flock/lease release."""
+            from brutex.crossverify.config import resolve_crossverify_config
+            from brutex.crossverify.run import default_seams, run_crossverify
+
+            try:
+                config = resolve_crossverify_config(lake_root=resolved)
+                if not config.enabled:
+                    return CrossverifyTailOutcome(
+                        status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
+                    )
+                seams = default_seams(config, session_rate=session_rate)
+            except ValueError as exc:
+                # Genuine construction failure (junk BRUTEX_CROSSVERIFY_* env /
+                # market-hours env at the seam build) — the ONLY production
+                # "not configured" path (ruling 8); fail-SOFT, the pull stands.
+                return CrossverifyTailOutcome(
+                    status="not_configured", human=f"not configured (ValueError: {exc})"
+                )
+            cv = run_crossverify(config, seams)
+            return CrossverifyTailOutcome(
+                status=cv.verdict,
+                human=(
+                    f"{cv.verdict} (published {cv.published} · withheld {cv.withheld} · "
+                    f"failed {cv.publish_failed})"
+                ),
+            )
+
+        try:
+            tail = run_crossverify_tail(
+                _production_tail if crossverify_tail is None else crossverify_tail,
+                dry_run=dry_run,
+                stopped_after=report.stopped_after,
+            )
+        except LakeWriteHalt as exc:
+            # A disk-full during the crossverify publish/pull leg AFTER the spot
+            # pull already succeeded (the fence deliberately re-raises it, B M6):
+            # ONE best-effort CRITICAL Telegram alert, then re-raise — the
+            # cmd_fetch halt convention (hostile-review r1 #3; never a silent,
+            # alert-less traceback).
+            _emit_pull_halt_alert(exc)
+            raise
+
+        # ── stdout summary (C §4 shape; "?" for defensively-None fields) ──
+        spot = report.spot
+        kind = spot.verdict.kind if spot is not None else "?"
+        completed = str(spot.total_completed) if spot is not None else "?"
+        # "?" for an unknown spot phase like EVERY sibling field (hostile-review
+        # r2 #1) — never a fabricated 0-FAILED count for a phase that is unknown.
+        still_failed = str(spot.still_failed_windows) if spot is not None else "?"
+        skipped = str(spot.windows_skipped) if spot is not None else "?"
+        built = "?" if report.prebuild_built is None else str(report.prebuild_built)
+        bars = "?" if report.prebuild_total_bars is None else str(report.prebuild_total_bars)
+        # The headline is ALWAYS the note through the ONE spot-only surgery law
+        # (refuter round 1, r2 MINOR-2): an ok=True note can carry LOUD warning
+        # clauses — the DEC-WINDOW-LEDGER-RESCUE-001 "window ledger reload
+        # FAILED" prefix, ", prebuild CRASHED (ErrorType)", the strict-gate
+        # skip, the vendor-conflict clause — and the bare "spot-only pipeline
+        # complete" headline silently DROPPED them on the surface a cron
+        # operator actually reads. The surgery keeps the clean-run headline
+        # starting with the same words ("spot-only pipeline complete — …").
+        headline = build_spot_only_note(report.note, tail)
+        print(f"[brutex] pull-all-spot: {headline}")
+        print(
+            f"[brutex]   spot:      {kind} — {completed} pair(s) fetched, "
+            f"{still_failed} window(s) FAILED (will retry), "
+            f"{skipped} window(s) skipped (already present)"
+        )
+        print(f"[brutex]   quarantined: {report.quarantined_count}")
+        if report.prebuild_crashed is not None:
+            # A crashed prebuild must never masquerade as a bland unknown
+            # "? symbol(s), ? bars" (refuter round 1, r2 MINOR-2).
+            print(f"[brutex]   prebuild:  CRASHED ({report.prebuild_crashed})")
+        else:
+            print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+        if report.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the
+            # structured-block twin of the headline's no-source clause — a
+            # clean run's stdout stays byte-identical.
+            print(
+                f"[brutex]   no-source: {report.prebuild_no_source_count} symbol(s) skipped "
+                "— no stored 1-minute data (vendor-empty or never pulled): "
+                f"{format_capped_names(report.prebuild_no_source, report.prebuild_no_source_count)}"
+            )
+        print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
+        print("[brutex]   greeks:    not run — no options in this pull")
+        print(f"[brutex]   cross-verify: {tail.human}")
+        print("[brutex]   verify:    dashboard /coverage/windows (FAILED tab), /completeness")
+
+        if not report.ok:
+            # Still-failing spot windows land HERE: they fail the spot gate, the
+            # chain stops, ``report.ok`` reads False — exit 2 by DEFAULT (no
+            # --strict-exit needed). That is why the strict compound below
+            # carries NO still_failed term: it could never be the deciding
+            # subterm (hostile-review r1 #1 — no dead subterms).
+            return EXIT_INTERNAL_ERROR
+        if strict_exit and (report.quarantined_count > 0 or tail.status in TAIL_ALERT_STATUSES):
+            return EXIT_INTERNAL_ERROR
+        return EXIT_OK
+
+
+# ────────────────────────────────────────────────────────────────────────
+# crossverify (DEC-CROSSVERIFY-PRODUCER-001) — thin, fully-covered shims
+# over the 100%-tested brutex.crossverify modules (the cmd_nightly template).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_crossverify_run(
+    *,
+    lake_root: Path | None,
+    day: str | None,
+    dry_run: bool,
+    skip_pull: bool,
+    no_publish: bool,
+) -> int:
+    """Run the cross-verify producer once (the launchd/cron entry point).
+
+    Thin by design: fail-loud config resolve → :func:`default_seams` →
+    :func:`run_crossverify` → the report's own exit code. The runner NEVER
+    raises for a data/vendor/publish problem (halts fold into the ``suspect``
+    verdict, exit 2) and owns the market-hours START gate at its step E — an
+    in-window vendor-calling invocation returns the honest
+    ``deferred_market_hours`` verdict with a clean EXIT_OK (the ``cmd_fetch``
+    deferral posture, DEC-GROWW-MARKET-HOURS-GUARD-001; ``--dry-run`` /
+    ``--skip-pull`` make no vendor calls and are exempt); this shim NEVER
+    passes any exemption. Exit law (DEC-CROSSVERIFY-PRODUCER-001 §4):
+    0 published/staged_only/nothing/skips/disabled/deferred · 1 junk config /
+    lock refusal / gate-module-absent · 2 halts/blocked/withheld-final/
+    publish-failed/deadline-suspect/calendar-abstain (cron-red).
+    """
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify run")
+    parsed_day: date | None = None
+    if day is not None:
+        try:
+            parsed_day = date.fromisoformat(day)
+        except ValueError:
+            print(f"[brutex] --day must be YYYY-MM-DD, got {day!r}", file=sys.stderr)
+            return EXIT_USER_ERROR
+    from brutex.crossverify.config import resolve_crossverify_config
+    from brutex.crossverify.run import default_seams, run_crossverify
+
+    try:
+        config = resolve_crossverify_config(
+            lake_root=resolved,
+            day=parsed_day,
+            dry_run=dry_run,
+            skip_pull=skip_pull,
+            no_publish=no_publish,
+        )
+        # Seam build resolves the market-hours env ONCE, fail-loud
+        # (resolve_market_closed) — junk env exits EXIT_USER_ERROR here,
+        # before any lock/vendor work (the DEC-RAM-BUDGETS-001 convention).
+        seams = default_seams(config)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    report = run_crossverify(config, seams)
+    detail = f": {report.detail}" if report.detail else ""
+    print(f"[brutex] crossverify {report.day.isoformat()} — {report.verdict}{detail}")
+    print(
+        f"[brutex]   published {report.published} · already {report.skipped_already} · "
+        f"recovered-prior {report.recovered_prior} · "
+        f"re-gated {report.regated} · "
+        f"strict-published {report.publish_strict} · "
+        f"observe-published {report.publish_observe} · withheld {report.withheld} · "
+        f"blocked {report.blocked} · nothing {report.nothing} · "
+        f"excluded {report.excluded} · publish-failed {report.publish_failed} · "
+        f"derived {report.derived} ({report.derive_failed} failed)"
+    )
+    return report.exit_code
+
+
+def cmd_crossverify_install(
+    *,
+    at: str | None,
+    label: str,
+    plist_dir: Path | None,
+    lake_root: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+    platform: str | None = None,
+) -> int:
+    """One-time launchd bootstrap — ``--at`` REQUIRED (probe-decided config)."""
+    from brutex.crossverify.schedule import (
+        AT_REQUIRED_MESSAGE,
+        CROSSVERIFY_CRON_GUIDANCE,
+        install_crossverify,
+    )
+    from brutex.nightly.schedule import parse_at, pmset_wake_command
+
+    plat = sys.platform if platform is None else platform
+    if plat != "darwin":
+        print(
+            "[brutex] crossverify install targets macOS launchd; on Linux schedule via cron:",
+            file=sys.stderr,
+        )
+        print(f"[brutex]   {CROSSVERIFY_CRON_GUIDANCE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if at is None or not at.strip():
+        print(f"[brutex] {AT_REQUIRED_MESSAGE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    try:
+        hour, minute = parse_at(at)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    outcome = install_crossverify(
+        at=at,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        lake_root=lake_root,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    print(
+        "[brutex] REQUIRED for on-time fires: launchd does NOT wake a sleeping "
+        "Mac — run this scheduled wake yourself (one-time, sudo — BruteX never "
+        f"runs pmset): {pmset_wake_command(hour, minute)}"
+    )
+    return EXIT_OK
+
+
+def cmd_crossverify_uninstall(
+    *,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """Unload + remove the producer's LaunchAgent, verifying it is unlisted."""
+    from brutex.crossverify.schedule import uninstall_crossverify
+
+    outcome = uninstall_crossverify(
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    return EXIT_OK
+
+
+def cmd_crossverify_status(
+    *,
+    lake_root: Path | None,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """The morning command — honest producer status even when nothing ran."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify status")
+    from brutex.crossverify.schedule import status
+
+    report = status(
+        lake_root=resolved,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    for line in report.lines():
+        print(f"[brutex] {line}")
+    if report.deadman.verdict == "MISSED":
+        # The row-20 posture (the nightly-status precedent): a Mac asleep at
+        # the trigger starts NO process, so only the surface that NOTICES the
+        # silence can alert. Best-effort — a disabled Telegram is a silent
+        # no-op; a raise never breaks the read-only status command.
+        with contextlib.suppress(Exception):
+            from brutex.notifications.sweep_alerts import SweepAlerter
+
+            SweepAlerter().crossverify_refused(
+                run_id="deadman", reason=f"DEAD-MAN: {report.deadman.detail}"
+            )
+    return EXIT_OK
+
+
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
     """Delete all persisted BruteX data — dry-run by default, typed-confirm to execute.
 
@@ -6316,6 +7154,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_combos: int | None,
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
     options_sim: bool = True,
@@ -6330,6 +7169,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     sweep_cache_bloom_capacity: int | None = None,
     allow_out_of_scope: bool = False,
     acknowledge_sla_overrun: bool = False,
+    detach: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -6363,12 +7203,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         count_sweep_tuples,
         make_store_for,
     )
-    from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
+    from brutex.engine.sweep_progress import SweepProgress
     from brutex.engine.sweep_run import SweepRunSummary
     from brutex.engine.sweep_supervisor import (
         SweepGuards,
         grid_identity,
-        publish_progress,
         run_supervised_grid,
     )
     from brutex.engine.sweep_watchdog import SweepWatchdog
@@ -6380,6 +7219,24 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+
+    # R7 detached survival (DEC-SWEEP-UNKILLABLE-CORE-001): re-exec this exact
+    # invocation as its own session leader and return — the child owns the run
+    # (progress + exit-status + Telegram) and survives this process's death.
+    # The env sentinel (NOT a sys.argv string match) gates re-detach: the
+    # spawned child carries BRUTEX_SWEEP_DETACHED=1, so any surviving
+    # ``--detach`` abbreviation (argparse's default allow_abbrev matches
+    # ``--det`` → detach=True) is IGNORED in the child and the real sweep runs
+    # instead of forking another detached generation (fork-bomb guard,
+    # hostile-review round 3, #1712).
+    from brutex.engine.sweep_detach import running_as_detached_child, spawn_detached_sweep
+
+    if detach and not running_as_detached_child():
+        handle = spawn_detached_sweep(
+            [a for a in sys.argv[1:] if a != "--detach"], results_root=out_root
+        )
+        print(f"[brutex] sweep-all detached — pid={handle.pid} (results: {out_root})")
+        return EXIT_OK
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
@@ -6445,6 +7302,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = _parse_int_csv(k, flag="--k")
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
@@ -6460,6 +7332,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # Phase-2 run-core knobs (DEC-SWEEP-UNKILLABLE-CORE-001): resolve every
+    # env-driven config EAGERLY — a typo'd tripwire/diffcheck/stall knob is a
+    # clean user-config error at launch, never a mid-run traceback (the same
+    # law as the cache knobs above; the stall policy's `workers` arg is
+    # validation-only, deliberately never used to lower the bound).
+    from brutex.engine.sweep_diffcheck import resolve_diffcheck_k
+    from brutex.engine.sweep_run_core import sweep_run_core
+    from brutex.engine.sweep_singleflight import lake_read_guard
+    from brutex.engine.sweep_stall_policy import resolve_stall_policy
+    from brutex.observability.run_tripwires import TripwireConfig
+
+    try:
+        tripwire_config = TripwireConfig.from_env()
+        diffcheck_k = resolve_diffcheck_k()
+        stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 1 of 2 ──
     # Resolve the run-end results-depth kill switch EAGERLY: a junk
     # BRUTEX_RESULTS_DEPTH is a clean pre-sweep user-config error, never a
@@ -6468,6 +7359,31 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     try:
         results_depth_enabled = resolve_results_depth_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
+    # BRUTEX_FILL_MODE — ANY value, even the literal "worst_case" — is a
+    # stale launch config from the deleted mode machinery and REFUSES loudly
+    # pre-sweep (fail-loud beats silently tolerating a dead knob).
+    from brutex.execution.fill_mode import FillMode, require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
+    # switch EAGERLY too — a junk BRUTEX_SWEEP_RESUME_STORE_GUARD is a clean
+    # pre-sweep user-config error, never a mid-launch traceback (both sweep
+    # drivers re-resolve the same switch at their own entry; this eager pass
+    # only front-loads the failure).
+    from brutex.engine.tuple_complete import resume_store_guard_enabled
+
+    try:
+        resume_store_guard_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -6524,8 +7440,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # heals nothing here, so suppressing the L1 classification on an
         # unchanged file is sound; the SHARED heal/census callers keep the
         # default stat_cache=False.
+        # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
+        # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
+        # this launch loudly; once the bars are in memory the guard is released.
         slices: dict[tuple[str, str], list[Any]] = {}
-        with Catalog.open(catalog) as cat:
+        with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
             for symbol in symbol_list:
                 for interval in interval_list:
                     slices[(symbol, interval)] = load_sweep_slice(
@@ -6639,6 +7558,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": _indicator_version(),
@@ -6802,9 +7722,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"(evaluated={summary.evaluated})"
         )
 
-    def _on_progress(snap: SweepProgressSnapshot) -> None:
-        publish_progress(progress_path, snap)
-
     print(
         f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
         f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
@@ -6817,12 +7734,28 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.notifications.sweep_alerts import SweepAlerter
 
     alerter = SweepAlerter()
-    watchdog = SweepWatchdog(on_hung=alerter.watchdog_hung_callback())
+    # G2 (DEC-SWEEP-UNKILLABLE-CORE-001): the stall policy resolved at launch
+    # (default == the exact 300 s identity; env/scaling only ever RAISES it)
+    # governs BOTH the inter-tuple watchdog and the parallel driver below.
+    watchdog = SweepWatchdog(
+        timeout_seconds=stall_policy.timeout_seconds,
+        on_hung=alerter.watchdog_hung_callback(),
+    )
     checkpoint = SweepCheckpointStore(
         path=checkpoint_path,
         sweep_id=grid_identity(grid),
         total_combos=count_sweep_tuples(grid),
     )
+    # Multi-core worker resolution hoisted above the run-core wrap so the
+    # RUN_START record carries the real worker budget (observability only).
+    from brutex.engine.sweep_parallel import (
+        refuse_parallel_on_legacy_path,
+        resolve_sweep_workers,
+        run_parallel_grid,
+    )
+
+    workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
+    refuse_parallel_on_legacy_path(workers, digest_path=True)
     # Sweep-abort Telegram alert (R2-SL-F8 / R2-CC-G4) — the sweep twin of
     # cmd_fetch's DEC-TELEGRAM-PULL-HALT-001 pattern (_one_fetch_pass): any
     # abort propagating out of the launch/grid/stage-3/options-sim/cascade
@@ -6831,7 +7764,35 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
-    with sweep_abort_alert(_emit_pull_halt_alert):
+    # The unkillable run core (DEC-SWEEP-UNKILLABLE-CORE-001): ONE composite CM
+    # (G6 single-flight flock BEFORE any chain writer opens · exit-status ·
+    # keep-awake · flight recorder · tripwires · manifest · G12 checkpoint
+    # pre-load · progress reset) wraps the UNTOUCHED body; every hook is
+    # fail-soft and results stay byte-identical (the I-1 proof test).
+    with (
+        sweep_run_core(
+            results_root=out_root,
+            grid=grid,
+            alerter=alerter,
+            entry_label="brutex sweep-all",
+            total_tuples=count_sweep_tuples(grid),
+            workers=workers,
+            progress_path=progress_path,
+            checkpoint_store=checkpoint,
+            cli_chain_path=audit_path,
+            selection_extra={
+                "start": start,
+                "end": end,
+                "exchange": exchange,
+                "segment": segment,
+            },
+            inner_on_tuple=_on_tuple,
+            tripwire_config=tripwire_config,
+            diffcheck_k=diffcheck_k,
+        ) as core,
+        sweep_abort_alert(_emit_pull_halt_alert),
+    ):
+        core.stage("sweep")
         # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
         # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
         # window, then handed to every observable trade surface below (grid
@@ -6851,6 +7812,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             end=_parse_dt(end),
             catalog_path=catalog,
         )
+        # Golden Rule #3: the R45 diffcheck's production re-simulations stamp
+        # with this SAME launch stamper — late-bound because the run-core CM
+        # entered (and composed the diffcheck closure) BEFORE the stamper
+        # existed; the closure reads the bind at call time.
+        core.bind_reference_stamper(reference_stamper)
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -6895,6 +7861,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
+                    # DEC-FILL-WORST-CASE-ONLY-001: the launch context line
+                    # records the one fill law ALWAYS AND EXPLICITLY —
+                    # matching canonical_trade_params' unconditional emit —
+                    # so sweep-verify's precise-era refusal can judge any
+                    # generation from its own audit lines.
+                    launch_params: dict[str, object] = {
+                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
+                        "fill_mode": FillMode.WORST_CASE.value,
+                    }
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,
                         subject=f"sweep-all:launch:{fut_instrument}",
@@ -6903,9 +7878,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             "data_snapshot_hash": grid.data_snapshot_hash,
                             "indicator_version": grid.indicator_version,
                             "code_commit_sha": grid.code_commit_sha,
-                            "params": {
-                                "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
-                            },
+                            "params": launch_params,
                         },
                     )
             dedup = plan_launch_dedup(grid, digest_path=True)
@@ -6927,15 +7900,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # tuple digest → ``bypass_dedup`` is always True); ``workers > 1``
             # on the legacy no-digest path is HARD-REFUSED (this path is always
             # the digest path, so the guard is a belt-and-braces flag check,
-            # not a real limit).
-            from brutex.engine.sweep_parallel import (
-                refuse_parallel_on_legacy_path,
-                resolve_sweep_workers,
-                run_parallel_grid,
-            )
-
-            workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
-            refuse_parallel_on_legacy_path(workers, digest_path=True)
+            # not a real limit). Resolution hoisted above the run-core wrap.
             if workers > 1:
                 print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
                 result = run_parallel_grid(
@@ -6945,6 +7910,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    stall_seconds=stall_policy.timeout_seconds,
+                    on_progress=core.on_progress,
+                    # MAJOR round-2 fix: wire the parent-side per-tuple hook so
+                    # TUPLE_DONE flight records + the R39 NaN/absurd SUSPECT
+                    # tripwire also run in the DEFAULT multi-core mode (the
+                    # applied summary is parent-side, so no spawn-boundary
+                    # closure). G1 store-quarantine runs IN-WORKER (a corrupt
+                    # store is quarantined + retried there so the grid never
+                    # aborts) and its QUARANTINE flight records replay here.
+                    # R45 diffcheck stays a sequential-only sampling assurance
+                    # (its stateful K budget + SUSPECT-latch mismatch callback
+                    # cannot cross the spawn boundary — named follow-up
+                    # DEC-SWEEP-DIFFCHECK-PARALLEL-001; the audit-replay
+                    # determinism lane still covers parallel runs).
+                    on_tuple=core.on_tuple,
+                    on_quarantine=core.record_worker_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
@@ -6956,12 +7937,16 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     dedup=dedup,
                     ingest_audit=ingest_audit,
                     guards=guards,
-                    on_tuple=_on_tuple,
-                    on_progress=_on_progress,
+                    on_tuple=core.on_tuple,
+                    on_progress=core.on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    diffcheck=core.diffcheck,
+                    store_quarantine=core.store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
                 )
+            core.grid_done(result)
+            core.stage("stage3")
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
             # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
@@ -6971,20 +7956,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # lockbox-excluded train slice only (ADR-0007 condition 7 + A1).
             from brutex.engine.stage3_wire import run_stage3_pass
 
-            stage3_report = run_stage3_pass(
-                grid,
-                results_root=out_root,
-                bars_for=_bars_for,
-                audit=ingest_audit,
-                exchange=exchange,
-                segment=segment,
-                start=start,
-                end=end,
-                roll_schedule_by_instrument=roll_schedule_by_instrument,
-                # The launch's already-built stamper (never a second lake
-                # read); resolved lazily by the pass so a stage3-disabled
-                # grid pays nothing extra.
-                stamper_for=lambda: reference_stamper,
+            # D-4 (DEC-SWEEP-UNKILLABLE-CORE-001): the run core stamps every
+            # refined CELL store (run-id + train-snapshot bound), validates
+            # them before the cascade consumes, and on an invalid cell
+            # discards + re-runs the idempotent pass ONCE (then hard error).
+            stage3_report = core.run_stage3(
+                lambda: run_stage3_pass(
+                    grid,
+                    results_root=out_root,
+                    bars_for=_bars_for,
+                    audit=ingest_audit,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    roll_schedule_by_instrument=roll_schedule_by_instrument,
+                    # The launch's already-built stamper (never a second lake
+                    # read); resolved lazily by the pass so a stage3-disabled
+                    # grid pays nothing extra.
+                    stamper_for=lambda: reference_stamper,
+                )
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -7070,12 +8061,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # re-scores a non-prev-day survivor against its own Fib levels
         # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
         # pragma-free, unit-tested helper (review MAJOR 2).
+        core.stage("cascade")
         cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
         # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
         # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
         # manifest records stage-3 enablement + the refined-cell list.
         cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
+        # into the results-depth adapter below (None when the cascade had no
+        # specs — the depth pass then writes the honest not_validated/no_report
+        # entries; no disk re-read, so a stale on-disk report can never leak in).
+        cascade_report = None
 
         if cascade_specs:
             # Freeze the per-leaderboard trial statistics into the manifest
@@ -7115,11 +8113,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # literal-None), so the launch stamper deliberately does NOT
                 # ride into Stage-4.
             )
+            core.cascade_done(cascade_report)
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        else:
+            # No cascade specs (an all-no-bars grid or every combo below
+            # min_hits) — a legitimate degenerate-but-CLEAN run. Vacuously
+            # satisfy the R39 ``artifacts`` prerequisite so the clean run is
+            # never false-flagged SUSPECT (DEC-SWEEP-UNKILLABLE-CORE-001).
+            core.mark_cascade_absent()
+
         # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
         # The ONE run-end results-depth block — trade capture → aggregates →
         # sidecar trio → baselines → the global top-100 artifact — strictly
@@ -7164,6 +8170,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
+                cascade_report=cascade_report,
             )
         else:
             print(
@@ -7174,7 +8181,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
         # skipped on a VIX-trio conflict — makes the exit non-zero.
-        return sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
+        core.stage("artifacts")
+        exit_code = sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
+        core.set_exit_code(exit_code)
+        return exit_code
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
@@ -7215,11 +8225,20 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
     from brutex.engine.sweep_scheduler import (
         IST_OFFSET_SECONDS,
         CheckpointView,
+        CycleFailureTracker,
         Schedule,
         SchedulerError,
         cycle_audit_payload,
+        daemon_init_guard,
         plan_cycle,
     )
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
+    # G13 alerter-first (DEC-SWEEP-UNKILLABLE-CORE-001 / D-5): the alerter
+    # exists BEFORE any other init so an init failure can reach the phone;
+    # the 100%-tested escalation kernel lives in brutex.engine.sweep_scheduler.
+    alerter = SweepAlerter()
+    tracker = CycleFailureTracker()
 
     tz_offset_seconds = (
         tz_offset_minutes * 60 if tz_offset_minutes is not None else IST_OFFSET_SECONDS
@@ -7230,12 +8249,13 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
         print(f"[brutex] sweep-daemon schedule error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
-    resolved_lake = _resolve_lake_root(sweep_kwargs.get("lake_root"))
-    results_root = sweep_kwargs.get("results_root")
-    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
-    checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
-    daemon_audit_path = out_root / "audit" / "sweep-daemon.jsonl"
-    daemon_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with daemon_init_guard(alerter):
+        resolved_lake = _resolve_lake_root(sweep_kwargs.get("lake_root"))
+        results_root = sweep_kwargs.get("results_root")
+        out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+        checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
+        daemon_audit_path = out_root / "audit" / "sweep-daemon.jsonl"
+        daemon_audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _checkpoint_view() -> CheckpointView:
         """Best-effort read of the shared sweep checkpoint for the audit decision.
@@ -7295,6 +8315,12 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
                 subject=f"sweep-daemon:cycle-{cycle}",
                 payload={"cycle_index": cycle, "exit_code": exit_code, "fire_at": plan.fire_at},
             )
+            # G13 escalation kernel: a streak of failed cycles fires ONE
+            # CRITICAL push at the threshold edge; a clean cycle resets it.
+            if exit_code == EXIT_OK:
+                tracker.record_success()
+            elif tracker.record_failure():
+                alerter.sweep_halted(run_id="", reason="daemon_cycle_failures")
             last_fire = plan.fire_at
             cycle += 1
             if once or (max_cycles is not None and cycle >= max_cycles):
@@ -7679,6 +8705,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -7847,6 +8874,21 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = _parse_int_csv(k, flag="--k")
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
@@ -7868,6 +8910,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": indicator,
@@ -7901,6 +8944,54 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     stage3 = None
     with contextlib.suppress(CascadeWireError):
         stage3 = load_manifest(out_root).stage3
+
+    # Gate-folded store addresses (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001
+    # merge re-derivation over DEC-STAGE3-RECOUNT-001): `_tuple_digest` now
+    # folds the ACTIVE gate config into every tuple/cell store ADDRESS, so a
+    # stage-3-enabled tree's expected paths are derivable ONLY from a grid
+    # carrying the tree's RECORDED Stage-3 knobs. Resolve them exactly as the
+    # recount tier does — the tree's OWN audit first (condition B1), the
+    # operator --stage3-* flags as the audit-less fallback (condition B8) —
+    # and fold them into the verify grid so `plan_expected_stores` + the
+    # shadow re-sweep address the SAME files the launcher wrote. A gate-less
+    # tree emits NO fragment (default-elision), so its verify grid — and every
+    # pre-fold verdict — is byte-identical to before. HONEST residual: an
+    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
+    # here yet, so its identity pairing still reads grid_mismatch — re-verify
+    # with a matching config (the #1336 remediation wording).
+    if stage3 is not None and stage3.enabled:
+        import dataclasses as _dc
+
+        from brutex.engine.sweep_verify import recorded_stage3_from_audit
+
+        _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        _addr_knobs = _addr_audit.knobs if _addr_audit.consistent else None
+        if _addr_knobs is not None:
+            grid = _dc.replace(
+                grid,
+                stage3_enable=True,
+                stage3_top_k=_addr_knobs.stage3_top_k,
+                stage3_max_fevals=_addr_knobs.max_fevals,
+                stage3_max_restarts=_addr_knobs.max_restarts,
+            )
+        elif stage3_enable:
+            _flag_fold: dict[str, Any] = {"stage3_enable": True}
+            for _key, _value in (
+                ("stage3_top_k", stage3_top_k),
+                ("stage3_max_fevals", stage3_fevals),
+                ("stage3_max_restarts", stage3_restarts),
+            ):
+                if _value is not None:
+                    _flag_fold[_key] = _value
+            grid = _dc.replace(grid, **_flag_fold)
+        else:
+            print(
+                "[brutex] sweep-verify: the tree records an ENABLED stage-3 pass but "
+                "its audit carries no consistent knobs and no --stage3-* flags were "
+                "given — the gate-folded store addresses cannot be re-derived "
+                "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so identity pairing may "
+                "honestly read grid_mismatch"
+            )
 
     current_sha = _resolve_code_commit_sha()
     current_indicator = _indicator_version()
@@ -8078,7 +9169,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             inconclusive_only = True
         else:
-            scratch = (
+            import dataclasses as _dataclasses
+
+            scratch_base = (
                 scratch_root
                 if scratch_root is not None
                 else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
@@ -8088,8 +9181,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # RECORDED (STAGE_3_PASS_START audit payloads — condition B1);
             # operator --stage3-* flags are the audit-less fallback only
             # (condition B8), and a disagreement refuses cells, never silently
-            # prefers either side.
-            stage3_grid = None
+            # prefers either side. Resolved ONCE — mode-independent — then
+            # folded into each recount mode's grid inside the loop below.
+            stage3_ready = False
             cells_note: str | None = None
             cell_evidence = False
             knobs_from_audit = False
@@ -8146,8 +9240,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         "no recorded Stage-3 knobs in the audit and no --stage3-* flags supplied"
                     )
                 if cells_note is None and stage3_kwargs is not None:
-                    import dataclasses as _dataclasses
-
                     from brutex.engine.stage3_wire import (
                         Stage3WireError,
                         ensure_stage3_runtime,
@@ -8157,9 +9249,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         current_versions = ensure_stage3_runtime()
                     except Stage3WireError as exc:
                         cells_note = f"stage3 runtime unavailable: {exc}"
-                        stage3_grid = None
                     else:
-                        stage3_grid = _dataclasses.replace(grid, **stage3_kwargs)
+                        stage3_ready = True
                         versions_ok = stage3_audit.optimizer_versions in (
                             (),
                             (current_versions,),
@@ -8173,9 +9264,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                             )
                 if cells_note is not None:
                     print(f"[brutex] stage3 cells degraded to INCONCLUSIVE: {cells_note}")
-            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
-            audit_path = scratch / "audit.jsonl"
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
             # The shadow re-sweep must stamp EXACTLY like the launcher did
             # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
             # the window-bounded India-VIX stamper into every persisted row,
@@ -8200,6 +9288,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 end=_parse_dt(end),
                 catalog_path=catalog,
             )
+            # DEC-FILL-WORST-CASE-ONLY-001: ONE fill law → ONE recount plan
+            # (the per-mode union loop is deleted with the mode vocabulary; a
+            # precise-era generation was already refused by
+            # recorded_audit_facts before any tier ran).
+            mode_grid = grid
+            scratch = scratch_base
+            stage3_grid = (
+                _dataclasses.replace(mode_grid, **stage3_kwargs)
+                if stage3_ready and stage3_kwargs is not None
+                else None
+            )
+            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
+            audit_path = scratch / "audit.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -8211,10 +9313,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # plan_launch_dedup returns the no-alloc raising sink instead.
             with AuditWriter.open(audit_path) as audit:
                 resweep_summary = run_sweep_grid(
-                    grid,
+                    mode_grid,
                     bars_for=lambda s, i: slices.get((s, i), []),
-                    store_for=make_store_for(scratch, grid),
-                    dedup=plan_launch_dedup(grid, digest_path=True),
+                    store_for=make_store_for(scratch, mode_grid),
+                    dedup=plan_launch_dedup(mode_grid, digest_path=True),
                     audit=audit,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=recount_stamper,
@@ -8271,7 +9373,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     out_root,
                     scratch,
                     plan_expected_stores(
-                        out_root, grid, stage3=stage3 if stage3_grid is not None else None
+                        out_root, mode_grid, stage3=stage3 if stage3_grid is not None else None
                     ),
                     context_match=context_match,
                     cell_evidence=cell_evidence,
@@ -8289,7 +9391,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 inconclusive_only = True
             # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
             # evidence exists ONLY under a matched context — the plan freezes
-            # the condemnation-time hashes for `brutex sweep-heal`.
+            # the condemnation-time hashes for `brutex sweep-heal`. The plan
+            # filename folds the grid identity, which carries the
+            # unconditional worst-case fill key.
             if emit_heal_plan:
                 if not context_match:
                     print(
@@ -8305,9 +9409,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
                     heal_plan = build_heal_plan(
                         rec_report,
-                        plan_expected_stores(out_root, grid),
+                        plan_expected_stores(out_root, mode_grid),
                         root=out_root,
-                        grid_identity=grid_identity(grid),
+                        grid_identity=grid_identity(mode_grid),
                         context=RecordedContext(
                             data_snapshot_hash=snapshot,
                             indicator_version=indicator,
@@ -8366,12 +9470,45 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
-    # C6 best-effort guard: a fresh "running" progress snapshot refuses. A
-    # snapshot older than this is a crashed sweep's leftover, not a live one.
-    progress_fresh_seconds = 600.0
-    progress = read_progress(out_root / "progress" / "sweep-progress.json")
-    fresh = (time.time() - float(progress.get("updated_at") or 0.0)) < progress_fresh_seconds
-    sweep_running = bool(progress.get("running")) and fresh
+    # C6 guard (G4, DEC-SWEEP-UNKILLABLE-CORE-001): judge liveness on the
+    # WALL-clock heartbeat + writer pid via the pure verdict — the prior
+    # `time.time() - updated_at` compared a MONOTONIC stamp to the wall clock
+    # (sweep_progress.py stamps time.monotonic()), so "fresh" was ~always
+    # False and a LIVE run's stores were quarantinable. FAIL-CLOSED: a legacy
+    # payload without wall/pid evidence (UNKNOWN) REFUSES the heal — never
+    # quarantine on doubt; a MISSING progress file has no run to protect. STALE
+    # ALSO refuses (DEC-SWEEP-UNKILLABLE-CORE-001, hostile-review round 1): STALE
+    # is only ever reached when the writer PID is ALIVE (a dead pid returns
+    # NOT_RUNNING before the staleness arm), so a stale-heartbeat verdict means a
+    # genuinely LIVE-but-slow run — a >600s lake preload, one very-large tuple,
+    # or the post-grid stage3/cascade phase. Quarantining a live run's
+    # stores/checkpoint/dedup is the exact corruption the C6 guard exists to
+    # prevent ("a LIVE run is never quarantinable"), so STALE joins the refuse
+    # set — heal-able is reserved for NOT_RUNNING (dead pid / clean terminal).
+    from brutex.engine.sweep_liveness import (
+        RunVerdict,
+        exit_status_running,
+        progress_verdict,
+    )
+
+    progress_path = out_root / "progress" / "sweep-progress.json"
+    progress = read_progress(progress_path)
+    if progress_path.exists():
+        verdict = progress_verdict(progress, now_wall=time.time())
+        sweep_running = verdict in (RunVerdict.RUNNING, RunVerdict.UNKNOWN, RunVerdict.STALE)
+    else:
+        sweep_running = False
+    # C6 resume-startup residual (round-4 hostile-review fix): the progress
+    # file LAGS a resuming run — on a crash-resume it still shows the PRIOR
+    # attempt's DEAD pid until `_reset_progress_at_launch` rewrites it, which
+    # runs AFTER the checkpoint preload. So a `progress_verdict`-only guard
+    # reads NOT_RUNNING in the enter→preload→reset window and a concurrent
+    # `--execute` heal could quarantine the resuming run's stores/checkpoint.
+    # The fresh `exit-status.json` (state=running + LIVE pid, written FIRST at
+    # run-core enter under the G6 flock, and already enriched into `progress`
+    # by `read_progress`) does NOT lag — treat the run as live when it says so.
+    if not sweep_running and exit_status_running(progress):
+        sweep_running = True
 
     try:
         assessment = assess_heal(
@@ -8780,6 +9917,15 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
 
     if not bars:
         return []
+    # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
+    # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
+    # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
+    # the (vwap, ema) source as a column. So this options-translation replay is
+    # BASELINE-SOURCE ONLY: a survivor swept under a non-default fib_anchor or
+    # price-source cell replays here with the wrong Group-4 / VWAP-EMA bits. This is
+    # a PRE-EXISTING limitation (equally true for fib_anchor since #1011) — threading
+    # the source in would require ResultRow to carry it; documented in
+    # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
@@ -8802,6 +9948,11 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-WORST-CASE-ONLY-001: the replay simulates under the ONE
+        # hardcoded worst-case fill law — the same law the winners were
+        # swept under by construction. NOTE the honest pre-existing
+        # envelope: this replay carries NO sl/tp either — it is an
+        # entry/exit-instant approximation, not a byte-parity re-simulation.
         reference_stamper=None,
     )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
@@ -8958,6 +10109,16 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model — a set
+    # BRUTEX_FILL_MODE (any value) is a stale launch config from the deleted
+    # mode machinery and REFUSES loudly at this executor launch too.
+    from brutex.execution.fill_mode import require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] options-sim config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # replay's stamps were provably discarded at the SpotSignal conversion —
     # see the sanctioned literal-None site in _replay_spot_signals_for_row —
@@ -9141,6 +10302,7 @@ def _run_results_depth_adapter(
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
     pass_runner: Callable[..., Any] | None = None,
+    cascade_report: Any | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -9159,14 +10321,37 @@ def _run_results_depth_adapter(
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+
+    ``cascade_report`` is the IN-MEMORY :class:`CascadeWireReport` the sweep's
+    Stage-4 cascade just produced (DEC-RESULTS-CASCADE-VERDICT-JOIN-001), or
+    ``None`` when the cascade was skipped. It is flattened HERE — inside the
+    fence — via the ONE :func:`brutex.engine.cascade_join.build_cascade_join`
+    law; a :class:`~brutex.engine.cascade_join.CascadeJoinError` is a
+    production-unreachable belt (our own serialization feeds it) that logs
+    ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
+    still runs, the sweep never fails.
     """
     import structlog
 
+    from brutex.engine.cascade_join import CascadeJoinError, build_cascade_join
+    from brutex.engine.cascade_wire import wire_report_to_dict
     from brutex.engine.margin_history import margin_roi_payload
     from brutex.engine.results_depth_pass import run_results_depth_pass
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    cascade_join = None
+    if cascade_report is not None:
+        try:
+            cascade_join = build_cascade_join(wire_report_to_dict(cascade_report))
+        except CascadeJoinError as exc:
+            structlog.get_logger("brutex.cli").warning(
+                "cli.results_depth.cascade_join_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="depth pass runs without the cascade join — entries read not_validated",
+            )
 
     def _margin_roi(candidate: Any) -> dict[str, object]:
         # lots=1 here is a margin-SIZING hypothetical for the refusal-only
@@ -9193,6 +10378,7 @@ def _run_results_depth_adapter(
             vix_bars=vix_bars,
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
+            cascade_join=cascade_join,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -9236,12 +10422,17 @@ def main(argv: list[str] | None = None) -> int:
     A :class:`CliUserError` raised by any command or shared helper below is
     converted to the standard one-line ``[brutex] <message>`` on stderr +
     :data:`EXIT_USER_ERROR` — the CLI's last-resort user-error net
-    (DEC-CLI-USER-ERROR-HYGIENE-001). Anything else still propagates raw: a
+    (DEC-CLI-USER-ERROR-HYGIENE-001). The two DEC-SWEEP-UNKILLABLE-CORE-001
+    launch refusals (G6 peer-sweep single-flight, G10 lake busy under a
+    pull/heal) ride the same clean-refusal net — an operator race is a loud
+    one-liner, never a traceback. Anything else still propagates raw: a
     genuine code bug must traceback, never be papered over (Golden Rule #10).
     """
+    from brutex.engine.sweep_singleflight import LakeBusyError, SweepAlreadyRunningError
+
     try:
         return _dispatch(argv)
-    except CliUserError as exc:
+    except (CliUserError, LakeBusyError, SweepAlreadyRunningError) as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
@@ -9350,6 +10541,14 @@ def _dispatch(argv: list[str] | None) -> int:
             until_clean_rounds=args.until_clean_rounds,
             max_retry_minutes=args.max_retry_minutes,
         )
+    if args.command == "pull-all-spot":
+        return cmd_pull_all_spot(
+            lake_root=args.lake_root,
+            auto=args.auto,
+            dry_run=args.dry_run,
+            settle_ist=args.settle_ist,
+            strict_exit=args.strict_exit,
+        )
     if args.command == "enrich-greeks":
         return cmd_enrich_greeks(
             args.lake_root,
@@ -9427,6 +10626,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -9449,6 +10649,7 @@ def _dispatch(argv: list[str] | None) -> int:
             sweep_cache_bloom_capacity=args.sweep_cache_bloom_capacity,
             allow_out_of_scope=args.allow_out_of_scope,
             acknowledge_sla_overrun=args.acknowledge_sla_overrun,
+            detach=args.detach,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
@@ -9481,6 +10682,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -9568,6 +10770,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -9629,6 +10832,29 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_nightly_status(
             lake_root=args.lake_root,
             results_root=args.results_root,
+            label=args.label,
+            plist_dir=args.plist_dir,
+        )
+    if args.command == "crossverify":
+        if args.crossverify_command == "run":
+            return cmd_crossverify_run(
+                lake_root=args.lake_root,
+                day=args.day,
+                dry_run=args.dry_run,
+                skip_pull=args.skip_pull,
+                no_publish=args.no_publish,
+            )
+        if args.crossverify_command == "install":
+            return cmd_crossverify_install(
+                at=args.at,
+                label=args.label,
+                plist_dir=args.plist_dir,
+                lake_root=args.lake_root,
+            )
+        if args.crossverify_command == "uninstall":
+            return cmd_crossverify_uninstall(label=args.label, plist_dir=args.plist_dir)
+        return cmd_crossverify_status(
+            lake_root=args.lake_root,
             label=args.label,
             plist_dir=args.plist_dir,
         )

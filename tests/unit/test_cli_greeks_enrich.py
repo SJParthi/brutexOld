@@ -37,13 +37,14 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from brutex import cli
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_enrich_pass import GREEKS_NOT_RUN, GreeksEnrichOutcome
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
 # ────────────────────────────────────────────────────────────────────────
 # Shared fixtures / fakes (the test_cli_retry_storm.py live-wiring idiom)
@@ -86,6 +87,26 @@ def _hermetic_greeks_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the seam's env gates so an ambient shell can never flip a test."""
     monkeypatch.delenv("BRUTEX_CLI_GREEKS_ENRICH", raising=False)
     monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _structlog_defaults() -> Iterator[None]:
+    """DEBUG-event captures need structlog's unfiltered library defaults.
+
+    Order-independence hardening: a sibling CLI suite that drives a REAL
+    ``main(["sweep", …])`` dispatch (e.g. test_cli_backup's fall-through
+    test) configures the DEC-SWEEP-LOG-VOLUME-GUARD-001 INFO threshold
+    process-wide; the filtering ``wrapper_class`` then silently drops this
+    file's asserted DEBUG events from ``capture_logs``. Reset to library
+    defaults per test and restore the prior config after — this hardens the
+    capture, it never tests the guard.
+    """
+    prior = structlog.get_config()
+    structlog.reset_defaults()
+    try:
+        yield
+    finally:
+        structlog.configure(**prior)
 
 
 @dataclass(frozen=True)

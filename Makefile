@@ -97,6 +97,12 @@ run-raw: preflight
 		$(VPIP) install maturin; \
 		cd rust/trading-core && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
+	@$(VPY) -c "import brutex_feed" 2>/dev/null || { \
+		echo "==> brutex_feed kernel not importable — building it (optional; DEC-FEED-RUST-CORE-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-feed && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST is default-OFF; the feed degrades to the Python oracle)"; \
+	}
 	$(VPY) -m brutex run
 
 fmt:

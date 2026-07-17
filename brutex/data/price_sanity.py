@@ -7,9 +7,21 @@ OHLC row sane?" — the polars twin of the per-bar
 * **positivity** — every price is non-null and ``> 0`` (a traded Indian price
   is never ``<= 0``; tick ≥ 0.05 rupees — the same market fact behind
   ``candle_fields.has_no_price``);
-* **ordering** — ``low <= open, close <= high`` (``high >= low``).
+* **ordering** — ``low <= open, close <= high`` (``high >= low``);
+* **finiteness** — every price is finite
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): ``inf``/``-inf``/``NaN`` in ANY
+  OHLC field is a violation. Pre-fix the vectorized mask was BLIND to
+  ``high ∈ {+inf, NaN}`` — ``high >= low`` holds vacuously for ``+inf`` and
+  polars' total float ordering places ``NaN`` above everything, so neither
+  the ordering nor the ``<= 0`` arm ever tripped (executed-repro'd by the
+  assurance session: a planted ``high = inf`` 1m bar laundered a derived
+  5-minute bucket ``high = inf`` through the max aggregation). No production
+  writer emits a non-finite price (the vendor parse rejects it via
+  ``candle_fields.to_price``) — this arm only fires on planted/out-of-band
+  corrupt stored data.
 
-Two read surfaces consume it:
+Four read surfaces consume the frame-level gate directly (and the strengthened
+law flows TRANSITIVELY into every caller of these seams):
 
 * :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` (the prebuild's
   1-minute read boundary) calls :func:`validate_frame_price_sanity` so a
@@ -21,11 +33,27 @@ Two read surfaces consume it:
   per-symbol quarantine set (``gated_prebuild._per_symbol_data_errors``), so
   the symbol is quarantined + NAMED and its derived TFs are NOT written —
   never a stage abort, never a silent drop/fix of rows.
+* :func:`~brutex.data.spot_daily_resample.make_lake_read_1m_window` (the
+  window-bounded 1-minute reader behind the post-pull ``1day`` derive, the
+  heal-recall and the crossverify prebuild leg) runs the SAME
+  :func:`validate_frame_price_sanity` gate on the window-cut frame
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001) — pre-fix it ran NO screen at
+  all, so a corrupt bar yielded a CLEAN derived ``1day`` via the full
+  prebuild but a POISONED ``1day`` via the window path.
+* the ``/movers`` raw-1m read seam
+  (``brutex.dashboard.movers_snapshot._read_cut_1m_frame``) runs
+  :func:`validate_frame_price_sanity` behind the
+  :func:`~brutex.data.bar_screen.screen_frame` row-drop
+  (DEC-DASHBOARD-READ-SCREEN-001 + the DEC-READ-GUARD-PARITY-001 belt), and
+  ``bar_screen``'s scalar path rides :func:`price_row_insane` — so the
+  ``/movers`` + ``/db`` display reads inherit the non-finite arm
+  transitively.
 * :func:`~brutex.data.lake_invariants.scan_lake_invariants` (the census/heal
   scanner) counts violations per month file via
   :func:`count_price_violations`, so ``brutex lake audit-unique`` + the L2/L3
   heal sweeps surface price-corrupt partitions instead of a blind "0
-  findings" verdict.
+  findings" verdict — a non-finite row now COUNTS there too
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001; census-pinned).
 
 Cost honesty (Golden Rule #10): every check is ONE vectorized polars pass —
 O(rows) per frame with O(1) Python state, never a per-row Python loop. The
@@ -38,6 +66,7 @@ the module stays importable wheel-free).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Final
 
 from brutex.data.errors import ResampleInputError
@@ -52,11 +81,15 @@ PRICE_SANITY_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 def price_violation_expr() -> pl.Expr:
     """One boolean expression flagging a price-insane row (vectorized).
 
-    ``True`` for a row where ANY price is null / non-positive, or the OHLC
-    ordering is broken (``high < low``, or ``open``/``close`` outside
-    ``[low, high]``). A null price makes the row ``True`` via the explicit
-    ``is_null`` arm (polars' three-valued logic folds ``True | null`` to
-    ``True``), so the combined mask is never null.
+    ``True`` for a row where ANY price is null / non-finite / non-positive,
+    or the OHLC ordering is broken (``high < low``, or ``open``/``close``
+    outside ``[low, high]``). A null price makes the row ``True`` via the
+    explicit ``is_null`` arm (polars' three-valued logic folds ``True | null``
+    to ``True``), so the combined mask is never null. The per-column
+    ``~is_finite`` arm (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001) closes the
+    ``high ∈ {+inf, NaN}`` blind spot: ``+inf``/``NaN`` pass the ordering and
+    ``<= 0`` checks VACUOUSLY (polars total float ordering), so the mask was
+    blind to a corrupt HIGH.
 
     Returns
     -------
@@ -66,12 +99,94 @@ def price_violation_expr() -> pl.Expr:
     import polars as pl
 
     open_, high, low, close = (pl.col(name) for name in PRICE_SANITY_COLUMNS)
-    checks = [pl.col(name).is_null() | (pl.col(name) <= 0) for name in PRICE_SANITY_COLUMNS]
+    checks = [
+        pl.col(name).is_null() | ~pl.col(name).is_finite() | (pl.col(name) <= 0)
+        for name in PRICE_SANITY_COLUMNS
+    ]
     checks.extend([high < low, open_ > high, open_ < low, close > high, close < low])
     combined = checks[0]
     for check in checks[1:]:
         combined = combined | check
     return combined
+
+
+def price_row_insane(
+    open_: float | None, high: float | None, low: float | None, close: float | None
+) -> bool:
+    """Scalar per-row twin of :func:`price_violation_expr` (positivity + ordering + finiteness).
+
+    The ONE COMMON SCALAR price-sanity predicate (CLAUDE.md §11 COMMON) — the
+    row-at-a-time twin of the vectorized :func:`price_violation_expr`, so the
+    two are the SAME boolean by construction over the shared input space
+    (pinned row-wise by a property test). ``True`` for an INSANE row: ANY
+    price ``None`` / non-finite (``NaN`` / ``±inf``) / non-positive
+    (``<= 0``), or the OHLC ordering broken (``high < low``, or ``open`` /
+    ``close`` outside ``[low, high]``).
+
+    Needed by the dashboard's scalar screening path
+    (:mod:`brutex.data.bar_screen`), where the columnar
+    :func:`price_violation_expr` is unavailable (a DuckDB page of Python
+    tuples). ``None`` is tested FIRST so a null price short-circuits before any
+    ``<=`` / ``<`` comparison (a ``None <= 0`` would raise) — mirroring the
+    ``is_null`` arm of the expression.
+
+    NON-FINITE ARM (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, closing the
+    DEC-DASHBOARD-READ-SCREEN-001 round-2 "DELIBERATE NaN ASYMMETRY"):
+    historically the scalar carried a NaN-only arm the vectorized
+    :func:`price_violation_expr` lacked, and this docstring recorded the
+    vectorized twin + the ``arrow_table_to_bars`` except-clause gap as the
+    NAMED ENGINE-side follow-up. That follow-up is now CLOSED: BOTH planes
+    flag any non-finite price (the scalar arm widened ``isnan`` →
+    ``not isfinite``, so a ``+inf`` HIGH — previously sane here because
+    ``inf`` passes every ordering compare — is insane too), the vectorized
+    twin carries the mirrored per-column ``~is_finite`` arm, and the engine
+    boundary rejects non-finite explicitly + re-wraps
+    ``decimal.InvalidOperation`` instead of letting it escape. Scalar ==
+    vector now holds over the FULL float plane (NaN/±inf included — the
+    parity property test's input space was consciously widened).
+
+    NON-NUMERIC GUARD (round-4 fold, scalar-only — unlike the non-finite
+    arm above, which is now mirrored in BOTH planes): a
+    NON-NUMERIC price cell — a ``str`` from a DuckDB ``union_by_name`` VARCHAR
+    promotion over an out-of-band parquet (the lake writers never produce
+    one), or a ``bool`` (``isinstance(True, int)`` is True, but a boolean
+    "price" is junk — deliberately classified insane, never coerced to
+    0.0/1.0) — is INSANE, never a raised ``TypeError``. The dashboard callers
+    feed RAW page cells (typed ``Any`` at runtime despite this signature), and
+    without this arm ``math.isnan(str)`` raised through ``screen_rows`` into a
+    /db page 500 — internally inconsistent with
+    :func:`brutex.data.bar_screen.screen_rows`'s ``_sortable_cell``, which
+    already orders such junk cells last. Conservative in direction: DROP,
+    never fabricate. The vectorized twin is untouched (its columns are typed —
+    a VARCHAR-promoted column never reaches ``price_violation_expr`` as a
+    numeric plane), and non-numerics are structurally outside the
+    scalar==vector parity pin's input space (floats only).
+
+    Parameters
+    ----------
+    open_, high, low, close
+        The four OHLC prices of one bar (rupees; ``None`` for a null cell).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the row violates price finiteness, positivity or OHLC
+        ordering (a ``None`` / ``NaN`` / ``±inf`` price counts as a
+        violation).
+    """
+    if open_ is None or high is None or low is None or close is None:
+        return True
+    # Non-numeric junk (str/bool — see the docstring) is insane, never a raise;
+    # bool is excluded explicitly (a bool IS an int to isinstance) as junk.
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in (open_, high, low, close)
+    ):
+        return True
+    if not all(math.isfinite(v) for v in (open_, high, low, close)):
+        return True
+    if open_ <= 0 or high <= 0 or low <= 0 or close <= 0:
+        return True
+    return high < low or open_ > high or open_ < low or close > high or close < low
 
 
 def count_price_violations(df: pl.DataFrame) -> int:
@@ -85,7 +200,7 @@ def count_price_violations(df: pl.DataFrame) -> int:
     Returns
     -------
     int
-        How many rows violate positivity or OHLC ordering.
+        How many rows violate finiteness, positivity or OHLC ordering.
     """
     if df.height == 0:
         return 0
@@ -120,7 +235,8 @@ def validate_frame_price_sanity(
     Raises
     ------
     ResampleInputError
-        When at least one row violates price positivity or OHLC ordering.
+        When at least one row violates price finiteness, positivity or OHLC
+        ordering.
     """
     if df.height == 0:
         return
@@ -133,7 +249,8 @@ def validate_frame_price_sanity(
     origin = f" in {context}" if context else ""
     raise ResampleInputError(
         f"stored 1-minute bars{origin} carry {violations.height} price-insane "
-        f"row(s) (non-positive price or broken OHLC ordering); first offender at "
+        f"row(s) (non-finite or non-positive price, or broken OHLC ordering); "
+        f"first offender at "
         f"{first_ts!r}. Refusing to derive timeframes from corrupt input — a "
         f"corrupt 1m bar would launder into self-consistent-looking derived "
         f"buckets (DEC-STORED-DATA-VALIDATION-001). Heal or re-pull the symbol's "
@@ -144,6 +261,7 @@ def validate_frame_price_sanity(
 __all__ = [
     "PRICE_SANITY_COLUMNS",
     "count_price_violations",
+    "price_row_insane",
     "price_violation_expr",
     "validate_frame_price_sanity",
 ]

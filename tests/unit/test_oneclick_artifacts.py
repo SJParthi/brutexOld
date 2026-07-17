@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -320,6 +321,45 @@ class TestDiscoverRuns:
         assert [info.run_id for info in found] == ["r-good"]
         skipped = [entry for entry in logs if entry["event"] == "oneclick.run_skipped"]
         assert {entry["run"] for entry in skipped} == {"r-badstat", "r-badisdir"}
+
+
+class TestNewestRunName:
+    """Fix round 2 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, refuter-confirmed
+    MINOR): the name-only newest-run listing — the same ``(mtime_ns, name)``
+    selection core ``discover_runs`` rides, with ZERO manifest reads/parses.
+    """
+
+    def test_absent_runs_tree_is_none(self, tmp_path: Path) -> None:
+        assert oc.newest_run_name(tmp_path / "sweeps") is None
+
+    def test_newest_name_matches_discover_runs_selection(self, tmp_path: Path) -> None:
+        runs = tmp_path / "sweep_runs"
+        for name, age in (("r-old", 100), ("r-new", 0)):
+            (runs / name).mkdir(parents=True)
+            stamp = 1_700_000_000 - age
+            os.utime(runs / name, (stamp, stamp))
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-new"
+        # ONE selection law: name-only listing == the RunInfo listing's head.
+        assert oc.newest_run_name(tmp_path / "sweeps") == (
+            oc.discover_runs(tmp_path / "sweeps", limit=1)[0].run_id
+        )
+
+    def test_zero_manifest_reads_even_when_manifest_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_dir = tmp_path / "sweep_runs" / "r-with-manifest"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text('{"suspect": false}', encoding="utf-8")
+        calls: list[str] = []
+        real_load = oc.load_manifest
+
+        def _spy(target: Path) -> Any:
+            calls.append(str(target))
+            return real_load(target)
+
+        monkeypatch.setattr(oc, "load_manifest", _spy)
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-with-manifest"
+        assert calls == []
 
 
 # ── manifest loader ─────────────────────────────────────────────────────
@@ -1727,15 +1767,133 @@ class TestFixtureTradesReader:
         assert [row["entry_ts"] for row in page.rows] == ["t0"]
         assert "trade row 1" in page.detail
 
-    def test_different_rank_is_a_memo_miss(self, tmp_path: Path) -> None:
-        """The memo is SINGLE-ENTRY by design (one artifact hot at a time)."""
+    def test_two_rank_alternation_no_longer_thrashes(self, tmp_path: Path) -> None:
+        """Fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): the bounded 2-entry
+        ``_RevisionMemo`` holds BOTH sides of a two-artifact alternation, so
+        flipping back to rank 1 is a HIT — the superseded single-entry memo
+        re-parsed on EVERY flip (this test previously pinned that thrash as
+        ``parse_count == 3``; the thrash IS the defect fix 4b removes).
+        """
         _trades_file(tmp_path, rank=1, rows=2)
         _trades_file(tmp_path, rank=2, rows=2)
         reader = oc.FixtureTradesReader(tmp_path)
         reader.page("r-x", 1, offset=0, limit=2)
         reader.page("r-x", 2, offset=0, limit=2)
-        reader.page("r-x", 1, offset=0, limit=2)  # single-entry memo: re-parse
+        reader.page("r-x", 1, offset=0, limit=2)  # 2-entry memo: a HIT now
+        assert reader.parse_count == 2
+
+    def test_third_artifact_evicts_lru_first(self, tmp_path: Path) -> None:
+        """Past the 2-entry bound the LEAST-recently-used artifact re-parses."""
+        for rank in (1, 2, 3):
+            _trades_file(tmp_path, rank=rank, rows=2)
+        reader = oc.FixtureTradesReader(tmp_path)
+        reader.page("r-x", 1, offset=0, limit=2)
+        reader.page("r-x", 2, offset=0, limit=2)
+        reader.page("r-x", 3, offset=0, limit=2)  # evicts rank 1 (the LRU)
         assert reader.parse_count == 3
+        reader.page("r-x", 2, offset=0, limit=2)  # still memoised — a hit
+        assert reader.parse_count == 3
+        reader.page("r-x", 1, offset=0, limit=2)  # evicted — re-parses
+        assert reader.parse_count == 4
+
+
+# ── _RevisionMemo (fix 4b, DEC-MEMORY-FOOTPRINT-HARDENING-001) ──────────
+
+
+class TestRevisionMemo:
+    """The ONE consolidated reader memo: bounded LRU + per-key single-flight."""
+
+    def test_capacity_below_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="capacity must be >= 1"):
+            oc._RevisionMemo(capacity=0)
+
+    def test_hit_refreshes_lru_recency(self) -> None:
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo(capacity=2)
+        calls: list[str] = []
+
+        def _compute(tag: str) -> Callable[[], str]:
+            def _run() -> str:
+                calls.append(tag)
+                return tag
+
+            return _run
+
+        assert memo.get_or_compute(("a",), _compute("a")) == "a"
+        assert memo.get_or_compute(("b",), _compute("b")) == "b"
+        # Touch "a" so "b" becomes the LRU, then insert "c" → "b" evicts.
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"
+        assert memo.get_or_compute(("c",), _compute("c")) == "c"
+        assert memo.get_or_compute(("a",), _compute("a-again")) == "a"  # still a hit
+        assert memo.get_or_compute(("b",), _compute("b2")) == "b2"  # evicted → recompute
+        assert calls == ["a", "b", "c", "b2"]
+
+    def test_concurrent_misses_pay_one_compute(self) -> None:
+        """Per-key single-flight: 8 cold threads on ONE key pay exactly 1 parse."""
+        memo: oc._RevisionMemo[int] = oc._RevisionMemo()
+        gate = threading.Event()
+        calls: list[int] = []
+        results: list[int] = []
+
+        def _compute() -> int:
+            gate.wait(timeout=5.0)
+            time.sleep(0.02)  # widen the window so followers genuinely wait
+            calls.append(1)
+            return 42
+
+        def _worker() -> None:
+            results.append(memo.get_or_compute(("k",), _compute))
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        gate.set()
+        for thread in threads:
+            thread.join(timeout=10.0)
+        assert results == [42] * 8
+        assert len(calls) == 1
+
+    def test_raising_compute_caches_nothing_and_releases_the_flight(self) -> None:
+        """A raising compute propagates raw; the NEXT caller recomputes (no wedge)."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        with pytest.raises(RuntimeError, match="boom"):
+            memo.get_or_compute(("k",), _raise_boom)
+        assert memo.get_or_compute(("k",), lambda: "ok") == "ok"
+
+    def test_waiter_takes_ownership_when_the_owner_raises(self) -> None:
+        """A follower parked on a raising owner's flight LOOPS and recomputes."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        owner_entered = threading.Event()
+        release_owner = threading.Event()
+        outcomes: list[str] = []
+
+        def _owner_compute() -> str:
+            owner_entered.set()
+            release_owner.wait(timeout=5.0)
+            raise RuntimeError("owner failed")
+
+        def _owner() -> None:
+            try:
+                memo.get_or_compute(("k",), _owner_compute)
+            except RuntimeError:
+                outcomes.append("owner-raised")
+
+        def _follower() -> None:
+            outcomes.append(memo.get_or_compute(("k",), lambda: "recovered"))
+
+        owner = threading.Thread(target=_owner)
+        owner.start()
+        assert owner_entered.wait(timeout=5.0)
+        follower = threading.Thread(target=_follower)
+        follower.start()
+        time.sleep(0.05)  # let the follower park on the in-flight event
+        release_owner.set()
+        owner.join(timeout=10.0)
+        follower.join(timeout=10.0)
+        assert sorted(outcomes) == ["owner-raised", "recovered"]
+
+
+def _raise_boom() -> str:
+    raise RuntimeError("boom")
 
 
 # ── production trades reader (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) ───────
@@ -2044,20 +2202,178 @@ class TestTradeStoreReader:
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2
 
-    def test_unstattable_top100_computes_fresh_uncached(
+    def test_absent_top100_computes_fresh_uncached(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A None revision computes fresh and caches NOTHING (lake_revision law)."""
+        """An ABSENT top100 (probe answered: no file) computes fresh, caches NOTHING.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 narrows the old blanket None-revision
+        doctrine to the absent arm only — a deleted/never-written artifact
+        must never be served from the memo (no stale illusion).
+        """
         results_root = _rebind_run(tmp_path)
         reader = oc.TradeStoreReader(results_root)
-        monkeypatch.setattr(oc, "artifact_revision", lambda _path: None)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, False))
         page = reader.page("r-x", 1, offset=0, limit=5)
-        # revision None on top100 → fresh parse; then the stamp probe also
-        # reads None → the awaiting sidecars arm (nothing fabricated).
+        # absent top100 → fresh parse of the (missing) artifact → awaiting.
         assert page.status == "awaiting"
         assert reader.parse_count == 1
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing was cached
+
+    def test_top100_probe_outage_serves_last_known_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe OUTAGE serves the memoised top100 (labelled) — no re-parse storm.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (fails-before: the pre-change reader
+        re-parsed the whole artifact on EVERY trades-page request while the
+        stat probe was down).
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        assert reader.parse_count == 1  # memo primed pre-outage
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        for _ in range(3):
+            page = reader.page("r-x", 1, offset=0, limit=5)
+            assert page.status == "ok"
+            assert "top100 revision probe outage — serving last-known" in page.detail
+        assert reader.parse_count == 1  # the memo served every outage page
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        clean = reader.page("r-x", 1, offset=0, limit=5)
+        assert clean.status == "ok"
+        assert "outage" not in clean.detail  # the label clears on recovery
+        assert reader.parse_count == 1  # same revision → the memo still holds
+
+    def test_top100_outage_note_rides_a_served_corrupt_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A last-known CORRUPT top100 served under outage carries BOTH notes."""
+        results_root = tmp_path / "sweeps"
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write(run_dir / oc.TOP100_FILENAME, "{not json")
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "corrupt"
+        assert reader.parse_count == 1  # corrupt verdict memoised per revision
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "corrupt"
+        assert "top100 revision probe outage — serving last-known" in page.detail
+        assert ";" in page.detail  # the corrupt detail is kept, the note appended
+        assert reader.parse_count == 1  # served from the memo — no re-parse
+
+    def test_top100_probe_outage_without_memo_parses_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An outage with NO primed memo falls back to the fresh uncached parse."""
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "awaiting"
+        assert reader.parse_count == 1
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # nothing cached — no memo to serve
+
+    def test_top100_outage_with_evicted_memo_parses_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An outage whose last-known entry was LRU-EVICTED falls back honestly.
+
+        The #1719 merge-compose: the serve-last-known doctrine now peeks the
+        bounded ``_RevisionMemo`` (capacity 2) — a two-sibling-run alternation
+        can evict the outage path's entry, in which case the gate still holds
+        a last-known key but the peek misses and the honest fresh UNCACHED
+        parse stands (never a fabricated serve, never a crash).
+        """
+        results_root = _rebind_run(tmp_path)
+        _rebind_run(tmp_path, run_id="r-y")
+        _rebind_run(tmp_path, run_id="r-z")
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)  # memo primed for r-x
+        reader.page("r-y", 1, offset=0, limit=5)
+        reader.page("r-z", 1, offset=0, limit=5)  # capacity 2 → r-x evicted
+        assert reader.parse_count == 3
+        real_probe = oc.artifact_probe
+
+        def _outage_on_rx_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME and path.parent.name == "r-x":
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_rx_top100)
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 4  # peek missed (evicted) → fresh parse
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 5  # and nothing was cached under outage
+
+    def test_revision_memo_peek_hit_and_miss(self) -> None:
+        """``_RevisionMemo.peek`` returns without computing — hit and miss arms."""
+        memo: oc._RevisionMemo[str] = oc._RevisionMemo()
+        assert memo.peek(("k", "r1")) is None  # miss — nothing computed
+        assert memo.get_or_compute(("k", "r1"), lambda: "v1") == "v1"
+        assert memo.peek(("k", "r1")) == "v1"  # hit — no compute ran
+
+    def test_top100_outage_memo_for_a_different_path_is_not_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The memo serves ONLY its own path under outage — never a foreign run's."""
+        results_root = _rebind_run(tmp_path)
+        _rebind_run(tmp_path, run_id="r-y")
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)  # memo primed for r-x
+        assert reader.parse_count == 1
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        reader.page("r-y", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # r-y parsed fresh — r-x's memo not served
+
+    def test_top100_outage_warns_once_per_outage_and_logs_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reader's OutageGate WARNs once per outage per path + recovery INFO.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 reconciled onto #1406's ONE
+        ``OutageGate`` mechanism: no route gate covers this reader, so it owns
+        a gate keyed on the top100 path — ``oneclick.probe_outage`` fires on
+        the FIRST outage poll only, ``oneclick.probe_recovered`` on the flip
+        back, never per poll.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                reader.page("r-x", 1, offset=0, limit=5)
+        warns = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(warns) == 1  # once per outage, never per poll
+        assert warns[0]["coordinate"] == str(run_dir / oc.TOP100_FILENAME)
+        assert warns[0]["last_known"] is True
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        with structlog.testing.capture_logs() as logs:
+            reader.page("r-x", 1, offset=0, limit=5)
+        assert any(e["event"] == "oneclick.probe_recovered" for e in logs)
 
 
 _EQUITY_POINTS = (
@@ -2126,6 +2442,33 @@ class TestEquityPage:
         assert page.total == 3
         clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
         assert len(clamped.rows) == 3  # negative offset clamps to 0
+
+    def test_equity_page_names_a_top100_probe_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The equity page's detail carries the top100 outage note too.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (club reconcile): the note threads
+        through the SHARED ``_resolve_sidecars`` 3-tuple, so BOTH pages name
+        a last-known top100 serve — never a silent stale resolution.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.equity_page("r-x", 1, offset=0, limit=100).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        page = reader.equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert "top100 revision probe outage — serving last-known" in page.detail
 
     def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
         results_root = _rebind_run(tmp_path)
@@ -2215,3 +2558,114 @@ class TestEquityPage:
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert calls["n"] == 2  # nothing was cached (lake_revision doctrine)
+
+
+from structlog.testing import capture_logs  # noqa: E402
+
+
+def _cascade_obj(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "status": "pass",
+        "rejected_at": None,
+        "detail": "survived all Stage-4 filters",
+        "cascade_composite": 1.5,
+        "provisional": False,
+        "cpcv_pass_rate": 0.75,
+        "survivor_rank": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestBridgeCascade:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the per-row cascade bridge."""
+
+    def test_absent_key_passes_through_untouched(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert "cascade" not in result.rows[0]
+
+    @pytest.mark.parametrize(
+        ("status", "expected_text"),
+        [
+            ("pass", "PASS"),
+            ("provisional_pass", "PASS (provisional)"),
+            ("fail", "FAIL @ cpcv"),
+            ("not_validated", "not validated"),
+        ],
+    )
+    def test_valid_statuses_stamped_with_server_text(
+        self, tmp_path: Path, status: str, expected_text: str
+    ) -> None:
+        obj = _cascade_obj(status=status)
+        if status == "fail":
+            obj["rejected_at"] = "cpcv"
+        if status == "not_validated":
+            obj = {"status": "not_validated", "reason": "no_report"}
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        cascade = result.rows[0]["cascade"]
+        assert cascade["status_text"] == expected_text
+        # The raw fields ride through untouched beside the stamp.
+        assert cascade["status"] == status
+
+    def test_actionable_reasons_carry_their_suffix(self, tmp_path: Path) -> None:
+        rows = [
+            _top100_row(1, cascade={"status": "not_validated", "reason": "sweep_id_mismatch"}),
+            _top100_row(2, cascade={"status": "not_validated", "reason": "duplicate_candidate_id"}),
+        ]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.rows[0]["cascade"]["status_text"] == "not validated · sweep_id_mismatch"
+        assert result.rows[1]["cascade"]["status_text"] == "not validated · duplicate verdict"
+
+    @pytest.mark.parametrize(
+        "obj",
+        [
+            "not-a-dict",
+            {"status": "GREEN"},
+            {"status": 7},
+            {"status": "pass", "detail": 42},
+            {"status": "pass", "provisional": "yes"},
+            {"status": "pass", "cpcv_pass_rate": "high"},
+            {"status": "pass", "cascade_composite": True},
+            {"status": "pass", "survivor_rank": 1.5},
+            {"status": "not_validated", "reason": 9},
+            {"status": "fail", "rejected_at": 3},
+            None,
+        ],
+    )
+    def test_invalid_object_dropped_and_named_partial(self, tmp_path: Path, obj: Any) -> None:
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        with capture_logs() as logs:
+            result = oc.load_top100(tmp_path)
+        # Row KEPT, key DROPPED, degrade NAMED — never a fabricated verdict.
+        assert result.status == "partial"
+        assert "invalid cascade object" in result.detail
+        assert "cascade" not in result.rows[0]
+        assert [e for e in logs if e["event"] == "oneclick.cascade_object_dropped"]
+
+    def test_root_cascade_join_passthrough(self, tmp_path: Path) -> None:
+        meta = {"state": "joined", "sweep_id": "s" * 64, "n_input": 4, "n_survived": 2}
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join=meta)
+        result = oc.load_top100(tmp_path)
+        assert result.cascade_join == meta
+
+    def test_non_object_root_meta_reads_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join="junk")
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_pre_change_doc_defaults_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_row_cap_partial_detail_wins_over_cascade_drop(self, tmp_path: Path) -> None:
+        rows = [_top100_row(i + 1, cascade="junk") for i in range(oc.TOP100_ROW_CAP + 1)]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        # The oversized-cap detail wins the slot; the drops still happened.
+        assert "beyond the" in result.detail
+        assert all("cascade" not in row for row in result.rows)

@@ -90,13 +90,44 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
 
 
 def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    # The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001):
+    # narrow gap-up bars (range 0.50 < the SL 0.80 — no same-bar stop-out;
+    # the next gap-up's low clears the TP level → +50 wins), a shallow
+    # bearish bar each cycle and a DEEP bearish bar (range 0.85) every 4th
+    # cycle whose stop-out keeps profit_factor finite — this suite's masks
+    # (bits 0/2/3, k=1) all clear the hard rank gates under sl=80/tp=50.
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = c
     return bars
 
 
@@ -280,6 +311,202 @@ class TestRecordedContext:
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_context_from_audit(path)
 
+    def test_shared_list_parse_maps_unreadable_audit(self, tmp_path: Path) -> None:
+        """The VERIFIED seam's shared list parse keeps its AuditError mapping.
+
+        Club reconcile pin: the streaming conversion moved
+        ``recorded_context_from_audit`` off ``_entries_from_audit``, so the
+        shared list parse's unreadable arm (rode by
+        ``_verified_entries_from_audit`` after ``verify_chain`` — e.g. a file
+        replaced between the verify and the parse) needs its own teeth.
+        """
+        from brutex.engine.sweep_verify import _entries_from_audit
+
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            _entries_from_audit(path)
+
+    def test_mid_chain_corruption_after_valid_start_still_maps(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: the streaming reader raises its
+        AuditError lazily MID-iteration — a malformed committed line AFTER a
+        successfully-folded ``SWEEP_START`` must still map to
+        ``SweepVerifyError`` (the try spans the loop, not just the call)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "x",
+                    "indicator_version": "v",
+                    "code_commit_sha": "c",
+                },
+            )
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")  # committed (newline-terminated) corruption
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_context_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin (DEC-AUDIT-READERS-STREAM-001): the reader must
+        ride ``iter_entries``, never the whole-chain ``read_entries`` list —
+        the pre-fix code resolved ``read_entries`` at call time (function-
+        local import), so this spy FAILS on the pre-fix implementation."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "x",
+                    "indicator_version": "v",
+                    "code_commit_sha": "c",
+                },
+            )
+        ctx = recorded_context_from_audit(path)
+        assert ctx is not None
+        assert ctx.data_snapshot_hash == "x"
+
+
+# ── Recorded fill mode (DEC-FILL-WORST-CASE-ONLY-001) ──
+
+
+class TestWorstCaseGenerationRefusal:
+    """DEC-FILL-WORST-CASE-ONLY-001: `_require_worst_case_entries` via the
+    facts seam — a scoped generation whose recorded params lack
+    ``fill_mode == "worst_case"`` refuses LOUDLY at fact-derivation time
+    (before any tier), naming the DEC; the remediation is a fresh sweep.
+    Generation-scoping (round-5 finding 6) is PRESERVED: only the ONE scoped
+    generation's context entries are judged.
+    """
+
+    _CTX: ClassVar[dict[str, str]] = {
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+
+    def _append(
+        self,
+        audit: AuditWriter,
+        *,
+        params: dict[str, object] | None,
+        snapshot: str = "snap0001",
+        action: str = "SWEEP_START",
+    ) -> None:
+        payload: dict[str, object] = {
+            **self._CTX,
+            "data_snapshot_hash": snapshot,
+            "instrument": "NIFTY",
+        }
+        if params is not None:
+            payload["params"] = params
+        audit.append(action=action, subject="s", payload=payload)
+
+    _REFUSAL = r"precise-era sweep tree refused \(DEC-FILL-WORST-CASE-ONLY-001\)"
+
+    def test_absent_audit_returns_empty_facts_without_refusal(self, tmp_path: Path) -> None:
+        # Nothing recorded → nothing to refuse (the caller supplies flags).
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, ())
+
+    def test_no_key_generation_refuses_as_precise_era(self, tmp_path: Path) -> None:
+        # Fails-before pin: a pre-DEC audit (params without fill_mode — the
+        # retired elide law recorded PRECISE by key ABSENCE) refuses loudly.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_paramsless_entry_refuses_as_precise_era(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params=None)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_literal_precise_token_refuses(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "precise"})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_junk_token_refuses_identically(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst"})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_worst_case_generation_reads_clean(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
+            self._append(audit, params={"fill_mode": "worst_case"})
+        context, _schedules, others = recorded_audit_facts(path)
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0001"
+        assert others == ()
+
+    def test_refusal_is_generation_scoped(self, tmp_path: Path) -> None:
+        # Generation A is precise-era (no key), generation B is worst-case:
+        # the scoped B read succeeds, the scoped A read refuses, and the
+        # unscoped read (latest = B) succeeds — the refusal never folds the
+        # whole file (the round-5 scoping law preserved).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
+        context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0002"
+        assert others == ("snap0001",)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path, snapshot="snap0001")
+        assert recorded_audit_facts(path)[0] is not None  # unscoped = latest = B
+
+    def test_non_context_action_params_stay_inert(self, tmp_path: Path) -> None:
+        # A NON-context action's params are never consulted (junk stays inert).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
+            self._append(audit, params={"fill_mode": "worst_case"})
+        assert recorded_audit_facts(path)[0] is not None
+
+    def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
+        # The verdict-grade read is chain-verified FIRST (round-8 finding 12
+        # of the facts seam), so trailing junk refuses at verification.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case"})
+        path.write_text(path.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="failed hash-chain verification"):
+            recorded_audit_facts(path)
+
+    def test_real_swept_tree_records_worst_case_and_verifies(self, tmp_path: Path) -> None:
+        # End-to-end: the CURRENT writers record the unconditional token, so
+        # a real swept tree derives facts refusal-free AND verifies clean.
+        root = tmp_path / "results"
+        root.mkdir()
+        grid = _grid()
+        _sweep(root, grid)
+        context, _schedules, others = recorded_audit_facts(root / "audit.jsonl")
+        assert context is not None
+        assert others == ()
+        report = verify_identity(root, grid)
+        assert report.checked_stores == 1
+        assert not report.corrupt, report.findings
+
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
 
@@ -433,7 +660,8 @@ class TestRecordedAuditFacts:
                     "code_commit_sha": code_sha,
                     "instrument": "NSE-NIFTY-FUT",
                     "params": {
-                        "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE)
+                        "fill_mode": "worst_case",
+                        "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE),
                     },
                 },
             )
@@ -637,7 +865,7 @@ class TestRecordedAuditFacts:
                     "data_snapshot_hash": "snap0001",
                     "indicator_version": "ind-v1",
                     "code_commit_sha": "deadbeef",
-                    "params": {"roll_schedule": list(self._SCHEDULE)},
+                    "params": {"fill_mode": "worst_case", "roll_schedule": list(self._SCHEDULE)},
                 },
             )
         context, schedules, others = recorded_audit_facts(path)
@@ -1541,6 +1769,15 @@ class TestIdentity:
         with pytest.raises(SweepVerifyError, match="results root not found"):
             verify_identity(tmp_path / "nope", _grid())
 
+    def test_no_fill_modes_seam_survives(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 killed-token pin: the round-3 mode-SET
+        # union planning is DELETED — verify_identity carries NO fill_modes
+        # kwarg (worst-case is the only fill model; precise-era generations
+        # refuse at fact-derivation, before any plan exists).
+        import inspect
+
+        assert "fill_modes" not in inspect.signature(verify_identity).parameters
+
     def test_clean_tree_is_clean(self, tree: Path) -> None:
         report = verify_identity(tree, _grid())
         assert report.checked_stores == 1
@@ -1671,7 +1908,9 @@ class TestIdentity:
         from brutex.engine.sweep_orchestrator import make_store_for
 
         schedule = (date(2026, 3, 31).toordinal(),)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: the futures verify machinery below the
+        # gate is RETAINED — constructed via the sanctioned research flag.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         root = tmp_path / "results"
         root.mkdir()
         with AuditWriter.open(root / "audit.jsonl") as audit:
@@ -2494,6 +2733,36 @@ class TestRecordedStage3FromAudit:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_stage3_from_audit(path)
+
+    def test_mid_chain_corruption_after_valid_pass_still_maps(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: a malformed committed line AFTER a
+        successfully-folded ``STAGE_3_PASS_START`` still maps to
+        ``SweepVerifyError`` — the try spans the streaming iteration."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")  # committed (newline-terminated) corruption
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_stage3_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin: the reader rides ``iter_entries``, never the
+        whole-chain ``read_entries`` list (spy fails on the pre-fix code)."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+        record = recorded_stage3_from_audit(path)
+        assert record.knobs is not None
+        assert record.knobs.stage3_top_k == 3
 
 
 class TestCellRecountCodes:

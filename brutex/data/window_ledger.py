@@ -42,7 +42,15 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
 from brutex.data.session import ALL_FILTERED
-from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
+from brutex.data.today_completeness import TODAY_INCOMPLETE
+from brutex.data.window_ledger_rust import routed_window_merge_key
+from brutex.data.window_status import (
+    EMPTY,
+    FAILED,
+    SUCCESS,
+    classify_window_status,
+    window_key_python,
+)
 
 __all__ = [
     "CONFIRMED_EMPTY_MIN_FETCHES",
@@ -56,6 +64,7 @@ __all__ = [
     "SETTLED_STATUSES",
     "SKIPPED",
     "SKIPPED_AUDIT_PER_PULL",
+    "STREAK_EXEMPT_DEGRADED_REASONS",
     "SUCCESS",
     "LedgerProgress",
     "LedgerRowTuple",
@@ -134,9 +143,29 @@ EXPIRED_WINDOW_SETTLE_SUFFIX: str = ", expired window)"
 #: production spines (both always pass a concrete tag) but, were it ever
 #: stamped, its settle is STILL a demotion settle and must never fall through
 #: to the "vendor confirmed no trades" wording (wiring-review fold, PR #1158).
+#: ``TODAY_INCOMPLETE`` (DEC-PULL-TODAY-COMPLETENESS-GATE-001) is the FIFTH
+#: member DEFENSIVELY (the ``"DEGRADED"`` precedent above): its demotion is
+#: streak-EXEMPT (:data:`STREAK_EXEMPT_DEGRADED_REASONS`), so a SKIPPED settle
+#: carrying it is structurally unreachable — but if a future caller ever bumped
+#: it there, the UI must never read "vendor confirmed no trades".
 DEMOTED_SETTLE_REASONS: frozenset[str] = frozenset(
-    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"}
+    {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, TODAY_INCOMPLETE, "DEGRADED"}
 )
+
+#: ``degraded_reason`` tags whose demotion is TIME-TRANSIENT evidence — exempt
+#: from the ``empty_streak`` bump + the bounded ``SKIPPED`` settle
+#: (DEC-PULL-TODAY-COMPLETENESS-GATE-001). ``TODAY_INCOMPLETE`` ("the vendor has
+#: not settled TODAY yet") expires at the session boundary by construction: the
+#: next pull whose window no longer covers today is inert and the settled bars
+#: land — unlike the STRUCTURAL ALL_FILTERED/INTERIOR_GAP/SUSPECTED_PARTIAL
+#: evidence, which repeats identically forever and legitimately converges to the
+#: accept-gap ``SKIPPED``. A streak-exempt demotion is treated like ``FAILED``
+#: for streak purposes (a settle lag is no more evidence of permanent emptiness
+#: than a 429 is — the exact rationale of the FAILED arm below), so a few
+#: same-evening vendor-lag records can never walk today's window to a
+#: ``SKIPPED`` the next nightly (which plans the SAME equal-end window —
+#: ``prune_superseded`` keeps equal-end rows) would then silently skip.
+STREAK_EXEMPT_DEGRADED_REASONS: frozenset[str] = frozenset({TODAY_INCOMPLETE})
 
 
 def expired_window_settle_reason(clean_attempts: int) -> str:
@@ -498,14 +527,14 @@ class WindowLedger:
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
-        """The 5-tuple identity of a window (market, symbol, interval, start, end)."""
-        return (
-            key.market,
-            key.security_id,
-            key.interval,
-            key.start.isoformat(),
-            key.end.isoformat(),
-        )
+        """The 5-tuple identity of a window (market, symbol, interval, start, end).
+
+        Delegates through the G8 routing facade with
+        :func:`~brutex.data.window_status.window_key_python` as the live
+        parity oracle (DEC-LAKE-RUST-WINDOW-LEDGER-001; flag OFF = the
+        oracle verbatim).
+        """
+        return routed_window_merge_key(key, python_law=window_key_python)
 
     def plan(self, key: WindowKey, *, now: datetime) -> None:
         """Upsert *key* as ``PLANNED`` if absent — **O(1)**, atomic, idempotent.
@@ -824,16 +853,37 @@ class WindowLedger:
                 # step the window toward the across-pull SKIPPED promotion.
                 empty_streak = prior_streak if suppress_settle else prior_streak + 1
             elif degraded_success:
-                # A demoted-SUCCESS (interior gap / truncation) re-pull is BOUNDED: bump the
-                # streak so it settles SKIPPED at the threshold, exactly like a genuine EMPTY,
-                # rather than re-pulling forever on a window the vendor will never complete.
-                empty_streak = prior_streak + 1
+                if degraded_reason in STREAK_EXEMPT_DEGRADED_REASONS:
+                    # A TIME-TRANSIENT demotion (TODAY_INCOMPLETE — the vendor
+                    # has not settled TODAY yet) PRESERVES the streak, like
+                    # FAILED: the evidence expires at the session boundary by
+                    # construction, so it must never step the window toward the
+                    # SKIPPED promotion (DEC-PULL-TODAY-COMPLETENESS-GATE-001).
+                    empty_streak = prior_streak
+                else:
+                    # A STRUCTURAL demoted-SUCCESS (interior gap / truncation /
+                    # all-filtered) re-pull is BOUNDED: bump the streak so it
+                    # settles SKIPPED at the threshold, exactly like a genuine
+                    # EMPTY, rather than re-pulling forever on a window the
+                    # vendor will never complete.
+                    empty_streak = prior_streak + 1
             elif classified == FAILED:
                 empty_streak = prior_streak  # rate-limit/timeout — preserve, never reset
             else:  # SUCCESS — the window has real data
                 empty_streak = 0
             status = classified
-            if degraded_success and empty_streak >= self._threshold:
+            # The streak-exempt guard here is a BELT (DEC-PULL-TODAY-COMPLETENESS-
+            # GATE-001): with the exemption above the streak never moves on a
+            # TODAY_INCOMPLETE record, and a prior streak >= threshold is
+            # unreachable (an unsuppressed EMPTY chain settles SKIPPED the moment
+            # it reaches the threshold; a suppressed chain never bumps) — but the
+            # guard makes the "a streak-exempt demotion can NEVER settle SKIPPED"
+            # invariant structural rather than emergent.
+            if (
+                degraded_success
+                and degraded_reason not in STREAK_EXEMPT_DEGRADED_REASONS
+                and empty_streak >= self._threshold
+            ):
                 # The window has been flagged incomplete ``_threshold`` consecutive pulls —
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
                 # been warned each time; the stored bars are kept).

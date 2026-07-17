@@ -602,6 +602,23 @@
     pollTimer = setTimeout(poll, delayMs);
   }
 
+  // Page fan-out (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): a
+  // template that ALSO renders /api/v1/liveproof data (e.g. the v29 heartbeat
+  // proof slot) subscribes via `(window.__bxLiveproofSubs ||= []).push(fn)` —
+  // its inline script may run BEFORE this deferred file, so the arrays are
+  // read at CALL time, never captured — instead of owning a SECOND poller on
+  // the same endpoint. Failure twins ride __bxLiveproofFailSubs. A throwing
+  // subscriber is isolated (it can never break this widget's poll chain).
+  // This file stays dependency-free by design, so the tiny fan-out helper is
+  // local (bx-rate-monitor.js carries the same-shape twin — deliberate, ledgered).
+  function notifyPageSubs(listName, arg) {
+    var subs = window[listName];
+    if (!subs || !subs.length) { return; }
+    for (var i = 0; i < subs.length; i++) {
+      try { subs[i](arg); } catch (e) { /* subscriber isolation */ }
+    }
+  }
+
   // Poll-fetch discipline (DEC-WINDOWS-COUNTS-ONLY-001 M15, merged with the
   // display-truth self-scheduling chain — mirrors the sibling
   // bx-rate-monitor.js fetchJson): at most ONE request in flight (the
@@ -686,7 +703,12 @@
         pollFailures = 0;
         lastPollOkMs = nowMs();
         lastPollOkWallMs = Date.now();
-        if (data && typeof data === "object") { render(data); }
+        if (data && typeof data === "object") {
+          render(data);
+          // Fan the ONE /api/v1/liveproof poll out to page subscribers
+          // (DEC-FRONTEND-LATENCY-HARDENING-001) — never a second poller.
+          notifyPageSubs("__bxLiveproofSubs", data);
+        }
         renderAge();   // stale marking clears on the very next reachable poll
         schedulePoll(POLL_MS);
       })
@@ -698,6 +720,7 @@
         pollInFlight = false;
         if (seq !== pollSeq) { return; }
         pollFailures += 1;
+        notifyPageSubs("__bxLiveproofFailSubs", pollFailures);
         renderAge();
         schedulePoll(backoffDelayMs(pollFailures));
       });

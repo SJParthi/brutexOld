@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from brutex import ranking
@@ -399,6 +399,7 @@ class TestBuildTop100:
             "signal": 20,
             "forced_1520": 5,
             "end_of_data": 0,
+            "session_gap": 0,
         }
         regime = entry["regime"]
         assert isinstance(regime, dict)
@@ -414,6 +415,42 @@ class TestBuildTop100:
         assert entry["equity_ref"] == {
             "tuple": "NIFTY/1minute/bull_k1_deadbeefdeadbeef",
             "sidecar": "equity",
+        }
+
+    def test_exit_tallies_map_positionally_never_swapped_or_zeroed(self) -> None:
+        """Each exits key reads its OWN agg tally (refuter round 4, CM3 pattern).
+
+        The fixture DEFAULTS zero both tail tallies, so the shape pin above let
+        an ``end_of_data`` <-> ``session_gap`` SWAP and a literal-``0``
+        ``session_gap`` both survive. Six pairwise-DISTINCT NONZERO tallies
+        (rebalanced so the exits still sum to ``n_trades`` = 40 — the
+        ``ComboAggregate.__post_init__`` invariant) kill the swap mutant in
+        BOTH directions plus the literal-0. Deliberately per-test
+        ``agg_overrides``, never a fixture-default change — the defaults feed
+        the sha256-locked ``test_top100_artifact_golden.py`` bytes.
+        """
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={
+                "exits_stop_loss": 7,
+                "exits_take_profit": 11,
+                "exits_signal": 13,
+                "exits_forced_1520": 3,
+                "exits_end_of_data": 2,
+                "exits_session_gap": 4,
+            },
+        )
+        artifact = _build([cand])
+        metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
+        assert metrics["exits"] == {
+            "stop_loss": 7,
+            "take_profit": 11,
+            "signal": 13,
+            "forced_1520": 3,
+            "end_of_data": 2,
+            "session_gap": 4,
         }
 
     def test_unstamped_vix_band_is_honest_none(self) -> None:
@@ -663,3 +700,299 @@ class TestLoadsObjectBelt:
 
         with pytest.raises(Top100Error, match="did not decode to an object"):
             _loads_object("[1,2,3]")
+
+
+# ── DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the cascade join at the writer ──
+
+from pathlib import Path as _Path  # noqa: E402
+
+from brutex.engine.cascade_join import CascadeJoin, CascadeVerdictView  # noqa: E402
+from brutex.engine.top100_artifact import (  # noqa: E402
+    CASCADE_STATE_JOINED,
+    CASCADE_STATE_NO_REPORT,
+    CASCADE_STATE_SWEEP_ID_MISMATCH,
+)
+
+_FIXTURES = _Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+_PRE_CASCADE_TOP100 = _FIXTURES / "top100_pre_cascade_v1" / ("grid" + "0" * 60) / "top100.json"
+
+
+def _view(cid: str, **overrides: Any) -> CascadeVerdictView:
+    base: dict[str, Any] = {
+        "candidate_id": cid,
+        "instrument": "NIFTY",
+        "tf": "1minute",
+        "passed": True,
+        "rejected_at": None,
+        "detail": "survived all Stage-4 filters",
+        "cascade_composite": 1.5,
+        "provisional": False,
+        "cpcv_pass_rate": 0.75,
+        "survivor_rank": 1,
+    }
+    base.update(overrides)
+    return CascadeVerdictView(**base)
+
+
+def _join(
+    views: dict[str, CascadeVerdictView],
+    *,
+    sweep_id: str = _RUN,
+    ambiguous: frozenset[str] = frozenset(),
+) -> CascadeJoin:
+    return CascadeJoin(
+        sweep_id=sweep_id,
+        version=1,
+        n_input=len(views) + len(ambiguous),
+        n_survived=sum(1 for v in views.values() if v.passed),
+        by_candidate=views,
+        ambiguous_ids=ambiguous,
+        groups=(),
+        skipped_groups=0,
+        skipped_verdicts=0,
+        nulled_values=0,
+        rank_inconsistencies=0,
+    )
+
+
+def _fixture_pair() -> list[Top100Candidate]:
+    """The EXACT candidate pair the frozen pre-change fixture was built from."""
+    from tests.fakes.wp4_twin_fixtures import fingerprint_seed as _fp
+
+    return [
+        make_candidate(1, fingerprint=_fp("fp-a")),  # type: ignore[arg-type]
+        make_candidate(
+            2,
+            fingerprint=_fp("fp-b"),  # type: ignore[arg-type]
+            row_overrides={"sharpe_ratio": 0.9, "max_drawdown_pct": 12.0},
+        ),
+    ]
+
+
+class TestCascadeJoinAtWriter:
+    def test_no_report_state(self) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert artifact.cascade_join == {
+            "state": CASCADE_STATE_NO_REPORT,
+            "sweep_id": None,
+            "n_input": None,
+            "n_survived": None,
+        }
+        (entry,) = artifact.entries
+        assert entry["cascade"] == {"status": "not_validated", "reason": "no_report"}
+        assert "cpcv_pass_pct" not in entry["metrics"]  # type: ignore[operator]
+
+    def test_sweep_id_gate_mismatch_drops_join_loudly(self) -> None:
+        join = _join({run_id_of(1): _view(run_id_of(1))}, sweep_id="other" + "0" * 59)
+        with capture_logs() as logs:
+            artifact = _build(
+                [make_candidate(1, fingerprint=fingerprint_seed(1))], cascade_join=join
+            )
+        assert artifact.cascade_join == {
+            "state": CASCADE_STATE_SWEEP_ID_MISMATCH,
+            "sweep_id": "other" + "0" * 59,
+            "n_input": None,
+            "n_survived": None,
+        }
+        (entry,) = artifact.entries
+        assert entry["cascade"] == {
+            "status": "not_validated",
+            "reason": "sweep_id_mismatch",
+        }
+        assert "cpcv_pass_pct" not in entry["metrics"]  # type: ignore[operator]
+        (warn,) = [e for e in logs if e["event"] == "top100.cascade_sweep_id_mismatch"]
+        assert warn["run_id"] == _RUN
+        assert warn["report_sweep_id"] == "other" + "0" * 59
+
+    def test_joined_pass_provisional_fail_and_absent(self) -> None:
+        views = {
+            run_id_of(1): _view(run_id_of(1), cascade_composite=2.5, cpcv_pass_rate=0.9),
+            run_id_of(2): _view(
+                run_id_of(2), provisional=True, cascade_composite=1.0, survivor_rank=2
+            ),
+            run_id_of(3): _view(
+                run_id_of(3),
+                passed=False,
+                rejected_at="walk_forward",
+                detail="anchored pass-rate 0.5000 < 0.75",
+                cascade_composite=None,
+                cpcv_pass_rate=0.625,
+                survivor_rank=None,
+            ),
+        }
+        candidates = [
+            make_candidate(1, fingerprint=fingerprint_seed(1)),
+            make_candidate(2, fingerprint=fingerprint_seed(2)),
+            make_candidate(3, fingerprint=fingerprint_seed(3)),
+            make_candidate(4, fingerprint=fingerprint_seed(4)),
+        ]
+        artifact = _build(candidates, cascade_join=_join(views))
+        assert artifact.cascade_join is not None
+        assert artifact.cascade_join["state"] == CASCADE_STATE_JOINED
+        assert artifact.cascade_join["sweep_id"] == _RUN
+        by_run = {entry["run_id"]: entry for entry in artifact.entries}
+        one = by_run[run_id_of(1)]
+        assert one["cascade"] == {
+            "status": "pass",
+            "rejected_at": None,
+            "detail": "survived all Stage-4 filters",
+            "cascade_composite": 2.5,
+            "provisional": False,
+            "cpcv_pass_rate": 0.9,
+            "survivor_rank": 1,
+        }
+        # The display alias is the EXACT float unit projection.
+        assert one["metrics"]["cpcv_pass_pct"] == 0.9 * 100.0  # type: ignore[index]
+        two = by_run[run_id_of(2)]
+        assert two["cascade"]["status"] == "provisional_pass"  # type: ignore[index]
+        assert two["cascade"]["provisional"] is True  # type: ignore[index]
+        three = by_run[run_id_of(3)]
+        assert three["cascade"] == {
+            "status": "fail",
+            "rejected_at": "walk_forward",
+            "detail": "anchored pass-rate 0.5000 < 0.75",
+            "cascade_composite": None,
+            "provisional": False,
+            "cpcv_pass_rate": 0.625,
+            "survivor_rank": None,
+        }
+        assert three["metrics"]["cpcv_pass_pct"] == 0.625 * 100.0  # type: ignore[index]
+        four = by_run[run_id_of(4)]
+        assert four["cascade"] == {
+            "status": "not_validated",
+            "reason": "not_in_cascade_pool",
+        }
+        assert "cpcv_pass_pct" not in four["metrics"]  # type: ignore[operator]
+
+    def test_fail_rank_one_stays_rank_one(self) -> None:
+        # R13: annotation NEVER reranks — the min_dd_first winner keeps rank 1
+        # even when the cascade FAILED it (the display flags it instead).
+        views = {
+            run_id_of(1): _view(
+                run_id_of(1),
+                passed=False,
+                rejected_at="pbo",
+                cascade_composite=None,
+                cpcv_pass_rate=None,
+                survivor_rank=None,
+            )
+        }
+        candidates = [
+            make_candidate(1, fingerprint=fingerprint_seed(1)),
+            make_candidate(
+                2, fingerprint=fingerprint_seed(2), row_overrides={"max_drawdown_pct": 20.0}
+            ),
+        ]
+        artifact = _build(candidates, cascade_join=_join(views))
+        assert artifact.entries[0]["run_id"] == run_id_of(1)
+        assert artifact.entries[0]["cascade"]["status"] == "fail"  # type: ignore[index]
+        # A fail with no measured rate emits NO pct key — never a 0.
+        assert "cpcv_pass_pct" not in artifact.entries[0]["metrics"]  # type: ignore[operator]
+
+    def test_duplicate_candidate_id_reads_ambiguous(self) -> None:
+        join = _join({}, ambiguous=frozenset({run_id_of(1)}))
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], cascade_join=join)
+        (entry,) = artifact.entries
+        assert entry["cascade"] == {
+            "status": "not_validated",
+            "reason": "duplicate_candidate_id",
+        }
+
+    def test_join_bytes_deterministic(self) -> None:
+        join = _join({run_id_of(1): _view(run_id_of(1))})
+        one = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))], cascade_join=join
+        ).rendered_bytes()
+        two = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))], cascade_join=join
+        ).rendered_bytes()
+        assert one == two
+
+    def test_entry_required_keys_not_extended(self) -> None:
+        # Extending ENTRY_REQUIRED_KEYS would flip every pre-change artifact
+        # + fixture to ABSENT on load — pinned NOT to grow.
+        assert (
+            frozenset(
+                {
+                    "rank",
+                    "run_id",
+                    "mask_hex",
+                    "conditions",
+                    "instrument",
+                    "tf",
+                    "direction",
+                    "arm",
+                    "metrics",
+                    "regime",
+                    "vix_band",
+                    "family_id",
+                    "family_members",
+                    "reasons",
+                    "margin_roi",
+                    "equity_ref",
+                }
+            )
+            == ENTRY_REQUIRED_KEYS
+        )
+        assert "cascade" not in ENTRY_REQUIRED_KEYS
+
+    def test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture(self) -> None:
+        """Stripping ONLY the new keys reproduces the frozen pre-change bytes.
+
+        The frozen fixture predates BOTH additive deltas now in the tree: the
+        #1749 ``cascade_join``/``cascade`` keys (this DEC's) AND main's
+        DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
+        ``metrics.exits["session_gap"]`` key — the strip normalizes both, so
+        the pin still proves the deltas are additive-only.
+        """
+        frozen = json.loads(_PRE_CASCADE_TOP100.read_text(encoding="utf-8"))
+        artifact = build_top100(
+            _fixture_pair(),
+            run_id="grid" + "0" * 60,
+            preset="min_dd_first",
+            families=_NO_FAMILIES,
+            counts=_counts(),
+            data_snapshot_hashes=("snap0001",),
+            baselines={"NIFTY": "baseline-NIFTY.json"},
+        )
+        payload = artifact.to_payload()
+        stripped = dict(payload)
+        stripped.pop("cascade_join")
+
+        def _strip_entry(entry: dict[str, object]) -> dict[str, object]:
+            out = {k: v for k, v in entry.items() if k != "cascade"}
+            metrics = dict(cast("dict[str, object]", out["metrics"]))
+            exits = dict(cast("dict[str, object]", metrics["exits"]))
+            session_gap_count = exits.pop("session_gap")
+            assert session_gap_count == 0  # the #1743 zero-count delta
+            metrics["exits"] = exits
+            out["metrics"] = metrics
+            return out
+
+        stripped["entries"] = [
+            _strip_entry(entry)
+            for entry in payload["entries"]  # type: ignore[union-attr]
+        ]
+        assert stripped == frozen
+
+    def test_frozen_pre_change_artifact_still_loads(self, tmp_path: Path) -> None:
+        """The back-compat oracle: a pre-change artifact loads fine, meta None."""
+        import shutil
+
+        run_id = "grid" + "0" * 60
+        shutil.copytree(_PRE_CASCADE_TOP100.parent.parent, tmp_path / "runs")
+        loaded = load_top100(tmp_path / "runs", run_id)
+        assert loaded is not None
+        assert loaded.cascade_join is None
+        assert all("cascade" not in entry for entry in loaded.entries)
+        # A None meta is NOT re-emitted — the round-trip payload byte-law.
+        assert "cascade_join" not in loaded.to_payload()
+
+    def test_load_round_trips_cascade_join_meta(self, tmp_path: Path) -> None:
+        join = _join({run_id_of(1): _view(run_id_of(1))})
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], cascade_join=join)
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.cascade_join == artifact.cascade_join
+        assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]

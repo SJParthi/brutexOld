@@ -119,6 +119,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.cascade_join import CascadeJoin
     from brutex.engine.results_store import ResultRow
     from brutex.engine.session_lens import SessionLens
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
@@ -364,7 +365,16 @@ def _build_tuple_sidecars(
 ) -> None:
     """Capture + aggregate + persist one STALE tuple's sidecar trio."""
     bar_bits = build_bar_bits(
-        bars, proximity=tuple_.proximity, prior_n=grid.prior_n, fib_anchor=tuple_.fib_anchor
+        bars,
+        proximity=tuple_.proximity,
+        prior_n=grid.prior_n,
+        fib_anchor=tuple_.fib_anchor,
+        # The swept price-source axis is bar_bits-affecting (bits 52-53 / 0-5,
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001): re-simulate a non-default cell's
+        # finalists against ITS OWN source so the parity tooth matches the stored
+        # rows (a default cell is byte-identical — the sources default to baseline).
+        vwap_source=tuple_.price_source.vwap_source,
+        ema_source=tuple_.price_source.ema_source,
     )
     captures = []
     aggs: list[ComboAggregate] = []
@@ -411,7 +421,27 @@ def _build_tuple_sidecars(
 
 
 def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
-    """Read the tuple's aggregate records back from its (validated) sidecar."""
+    """Read the tuple's aggregate records back from its (validated) sidecar.
+
+    ``exits_session_gap`` is read PRESENCE-TOLERANTLY (the WindowLedgerRecord
+    ``bars_net_new`` / gap-register Ruling-5 optional-column template — the
+    ``results_store._optional_float`` sibling): a 49-column ``aggs.parquet``
+    written before DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
+    lacks the column, and a bare ``ComboAggregate(**record)`` raised
+    ``TypeError`` — swallowed by the caller's per-tuple fence as a spurious
+    ``tuples_errored`` (double-counted beside ``tuples_skipped_current``) with
+    the stamped-current tuple silently dropped from the pool.
+
+    The default is the HONEST ``0``, NOT an unknown-``None``: the pre-guard
+    walker NEVER emitted a ``session_gap`` exit, so zero is factually the true
+    count of ``session_gap``-LABELED exits in that old artifact. (Its trades
+    were simulated WITHOUT session-gap closes — a different-semantics sim,
+    disclosed in #1743's honest clause (ii) and healed by the post-deploy
+    re-sweep — but this counter counts LABELS, and the old artifact's label
+    count is exactly 0.) ``0`` also keeps the ``__post_init__`` exit-tally sum
+    invariant satisfied: the old record's five tallies already sum to
+    ``n_trades``.
+    """
     try:
         import polars as pl
     except ImportError as exc:
@@ -420,7 +450,11 @@ def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
         df = pl.read_parquet(paths.aggs)
     except (pl.exceptions.PolarsError, OSError) as exc:
         raise ResultsDepthError(f"unreadable aggs sidecar at {paths.aggs}: {exc}") from exc
-    return [ComboAggregate(**record) for record in df.iter_rows(named=True)]
+    records: list[ComboAggregate] = []
+    for record in df.iter_rows(named=True):
+        record.setdefault("exits_session_gap", 0)
+        records.append(ComboAggregate(**record))
+    return records
 
 
 def _entry_ts_sets(paths: SidecarPaths, run_ids: Sequence[str]) -> dict[str, frozenset[int]]:
@@ -512,6 +546,7 @@ def run_results_depth_pass(
     preset_name: str = DEFAULT_TOP100_PRESET,
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
+    cascade_join: CascadeJoin | None = None,
 ) -> ResultsDepthReport:
     """Run the full results-depth pass over one grid's persisted stores.
 
@@ -541,6 +576,13 @@ def run_results_depth_pass(
         The top-100 ranking preset (unknown degrades to the default, logged).
     reason_provider, margin_roi_provider
         The WP3 seams, threaded to :func:`build_top100` (see that module).
+    cascade_join
+        The flattened Stage-4 cascade join
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001), threaded VERBATIM to
+        :func:`build_top100` (the sweep_id gate + the entry law live
+        there); ``None`` (the default — every pre-change caller) means no
+        report was threaded. The fence law is unchanged: a pass failure
+        never fails the sweep.
 
     Returns
     -------
@@ -700,6 +742,7 @@ def run_results_depth_pass(
             baselines=baselines,
             reason_provider=reason_provider,
             margin_roi_provider=margin_roi_provider,
+            cascade_join=cascade_join,
         )
         write_top100(runs_dir, artifact)
         top100_written = True

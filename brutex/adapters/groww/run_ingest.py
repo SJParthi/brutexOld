@@ -345,6 +345,7 @@ def run_groww_spot_ingest(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
@@ -453,6 +454,13 @@ def run_groww_spot_ingest(
         real-vendor production sites construct one
         (:func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`),
         mirroring the ``detect_completeness_gaps`` gating.
+    today_completeness_gate
+        The pre-settle TODAY minute-completeness gate
+        (DEC-PULL-TODAY-COMPLETENESS-GATE-001), threaded verbatim into every
+        pair's window tails — see
+        :func:`~brutex.adapters.groww.ingest.ingest_spot`. Default ``False``
+        (library-inert); the production sites pass ``(not dry_run) and
+        resolve_today_completeness_enabled()``.
     write_breaker
         Optional :class:`~brutex.data.write_breaker.WriteHealthBreaker`
         (DEC-WRITE-HEALTH-BREAKER-001). ``None`` (the default) resolves a FRESH
@@ -591,6 +599,7 @@ def run_groww_spot_ingest(
                 on_window=on_window,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                today_completeness_gate=today_completeness_gate,
                 observed_holidays=observed_holidays,
                 empty_breaker=breaker,
                 storm_breaker=storm_breaker,
@@ -803,6 +812,7 @@ def run_groww_spot_ingest_with_retry(
     write_pool: WriteConsumer | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
@@ -906,6 +916,7 @@ def run_groww_spot_ingest_with_retry(
             write_pool=write_pool,
             fetch_pipeline=fetch_pipeline,
             detect_completeness_gaps=detect_completeness_gaps,
+            today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             storm_breaker=storm_breaker,

@@ -1135,6 +1135,154 @@ def test_prebuild_quarantines_corrupt_symbol_and_names_it(tmp_path: Path) -> Non
     assert (tmp_path / "bars" / _EXCHANGE / _SEGMENT / clean / "5minute").exists()
 
 
+def _plant_nonfinite_1m(lake_root: Path, symbol: str, *, column: str, value: float) -> None:
+    """Raw-plant a 1-minute partition holding one non-finite *column* bar.
+
+    Raw pyarrow — the writer + the vendor parse (``to_price``'s explicit
+    ``is_finite`` guard) refuse non-finite prices, so a stored non-finite
+    price is only ever planted/out-of-band corrupt data (the #1067 raw-plant
+    convention; DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / _SEGMENT
+        / symbol
+        / "1minute"
+        / f"{_SESSION_OPEN_UTC.year:04d}"
+        / f"{_SESSION_OPEN_UTC.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = [_SESSION_OPEN_UTC + timedelta(minutes=i) for i in range(3)]
+    columns: dict[str, list[float]] = {
+        "open": [100.0, 100.0, 100.0],
+        "high": [110.0, 110.0, 110.0],
+        "low": [90.0, 90.0, 90.0],
+        "close": [105.0, 105.0, 105.0],
+    }
+    columns[column][0] = value  # bar 0 carries the non-finite poison
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array(columns["open"], type=pa.float64()),
+                "high": pa.array(columns["high"], type=pa.float64()),
+                "low": pa.array(columns["low"], type=pa.float64()),
+                "close": pa.array(columns["close"], type=pa.float64()),
+                "volume": pa.array([10, 10, 10], type=pa.int64()),
+                "open_interest": pa.array([None, None, None], type=pa.int64()),
+            }
+        ),
+        dest,
+    )
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+def test_nonfinite_high_1m_partition_refuses_to_derive(tmp_path: Path, value: float) -> None:
+    """FAILS-BEFORE (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, defect #2): the
+    pre-fix price-sanity mask was BLIND to ``high ∈ {+inf, NaN}`` — the
+    assurance session executed-repro'd ``make_lake_read_1m`` RETURNING
+    ``highs=[inf, ...]`` silently and the 5-minute max aggregation minting a
+    derived bucket ``high = inf``. Now the read refuses loudly and NOTHING
+    derived is written."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_nonfinite_1m(tmp_path, _SYMBOL, column="high", value=value)
+    with pytest.raises(ResampleInputError, match="price-insane") as excinfo:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+        )
+    assert f"{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute" in str(excinfo.value)
+    # No derived partition was written — the inf/NaN did not launder.
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "5minute").exists()
+
+
+def test_prebuild_quarantines_nonfinite_symbol_and_names_it(tmp_path: Path) -> None:
+    """The pipeline prebuild quarantines the inf-HIGH symbol via the EXISTING
+    per-symbol machinery (the strengthened gate raises ResampleInputError —
+    already in ``gated_prebuild._per_symbol_data_errors``): the clean sibling
+    still builds, the poisoned one is NAMED in ``failed``, no derived TFs."""
+    from brutex.dashboard.fno_cascade import build_fno_cascade
+    from brutex.dashboard.pipeline_prebuild import PrebuildTarget, run_pipeline_prebuild
+    from brutex.data.timeframe_materialize import MaterializeResult
+    from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+    def _spot(name: str) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=abs(hash(name)) & 0xFFFF,
+            symbol_name=name,
+            display_name=name,
+            instrument=InstrumentType.IDX,
+            segment=Segment.INDEX,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+        )
+
+    poisoned, clean = "INFSYM", "GOODSYM"
+    _plant_nonfinite_1m(tmp_path, poisoned, column="high", value=float("inf"))
+    _write_1m_bars_for(tmp_path, clean)
+
+    def _materialize(target: PrebuildTarget) -> MaterializeResult:
+        return materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=target.exchange,
+            segment=target.segment,
+            symbol=target.symbol,
+            kind=target.kind,
+            tfs=("5m",),
+        )
+
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot(poisoned), _spot(clean)],
+        cascade=build_fno_cascade([]),
+        materialize=_materialize,
+    )
+    assert outcome.ok is False
+    assert outcome.failed == (poisoned,)  # the poisoned symbol is NAMED
+    assert outcome.symbols_built == 1  # the clean sibling still built
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / poisoned / "5minute").exists()
+    assert (tmp_path / "bars" / _EXCHANGE / _SEGMENT / clean / "5minute").exists()
+
+
+def test_clean_lake_read_1m_is_pure_pass_through(tmp_path: Path) -> None:
+    """HEALTHY-LAKE IDENTITY PIN (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): on
+    a clean lake the strengthened gate changes NOTHING — the reader's frame
+    equals the raw parquet content under the same rename/select/sort."""
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    _write_1m_bars_for(tmp_path, _SYMBOL, n=10)
+    frame = make_lake_read_1m(
+        lake_root=tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL
+    )()
+    raw = pl.read_parquet(
+        (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute").as_posix()
+        + "/**/*.parquet"
+    )
+    expected = (
+        raw.rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+    assert frame.equals(expected)
+
+
 def _write_1m_bars_for(lake_root: Path, symbol: str, n: int = 10) -> None:
     """Write *n* clean in-session 1-minute bars for *symbol* via the real sink."""
     bars = [
@@ -1151,3 +1299,164 @@ def _write_1m_bars_for(lake_root: Path, symbol: str, n: int = 10) -> None:
     ]
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     sink.append(exchange=_EXCHANGE, segment=_SEGMENT, symbol=symbol, interval="1minute", bars=bars)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Prebuild bad-tick screen — a self-consistent x10 spike never poisons the
+# derived TFs / 1day anchor (DEC-READ-GUARD-PARITY-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: Clean in-session 1-minute closes by minute offset (two 5-minute buckets;
+#: minute 2 is deliberately absent — the spike's own slot, so the SCREENED
+#: spiked frame is exactly the clean twin's frame).
+_BT_CLEAN_CLOSES: dict[int, float] = {
+    0: 100.0,
+    1: 100.5,
+    3: 100.75,
+    4: 101.25,
+    5: 100.9,
+    6: 101.1,
+    7: 100.8,
+    8: 101.0,
+}
+
+#: The mid-bucket minute the self-consistent x10 spike occupies.
+_BT_SPIKE_MINUTE = 2
+
+#: max(close + 0.5) over the clean bars — the derived HIGH every arm must read.
+_BT_CLEAN_HIGH = 101.75
+
+
+def _seed_spiked_lake(lake_root: Path, *, spike: bool) -> None:
+    """~8 clean 1m bars (close ~= 100, two 5m buckets) via the REAL writer.
+
+    With ``spike=True`` one mid-bucket SELF-CONSISTENT x10 bar
+    ``(open=1000.0, high=1001.0, low=999.0, close=1000.5)`` is added at
+    minute 2 — internally ordered + positive, so it passes
+    ``CandleBar._validate_price_bar`` AND the frame price-sanity gate (the
+    exact DEC-SWEEP-DATA-EDGE-GUARDS-001 scaled-bar class), hence the REAL
+    ``ParquetWriter`` plant (never raw pyarrow). ``spike=False`` is the
+    clean twin: the identical bars MINUS the spike.
+    """
+    bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=minute),
+            open=Decimal(str(close)),
+            high=Decimal(str(close + 0.5)),
+            low=Decimal(str(close - 0.5)),
+            close=Decimal(str(close)),
+            volume=10 + minute,
+            open_interest=0,
+        )
+        for minute, close in sorted(_BT_CLEAN_CLOSES.items())
+    ]
+    if spike:
+        bars.append(
+            CandleBar(
+                timestamp=_SESSION_OPEN_UTC + timedelta(minutes=_BT_SPIKE_MINUTE),
+                open=Decimal("1000.0"),
+                high=Decimal("1001.0"),
+                low=Decimal("999.0"),
+                close=Decimal("1000.5"),
+                volume=999,
+                open_interest=0,
+            )
+        )
+        bars.sort(key=lambda bar: bar.timestamp)
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink.append(exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL, interval="1minute", bars=bars)
+
+
+def _bt_materialize(lake_root: Path) -> None:
+    """The production derive: 5minute + the derived 1day, deterministic cutoff."""
+    materialize_lake_timeframes(
+        lake_root=lake_root,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        kind=PrebuildKind.SPOT,
+        tfs=("5m",),
+        include_daily=True,
+        daily_before=datetime(2021, 6, 1, tzinfo=UTC).date(),
+    )
+
+
+def _bt_derived_high(lake_root: Path, interval: str) -> float:
+    """The max stored HIGH of the symbol's derived *interval* partition."""
+    part = lake_root / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / interval
+    df = pl.read_parquet(part.as_posix() + "/**/*.parquet")
+    return float(df.get_column("high").max())  # type: ignore[arg-type]
+
+
+def _bt_derived_hashes(lake_root: Path) -> dict[str, bytes]:
+    """Per-file bytes of every DERIVED partition (the 1minute base excluded)."""
+    return {
+        rel: content
+        for rel, content in _hash_lake_parquet(lake_root).items()
+        if "/1minute/" not in f"/{rel}"
+    }
+
+
+class TestPrebuildBadTickScreen:
+    """GAP-1 (DEC-READ-GUARD-PARITY-001): the prebuild 1m read screens spikes."""
+
+    def test_prebuild_excludes_x10_spike_from_derived_and_1day(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILS-BEFORE: the self-consistent x10 spike (which passes the
+        price-sanity gate) leaked into the derived 5minute bucket HIGH and the
+        1day anchor HIGH; the screened derive now writes the clean twin's
+        bytes, with exactly ONE ``feed.bad_tick_skipped`` WARN carrying the
+        ``prebuild:``-prefixed source."""
+        from structlog.testing import capture_logs
+
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)  # default ON
+        spiked = tmp_path / "spiked"
+        clean = tmp_path / "clean"
+        _seed_spiked_lake(spiked, spike=True)
+        _seed_spiked_lake(clean, spike=False)
+        with capture_logs() as logs:
+            _bt_materialize(spiked)
+        _bt_materialize(clean)
+        # (a) the spike bucket's derived 5minute HIGH == the clean high.
+        assert _bt_derived_high(spiked, "5minute") == _BT_CLEAN_HIGH
+        # (b) the derived 1day anchor HIGH == the clean high.
+        assert _bt_derived_high(spiked, "1day") == _BT_CLEAN_HIGH
+        # (c) screened(spiked frame) == clean frame ⇒ byte-identical derive.
+        assert _bt_derived_hashes(spiked) == _bt_derived_hashes(clean)
+        # (d) exactly ONE per-session WARN, boundary-distinct prebuild source.
+        warns = [e for e in logs if e.get("event") == "feed.bad_tick_skipped"]
+        assert len(warns) == 1
+        assert warns[0]["source"] == f"prebuild:{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute"
+        assert warns[0]["skipped"] == 1
+
+    def test_prebuild_kill_switch_off_keeps_spike_in_derived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``BRUTEX_BAD_TICK_SCREEN=off`` restores the legacy (spike-poisoned)
+        derive end-to-end — the operator's forensic raw-bytes escape hatch —
+        and emits ZERO bad-tick WARNs (pins the M5 switch polarity)."""
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
+        _seed_spiked_lake(tmp_path, spike=True)
+        with capture_logs() as logs:
+            _bt_materialize(tmp_path)
+        assert _bt_derived_high(tmp_path, "5minute") == 1001.0
+        assert _bt_derived_high(tmp_path, "1day") == 1001.0
+        assert not [e for e in logs if e.get("event") == "feed.bad_tick_skipped"]
+
+    def test_prebuild_clean_lake_screen_on_vs_off_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The clean-lake A/B: screen ON (default) vs OFF derive the SAME
+        bytes — clean lakes are provably untouched by the new gate."""
+        lake_on = tmp_path / "on"
+        lake_off = tmp_path / "off"
+        _seed_spiked_lake(lake_on, spike=False)
+        _seed_spiked_lake(lake_off, spike=False)
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        _bt_materialize(lake_on)
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
+        _bt_materialize(lake_off)
+        assert _hash_lake_parquet(lake_on) == _hash_lake_parquet(lake_off)

@@ -100,6 +100,59 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
+class TestSpecFillModeManifestLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001: the unconditional manifest token + the
+    precise-era refusal law (worst-case is the ONLY fill model)."""
+
+    def test_spec_dict_carries_the_permanent_worst_case_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["fill_mode"] == "worst_case"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_precise_era(self) -> None:
+        # Fails-before pin: a pre-DEC manifest (no fill_mode key — the old
+        # PRECISE elide) must refuse LOUDLY naming the DEC, never replay.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_literal_precise_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a worst-case manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_fill_mode_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "worst"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_fill_mode_field(self) -> None:
+        # Killed-token pin: the config object carries NO mode — the law is
+        # global, so nothing can thread a per-spec fill choice back in.
+        from dataclasses import fields
+
+        assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+    def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
+        bars = _session_bars()
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        assert len(a) == 1
+        assert a[0].returns == b[0].returns  # no hidden mode input survives
+
+
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
     """Return a ``bars_for`` that serves *bars* for NIFTY/1minute, else empty."""
 
@@ -177,6 +230,32 @@ def _fib_anchor_history(
     return bars
 
 
+def _lockbox_intraday_history() -> list[CandleBar]:
+    """Twelve real trading days whose ±500-paisa legs close IN-day.
+
+    Fixture repair for DEC-TRADESIM-OPEN-SESSION-GUARD-001: the original
+    ``_fib_anchor_history()`` shape (flat interiors, each 5-bar day a
+    session-tail hole) closed its SL/TP trades ONLY via cross-session fills
+    against each NEXT day's first bar — the exact overnight-gap fills the
+    open-position session guard now closes at the prior day's last stored
+    bar (every trade 0-pnl → flat complement equity → an undefined train
+    Sharpe). Alternating up/down days with in-day ±6-point ranges give the
+    lockbox split REAL in-day trade variance on BOTH sides of the window.
+    """
+    bars: list[CandleBar] = []
+    for n, day in enumerate(_FIB_TRADING_DAYS):
+        base_px = 10_000 + 25 * n
+        base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+        up_day = n % 2 == 0
+        for i in range(6):
+            o = base_px + i
+            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            bars.append(
+                _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
+            )
+    return bars
+
+
 def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
     return CandleBar(
         timestamp=ts_ist.astimezone(UTC),
@@ -190,28 +269,33 @@ def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
-    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+    """A 40-bar gap-up session with two down-spikes → fat-tailed WORST-CASE PnL.
 
-    The wide intrabar ranges let an SL/TP exit fill at different prices across
-    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
-    tails, so a reconstruction over these bars yields a DEFINED, non-zero
-    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
-    is material to the DSR. The pattern is deterministic (no RNG): a fixed
-    ``±`` swing list plus the spike overrides.
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the one hardcoded adverse-max
+    law): a long ENTERS at the bar HIGH and a triggered TP fills at
+    ``min(level, low)``, so a positive-Sharpe fixture needs the TRIGGER bar's
+    LOW to clear the target — every regular bar GAPS UP (open = prior close
+    + 3.00, low = open − 0.20, close = open + 1.00, high = close + 0.30), so
+    the next bar's low (prior close + 2.80) sits above the TP level (entry
+    high + 2.00 = prior close + 2.30 relative to its own bar) and the win
+    banks exactly +200 paisa. The two down-spike bars (16: −4.00, 30: −6.00)
+    inject the heavy tail: bar 30's dip breaches the entry-relative floor and
+    the trade closes at the adverse ``min(level, low)`` for −330 paisa.
+    Measured on this tree: 13 trades = twelve +200 and one −330 → Sharpe
+    ≈ 1.127 (> the test's SR_0 ≈ 0.207) with a DEFINED, non-zero excess
+    kurtosis ≈ 8.083 — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. Deterministic (no RNG).
     """
-    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
     seq: list[tuple[str, str, str, str]] = []
     price = 100.0
     for i in range(40):
-        o = price
-        if i in (10, 24):  # fat UPSIDE spikes
-            high, low, c = o + 15.0, o - 0.5, o + 12.0
-        elif i in (16, 30):  # fat DOWNSIDE spikes
-            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        o = price + 3.0
+        if i in (16, 30):  # fat DOWNSIDE spikes (different depths → tail variety)
+            depth = 4.0 if i == 16 else 6.0
+            high, low, c = o + 0.1, o - depth, o - depth + 1.0
         else:
-            delta = swings[i % len(swings)]
-            c = o + delta
-            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+            c = o + 1.0
+            high, low = c + 0.3, o - 0.2
         seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
         price = c
 
@@ -234,9 +318,9 @@ def _fat_tailed_bars() -> list[CandleBar]:
 def _fat_tailed_candidate() -> Any:
     """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
 
-    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
-    defined, non-zero excess kurtosis (≈1.73) — the fixture the
-    DSR-kurtosis-convention regression tests share.
+    ``sl=500 / tp=200`` over the gap-up session produces 13 worst-case trades
+    (twelve +200, one −330) with a defined, non-zero excess kurtosis (≈8.08)
+    — the fixture the DSR-kurtosis-convention regression tests share.
     """
     bars = _fat_tailed_bars()
     bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
@@ -569,9 +653,12 @@ class TestBuildCandidateInput:
         the old ``0.0``, which the DSR would have mis-read as a non-excess
         kurtosis of zero).
         """
-        bars = _session_bars()
+        # A FLAT session (o == h == l == c on every bar): under the one
+        # worst-case law every fill lands at the same price, so the
+        # reconstructed PnL is constant (zero) → kurtosis undefined.
+        flat = [_bar(16 + i, "100.00", "100.00", "100.00", "100.00") for i in range(6)]
+        bars = flat
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
-        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
         cand = cw.build_candidate_input(
             run_id=_rid(1),
             mask=0,
@@ -678,10 +765,12 @@ class TestLockboxTrainingSplit:
         from brutex.metrics.cpcv import sharpe_of_returns
         from brutex.metrics.lockbox import resolve_lockbox_window
 
-        bars = _fib_anchor_history()
-        # SL/TP legs so trades CLOSE throughout the 12-day history (with no
-        # legs the single mask-0 position holds to end_of_data and the
-        # complement equity is flat — the fallback case tested separately).
+        bars = _lockbox_intraday_history()
+        # SL/TP legs so trades CLOSE IN-day throughout the 12-day history
+        # (with no legs the single mask-0 position holds to end_of_data and
+        # the complement equity is flat — the fallback case tested
+        # separately; the in-day ranges are the DEC-TRADESIM-OPEN-SESSION-
+        # GUARD-001 fixture repair — see _lockbox_intraday_history).
         cand = self._build(bars, sl_paisa=500, tp_paisa=500)
 
         # Independent recompute of the exact reconstruction chain.
@@ -1080,6 +1169,10 @@ def _manual_report() -> cw.CascadeWireReport:
                 # hand-built serializer fixture: the leaderboard dsr stamp
                 # below is not cross-validated against the flag.
                 provisional=True,
+                # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: a MEASURED stage-3
+                # rate here vs the default-None rejected verdict below, so
+                # the serializer is value-pinned for BOTH states.
+                cpcv_pass_rate=0.875,
             ),
             CandidateVerdict(
                 candidate_id=_rid(2),
@@ -2310,3 +2403,53 @@ class TestManifestWindowDt:
     def test_aware_endpoint_offset_preserved(self) -> None:
         parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
         assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+class TestCpcvRateSerialisation:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the additive per-verdict rate key."""
+
+    def test_cpcv_pass_rate_serialises_both_states(self) -> None:
+        # Additive at REPORT_VERSION 1 (the pool_pbo/provisional precedent):
+        # the RAW full-precision fraction on the measured verdict, JSON null
+        # on the never-measured one — and the version does NOT bump.
+        payload = cw.wire_report_to_dict(_manual_report())
+        assert payload["version"] == cw.REPORT_VERSION
+        verdicts = payload["groups"][0]["report"]["verdicts"]  # type: ignore[index]
+        assert verdicts[0]["cpcv_pass_rate"] == 0.875
+        assert verdicts[1]["cpcv_pass_rate"] is None
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"cpcv_pass_rate":0.875' in raw
+        assert b'"cpcv_pass_rate":null' in raw
+
+
+class TestWriteReportAtomic:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: write_report is tmp→fsync→replace."""
+
+    def test_bytes_identical_and_no_temp_residue(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+        # The atomic_write_simple temp file never survives a clean write.
+        residue = [p.name for p in path.parent.iterdir() if p.name != path.name]
+        assert residue == []
+
+    def test_lands_via_os_replace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import atomic_io
+
+        calls: list[tuple[str, str]] = []
+        real_replace = atomic_io.os.replace
+
+        def _spy(src: str | Path, dst: str | Path) -> None:
+            calls.append((str(src), str(dst)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(atomic_io.os, "replace", _spy)
+        path = cw.write_report(tmp_path, _manual_report())
+        # Exactly ONE atomic rename, landing the final report path — a
+        # concurrent /results read can never see a torn half-write.
+        assert [dst for _, dst in calls] == [str(path)]
+
+    def test_overwrite_replaces_previous_report(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        first = path.read_bytes()
+        cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == first  # deterministic bytes, atomically re-landed

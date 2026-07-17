@@ -56,6 +56,22 @@ on:
   pull_request:
     branches:
       - main
+  # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): merge-queue readiness. When a
+  # merge queue rules `main`, GitHub dispatches `merge_group` events for the
+  # queue's speculative merge commits (refs/heads/gh-readonly-queue/...).
+  # EVERY branch-protection required context is produced by THIS workflow
+  # (the 21 static job names in branch-protection-drift.yml's expected
+  # snapshot + the ci-ok dynamic name below), so without this trigger no
+  # required check could ever report on a queue ref and every queued PR
+  # would hang until the queue times it out — the classic merge-queue
+  # deadlock. Notes: (a) `merge_group` supports NO `paths:` filtering —
+  # irrelevant here, this workflow is unfiltered; (b) the PR-only sub-gates
+  # (job/step `if: github.event_name == 'pull_request'`) SKIP on
+  # merge_group exactly as they already do on push-to-main — ci-ok treats
+  # skipped==pass and none of them is a DIRECT required context (they
+  # enforced the PR itself on its pull_request run); (c) the concurrency
+  # group below keys on github.ref, which is unique per queue entry.
+  merge_group:
   workflow_dispatch:
 
 # Cancel in-progress runs for the same branch on new pushes — saves
@@ -114,9 +130,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -144,7 +160,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install pinned actionlint
         env:
           AL_VERSION: "1.7.7"
@@ -169,9 +185,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -191,7 +207,7 @@ jobs:
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
         # actually importable.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -224,6 +240,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: mypy --strict
@@ -276,6 +309,21 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
+    # 75 -> 110 (2026-07-09, DEC-SWEEP-UNKILLABLE-CORE-001, run 28988287641
+    # job 86022289736): the Phase-2 unkillable-run-core work adds 23,766 lines
+    # of new unit/integration/property tests (16 new 100%-covered modules +
+    # their suites). The job hit the 75m wall (started 01:47:42Z, cancelled
+    # 03:03:00Z) MID step 10 "Strict per-module gate" (orphan pytest reaped at
+    # teardown) with EVERY executed step green: step 8 whole-package coverage
+    # SUCCEEDED at 100.00% in 3946s (65.8m) and coverage-xml uploaded, step 10
+    # got only 442s before the wall. Measured attribution vs the pre-Phase-2
+    # baseline dc859da7 (run 28985489988, SUCCESS, 58m wall): step 8 grew
+    # 2513s -> 3946s (+23.9m) and step 10 (full) was 849s there, so the
+    # projected full Phase-2 wall is ~88m (setup ~2m + step 8 65.8m + smoke
+    # 0.2m + step 10 ~18-20m). 110 gives evidenced ~25% headroom over the
+    # projected ~88m wall. Zero real failures, zero coverage loss (100.00%
+    # reached) — pure wall-time growth from the new test volume. Continues the
+    # 15->25->40->60->75 ratchet.
     # 75 -> 120 (2026-07-08, PR #1274 run 28922322988 job 85802830877): killed
     # at exactly 75:13 wall with EVERY executed step green — pytest+coverage
     # 54m12 SUCCESS (was 33m05 at the 60->75 raise; the VIX stamping PR adds
@@ -320,9 +368,19 @@ jobs:
     # union-resolved to 150 = the higher of the concurrent raises
     # (the same rule as the 2026-07-04 60-raise union). Wall-clock budget
     # only — no gate is weakened.
-    timeout-minutes: 150
+    # MERGE UNION (2026-07-11, train T1 origin/main fold): the train's
+    # concurrent 75 -> 110 raise (DEC-SWEEP-UNKILLABLE-CORE-001, recorded
+    # above) union-resolves to main's 150 = the higher of the concurrent
+    # raises (same rule as the 2026-07-10 union note above). Wall-clock
+    # budget only — no gate is weakened.
+    # 150 -> 180 (2026-07-11: run 29150445450 measured the T1 train head
+    # needing >150 — whole-suite 100min + strict per-module gate 22min +
+    # touched-module discovery gate >26min, ZERO test failures; wall-clock
+    # budget only, no gate weakened; coverage-gate sharding stays the
+    # declared follow-up DEC-SWEEP-COVERAGE-SHARD-001)
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -330,7 +388,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -354,7 +412,7 @@ jobs:
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
         # Rust may be older than the crate's `rust-version = "1.93.1"`
         # floor, so install stable explicitly.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # `pip install` triggers maturin (declared in
         # rust/fno-math/pyproject.toml's [build-system] requires) to
@@ -391,6 +449,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest with coverage gate
@@ -478,6 +553,25 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-STAGE1A-RUST-BATCH-001: the batch Rust Stage-1A seam (flag /
+          # burn-in / autorevert / observability leaf) — 100% line+branch
+          # STANDALONE under its dedicated unit file (the module also rides
+          # the whole-engine glob gate above).
+          if compgen -G "tests/unit/test_engine_rust_stage1a.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_stage1a --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_stage1a.py
+          else
+            echo "(brutex.engine.rust_stage1a test file not present yet — gate inactive)"
+          fi
+          # DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (MIGRATION.md #1671): the
+          # rank-budget worker-divisor wiring — a dedicated per-module pin at
+          # 100% line+branch over its two suites (the module also rides the
+          # whole-engine glob gate above; this line keeps the divisor seam's
+          # coverage visible on its own).
+          if compgen -G "tests/unit/test_engine_sweep_mem_budget_workers.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_mem_budget_workers.py
+          else
+            echo "(sweep_mem_budget worker-divisor test file not present yet — gate inactive)"
+          fi
           # DEC-AUDIT-VERIFY-UNIFY-001 (MIGRATION.md #560): the unified
           # audit-chain verifier (auto-detect SHA-256 ingest vs BLAKE3
           # supervisor) ships at 100% line+branch; the CLI shim it backs
@@ -553,6 +647,21 @@ jobs:
           else
             echo "(brutex.wheel_digest test file not present yet — gate inactive)"
           fi
+          # brutex.feed_rust — DEC-FEED-RUST-CORE-001: the default-OFF
+          #       Rust feed-kernel leaf (flag + wheel resolve + the
+          #       refuse-poison validate_scan gate); 100% line+branch
+          #       STANDALONE on its dedicated unit suite. (Also gated at the
+          #       19-series site below — the doctor two-site precedent.)
+          if compgen -G "tests/unit/test_feed_rust.py" > /dev/null; then
+            pytest \
+              --cov=brutex.feed_rust \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_feed_rust.py
+          else
+            echo "(brutex.feed_rust test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 2 (2026-05-24, MIGRATION.md entry #211):
           # ratchet `brutex.universe` into the strict per-module 100%
           # gate. `tests/unit/test_universe.py` has dedicated test
@@ -618,6 +727,15 @@ jobs:
             pytest --cov=brutex.execution.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_errors.py
           else
             echo "(brutex.execution.errors test file not present yet — gate inactive)"
+          fi
+          # DEC-FILL-WORST-CASE-ONLY-001: the stdlib-only global fill-mode
+          # vocabulary leaf (the single-member WORST_CASE token + the
+          # fail-loud require_fill_mode_env_unset refusal guard) — 100%
+          # line+branch standalone.
+          if compgen -G "tests/unit/test_execution_fill_mode.py" > /dev/null; then
+            pytest --cov=brutex.execution.fill_mode --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_fill_mode.py
+          else
+            echo "(brutex.execution.fill_mode test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_strategies_errors.py" > /dev/null; then
             pytest --cov=brutex.strategies.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_errors.py
@@ -752,11 +870,15 @@ jobs:
           else
             echo "(brutex.options.risk_free test file not present yet — gate inactive)"
           fi
-          # 12d · brutex.options.greeks (37 stmts, 4 branches, 47 tests)
+          # 12d · brutex.options.greeks
           #       DEC-GREEKS-ENGINE-PR2-001: the thin wrapper over the shared
           #       Rust Black-76 Greeks + verified Jäckel-IV kernel in
           #       trading_core — Greeks Phase 2 (needs the trading_core wheel,
-          #       installed above in this job)
+          #       installed above in this job) — plus the columnar batch face
+          #       compute_greeks_batch (DEC-GREEKS-RUST-BATCH-001). The
+          #       --cov-fail-under=100 flag is the gate; stmt/branch/test
+          #       counts live in the coverage output, not this comment (the
+          #       old "(37 stmts, 4 branches, 47 tests)" literals rotted).
           if compgen -G "tests/unit/test_options_greeks.py" > /dev/null; then
             pytest --cov=brutex.options.greeks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_greeks.py
           else
@@ -775,7 +897,9 @@ jobs:
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
               tests/golden/test_greeks_enrich_golden.py \
-              tests/golden/test_greeks_enrich_parallel_golden.py
+              tests/golden/test_greeks_enrich_parallel_golden.py \
+              tests/unit/test_greeks_enrich_rust_batch.py \
+              tests/golden/test_greeks_enrich_rust_batch_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi
@@ -903,10 +1027,38 @@ jobs:
           # backup_repo_corrupt) + the module-level emit_backup_failed_alert
           # are covered by the sibling test_notifications_sweep_alerts_backup
           # suite added to the invocation.
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the two
+          # cross-verify alert methods (crossverify_summary /
+          # crossverify_refused) + the module-level emit helpers are covered
+          # by the sibling test_notifications_sweep_alerts_crossverify suite
+          # added to the invocation.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_runcore.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py tests/unit/test_notifications_sweep_alerts_crossverify.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
+          fi
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) +
+          # DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) +
+          # DEC-CROSSVERIFY-DAY-DERIVE-001 (#1778): the daily TickVault
+          # cross-verify producer — every brutex/crossverify module ships at
+          # 100% line+branch STANDALONE under its dedicated unit file (the
+          # real boto3 client build is the ONE sanctioned pragma; FakeS3Client
+          # drives the publisher — boto3 stays OUT of CI).
+          if compgen -G "tests/unit/test_crossverify_config.py" > /dev/null; then
+            pytest --cov=brutex.crossverify.config       --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_config.py
+            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py
+            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py
+            pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
+            pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
+            pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
+            pytest --cov=brutex.crossverify.owed         --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_owed.py
+            pytest --cov=brutex.crossverify.s3_publish   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_s3_publish.py
+            pytest --cov=brutex.crossverify.pull_leg     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_pull_leg.py
+            pytest --cov=brutex.crossverify.prebuild_leg --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_prebuild_leg.py
+            pytest --cov=brutex.crossverify.run          --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_run.py
+            pytest --cov=brutex.crossverify.schedule     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_schedule.py
+          else
+            echo "(brutex.crossverify test files not present yet — gate inactive)"
           fi
           # DEC-TELEGRAM-WIRING-001 (2026-05-25, MIGRATION entry #238):
           # ratchet brutex.notifications.wiring (the Telegram⇄pipeline
@@ -953,6 +1105,16 @@ jobs:
             echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
           fi
           # DEC-MONITOR-LOOP-001 (2026-05-25, MIGRATION entry #242):
+          # ratchet brutex.observability.loop_watchdog (the event-loop
+          # liveness watchdog — heartbeat task + monitor daemon + the pure
+          # check_once state machine; DEC-DASHBOARD-PULL-CONTENTION-
+          # RESILIENCE-001 G5). 100% line+branch on its dedicated suite.
+          if compgen -G "tests/unit/test_observability_loop_watchdog.py" > /dev/null; then
+            pytest --cov=brutex.observability.loop_watchdog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_loop_watchdog.py
+          else
+            echo "(brutex.observability.loop_watchdog test file not present yet — gate inactive)"
+          fi
+
           # ratchet brutex.observability.monitor (daemon-thread poller
           # for SLA + Watchdog + L3 replay oracle) into the strict
           # per-module 100% gate. 26 unit tests cover construction
@@ -1157,6 +1319,14 @@ jobs:
             pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py tests/unit/test_doctor_wheel_source_digest.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
+          fi
+          # 19c2 · brutex.feed_rust (DEC-FEED-RUST-CORE-001) — the second gate
+          #        site (mirrors the DEC-COV-001 block above; the doctor
+          #        two-site precedent).
+          if compgen -G "tests/unit/test_feed_rust.py" > /dev/null; then
+            pytest --cov=brutex.feed_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_rust.py
+          else
+            echo "(brutex.feed_rust test file not present yet — gate inactive)"
           fi
           # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
           #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
@@ -1383,8 +1553,9 @@ jobs:
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
-          # 21c · brutex.data.tf_resampler (48 stmts, 20 branches —
-          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard)
+          # 21c · brutex.data.tf_resampler (57 stmts, 26 branches —
+          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard,
+          #       then the DEC-LAKE-RUST-RESAMPLE-001 seam branch)
           #       Closes 94.74→100% via 1 surgical test
           #       (`test_non_dataframe_input_raises_typeerror` covers line
           #       77 TypeError for non-polars.DataFrame input).
@@ -1393,9 +1564,12 @@ jobs:
           #       reachable ONLY from a frame carrying an `open_interest`
           #       column, which test_fno_resample.py provides (the
           #       OHLCV-only test_tf_resampler.py never grows that column).
-          #       Both files are required to keep this module 100%.
+          #       DEC-LAKE-RUST-RESAMPLE-001: the flag-ON seam branch is
+          #       reachable only via test_tf_resampler_rust_seam.py (the
+          #       stem-matched seam-wiring pins — the feed_replay_rust_seam
+          #       precedent). All the files are required for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_rust_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
@@ -1610,6 +1784,16 @@ jobs:
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
           fi
+          # DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001 (MIGRATION.md #1672): strict gate
+          # on the durable-write freeze guard (append_with_deadline one-shot pop
+          # handoff + lock-order inversion WARN + env resolver). Injectable sink
+          # fakes, so standalone-gateable with no growwapi/network. 100%
+          # line+branch over the three suites.
+          if compgen -G "tests/unit/test_groww_write_deadline_zombie.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.write_deadline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_write_deadline.py tests/unit/test_write_deadline_lock_order.py tests/unit/test_groww_write_deadline_zombie.py
+          else
+            echo "(write_deadline zombie test file not present yet — gate inactive)"
+          fi
           # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
           # form-winner map (symbol_form_preference — probe-evidence fold +
           # schema_meta persist/load) and the ONE shared schema_meta key/value
@@ -1641,6 +1825,15 @@ jobs:
             pytest --cov=brutex.data.price_sanity --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_price_sanity.py
           else
             echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
+          fi
+          # DEC-DASHBOARD-READ-SCREEN-001: the ONE COMMON dashboard screened bar
+          # reader (SessionBarScreen + screen_frame/screen_rows) composing the
+          # public bad_tick + price_sanity predicates. Standalone-gateable at
+          # 100% line+branch with its own unit+property suite.
+          if compgen -G "tests/unit/test_bar_screen.py" > /dev/null; then
+            pytest --cov=brutex.data.bar_screen --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_bar_screen.py
+          else
+            echo "(brutex.data.bar_screen test file not present yet — gate inactive)"
           fi
           # DEC-BENCH-ABS-BASELINE-001: the absolute bench-baseline schema/
           # comparator/capture/governance core — pure stdlib, standalone-gateable
@@ -1693,6 +1886,53 @@ jobs:
             pytest --cov=brutex.data.session --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session.py
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1774): the
+          # pre-settle TODAY minute-completeness gate — the pure classifier +
+          # guarded observe wiring both ingest tails consult before sink.append
+          # + ledger.record. 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_today_completeness.py" > /dev/null; then
+            pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py
+          else
+            echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): the pull-scope
+          # registry + spot-only no-op F&O reports + note surgery + the fail-soft
+          # crossverify tail fence, and the CLI --auto gate (settle constant +
+          # Muhurat deferral + composed mid-run belt). Both ship at 100%
+          # line+branch standalone from the start.
+          if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+          else
+            echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+          else
+            echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold: the self-arming
+          # post-market auto-pull scheduler (durable armed state + daemon
+          # ticker + the once-per-day fire law). 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+          else
+            echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
+          fi
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
+          # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
+          # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_settle_evidence.py" > /dev/null; then
+            pytest --cov=brutex.calendars.settle_evidence --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_settle_evidence.py
+          else
+            echo "(brutex.calendars.settle_evidence test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_sidecar_read.py" > /dev/null; then
+            pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
+          else
+            echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
           fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
@@ -2046,8 +2286,42 @@ jobs:
           # log) is covered by
           # tests/unit/test_dashboard_db_candles_torn_read_retry.py, which
           # MUST also join this gate.
+          # DEC-DASHBOARD-READ-SCREEN-001: the split-brain screen's /db seams
+          # (the _bad_tick_seed_bar empty-page + all-screened-window
+          # `return None` arms and the FNO CE/PE kind-derived
+          # bad_tick_enabled arms) are covered by
+          # tests/unit/test_dashboard_split_brain_screen.py, which MUST also
+          # join this gate.
+          # DEC-DB-TZ-MONEYNESS-FIXES-001: the session-TZ invariance belt
+          # (end-to-end pager + _IST_DATE_EXPR pin + source drift pin) AND
+          # the moneyness stock-drift rung (the stock_drift_loader lazy memo
+          # + rung attribution in _underlying_spot_close_by_ts) are covered
+          # by tests/unit/test_dashboard_db_tz_moneyness.py, which MUST also
+          # join this gate (23 test files total in this gate's list).
+          # DEC-ALIEN-SCHEMA-READ-HEAL-001: the schema-aware per-file probe
+          # (alien-schema skip + the union-conflict empty-degrade residue) is
+          # covered by tests/unit/test_dashboard_db_alien_schema.py, which
+          # MUST also join this gate.
+          # DEC-WINDOWS-STAT-GUARD-LATCH-001: the OSError-classed ledger stat
+          # guard + the readable-subset per-click latch are covered by
+          # tests/unit/test_dashboard_db_ledger_stat_guard.py, which MUST
+          # also join this gate.
+          # DEC-DB-BASELINE-MANIFEST-ROUTE-001: the %-baseline file pruning
+          # (manifest/month-grammar routing + the parity pins) is covered by
+          # tests/unit/test_dashboard_db_baseline_manifest.py, which MUST
+          # also join this gate.
+          # DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): the /db
+          # window-ledger DuckDB page fast path (query_window_ledger_page —
+          # the fast-equals-legacy parity, the legacy-shape/NULL-cell/
+          # torn-read/conn-None degrade arms, the wledger-* memo families)
+          # is covered by
+          # tests/unit/test_dashboard_db_view_window_ledger_page.py, and the
+          # span-bounded IEP reads (_existing_month_files_in_span + the
+          # _execute_parquet_resilient `files` arm + the span kwargs) by
+          # tests/unit/test_dashboard_db_span_bounded_reads.py — BOTH MUST
+          # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py tests/unit/test_dashboard_split_brain_screen.py tests/unit/test_dashboard_db_tz_moneyness.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -2090,7 +2364,7 @@ jobs:
           # (#440): the COMMON correlation primitive — pull_id (ingest) + request_id
           # (dashboard). 100% line+branch on correlation.py.
           if compgen -G "tests/unit/test_observability_correlation.py" > /dev/null; then
-            pytest --cov=brutex.observability.correlation --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_correlation.py
+            pytest --cov=brutex.observability.correlation --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_correlation.py tests/unit/test_observability_correlation_runid.py
           else
             echo "(brutex.observability.correlation test file not present yet — gate inactive)"
           fi
@@ -2226,6 +2500,15 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
           fi
+          # DEC-CACHE-SERVE-LAST-KNOWN-001 (MIGRATION.md #1666): the COMMON
+          # keyed cache (`MoversSnapshotCache`) gains the serve-last-known
+          # probe-outage mode + the mru_prefix bookkeeping — the module ships
+          # at 100% line+branch under its two dedicated unit suites.
+          if compgen -G "tests/unit/test_movers_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_cache.py tests/unit/test_movers_cache_serve_last_known.py tests/unit/test_movers_cache_swr.py
+          else
+            echo "(brutex.dashboard.movers_cache test file not present yet — gate inactive)"
+          fi
           # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the pure oneclick
           # payload builders — run pill / chain map / funnel reconcile / the
           # R44 5-state verify truth table (no I/O, no FastAPI). 100%
@@ -2234,6 +2517,114 @@ jobs:
             pytest --cov=brutex.dashboard.oneclick_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_view.py
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
+          fi
+          # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
+          # unkillable-run-core modules ship at 100% line+branch STANDALONE —
+          # observability core (flight recorder / manifest / stamps / bundle /
+          # chain map / tripwires), the R45 diffcheck, the run-lifecycle pure
+          # modules (single-flight / stall policy / liveness / quarantine /
+          # exit-status / detach), the G8/G14 adapters, and the run-core CM
+          # itself. Each gate proves its module at 100% over its OWN curated
+          # unit file so a sibling suite can never mask a coverage hole
+          # (measured 100.00% each at ship time, WP-6 evidence).
+          if compgen -G "tests/unit/test_observability_flight_recorder.py" > /dev/null; then
+            pytest --cov=brutex.observability.flight_recorder --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_flight_recorder.py
+          else
+            echo "(brutex.observability.flight_recorder test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_observability_run_manifest.py" > /dev/null; then
+            pytest --cov=brutex.observability.run_manifest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_run_manifest.py
+          else
+            echo "(brutex.observability.run_manifest test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_observability_stage_stamp.py" > /dev/null; then
+            pytest --cov=brutex.observability.stage_stamp --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_stage_stamp.py
+          else
+            echo "(brutex.observability.stage_stamp test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_observability_diag_bundle.py" > /dev/null; then
+            pytest --cov=brutex.observability.diag_bundle --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_diag_bundle.py
+          else
+            echo "(brutex.observability.diag_bundle test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_observability_chain_map.py" > /dev/null; then
+            pytest --cov=brutex.observability.chain_map --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_chain_map.py
+          else
+            echo "(brutex.observability.chain_map test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_observability_run_tripwires.py" > /dev/null; then
+            pytest --cov=brutex.observability.run_tripwires --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_run_tripwires.py
+          else
+            echo "(brutex.observability.run_tripwires test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_diffcheck.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_diffcheck --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_diffcheck.py
+          else
+            echo "(brutex.engine.sweep_diffcheck test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_singleflight.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_singleflight --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_singleflight.py
+          else
+            echo "(brutex.engine.sweep_singleflight test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_stall_policy.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_stall_policy --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_stall_policy.py
+          else
+            echo "(brutex.engine.sweep_stall_policy test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_liveness.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_liveness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_liveness.py
+          else
+            echo "(brutex.engine.sweep_liveness test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_quarantine.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_quarantine --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_quarantine.py
+          else
+            echo "(brutex.engine.sweep_quarantine test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_exit_status.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_exit_status --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_exit_status.py
+          else
+            echo "(brutex.engine.sweep_exit_status test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_detach.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_detach --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_detach.py
+          else
+            echo "(brutex.engine.sweep_detach test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_run_verdicts.py" > /dev/null; then
+            pytest --cov=brutex.engine.run_verdicts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_run_verdicts.py
+          else
+            echo "(brutex.engine.run_verdicts test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_artifact_guard.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_artifact_guard --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_artifact_guard.py
+          else
+            echo "(brutex.engine.sweep_artifact_guard test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_sweep_run_core.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_run_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_run_core.py
+          else
+            echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
@@ -2291,6 +2682,22 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
+          # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
+          # pure cascade-report → display-join law (flattener/validator shared
+          # by the top-100 writer and the /results loader) + the read-time
+          # aggs-composite index behind /results' ?preset=composite activation
+          # — both NEW modules ship at 100% line+branch from their own suites
+          # (the #1561 two-new-static-gates precedent).
+          if compgen -G "tests/unit/test_engine_cascade_join.py" > /dev/null; then
+            pytest --cov=brutex.engine.cascade_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_join.py
+          else
+            echo "(brutex.engine.cascade_join test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dashboard_composite_join.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
+          else
+            echo "(brutex.dashboard.composite_join test file not present yet — gate inactive)"
+          fi
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -2307,12 +2714,20 @@ jobs:
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
           fi
+          # DEC-MERGE-QUEUE-001: on a merge_group ref, diff against the merge
+          # group's OWN base SHA (the exact commit the queue applies the group
+          # onto — an ancestor of the checked-out queue ref, so present under
+          # fetch-depth 0), not origin/main — precise when main advances while
+          # the group builds. Absent on every other event → no-op.
+          if [ -n "${{ github.event.merge_group.base_sha }}" ]; then
+            BASE="${{ github.event.merge_group.base_sha }}"
+          fi
           python scripts/ci/coverage_gate_discovery.py --base "$BASE"
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-xml
           path: coverage.xml
@@ -2340,9 +2755,9 @@ jobs:
     # silent merge-green escape hatch (pinned by the discipline test).
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2358,7 +2773,7 @@ jobs:
         # engine.combo_mask → fno_math), so the browser job needs the same
         # wheel builds as the test job — verified by a real import probe
         # during the design round, NOT assumed.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2407,7 +2822,7 @@ jobs:
         # Keyed on the RESOLVED installed playwright version (not the range
         # pin in pyproject) so a playwright upgrade invalidates the cache
         # exactly when the pinned Chromium build changes.
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: pw-chromium-${{ runner.os }}-${{ steps.pwver.outputs.version }}
@@ -2423,7 +2838,7 @@ jobs:
         run: pytest tests/browser -q
       - name: Upload failure artifacts (traces + screenshots + ledgers)
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: browser-failure-artifacts
           path: test-artifacts/browser/
@@ -2438,9 +2853,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2450,7 +2865,7 @@ jobs:
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load time. Every Python job that imports any
         # brutex.orchestrator.* module must install the Rust extension.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2485,6 +2900,13 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
+      # this job installs `.[dev]` only (no pyarrow), so the feed parity
+      # module (tests/property/test_feed_rust_parity.py) skips on its
+      # pyarrow guard regardless; installing the wheel was dead weight. The
+      # dual-arm parity gate's execution home is the `test:` job
+      # ([dev,data,ui] + the wheel), which runs tests/property in its
+      # coverage pass.
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -2520,13 +2942,20 @@ jobs:
   bench:
     name: Benchmarks (O(1) NFR gates)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Budget raised 15 -> 25 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
+    # a banked observation put the real bench wall-time at ~10.9 min, only
+    # ~4.1 min under the old 15-min cap (~27% headroom) — thin enough that a
+    # single shared-runner contention spike (like the R38 spike on PR #1462)
+    # could auto-cancel it. Budget-for-contention only; the O(1) ratio
+    # ceilings in tests/bench/_o1_tiers.py are UNTOUCHED (a real perf
+    # regression still fails the ratio gate, Golden Rule #10).
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0   # DEC-BENCH-ABS-BASELINE-001: baseline governance diffs vs base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2544,19 +2973,28 @@ jobs:
         run: |
           git fetch --no-tags origin "${BASE_REF}"
           python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
-      - name: Install deps (dev + data — the lake benches need polars/duckdb)
+      - name: Install deps (dev + data + ui — the lake AND route benches need them)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
         # gates (test_parquet_write_o1.py, test_db_candle_query_o1.py,
         # test_catalog_reconcile_o1.py, test_write_latency.py, …) NEVER ran in
         # CI, so a linear-scan regression on those hot paths could not fail
-        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute; the
+        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute.
+        # DEC-O1-GUARANTEE-HARDEN-001 review round 1 (the same finding class,
+        # one extra over): `[ui]` (fastapi) makes the SIX route-level bench
+        # gates execute too (test_db_tables_swr_o1 / test_preopen_export_memo_o1
+        # / test_revision_probe_ttl_o1 / test_lake_census_route_o1 /
+        # test_ledger_delta_o_page_o1 / test_movers_pcr_o1 — all previously
+        # collected-then-SKIPPED on this job via importorskip("fastapi")); the
         # fno_math/trading_core wheels the remaining skips need are built by
-        # the steps below, so no bench silently skips for a missing extra.
-        run: pip install -e ".[dev,data]"
+        # the steps below, so no bench silently skips for a missing extra
+        # (verified locally: the full tests/bench dir with ui deps = 371
+        # passed / 11 skipped, every remaining skip the documented
+        # BRUTEX_M4PRO_ABS class; the 6 route files ran 3× stable ~30 s).
+        run: pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2589,6 +3027,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest benchmarks
@@ -2610,7 +3065,7 @@ jobs:
           fi
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bench-results
           path: bench-results.json
@@ -2625,9 +3080,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2640,7 +3095,7 @@ jobs:
         run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -2675,6 +3130,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -2692,9 +3164,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2748,9 +3220,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2781,9 +3253,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -2811,14 +3283,14 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt,clippy
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/fno-math -> target
       - name: cargo fmt --check
@@ -2841,14 +3313,14 @@ jobs:
       run:
         working-directory: rust/trading-core
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt,clippy
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust/trading-core -> target
       - name: cargo fmt --check
@@ -2874,7 +3346,7 @@ jobs:
       # parity check against the same golden oracle. Isolated here (not the main
       # Python test job) so a wheel-build issue can't destabilise that pipeline.
       - name: Set up Python (binding parity check)
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
@@ -2896,6 +3368,76 @@ jobs:
           done
           pip install dist/*.whl
           python ../../scripts/check_vocab_rust_parity.py
+
+  rust-brutex-feed:
+    name: Rust (brutex-feed build + clippy + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-feed
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-feed -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      # DEC-FEED-RUST-CORE-001: the pure decision core's edge matrix (26
+      # cases) + proptest invariants + the source-digest twin parity. The
+      # Python-side bit-identity proof (frozen bxsnap2 goldens flag-ON +
+      # the hypothesis dual-arm gate) lives in the test (unit) + golden
+      # jobs, which install the wheel via `pip install ./rust/brutex-feed`
+      # (type + bench install it too; the PROPERTY job's install was pruned
+      # in review round 1 — no pyarrow there, the parity module skips).
+      - name: cargo test
+        run: cargo test --release
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
+  rust-brutexd:
+    name: Rust (brutexd build + clippy + test)
+    # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
+    # gates itself — fmt/check/clippy/test, mirroring the fno-math job
+    # pattern. The Python-side parity suite
+    # (tests/integration/test_sidecar_parity_static.py) additionally builds
+    # this crate inside the test job whenever cargo is present.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutexd
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutexd -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
 
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
@@ -2925,14 +3467,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install Rust toolchain (for the kernels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       # CRITICAL: install ONLY what `make run` installs — `.[data,ui]`,
@@ -3010,9 +3552,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3021,7 +3563,7 @@ jobs:
       - name: Install Rust toolchain (for fno_math wheel)
         # brutex.orchestrator.__init__ transitively imports brutex.orchestrator.bloom,
         # which needs the Rust-backed fno_math extension (mirrors stress-nightly).
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Install fno_math Rust extension
@@ -3067,6 +3609,105 @@ jobs:
         run: pytest tests/chaos -v -m chaos --tb=short
 
   # ─────────────────────────────────────────────────────────────────
+  # SWEEP FULL-CHAIN REHEARSAL (R38 / DEC-SWEEP-UNKILLABLE-CORE-001,
+  # design D-10): the ENTIRE sweep chain — preflight → sweep → stage-3
+  # refinement → Stage-4 cascade → artifacts — runs on every push
+  # against a small REAL lake (seeded with the production writers) by
+  # driving the REAL `cli.cmd_sweep_all`, plus the resume re-click
+  # ("0 recomputed") and the adversarial leg (corrupt checkpoint +
+  # corrupt store + poisoned lake ⇒ honest quarantines/refusals), and
+  # the I-1 run-core ON-vs-OFF byte-identity proof. Wired into the
+  # ci-ok aggregate (the house pattern) — deliberately NOT a new
+  # branch-protection required context, so the drift snapshot in
+  # branch-protection-drift.yml is untouched. Measured 2026-07-07:
+  # BOTH files together = 21 tests in ~29 s (first pass 6.9 s, resume
+  # 5.8 s, adversarial 6.9 s) on a shared-runner-class box — minutes
+  # not hours (the R38 "2-day run in miniature" budget claim).
+  # Budget raised 15 -> 30 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
+  # on PR #1462 (2026-07-11) the rehearsal's 21 tests PASSED
+  # (tuples_failed=0) but the JOB hit the old 15-min cap at 17:48. That
+  # wall-time was dominated by the job's install + the two from-source
+  # cargo Rust wheel builds (fno-math + trading-core, each with a 3x
+  # network-retry loop) — the flaky, contention-sensitive setup phases
+  # — NOT sweep compute. The sweep-compute leg has its own hard in-test
+  # ceiling `seconds_first < 300.0` (`_RUNTIME_CEILING_S` in
+  # tests/integration/test_sweep_full_chain_rehearsal.py — the STRICT
+  # tier, asserted whenever the process is NOT coverage-traced, i.e.
+  # exactly THIS job; the coverage-traced unit job asserts the
+  # documented 3x instrumentation allowance instead, since under
+  # whole-package `--cov=brutex --cov-branch` tracing the same pass
+  # measures the tracer, ~45x — 315.4 s vs ~7 s, run 29269883269), which
+  # the 21 tests PASSED on #1462 — so the sweep ran in under 5 min even
+  # during the contended run, and this timeout raise CANNOT mask a
+  # sweep regression (a real slowdown trips that 300s assertion and
+  # fails the tests regardless of the job timeout). The raise gives
+  # budget for the setup/build spike; a real sweep regression is fixed
+  # in the sweep, not the timeout (Golden Rule #10).
+  # ─────────────────────────────────────────────────────────────────
+  sweep-rehearsal:
+    name: Sweep full-chain rehearsal (R38)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        # [optimize] is REQUIRED here (unlike chaos-race): the rehearsal runs
+        # the REAL stage-3 BIPOP-CMA-ES refinement pass (pycma) so stage-3
+        # CELL stamps are genuinely written + validated (design D-4).
+        run: pip install -e ".[dev,data,optimize]"
+      - name: Install Rust toolchain (for the wheels)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (see chaos-race above).
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # The rehearsal drives the real evaluate path (52→60-condition vocab
+        # delegates to trading_core.evaluate_with_levels at module load).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Run the full-chain rehearsal + byte-identity proof
+        # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
+        # log (the runtime budget stays evidence-backed on every push).
+        run: |
+          pytest -q -s \
+            tests/integration/test_sweep_full_chain_rehearsal.py \
+            tests/integration/test_sweep_runcore_byte_identity.py \
+            | tee rehearsal-run.log
+          {
+            echo "## Sweep full-chain rehearsal (R38)"
+            echo ""
+            echo '```'
+            grep -E "rehearsal\.[a-z_]+\.seconds|passed|failed" rehearsal-run.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
   # ─────────────────────────────────────────────────────────────────
   banned:
@@ -3074,7 +3715,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run scanner
         run: bash scripts/ci/scan-banned-patterns.sh
 
@@ -3096,7 +3737,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Validate MIGRATION.md ledger numbering
         # MIGRATION.md entry numbers stay machine-checked unique — the
         # parallel-session collision era (30 groups reconciled 2026-06-10)
@@ -3117,7 +3758,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run no-dhan guard
         run: bash scripts/ci/no-dhan-guard.sh
 
@@ -3130,7 +3771,7 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
       - name: Check commit messages
@@ -3148,7 +3789,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
       - name: Install gitleaks
@@ -3190,13 +3831,13 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           languages: python
           queries: security-extended,security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           category: "/language:python"
 
@@ -3210,7 +3851,7 @@ jobs:
     container:
       image: semgrep/semgrep:latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: semgrep scan
         # Use `semgrep scan` (not `semgrep ci`) so we don't need a
         # SEMGREP_APP_TOKEN — public rulesets are pulled from the
@@ -3234,9 +3875,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -3246,7 +3887,7 @@ jobs:
           output: 'trivy-results.sarif'
       - name: Upload SARIF
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: trivy-results
           path: trivy-results.sarif
@@ -3260,9 +3901,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3276,7 +3917,7 @@ jobs:
           cyclonedx-py environment --output-file sbom-python.json
       - name: Upload SBOM
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sbom
           path: sbom-python.json
@@ -3290,9 +3931,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: typos
-        uses: crate-ci/typos@v1.48.0
+        uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
         continue-on-error: true  # report but don't block
       - name: codespell
         run: |
@@ -3309,9 +3950,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3339,9 +3980,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3363,8 +4004,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '22'
       - name: Install jscpd
@@ -3413,11 +4054,17 @@ jobs:
   mutation-py:
     name: Python mutation (mutmut on critical modules)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 20 -> 90 (DEC-SWEEP-UNKILLABLE-CORE-001 D-19): the four Phase-2
+    # run-core critical modules join the gate. Measured GREEN path (ship
+    # time): ~40 min of mutmut on the four + ~9 min state.py/money.py +
+    # installs = ~55 min typical; 90 is the hang belt. A module that
+    # exhausts its OWN per-step `timeout` budget fails that step (exit 124)
+    # long before this job value bites.
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3426,7 +4073,7 @@ jobs:
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load; mutmut runs pytest which imports orchestrator.
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
@@ -3596,9 +4243,62 @@ jobs:
           MUT_MODULE="money.py" MUT_XML="mutmut-money-results.xml" MUT_FLOOR="0.99" \
             python3 /tmp/check_mutation_score.py
 
+      - name: mutmut on the Phase-2 run-core critical modules (blocking — DEC-SWEEP-UNKILLABLE-CORE-001 D-19)
+        run: |
+          # The four unkillable-run-core critical modules (design D-19) ride
+          # the SAME bounded-timeout + shared-parser pattern as state.py /
+          # money.py above, driven by ONE loop (Golden Rule #11 COMMON — no
+          # four copy-pasted runner blocks).
+          #
+          # HONEST FLOORS (Golden Rule #10): each floor is the score MEASURED
+          # at ship time (2026-07-07, mutmut 2.5.1, unit-file runners, WP-6
+          # evidence) minus ~1 mutant of headroom — a RATCHET pinning today's
+          # kill rate so it can only rise, NOT yet the Golden Rule #12 >= 85%
+          # target. Raising each module to >= 0.85 by killing the named
+          # survivors is the ledgered follow-up
+          # (DEC-SWEEP-UNKILLABLE-CORE-001 WP-6 integration notes); do NOT
+          # lower a floor without an ADR.
+          #
+          # Budget per module = measured wall x ~2 headroom for slower shared
+          # runners (measured: liveness 100s / stage_stamp 379s /
+          # run_manifest 876s / run_tripwires 952s).
+          run_gate() {
+            mod_path="$1"; test_file="$2"; budget="$3"; floor="$4"; label="$5"
+            rm -rf .mutmut-cache
+            set +e
+            timeout "$budget" mutmut run \
+              --paths-to-mutate "$mod_path" \
+              --tests-dir tests/unit \
+              --runner "pytest -x $test_file"
+            run_rc=$?
+            set -e
+            if [ $run_rc -eq 124 ]; then
+              echo "ERROR: mutmut timed out after ${budget}s on $label"
+              exit 124
+            fi
+            echo "::group::mutmut results — $label"
+            mutmut results || true
+            echo "::endgroup::"
+            set +e
+            mutmut junitxml > "mutmut-$label-results.xml" 2>"mutmut-$label.err"
+            xml_rc=$?
+            set -e
+            if [ $xml_rc -ne 0 ]; then
+              echo "ERROR: mutmut junitxml failed for $label (exit $xml_rc)"
+              cat "mutmut-$label.err"
+              exit 1
+            fi
+            MUT_MODULE="$label" MUT_XML="mutmut-$label-results.xml" MUT_FLOOR="$floor" \
+              python3 /tmp/check_mutation_score.py
+          }
+          run_gate brutex/engine/sweep_liveness.py tests/unit/test_engine_sweep_liveness.py 300 0.78 sweep_liveness
+          run_gate brutex/observability/stage_stamp.py tests/unit/test_observability_stage_stamp.py 900 0.74 stage_stamp
+          run_gate brutex/observability/run_manifest.py tests/unit/test_observability_run_manifest.py 1800 0.77 run_manifest
+          run_gate brutex/observability/run_tripwires.py tests/unit/test_observability_run_tripwires.py 2100 0.75 run_tripwires
+
       - name: Upload mutmut results XML for analysis
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutmut-results-xml
           path: mutmut-results.xml
@@ -3634,7 +4334,7 @@ jobs:
     timeout-minutes: 3
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -3672,7 +4372,7 @@ jobs:
       && github.event.pull_request.state != 'closed'
       && github.event.pull_request.merged != true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -3712,11 +4412,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history to diff against base (appropriateness check)
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
@@ -3747,11 +4447,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history to diff against base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan bug-fix PR for regression test
@@ -3780,18 +4480,18 @@ jobs:
     timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # need history for merge-base against the PR base
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,data,ui,optimize]"
       - name: Install Rust toolchain (for fno_math + trading_core wheels)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (see mutation-py job).
         run: |
@@ -3833,9 +4533,9 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan PR body for uncited external-system claims
@@ -3862,9 +4562,9 @@ jobs:
     # job scans TRACKED docs (not the PR body), so it runs on push AND PR and
     # is never legitimately skipped (safe under the ci-ok skipped==pass loop).
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate file:line + MIGRATION.md citations in the normative docs
@@ -3886,28 +4586,28 @@ jobs:
     steps:
       - name: Download coverage artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: coverage-xml
           path: proof/coverage/
         continue-on-error: true
       - name: Download benchmark artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: bench-results
           path: proof/bench/
         continue-on-error: true
       - name: Download Trivy artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: trivy-results
           path: proof/trivy/
         continue-on-error: true
       - name: Download SBOM artifact
         if: always()
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: sbom
           path: proof/sbom/
@@ -3951,7 +4651,7 @@ jobs:
           find proof -type f -print
       - name: Upload proof bundle
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: proof-bundle
           path: proof/
@@ -3979,7 +4679,19 @@ jobs:
     # expected snapshot (line 133), so no existing green requirement breaks.
     # This NARROWS which event can produce the required context (adds
     # enforcement); it removes no gate.
-    name: ${{ github.event_name == 'pull_request' && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
+    #
+    # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): `merge_group` is the SECOND
+    # legitimate producer of the required context. A merge queue evaluates
+    # required checks against ITS OWN speculative merge commit (the
+    # gh-readonly-queue ref), so the context MUST report there or every
+    # queued PR deadlocks. This does NOT reopen the shadowing hole the
+    # PR-only narrowing closed: a merge-group check run lands on the queue's
+    # merge SHA, never on a PR head SHA, so it can never satisfy or shadow a
+    # PR head's required context on the manual-merge path (check runs are
+    # keyed by commit). The PR-only sub-gates skip on merge_group (as on
+    # push) — they are not direct required contexts and already enforced
+    # the PR on its own pull_request run.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
     runs-on: ubuntu-24.04
     needs:
       - lint
@@ -4001,6 +4713,11 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
+      # DEC-FEED-RUST-CORE-001: the feed decision-kernel crate gate.
+      - rust-brutex-feed
+      # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
+      # that introduces a crate must gate that crate (roadmap PR-1).
+      - rust-brutexd
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -4084,6 +4801,13 @@ jobs:
       # chaos suite — a HARD per-PR gate (the operator's stricter-hardening
       # decree). Fast (<30s); the nightly stress soak is the heavyweight sibling.
       - chaos-race
+      # DEC-SWEEP-UNKILLABLE-CORE-001 (R38/D-10): the full-chain sweep
+      # rehearsal — preflight→sweep→stage-3→cascade→artifacts over a small
+      # REAL lake + the resume/adversarial legs + the I-1 byte-identity
+      # proof, every push. Enforced via this required CI OK aggregate, NOT
+      # as a direct branch-protection required context, so the drift
+      # snapshot is untouched (the no-dhan-guard precedent).
+      - sweep-rehearsal
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
@@ -4106,6 +4830,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -4128,6 +4853,7 @@ jobs:
           echo "  citation-accuracy-scan:${{ needs.citation-accuracy-scan.result }}"
           echo "  conv-commits:  ${{ needs.conv-commits.result }}"
           echo "  chaos-race:    ${{ needs.chaos-race.result }}"
+          echo "  sweep-rehearsal:${{ needs.sweep-rehearsal.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.actionlint.result }}" \
@@ -4142,6 +4868,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \
@@ -4163,7 +4890,8 @@ jobs:
             "${{ needs.no-hallucination-scan.result }}" \
             "${{ needs.citation-accuracy-scan.result }}" \
             "${{ needs.conv-commits.result }}" \
-            "${{ needs.chaos-race.result }}"; do
+            "${{ needs.chaos-race.result }}" \
+            "${{ needs.sweep-rehearsal.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
