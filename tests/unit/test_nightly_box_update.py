@@ -1638,3 +1638,541 @@ class TestBrokenWheelImport:
         rc, out, err = default_command_runner([sys.executable, "-c", code], timeout_s=60.0)
         assert rc == 0, err
         assert "WHEEL_FREE_IMPORT_OK" in out
+
+
+# ── degrade arms (failure-matrix rows 17/20/21/24 + parse totality) ──────
+class TestDegradeArms:
+    def _ctx(self, repo: Path, state: Path | None, runner: FakeRunner | None = None) -> bu._Ctx:
+        return bu._Ctx(
+            runner=runner or FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=state,
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+
+    def test_porcelain_path_parses_rename_arrows_and_blanks(self) -> None:
+        assert bu._porcelain_path("R  old.lock -> rust/x/Cargo.lock") == "rust/x/Cargo.lock"
+        assert bu._porcelain_path(" M rust/x/Cargo.lock") == "rust/x/Cargo.lock"
+        assert bu._porcelain_path("??") == ""
+
+    def test_classify_delta_skips_blank_lines(self) -> None:
+        assert classify_delta(["", "  ", "rust/x/src/lib.rs"]) == bu.DeltaClass(True, False)
+
+    def test_bounded_read_arms(self, tmp_path: Path) -> None:
+        # oversized ⇒ None; missing ⇒ None; non-regular (dir) ⇒ None.
+        big = tmp_path / "big.json"
+        big.write_bytes(b"x" * (bu._BOUNDED_READ_CAP + 10))
+        assert bu._bounded_read_json(big) is None
+        assert bu._bounded_read_json(tmp_path / "absent.json") is None
+        assert bu._bounded_read_json(tmp_path) is None
+
+    def test_sidecar_write_failure_returns_false(self, tmp_path: Path) -> None:
+        # state_dir path occupied by a FILE ⇒ mkdir raises ⇒ False, never a raise.
+        blocked = tmp_path / "state"
+        blocked.write_text("file", encoding="utf-8")
+        repo = _mk_repo(tmp_path)
+        ctx = self._ctx(repo, blocked)
+        assert bu._sidecar_write(ctx, "x.json", {"a": 1}) is False
+        with capture_logs() as logs:
+            bu._write_marker(ctx, ["rust/fno-math/Cargo.lock"])
+        assert any(e["event"] == "box_update.build_marker_write_failed" for e in logs)
+
+    def test_marker_clear_failure_warns(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        marker_dir = state / "build_marker.json"
+        (marker_dir / "inner").mkdir(parents=True)  # unlink on a dir raises
+        ctx = self._ctx(repo, state)
+        with capture_logs() as logs:
+            bu._clear_marker(ctx)
+        assert any(e["event"] == "box_update.build_marker_clear_failed" for e in logs)
+
+    def test_quarantine_dir_serials_on_same_second_collision(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        ctx = self._ctx(repo, state)
+        first = bu._quarantine_dir(ctx)
+        second = bu._quarantine_dir(ctx)
+        assert first is not None and second is not None
+        assert first != second
+        assert second.name.startswith(first.name.split("-")[0])
+
+    def test_quarantine_dir_mkdir_failure_returns_none(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "quarantine").write_text("file", encoding="utf-8")
+        assert bu._quarantine_dir(self._ctx(repo, state)) is None
+
+    def test_prune_arms(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        ctx = self._ctx(repo, state)
+        bu._prune_quarantine(ctx)  # missing quarantine root ⇒ benign return
+        ctx_none = self._ctx(repo, None)
+        bu._prune_quarantine(ctx_none)  # state_dir=None ⇒ benign
+
+    def test_quarantine_copy_src_unreadable_warns(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        qdir = state / "quarantine" / "ts"
+        qdir.mkdir(parents=True)
+        ctx = self._ctx(repo, state)
+        with capture_logs() as logs:
+            ok = bu._quarantine_copy(ctx, qdir, "rust/absent/Cargo.lock")
+        assert ok is False
+        assert any(e["event"] == "box_update.quarantine_copy_failed" for e in logs)
+
+    def test_quarantine_copy_content_mismatch_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # §10 test 21(b) second arm — an equal-size wrong-byte copy is caught
+        # by the CONTENT verify (the round-5 upgrade of the size-only check).
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        qdir = state / "quarantine" / "ts"
+        qdir.mkdir(parents=True)
+        ctx = self._ctx(repo, state)
+        real_read = Path.read_bytes
+
+        def _fake_read(self: Path) -> bytes:
+            data = real_read(self)
+            if self.name == "rust__fno-math__Cargo.lock":
+                return b"X" * len(data)  # equal-size wrong bytes
+            return data
+
+        monkeypatch.setattr(Path, "read_bytes", _fake_read)
+        with capture_logs() as logs:
+            ok = bu._quarantine_copy(ctx, qdir, "rust/fno-math/Cargo.lock")
+        assert ok is False
+        assert any(e["event"] == "box_update.quarantine_copy_failed" for e in logs)
+
+    def test_restore_porcelain_failure_warns_and_refuses(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        ctx = self._ctx(repo, tmp_path / "state")
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (128, "", "boom"))
+        with capture_logs() as logs:
+            bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        assert runner.git_calls("checkout") == []
+        assert any(e["event"] == "box_update.lock_restore_failed" for e in logs)
+
+    def test_ensure_maturin_installs_when_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        empty_bin = tmp_path / "venvbin"
+        empty_bin.mkdir()
+        monkeypatch.setattr(bu, "_venv_bin", lambda: empty_bin)
+        runner = FakeRunner()
+        runner.on(lambda a: a[0].endswith("pip"), (1, "", "no network"))
+        ctx = self._ctx(repo, None, runner)
+        with capture_logs() as logs:
+            bu._ensure_maturin(ctx)
+        pip = [a for a in runner.argvs() if a[0].endswith("pip")]
+        assert pip == [[str(empty_bin / "pip"), "install", "maturin"]]
+        assert any(e["event"] == "box_update.maturin_install_failed" for e in logs)
+        bu._ensure_maturin(ctx)  # once-per-run law: no second attempt
+        assert len(runner.argvs()) == 1
+
+    def test_doctor_child_garbage_json_is_error(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = FakeRunner()
+        runner.on(
+            lambda a: True,
+            (0, f"{bu._IMPORT_OK_MARKER}\n{bu._CHECKS_MARKER}{{not json", ""),
+        )
+        ctx = self._ctx(repo, None, runner)
+        assert bu._run_doctor_child(ctx, include_smoke=True) == ("error", None)
+        runner2 = FakeRunner()
+        runner2.on(lambda a: True, (0, f"{bu._IMPORT_OK_MARKER}\nno checks line", ""))
+        ctx2 = self._ctx(repo, None, runner2)
+        assert bu._run_doctor_child(ctx2, include_smoke=True) == ("error", None)
+
+    def test_fold_unexpected_status_is_stale(self) -> None:
+        assert bu._fold_checks([("wheel_freshness", "FAIL", "x")]) == "stale"
+
+    def test_alarm_state_clear_failure_warns(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        (state / "last_alarm.json" / "inner").mkdir(parents=True)
+        ctx = self._ctx(repo, state)
+        with capture_logs() as logs:
+            bu._apply_alarm_dedupe(ctx, BoxUpdateStatus.UPDATED)
+        assert any(e["event"] == "box_update.alarm_state_clear_failed" for e in logs)
+
+    def test_alarm_state_write_failure_warns_both_arms(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        blocked = tmp_path / "state"
+        blocked.write_text("file", encoding="utf-8")  # sidecar writes fail
+        ctx = self._ctx(repo, blocked)
+        ctx.gate = "import_failed"
+        with capture_logs() as logs:
+            sig, repeats, demoted = bu._apply_alarm_dedupe(ctx, BoxUpdateStatus.ROLLED_BACK)
+        assert sig is not None and repeats == 0 and demoted is False
+        assert any(e["event"] == "box_update.alarm_state_write_failed" for e in logs)
+
+    def test_rev_parse_head_and_branch_failures_skip(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "HEAD"], (128, "", "x"))
+        out = _run(repo, runner)
+        assert out.skip_reason == "rev_parse_failed"
+        runner2 = _std_runner(repo)
+        runner2.on(lambda a: a[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"], (128, "", "x"))
+        out2 = _run(repo, runner2)
+        assert out2.skip_reason == "rev_parse_failed"
+
+    def test_g5_porcelain_command_failure_skips(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (128, "", "x"))
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == "porcelain_failed"
+
+    def test_toplevel_resolve_oserror_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        real_resolve = Path.resolve
+
+        def _fake_resolve(self: Path, strict: bool = False) -> Path:
+            if str(self) == str(repo) + "-loop":
+                raise OSError("symlink loop")
+            return real_resolve(self, strict)
+
+        monkeypatch.setattr(Path, "resolve", _fake_resolve)
+        runner.on(
+            lambda a: a[:3] == ["git", "rev-parse", "--show-toplevel"],
+            (0, f"{repo}-loop\n", ""),
+        )
+        out = _run(repo, runner)
+        assert out.skip_reason == "not_a_repo_checkout"
+
+    def test_self_heal_rebuild_failure_enters_vacuous_rollback(self, tmp_path: Path) -> None:
+        # §7 — self-heal build fails ⇒ the §4.6 arm with the tree-move VACUOUS
+        # (HEAD already == origin/main ⇒ NO checkout -B argv).
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, FROM_SHA, ""))
+        stale = [
+            ["wheel_freshness", "WARN", "stale"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "PASS", "ok"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(stale), ""),
+        )
+        runner.on(lambda a: a[0].endswith("maturin"), (1, "", "build boom"))
+        out = _run(repo, runner, state_dir=tmp_path / "state")
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert runner.git_calls("checkout", "-B") == []  # vacuous — no tree move
+        assert "self_heal" in out.detail
+
+    def test_already_rebuilt_crate_still_warn_folds_failed_stale(self, tmp_path: Path) -> None:
+        # The at-most-once law: a crate repaired at 10b whose digest STILL
+        # WARNs at the coherence check is NEVER rebuilt twice ⇒ failed_stale.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        builds = {"n": 0}
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            builds["n"] += 1
+            if builds["n"] == 1 and runner.calls[-1]["cwd"] == fno_dir:
+                return (1, "", "boom")
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        smokes = {"n": 0}
+
+        def _smoke(a: list[str]) -> tuple[int, str, str]:
+            if a[2] == "import trading_core, fno_math":
+                smokes["n"] += 1
+                return (1, "", "broken") if smokes["n"] == 1 else (0, "", "")
+            if a[2] == "import fno_math":
+                return (1, "", "broken")
+            return (0, "", "")
+
+        runner.on(
+            lambda a: (
+                a[0] == sys.executable
+                and a[1] == "-c"
+                and a[2].startswith("import ")
+                and "brutex.doctor" not in a[2]
+            ),
+            _smoke,
+        )
+        still_warn = [
+            ["wheel_freshness", "PASS", "ok"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "PASS", "ok"],
+            ["wheel_source_digest_fno_math", "WARN", "still mismatched"],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(still_warn), ""),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.repair == "failed_stale"
+        # fno_math was rebuilt EXACTLY once (10b); never a second build.
+        repair_builds = [c for c in runner.maturin_calls() if c["cwd"] == repo / "rust/fno-math"]
+        assert len(repair_builds) == 2  # the failed forward build + ONE repair
+
+    def test_mismatch_repair_re_smoke_unloadable_is_critical(self, tmp_path: Path) -> None:
+        # 10c → re-smoke unloadable ⇒ the row-10b CRITICAL arm.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        stale = [
+            ["wheel_freshness", "PASS", "ok"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "WARN", "digest mismatch"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(stale), ""),
+        )
+        smokes = {"n": 0}
+
+        def _smoke(a: list[str]) -> tuple[int, str, str]:
+            if a[2] == "import trading_core, fno_math":
+                smokes["n"] += 1
+                # First smoke loadable (10a door); the post-repair re-smoke broken.
+                return (0, "", "") if smokes["n"] == 1 else (1, "", "broken")
+            return (0, "", "")
+
+        runner.on(
+            lambda a: (
+                a[0] == sys.executable
+                and a[1] == "-c"
+                and a[2].startswith("import ")
+                and "brutex.doctor" not in a[2]
+            ),
+            _smoke,
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ERROR
+        assert out.repair == "failed"
+        assert any(e["event"] == "box_update.required_wheel_unloadable" for e in logs)
+
+    def test_adopt_state_shape_errors_fold_to_row_15(self) -> None:
+        base = {
+            "status": "updated",
+            "from_sha": FROM_SHA,
+            "to_sha": TO_SHA,
+            "skip_reason": None,
+            "delta_rust": True,
+            "delta_pyproject": False,
+            "wheels": ["not-a-dict"],
+            "gate": "ok",
+            "repair": "not_needed",
+            "pip_restore": "not_needed",
+            "alarm_repeats": 0,
+            "duration_s": 1.0,
+            "detail": "",
+        }
+        adopted = adopt_state({BOX_UPDATE_STATE_ENV: json.dumps(base)})
+        assert adopted is not None and adopted.detail == "state_unparseable"
+        bad_digest = dict(base)
+        bad_digest["wheels"] = [
+            {
+                "name": "x",
+                "crate_dir": "y",
+                "required": True,
+                "result": "ok",
+                "digest_ok": "yes",  # wrong type
+                "duration_s": 1.0,
+                "detail": "",
+            }
+        ]
+        adopted = adopt_state({BOX_UPDATE_STATE_ENV: json.dumps(bad_digest)})
+        assert adopted is not None and adopted.detail == "state_unparseable"
+        adopted = adopt_state({BOX_UPDATE_STATE_ENV: "[]"})
+        assert adopted is not None and adopted.detail == "state_unparseable"
+
+
+# ── residual coverage arms (the 100% line+branch law) ────────────────────
+class TestResidualArms:
+    def _ctx(self, repo: Path, state: Path | None, runner: FakeRunner | None = None) -> bu._Ctx:
+        return bu._Ctx(
+            runner=runner or FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=state,
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+
+    def test_command_runner_protocol_stub(self) -> None:
+        # The Protocol stub body is executable (returns None unbound).
+        assert bu.CommandRunner.__call__(default_command_runner, ["true"], timeout_s=1.0) is None
+
+    def test_sidecar_write_state_dir_none_is_false(self, tmp_path: Path) -> None:
+        ctx = self._ctx(_mk_repo(tmp_path), None)
+        assert bu._sidecar_write(ctx, "x.json", {}) is False
+
+    def test_read_alarm_state_state_dir_none(self, tmp_path: Path) -> None:
+        assert bu._read_alarm_state(self._ctx(_mk_repo(tmp_path), None)) is None
+
+    def test_quarantine_dir_serial_exhaustion_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import UTC as _utc
+        from datetime import datetime as _dt
+
+        fixed = _dt(2026, 1, 1, tzinfo=_utc)
+
+        class _FakeDt:
+            @staticmethod
+            def now(tz: object = None) -> _dt:
+                return fixed
+
+            @staticmethod
+            def strftime(fmt: str) -> str:  # pragma: no cover - unused
+                raise AssertionError
+
+        monkeypatch.setattr(bu, "datetime", _FakeDt)
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        qroot = state / "quarantine"
+        stamp = fixed.strftime("%Y%m%dT%H%M%SZ")
+        (qroot / stamp).mkdir(parents=True)
+        for serial in range(1, 100):
+            (qroot / f"{stamp}-{serial:02d}").mkdir()
+        assert bu._quarantine_dir(self._ctx(repo, state)) is None
+
+    def test_prune_rmtree_failure_warns_best_effort(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        qroot = state / "quarantine"
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        qroot.mkdir(parents=True)
+        # The OLDEST entry is a symlink-to-a-dir: is_dir() True, rmtree raises.
+        (qroot / "00000000T000000Z").symlink_to(target)
+        for i in range(1, 12):
+            (qroot / f"20260101T0000{i:02d}Z").mkdir()
+        with capture_logs() as logs:
+            bu._prune_quarantine(self._ctx(repo, state))
+        assert any(e["event"] == "box_update.quarantine_prune_failed" for e in logs)
+        assert target.exists()  # never a repo/foreign deletion
+
+    def test_ensure_maturin_install_success_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        empty_bin = tmp_path / "venvbin"
+        empty_bin.mkdir()
+        monkeypatch.setattr(bu, "_venv_bin", lambda: empty_bin)
+        runner = FakeRunner()
+        runner.on(lambda a: a[0].endswith("pip"), (0, "", ""))
+        ctx = self._ctx(repo, None, runner)
+        with capture_logs() as logs:
+            bu._ensure_maturin(ctx)
+        assert not any(e["event"] == "box_update.maturin_install_failed" for e in logs)
+
+    def test_alarm_state_junk_shapes_read_absent(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        for payload in ('{"signature": 1, "nights": 2}', '{"signature": "x", "nights": true}'):
+            (state / "last_alarm.json").write_text(payload, encoding="utf-8")
+            with capture_logs() as logs:
+                assert bu._read_alarm_state(self._ctx(repo, state)) is None
+            assert any(e["event"] == "box_update.alarm_state_unreadable" for e in logs)
+
+    def test_repeat_arm_write_failure_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        ctx = self._ctx(repo, state)
+        ctx.gate = "import_failed"
+        sig = bu._alarm_signature(ctx, BoxUpdateStatus.ROLLED_BACK)
+        (state / "last_alarm.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "signature": sig,
+                    "first_utc": "2026-01-01T00:00:00+00:00",
+                    "nights": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def _boom(dest: Path, write_to: object, *, chmod: object = None) -> None:
+            raise OSError("planted write failure")
+
+        monkeypatch.setattr(bu, "atomic_write_simple", _boom)
+        with capture_logs() as logs:
+            got_sig, repeats, demoted = bu._apply_alarm_dedupe(ctx, BoxUpdateStatus.ROLLED_BACK)
+        assert (got_sig, repeats, demoted) == (sig, 1, True)
+        assert any(e["event"] == "box_update.alarm_state_write_failed" for e in logs)
+
+    def test_recheck_child_error_after_mismatch_repair_is_failed_stale(
+        self, tmp_path: Path
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        stale = [
+            ["wheel_freshness", "PASS", "ok"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "WARN", "digest mismatch"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.state["doctor_calls"] = 0
+
+        def _gate(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["doctor_calls"] += 1
+            if runner.state["doctor_calls"] <= 2:
+                return (0, _gate_stdout(stale), "")
+            return (124, "", "")  # the post-repair re-check child times out
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _gate,
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.repair == "failed_stale"  # never "rebuilt" on an unproven re-check
+
+    def test_self_heal_rebuild_ok_but_gate_still_stale_vacuous_rollback(
+        self, tmp_path: Path
+    ) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, FROM_SHA, ""))
+        stale = [
+            ["wheel_freshness", "WARN", "stale"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "PASS", "ok"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(stale), ""),
+        )
+        out = _run(repo, runner, state_dir=tmp_path / "state")
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert len(runner.maturin_calls()) >= len(WHEEL_SET)  # the self-heal rebuild ran
+        assert runner.git_calls("checkout", "-B") == []  # vacuous

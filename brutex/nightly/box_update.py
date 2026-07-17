@@ -584,6 +584,13 @@ def _prune_quarantine(ctx: _Ctx) -> None:
 def _quarantine_copy(ctx: _Ctx, qdir: Path | None, rel_path: str) -> bool:
     """PRESERVE-FIRST: copy + CONTENT-verify one path's bytes; False ⇒ NO restore."""
     if qdir is None:
+        # The vacuous-fail arm (§9 row 24): state_dir=None / an uncreatable
+        # quarantine run dir makes a copy IMPOSSIBLE — the restore is refused.
+        logger.warning(
+            "box_update.quarantine_copy_failed",
+            path=repr(rel_path),
+            error=repr("quarantine dir unavailable (state_dir=None or mkdir failed)"),
+        )
         return False
     src = ctx.repo_root / rel_path
     dst = qdir / rel_path.replace("/", "__")
@@ -733,8 +740,9 @@ def _build_wheels(ctx: _Ctx, specs: Sequence[WheelSpec]) -> bool:
     _write_marker(ctx, lock_paths)
     for spec in specs:
         result = _build_one(ctx, spec)
-        if spec.name not in ctx.wheels or result.result == "ok":
-            ctx.wheels[spec.name] = result
+        # _build_wheels runs at most ONCE per run (the forward §4 step 4b OR
+        # the §7 self-heal), so this is the crate's FIRST recorded result.
+        ctx.wheels[spec.name] = result
         restore_lane_lock_artifacts(ctx, ctx.marker_paths)
         if result.result != "ok":
             logger.warning(
