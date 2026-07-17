@@ -34,13 +34,20 @@ def _bar(minute: int, o: str, h: str, lo: str, c: str) -> CandleBar:
 
 
 def _session_bars() -> list[CandleBar]:
-    """A rising-then-falling 5-bar session (entry bar1 open 100.50 → exit 99.20)."""
+    """A rising-then-CRASHING 5-bar session under the one worst-case law.
+
+    Entries fill on bar1 at its adverse extreme (BUY @HIGH 102.00 / SELL
+    @LOW 100.00); end-of-data prices the last bar's adverse extreme (BUY
+    @LOW 95.00 / SELL @HIGH 96.30) — the tail crash is deep enough that the
+    short profits DESPITE the adverse entry+exit (+370p) while the long
+    loses (−700p).
+    """
     return [
         _bar(16, "100.00", "101.00", "99.50", "100.50"),
         _bar(17, "100.50", "102.00", "100.00", "101.50"),
         _bar(18, "101.50", "101.80", "100.20", "100.40"),
         _bar(19, "100.40", "100.90", "99.80", "100.10"),
-        _bar(20, "100.10", "100.30", "99.00", "99.20"),
+        _bar(20, "96.00", "96.30", "95.00", "95.20"),
     ]
 
 
@@ -75,8 +82,8 @@ class TestComboReturns:
             combo_returns([], 0, direction=Side.BUY, tf_minutes=1)
 
     def test_buy_on_falling_tail_loses(self) -> None:
-        # mask=0 → one long held to end-of-data; the falling tail (entry 100.50 →
-        # exit 99.20) yields a single NEGATIVE per-trade return.
+        # mask=0 → one long held to end-of-data; the crashing tail (worst-case
+        # entry @HIGH 102.00 → exit @LOW 95.00) yields a single NEGATIVE return.
         rets = combo_returns(
             _session_bars(), 0, direction=Side.BUY, tf_minutes=1, start_equity_paisa=1_000
         )

@@ -178,9 +178,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of masks → per-mask round-trip trade tuples.
 
@@ -196,9 +193,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (the throughput-bench fast path).
 
@@ -239,9 +233,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of u128 masks → per-mask round-trip trade tuples.
 
@@ -257,9 +248,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (no per-trade allocation).
 

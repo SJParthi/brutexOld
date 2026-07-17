@@ -2,8 +2,11 @@
 
 The futures twin of the options cost calculator (:mod:`brutex.costs.calculator`),
 built for the Phase-5 futures translation executor (R14/R15 of the one-click sweep
-law). It prices ONE round-trip futures trade — entry/exit minute-bar OPEN ± one
-tick, then the statutory + broker charge stack — under the HARD honesty rule
+law). It prices ONE round-trip futures trade — each fill anchored on the fill
+minute-bar's ADVERSE EXTREME ± one adverse tick, the ONLY fill law
+(DEC-FILL-WORST-CASE-ONLY-001; see :func:`apply_futures_fill` — the retired
+R15 OPEN-anchored PRECISE law is deleted with its mode) —
+then the statutory + broker charge stack — under the HARD honesty rule
 locked by DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1524):
 
     **A rate that is not citation-grounded in the repo's verified-costs docs is
@@ -78,7 +81,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final, Literal, get_args
 
-from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import _round_levy_paisa, _round_levy_rupee
 from brutex.costs.constants import (
     BSE_IPFT_BPS_X100,
     GROWW_BROKERAGE_PAISA,
@@ -95,7 +98,7 @@ from brutex.costs.constants import (
     unverified_windows,
     validate_regime_table,
 )
-from brutex.costs.types import Broker, GstSplit
+from brutex.costs.types import Broker, GstSplit, require_bar_extremes
 from brutex.universe import BRUTE_FORCE_INDEX_UNDERLYINGS
 
 __all__ = [
@@ -462,7 +465,8 @@ def futures_etc_unverified_windows() -> dict[str, tuple[tuple[date, date | None]
 
 
 # ─────────────────────────────────────────────────────────────────
-# Fill application (R15 — OPTIMISTIC = PRECISE, open ± one tick)
+# Fill application — PRECISE (R15, open ± one tick) / WORST_CASE
+# (DEC-FILL-WORST-CASE-ONLY-001, adverse bar extreme ± the SAME tick)
 # ─────────────────────────────────────────────────────────────────
 
 FuturesSide = Literal["long", "short"]
@@ -476,43 +480,55 @@ _GST_SPLIT_VALUES: Final[frozenset[str]] = frozenset(get_args(GstSplit))
 
 
 def apply_futures_fill(
-    entry_open_paisa: int, exit_open_paisa: int, *, side: FuturesSide
+    *,
+    side: FuturesSide,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
 ) -> tuple[int, int, int]:
-    """Apply the R15 one-tick ADVERSE fill to the entry/exit minute-bar OPENs.
+    """Apply the one-tick ADVERSE fill around the worst-case bar extremes.
 
-    The OPTIMISTIC = PRECISE fill law (R15): every fill is the fill minute's bar
-    OPEN moved ONE tick (:data:`~brutex.costs.constants.TICK_PAISA` = ₹0.05)
-    AGAINST the trader — never the favorable bar extreme (buy-at-LOW /
-    sell-at-HIGH is look-ahead fantasy, forbidden). Every fill is floored at one
-    tick (nothing trades below ₹0.05).
+    The ONE fill law (DEC-FILL-WORST-CASE-ONLY-001; the retired R15
+    OPEN-anchored PRECISE law is deleted with its mode): each fill anchors
+    on the fill minute-bar's ADVERSE EXTREME and then applies ONE adverse
+    tick on top (:data:`~brutex.costs.constants.TICK_PAISA` = ₹0.05; every
+    fill floored at one tick — nothing trades below ₹0.05). Keeping the
+    tick ON TOP of the extreme preserves the tick discipline: on a flat bar
+    (``high == open``) the bare ``high`` would beat the retired
+    ``open + tick`` fill by one tick; with the tick the flat bar is EQUAL,
+    so the worst-case fill can never flatter (the proven counterexample;
+    the bar model guarantees ``low ≤ open ≤ high``).
 
-    * ``long``: buy = entry open **+** tick; sell = exit open **−** tick —
-      byte-equal to the options calculator's
-      ``_apply_slippage(entry, exit, "long")`` (golden-pinned, CLAUDE.md §11
-      COMMON).
-    * ``short``: sell = entry open **−** tick (opening sell fills adverse-LOWER);
-      buy = exit open **+** tick (the cover fills adverse-HIGHER) — computed
-      adverse-both-sides DIRECTLY, deliberately NOT inheriting
-      ``_apply_slippage``'s short branch, whose entry-sell sign is a documented
-      ``# CHECK SIGN`` spec ambiguity (``calculator.py`` MINOR-4) that fills the
-      opening sell FAVORABLY higher.
+    * ``long``: buy = entry HIGH **+** tick; sell = exit LOW **−** tick —
+      byte-equal to the options calculator's ``_apply_slippage("long", …)``
+      (golden-pinned, CLAUDE.md §11 COMMON).
+    * ``short``: sell = entry LOW **−** tick (opening sell fills
+      adverse-LOWER); buy = exit HIGH **+** tick (the cover fills
+      adverse-HIGHER) — computed adverse-both-sides DIRECTLY (the resolved
+      ``# CHECK SIGN`` law, calculator.py MINOR-4).
 
     Parameters
     ----------
-    entry_open_paisa, exit_open_paisa
-        The entry / exit minute-bar OPEN prices in int64 paisa (already snapped
-        to the 2dp tick grid at the lake-write boundary,
-        DEC-SPOT-PRICE-2DP-001, so the ± tick here is applied exactly once).
     side
         ``"long"`` or ``"short"``.
+    entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa
+        The fill bars' extremes in paisa — the adverse anchors (already
+        snapped to the 2dp tick grid at the lake-write boundary,
+        DEC-SPOT-PRICE-2DP-001, so the ± tick here is applied exactly once).
+        All four REQUIRED — worst-case is the only law, so an anchor-less
+        call is unpriceable.
 
     Returns
     -------
     tuple[int, int, int]
         ``(buy_fill_paisa, sell_fill_paisa, realized_slippage_per_unit_paisa)``.
-        The realized slippage is the adverse movement TRULY baked into the
-        floored fills (``2 × tick`` normally; ``1 × tick`` when the one-tick
-        floor caps a degenerate sub-2-tick leg) — never over-stated.
+        The realized slippage is the adverse TICK movement truly baked into
+        the floored fills, measured against the worst-case fill anchors
+        (``2 × tick`` normally; ``1 × tick`` when the one-tick floor caps a
+        degenerate sub-2-tick leg) — the open→extreme move is fill-ANCHOR
+        semantics carried by the gross P&L, not slippage, so the line is
+        never over-stated.
 
     Raises
     ------
@@ -524,13 +540,12 @@ def apply_futures_fill(
         raise ValueError(msg)
     tick = TICK_PAISA
     if side == "long":
-        buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+        buy_raw, sell_raw = entry_high_paisa, exit_low_paisa
     else:
-        # Short: the OPENING sell fills one tick LOWER (adverse), the closing
-        # cover one tick HIGHER (adverse) — adverse on BOTH legs by construction.
-        buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+        # Short: the OPENING sell fills adverse-LOWER off the entry LOW, the
+        # closing cover adverse-HIGHER off the exit HIGH — both legs adverse.
+        buy_raw, sell_raw = exit_high_paisa, entry_low_paisa
+    buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
     realized_per_unit = abs(buy_fill - buy_raw) + abs(sell_raw - sell_fill)
     return buy_fill, sell_fill, realized_per_unit
@@ -541,7 +556,10 @@ def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
 
     * ``groww``: ``min(₹20, 0.03% × leg turnover)`` — the VERIFIED Groww futures
       law (PLAN_FINALIZATION_2026-05-16.md §8.1 row 2); the turnover arm rounds
-      to paisa half-up (non-statutory, the COMMON ``_round_to_paisa`` rule).
+      ADVERSELY to the next paisa (ceiling — the permanent adverse-levy-
+      rounding law, DEC-FILL-WORST-CASE-ONLY-001: the turnover arm is a
+      rounded charge, so it never rounds in the trade's favor). The flat ₹20
+      arm is rounding-free.
     * ``zerodha``: flat ₹20 per executed order — the in-repo COSTS_VERIFIED.md
       §8.2 row ("flat for F&O since June 2024"); the min-formula verification is
       Groww-specific, so Zerodha deliberately keeps its own verified flat row.
@@ -560,7 +578,7 @@ def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
     """
     if broker == "zerodha":
         return ZERODHA_BROKERAGE_PAISA
-    turnover_arm = _round_to_paisa(notional_paisa * GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100)
+    turnover_arm = _round_levy_paisa(notional_paisa * GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100)
     return min(GROWW_BROKERAGE_PAISA, turnover_arm)
 
 
@@ -603,6 +621,14 @@ class FuturesTradeInput:
         Number of lots (``>= 1``).
     broker, gst_split
         Cost-model parameters (defaults: Groww, intra-state GST).
+    entry_bar_high_paisa, entry_bar_low_paisa, exit_bar_high_paisa, exit_bar_low_paisa
+        The fill bars' extremes in paisa — the worst-case fill anchors,
+        REQUIRED all four (DEC-FILL-WORST-CASE-ONLY-001: worst-case is the
+        ONLY fill law, so an anchor-less input is unpriceable and refuses
+        fail-loud; the ``| None`` typing survives only so the refusal is a
+        validated ``ValueError``). Each pair must bracket its bar's open
+        (``low <= open <= high`` — the bar-model invariant restated at this
+        boundary).
 
     Raises
     ------
@@ -622,6 +648,10 @@ class FuturesTradeInput:
     n_lots: int = 1
     broker: Broker = "groww"
     gst_split: GstSplit = "intra_state"
+    entry_bar_high_paisa: int | None = None
+    entry_bar_low_paisa: int | None = None
+    exit_bar_high_paisa: int | None = None
+    exit_bar_low_paisa: int | None = None
 
     def __post_init__(self) -> None:
         if self.exit_dt_ist < self.entry_dt_ist:
@@ -664,6 +694,45 @@ class FuturesTradeInput:
         ):
             if value not in allowed:
                 msg = f"{field_name} {value!r} is not a valid value; allowed: {sorted(allowed)}"
+                raise ValueError(msg)
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the four adverse-anchor extremes are REQUIRED unconditionally — an
+        # input without them cannot be priced and refuses fail-loud (never a
+        # silent open-anchored fill; the retired PRECISE law is deleted).
+        missing = [
+            name
+            for name in (
+                "entry_bar_high_paisa",
+                "entry_bar_low_paisa",
+                "exit_bar_high_paisa",
+                "exit_bar_low_paisa",
+            )
+            if getattr(self, name) is None
+        ]
+        if missing:
+            msg = (
+                f"the worst-case fill law needs the fill-bar extremes; missing {missing} "
+                f"(worst-case is the ONLY fill law — DEC-FILL-WORST-CASE-ONLY-001)"
+            )
+            raise ValueError(msg)
+        for label, open_p, high, low in (
+            (
+                "entry",
+                self.entry_bar_open_paisa,
+                self.entry_bar_high_paisa,
+                self.entry_bar_low_paisa,
+            ),
+            ("exit", self.exit_bar_open_paisa, self.exit_bar_high_paisa, self.exit_bar_low_paisa),
+        ):
+            # Ordering only (the bar-model `low <= open <= high` invariant);
+            # positivity/tick floors on the EXTREMES are deliberately NOT
+            # demanded — a degenerate sub-tick LOW is absorbed by the fill
+            # floor in apply_futures_fill, never a sim crash.
+            if high is not None and high < open_p:
+                msg = f"{label}_bar_high_paisa {high} < {label}_bar_open_paisa {open_p}"
+                raise ValueError(msg)
+            if low is not None and low > open_p:
+                msg = f"{label}_bar_low_paisa {low} > {label}_bar_open_paisa {open_p}"
                 raise ValueError(msg)
 
 
@@ -754,8 +823,23 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         skips-and-counts BEFORE calling here; this raise is the
         defence-in-depth choke point for direct callers.
     """
+    # The FuturesTradeInput validated all four extremes non-None at
+    # construction; the COMMON `require_bar_extremes` seam narrows the
+    # Optional typing (a None here is a broken dataclass invariant, not a
+    # reachable state — it raises the explicit AssertionError, never a bare
+    # `assert` per bandit B101).
+    entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa = require_bar_extremes(
+        entry_bar_high_paisa=trade.entry_bar_high_paisa,
+        entry_bar_low_paisa=trade.entry_bar_low_paisa,
+        exit_bar_high_paisa=trade.exit_bar_high_paisa,
+        exit_bar_low_paisa=trade.exit_bar_low_paisa,
+    )
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit = apply_futures_fill(
-        trade.entry_bar_open_paisa, trade.exit_bar_open_paisa, side=trade.side
+        side=trade.side,
+        entry_high_paisa=entry_high_paisa,
+        entry_low_paisa=entry_low_paisa,
+        exit_high_paisa=exit_high_paisa,
+        exit_low_paisa=exit_low_paisa,
     )
     n_shares = trade.n_lots * trade.lot_size
     buy_notional_paisa = buy_fill_paisa * n_shares
@@ -792,35 +876,38 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         )
 
     entry_date = trade.entry_dt_ist.date()
-    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law).
+    # Every rounded charge below rounds ADVERSELY (ceiling) — the permanent
+    # adverse-levy-rounding law (DEC-FILL-WORST-CASE-ONLY-001).
+    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law);
+    # the flat arm is rounding-free, the turnover arm is adverse-rounded.
     brokerage_paisa = futures_brokerage_leg_paisa(
         buy_notional_paisa, trade.broker
     ) + futures_brokerage_leg_paisa(sell_notional_paisa, trade.broker)
     # STT: sell-side turnover, statutory rupee rounding. Raises on the
     # pre-2024-10-01 refusal window.
     stt_rate = stt_futures_rate_bps_x100(entry_date)
-    stt_paisa = _round_to_rupee((sell_notional_paisa * stt_rate) // 10_000_000)
+    stt_paisa = _round_levy_rupee((sell_notional_paisa * stt_rate) // 10_000_000)
     # ETC: both sides on turnover — raises for EVERY window today (all-refusal
     # tables; reachable past this line only under a synthetic-cited fixture).
     exch_rate = futures_exchange_charge_bps_x100(trade.instrument, entry_date)
-    exch_paisa = _round_to_paisa(buy_notional_paisa * exch_rate) + _round_to_paisa(
+    exch_paisa = _round_levy_paisa(buy_notional_paisa * exch_rate) + _round_levy_paisa(
         sell_notional_paisa * exch_rate
     )
     # SEBI: both sides (COMMON verified rate).
-    sebi_paisa = _round_to_paisa(buy_notional_paisa * SEBI_FEE_BPS_X100) + _round_to_paisa(
+    sebi_paisa = _round_levy_paisa(buy_notional_paisa * SEBI_FEE_BPS_X100) + _round_levy_paisa(
         sell_notional_paisa * SEBI_FEE_BPS_X100
     )
     # IPFT: both sides — NSE refuses today; BSE is the assumed-0 options stance.
     ipft_rate = ipft_futures_bps_x100(trade.instrument, entry_date)
-    ipft_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate) + _round_to_paisa(
+    ipft_paisa = _round_levy_paisa(buy_notional_paisa * ipft_rate) + _round_levy_paisa(
         sell_notional_paisa * ipft_rate
     )
     # Stamp: buy side, statutory rupee rounding — refuses today.
     stamp_rate = stamp_futures_rate_bps_x100(entry_date)
-    stamp_paisa = _round_to_rupee((buy_notional_paisa * stamp_rate) // 10_000_000)
+    stamp_paisa = _round_levy_rupee((buy_notional_paisa * stamp_rate) // 10_000_000)
     # GST 18% on services only, rounded ONCE on the total (DEC-COST-001).
     gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
-    gst_paisa = _round_to_rupee((gst_base_paisa * GST_TOTAL_BPS_X100) // 10_000_000)
+    gst_paisa = _round_levy_rupee((gst_base_paisa * GST_TOTAL_BPS_X100) // 10_000_000)
 
     total_charges_paisa = (
         brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
