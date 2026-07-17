@@ -3033,8 +3033,11 @@ hostile-review pass._
   engaged path printed, the 66-bit sweep-shaped grid, the u64-vs-u128
   same-window ratio, the C(60/62/64,k) growth table: k≤8 aggregate ×1.3017 vs
   62 / ×1.7097 vs the 33B-era 60) wired into bench-m4pro.yml — the §8 SLA
-  re-derivation happens FROM that run's printed numbers. TickVault: additive
-  ABI, pin >= 0.5.0 at adoption (0% today, attested). ENGINE surface
+  re-derivation happens FROM that run's printed numbers. TickVault: the FFI
+  arg is additive on the four PYTHON pyfn faces (pyo3-defaulted); a native
+  `IndicatorSnapshot` struct literal must add the one `supertrend_x2_paisa`
+  field (trivial — `None` clears 64/65); zero live impact at 0% adoption
+  (attested); pin >= 0.5.0 at adoption. ENGINE surface
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/rate change; the
   vocabulary ACTIVATION is the consciously-ledgered subject — see §1's chain +
   MIGRATION.md #1807 for the full record.)
