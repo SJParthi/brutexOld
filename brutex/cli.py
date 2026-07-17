@@ -5960,45 +5960,71 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
     repo_root = Path(_brutex_pkg.__file__).resolve().parents[1]
     box_outcome = None if args.dry_run else adopt_state(os.environ)
     if box_outcome is None and not args.dry_run:
-        if box_enabled:
-            from brutex.adapters.groww.pull_singleflight import (
-                NightlyAlreadyRunningError,
-                nightly_singleflight_lock,
-            )
-
-            leg_lock = contextlib.ExitStack()
-            try:
-                leg_lock.enter_context(
-                    nightly_singleflight_lock(resolved, holder_note="box-update:nightly")
+        # THE DEFENSIVE LEG WRAP (§25 deviation 12 — supersedes the traceback
+        # posture): the never-block law must hold against CODING BUGS too —
+        # `run_box_update`'s own never-raise posture covers OPERATIONAL
+        # failures, this belt covers a defect in the leg itself (and a
+        # RAISING `os.execv`, e.g. OSError).  One structlog ERROR
+        # `box_update.leg_error`, block honestly None, the nightly proceeds
+        # on the existing checkout.  `KeyboardInterrupt`/`SystemExit`
+        # propagate raw (excluded by `except Exception`); `MemoryError` is
+        # explicitly RE-RAISED, never swallowed into a silent leg skip.  A
+        # SUCCESSFUL exec never returns, so the wrap cannot affect it.
+        try:
+            if box_enabled:
+                from brutex.adapters.groww.pull_singleflight import (
+                    NightlyAlreadyRunningError,
+                    nightly_singleflight_lock,
                 )
-            except NightlyAlreadyRunningError:
-                # A sibling holds the flock — the leg is SKIPPED (no block);
-                # run_nightly takes its standard COLLISION refusal moments later.
-                box_outcome = None
-            else:
+
+                leg_lock = contextlib.ExitStack()
                 try:
-                    box_outcome = run_box_update(
-                        repo_root=repo_root,
-                        runner=default_command_runner,
-                        env=os.environ,
-                        state_dir=resolved / ".box_update",
+                    leg_lock.enter_context(
+                        nightly_singleflight_lock(resolved, holder_note="box-update:nightly")
                     )
-                finally:
-                    # EXPLICIT-RELEASE INVARIANT (§6 step 3): the flock is FULLY
-                    # released (LOCK_UN + fd close EXECUTED) strictly BEFORE
-                    # os.execv — exec never returns, so no context manager
-                    # could release it "after".
-                    leg_lock.close()
-                maybe_reexec(box_outcome, argv=sys.argv[1:], environ=os.environ)
-        else:
-            # Disabled kill switch: G0 performs ZERO actions — no lock needed;
-            # the honest `status=disabled` block is still written (§7).
-            box_outcome = run_box_update(
-                repo_root=repo_root,
-                runner=default_command_runner,
-                env=os.environ,
-                state_dir=resolved / ".box_update",
+                except NightlyAlreadyRunningError:
+                    # A sibling holds the flock — the leg is SKIPPED (no block);
+                    # run_nightly takes its standard COLLISION refusal moments later.
+                    box_outcome = None
+                else:
+                    try:
+                        box_outcome = run_box_update(
+                            repo_root=repo_root,
+                            runner=default_command_runner,
+                            env=os.environ,
+                            state_dir=resolved / ".box_update",
+                        )
+                    finally:
+                        # EXPLICIT-RELEASE INVARIANT (§6 step 3): the flock is FULLY
+                        # released (LOCK_UN + fd close EXECUTED) strictly BEFORE
+                        # os.execv — exec never returns, so no context manager
+                        # could release it "after".
+                        leg_lock.close()
+                    maybe_reexec(box_outcome, argv=sys.argv[1:], environ=os.environ)
+            else:
+                # Disabled kill switch: G0 performs ZERO actions — no lock needed;
+                # the honest `status=disabled` block is still written (§7).
+                box_outcome = run_box_update(
+                    repo_root=repo_root,
+                    runner=default_command_runner,
+                    env=os.environ,
+                    state_dir=resolved / ".box_update",
+                )
+        except MemoryError:
+            raise
+        except Exception as exc:  # pylint: disable=broad-exception-caught — never block the night
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "box_update.leg_error",
+                error=repr(str(exc)),
+                error_type=type(exc).__name__,
+                detail=(
+                    "the box-update leg crashed — the nightly proceeds on the "
+                    "existing checkout (box_update block absent)"
+                ),
             )
+            box_outcome = None
     env_preflight_block: Mapping[str, object] | None = None
     if not args.dry_run:
         env_preflight_block = run_env_preflight(

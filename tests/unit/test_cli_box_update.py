@@ -22,6 +22,7 @@ from brutex.nightly.box_update import (
     BoxUpdateStatus,
 )
 from brutex.nightly.chain import LINK_ORDER, LinkOutcome, LinkStatus, NightlyReport
+from structlog.testing import capture_logs
 
 
 def _mini_lake(tmp_path: Path) -> Path:
@@ -380,6 +381,102 @@ class TestNightlyThreading:
         (nightly_dir / "report.json").write_text(json.dumps(report), encoding="utf-8")
         lane = nightly_lane(results, now=1_800_000_100.0)
         assert lane.verdict == "ok"
+
+
+class TestDefensiveLegWrap:
+    """§25 deviation 12 — the never-block law reaches CODING BUGS in the leg."""
+
+    def _spy(self, monkeypatch: pytest.MonkeyPatch, results: Path) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        def fake_run_nightly(plan: Any, *, seams: Any = None) -> NightlyReport:
+            captured["plan"] = plan
+            return _green_report(results)
+
+        monkeypatch.setattr("brutex.nightly.run.run_nightly", fake_run_nightly)
+        return captured
+
+    def test_bombing_leg_logs_error_and_the_nightly_proceeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A coding bug in run_box_update: one box_update.leg_error ERROR,
+        # box_update block honestly None, run_nightly still invoked + the
+        # report summary written — the chain is never blocked.
+        from brutex.adapters.groww.pull_singleflight import nightly_singleflight_lock
+
+        lake = _mini_lake(tmp_path)
+        captured = self._spy(monkeypatch, lake / "sweeps")
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        with (
+            mock.patch.object(bu, "run_box_update", side_effect=RuntimeError("leg bug")),
+            capture_logs() as logs,
+        ):
+            rc = cli.main(["nightly", "run", "--lake-root", str(lake)])
+        assert rc == 0
+        assert captured["plan"].box_update is None  # honest absence, never fabricated
+        events = [e for e in logs if e["event"] == "box_update.leg_error"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "error"
+        assert events[0]["error"] == repr("leg bug")
+        assert events[0]["error_type"] == "RuntimeError"
+        assert capsys.readouterr().out.strip()  # the report summary was written
+        # The flock released on the bomb path too (the inner finally).
+        with nightly_singleflight_lock(lake, holder_note="post-bomb"):
+            pass
+
+    def test_execv_oserror_is_the_same_continuation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A RAISING os.execv (OSError) folds into the SAME continuation:
+        # leg_error logged, block None, the nightly proceeds. (A SUCCESSFUL
+        # exec never returns — the wrap cannot affect it, pinned by
+        # TestFlockReleaseBeforeExec / test_updated_leg_reexecs... above.)
+        import os
+
+        lake = _mini_lake(tmp_path)
+        captured = self._spy(monkeypatch, lake / "sweeps")
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        monkeypatch.setattr(bu.os, "execv", mock.Mock(side_effect=OSError("exec format error")))
+        with (
+            mock.patch.object(bu, "run_box_update", return_value=_outcome(BoxUpdateStatus.UPDATED)),
+            capture_logs() as logs,
+        ):
+            rc = cli.main(["nightly", "run", "--lake-root", str(lake)])
+        os.environ.pop(BOX_UPDATE_STATE_ENV, None)  # the pre-exec stamp survives the raise
+        assert rc == 0
+        assert captured["plan"].box_update is None
+        events = [e for e in logs if e["event"] == "box_update.leg_error"]
+        assert len(events) == 1 and events[0]["error_type"] == "OSError"
+
+    def test_memory_error_is_explicitly_reraised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # MemoryError is Exception-derived — the wrap must NEVER swallow it
+        # into a silent leg skip (the explicit re-raise arm).
+        lake = _mini_lake(tmp_path)
+        self._spy(monkeypatch, lake / "sweeps")
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        with (
+            mock.patch.object(bu, "run_box_update", side_effect=MemoryError),
+            pytest.raises(MemoryError),
+        ):
+            cli.main(["nightly", "run", "--lake-root", str(lake)])
+
+    def test_keyboard_interrupt_propagates_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # KeyboardInterrupt is structurally excluded by `except Exception`.
+        lake = _mini_lake(tmp_path)
+        self._spy(monkeypatch, lake / "sweeps")
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        with (
+            mock.patch.object(bu, "run_box_update", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            cli.main(["nightly", "run", "--lake-root", str(lake)])
 
 
 class TestFlockReleaseBeforeExec:

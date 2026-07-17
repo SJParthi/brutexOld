@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from brutex.nightly import box_update as bu
@@ -270,6 +271,34 @@ class TestPureCore:
         assert (
             guard_skip_reason(branch="main", porcelain=[], ancestor_rc=2) == "ancestor_check_failed"
         )
+
+    def test_guard_skip_reason_negative_rc_is_ancestor_check_failed(self) -> None:
+        # The delegation-alignment pin: a NEGATIVE (signal-kill) merge-base rc
+        # folds ancestor_check_failed — never a fail-open proceed (the core is
+        # the ONE truth table run_box_update's G6 now delegates to).
+        assert (
+            guard_skip_reason(branch="main", porcelain=[], ancestor_rc=-9)
+            == "ancestor_check_failed"
+        )
+
+    def test_run_delegates_guard_verdicts_to_the_pure_core(self, tmp_path: Path) -> None:
+        # The drift-risk NIT closure: run_box_update's G2/G5/G6 verdicts come
+        # FROM guard_skip_reason (spy-pinned — one truth table, no inline twin).
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        calls: list[dict[str, Any]] = []
+        real = bu.guard_skip_reason
+
+        def _spy(**kwargs: Any) -> str | None:
+            calls.append(dict(kwargs))
+            return real(**kwargs)
+
+        with mock.patch.object(bu, "guard_skip_reason", _spy):
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        # One delegation per guard phase: G2 (branch), G5 (porcelain), G6 (rc).
+        assert [c["branch"] for c in calls] == ["main", "main", "main"]
+        assert len(calls) == 3
 
     def test_classify_delta_patterns(self) -> None:
         assert classify_delta(["rust/trading-core/src/lib.rs"]) == bu.DeltaClass(True, False)
@@ -1045,12 +1074,24 @@ class TestRestoreMarkerQuarantine:
         assert len(remaining) == bu._QUARANTINE_KEEP
         assert sentinel.exists()  # pruning deletes ONLY lane quarantine dirs
 
-    def test_corrupt_marker_treated_as_absent(self, tmp_path: Path) -> None:
-        # §10 test 20(d) — corrupt marker: NO restore on unproven provenance.
+    @pytest.mark.parametrize(
+        "marker_text",
+        [
+            "{not json",
+            # A TAMPERED marker scoping an arbitrary TRACKED path — the shape
+            # law refuses it wholesale (defense-in-depth over the porcelain ∩).
+            json.dumps({"schema": 1, "lock_paths": ["brutex/cli.py"], "started_utc": "t"}),
+        ],
+        ids=["corrupt", "tampered_foreign_path"],
+    )
+    def test_corrupt_marker_treated_as_absent(self, tmp_path: Path, marker_text: str) -> None:
+        # §10 test 20(d) — corrupt/tampered marker: NO restore on unproven
+        # provenance (a foreign-path entry is UNPROVEN by definition — the
+        # lane only ever markers rust/<crate>/Cargo.lock).
         repo = _mk_repo(tmp_path)
         state = tmp_path / "state"
         state.mkdir()
-        (state / "build_marker.json").write_text("{not json", encoding="utf-8")
+        (state / "build_marker.json").write_text(marker_text, encoding="utf-8")
         runner = _std_runner(repo)
         runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, " M x\n", ""))
         with capture_logs() as logs:
@@ -1059,6 +1100,26 @@ class TestRestoreMarkerQuarantine:
         assert out.skip_reason == "dirty_tree"
         assert runner.git_calls("checkout") == []
         assert any(e["event"] == "box_update.build_marker_unreadable" for e in logs)
+
+    @pytest.mark.parametrize(
+        ("path", "ok"),
+        [
+            ("rust/fno-math/Cargo.lock", True),
+            ("rust/trading-core/Cargo.lock", True),
+            ("brutex/cli.py", False),  # not the 3-segment lane shape
+            ("rust/a/b/Cargo.lock", False),  # four segments
+            ("notrust/x/Cargo.lock", False),  # wrong root token
+            ("rust/x/Cargo.toml", False),  # wrong leaf token
+            ("rust//Cargo.lock", False),  # empty crate segment
+            ("rust/./Cargo.lock", False),  # dot token
+            ("rust/../Cargo.lock", False),  # parent-escape token
+            ("rust/a\\b/Cargo.lock", False),  # backslash smuggling
+        ],
+    )
+    def test_lane_lock_path_shape_law(self, path: str, ok: bool) -> None:
+        # The ONE shape the lane itself ever markers — everything else is
+        # refused into the corrupt-marker WARN arm (tamper defense-in-depth).
+        assert bu._is_lane_lock_path(path) is ok
 
     def test_prologue_consumes_marker_on_quiet_upstream_night(self, tmp_path: Path) -> None:
         # §10 tests 6b/20(c) round-9 arm — planted marker + dirty lock + origin
@@ -1272,6 +1333,11 @@ class TestRollbackRepairCoherence:
         events = {e["event"]: e for e in logs}
         assert "box_update.repair_failed_stale" in events
         assert events["box_update.repair_failed_stale"]["log_level"] == "warning"
+        # The manual-fix pointer names the runbook's env-prefixed wedge-rescue
+        # command (a bare maturin paste in a fresh shell hits maturin-not-found).
+        assert (
+            "docs/runbooks/box-autodeploy.md" in events["box_update.repair_failed_stale"]["detail"]
+        )
         assert "box_update.required_wheel_unloadable" not in events
         by_name = {w.name: w for w in out.wheels}
         assert by_name["trading_core"].digest_ok is False  # visible torn residual
@@ -2428,6 +2494,9 @@ class TestAlarmDemotionLogText:
         assert crit2[0]["signature"] == out2.alarm_signature
         assert "maturin develop --release" in crit2[0]["detail"]
         assert "HARD CLI-DOWN" in crit2[0]["detail"]
+        # The bare command alone strands a fresh shell (maturin-not-found) —
+        # the detail must point at the runbook's full env-prefixed form.
+        assert "docs/runbooks/box-autodeploy.md" in crit2[0]["detail"]
 
 
 # ── mutation-workflow wiring pin (§10 CI gating — the #1614/#1832 precedent) ─

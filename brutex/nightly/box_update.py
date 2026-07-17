@@ -101,10 +101,15 @@ RC_TIMEOUT: Final[int] = 124
 _ANCESTOR_RC_DIVERGED: Final[int] = 1
 #: One porcelain line = 2-char XY code + one space before the path.
 _PORCELAIN_PATH_OFFSET: Final[int] = 3
+#: A lane lock path is EXACTLY ``rust/<crate>/Cargo.lock`` — three segments.
+_LANE_LOCK_SEGMENTS: Final[int] = 3
 
 #: Bounded-detail law (the chain ``_DETAIL_MAX_CHARS`` mirror, chain.py:82).
 _DETAIL_MAX_CHARS: Final[int] = 500
-#: Bounded sidecar read cap (the #1614/#1832 regular-file-only discipline).
+#: Bounded sidecar read cap.  HONEST form: an ``is_file()``-STAT guard + a
+#: capped read — NOT the #1614 round-7 fd-based ``O_NONBLOCK`` + ``S_ISREG``
+#: discipline; the stat→open TOCTOU residual is disclosed and accepted (the
+#: sidecars live under the operator's own lake on a non-adversarial box).
 _BOUNDED_READ_CAP: Final[int] = 16 * 1024
 
 _STATE_FILE_NAME: Final[str] = "last_alarm.json"
@@ -371,7 +376,14 @@ def _non_untracked_lines(porcelain: Sequence[str]) -> list[str]:
 
 
 def guard_skip_reason(*, branch: str, porcelain: Sequence[str], ancestor_rc: int) -> str | None:
-    """The §2 guard truth table as ONE pure function (``None`` = proceed)."""
+    """The §2 guard truth table as ONE pure function (``None`` = proceed).
+
+    :func:`run_box_update` DELEGATES its G2/G5/G6 verdicts here (inputs not
+    yet measured at a phase ride their proceed values).  ANY nonzero
+    ``ancestor_rc`` other than the ``diverged`` verdict rc — including a
+    NEGATIVE signal-kill rc — is ``ancestor_check_failed`` (fail-safe:
+    an unproven ancestry never proceeds to the merge).
+    """
     if branch == "HEAD":
         return "detached_head"
     if branch != "main":
@@ -380,7 +392,7 @@ def guard_skip_reason(*, branch: str, porcelain: Sequence[str], ancestor_rc: int
         return "dirty_tree"
     if ancestor_rc == _ANCESTOR_RC_DIVERGED:
         return "diverged"
-    if ancestor_rc > _ANCESTOR_RC_DIVERGED:
+    if ancestor_rc != 0:
         return "ancestor_check_failed"
     return None
 
@@ -507,8 +519,30 @@ def _write_marker(ctx: _Ctx, lock_paths: Sequence[str]) -> None:
         )
 
 
+def _is_lane_lock_path(path: str) -> bool:
+    """``True`` iff *path* has the ONE shape the lane itself ever markers.
+
+    The marker may scope a restore ONLY to a ``rust/<crate>/Cargo.lock``
+    path (defense-in-depth: a TAMPERED marker must never scope a
+    ``git checkout -f`` at an arbitrary tracked path — the restore already
+    intersects with the fresh dirty porcelain, this bounds the pathset
+    STRUCTURALLY too).  Exactly three ``/``-segments, ``rust`` first,
+    ``Cargo.lock`` last, a non-empty non-dot-token crate dir between, no
+    backslash anywhere.
+    """
+    parts = path.split("/")
+    return (
+        len(parts) == _LANE_LOCK_SEGMENTS
+        and parts[0] == "rust"
+        and parts[2] == "Cargo.lock"
+        and bool(parts[1])
+        and parts[1] not in (".", "..")
+        and "\\" not in path
+    )
+
+
 def _read_marker(ctx: _Ctx) -> tuple[str, ...] | None:
-    """Read the crash marker; corrupt/non-regular ⇒ treated as ABSENT + one WARN."""
+    """Read the crash marker; corrupt/non-regular/foreign-path ⇒ ABSENT + one WARN."""
     if ctx.state_dir is None:
         return None
     path = ctx.state_dir / _MARKER_FILE_NAME
@@ -519,15 +553,16 @@ def _read_marker(ctx: _Ctx) -> tuple[str, ...] | None:
         isinstance(payload, dict)
         and payload.get("schema") == 1
         and isinstance(payload.get("lock_paths"), list)
-        and all(isinstance(p, str) for p in payload["lock_paths"])
+        and all(isinstance(p, str) and _is_lane_lock_path(p) for p in payload["lock_paths"])
     ):
         return tuple(payload["lock_paths"])
     logger.warning(
         "box_update.build_marker_unreadable",
         marker=str(path),
         detail=(
-            "corrupt/oversized/non-regular crash marker treated as ABSENT — no restore on "
-            "unproven provenance (a dirty lane lock then takes the visible dirty_tree skip)"
+            "corrupt/oversized/non-regular/foreign-path crash marker treated as ABSENT — no "
+            "restore on unproven provenance (a dirty lane lock then takes the visible "
+            "dirty_tree skip); the marker may only ever scope rust/<crate>/Cargo.lock paths"
         ),
     )
     return None
@@ -1041,7 +1076,8 @@ def _emit_alarms(
             detail=(
                 "HARD CLI-DOWN: a required wheel is unloadable and the repair rebuild "
                 "failed — the next invocation cannot import; remediation: "
-                "cd rust/<crate> && maturin develop --release"
+                "cd rust/<crate> && maturin develop --release (a fresh shell needs the "
+                "env-prefixed form — see docs/runbooks/box-autodeploy.md §4 wedge-rescue)"
             ),
             **repeat_fields,
         )
@@ -1050,7 +1086,8 @@ def _emit_alarms(
             "box_update.repair_failed_stale",
             detail=(
                 "torn-version residual: the wheel is loadable but venv/tree mismatched "
-                "(digest_ok=false) — re-attempted next night"
+                "(digest_ok=false) — re-attempted next night; manual fix: the env-prefixed "
+                "wedge-rescue command (docs/runbooks/box-autodeploy.md §4)"
             ),
             **repeat_fields,
         )
@@ -1260,11 +1297,14 @@ def run_box_update(
     rc, out, _ = _git(ctx, "rev-parse", "--abbrev-ref", "HEAD")
     if rc != 0:
         return _skip(ctx, "rev_parse_failed", evidence="rev-parse --abbrev-ref failed")
+    # The G2/G5/G6 verdicts each DELEGATE to the ONE pure truth table
+    # (guard_skip_reason); inputs not yet measured ride their proceed values.
     branch = out.strip()
-    if branch == "HEAD":
-        return _skip(ctx, "detached_head")
-    if branch != "main":
-        return _skip(ctx, "not_on_main", evidence=f"branch={branch!r}")
+    branch_reason = guard_skip_reason(branch=branch, porcelain=(), ancestor_rc=0)
+    if branch_reason == "detached_head":
+        return _skip(ctx, branch_reason)
+    if branch_reason is not None:
+        return _skip(ctx, branch_reason, evidence=f"branch={branch!r}")
     # P — the pre-G4a MARKER PROLOGUE (marker-gated; before G3/G4/G4a).
     _marker_prologue(ctx)
     # G3 — fetch, 2 attempts, FAIL-OPEN.
@@ -1292,18 +1332,20 @@ def run_box_update(
         return _skip(ctx, "porcelain_failed", evidence=f"status --porcelain rc={rc}")
     lines = [line for line in out.splitlines() if line.strip()]
     blocked = _non_untracked_lines(lines)
-    if blocked:
+    dirty_reason = guard_skip_reason(branch=branch, porcelain=lines, ancestor_rc=0)
+    if dirty_reason is not None:
         sample = ", ".join(repr(_porcelain_path(line)) for line in blocked[:5])
-        return _skip(ctx, "dirty_tree", evidence=f"{len(blocked)} tracked change(s): {sample}")
+        return _skip(ctx, dirty_reason, evidence=f"{len(blocked)} tracked change(s): {sample}")
     untracked = len(lines) - len(blocked)
     if untracked:
         ctx.detail_parts.append(f"untracked_files={untracked}")
     # G6 — strict ancestor.
     rc, _, _ = _git(ctx, "merge-base", "--is-ancestor", "HEAD", "origin/main")
-    if rc == _ANCESTOR_RC_DIVERGED:
-        return _skip(ctx, "diverged")
-    if rc != 0:
-        return _skip(ctx, "ancestor_check_failed", evidence=f"merge-base rc={rc}")
+    ancestor_reason = guard_skip_reason(branch=branch, porcelain=(), ancestor_rc=rc)
+    if ancestor_reason == "diverged":
+        return _skip(ctx, ancestor_reason)
+    if ancestor_reason is not None:
+        return _skip(ctx, ancestor_reason, evidence=f"merge-base rc={rc}")
     # §3 — ff-only merge + post-merge verify.
     rc, _, err = _git(ctx, "merge", "--ff-only", "origin/main")
     if rc != 0:
