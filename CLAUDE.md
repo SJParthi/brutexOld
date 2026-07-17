@@ -3224,8 +3224,8 @@ hostile-review pass._
   `spot_resample.derive_intraday_tfs` inherits the batch face transitively
   (module untouched, spy-pinned); `feed/resampler.py` NOT touched
   (ADR-EXEMPT oracle, #1492 G3). PROOF (executed, real maturin wheel):
-  cargo fmt/clippy(-D warnings)/test --release --locked 81 passed (15 new:
-  6 session + 9 daily; crate stays 0.1.0, Cargo.lock byte-untouched); the
+  cargo fmt/clippy(-D warnings)/test --release --locked 81 passed (14 new:
+  5 session + 9 daily; crate stays 0.1.0, Cargo.lock byte-untouched); the
   real-wheel parity suite 26 passed — daily ON-vs-OFF at CandleBar strength
   INCLUDING Decimal reprs, session-cutoff parity, batch 21-TF parity + the
   one-crossing count pin, whole-prebuild sha256 A/B
