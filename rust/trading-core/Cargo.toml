@@ -12,7 +12,15 @@
 
 [package]
 name = "trading-core"
-# 0.3.2 → 0.4.0: the 66-bit vocabulary reshape — VWAP bits 52-53 TOMBSTONED
+# 0.4.0 → 0.5.0: the SuperTrend implemented-flip (vocab-66 PR-B) — bits 64-65
+# go implemented=true off the NEW `indicators::supertrend::SupertrendState`
+# (ATR-10 Wilder, factor 3, hl2 source, exact ×2-scaled integer paisa), the
+# ONE appended defaulted `supertrend_x2_paisa` FFI arg lands on all four
+# evaluate pyfunctions + the batch face, and IMPLEMENTED_MASK widens to
+# bits {0..51, 54..65}. The bump moves `_indicator_version()` and re-keys
+# every new run_id (the sanctioned re-key lever — the mask/ABI change MUST
+# re-key).
+# Earlier, 0.3.2 → 0.4.0: the 66-bit vocabulary reshape — VWAP bits 52-53 TOMBSTONED
 # (the VwapState math + the vwap_paisa/batch VWAP columns DELETED — an ABI
 # narrowing across all four evaluate pyfunctions), Central Pivot Range bits
 # 60-63 implemented, Supertrend bits 64-65 declared layout-only. The bump
@@ -22,7 +30,7 @@ name = "trading-core"
 # bar-bits kernel (`stage1a_batch` + the `stage1a_bar_bits_batch` pyfunction).
 # The bump moves `_indicator_version()` and re-keys every new run_id (the
 # sanctioned #1548 precedent — bump on ANY change, even with no math delta).
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)"
