@@ -262,10 +262,10 @@ class TestLakeDerivedFreshnessVerdicts:
         reads = {"1minute": 0}
         real_read = tf_autoderive.read_lake_bars_frame
 
-        def _counting_read(symbol_dir, interval, *, source=""):
+        def _counting_read(symbol_dir, interval, *, source="", screen_bad_ticks=False):
             if interval == "1minute":
                 reads["1minute"] += 1
-            return real_read(symbol_dir, interval, source=source)
+            return real_read(symbol_dir, interval, source=source, screen_bad_ticks=screen_bad_ticks)
 
         monkeypatch.setattr(tf_autoderive, "read_lake_bars_frame", _counting_read)
         verdicts = tf_autoderive.lake_derived_freshness_verdicts(
@@ -280,3 +280,175 @@ class TestLakeDerivedFreshnessVerdicts:
             ("NIFTY", "15minute"): "fresh",
         }
         assert reads["1minute"] == 1
+
+
+def _seed_lake_1m_spike(lake_root, *, sole_bucket_spike: bool = False):
+    """Write in-session 1-minute bars with ONE self-consistent ~5x spike bar.
+
+    The spike bar (09:25 IST) has every OHLC field scaled together — internally
+    ordered, strictly positive — so it passes every write-side guard (the exact
+    class the bad-tick screen exists for; DEC-SWEEP-DATA-EDGE-GUARDS-001) and is
+    STORED. With *sole_bucket_spike* the surrounding minutes are absent, so the
+    spike is the SOLE 1-minute source of its 5-minute bucket (the ghost shape —
+    DEC-DERIVED-GHOST-BUCKET-PRUNE-001).
+    """
+    from datetime import timezone
+    from decimal import Decimal
+    from pathlib import Path
+
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    minutes = [0, 1, 2, 3, 9, 14, 15, 16, 17, 18] if sole_bucket_spike else list(range(20))
+    bars = []
+    for i in minutes:
+        ts = datetime(2024, 1, 2, 9, 16 + i, tzinfo=ist).astimezone(UTC)
+        close = Decimal("500.00") if i == 9 else Decimal("100.00") + Decimal(i) / 10
+        bars.append(
+            CandleBar(
+                timestamp=ts,
+                open=close - Decimal("0.05"),
+                high=close + Decimal("0.05"),
+                low=close - Decimal("0.10"),
+                close=close,
+                volume=1000,
+                open_interest=None,
+            )
+        )
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(lake_root)))
+    sink.append(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=bars)
+    return bars
+
+
+def _production_prebuild(lake_root) -> None:
+    """Run the REAL pipeline prebuild primitive over the NIFTY 5m timeframe."""
+    from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+    materialize_lake_timeframes(
+        lake_root=lake_root,
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        kind=PrebuildKind.SPOT,
+        tfs=["5m"],
+        incremental=False,  # the forced FULL derive — never the stamp skip
+    )
+
+
+def _verdicts(lake_root) -> dict:
+    return tf_autoderive.lake_derived_freshness_verdicts(
+        lake_root,
+        exchange="NSE",
+        segment="INDEX",
+        symbols=["NIFTY"],
+        intervals=["5minute"],
+    )
+
+
+class TestBadTickScreenParity:
+    """DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001 — the freshness re-derivation runs
+    the SAME bad-tick screen the prebuild's 1-minute read runs (B-1: the false
+    sweep/doctor wedge), plus the honest ghost-bucket pins (B-2:
+    DEC-DERIVED-GHOST-BUCKET-PRUNE-001, the named follow-up)."""
+
+    def test_screened_spike_lake_production_prebuild_reads_fresh(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """FAILS-BEFORE (r10, the B-1 false wedge): a lake whose stored 1-minute
+        legitimately holds ONE self-consistent >=4x in-session spike — exactly the
+        class the screen exists for; write-side guards accept it — with derived
+        TFs written by the PRODUCTION prebuild (screened) previously read
+        PERMANENTLY 'stale' (the re-derivation was unscreened), and the printed
+        remedy (re-run the prebuild) could never clear it. Screen parity: fresh."""
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        _seed_lake_1m_spike(tmp_path)
+        _production_prebuild(tmp_path)
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "fresh"}
+        # And a prebuild RE-run keeps it fresh (the remedy converges, no wedge).
+        _production_prebuild(tmp_path)
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "fresh"}
+
+    def test_read_opt_in_screens_spike_and_default_read_does_not(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The opt-in seam: `screen_bad_ticks=True` drops the spike row (screen ON
+        by default); the DEFAULT read is byte-identical to the pre-parity read —
+        the stored DERIVED partitions (the prebuild's screened OUTPUT) must never
+        be re-screened."""
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        bars = _seed_lake_1m_spike(tmp_path)
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        raw = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute")
+        screened = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute", screen_bad_ticks=True)
+        assert raw.height == len(bars)  # default: spike KEPT (unchanged behavior)
+        assert screened.height == len(bars) - 1  # opt-in: spike dropped
+        assert 500.0 in raw.get_column("close").to_list()
+        assert 500.0 not in screened.get_column("close").to_list()
+
+    def test_kill_switch_off_compares_unscreened_vs_unscreened(self, tmp_path, monkeypatch) -> None:
+        """BRUTEX_BAD_TICK_SCREEN=0 flips BOTH boundaries together (the one-switch
+        law): the prebuild writes the spike-carrying derivation and the freshness
+        re-derivation keeps the spike too — unscreened-vs-unscreened, verdict
+        fresh (the pre-parity behavior, byte-preserved)."""
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+        bars = _seed_lake_1m_spike(tmp_path)
+        _production_prebuild(tmp_path)
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        # The opt-in read honors the kill switch: spike kept.
+        screened = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute", screen_bad_ticks=True)
+        assert screened.height == len(bars)
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "fresh"}
+
+    def test_clean_lake_verdict_parity(self, tmp_path, monkeypatch) -> None:
+        """A clean lake (no bad ticks) is verdict-identical with the screen ON —
+        the screen returns clean frames unchanged, so the compare is byte-for-byte
+        the pre-parity compare (the no-behavior-change pin)."""
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        sink, _ = _seed_lake_1m(tmp_path)
+        _write_derived(tmp_path, sink)
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        raw = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute")
+        screened = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute", screen_bad_ticks=True)
+        assert screened.equals(raw)
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "fresh"}
+
+    def test_ghost_bucket_reads_stale_honestly_and_escape_works(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The B-2 disposition pins (executed evidence for
+        DEC-DERIVED-GHOST-BUCKET-PRUNE-001, the named follow-up):
+
+        1. a stored derived bucket whose SOLE 1-minute source is screened away
+           SURVIVES a forced full re-prebuild (the latest-wins derived writer
+           never deletes) — the ghost;
+        2. the screen-parity gate reads the ghost lake 'stale' — the HONEST
+           verdict (the stored table genuinely serves a bucket the screened
+           base disowns); never 'fresh' (pre-parity the unscreened compare
+           blessed the poison bucket);
+        3. the printed escape WORKS: delete the derived TF partition dirs +
+           re-run the prebuild → fresh (the wedge is never permanent).
+        """
+        import shutil
+
+        import polars as pl
+
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        _seed_lake_1m_spike(tmp_path, sole_bucket_spike=True)
+        derived_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "5minute"
+        # The pre-#1811-shaped derive (screen OFF): the spike-only bucket IS written.
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+        _production_prebuild(tmp_path)
+        monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+        # Screen back ON: a FORCED FULL re-prebuild does NOT delete the ghost.
+        _production_prebuild(tmp_path)
+        stored = pl.read_parquet(derived_dir.as_posix() + "/**/*.parquet")
+        ghost_utc = datetime(2024, 1, 2, 3, 55)  # 09:25 IST — the spike-only bucket
+        stamps = [t.replace(tzinfo=None) for t in stored.get_column("timestamp").to_list()]
+        assert ghost_utc in stamps  # (1) the ghost survives
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "stale"}  # (2) honest
+        # (3) the printed escape: delete the derived dirs, re-run the prebuild.
+        shutil.rmtree(derived_dir)
+        _production_prebuild(tmp_path)
+        assert _verdicts(tmp_path) == {("NIFTY", "5minute"): "fresh"}

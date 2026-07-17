@@ -157,3 +157,54 @@ def test_fetched_interval_only_request_abstains(tmp_path: Path) -> None:
     lake_root, catalog_path = _seed(tmp_path, derived="stale")  # stale 5m present but UNREQUESTED
     rc = cmd_sweep_all(symbols="NIFTY", **_kwargs(lake_root, catalog_path, tmp_path, "1minute"))
     assert rc == EXIT_OK
+
+
+def test_screened_spike_lake_production_prebuild_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILS-BEFORE (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, the r10 e2e): a lake
+    whose stored 1-minute legitimately holds ONE self-consistent >=4x in-session
+    spike — exactly the class the bad-tick screen exists for; every write-side
+    guard accepts it — with derived TFs written by the REAL production prebuild
+    (which screens its 1-minute read, DEC-READ-GUARD-PARITY-001) previously
+    HARD-REFUSED `cmd_sweep_all` with no escape flag, and the printed remedy
+    (re-run the prebuild) could NEVER clear it: the freshness gate re-derived
+    from the UNSCREENED raw 1-minute. With screen parity the gate compares
+    screened-vs-screened and the sweep launches (EXIT_OK)."""
+    from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+    monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+    lake_root = tmp_path / "lake"
+    catalog_path = tmp_path / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    bars = _bars()
+    # The ~5x self-consistent scaled bar (09:25 IST): internally ordered,
+    # strictly positive — stored by the production writer, screened at read.
+    spike_close = Decimal("500.00")
+    bars[9] = CandleBar(
+        timestamp=bars[9].timestamp,
+        open=spike_close - Decimal("0.05"),
+        high=spike_close + Decimal("0.05"),
+        low=spike_close - Decimal("0.10"),
+        close=spike_close,
+        volume=1000,
+        open_interest=None,
+    )
+    with Catalog.open(catalog_path) as cat:
+        sink = ParquetBarSink(writer=writer, catalog=cat)
+        sink.append(
+            exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", interval="1minute", bars=bars
+        )
+    # THE PRODUCTION PREBUILD (bad-tick screen ON by default) — the exact
+    # producer of every real lake's derived TFs.
+    materialize_lake_timeframes(
+        lake_root=lake_root,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol="NIFTY",
+        kind=PrebuildKind.SPOT,
+        tfs=["5m"],
+        incremental=False,
+    )
+    rc = cmd_sweep_all(symbols="NIFTY", **_kwargs(lake_root, catalog_path, tmp_path, "5minute"))
+    assert rc == EXIT_OK
