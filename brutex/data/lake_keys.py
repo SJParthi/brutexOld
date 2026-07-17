@@ -90,9 +90,7 @@ def stock_drift_fold(symbol: str) -> str:
     seam (DEC-DATA-RUST-LAKE-KEYS-001); :func:`_stock_drift_fold_python`
     is the verbatim body — the live parity oracle every degrade path ships.
     """
-    return lake_keys_rust.routed_stock_drift_fold(
-        symbol, python_law=_stock_drift_fold_python
-    )
+    return lake_keys_rust.routed_stock_drift_fold(symbol, python_law=_stock_drift_fold_python)
 
 
 def _stock_drift_fold_python(symbol: str) -> str:
