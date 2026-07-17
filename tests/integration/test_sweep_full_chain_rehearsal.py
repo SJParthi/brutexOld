@@ -99,25 +99,44 @@ def _trading_days(start: date, n: int) -> list[date]:
 
 
 def _bars() -> list[CandleBar]:
-    """A winning upward-zigzag: BUY masks pass the 5 hard gates via the TP leg."""
+    """The worst-case-rankable gap-up drift: BUY masks pass the 5 hard gates.
+
+    DEC-FILL-WORST-CASE-ONLY-001 re-craft (the old wide-range zigzag SL'd
+    every worst-case entry on its own bar): narrow gap-up bars (range 0.50 <
+    the SL 0.80; the next gap-up's low clears the TP level → +50 wins), a
+    shallow bearish bar each 7-bar cycle, and a DEEP bearish bar (range
+    0.85) every 4th cycle whose stop-out keeps profit_factor finite.
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for day in _trading_days(date(2024, 1, 1), _N_DAYS):
         price = 100.0
         for m in range(_PER_DAY):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
             out.append(
                 CandleBar(
                     timestamp=ts.astimezone(UTC),
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(max(price, close) + 0.5, 2))),
-                    low=Decimal(str(round(min(price, close) - 0.5, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=1000,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
@@ -250,10 +269,48 @@ def test_r38_full_chain_completes_clean(rehearsal: _Rehearsal) -> None:
     assert status["error_type"] is None
 
 
+def _coverage_instrumented() -> bool:
+    """True when coverage.py is actively tracing THIS process.
+
+    Distinguishes the unit job (whole-suite ``pytest --cov=brutex
+    --cov-branch`` — every traced line pays the tracer) from the dedicated
+    ``sweep-rehearsal`` CI job, which runs this file standalone with NO
+    coverage. Probes the LIVE tracer (``coverage.Coverage.current()``), never
+    "is the package importable" — [dev] always installs coverage.
+    """
+    try:
+        import coverage
+    except ImportError:
+        return False
+    return coverage.Coverage.current() is not None
+
+
+#: The STRICT sweep-compute ceiling — asserted where the process is NOT
+#: coverage-traced (the dedicated `sweep-rehearsal` job, measured ~7 s there),
+#: so ci.yml's "a real sweep slowdown trips the in-test ceiling" claim keeps
+#: its full teeth on every push.
+_RUNTIME_CEILING_S = 300.0
+#: The documented 3x instrumentation allowance for a coverage-traced process:
+#: under the unit job's whole-package `--cov=brutex --cov-branch` tracing the
+#: SAME first pass measures the TRACER, not sweep compute (315.4 s vs ~7 s
+#: uninstrumented — run 29269883269, 2026-07-13), so the strict tier would
+#: flake on tracer+contention noise while catching nothing the dedicated job
+#: does not. 900 s stays "minutes not hours" — the assertion is never deleted.
+_RUNTIME_CEILING_COVERAGE_S = 3 * _RUNTIME_CEILING_S
+
+
 def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
-    """The chain-in-miniature stays MINUTES not hours (measured, not assumed)."""
-    assert rehearsal.seconds_first < 300.0, (
-        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s — the CI budget claim broke"
+    """The chain-in-miniature stays MINUTES not hours (measured, not assumed).
+
+    Two-tier ceiling (the CLAUDE.md §2 Rule 5 two-tier philosophy): strict
+    300 s where uninstrumented (the dedicated rehearsal job); the documented
+    3x instrumentation allowance where coverage.py is actively tracing (the
+    unit job's whole-package branch tracing).
+    """
+    ceiling = _RUNTIME_CEILING_COVERAGE_S if _coverage_instrumented() else _RUNTIME_CEILING_S
+    assert rehearsal.seconds_first < ceiling, (
+        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s"
+        f" (ceiling {ceiling:.0f}s) — the CI budget claim broke"
     )
 
 

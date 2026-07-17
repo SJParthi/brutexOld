@@ -30,28 +30,46 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _bars() -> list[CandleBar]:
+    # The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001):
+    # narrow gap-up bars (range 0.50 < the SL 0.80 — no same-bar stop-out;
+    # the next gap-up's low clears the TP level so the win banks +50), a
+    # shallow bearish bar each 7-bar cycle and a DEEP bearish bar (range
+    # 0.85 > the SL) every 4th cycle whose stop-out keeps profit_factor
+    # finite for every k=1 mask over bits 0-4 (per-day price RESET under
+    # carried EMAs fires the below-EMA bits early-day, the above-EMA bits
+    # late-day).
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 

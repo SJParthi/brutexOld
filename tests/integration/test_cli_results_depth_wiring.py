@@ -89,22 +89,34 @@ def _persist(tmp_path: Path) -> tuple[Path, Path]:
 
 def _trading_bars() -> list[CandleBar]:
     """The proven trade-PRODUCING fixture (the depth unit suite's 12-day
-    upward-drift bars, verbatim shape) — the tiny 8-bar lake above persists
-    zero trades, which cannot exercise VIX stamping."""
+    GAP-UP drift, verbatim shape — DEC-FILL-WORST-CASE-ONLY-001: a worst-case
+    entry fills at the bar HIGH, so the old ±0.5-pad drift SL'd every entry
+    on its own bar; narrow gap-up bars rank at sl=80/tp=50) — the tiny 8-bar
+    lake above persists zero trades, which cannot exercise VIX stamping."""
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
+                    open=Decimal(str(round(o, 2))),
                     high=Decimal(str(round(hi, 2))),
                     low=Decimal(str(round(lo, 2))),
                     close=Decimal(str(round(close, 2))),

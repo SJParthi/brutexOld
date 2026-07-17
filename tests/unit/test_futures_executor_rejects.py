@@ -155,7 +155,6 @@ class TestRejectOrderPinned:
             _signal(),
             resolver=_Resolver(),
             source=_Source(window=None),
-            reject_stale_bars=True,
         )
         assert isinstance(out, RejectedFuturesTrade)
         assert out.reason is FuturesRejectReason.NO_DATA
@@ -192,34 +191,47 @@ class TestR15MissingBarNoSubstitution:
         assert repr(sig) == before
 
 
-class TestStaleBarOptIn:
-    def test_stale_gate_fires_only_with_flag_on_entry(self) -> None:
+class TestStaleBarUnconditional:
+    """DEC-FILL-WORST-CASE-ONLY-001: the volume-0 stale-bar reject is
+    UNCONDITIONAL — the ``reject_stale_bars`` knob is DELETED and futures
+    FLIP from R15's fill-by-default to always-reject (the R15 "printed bar
+    is REAL and TRADABLE" clause is consciously superseded; the reject is
+    COUNTED so the survivorship tilt stays visible, never silent)."""
+
+    def test_stale_gate_fires_unconditionally_on_entry(self) -> None:
         out = materialize_futures_trade(
             _signal(),
             resolver=_Resolver(),
             source=_Source(window=_window(entry_volume=0)),
-            reject_stale_bars=True,
         )
         assert isinstance(out, RejectedFuturesTrade)
         assert out.reason is FuturesRejectReason.STALE_BAR
 
-    def test_stale_gate_fires_only_with_flag_on_exit(self) -> None:
+    def test_stale_gate_fires_unconditionally_on_exit(self) -> None:
         out = materialize_futures_trade(
             _signal(),
             resolver=_Resolver(),
             source=_Source(window=_window(exit_volume=0)),
-            reject_stale_bars=True,
         )
         assert isinstance(out, RejectedFuturesTrade)
         assert out.reason is FuturesRejectReason.STALE_BAR
 
-    def test_default_fills_zero_volume(self) -> None:
+    def test_zero_volume_never_fills_the_r15_flip(self) -> None:
+        # Fails-before pin: pre-DEC the flagless default FILLED this window.
         out = materialize_futures_trade(
             _signal(),
             resolver=_Resolver(),
             source=_Source(window=_window(entry_volume=0, exit_volume=0)),
         )
-        assert isinstance(out, MaterializedFuturesTrade)
+        assert isinstance(out, RejectedFuturesTrade)
+        assert out.reason is FuturesRejectReason.STALE_BAR
+
+    def test_no_reject_stale_bars_knob_survives(self) -> None:
+        # Killed-token pin: the knob is gone from BOTH entry points.
+        import inspect
+
+        assert "reject_stale_bars" not in inspect.signature(materialize_futures_trade).parameters
+        assert "reject_stale_bars" not in inspect.signature(run_futures_over_signals).parameters
 
 
 class TestOneWarnPerReject:
@@ -250,7 +262,6 @@ class TestOneWarnPerReject:
                 _signal(),
                 resolver=_Resolver(),
                 source=_Source(window=_window(entry_volume=0)),
-                reject_stale_bars=True,
             )
         assert [x["event"] for x in logs] == ["futures.reject.stale_bar"]
 
@@ -343,7 +354,6 @@ class TestRejectCountsNoSilentMiscount:
             direction=TradeDirection.BULL,
             resolver=resolver,
             source=_MapSource(),
-            reject_stale_bars=True,
         )
         assert res.n_signals == 5
         assert res.n_accepted == 1
