@@ -125,6 +125,12 @@ pub mod resample;
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
 pub mod stats_shard;
 pub mod window_ledger;
+// SLICE T24 PR-1 — the cold data-integrity detector pure laws
+// (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948): the
+// raw-integrity blake2b digest + the interior bar-less run walker + the
+// partial-window truncation verdict. ADDITIVE registration (§4.1 sibling
+// merge law); own module file.
+pub mod detectors;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -566,6 +572,19 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // which is irrelevant to a polars-free law).
     m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
     m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
+    // SLICE T24 PR-1 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001) — the detector
+    // pure laws; the facade `brutex/data/detectors_rust.py` engages them
+    // behind three default-OFF flags via the all-or-nothing SYMBOL
+    // handshake over exactly these three names (polars-free laws — never
+    // the polars version guard). Appended AFTER the G8 pair, never
+    // reordering it (§4.1 — the concurrent-sibling additive-registration
+    // merge law).
+    m.add_function(wrap_pyfunction!(detectors::raw_integrity_blake2b_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(detectors::interior_barless_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        detectors::classify_partial_window_verdict,
+        m
+    )?)?;
     Ok(())
 }
 

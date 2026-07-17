@@ -95,6 +95,17 @@ on:
       - "brutex/data/lake_stats_manifest.py"
       - "tests/unit/test_lake_rust_stats.py"
       - "tests/golden/test_lake_stats_shard_rust_parity.py"
+      # SLICE T24 PR-1 — the detector pure-law facade + its three targets
+      # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948).
+      - "brutex/data/detectors_rust.py"
+      - "brutex/data/raw_integrity.py"
+      - "brutex/data/interior_gap_detect.py"
+      - "brutex/data/partial_window_detect.py"
+      - "tests/unit/test_detectors_rust.py"
+      - "tests/unit/test_raw_integrity_rust_seam.py"
+      - "tests/unit/test_interior_gap_detect_rust_seam.py"
+      - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
       # lake_invariants.py + their suites. The flag-ON heal twin step is
@@ -132,6 +143,17 @@ on:
       - "brutex/data/lake_stats_manifest.py"
       - "tests/unit/test_lake_rust_stats.py"
       - "tests/golden/test_lake_stats_shard_rust_parity.py"
+      # SLICE T24 PR-1 — the detector pure-law facade + its three targets
+      # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948).
+      - "brutex/data/detectors_rust.py"
+      - "brutex/data/raw_integrity.py"
+      - "brutex/data/interior_gap_detect.py"
+      - "brutex/data/partial_window_detect.py"
+      - "tests/unit/test_detectors_rust.py"
+      - "tests/unit/test_raw_integrity_rust_seam.py"
+      - "tests/unit/test_interior_gap_detect_rust_seam.py"
+      - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
       # same rationale as the push block above (render-seam-scoped twin).
@@ -299,13 +321,34 @@ jobs:
             tests/unit/test_lake_rust_resample.py \
             tests/unit/test_tf_resampler_rust_seam.py \
             tests/integration/test_lake_rust_resample_parity.py \
-            tests/unit/test_window_ledger_rust.py
+            tests/unit/test_window_ledger_rust.py \
+            tests/unit/test_detectors_rust.py \
+            tests/unit/test_raw_integrity_rust_seam.py \
+            tests/unit/test_interior_gap_detect_rust_seam.py \
+            tests/unit/test_partial_window_detect_rust_seam.py
           # G8 window-ledger differential + affected suites, flag-ON arm
           # (the real wheel is installed + lockstep-aligned above).
           BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
             tests/unit/test_window_ledger_rust.py \
             tests/unit/test_window_status.py \
             tests/unit/test_window_ledger.py
+          # SLICE T24 detector laws, flag-ON arm
+          # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the three EXISTING
+          # detector suites run VERBATIM under all three flags with the real
+          # wheel — every catching test must still catch (the fails-before
+          # mechanism), plus the seam suites' real-wheel differentials.
+          BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
+          BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
+          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rs -q \
+            tests/unit/test_detectors_rust.py \
+            tests/unit/test_raw_integrity.py \
+            tests/unit/test_raw_integrity_store.py \
+            tests/integration/test_raw_integrity_wiring.py \
+            tests/unit/test_interior_gap_detect.py \
+            tests/unit/test_partial_window_detect.py \
+            tests/unit/test_raw_integrity_rust_seam.py \
+            tests/unit/test_interior_gap_detect_rust_seam.py \
+            tests/unit/test_partial_window_detect_rust_seam.py
 
       - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
         # The PR-2 non-perturbation leg: the 18-round
