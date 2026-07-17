@@ -38,6 +38,27 @@ READ/representation-only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1929.)
+Earlier: 2026-07-16 (DEC-LAKE-RUST-WAVED-HARNESS-001, MIGRATION.md #1916 —
+the ADR-0020 Wave-D POISON-CORPUS DIFFERENTIAL harness (slice G9): a reusable
+27-case poisoned-lake corpus + a two-implementation differential runner with the
+Python-vs-Python identity self-test — the mechanical gate the future
+`lake_invariants`/`lake_heal` Rust flip must pass; tests + docs ONLY, ZERO
+brutex/ source change. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The per-item
+record lives in the §1 Active-branch blurb + MIGRATION.md #1916 — this header
+carries the pointer, never the story.)
+Earlier: 2026-07-16 (DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914 —
+ADR-0020 Wave C row 4 + the row-5 rider: the stats-manifest shard RENDER
+re-hosted on `rust/brutex-lake` behind the default-OFF
+`BRUTEX_LAKE_RUST_STATS_MANIFEST` seam (ints + isoformat-strings-only FFI;
+burn-in bit-compare + ship-the-oracle autorevert; NO version guard — stdlib
+JSON has no wheel lockstep, a documented deviation vs PR-1) + crate-internal
+`option_partition_stem`/`validate_year_month` partition twins (Python
+partition.py byte-UNCHANGED — the ADR net-loss ruling); flag OFF is
+byte-identical + crate-untouched (spy-pinned); the frozen render_shard golden
+is the cross-language byte pin (cargo AND pytest, executed). READ-accelerator
+only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The per-item record lives in
+the §1 Active-branch blurb + MIGRATION.md #1914 — this header carries the
+pointer, never the story.)
 Earlier: 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 /
 ADR-0023, branch `claude/fill-worst-case-only` — WORST-CASE IS THE ONLY FILL
 MODEL by operator directive: the interim PRECISE opt-out idea is DEAD —
@@ -3104,6 +3125,178 @@ hostile-review pass._
   smoke clean (no new cycle). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes, no new env vars.)
+  Earlier: `claude/rust-lake-ledgerstore-spike-r2` (**DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917** — allocator-final;
+  the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE. VERDICT:
+  byte-identity NOT FOUND — 14 polars-native (Rust encoder,
+  `use_pyarrow=False`) writer arms × the 7-case corpus built through the
+  PRODUCTION writer (`save_window_ledger`/`append_ledger_delta`, both
+  all-defaults `pq.write_table` sites) yield ZERO sha256 matches vs the
+  pyarrow-25.0.0 production bytes — ADR-0020 F3's "infeasible by
+  construction" CONFIRMED BY MEASUREMENT: the divergence starts at byte ~15
+  (the first data-page header thrift; byte 5 on the empty file) and
+  includes the un-knobbable encoder-identity classes — `created_by`
+  ("parquet-cpp-arrow version 25.0.0" vs "Polars"), the footer
+  format-version marker ("2.6" vs "1.0"), the `ARROW:schema` flatbuffer
+  BYTES (BOTH encoders embed the key; the serialization differs — the
+  sweep's initial "polars never writes it" classification was measured
+  FALSE and corrected in-place, the transcript's `measured_correction`
+  field) and the empty-file row-group structure (1 vs 0); the pyarrow write
+  itself is byte-DETERMINISTIC across runs (measured — encoder identity,
+  never nondeterminism). DELIVERED (branch B of the spike decision tree):
+  the priced DEC-LAKE-EXACT-PIN-001 escalation for the coordinator
+  (`docs/lake/g10_window_ledger_byte_parity/ESCALATION.md` — options
+  (i) exact-pin / (ii) row-equivalence law / (iii) golden re-baseline, each
+  costed; NONE adopted here — the coordinator rules) + the trimmed per-case
+  probe transcript (`probe_transcript.json`, the #1775 committed-probe
+  precedent) + the always-green probe pin
+  `tests/golden/test_window_ledger_bytes_probe.py` (production write
+  deterministic · the polars-native bytes diverge in EXACTLY the documented
+  class — a future byte-EQUALITY fails loudly and re-opens the decision ·
+  the cross-encoder ROW fixed point through the production
+  `_read_ledger_file_rows`, the load-bearing fact for options (ii)/(iii)).
+  ZERO production-code change — `brutex/data/window_ledger_store.py`
+  byte-untouched; the existing 164-test store suite passes unmodified.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/rust-lake-waved-harness` (**DEC-LAKE-RUST-WAVED-HARNESS-001,
+  MIGRATION.md #1916** — the ADR-0020 Wave-D POISON-CORPUS DIFFERENTIAL harness (slice G9):
+  NEW `tests/fakes/poison_corpus.py` — a 27-case `PoisonCase` manifest, one builder per known
+  ON-DISK poison class of the scan/heal surface (bars dup/foreign/overlap · legacy-key drift ·
+  option dup/foreign/multi-month overlap · null-side keys · non-canonical + Unicode-digit stems ·
+  glob-metachar series · nested-dtype sides · out-of-range `2**62`-µs datetimes both trees ·
+  schema-alien · price-sanity · naive-ts routing · zero-row · mass-poison majority · the
+  symlink family incl. loop + dangling; hoisted COPIES of the proven unit-suite fixtures,
+  raw-pyarrow plants per the #1067 convention) + NEW
+  `tests/integration/test_waved_poison_corpus_differential.py` — the `ScannerImpl` seam, the
+  verdict NORMALIZER (`duration_s`/`*_utc` excluded; lake roots folded to `<LAKE>`; findings as
+  sorted type-tagged field-dicts + the census fold), `run_differential` over TWO independent
+  fresh lakes per case, the Python-vs-Python IDENTITY self-test (impl_a = impl_b =
+  `scan_lake_invariants` — also the per-case determinism pin) + the anti-vacuous per-case
+  expectation teeth + the registered-class coverage law; NEW
+  `docs/runbooks/wave-d-poison-corpus.md` — the readiness record ADR-0020 Wave D gates on
+  (corpus provenance #1175/#1510/#1594 r1-18/#1762, the exception-taxonomy table, conversion
+  order `timeframe_materialize` → `lake_heal` → `catalog_reconcile` → `lake_invariants` LAST,
+  the go/no-go flip checklist). HONEST: parity over the CORPUS only, Python-vs-Python TODAY (no
+  Rust exists for these modules); scan-side only — the heal-side differential is the documented
+  phase 2; the runtime-injection classes (mid-heal TOCTOU, PanicException at L3) stay
+  OUT-of-corpus, pinned by `test_lake_heal.py`. Tests + docs ONLY — ZERO brutex/ source change;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the
+  harness suite 59/59 green, both new modules 100% line+branch (targeted --cov), neighbor
+  suites green unmodified; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/rust-lake-window-ledger-v2` (**DEC-LAKE-RUST-WINDOW-LEDGER-001, MIGRATION.md #1915** —
+  ADR-0020 Wave C-3 (slice G8) FIRST CUT: the TWO pure window-ledger laws — status classification
+  (`classify_window_status`) + the 5-tuple merge key (`WindowStatusLog._key`/`WindowLedger._key`) — routed
+  through `rust/brutex-lake` (NEW `window_ledger.rs`: `classify_window_status` + `date_isoformat`
+  pyfunctions, token-for-token law mirrors) behind the NEW default-OFF `BRUTEX_LAKE_RUST_WINDOW_LEDGER`
+  flag, with the VERBATIM Python law retained as the LIVE parity oracle (NEW public `window_key_python`
+  consolidates the two prior verbatim `_key` copies — §11 COMMON). The facade
+  `brutex/data/window_ledger_rust.py` (the PR-1 `lake_rust_render` template adapted): per-law 16-call
+  burn-in bit-compare + ship-the-ORACLE-value autorevert (`window_ledger_rust.autoreverted` ERROR); import
+  guard + SYMBOL handshake (`crate_unavailable`/`crate_stale` — the PR-1 polars VERSION guard is
+  DELIBERATELY unused, these laws are polars-free; a disclosed deviation); narrow degrade set
+  (ValueError/RuntimeError/TypeError/OverflowError/AttributeError) → oracle with one capped WARN per
+  reason; MemoryError/KeyboardInterrupt/SystemExit re-raise RAW above the imported panic belt; the
+  EXACT-TYPE date gate refuses a `datetime`-carrying key to the oracle (`datetime` IS a `date` subclass
+  whose isoformat DIFFERS — the real "isoformat trap" for THIS law; the WindowKey start/end are date-only,
+  so tz-aware/naive/microsecond datetime isoformat is a PAYLOAD-field concern, stated honestly). FFI
+  discipline (DEC-FEED-RUST-CORE-001 style): ONLY date ints cross IN, only the two rendered ASCII date
+  strings cross OUT — market/security_id/interval are the ORIGINAL Python objects (identity-pinned).
+  FIRST-CUT scope: `record()`'s streak/tombstone rules + the merge-on-save conflict law + optional-column
+  None back-compat stay PYTHON — the full #1548 pyclass single-source flip is the named follow-up
+  DEC-LAKE-RUST-WINDOW-LEDGER-002. Flag OFF (default) is byte-identical (OFF-never-imports-crate bomb-spy
+  pinned); crate stays 0.1.0, Cargo.toml/Cargo.lock byte-UNTOUCHED (deliberately NO Rust proptest — the
+  `--locked` lockstep protected; the Rust unit matrix + the Python hypothesis differential carry the
+  property load); window_ledger is NOT in run identity — no re-key concern. EVIDENCE (executed): the facade
+  suite 35 passed at 100.00% line+branch STANDALONE (131/42) incl. the hypothesis differential vs the REAL
+  built wheel (classify over the FULL i64 × {None, text} × bool domain ≡ oracle — the out-of-i64 `2**63`
+  OverflowError degrade pin scopes the claim honestly; merge key over dates(0001-01-01..9999-12-31) ≡
+  oracle); the ci.yml window_status gate 12 passed 100.00% + the window_ledger gate 172 passed 100.00%
+  (additive pin classes only — every pre-existing test byte-unmodified); all four affected suites flag-ON
+  against the real wheel 219 passed; cargo fmt --check / clippy --all-targets --locked -D warnings /
+  test --release --locked ALL green (18 tests incl. the 8 new); ruff check + ruff format --check clean;
+  `mypy --strict` clean on the three touched data modules; pyright 0 errors; lake-rust-parity.yml gains the
+  G8 paths (both lists) + the facade suite + the flag-ON differential arm. HONEST (the ADR-0020 banner
+  verbatim): expected payoff ≈ 0 — conversion is for uniformity, not speed; both laws are nanosecond-scale
+  in Python and the FFI hop is a small SLOWDOWN, acceptable because the seams run per window record on an
+  I/O-dominated vendor-fetch path and ship DEFAULT-OFF (a default flip needs its own DEC). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/rust-lake-stats-shard` (**DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914** —
+  ADR-0020 Wave C row 4 (G6) + the row-5 rider (G7): the ONE pure serializer
+  `lake_stats_manifest.render_shard` re-hosted on the `rust/brutex-lake` crate
+  (NEW `src/stats_shard.rs` — the CPython `json.dumps(sort_keys=True,
+  separators=(",", ":"), ensure_ascii=True)` byte-law twin incl. the
+  `py_encode_basestring_ascii` escaper with lowercase-hex + surrogate-pair
+  astral escapes) behind the NEW default-OFF `BRUTEX_LAKE_RUST_STATS_MANIFEST`
+  seam `brutex/data/lake_rust_stats.py` (the PR-1 facade shape: import/API
+  guard, 16-render burn-in bit-compare + ship-the-ORACLE autorevert, narrow
+  degrade set + pyo3 panic-belt twin, warn-once registry, test reset seam;
+  ONE documented deviation — NO version guard, stdlib JSON has no wheel↔crate
+  lockstep to attest; `MemoryError` re-raises raw per the `_write_shard`
+  hooks' `_BEST_EFFORT_ERRORS` exclusion law). Ints + isoformat-strings ONLY
+  cross the FFI (Python pre-formats every timestamp — the row-4 "isoformat
+  pinned both arms" gate holds by construction; floats fail extraction and
+  degrade; lone surrogates degrade via `UnicodeEncodeError` ⊂ `ValueError` —
+  both parity-pinned). Flag OFF is the verbatim stdlib `json.dumps` —
+  byte-identical AND crate-untouched (bomb-crate spy pin); the loader /
+  validator / stat fast path / flock / `atomic_write_simple` write mechanics
+  ALL STAY PYTHON (the recorded SCOPE NARROWING vs the ADR Wave-C sketch:
+  render only — locks/atomic-replace remain ADR PR-4 territory). G7 rider:
+  `option_partition_stem` + `validate_year_month` as CRATE-INTERNAL twins
+  cargo-pinned to the exact Python outputs (grid + [2000, 2100]/[1, 12]
+  bounds + exact messages) with the same literal grid pinned Python-side in
+  the parity pytest — Python `partition.py` byte-UNCHANGED (the net-loss
+  ruling); the interval-vocabulary inversion clause stays with the FULL
+  partition port, out of scope, stated. PARITY EXECUTED against the built
+  wheel: the frozen `_EXPECTED_BARS_SHARD` golden both arms (cargo hardcodes
+  the literal verbatim) + options/empty/non-ASCII/astral/Unicode-digit-rel/
+  at-cap(>16 MiB)/i64-boundary parity + the OverflowError + lone-surrogate
+  degrade laws + the hypothesis differential; burn-in autorevert pinned; the
+  existing 243 stats-manifest tests pass UNMODIFIED, NO golden regenerated.
+  Registrations STRICTLY ADDITIVE (the §4.1 concurrent-sibling merge law vs
+  the in-flight G8 window-ledger branch — a merge-reconcile at club time is
+  expected + disclosed). GATES: cargo fmt/clippy(-D warnings)/test
+  --release --locked green; `lake_rust_stats.py` 100.00% line+branch (48-test
+  wheel-free matrix + the mutation.yml mutmut pair, wiring-pinned); parity
+  corpus 12/12; ruff/ruff-format clean; `mypy --strict` clean; pyright 0
+  errors. HONEST: a UNIFORMITY conversion (ADR-0020 banner — expected payoff
+  ≈ 0, no speedup claimed); ships INERT — a default flip needs its own DEC.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; results-safe — never in run identity /
+  partition bytes / `data_snapshot_hash`.)
+  Earlier: `claude/rust-lake-resample-wave` (**DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 —
+  allocator-final** — Wave-B slice 1 of ADR-0020 (slice G5): the 1-minute → derived-TF resample core
+  (`tf_resampler.resample_1m_to_tf`) re-hosted on the `rust/brutex-lake` crate behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_RESAMPLE` facade — the exact PR-1 (`lake_rust_render`, #1891) pattern one seam over. NEW
+  `rust/brutex-lake/src/resample.rs` (own module file, additive lib.rs registration — concurrent Wave siblings
+  extend the same crate without collision): `resample_1m_ipc_impl` + the batch face `resample_all_ipc_impl`
+  reproduce the 09:15-IST session-open-anchored bucket LAW op-for-op as pure integer arithmetic
+  (truncate=floor/`div_euclid` · total_minutes=TRUNC-toward-zero/Rust `/` · `//`=floor-div/`div_euclid` — three
+  DISTINCT rounding modes, so sub-minute + pre-09:15 stray timestamps bucket bit-identically; daily 375 = one
+  bucket per IST day at the 09:15 open), the aggregation set token-for-token (first/max/min/last/sum +
+  carry-LAST OI + the ten Greeks-overlay columns by PRESENCE — STATE never FLOW) under STABLE group_by; frames
+  cross as uncompressed Arrow IPC bytes (the PR-1 deviation). NEW facade leaf `brutex/data/lake_rust_resample.py`
+  mirrors `lake_rust_render` section-for-section (local tristate twin · import/API + polars-version lockstep
+  guards · 16-sample burn-in + schema×tf shape gate at DTYPE-EXACT frame strength — schema equality AND
+  `.equals`, the #1795b dtype-insensitivity closed — with ship-the-ORACLE autorevert · blanket degrade + panic
+  belt; OSError joins the DECODE leg only, probed; MemoryError re-raises raw); the seam sits inside
+  `resample_1m_to_tf` ONLY, AFTER validation + TF-membership (the verbatim body extracted to
+  `_resample_1m_to_tf_python`, Slice-0-style — ALSO the live parity oracle every degrade path serves); the
+  wrappers (`spot_resample`/`fno_resample`/`resample_all_21_tfs`) inherit the seam free and STAY Python.
+  PROOF (executed, real maturin wheel): the 9-case parity corpus (regular day · Muhurat evening · month edge ·
+  holey · volume-zero · OI/Greeks carry-last · 09:15-open collapse (naive dtype arm) · tf=1 identity · single
+  bar) ON-vs-OFF dtype-exact across ALL 21 TFs with the oracle BOMBED on the steady-state ON arm; the
+  whole-prebuild A/B (`materialize_lake_timeframes` over a real `ParquetBarSink` lake — derived partition bytes
+  sha256-EQUAL ON vs OFF); the existing independent-oracle/property/golden suites pass UNMODIFIED on BOTH arms
+  (65/65 each); cargo 21 tests + fmt + clippy `-D warnings` clean. Flag OFF (default) BYTE-IDENTICAL
+  (bomb-spy-pinned); run identity untouched (derived partitions only — stated, with the sweep's derived-TF read
+  dependency named). HONEST: the daily residues (`fno_daily_resample`/`spot_daily_resample`) are NOT this PR —
+  named follow-up DEC-LAKE-RUST-RESAMPLE-DAILY-001; the forming-bucket `resample_session_to_tf` fold + the batch
+  `resample_all_ipc` adoption are named follow-ups; `feed/resampler.py` stays EXEMPT (#1492 G3); the honesty
+  banner holds verbatim — "expected payoff ≈ 0 — uniformity, not speed", NO speedup claimed (the seam ADDS an
+  IPC round-trip per derived TF). `lake_rust_resample.py` 100% line+branch standalone; `tf_resampler.py` 100%
+  on both its gate shapes (the ci.yml 21c stanza extended with the NEW stem-matched
+  `test_tf_resampler_rust_seam.py`); ruff/ruff-format/`mypy --strict` clean, pyright 0 errors on touched files;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
   Earlier: `claude/fill-worst-case-only` (**DEC-FILL-WORST-CASE-ONLY-001,
   MIGRATION.md #1825 / ADR-0023** — WORST-CASE IS THE ONLY FILL MODEL, PR-A of the
   worst-case-fills-only track (worktree base = PR #1522's head 95ee9ce5; the entry
@@ -8945,6 +9138,74 @@ hostile-review pass._
   is the named follow-up — untouched; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1929 for the full blurb)
+  Earlier: `claude/rust-lake-ledgerstore-spike-r2`
+  (DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917 — allocator-final;
+  the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE: VERDICT
+  byte-identity NOT FOUND (F3 confirmed by measurement — 14 polars-native
+  arms × 7 production-writer corpus cases, ZERO sha256 matches; the
+  divergence = `created_by` · the footer format-version marker · the
+  `ARROW:schema` flatbuffer bytes · the first data-page header thrift —
+  none an exposed polars knob), so the priced DEC-LAKE-EXACT-PIN-001
+  escalation ships to the coordinator
+  (`docs/lake/g10_window_ledger_byte_parity/` — transcript + three costed
+  options, none adopted here) + the always-green probe pin
+  `tests/golden/test_window_ledger_bytes_probe.py` (the documented
+  divergence class + the cross-encoder row fixed point); ZERO
+  production-code change — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
+  Earlier: `claude/rust-lake-waved-harness`
+  (DEC-LAKE-RUST-WAVED-HARNESS-001, MIGRATION.md #1916 — the ADR-0020 Wave-D
+  poison-corpus differential harness: the 27-case corpus
+  (`tests/fakes/poison_corpus.py`) + the differential runner with the
+  Python-vs-Python identity self-test
+  (`tests/integration/test_waved_poison_corpus_differential.py`) + the readiness
+  runbook (`docs/runbooks/wave-d-poison-corpus.md`); tests + docs ONLY, ZERO
+  brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line)
+  Earlier: `claude/rust-lake-window-ledger-v2`
+  (DEC-LAKE-RUST-WINDOW-LEDGER-001, MIGRATION.md #1915 — ADR-0020 Wave C-3
+  (slice G8) FIRST CUT: the TWO pure window-ledger laws — status
+  classification + the 5-tuple merge key — routed through `rust/brutex-lake`
+  (NEW `window_ledger.rs`) behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_WINDOW_LEDGER` flag via the NEW facade
+  `brutex/data/window_ledger_rust.py` (per-law 16-call burn-in + ship-oracle
+  autorevert; import guard + SYMBOL handshake — the polars version guard
+  deliberately unused, the laws are polars-free; exact-type date gate; only
+  date ints cross the FFI in, only the two ASCII date strings cross out),
+  with the verbatim Python law retained as the LIVE parity oracle
+  (`window_key_python` consolidates the two prior `_key` copies); record()
+  streak/tombstone + merge-on-save + None back-compat stay Python — the full
+  #1548 pyclass flip is the named follow-up DEC-LAKE-RUST-WINDOW-LEDGER-002;
+  flag OFF byte-identical (bomb-spy pinned); crate stays 0.1.0, Cargo.lock
+  untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line)
+  Earlier: `claude/rust-lake-stats-shard`
+  (DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914 — ADR-0020 Wave C
+  row 4 + the row-5 rider: the stats-manifest shard render on the
+  `rust/brutex-lake` crate behind the default-OFF
+  `BRUTEX_LAKE_RUST_STATS_MANIFEST` seam (flag OFF byte-identical +
+  crate-untouched, spy-pinned; burn-in + ship-the-oracle autorevert; ints +
+  isoformat-strings-only FFI) + crate-internal partition stem/validate twins
+  (Python partition.py byte-UNCHANGED); render ONLY — locks/atomic write stay
+  Python (the recorded narrowing vs the ADR sketch); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1914 for the full blurb)
+  Earlier: `claude/rust-lake-resample-wave`
+  (DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 — allocator-final — Wave-B
+  slice 1 of ADR-0020 (slice G5): the tf_resampler 1m→derived-TF core
+  re-hosted on `rust/brutex-lake` (`resample_1m_ipc_impl` + the batch face)
+  behind the NEW default-OFF `BRUTEX_LAKE_RUST_RESAMPLE` facade
+  (`brutex/data/lake_rust_resample.py` — the PR-1 lake_rust_render mirror:
+  tristate flag twin, import/API + polars-version lockstep guards, 16-sample
+  burn-in at DTYPE-EXACT frame strength with ship-the-oracle autorevert);
+  the seam inside `resample_1m_to_tf` ONLY, after validation + TF-membership,
+  with the verbatim body extracted to `_resample_1m_to_tf_python` as the live
+  parity oracle; wrappers + daily residues STAY Python (residues = named
+  follow-up DEC-LAKE-RUST-RESAMPLE-DAILY-001); the 9-case ON-vs-OFF parity
+  corpus + the whole-prebuild sha256 A/B EXECUTED green on the real wheel;
+  flag OFF byte-identical (bomb-spy-pinned); honesty banner verbatim —
+  expected payoff ≈ 0, uniformity not speed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/fill-worst-case-only`
   (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023 — WORST-CASE
   IS THE ONLY FILL MODEL: the product moves from precise

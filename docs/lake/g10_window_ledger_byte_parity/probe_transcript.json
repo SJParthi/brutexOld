@@ -1,0 +1,1240 @@
+{
+ "spike": "ADR-0020 G10 window_ledger_store byte-parity",
+ "scouted_main": "bd3a20146",
+ "env": {
+  "pyarrow_version": "25.0.0",
+  "polars_version": "1.42.1",
+  "python": "3.12.3",
+  "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+  "pq_write_table_defaults": {
+   "row_group_size": "None",
+   "version": "'2.6'",
+   "use_dictionary": "True",
+   "compression": "'snappy'",
+   "write_statistics": "True",
+   "use_deprecated_int96_timestamps": "None",
+   "coerce_timestamps": "None",
+   "allow_truncated_timestamps": "False",
+   "data_page_size": "None",
+   "flavor": "None",
+   "filesystem": "None",
+   "compression_level": "None",
+   "use_byte_stream_split": "False",
+   "column_encoding": "None",
+   "data_page_version": "'1.0'",
+   "use_compliant_nested_type": "True",
+   "encryption_properties": "None",
+   "write_batch_size": "None",
+   "dictionary_pagesize_limit": "None",
+   "store_schema": "True",
+   "write_page_index": "False",
+   "write_page_checksum": "False",
+   "sorting_columns": "None",
+   "store_decimal_as_integer": "False",
+   "write_time_adjusted_to_utc": "False",
+   "max_rows_per_page": "None",
+   "bloom_filter_options": "None"
+  }
+ },
+ "polars_write_parquet_signature": "(self, file: 'str | Path | IO[bytes]', *, compression: 'ParquetCompression' = 'zstd', compression_level: 'int | None' = None, statistics: 'bool | str | dict[str, bool]' = True, row_group_size: 'int | None' = None, data_page_size: 'int | None' = None, use_pyarrow: 'bool' = False, pyarrow_options: 'dict[str, Any] | None' = None, partition_by: 'str | Sequence[str] | None' = None, partition_chunk_size_bytes: 'int' = 4294967296, storage_options: 'StorageOptionsDict | None' = None, credential_provider: \"CredentialProviderFunction | Literal['auto'] | None\" = 'auto', retries: 'int | None' = None, metadata: 'ParquetMetadata | None' = None, arrow_schema: 'ArrowSchemaExportable | None' = None, mkdir: 'bool' = False) -> 'None'",
+ "pyarrow_write_deterministic_across_runs": true,
+ "verdict_byte_identity_any_arm_any_case": false,
+ "cases": [
+  {
+   "case": "a_empty",
+   "rows": 0,
+   "pyarrow_sha256": "a4dfdbd112fd3f7bbb4522693df05a2a3f8dea0020ce9b92d04a86ee27101b26",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 0,
+    "num_row_groups": 1,
+    "serialized_size": 2472,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 2724
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 2724,
+    "len_b": 1692,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 5,
+      "a": 4,
+      "b": 2
+     },
+     {
+      "offset": 6,
+      "a": 21,
+      "b": 25
+     },
+     {
+      "offset": 7,
+      "a": 0,
+      "b": 252
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "num_row_groups": {
+     "pyarrow": 1,
+     "polars": 0
+    },
+    "serialized_size": {
+     "pyarrow": 2472,
+     "polars": 1680
+    },
+    "size_bytes": {
+     "pyarrow": 2724,
+     "polars": 1692
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "21edc6ceb79845b99c1413d6c3e20c951cfadaf52a13a20785d82468f6fb35cf",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "empty-file row-group structure (pyarrow 1 empty row group vs polars 0)",
+    "footer thrift structure from byte ~4 (no data pages in the empty file)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "087199d206505a35f90c4fc812e0da4a2bd7f8ac12539572281e329beb67eece",
+     "byte_identical": false,
+     "size": 1692,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "b_one_row",
+   "rows": 1,
+   "pyarrow_sha256": "963520fb3499ccae7cdb3f46f74ecca7cd23e21fdd078f407d60aec98bcf6cf0",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 1,
+    "num_row_groups": 1,
+    "serialized_size": 3254,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 4581
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 4581,
+    "len_b": 5718,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 3254,
+     "polars": 2893
+    },
+    "size_bytes": {
+     "pyarrow": 4581,
+     "polars": 5718
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "bb3bddaa05fd8c7c3424d82cabdd0169e276e8a9aa14054563221fc87e7c9f58",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "ccb15a85211929aff5736ee103f3547d8fa4ec9c4fd2d1951da70f86254c4451",
+     "byte_identical": false,
+     "size": 4012,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "dc3b52ef2be5df8604411ead96ccc956a1be3f9bc9ac26869cc868a69442d09a",
+     "byte_identical": false,
+     "size": 5946,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "ccb15a85211929aff5736ee103f3547d8fa4ec9c4fd2d1951da70f86254c4451",
+     "byte_identical": false,
+     "size": 4012,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "40d0164416278df1657b8d3408bd2e929736bcffe375a5492325cdca3b2270c7",
+     "byte_identical": false,
+     "size": 5718,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "dc3b52ef2be5df8604411ead96ccc956a1be3f9bc9ac26869cc868a69442d09a",
+     "byte_identical": false,
+     "size": 5946,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "c_mixed_plan",
+   "rows": 3,
+   "pyarrow_sha256": "83486772093cbefee6ae2bfb4ae3bc3bf0bc390e9f9d56d9ded0f018b567d8e6",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 3,
+    "num_row_groups": 1,
+    "serialized_size": 3435,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 5062
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 5062,
+    "len_b": 6256,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 3435,
+     "polars": 3005
+    },
+    "size_bytes": {
+     "pyarrow": 5062,
+     "polars": 6256
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "75ed6cfa4e7b3adb90e39ce53f3b69ee79ef3c5ccfb1f8bc389a236071b505a1",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "206d11f2006f1f5c0200b9926e661d3879c84f425406b50838a3aa12155c0d7c",
+     "byte_identical": false,
+     "size": 4151,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "3fe5cc9b8df13350de10093d54c90b95a8f87bd62ca7a5f621c52df6e1f12019",
+     "byte_identical": false,
+     "size": 6480,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "206d11f2006f1f5c0200b9926e661d3879c84f425406b50838a3aa12155c0d7c",
+     "byte_identical": false,
+     "size": 4151,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "4d06d0b03869611172cd9198f72d12d0401ea69b13ace6a7c350d6fa3a434fb6",
+     "byte_identical": false,
+     "size": 6256,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "3fe5cc9b8df13350de10093d54c90b95a8f87bd62ca7a5f621c52df6e1f12019",
+     "byte_identical": false,
+     "size": 6480,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "d_none_optional",
+   "rows": 2,
+   "pyarrow_sha256": "a04409c467434a26b2ddeaea3dca9c878c7aae65e205fca878d43356d70ae33c",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 2,
+    "num_row_groups": 1,
+    "serialized_size": 3255,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 4628
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 4628,
+    "len_b": 5772,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 3255,
+     "polars": 2894
+    },
+    "size_bytes": {
+     "pyarrow": 4628,
+     "polars": 5772
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "d7e237f4ef9a78cb6a0cb7ea59bed5d24ed9365e78e087201716750bcd737729",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "9495b395402bed28f8f6e382d676a10e082fa09660d4c7373726f9d62897ff2d",
+     "byte_identical": false,
+     "size": 4064,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "ce901e4e514b584da6e6e2772598054e5f8e8205e710166c59bb5878a38ca578",
+     "byte_identical": false,
+     "size": 6000,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "9495b395402bed28f8f6e382d676a10e082fa09660d4c7373726f9d62897ff2d",
+     "byte_identical": false,
+     "size": 4064,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "11158fda89d4b9d9ae43223e7d1e754d99ab170ebc2133058e45b95f60599b58",
+     "byte_identical": false,
+     "size": 5772,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "ce901e4e514b584da6e6e2772598054e5f8e8205e710166c59bb5878a38ca578",
+     "byte_identical": false,
+     "size": 6000,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "e_unicode_error",
+   "rows": 1,
+   "pyarrow_sha256": "003f7ebd529ac50497b95ac8acf07f93b718a9c60967015d828913c7586af40e",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 1,
+    "num_row_groups": 1,
+    "serialized_size": 4129,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 6395
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 6395,
+    "len_b": 6304,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 4129,
+     "polars": 3026
+    },
+    "size_bytes": {
+     "pyarrow": 6395,
+     "polars": 6304
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "b5b66602fd226d67c10db854f1e509af2a20f2b5f93f547d7541f9eb88b53075",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "74f6ee7838eee3115209f4a4315e8a4e990c1b6e5792ff39b90a6f38184a9840",
+     "byte_identical": false,
+     "size": 4082,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "cf22505f0abdcbd6c1b66e6d075b376f6d62eebe7e9aa4ce5004865a92649502",
+     "byte_identical": false,
+     "size": 6515,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "74f6ee7838eee3115209f4a4315e8a4e990c1b6e5792ff39b90a6f38184a9840",
+     "byte_identical": false,
+     "size": 4082,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "bf05614226ce855e873dcdaada753ff3f31a6fcc680a923a5a4f522377d8d06a",
+     "byte_identical": false,
+     "size": 6304,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "cf22505f0abdcbd6c1b66e6d075b376f6d62eebe7e9aa4ce5004865a92649502",
+     "byte_identical": false,
+     "size": 6515,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "f_10k_rows",
+   "rows": 10000,
+   "pyarrow_sha256": "a9c2fa8004319abf3a094273940dc56089d4f5c3bc93431d419b24423f972115",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 10000,
+    "num_row_groups": 1,
+    "serialized_size": 3426,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 71329
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 71329,
+    "len_b": 52003,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 3426,
+     "polars": 3056
+    },
+    "size_bytes": {
+     "pyarrow": 71329,
+     "polars": 52003
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "add593caba1f46850513118377a48028cb233932c7420b23965e97f5d3200d69",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "21845652c390b9599e28a006fe923d207628e8923abffa2b59a18be61c3eb8d3",
+     "byte_identical": false,
+     "size": 50105,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "26ba9426223984fd3ae50658e85215bf19d0938f4239235c4267e1650ffa1f00",
+     "byte_identical": false,
+     "size": 12438,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "21845652c390b9599e28a006fe923d207628e8923abffa2b59a18be61c3eb8d3",
+     "byte_identical": false,
+     "size": 50105,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "a0ccab1e7ad76788c75378855184f412ef62457a28befca5c4857809a04f169b",
+     "byte_identical": false,
+     "size": 52003,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "26ba9426223984fd3ae50658e85215bf19d0938f4239235c4267e1650ffa1f00",
+     "byte_identical": false,
+     "size": 12438,
+     "error": null
+    }
+   ]
+  },
+  {
+   "case": "g_delta",
+   "rows": 1,
+   "pyarrow_sha256": "640b9edfa1a32bd38ad1882b1345d4936c989be8d7a467e23e12bc40b175069e",
+   "pyarrow_footer": {
+    "created_by": "parquet-cpp-arrow version 25.0.0",
+    "format_version": "2.6",
+    "num_rows": 1,
+    "num_row_groups": 1,
+    "serialized_size": 3262,
+    "kv_keys": [
+     "ARROW:schema"
+    ],
+    "size_bytes": 4601
+   },
+   "best_polars_arm": "from_arrow/snappy_defaults",
+   "best_polars_sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+   "byte_identity_found": false,
+   "first_divergence": {
+    "len_a": 4601,
+    "len_b": 5754,
+    "both_par1_magic": true,
+    "first_diffs": [
+     {
+      "offset": 15,
+      "a": 18,
+      "b": 0
+     },
+     {
+      "offset": 17,
+      "a": 0,
+      "b": 8
+     },
+     {
+      "offset": 18,
+      "a": 8,
+      "b": 28
+     }
+    ]
+   },
+   "footer_diff_vs_best_polars": {
+    "created_by": {
+     "pyarrow": "parquet-cpp-arrow version 25.0.0",
+     "polars": "Polars"
+    },
+    "format_version": {
+     "pyarrow": "2.6",
+     "polars": "1.0"
+    },
+    "serialized_size": {
+     "pyarrow": 3262,
+     "polars": 2901
+    },
+    "size_bytes": {
+     "pyarrow": 4601,
+     "polars": 5754
+    }
+   },
+   "bridging_control_use_pyarrow_true_VACUOUS": {
+    "arm": "from_arrow/use_pyarrow_true (VACUOUS CONTROL \u2014 pyarrow C++ re-entry)",
+    "sha256": "019ae82b2f2dca451ef3a3a4519a8fef83d0d1ba2c4aa8f4abf6a6fde7ebe31b",
+    "byte_identical": false
+   },
+   "divergence_class": [
+    "created_by string (pyarrow 'parquet-cpp-arrow version 25.0.0' vs polars 'Polars'; NO polars knob)",
+    "footer format_version marker (pyarrow '2.6' vs polars '1.0'; NO polars knob)",
+    "ARROW:schema key-value flatbuffer BYTES differ \u2014 BOTH encoders embed the key (pyarrow store_schema=True default; polars writes its own), but the serialized flatbuffer is not identical (measured case c: 1248 vs 1244 bytes; no byte-level knob on either side)",
+    "first DATA PAGE header thrift from byte 15 (page/dictionary layout)"
+   ],
+   "all_arms": [
+    {
+     "arm": "from_arrow/snappy_defaults",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_true",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_false",
+     "sha256": "46ec85168e3049e95f6a00cee4b7c2be698df54c28117c58f65e31fee94e0113",
+     "byte_identical": false,
+     "size": 4016,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_stats_full",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_matched",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/snappy_rg_dps_matched",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "from_arrow/zstd_polars_default",
+     "sha256": "b9e90f763ee4f9c3dce316dced4d50c15801b0db2e9cb633fde05213cf41abb4",
+     "byte_identical": false,
+     "size": 5982,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_defaults",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_true",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_false",
+     "sha256": "46ec85168e3049e95f6a00cee4b7c2be698df54c28117c58f65e31fee94e0113",
+     "byte_identical": false,
+     "size": 4016,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_stats_full",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_matched",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/snappy_rg_dps_matched",
+     "sha256": "9129013776c10230b97d4cdbed5ad8e36e50d9a7e9f8cbc22a171fdc564a0ff2",
+     "byte_identical": false,
+     "size": 5754,
+     "error": null
+    },
+    {
+     "arm": "explicit_schema/zstd_polars_default",
+     "sha256": "b9e90f763ee4f9c3dce316dced4d50c15801b0db2e9cb633fde05213cf41abb4",
+     "byte_identical": false,
+     "size": 5982,
+     "error": null
+    }
+   ]
+  }
+ ],
+ "measured_correction": "polars 1.42.1 DOES write an ARROW:schema key-value block; the divergence is in the flatbuffer BYTES, not the key's absence (measured post-sweep, corrected in-place)"
+}
