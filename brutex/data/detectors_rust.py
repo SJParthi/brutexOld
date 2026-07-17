@@ -46,17 +46,22 @@ factories, so no verdict dataclass ever has to import back into this module):
   three law callables is a pre-T24 (or foreign/broken) install and latches
   ``crate_stale``.
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
-  FFI error surface), ``TypeError``/``OverflowError`` (PyO3 argument
-  conversion — an out-of-``i64`` ordinal lands here), ``AttributeError``
-  (broken-crate-internals belt) → oracle with one capped WARN per reason.
-  ``MemoryError`` is DELIBERATELY absent — OOM re-raises raw, identical to
-  the pure-Python path; ``KeyboardInterrupt``/``SystemExit`` likewise. The
-  narrow panic belt (:func:`_panic_belt_errors` — imported from the sibling
-  facade, ONE copy per §11 COMMON) latches ``crate_panic``.
+  FFI error surface — NOTE: a Rust panic the crate's own ``catch_unwind``
+  boundary CATCHES surfaces as ``PyRuntimeError`` and lands in THIS arm,
+  a warn-once degrade with NO latch), ``TypeError``/``OverflowError``
+  (PyO3 argument conversion — an out-of-``i64`` ordinal lands here),
+  ``AttributeError`` (broken-crate-internals belt) → oracle with one
+  capped WARN per reason. ``MemoryError`` is DELIBERATELY absent — OOM
+  re-raises raw, identical to the pure-Python path;
+  ``KeyboardInterrupt``/``SystemExit`` likewise. The narrow panic belt
+  (:func:`_panic_belt_errors` — imported from the sibling facade, ONE
+  copy per §11 COMMON) latches ``crate_panic`` ONLY for a panic that
+  ESCAPES ``catch_unwind`` as a ``pyo3_runtime.PanicException`` (the
+  executed truth — the round-1 review wording fold).
 * **Refuse-poison gates** — a wrong-shaped crate return (non-str hex,
   junk run tuples / out-of-``date``-range ordinals, malformed verdict
-  fields) is REFUSED to the oracle with one WARN — a poisoned wheel can
-  only degrade, never corrupt.
+  fields or an unknown reason token) is REFUSED to the oracle with one
+  WARN — a poisoned wheel can only degrade, never corrupt.
 * **Burn-in + autorevert** — the first :data:`BURN_IN_SAMPLES` engaged
   calls PER LAW compare the (materialized) Rust value against the live
   oracle; ANY difference ships the ORACLE value and autoreverts the Rust
@@ -512,12 +517,41 @@ def routed_classify_partial_window[VerdictT](
     return _burn_in_check(_LAW_PARTIAL_WINDOW, verdict, python_law)
 
 
+#: The KNOWN partial-window reason-token vocabulary — the refuse-poison
+#: MEMBERSHIP set for the crate-returned ``reason`` field (the round-1
+#: review hardening). SOURCE: the inline ``reason="…"`` literals of
+#: :func:`brutex.data.partial_window_detect._classify_partial_window_python`
+#: (the oracle mints them as literals — no named constant exists there to
+#: import, and importing that module HERE would be the verdict-dataclass
+#: import cycle the G6 routing shape exists to avoid), so the set is
+#: defined beside its gate and MIRROR-PINNED against the oracle's own
+#: source by ``tests/unit/test_detectors_rust.py``.
+_KNOWN_PARTIAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "empty",
+        "out_of_calendar_coverage",
+        "at_expiry",
+        "live_edge",
+        "complete",
+        "truncated",
+        "sparse_complete",
+    }
+)
+
+
 def _partial_fields_well_formed(fields: object) -> bool:
-    """The refuse-poison shape gate for the partial-window verdict fields."""
+    """The refuse-poison shape gate for the partial-window verdict fields.
+
+    Beyond arity / field types / the ``date``-domain ordinal bounds, the
+    ``reason`` must be a member of :data:`_KNOWN_PARTIAL_REASONS` — an
+    unknown token is a stale/foreign crate speaking a different verdict
+    vocabulary, refused to the oracle exactly like every other shape
+    failure (one WARN; degrade, never a latch).
+    """
     if not (isinstance(fields, tuple) and len(fields) == _VERDICT_FIELDS_ARITY):
         return False
     reason, last_bar_ordinal, expected_end_ordinal, missing = fields
-    if not isinstance(reason, str):
+    if not isinstance(reason, str) or reason not in _KNOWN_PARTIAL_REASONS:
         return False
     for ordinal in (last_bar_ordinal, expected_end_ordinal):
         if ordinal is None:

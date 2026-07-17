@@ -14,6 +14,8 @@ wheel (skipped when absent).
 from __future__ import annotations
 
 import hashlib
+import inspect
+import re
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
@@ -609,6 +611,42 @@ class TestPartialWindowRouting:
             materialize=_identity_materialize,
         )
         assert result == ("empty", None, None, 0)
+
+    def test_unknown_reason_token_refused_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-1 review hardening: a crate speaking an UNKNOWN reason
+        # vocabulary (a stale/foreign wheel) is refused like any other
+        # shape failure — the ORACLE verdict serves, one WARN per process,
+        # never a latch.
+        _install_crate(
+            monkeypatch,
+            fake_detectors_crate(classify_partial=lambda *a: ("bogus_reason", 1, 2, 3)),
+        )
+        with capture_logs() as logs:
+            results = [
+                dr.routed_classify_partial_window(
+                    payload_factory=_partial_payload(),
+                    python_law=lambda: ("oracle", None, None, 0),
+                    materialize=_identity_materialize,
+                )
+                for _ in range(2)
+            ]
+        assert results == [("oracle", None, None, 0)] * 2
+        warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "partial_window_result_refused"
+        assert dr.rust_detectors_disabled() is False  # degrade, never a latch
+
+    def test_known_partial_reasons_mirror_the_oracle_source(self) -> None:
+        # The vocabulary frozenset is defined FACADE-side (importing the
+        # target there would be the G6 verdict-dataclass import cycle) —
+        # MIRROR-PIN it against the ``reason="…"`` literals the oracle
+        # actually mints, so a new Python-side arm can never silently
+        # widen the vocabulary past the refuse-poison gate.
+        import brutex.data.partial_window_detect as pwd
+
+        minted = set(re.findall(r'reason="(\w+)"', inspect.getsource(pwd)))
+        assert minted == set(dr._KNOWN_PARTIAL_REASONS)
+        assert len(minted) == 7  # anti-vacuity: the regex genuinely harvested
 
     def test_burn_in_mismatch_ships_oracle_and_autoreverts(
         self, monkeypatch: pytest.MonkeyPatch

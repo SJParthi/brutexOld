@@ -3122,18 +3122,29 @@ hostile-review pass._
   bad-tick predicate is COMMON-reuse territory (a future hot-path PR reuses
   the `rust/brutex-feed` scan.rs predicate, never a second copy). EVIDENCE
   (executed): cargo fmt/clippy(-D warnings)/`test --release --locked` 90
-  passed; the NEW 94-test Python battery green against the REAL wheel
-  (51-facade matrix + 3 stem-matched seam suites incl. 4 hypothesis
+  passed; the NEW 97-test Python battery green against the REAL wheel
+  (53-facade matrix + 3 stem-matched seam suites incl. 4 hypothesis
   differentials + the frozen raw-integrity golden re-driven flag-ON + the
   7-reason partial-window parity matrix on the REAL 2024 NSE calendar); the
-  three EXISTING detector suites re-run flag-ON UNMODIFIED 140 passed (every
-  catching test still catches through the Rust arm); consumer suites
+  three EXISTING detector suites re-run flag-ON UNMODIFIED 96 passed (+ the
+  raw-integrity store/wiring consumers 45 flag-ON in the same lane leg —
+  the recorded 140 was a mis-count of that 141 union, the round-1
+  re-measure) (the
+  flag-ON BELT — no regression in the catching suites under the flags; the
+  genuine parity gates are the seam remaining=0 differentials + the cargo
+  frozen vectors, the round-1 reframe); consumer suites
   flag-OFF 391 passed; COVERAGE 100.00% line+branch on all four modules
-  (`detectors_rust.py` 202/64 · `raw_integrity.py` 63/6 ·
+  (`detectors_rust.py` 204/64 · `raw_integrity.py` 63/6 ·
   `interior_gap_detect.py` 105/34 · `partial_window_detect.py` 114/38);
   ruff/ruff-format clean; `mypy --strict` clean (473 files); pyright FULL
   0 errors; mutation.yml pair + lake-rust-parity.yml T24 paths/flag-ON leg
-  wired. HONEST (the ADR-0020 banner verbatim): expected payoff ≈ 0 —
+  wired. HOSTILE-REVIEW ROUND 1 folded (both lenses SHIP, 0 MINOR+ — the
+  four NITs: the ledger count re-measured, the panic-belt docstring
+  reworded to the executed truth (a catch_unwind-caught panic lands in the
+  RuntimeError DEGRADE arm, no latch), the parity-lane belt reframe, + the
+  `_KNOWN_PARTIAL_REASONS` reason-token refuse-poison hardening; the
+  shared-latch NIT stays already-disclosed — per-item record in
+  MIGRATION.md #1948). HONEST (the ADR-0020 banner verbatim): expected payoff ≈ 0 —
   conversion is for uniformity, not speed; cold paths, the FFI hop is a
   small slowdown; ships INERT — a default flip needs its own DEC; none of
   the three laws is in run identity. ENGINE UNCHANGED —
@@ -9289,9 +9300,11 @@ hostile-review pass._
   9000 days); flag OFF byte-identical + crate-never-imported (bomb-spy
   pinned); `window_status` EXCLUDED from the slice (write-retired) + the
   bad_tick COMMON-reuse ruling recorded in #1948; cargo 90 passed
-  --release --locked, the new 94-test battery + the existing detector suites
-  flag-ON 140 passed + consumer suites 391 passed, all four modules 100.00%
-  line+branch; ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  --release --locked, the new 97-test battery + the existing detector suites
+  flag-ON 96 passed (+45 store/wiring) + consumer suites flag-OFF 391
+  passed, all four modules 100.00%
+  line+branch; round-1 review folded (both lenses SHIP, 0 MINOR+ — see §1 +
+  MIGRATION.md #1948); ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line — see §1 + MIGRATION.md #1948 for the full
   blurb)
   Earlier: `claude/rust-lake-locks-atomic`

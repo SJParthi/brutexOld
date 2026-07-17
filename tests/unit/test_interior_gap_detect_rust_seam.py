@@ -183,6 +183,12 @@ class TestRealWheel:
         dr.reset_detectors_rust_for_tests(remaining=0)  # steady state
 
     def test_catching_case_still_catches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # HONEST framing (round-1 review): _require_wheel pins remaining=0,
+        # so THIS re-drive genuinely ships the Rust value — unlike the
+        # parity lane's flag-ON leg over the EXISTING suites, which is a
+        # BELT only (burn-in autorevert can leave the ORACLE catching
+        # there). The genuine parity gates are this suite's remaining=0
+        # differential below + the cargo frozen vectors.
         self._require_wheel(monkeypatch)
         verdict = classify_interior_gap(bar_timestamps=[_ts(2021, 3, 1), _ts(2021, 3, 22)])
         assert verdict.verdict == INTERIOR_GAP

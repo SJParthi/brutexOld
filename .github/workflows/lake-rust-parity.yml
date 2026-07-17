@@ -335,8 +335,11 @@ jobs:
           # SLICE T24 detector laws, flag-ON arm
           # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the three EXISTING
           # detector suites run VERBATIM under all three flags with the real
-          # wheel — every catching test must still catch (the fails-before
-          # mechanism), plus the seam suites' real-wheel differentials.
+          # wheel. HONEST framing (round-1 review): this leg is a BELT — it
+          # proves no flag-ON regression in the catching suites, but burn-in
+          # autorevert means the ORACLE could be doing the catching here, so
+          # the genuine Rust-parity gates are the seam suites' remaining=0
+          # hypothesis differentials + the cargo frozen vectors.
           BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
           BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
           BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rs -q \
