@@ -367,8 +367,6 @@ def _resample_1m_to_tf_python(df_1m, target_tf_minutes: int):  # type: ignore[no
     ALREADY-validated frame and an ``ALL_TF_MINUTES`` member (the public
     fn's contract; never call this directly from production code).
     """
-    import polars as pl
-
     # 1m -> 1m is a no-op (shallow copy preserves immutability semantics) —
     # it carries WHATEVER columns the input has (OI present for F&O, absent
     # for spot), unchanged.
