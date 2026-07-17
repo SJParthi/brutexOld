@@ -246,6 +246,7 @@ mod tests {
             pivot_proximity_bps: 50,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
+            swing_proximity_bps: 10,
         }
     }
 
@@ -308,6 +309,8 @@ mod tests {
             day_low_paisa: 990_000,
             open_of_day_paisa: 1_000_000,
             market_structure: MarketStructureSignal::default(),
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
         }
     }
 
@@ -356,10 +359,15 @@ mod tests {
 
     #[test]
     fn new_rejects_a_reserved_bit() {
-        // Bit 66 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 66).
-        let reserved = 1u128 << 66;
+        // Bit 74 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 74,
+        // DEC-FIB-TEMPLATE-EXPRESS-001).
+        let reserved = 1u128 << 74;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // Bit 66 is a declared RESERVED placeholder (the gap-midpoint
+        // re-stack fillers, bits 66-68) — equally refused.
+        let placeholder = 1u128 << 66;
+        assert!(StrategySpec::new(placeholder, Direction::Long, proximity(), 1, 0).is_err());
         // Bit 64 (Supertrend) is DECLARED but layout-only — equally refused.
         let declared_only = 1u128 << 64;
         assert!(StrategySpec::new(declared_only, Direction::Long, proximity(), 1, 0).is_err());
@@ -400,6 +408,7 @@ mod tests {
                 pivot_proximity_bps: 51,
                 pdh_pdl_proximity_bps: 10,
                 fib_proximity_bps: 25,
+                swing_proximity_bps: 10,
             },
             2,
             1,

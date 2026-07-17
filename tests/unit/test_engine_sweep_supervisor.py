@@ -238,6 +238,45 @@ class TestIdentity:
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
         assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
 
+    def test_swing_band_default_omitted_from_identity_and_cache_key(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001 default-omit law, BOTH builders.
+
+        A grid/tuple whose every proximity carries the DEFAULT swing band
+        (10 — including the implicit default on a pre-express-style
+        construction) is byte-identical to one with the band spelled out, so
+        every pre-express checkpoint + tuple-cache key stays stable (the
+        frozen golden below is the byte proof at ``proximities=[None]``).
+        """
+        g_implicit = _grid(proximities=[ProximityParams(pivot_proximity_bps=12)])
+        g_explicit = _grid(
+            proximities=[ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=10)]
+        )
+        assert grid_identity(g_implicit) == grid_identity(g_explicit)
+        k_implicit = tuple_cache_key(next(iter_sweep_tuples(g_implicit)), g_implicit)
+        k_explicit = tuple_cache_key(next(iter_sweep_tuples(g_explicit)), g_explicit)
+        assert k_implicit == k_explicit
+        # And the descriptor emits NO swing key at the default.
+        from brutex.engine.sweep_supervisor import _grid_descriptor
+
+        assert "swing_proximity_bps" not in _grid_descriptor(g_implicit)
+
+    def test_swing_band_change_rekeys_identity_and_cache_key(self) -> None:
+        """A swept ``swing_proximity_bps`` cell evaluates DIFFERENT bits 72/73,
+        so it must re-key the grid (checkpoint) AND the tuple cache key (the
+        cache-SKIP fast path) — the review-A MAJOR-1 P0-1/P2-4 law."""
+        g_default = _grid(proximities=[ProximityParams(pivot_proximity_bps=12)])
+        g_swing = _grid(
+            proximities=[ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=25)]
+        )
+        assert grid_identity(g_default) != grid_identity(g_swing)
+        k_default = tuple_cache_key(next(iter_sweep_tuples(g_default)), g_default)
+        k_swing = tuple_cache_key(next(iter_sweep_tuples(g_swing)), g_swing)
+        assert k_default != k_swing
+        from brutex.engine.sweep_supervisor import _grid_descriptor
+
+        # Index-aligned with ``proximities`` when present.
+        assert _grid_descriptor(g_swing)["swing_proximity_bps"] == [25]
+
     def test_gate_config_change_rekeys_identity_and_cache_key(self) -> None:
         """Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit + Stage-3 gate config
         is part of BOTH the run identity AND the tuple cache key.

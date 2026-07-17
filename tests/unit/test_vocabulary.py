@@ -20,9 +20,10 @@ from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 import pytest
-from brutex.indicators.fib_levels import compute_fib_levels
+from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.vocabulary import (
+    DEFAULT_SWING_PROXIMITY_BPS,
     IndicatorSnapshot,
     PriorBarHistory,
     ProximityParams,
@@ -894,9 +895,13 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     assert B.APPLIES_TO_1DAY_MASK & (1 << B.BIT_CLOSE_BELOW_VWAP) == 0
     # The ONLY 1day-applicable bits the evaluator does not implement are the
     # two declared-only Supertrend positions (their AND-mask membership is
-    # inert until the math lands — the evaluator never sets them).
+    # inert until the math lands — the evaluator never sets them) plus the
+    # three DEC-FIB-TEMPLATE-EXPRESS-001 gap placeholders (bits 66-68,
+    # reserved=true — dropped at the re-stack onto the gap-midpoint branch).
     assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == (
-        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND)
+        | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
+        | (0b111 << 66)
     )
 
 
@@ -911,6 +916,7 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
 # byte-identical to the pre-extraction inline build by construction — the
 # frozen 400-case golden re-pins it end-to-end).
 
+import dataclasses  # noqa: E402
 from datetime import date as _pl_date  # noqa: E402
 
 import trading_core as _tc  # noqa: E402
@@ -940,7 +946,7 @@ def test_pivot_levels_list_frozen_order_and_length() -> None:
 def test_fib_levels_list_frozen_order_and_length() -> None:
     fib = compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
     levels = fib_levels_list(fib)
-    assert len(levels) == _tc.FIB_LEVELS_LEN == 15
+    assert len(levels) == _tc.FIB_LEVELS_LEN == 19
     assert levels == [
         fib.retrace_level_at_pdh_paisa,
         fib.retrace_23_paisa,
@@ -957,11 +963,27 @@ def test_fib_levels_list_frozen_order_and_length() -> None:
         fib.ext_down_162_paisa,
         fib.ext_down_200_paisa,
         fib.ext_down_262_paisa,
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the four appended-last slots read by
+        # bits 69-71 (bull23 → 69, bull78 → 70, up424/dn424 both → 71). The
+        # original 15 slots above are byte-identical to the pre-express order.
+        fib.retrace_bull_23_paisa,
+        fib.retrace_bull_78_paisa,
+        fib.ext_up_424_paisa,
+        fib.ext_down_424_paisa,
     ]
-    # The bullish-retrace tail (FIB_COMPUTE_LIST_LEN = 19) is deliberately
-    # ABSENT — the evaluator ABI stays the frozen 15.
-    assert fib.retrace_bull_23_paisa not in (None,)  # field exists on the dataclass
-    assert len(levels) != 19
+    # §4.2 constant-pun discipline: FIB_COMPUTE_LIST_LEN (the compute
+    # projection) is ALSO 19 now, but the two projections stay DISTINCT —
+    # this ABI list carries the 424 pair while the compute projection carries
+    # bull_38/bull_62 instead, so equal lengths never imply equal lists
+    # (never merge). bull_23 vs bull_78 asymmetry: for a non-degenerate range
+    # the two appended retrace slots differ (0.55·range apart).
+    assert fib.retrace_bull_23_paisa != fib.retrace_bull_78_paisa
+    assert levels[15:] == [
+        fib.retrace_bull_23_paisa,
+        fib.retrace_bull_78_paisa,
+        fib.ext_up_424_paisa,
+        fib.ext_down_424_paisa,
+    ]
 
 
 def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
@@ -1206,3 +1228,189 @@ def test_narrow_cpr_width_bps_cross_pin() -> None:
     import trading_core
 
     assert trading_core.NARROW_CPR_WIDTH_BPS == 30
+
+
+# ────── Fib-Template Express: Fibonacci Extended (69-71) + Swing (72-73) ──────
+#
+# DEC-FIB-TEMPLATE-EXPRESS-001. Every case drives the REAL evaluate_atoms
+# (the Rust core via the shim). Fails-before: none of these bits exist at the
+# pre-express merge-base (TOTAL_CONDITIONS was 66) — the entire class fails
+# to import BIT_NEAR_FIB_BULL_236 there.
+
+
+class TestExpressFibExtended:
+    """Bits 69-71: bull-236/bull-786 retracements + the two-sided 424."""
+
+    def _fib(self) -> FibLevels:
+        return compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
+
+    def test_near_fib_bull_236_fires_on_exact_level(self) -> None:
+        fib = self._fib()
+        s = _make_snapshot(close_paisa=fib.retrace_bull_23_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_bull_236_clear_just_outside_band(self) -> None:
+        # close < level by MORE than the close-anchored tolerance: the gap is
+        # level*bps//10⁴ + 2 while tol(close) <= level*bps//10⁴ (close < level).
+        fib = self._fib()
+        level = fib.retrace_bull_23_paisa
+        close = level - (level * 10) // 10_000 - 2
+        s = _make_snapshot(close_paisa=close)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_bull_786_fires_and_is_not_bull_236(self) -> None:
+        # Asymmetric-ladder fixture: the two bull slots differ by 0.55·range,
+        # so a close snapped onto bull_78 fires 70 and NOT 69 (kills the
+        # retrace_bull_23 ↔ retrace_bull_78 field-swap mutant).
+        fib = self._fib()
+        assert fib.retrace_bull_23_paisa != fib.retrace_bull_78_paisa
+        s = _make_snapshot(close_paisa=fib.retrace_bull_78_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_BULL_786)
+        assert not _bit(m, B.BIT_NEAR_FIB_BULL_236)
+
+    def test_near_fib_424_fires_on_up_variant_only(self) -> None:
+        # Near ONLY ext_up_424 (far from ext_down_424) — kills the OR→AND
+        # mutant on the two-sided bit-71 predicate.
+        fib = self._fib()
+        assert abs(fib.ext_up_424_paisa - fib.ext_down_424_paisa) > 100_00
+        s = _make_snapshot(close_paisa=fib.ext_up_424_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_near_fib_424_fires_on_down_variant_only(self) -> None:
+        fib = self._fib()
+        s = _make_snapshot(close_paisa=fib.ext_down_424_paisa)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_near_fib_424_clear_between_variants(self) -> None:
+        # Midway between the up/down 424 extensions — near NEITHER.
+        fib = self._fib()
+        mid = (fib.ext_up_424_paisa + fib.ext_down_424_paisa) // 2
+        s = _make_snapshot(close_paisa=mid)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_FIB_424)
+
+    def test_bull_bits_use_the_fib_band_not_the_swing_band(self) -> None:
+        # Distinct band values: at fib_bps=50 the offset close classifies
+        # near bull_23; at fib_bps=5 it does not — swing_bps huge either way
+        # (kills a fib_bps → swing_proximity_bps band-field swap on 69-71).
+        fib = self._fib()
+        level = fib.retrace_bull_23_paisa
+        close = level + (level * 30) // 10_000  # ~30 bps away
+        wide = ProximityParams(fib_proximity_bps=50, swing_proximity_bps=5000)
+        narrow = ProximityParams(fib_proximity_bps=5, swing_proximity_bps=5000)
+        m_wide = evaluate_atoms(_make_snapshot(close_paisa=close), wide, _empty_history())
+        m_narrow = evaluate_atoms(_make_snapshot(close_paisa=close), narrow, _empty_history())
+        assert _bit(m_wide, B.BIT_NEAR_FIB_BULL_236)
+        assert not _bit(m_narrow, B.BIT_NEAR_FIB_BULL_236)
+
+
+class TestExpressSwingProximity:
+    """Bits 72/73: last-confirmed-swing proximity (None-abstain law)."""
+
+    _CLOSE = 24_000_00
+    _TOL_10BPS = (24_000_00 * 10) // 10_000  # 24_000 paisa at the default band
+
+    def test_bits_never_fire_on_none_swings(self) -> None:
+        # fire-on-None mutant killer: no confirmed swing ⇒ bits 72/73 CLEAR
+        # even though close would be trivially "near" any fabricated level.
+        s = _make_snapshot(close_paisa=self._CLOSE)
+        assert s.last_swing_high_paisa is None and s.last_swing_low_paisa is None
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(m, B.BIT_NEAR_SWING_LOW)
+
+    def test_snapshot_defaults_are_none_and_mask_is_byte_identical(self) -> None:
+        # Snapshot-defaults pin: omitting the swing kwargs ≡ explicit None/None
+        # — the whole mask (every other bit included) byte-identical.
+        s_default = _make_snapshot(close_paisa=self._CLOSE)
+        s_explicit = dataclasses.replace(
+            s_default, last_swing_high_paisa=None, last_swing_low_paisa=None
+        )
+        m1 = evaluate_atoms(s_default, _default_proximity(), _empty_history())
+        m2 = evaluate_atoms(s_explicit, _default_proximity(), _empty_history())
+        assert m1 == m2
+
+    def test_near_swing_high_exact_band_edge_in_and_out(self) -> None:
+        # The exact tolerance law: tol = close*bps//10⁴ with close FIXED, the
+        # free swing level placed AT the edge (fires) and one paisa past (clear).
+        close = self._CLOSE
+        tol = self._TOL_10BPS
+        s_in = _make_snapshot(close_paisa=close)
+        s_in = dataclasses.replace(s_in, last_swing_high_paisa=close + tol)
+        m_in = evaluate_atoms(s_in, _default_proximity(), _empty_history())
+        assert _bit(m_in, B.BIT_NEAR_SWING_HIGH)
+        s_out = dataclasses.replace(s_in, last_swing_high_paisa=close + tol + 1)
+        m_out = evaluate_atoms(s_out, _default_proximity(), _empty_history())
+        assert not _bit(m_out, B.BIT_NEAR_SWING_HIGH)
+
+    def test_near_swing_low_exact_band_edge_in_and_out(self) -> None:
+        close = self._CLOSE
+        tol = self._TOL_10BPS
+        base = _make_snapshot(close_paisa=close)
+        s_in = dataclasses.replace(base, last_swing_low_paisa=close - tol)
+        m_in = evaluate_atoms(s_in, _default_proximity(), _empty_history())
+        assert _bit(m_in, B.BIT_NEAR_SWING_LOW)
+        s_out = dataclasses.replace(base, last_swing_low_paisa=close - tol - 1)
+        m_out = evaluate_atoms(s_out, _default_proximity(), _empty_history())
+        assert not _bit(m_out, B.BIT_NEAR_SWING_LOW)
+
+    def test_swing_high_and_low_are_not_swapped(self) -> None:
+        # Asymmetric fixture: ONLY the high is near ⇒ ONLY bit 72; then ONLY
+        # the low is near ⇒ ONLY bit 73 (kills the hi↔lo swap mutant).
+        base = _make_snapshot(close_paisa=self._CLOSE)
+        s_high = dataclasses.replace(
+            base, last_swing_high_paisa=self._CLOSE + 5_00, last_swing_low_paisa=20_000_00
+        )
+        m_high = evaluate_atoms(s_high, _default_proximity(), _empty_history())
+        assert _bit(m_high, B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(m_high, B.BIT_NEAR_SWING_LOW)
+        s_low = dataclasses.replace(
+            base, last_swing_high_paisa=28_000_00, last_swing_low_paisa=self._CLOSE - 5_00
+        )
+        m_low = evaluate_atoms(s_low, _default_proximity(), _empty_history())
+        assert _bit(m_low, B.BIT_NEAR_SWING_LOW)
+        assert not _bit(m_low, B.BIT_NEAR_SWING_HIGH)
+
+    def test_swing_bits_use_the_swing_band_not_the_fib_band(self) -> None:
+        # Distinct band values (band off-by-one/field-swap killer): the level
+        # sits ~30 bps off close — inside swing_bps=50, outside swing_bps=5 —
+        # with fib_bps pinned OPPOSITE each time.
+        close = self._CLOSE
+        level = close + (close * 30) // 10_000
+        base = _make_snapshot(close_paisa=close)
+        s = dataclasses.replace(base, last_swing_high_paisa=level)
+        wide = ProximityParams(fib_proximity_bps=5, swing_proximity_bps=50)
+        narrow = ProximityParams(fib_proximity_bps=50, swing_proximity_bps=5)
+        assert _bit(evaluate_atoms(s, wide, _empty_history()), B.BIT_NEAR_SWING_HIGH)
+        assert not _bit(evaluate_atoms(s, narrow, _empty_history()), B.BIT_NEAR_SWING_HIGH)
+
+    def test_default_swing_band_constant_cross_pin(self) -> None:
+        assert DEFAULT_SWING_PROXIMITY_BPS == 10
+        assert ProximityParams().swing_proximity_bps == 10
+
+
+def test_abi_and_compute_fib_projections_are_distinct() -> None:
+    """§4.2 constant-pun discipline: 19 == 19 yet the two lists DIFFER.
+
+    ``fib_levels_list`` (the evaluator ABI, FIB_LEVELS_LEN) appends
+    bull23/bull78/up424/dn424; the ``compute_fib_levels`` FFI projection
+    (FIB_COMPUTE_LIST_LEN) carries bull_38/bull_62 instead of the 424 pair —
+    equal lengths never imply mergeable lists.
+    """
+    fib = compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
+    abi = fib_levels_list(fib)
+    compute_projection = list(_tc.compute_fib_levels(24_050_00, 23_950_00))
+    assert len(abi) == len(compute_projection) == 19
+    assert abi != compute_projection
+    # The pdh/pdl retrace anchors are ABI-only slots (the compute projection
+    # starts at retrace_23 and derives the anchors caller-side); slot 0 alone
+    # proves the orders can never pun (bull_38 vs bearish-62 is an IEEE
+    # coincidence, so field-level membership is deliberately NOT the probe).
+    assert abi[0] == fib.retrace_level_at_pdh_paisa
+    assert fib.retrace_level_at_pdh_paisa not in compute_projection
+    assert abi[0] != compute_projection[0]

@@ -98,6 +98,12 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         fb.ext_down_162_paisa,
         fb.ext_down_200_paisa,
         fb.ext_down_262_paisa,
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the four appended-last ABI slots
+        # (bull23 → bit 69, bull78 → bit 70, up424/dn424 both → bit 71).
+        fb.retrace_bull_23_paisa,
+        fb.retrace_bull_78_paisa,
+        fb.ext_up_424_paisa,
+        fb.ext_down_424_paisa,
     ]
     proximity = case["proximity"]
     prior = case["prior"]
@@ -123,6 +129,11 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — appended-last swing pair + band
+        # (absent on the frozen pre-express cases ⇒ None / the default 10).
+        case.get("last_swing_high_paisa"),
+        case.get("last_swing_low_paisa"),
+        case["proximity"].get("swing_bps", 10),
     )
     return result
 
@@ -156,6 +167,11 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — appended-last swing pair + band
+        # (absent on the frozen pre-express cases ⇒ None / the default 10).
+        case.get("last_swing_high_paisa"),
+        case.get("last_swing_low_paisa"),
+        case["proximity"].get("swing_bps", 10),
     )
     return result
 

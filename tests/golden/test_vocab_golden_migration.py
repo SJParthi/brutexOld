@@ -16,7 +16,9 @@ regenerate-and-trust):
   (``new & ((1<<60)-1) == old & ~((1<<52)|(1<<53))``) — **this is the reshape
   back-compat harness: the 58 pre-existing active conditions (bits 0-51 +
   54-59) evaluate bit-identically pre/post reshape over the frozen inputs**;
-* no bit at or above 64 is ever set (``new >> 64 == 0``);
+* the only legal bits at or above 64 are the DEC-FIB-TEMPLATE-EXPRESS-001
+  express bits 69-73 (pre-express this law read ``new >> 64 == 0``; bits
+  69-71 derive from the frozen anchors, so they may fire on seeded cases);
 * the only NEW bits (60-63) are exactly justified by the CPR arithmetic
   recomputed INDEPENDENTLY here from the case's own prev-day anchors (exact
   integer/Decimal math — never the production helper).
@@ -103,11 +105,23 @@ def _old_by_id() -> dict[int, dict[str, Any]]:
     return {c["id"]: c for c in _OLD["cases"]}
 
 
+def _migration_cases() -> list[dict[str, Any]]:
+    """The 400 seeded migration-invariant cases (ids 0-399).
+
+    DEC-FIB-TEMPLATE-EXPRESS-001 appended DETERMINISTIC express cases at
+    ids >= 400 (they carry NEW swing inputs, so no pre-reshape companion row
+    can exist for them); the migration invariant is scoped to the frozen
+    seeded corpus the companion fixture describes.
+    """
+    return [c for c in _NEW["cases"] if c["id"] < 400]
+
+
 def test_companion_covers_the_full_corpus() -> None:
-    """One companion row per new-fixture case — same ids, both 400 strong."""
+    """One companion row per seeded case — same ids, both 400 strong."""
     assert _OLD["schema"] == "vocab-golden-migration-v2-masks"
-    assert len(_OLD["cases"]) == len(_NEW["cases"]) == 400
-    assert {c["id"] for c in _OLD["cases"]} == {c["id"] for c in _NEW["cases"]}
+    migration = _migration_cases()
+    assert len(_OLD["cases"]) == len(migration) == 400
+    assert {c["id"] for c in _OLD["cases"]} == {c["id"] for c in migration}
 
 
 def test_companion_records_the_pre_reshape_whole_file_sha() -> None:
@@ -125,9 +139,17 @@ def test_companion_records_the_pre_reshape_whole_file_sha() -> None:
 
 
 def test_inputs_are_byte_identical_to_the_pre_reshape_fixture() -> None:
-    """The RNG-burn proof: every case's input fields carry the OLD fixture's SHA."""
+    """The RNG-burn proof: every seeded case's input fields carry the OLD SHA.
+
+    Strongest form under DEC-FIB-TEMPLATE-EXPRESS-001: the 400 seeded cases
+    carry NO swing keys at all (readers default them), so the hash covers the
+    LITERAL historical key set — any added/renamed/reordered input key fails
+    here, including a swing key accidentally leaking into a seeded case.
+    """
     old = _old_by_id()
-    mismatches = [c["id"] for c in _NEW["cases"] if _input_sha(c) != old[c["id"]]["inputs_sha256"]]
+    mismatches = [
+        c["id"] for c in _migration_cases() if _input_sha(c) != old[c["id"]]["inputs_sha256"]
+    ]
     assert not mismatches, f"case INPUTS drifted from the frozen pre-reshape corpus: {mismatches}"
 
 
@@ -142,7 +164,7 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     old = _old_by_id()
     violations: list[str] = []
     tombstones_cleared = 0
-    for case in _NEW["cases"]:
+    for case in _migration_cases():
         new_mask = int(case["expected_mask"], 16)
         old_mask = int(old[case["id"]]["old_mask"], 16)
         if new_mask & _LOW60 != old_mask & ~_TOMBSTONE_MASK:
@@ -154,11 +176,29 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     assert tombstones_cleared > 0
 
 
-def test_no_bit_at_or_above_64_is_ever_set() -> None:
-    """The declared-only SuperTrend bits (64/65) + reserved headroom stay inert."""
+#: The ONLY legal high bits (>= 64): the DEC-FIB-TEMPLATE-EXPRESS-001 express
+#: bits 69-73. SuperTrend 64/65 (layout-only), the gap placeholders 66-68
+#: (reserved) and everything >= 74 must stay inert in EVERY case.
+_EXPRESS_HIGH_MASK = 0b11111 << 69
+
+
+def test_high_bits_are_exactly_the_express_set() -> None:
+    """Bits >= 64: only the express bits 69-73 may ever fire.
+
+    (Supersedes the pre-express ``new >> 64 == 0`` law: bits 69-71 derive
+    from the frozen prev-day anchors, so they legitimately fire on seeded
+    cases too — DEC-FIB-TEMPLATE-EXPRESS-001.)
+    """
+    seen_express = 0
     for case in _NEW["cases"]:
         mask = int(case["expected_mask"], 16)
-        assert mask >> 64 == 0, f"case {case['id']}: bit >= 64 fired ({mask:#034x})"
+        high = mask >> 64 << 64
+        assert high & ~_EXPRESS_HIGH_MASK == 0, (
+            f"case {case['id']}: an inert high bit fired ({mask:#034x})"
+        )
+        seen_express |= mask & _EXPRESS_HIGH_MASK
+    # Anti-vacuity: every express bit genuinely fires somewhere in the corpus.
+    assert seen_express == _EXPRESS_HIGH_MASK
 
 
 def test_new_cpr_bits_are_exactly_the_independent_arithmetic() -> None:

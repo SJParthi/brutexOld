@@ -613,8 +613,9 @@ class TestSpecIdentityDedupChain:
             prior_n=0,
             symbol_label="NSE-NIFTY",
         )
-        # One REAL evaluate_spec call (the 23-arg pre-built-levels ABI —
-        # the retired vwap arg is gone at crate 0.4.0): the
+        # One REAL evaluate_spec call (the 26-arg pre-built-levels ABI —
+        # the retired vwap arg is gone at crate 0.4.0; the swing pair + band
+        # appended last at 0.4.1, DEC-FIB-TEMPLATE-EXPRESS-001): the
         # empty mask is a subset of every bar's bits, so it always fires.
         bar_bits, fires, direction_u8 = trading_core.evaluate_spec(
             f"{spec.condition_mask:032x}",
@@ -627,7 +628,7 @@ class TestSpecIdentityDedupChain:
             None,  # ema20
             None,  # ema200
             [100_00] * 12,  # pivot levels (p,r1..r3,s1..s3,pdh,pdl,pdc,r5,s5)
-            [100_00] * 15,  # fib levels
+            [100_00] * 19,  # fib levels (15 + the express bull23/bull78/424s)
             110_00,  # day_high
             90_00,  # day_low
             100_00,  # open_of_day
@@ -640,6 +641,9 @@ class TestSpecIdentityDedupChain:
             False,
             False,
             False,
+            None,  # last_swing_high_paisa (no confirmed swing)
+            None,  # last_swing_low_paisa
+            10,  # swing_proximity_bps — the spec path's production default
         )
         assert fires is True
         assert direction_u8 == 0

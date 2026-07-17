@@ -495,7 +495,8 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     if is_near(close, fib.retrace_bull_78_paisa, bps_fib) {
         mask |= bit(bits::BIT_NEAR_FIB_BULL_786);
     }
-    if is_near(close, fib.ext_up_424_paisa, bps_fib) || is_near(close, fib.ext_down_424_paisa, bps_fib)
+    if is_near(close, fib.ext_up_424_paisa, bps_fib)
+        || is_near(close, fib.ext_down_424_paisa, bps_fib)
     {
         mask |= bit(bits::BIT_NEAR_FIB_424);
     }
@@ -509,15 +510,15 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     // (no confirmed swing yet, or a contract-roll hard reset) ⇒ the bit does
     // not fire — never fabricated. Band: the swept `swing_proximity_bps`.
     let bps_swing = p.swing_proximity_bps;
-    if let Some(sh) = s.last_swing_high_paisa {
-        if is_near(close, sh, bps_swing) {
-            mask |= bit(bits::BIT_NEAR_SWING_HIGH);
-        }
+    if let Some(sh) = s.last_swing_high_paisa
+        && is_near(close, sh, bps_swing)
+    {
+        mask |= bit(bits::BIT_NEAR_SWING_HIGH);
     }
-    if let Some(sl) = s.last_swing_low_paisa {
-        if is_near(close, sl, bps_swing) {
-            mask |= bit(bits::BIT_NEAR_SWING_LOW);
-        }
+    if let Some(sl) = s.last_swing_low_paisa
+        && is_near(close, sl, bps_swing)
+    {
+        mask |= bit(bits::BIT_NEAR_SWING_LOW);
     }
 
     mask

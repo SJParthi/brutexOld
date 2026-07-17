@@ -409,7 +409,10 @@ fn evaluate_from_raw_impl(
     // The caller-supplied swing LEVELS are subtracted in `is_near` — take the
     // same garbage-level bound as the pre-built-levels path
     // (DEC-FIB-TEMPLATE-EXPRESS-001).
-    for v in [last_swing_high_paisa, last_swing_low_paisa].into_iter().flatten() {
+    for v in [last_swing_high_paisa, last_swing_low_paisa]
+        .into_iter()
+        .flatten()
+    {
         if !bar_in_range(v) {
             return Err(format!(
                 "level magnitude {v} out of the overflow-safe range \
@@ -605,7 +608,10 @@ fn evaluate_with_levels_impl(
     // The caller-supplied swing LEVELS take the SAME garbage-level bound (they
     // are subtracted in `is_near` exactly like the fib/pivot lists — never the
     // compare-only carve-out; DEC-FIB-TEMPLATE-EXPRESS-001).
-    for v in [last_swing_high_paisa, last_swing_low_paisa].into_iter().flatten() {
+    for v in [last_swing_high_paisa, last_swing_low_paisa]
+        .into_iter()
+        .flatten()
+    {
         if !bar_in_range(v) {
             return Err(format!(
                 "level magnitude {v} out of the overflow-safe range \

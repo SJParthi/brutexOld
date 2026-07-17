@@ -704,6 +704,9 @@ mod tests {
         let fib_row = [
             10_100, 10_053, 10_024, 10_000, 9_976, 9_943, 9_900, 10_154, 10_224, 10_300, 10_424,
             9_846, 9_776, 9_700, 9_576,
+            // DEC-FIB-TEMPLATE-EXPRESS-001 appended tail (bull23/bull78/424s)
+            // — deliberately OUTSIDE the 10 bps band around close 10_050.
+            9_794, 10_014, 11_395, 8_005,
         ];
         c.day_pivots = [[0i64; PIVOT_ROW_LEN].as_slice(), pivot_row.as_slice()].concat();
         c.day_fibs = [[0i64; FIB_ROW_LEN].as_slice(), fib_row.as_slice()].concat();
@@ -996,9 +999,13 @@ mod tests {
     /// (and need not) be distinguished.
     #[test]
     fn each_fib_row_slot_feeds_exactly_its_own_near_bit() {
-        const EXPECTED_BIT: [u32; FIB_ROW_LEN] =
-            [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 26, 27, 28, 29];
-        const FIB_BIT_FAMILY: u128 = 0x3ff8_0000; // bits 19..=29
+        const EXPECTED_BIT: [u32; FIB_ROW_LEN] = [
+            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 26, 27, 28, 29, 69, 70, 71, 71,
+        ];
+        // Bits 19..=29 plus the Fibonacci-Extended bits 69..=71
+        // (DEC-FIB-TEMPLATE-EXPRESS-001; slots 17/18 share bit 71 — the
+        // up/down 424 pair ORs exactly like the 26..=29 extension pairs).
+        const FIB_BIT_FAMILY: u128 = 0x3ff8_0000 | (0b111 << 69);
         for (slot, expected_bit) in EXPECTED_BIT.iter().enumerate() {
             let mut c = cols(1);
             c.day_has_pivot = vec![true];

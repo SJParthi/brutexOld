@@ -1,7 +1,7 @@
 //! The cross-language bit-identity proof (Phase 1 of DEC-SHARED-CORE-001).
 //!
 //! Reads the SAME language-neutral oracle the Python test reads
-//! (`tests/golden/fixtures/vocab_golden_vectors.json`, 400 cases) and asserts
+//! (`tests/golden/fixtures/vocab_golden_vectors.json`, 400 seeded + 8 express cases) and asserts
 //! this Rust crate reproduces every frozen `u64` bit-for-bit. Both engines
 //! reading the same vectors is what makes the backtest = live guarantee real.
 
@@ -26,6 +26,14 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the swing band (bits 72/73). Defaulted
+    /// so the parser stays tolerant of the pre-express fixture shape.
+    #[serde(default = "default_swing_bps")]
+    swing_bps: i64,
+}
+
+fn default_swing_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -65,6 +73,12 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the confirmed-swing anchors (bits
+    /// 72/73). Defaulted (None = no confirmed swing) for pre-express shapes.
+    #[serde(default)]
+    last_swing_high_paisa: Option<i64>,
+    #[serde(default)]
+    last_swing_low_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -129,11 +143,14 @@ fn eval_case(c: &Case) -> u128 {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        last_swing_high_paisa: c.last_swing_high_paisa,
+        last_swing_low_paisa: c.last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        swing_proximity_bps: c.proximity.swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,

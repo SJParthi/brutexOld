@@ -138,11 +138,15 @@ def generate() -> dict[str, object]:
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     masks = Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     return {
-        # v2: the 60→66 reshape — the five retired VWAP-feed columns
+        # v3: DEC-FIB-TEMPLATE-EXPRESS-001 — the fib day rows widen 15→19
+        # (bull_23/bull_78/ext_up_424/ext_down_424 appended), the config
+        # gains ``swing_bps`` and the masks may carry the express bits 69-73
+        # (72/73 from the kernel's own MarketStructureState swings).
+        # v2 was the 60→66 reshape — the five retired VWAP-feed columns
         # (typical_paisa / volume / pre_open / session_key / session_day)
-        # are GONE from the batch ABI; masks may carry the CPR bits 60-63
+        # GONE from the batch ABI; masks may carry the CPR bits 60-63
         # and never the tombstones 52/53.
-        "schema": "stage1a-batch-golden-v2",
+        "schema": "stage1a-batch-golden-v3",
         "columns": {
             "open_paisa": inputs.open_paisa,
             "high_paisa": inputs.high_paisa,
@@ -164,6 +168,7 @@ def generate() -> dict[str, object]:
             "pivot_bps": inputs.pivot_bps,
             "pdh_pdl_bps": inputs.pdh_pdl_bps,
             "fib_bps": inputs.fib_bps,
+            "swing_bps": inputs.swing_bps,
             "prior_n": inputs.prior_n,
             "fractal_k": inputs.fractal_k,
             "apply_1day_mask": inputs.apply_1day_mask,

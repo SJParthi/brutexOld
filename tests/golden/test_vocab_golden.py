@@ -81,11 +81,18 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bullish=ms["choch_bullish"],
             choch_bearish=ms["choch_bearish"],
         ),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the swing anchors (bits 72/73). The
+        # 400 migration-invariant cases carry NO swing keys (byte-frozen input
+        # discipline); readers default them to None / 10 exactly like the Rust
+        # twin's serde defaults.
+        last_swing_high_paisa=case.get("last_swing_high_paisa"),
+        last_swing_low_paisa=case.get("last_swing_low_paisa"),
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],
         pdh_pdl_proximity_bps=case["proximity"]["pdh_pdl_bps"],
         fib_proximity_bps=case["proximity"]["fib_bps"],
+        swing_proximity_bps=case["proximity"].get("swing_bps", 10),
     )
     prior = PriorBarHistory(prior_n=case["prior"]["prior_n"], flags=list(case["prior"]["flags"]))
     return snapshot, proximity, prior
@@ -138,7 +145,7 @@ def test_layout_only_bits_are_always_clear() -> None:
 
 def test_fixture_metadata_is_consistent() -> None:
     """Guard the fixture header against silent corruption / regeneration drift."""
-    assert _DATA["version"] == 3
+    assert _DATA["version"] == 4
     assert _DATA["total_conditions"] == TOTAL_CONDITIONS
     assert int(_DATA["implemented_mask"], 16) == IMPLEMENTED_MASK
     assert int(_DATA["full_mask"], 16) == (1 << TOTAL_CONDITIONS) - 1
@@ -155,7 +162,7 @@ def test_fixture_metadata_is_consistent() -> None:
 #: SHA-256 of the frozen fixture bytes (GOLD-06 — the README "SHA-256
 #: manifest" drift guard). Regenerate with
 #: ``python scripts/gen_vocab_golden_vectors.py`` then update this.
-_EXPECTED_SHA256 = "0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0"
+_EXPECTED_SHA256 = "05109387ff60a5f631cf56949ae08f64568b203ba6f6aeb4aeb4f492c9e23af8"
 
 
 def test_fixture_sha256_matches_pinned_manifest() -> None:

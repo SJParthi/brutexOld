@@ -1,7 +1,7 @@
 //! The DEPLOY-CONTRACT golden: `evaluate(spec)` is bit-consistent with the FROZEN
-//! `evaluate_atoms` kernel + the 400-case answer-key (DEC-STRATEGYSPEC-CORE-001).
+//! `evaluate_atoms` kernel + the 408-case answer-key (DEC-STRATEGYSPEC-CORE-001).
 //!
-//! For EVERY one of the 400 `vocab_golden_vectors.json` cases we build a
+//! For EVERY one of the 408 `vocab_golden_vectors.json` cases we build a
 //! [`StrategySpec`] whose `condition_mask` IS that case's frozen `expected_mask`
 //! and prove:
 //!
@@ -38,6 +38,14 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the swing band (bits 72/73). Defaulted
+    /// so the parser stays tolerant of the pre-express fixture shape.
+    #[serde(default = "default_swing_bps")]
+    swing_bps: i64,
+}
+
+fn default_swing_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -73,6 +81,12 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the confirmed-swing anchors (bits
+    /// 72/73). Defaulted (None = no confirmed swing) for pre-express shapes.
+    #[serde(default)]
+    last_swing_high_paisa: Option<i64>,
+    #[serde(default)]
+    last_swing_low_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -134,11 +148,14 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        last_swing_high_paisa: c.last_swing_high_paisa,
+        last_swing_low_paisa: c.last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        swing_proximity_bps: c.proximity.swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,
@@ -150,7 +167,8 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
 #[test]
 fn spec_requiring_its_own_bits_fires_and_reproduces_the_oracle() {
     let fixture = load_fixture();
-    assert_eq!(fixture.cases.len(), 400, "deploy golden expects 400 cases");
+    // 400 seeded + the 8 DEC-FIB-TEMPLATE-EXPRESS-001 deterministic cases.
+    assert_eq!(fixture.cases.len(), 408, "deploy golden expects 408 cases");
     let mut failures: Vec<String> = Vec::new();
     for c in &fixture.cases {
         let (snapshot, proximity, prior) = rebuild(c);

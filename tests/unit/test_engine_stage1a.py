@@ -870,7 +870,7 @@ def test_collect_batch_inputs_spot_constant_key_and_no_resets() -> None:
     assert inputs.day_has_fib == [False, True]  # prev-day fib warms with pivots
     # Day-1 (cold) rows carry the placeholder levels; day-2 rows are real.
     assert inputs.day_pivot_levels[:12] == pivot_levels_list(_PLACEHOLDER_PIVOTS)
-    assert inputs.day_fib_levels[:15] == fib_levels_list(_PLACEHOLDER_FIB)
+    assert inputs.day_fib_levels[:19] == fib_levels_list(_PLACEHOLDER_FIB)
     assert inputs.day_pivot_levels[12:] != pivot_levels_list(_PLACEHOLDER_PIVOTS)
 
 
@@ -889,7 +889,7 @@ def test_collect_batch_inputs_cold_weekly_fib_keeps_warm_pivots() -> None:
     )
     assert inputs.day_has_pivot == [False, True, True]
     assert inputs.day_has_fib == [False, False, False]  # cold week
-    assert inputs.day_fib_levels[15:30] == fib_levels_list(_PLACEHOLDER_FIB)
+    assert inputs.day_fib_levels[19:38] == fib_levels_list(_PLACEHOLDER_FIB)
     assert inputs.day_pivot_levels[12:24] != pivot_levels_list(_PLACEHOLDER_PIVOTS)
 
 
@@ -908,7 +908,7 @@ def test_collect_batch_inputs_all_three_anchors_produce_valid_tables(anchor_name
     n_days = len(inputs.day_has_pivot)
     assert n_days == len(days)
     assert len(inputs.day_pivot_levels) == 12 * n_days
-    assert len(inputs.day_fib_levels) == 15 * n_days
+    assert len(inputs.day_fib_levels) == 19 * n_days
     assert inputs.day_index == [i for i in range(n_days) for _ in range(2)]
     # Every anchor family eventually warms its fib on this 8-session feed.
     assert inputs.day_has_fib[-1] is True

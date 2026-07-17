@@ -1424,18 +1424,23 @@
   ]
  },
  "config": {
-  "anchor_dependent_mask_hex": "f00f00003fffffc0",
-  "applies_to_1day_mask_hex": "3ffcf0fffffffffff",
+  "anchor_dependent_mask_hex": "e0f00f00003fffffc0",
+  "applies_to_1day_mask_hex": "3ffffcf0fffffffffff",
   "apply_1day_mask": false,
   "fib_bps": 10,
-  "fib_dependent_mask_hex": "3ff80000",
+  "fib_dependent_mask_hex": "e0000000003ff80000",
   "fractal_k": 2,
   "pdh_pdl_bps": 10,
   "pivot_bps": 10,
-  "prior_n": 3
+  "prior_n": 3,
+  "swing_bps": 10
  },
  "day_tables": {
   "day_fib_levels": [
+   0,
+   0,
+   0,
+   0,
    0,
    0,
    0,
@@ -1466,6 +1471,14 @@
    -180,
    -4000,
    -10180,
+   8360,
+   13860,
+   48360,
+   -26360,
+   0,
+   0,
+   0,
+   0,
    0,
    0,
    0,
@@ -1496,6 +1509,14 @@
    3820,
    0,
    -6180,
+   12360,
+   17860,
+   52360,
+   -22360,
+   0,
+   0,
+   0,
+   0,
    0,
    0,
    0,
@@ -1525,7 +1546,11 @@
    11280,
    7820,
    4000,
-   -2180
+   -2180,
+   16360,
+   21860,
+   56360,
+   -18360
   ],
   "day_has_fib": [
    false,
@@ -1776,5 +1801,5 @@
   "400214848000c001",
   "110214004000c001"
  ],
- "schema": "stage1a-batch-golden-v2"
+ "schema": "stage1a-batch-golden-v3"
 }

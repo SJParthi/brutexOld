@@ -260,7 +260,7 @@ class TestLevelListLengthGuard:
                 None,
                 None,
                 [0] * 11,
-                [0] * 15,
+                [0] * 19,
                 1,
                 1,
                 1,
@@ -276,7 +276,7 @@ class TestLevelListLengthGuard:
             )
 
     def test_short_fib_list_raises(self) -> None:
-        with pytest.raises(ValueError, match="fib_levels must have 15 entries"):
+        with pytest.raises(ValueError, match="fib_levels must have 19 entries"):
             trading_core.evaluate_with_levels(
                 0,
                 1,

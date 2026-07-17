@@ -68,11 +68,24 @@ fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
 
 /// Proximity tolerances spanning 0 bps (degenerate, only exact hits) … 2 %.
 fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
-    (0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c)| ProximityParams {
+    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c, d)| ProximityParams {
         pivot_proximity_bps: a,
         pdh_pdl_proximity_bps: b,
         fib_proximity_bps: c,
+        swing_proximity_bps: d,
     })
+}
+
+/// One confirmed-swing anchor (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
+/// None (no confirmed swing yet — the abstain arm), a value clustered tightly
+/// around `close` (so the `is_near` band edges are exercised both ways under
+/// the drawn `swing_proximity_bps`), or anywhere in range.
+fn arb_swing_side(close: i64) -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        2 => Just(None),
+        3 => (close.saturating_sub(5).max(1)..=close.saturating_add(5)).prop_map(Some),
+        2 => (1i64..=2 * MAX_PAISA).prop_map(Some),
+    ]
 }
 
 /// Prior-bar window: `prior_n` in 1..=6 with a flag vector whose length is
@@ -207,7 +220,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 Just((pdc - gap_thr - 1).max(1)),
                 1i64..=2 * MAX_PAISA,
             ];
-            // Nine elements (nested tuples keep us inside proptest's 12-tuple cap).
+            // Ten elements (nested tuples keep us inside proptest's 12-tuple cap).
             (
                 Just(pivots),
                 Just(fib),
@@ -228,6 +241,11 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 // by the `MarketStructureState` unit + property tests; here the
                 // evaluator's job is only to copy each flag onto its bit).
                 arb_market_structure(),
+                // The confirmed-swing anchors (bits 72/73,
+                // DEC-FIB-TEMPLATE-EXPRESS-001) — None / around-close / far,
+                // each side independent, so the Option-abstain arm AND both
+                // near/far outcomes are exercised under the drawn swing band.
+                (arb_swing_side(close), arb_swing_side(close)),
             )
         })
         .prop_map(
@@ -242,10 +260,12 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 proximity,
                 prior,
                 market_structure,
+                swings,
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
                 let (ema20, ema200) = emas;
+                let (swing_high, swing_low) = swings;
                 let snapshot = IndicatorSnapshot {
                     tod_seconds,
                     open_paisa: open,
@@ -260,6 +280,8 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     day_low_paisa: day_low,
                     open_of_day_paisa: open_of_day,
                     market_structure,
+                    last_swing_high_paisa: swing_high,
+                    last_swing_low_paisa: swing_low,
                 };
                 (snapshot, proximity, prior)
             },
@@ -293,7 +315,7 @@ fn oracle_is_near(close: i64, level: i64, bps: i64) -> bool {
     (close - level).abs() <= tolerance
 }
 
-/// A second, deliberately independent implementation of all 52 conditions, used
+/// A second, deliberately independent implementation of every implemented condition, used
 /// only as a test oracle. `cargo-mutants` mutates `src/` but never `tests/`, so
 /// any mutant in `evaluate_atoms` diverges from this reference and is killed
 /// (provided the generators reach the mutated line — they are boundary-aware).
@@ -405,6 +427,32 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         if oracle_is_near(c, up, bf) || oracle_is_near(c, down, bf) {
             m |= 1 << bit;
         }
+    }
+
+    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73):
+    // the asymmetric BULL retracement pair, the 4.24 extension (both
+    // directions, the ext-family OR law) and the confirmed-swing anchors
+    // (Option-abstain: no confirmed swing ⇒ the bit can never fire).
+    if oracle_is_near(c, fib.retrace_bull_23_paisa, bf) {
+        m |= 1u128 << bits::BIT_NEAR_FIB_BULL_236;
+    }
+    if oracle_is_near(c, fib.retrace_bull_78_paisa, bf) {
+        m |= 1u128 << bits::BIT_NEAR_FIB_BULL_786;
+    }
+    if oracle_is_near(c, fib.ext_up_424_paisa, bf) || oracle_is_near(c, fib.ext_down_424_paisa, bf)
+    {
+        m |= 1u128 << bits::BIT_NEAR_FIB_424;
+    }
+    let bs = p.swing_proximity_bps;
+    if let Some(sh) = s.last_swing_high_paisa
+        && oracle_is_near(c, sh, bs)
+    {
+        m |= 1u128 << bits::BIT_NEAR_SWING_HIGH;
+    }
+    if let Some(sl) = s.last_swing_low_paisa
+        && oracle_is_near(c, sl, bs)
+    {
+        m |= 1u128 << bits::BIT_NEAR_SWING_LOW;
     }
 
     // Group 5: candle shape.
@@ -766,11 +814,14 @@ fn every_implemented_bit_is_individually_reachable() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 10,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 10,
+        swing_proximity_bps: 10,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1366,9 +1417,53 @@ fn every_implemented_bit_is_individually_reachable() {
         &no_prior,
     );
 
+    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73).
+    // Anchor levels (pdh 1_100_000 / pdl 1_000_000, r = 100_000):
+    // bull_23 = 1_023_600 · bull_78 = 1_078_600 · ext_up_424 = 1_423_600.
+    check(
+        bits::BIT_NEAR_FIB_BULL_236,
+        IndicatorSnapshot {
+            close_paisa: 1_023_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_BULL_786,
+        IndicatorSnapshot {
+            close_paisa: 1_078_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_424,
+        IndicatorSnapshot {
+            close_paisa: 1_423_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_SWING_HIGH,
+        IndicatorSnapshot {
+            last_swing_high_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_SWING_LOW,
+        IndicatorSnapshot {
+            last_swing_low_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR) were exercised"
+        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR/fib-express) were exercised"
     );
 }
 
@@ -1383,6 +1478,7 @@ fn tombstoned_vwap_bits_never_fire() {
         pivot_proximity_bps: 10,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 10,
+        swing_proximity_bps: 10,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1403,6 +1499,8 @@ fn tombstoned_vwap_bits_never_fire() {
             day_low_paisa: close,
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
         };
         let m = evaluate_atoms(&s, &prox, &no_prior);
         assert_eq!(
@@ -1426,6 +1524,7 @@ fn cpr_equality_boundaries_are_pinned() {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1446,6 +1545,8 @@ fn cpr_equality_boundaries_are_pinned() {
             day_low_paisa: close,
             open_of_day_paisa: close,
             market_structure: MarketStructureSignal::default(),
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
         };
         evaluate_atoms(&s, &prox, &no_prior)
     };
@@ -1494,6 +1595,8 @@ fn cpr_equality_boundaries_are_pinned() {
         day_low_paisa: 1_000_000,
         open_of_day_paisa: 1_000_000,
         market_structure: MarketStructureSignal::default(),
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let m_tie = evaluate_atoms(&s_tie, &prox, &no_prior);
     assert_eq!(
@@ -1548,11 +1651,14 @@ fn equality_boundaries_keep_strict_bits_clear() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1804,11 +1910,14 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,

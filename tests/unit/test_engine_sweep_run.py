@@ -701,6 +701,67 @@ class TestCanonicalTradeParams:
         assert params["proximity_bps"] == [5, 10, 25]
         assert params["sl_paisa"] is None and params["tp_paisa"] is None
 
+    def test_swing_band_default_omitted_exact_key_set(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001: the default swing band emits NO key —
+        the EXACT pre-express key-set (dict equality, not just absence), so
+        every pre-express run identity stays byte-stable; ``proximity_bps``
+        stays the FROZEN 3-list (never grows to 4)."""
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=ProximityParams(
+                pivot_proximity_bps=5,
+                pdh_pdl_proximity_bps=10,
+                fib_proximity_bps=25,
+                swing_proximity_bps=10,  # the default — omitted
+            ),
+            start_equity_paisa=10_000_000,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": [5, 10, 25],
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10_000_000,
+        }
+
+    def test_swing_band_non_default_adds_exactly_one_key(self) -> None:
+        """A swept ``swing_proximity_bps=25`` cell adds EXACTLY one top-level
+        key and re-keys the run identity (bits 72/73 evaluate differently)."""
+        common: dict[str, object] = {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "start_equity_paisa": 10_000_000,
+        }
+        default = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5),
+            **common,  # type: ignore[arg-type]
+        )
+        swept = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5, swing_proximity_bps=25),
+            **common,  # type: ignore[arg-type]
+        )
+        assert set(swept) - set(default) == {"swing_proximity_bps"}
+        assert swept["swing_proximity_bps"] == 25
+        assert swept["proximity_bps"] == default["proximity_bps"] == [5, 10, 10]
+        assert mask_run_id(mask=1, params=default, **_CTX) != mask_run_id(
+            mask=1, params=swept, **_CTX
+        )
+
+    def test_none_proximity_emits_no_swing_key(self) -> None:
+        # proximity=None means every band is defaulted — no swing key either.
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert "swing_proximity_bps" not in params
+
     def test_sweep_config_identity_routes_through_it(self) -> None:
         # §11 COMMON: the sweep's run-identity params ARE this helper's output —
         # the Stage-3 cell recovery re-derives identities through the same
@@ -2851,19 +2912,26 @@ class TestU128EnvelopeThroughSweep:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Bit 0 FIRES on `_trending_bars` (the default-config masks produce real
-        # trades), bits 64/65 never do — the wide masks now PROMOTE the batch
-        # to the u128 kernel (no call fallback), and the byte-equality below
-        # compares stores with REAL trade rows, never two degenerate
-        # zero-trade stores (the vacuous-equality trap).
+        # trades), bits 64/65 never do — the wide masks are RUST-served with no
+        # call fallback, and the byte-equality below compares stores with REAL
+        # trade rows, never two degenerate zero-trade stores (the
+        # vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # NOT a fallback any more: the wide sibling kernel was promoted once.
+        # NOT a fallback: the wide masks are u128-kernel-served.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert fallbacks == []
+        # DEC-FIB-TEMPLATE-EXPRESS-001 u128 pin: the express bull-fib bits
+        # (69/70) FIRE on this trending feed, so the bar_bits word already
+        # exceeds u64 and the u128 kernel is resident from CONSTRUCTION — the
+        # lazy wide PROMOTION never runs (0 events; the promotion path itself
+        # stays covered by test_engine_rust_trade_sim.py over synthetic
+        # ≤u64 bar_bits). Pre-express this feed promoted lazily (1 event).
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
-        assert len(promotions) == 1
+        assert promotions == []
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
