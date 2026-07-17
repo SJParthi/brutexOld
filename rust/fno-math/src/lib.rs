@@ -79,6 +79,12 @@ pub mod trade_sim;
 /// f64-exactness envelope the Python wrapper pre-guards.
 pub mod metrics;
 
+/// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
+/// sequential/integer heavy loops of the Stage-3/4 statistical filters
+/// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
+/// Python keeps every numpy pairwise reduction, libm call and raise.
+pub mod stats;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -157,5 +163,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
+    // ---- stats module (slice 6, DEC-METRICS-RUST-STATS-001): Stage-3/4
+    // statistics kernels. Additive registration only; existing registrations
+    // above are untouched. Later slice-6 PRs append inside this fence.
+    m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // ---- end stats module ----
     Ok(())
 }

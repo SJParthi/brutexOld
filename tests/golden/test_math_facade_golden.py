@@ -51,6 +51,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
+        "stats_cpcv_pass_count",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",

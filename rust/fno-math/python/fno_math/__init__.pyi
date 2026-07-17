@@ -35,6 +35,7 @@ __all__ = [
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
     "popcount_bytes",
+    "stats_cpcv_pass_count",
 ]
 
 __version__: str
@@ -134,6 +135,27 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def stats_cpcv_pass_count(
+    counts: list[int],
+    means: list[float],
+    m2s: list[float],
+    n_test_groups: int,
+    min_sharpe: float,
+) -> int:
+    """CPCV fold pass-count over per-group moment triples (DEC-METRICS-RUST-STATS-001).
+
+    `counts`/`means`/`m2s` are the per-group `(n, mean, M2)` triples from
+    `brutex.metrics.cpcv._group_moments`. Returns how many of the
+    `C(len(counts), n_test_groups)` folds have a defined Chan/Pébay-merged
+    Sharpe STRICTLY greater than `min_sharpe` — the exact
+    `brutex.metrics.cpcv._combine_moments` fold, operation-for-operation
+    (claim class STRUCTURAL). Raises `ValueError` on a structurally invalid
+    input (length mismatch, `n_groups < 2`, `n_test_groups` out of
+    `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
+    `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
     ...
 
 def sweep_drawdown_stats(

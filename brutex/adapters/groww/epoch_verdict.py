@@ -62,15 +62,21 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Final
 
-from brutex.calendars.nse import get_session_checked, is_holiday_data_available
+from brutex.calendars.nse import (
+    IST_UTC_OFFSET,
+    get_session_checked,
+    is_holiday_data_available,
+)
 
 #: The fixed IST offset (+05:30, no DST) between the two candidate
-#: interpretations of one epoch value.
-_IST_OFFSET: Final = timedelta(hours=5, minutes=30)
+#: interpretations of one epoch value — the ONE canonical
+#: :data:`brutex.calendars.nse.IST_UTC_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST_OFFSET: Final = IST_UTC_OFFSET
 
 #: Classification cap — at most this many samples of a payload are classified
 #: (first-N in input order, deterministic). Bounds the calendar-lookup work
