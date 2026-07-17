@@ -11,6 +11,8 @@ import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+from brutex.config.feed_scope import FEED_SCOPE_ENV, SCOPE_INDEX4
+from brutex.config.feed_scope import _reset_for_tests as _feed_scope_reset_for_tests
 from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
 from brutex.data.today_completeness import (
     TODAY_COMPLETENESS_GATE_ENV,
@@ -109,6 +111,38 @@ os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
 # directly) — so this default disables ONLY the ambient repo read, never the
 # tested law.
 os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
+
+# DEC-UNIVERSE-INDEX-ONLY-001 test hermeticity (design §2.3 Rev 4 — a FORCED
+# normalization, deliberately an OVERWRITE, never ``setdefault``): the §5.6
+# widen procedure MANDATES ``BRUTEX_FEED_SCOPE`` be PERSISTENTLY SET (e.g.
+# ``groww=full``) on a widened box — including CLI shells — so on that box an
+# un-normalized suite would read the ambient ``full`` and silently fail every
+# index4-default test (the memo gives no pointer to the env), and a plain
+# setdefault only fills an ABSENT var. FULL-arm suites set the env explicitly
+# per-test (``monkeypatch.setenv`` wins over this value); every scope-touching
+# suite additionally rides the ``_feed_scope_isolation`` autouse reset below.
+# Running the suite on a widened box neither depends on nor disturbs the box's
+# ambient scope (the §5.6 runbook caveat).
+os.environ[FEED_SCOPE_ENV] = SCOPE_INDEX4
+
+
+@pytest.fixture(autouse=True)
+def _feed_scope_isolation() -> Any:
+    """Reset feed_scope's process-global state around EVERY test (design §6).
+
+    DEC-UNIVERSE-INDEX-ONLY-001: the §2.5 registration seam makes every
+    ``VendorProfileRegistry.register`` mutate ``feed_scope``'s process-global
+    ACTIVE set (``tests/unit/test_vendor_profile.py`` alone carries ~29
+    ``register(`` calls, plus the hypothesis profile property suite's
+    unbounded generated tokens and the nightly binding tests) — without a
+    reset the unregistered-key / gdfl-no-loop / dhan-excluded pins would be
+    order-dependent on whatever tokens earlier tests leaked. Resets ACTIVE to
+    the ``{"groww"}`` seed + clears both memos + the warn-once registries,
+    BEFORE and AFTER each test (a few dict clears — negligible).
+    """
+    _feed_scope_reset_for_tests()
+    yield
+    _feed_scope_reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
