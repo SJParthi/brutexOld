@@ -48,7 +48,10 @@
 #      flag-OFF at 100% coverage, then the models family re-run VERBATIM
 #      with the seam ENGAGED (TestRealCrateParity: engagement spy + edge
 #      corpus + 300-example hypothesis differential + the refuse-prefix
-#      mirror pin).
+#      mirror pin) + the frozen tick-size literal golden's crate arm
+#      (tests/golden/test_models_tick_size_golden.py — the live-Python-
+#      oracle ARBITER arm never skips; the crate arm asserts the SAME
+#      captured literals here).
 #
 # NOT a required gate (the lake-rust-parity precedent / coordinator
 # ruling): it gates the FUTURE default-ON flip, not every PR — a red run
@@ -91,6 +94,7 @@ on:
       - "tests/unit/test_models.py"
       - "tests/unit/test_models_rust.py"
       - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
@@ -125,6 +129,7 @@ on:
       - "tests/unit/test_models.py"
       - "tests/unit/test_models_rust.py"
       - "tests/unit/test_models_type_contract.py"
+      - "tests/golden/test_models_tick_size_golden.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
@@ -362,4 +367,5 @@ jobs:
           pytest -q \
             tests/unit/test_models.py \
             tests/unit/test_models_rust.py \
-            tests/unit/test_models_type_contract.py
+            tests/unit/test_models_type_contract.py \
+            tests/golden/test_models_tick_size_golden.py
