@@ -588,7 +588,9 @@ class ResidentBarBuffer:
     over a u64-resident window lazily PROMOTES the window to the u128 sibling
     (built at most once from the kept raw bars, announced with ONE
     ``combo_mask.wide_kernel_promoted`` INFO per instance — the #1550
-    trade-sim promotion shape).
+    trade-sim promotion shape; both "at most once" laws are SINGLE-THREAD
+    invariants — see :meth:`_promote_wide_kernel`'s honest threading
+    envelope; production never thread-shares a buffer).
 
     On the <=64-bit arm ONLY, a stale ``fno_math`` module missing
     ``ResidentBars`` degrades the construction to a resident two-limb numpy
@@ -729,6 +731,15 @@ class ResidentBarBuffer:
         the installed module predates the class this RAISES
         :class:`WideKernelUnavailableError` (reason ``wheel_missing_u128``) —
         never returns ``None``, never demotes to numpy.
+
+        Honest threading envelope (Golden Rule #10): the "built at most
+        once" / ONE-INFO law is a SINGLE-THREAD invariant — the memo latch
+        is a non-atomic read-check-set, so two threads sharing one instance
+        could EACH build the sibling and log the INFO. Correctness is
+        unaffected (construction is idempotent over the same kept raw bars;
+        last-writer-wins on the memo slot), and production never
+        thread-shares a buffer (one per SweepKernel; parallelism is
+        process-spawn). Deliberately doc-only — no lock on this path.
         """
         if self._rust_wide is not None:
             return self._rust_wide
