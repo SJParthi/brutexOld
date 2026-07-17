@@ -681,7 +681,11 @@ class TestMutationWorkflowWiring:
     _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
 
     def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        # SLICE T24 PR-2: the pair's test field widens to the module's
+        # two-file field (this suite + the Rust-seam suite) so mutants in
+        # the flag-OFF-inert routed arm are killable by the pair itself.
         text = self._WORKFLOW.read_text(encoding="utf-8")
         assert (
-            '"brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:"' in text
+            '"brutex/data/today_completeness.py:tests/unit/test_today_completeness.py'
+            ' tests/unit/test_today_completeness_rust_seam.py:"' in text
         ), "today_completeness.py is not wired into mutation.yml's per-module mutmut loop"

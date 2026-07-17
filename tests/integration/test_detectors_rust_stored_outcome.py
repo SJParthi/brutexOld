@@ -63,11 +63,21 @@ from tests.fakes.detectors_crate import (
 # proven date grid: 04:05 UTC = 09:35 IST, in the [09:15, 15:30) session).
 # ---------------------------------------------------------------------------
 
-#: The three routing flags — armed/disarmed TOGETHER (the production shape).
+#: The three PR-1 routing flags — armed/disarmed TOGETHER (the production
+#: shape). The ON arms below arm exactly this trio.
 _FLAG_ENVS: tuple[str, ...] = (
     dr.LAKE_RUST_RAW_INTEGRITY_ENV,
     dr.LAKE_RUST_INTERIOR_GAP_ENV,
     dr.LAKE_RUST_PARTIAL_WINDOW_ENV,
+)
+
+#: EVERY detector-law flag the autouse fixture must clear — the PR-1 trio
+#: PLUS the PR-2 today-completeness flag: the OFF arm must be genuinely
+#: all-OFF even under the lake-rust-parity lane's four-flag armed
+#: environment (SLICE T24 PR-2 isolation hardening).
+_ALL_FLAG_ENVS: tuple[str, ...] = (
+    *_FLAG_ENVS,
+    dr.LAKE_RUST_TODAY_COMPLETENESS_ENV,
 )
 
 #: A fixed injected clock (the existing suite's 2026 clock) so BOTH arms
@@ -148,7 +158,7 @@ class _Adapter:
 
 @pytest.fixture(autouse=True)
 def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for env in _FLAG_ENVS:
+    for env in _ALL_FLAG_ENVS:
         monkeypatch.delenv(env, raising=False)
     dr.reset_detectors_rust_for_tests()
     yield

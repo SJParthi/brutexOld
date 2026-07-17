@@ -1,14 +1,15 @@
 """A faithful stand-in ``brutex_lake`` crate for the T24 detector laws.
 
-DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 PR-1). The ONE fake-crate
-builder the facade suite (``test_detectors_rust.py``) and the three target
-seam suites share (CLAUDE.md §11 COMMON — no per-file copy): a
-``SimpleNamespace`` exposing the exact ``_CRATE_API`` surface with law-
-faithful pure-Python implementations, so ON-arm wiring/coverage tests run
-WITHOUT the built wheel (the real-wheel differentials are separate,
-``importorskip``-gated). Each law callable is overridable for
-poison/degrade/panic scenarios (the ``test_window_ledger_rust.py``
-``_fake_crate`` convention, hoisted because FOUR suites need it).
+DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 — PR-1 laws 1-3, PR-2
+adds law 4). The ONE fake-crate builder the facade suite
+(``test_detectors_rust.py``) and the target seam suites share (CLAUDE.md
+§11 COMMON — no per-file copy): a ``SimpleNamespace`` exposing the exact
+``_CRATE_API`` surface with law-faithful pure-Python implementations, so
+ON-arm wiring/coverage tests run WITHOUT the built wheel (the real-wheel
+differentials are separate, ``importorskip``-gated). Each law callable is
+overridable for poison/degrade/panic scenarios (the
+``test_window_ledger_rust.py`` ``_fake_crate`` convention, hoisted because
+FIVE suites need it).
 """
 
 from __future__ import annotations
@@ -132,11 +133,61 @@ def fake_classify_partial_window_verdict(
     return ("sparse_complete", last_bar_ordinal, expected_end, missing)
 
 
+def fake_classify_today_completeness_verdict(
+    instrument_class: int,
+    expected_minutes: int,
+    minute_ordinals: Sequence[int],
+    zero_volume: Sequence[bool],
+    oi_null: Sequence[bool],
+    last_bar_complete: bool,
+) -> tuple[bool, int, int, int, int, bool]:
+    """The today-completeness criteria law (PR-2) — the crate mirror in Python.
+
+    Reason indexes mirror the crate's ``TODAY_REASON_*`` order (= the
+    facade's ``_TODAY_REASONS`` tuple): 0 complete · 1 no_today_bars ·
+    2 count_short · 3 count_excess · 4 last_bar_incomplete ·
+    5 oi_null_settling · 6 volume_all_zero.
+    """
+    n = len(minute_ordinals)
+    if len(zero_volume) != n or len(oi_null) != n:
+        raise ValueError("column lengths diverge")
+    if not 0 <= instrument_class <= 3:
+        raise ValueError(f"unknown instrument-class code {instrument_class}")
+    distinct = len(set(minute_ordinals))
+    oi_null_count = sum(1 for flag in oi_null if flag)
+    zero_volume_count = sum(1 for flag in zero_volume if flag)
+    reason = 0
+    incomplete = False
+    count_short_observed = False
+    if instrument_class == 0:  # INDEX_SPOT
+        if distinct < expected_minutes:
+            reason, incomplete = 2, True
+        elif distinct > expected_minutes:
+            reason, incomplete = 3, True
+        elif n > 0 and not last_bar_complete:
+            reason, incomplete = 4, True
+    elif n == 0:
+        reason = 1
+    elif instrument_class == 1:  # CASH_SPOT
+        if zero_volume_count == n:
+            reason, incomplete = 6, True
+    elif instrument_class == 2:  # FUT
+        count_short_observed = distinct < expected_minutes
+        if oi_null_count > 0:
+            reason, incomplete = 5, True
+        elif zero_volume_count == n:
+            reason, incomplete = 6, True
+    elif oi_null_count > 0:  # OPTION
+        reason, incomplete = 5, True
+    return (incomplete, reason, distinct, oi_null_count, zero_volume_count, count_short_observed)
+
+
 def fake_detectors_crate(
     *,
     blake2b_hex: Callable[..., object] | None = None,
     interior_runs: Callable[..., object] | None = None,
     classify_partial: Callable[..., object] | None = None,
+    classify_today: Callable[..., object] | None = None,
     version: str = "0.1.0-fake",
 ) -> SimpleNamespace:
     """A stand-in ``brutex_lake`` module exposing the T24 ``_CRATE_API`` surface."""
@@ -149,6 +200,11 @@ def fake_detectors_crate(
             classify_partial
             if classify_partial is not None
             else fake_classify_partial_window_verdict
+        ),
+        classify_today_completeness_verdict=(
+            classify_today
+            if classify_today is not None
+            else fake_classify_today_completeness_verdict
         ),
         __version__=version,
     )

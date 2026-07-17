@@ -38,6 +38,7 @@ _ALL_FLAGS = (
     dr.LAKE_RUST_RAW_INTEGRITY_ENV,
     dr.LAKE_RUST_INTERIOR_GAP_ENV,
     dr.LAKE_RUST_PARTIAL_WINDOW_ENV,
+    dr.LAKE_RUST_TODAY_COMPLETENESS_ENV,
 )
 
 
@@ -121,6 +122,40 @@ def _identity_materialize(
     return (reason, last_bar, expected_end, missing)
 
 
+#: 09:15 IST on _MON's date, as an absolute minute ordinal.
+_MON_OPEN_MINUTE = _MON * 1440 + 9 * 60 + 15
+
+
+def _today_payload(**overrides: Any) -> Any:
+    """A count-short-shaped TodayCompletenessPayload factory (overridable)."""
+    fields: dict[str, Any] = {
+        "instrument_class_code": 0,  # INDEX_SPOT
+        "expected_minutes": 375,
+        "minute_ordinals": tuple(_MON_OPEN_MINUTE + i for i in range(374)),
+        "zero_volume": tuple([False] * 374),
+        "oi_null": tuple([False] * 374),
+        "last_bar_complete": True,
+    }
+    fields.update(overrides)
+    payload = dr.TodayCompletenessPayload(**fields)
+    return lambda: payload
+
+
+def _today_identity_materialize(
+    reason: str,
+    incomplete: bool,
+    distinct: int,
+    oi_null_count: int,
+    zero_volume_count: int,
+    count_short_observed: bool,
+) -> tuple[str, bool, int, int, int, bool]:
+    return (reason, incomplete, distinct, oi_null_count, zero_volume_count, count_short_observed)
+
+
+#: The count-short payload's expected identity-materialized verdict.
+_TODAY_ORACLE: tuple[str, bool, int, int, int, bool] = ("count_short", True, 374, 0, 0, False)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Fresh latch/burn-in/memo state + flags unset around every test."""
@@ -138,6 +173,7 @@ class TestFlagResolution:
             (dr.raw_integrity_rust_enabled, dr.LAKE_RUST_RAW_INTEGRITY_ENV),
             (dr.interior_gap_rust_enabled, dr.LAKE_RUST_INTERIOR_GAP_ENV),
             (dr.partial_window_rust_enabled, dr.LAKE_RUST_PARTIAL_WINDOW_ENV),
+            (dr.today_completeness_rust_enabled, dr.LAKE_RUST_TODAY_COMPLETENESS_ENV),
         ],
     )
     def test_flag_matrix(self, enabled: Any, env: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -696,6 +732,213 @@ class TestPartialWindowRouting:
         )
 
 
+class TestTodayCompletenessRouting:
+    """The 4th law's routed wrapper (SLICE T24 PR-2) — every arm."""
+
+    def test_success_routes_and_materializes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_crate(monkeypatch, fake_detectors_crate())
+        result = dr.routed_classify_today_completeness(
+            payload_factory=_today_payload(),
+            python_law=lambda: _TODAY_ORACLE,
+            materialize=_today_identity_materialize,
+        )
+        assert result == _TODAY_ORACLE
+
+    def test_degrade_error_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raises(*_a: object) -> object:
+            raise ValueError("column lengths diverge")
+
+        _install_crate(monkeypatch, fake_detectors_crate(classify_today=_raises))
+        with capture_logs() as logs:
+            result = dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+        assert result == _TODAY_ORACLE
+        warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
+        assert warns[0]["reason"] == "today_completeness_error"
+        assert dr.rust_detectors_disabled() is False  # degrade, never a latch
+
+    def test_memory_error_reraises_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _oom(*_a: object) -> object:
+            raise MemoryError
+
+        _install_crate(monkeypatch, fake_detectors_crate(classify_today=_oom))
+        with pytest.raises(MemoryError):
+            dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+
+    def test_panic_belt_latches_crate_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class FakePanic(Exception):
+            pass
+
+        def _panics(*_a: object) -> object:
+            raise FakePanic("today law panicked")
+
+        _install_crate(monkeypatch, fake_detectors_crate(classify_today=_panics))
+        monkeypatch.setattr(dr, "_panic_belt_errors", lambda: (FakePanic,))
+        with capture_logs() as logs:
+            result = dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+        assert result == _TODAY_ORACLE
+        assert any(
+            e["event"] == "detectors_rust.rust_path_disabled" and e["reason"] == "crate_panic"
+            for e in logs
+        )
+        assert dr.rust_detectors_disabled() is True
+
+    @pytest.mark.parametrize(
+        "poison",
+        [
+            "junk",
+            (True, 2, 374, 0, 0),  # wrong arity
+            (1, 2, 374, 0, 0, False),  # incomplete not an exact bool
+            (True, 2, 374, 0, 0, 1),  # count_short_observed not an exact bool
+            (True, True, 374, 0, 0, False),  # reason_idx a bool pun
+            (True, "count_short", 374, 0, 0, False),  # reason_idx a str
+            (True, 99, 374, 0, 0, False),  # reason_idx out of range
+            (True, -1, 374, 0, 0, False),  # reason_idx negative
+            (True, 2, True, 0, 0, False),  # a count as a bool pun
+            (True, 2, "374", 0, 0, False),  # a count as a str
+            (True, 2, -1, 0, 0, False),  # a negative count
+        ],
+        ids=[
+            "non_tuple",
+            "wrong_arity",
+            "incomplete_int_pun",
+            "observe_int_pun",
+            "reason_bool_pun",
+            "reason_str",
+            "reason_out_of_range",
+            "reason_negative",
+            "count_bool_pun",
+            "count_str",
+            "count_negative",
+        ],
+    )
+    def test_poisoned_result_shapes_refused(
+        self, poison: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(monkeypatch, fake_detectors_crate(classify_today=lambda *a: poison))
+        with capture_logs() as logs:
+            result = dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+        assert result == _TODAY_ORACLE
+        warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
+        assert warns[0]["reason"] == "today_completeness_result_refused"
+        assert dr.rust_detectors_disabled() is False
+
+    def test_burn_in_mismatch_ships_oracle_and_autoreverts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A shape-valid "complete" claim on a count-short payload dies at
+        # burn-in — the ORACLE verdict ships, the path autoreverts.
+        _install_crate(
+            monkeypatch,
+            fake_detectors_crate(classify_today=lambda *a: (False, 0, 375, 0, 0, False)),
+        )
+        with capture_logs() as logs:
+            result = dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+        assert result == _TODAY_ORACLE
+        errors = [e for e in logs if e["event"] == "detectors_rust.autoreverted"]
+        assert errors[0]["reason"] == "burn_in_mismatch_today_completeness"
+        assert dr.rust_detectors_disabled() is True
+
+    def test_burn_in_completes_then_steady_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_crate(monkeypatch, fake_detectors_crate())
+        dr.reset_detectors_rust_for_tests(remaining=1)
+        with capture_logs() as logs:
+            assert (
+                dr.routed_classify_today_completeness(
+                    payload_factory=_today_payload(),
+                    python_law=lambda: _TODAY_ORACLE,
+                    materialize=_today_identity_materialize,
+                )
+                == _TODAY_ORACLE
+            )
+        done = [e for e in logs if e["event"] == "detectors_rust.burn_in_complete"]
+        assert done[0]["law"] == "today_completeness"
+
+        def _oracle_bomb() -> tuple[str, bool, int, int, int, bool]:
+            raise AssertionError("steady state consulted the oracle")
+
+        assert (
+            dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=_oracle_bomb,
+                materialize=_today_identity_materialize,
+            )
+            == _TODAY_ORACLE
+        )
+
+    def test_crate_absent_serves_oracle_and_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _import(name: str) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(dr.importlib, "import_module", _import)
+        assert (
+            dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+            == _TODAY_ORACLE
+        )
+        assert dr.rust_detectors_disabled() is True
+
+    def test_crate_stale_pre_pr2_wheel_latches_all_laws(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The disclosed all-or-nothing consequence of the _CRATE_API growth:
+        # a PR-1-era wheel (no 4th symbol) latches crate_stale for EVERY
+        # detector law, not only the new one.
+        crate = fake_detectors_crate()
+        del crate.classify_today_completeness_verdict
+        _install_crate(monkeypatch, crate)
+        assert dr.routed_hash_payload_hex(b"x", python_law=lambda: "oracle") == "oracle"
+        assert dr.rust_detectors_disabled() is True
+        _bomb_import(monkeypatch, "post-stale-latch today law")
+        assert (
+            dr.routed_classify_today_completeness(
+                payload_factory=_today_payload(),
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+            == _TODAY_ORACLE
+        )
+
+    def test_today_reasons_mirror_the_oracle_constants(self) -> None:
+        # The indexed vocabulary is defined FACADE-side (importing the
+        # target there would be the G6 import cycle) — MIRROR-PIN it
+        # against the target's own REASON_* constants, order-sensitively
+        # (the crate's TODAY_REASON_* indexes must agree with this tuple).
+        import brutex.data.today_completeness as tc
+
+        assert dr._TODAY_REASONS == (
+            tc.REASON_COMPLETE,
+            tc.REASON_NO_TODAY_BARS,
+            tc.REASON_COUNT_SHORT,
+            tc.REASON_COUNT_EXCESS,
+            tc.REASON_LAST_BAR_INCOMPLETE,
+            tc.REASON_OI_NULL_SETTLING,
+            tc.REASON_VOLUME_ALL_ZERO,
+        )
+
+
 class TestRealWheelDifferential:
     """Hypothesis differentials vs the REAL built wheel (skipped when absent)."""
 
@@ -790,6 +1033,61 @@ class TestRealWheelDifferential:
                 materialize=_identity_materialize,
             )
             == oracle_fields
+        )
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        instrument_class=st.integers(min_value=0, max_value=3),
+        expected=st.integers(min_value=0, max_value=400),
+        minutes=st.lists(st.integers(min_value=0, max_value=1440 * 3), max_size=40),
+        flags_seed=st.lists(st.tuples(st.booleans(), st.booleans()), min_size=40, max_size=40),
+        last_bar_complete=st.booleans(),
+    )
+    def test_today_completeness_differential(
+        self,
+        instrument_class: int,
+        expected: int,
+        minutes: list[int],
+        flags_seed: list[tuple[bool, bool]],
+        last_bar_complete: bool,
+    ) -> None:
+        self._require_wheel()
+        n = len(minutes)
+        payload = dr.TodayCompletenessPayload(
+            instrument_class_code=instrument_class,
+            expected_minutes=expected,
+            minute_ordinals=tuple(_MON_OPEN_MINUTE + m for m in minutes),
+            zero_volume=tuple(flags_seed[i][0] for i in range(n)),
+            oi_null=tuple(flags_seed[i][1] for i in range(n)),
+            last_bar_complete=last_bar_complete,
+        )
+        from tests.fakes.detectors_crate import fake_classify_today_completeness_verdict
+
+        incomplete, reason_idx, distinct, oi_nulls, zero_vols, observed = (
+            fake_classify_today_completeness_verdict(
+                payload.instrument_class_code,
+                payload.expected_minutes,
+                payload.minute_ordinals,
+                payload.zero_volume,
+                payload.oi_null,
+                payload.last_bar_complete,
+            )
+        )
+        oracle = (
+            dr._TODAY_REASONS[reason_idx],
+            incomplete,
+            distinct,
+            oi_nulls,
+            zero_vols,
+            observed,
+        )
+        assert (
+            dr.routed_classify_today_completeness(
+                payload_factory=lambda: payload,
+                python_law=lambda: oracle,
+                materialize=_today_identity_materialize,
+            )
+            == oracle
         )
 
 
