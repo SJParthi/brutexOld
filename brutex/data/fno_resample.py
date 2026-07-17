@@ -30,8 +30,21 @@ from typing import TYPE_CHECKING
 # source of truth; do NOT redefine ``1`` here). The friend import is the established
 # convention (pyproject reportPrivateUsage="warning" + per-site ignore at deliberate
 # cross-module reuse sites — DEC-P0-017).
+from brutex.data.lake_rust_resample import (
+    lake_rust_resample_enabled,
+    resample_session_frame_via_rust,
+)
 from brutex.data.spot_resample import _BASE_TF_MINUTES  # pyright: ignore[reportPrivateUsage]
-from brutex.data.tf_resampler import resample_1m_to_tf, resample_all_21_tfs
+
+# The verbatim Python resample body is the session composite's oracle arm
+# (DEC-LAKE-RUST-RESAMPLE-DAILY-001); the friend import is the established
+# convention (DEC-P0-017 — per-site ignore at deliberate reuse sites).
+from brutex.data.tf_resampler import (
+    _resample_1m_to_tf_python,  # pyright: ignore[reportPrivateUsage]
+    resample_1m_to_tf,
+    resample_all_21_tfs,
+    validate_resample_frame,
+)
 from brutex.data.timeframes import DAILY_TF_MINUTES, TF_LABELS
 
 if TYPE_CHECKING:
@@ -115,14 +128,43 @@ def resample_session_to_tf(
         present), ascending by ``ts_utc``, with the trailing forming bucket dropped when
         *cutoff_min* lands mid-bucket. Empty when the input is empty.
     """
-    import polars as pl
-
     if day_df.is_empty():
         return day_df
     renamed = day_df.rename({_LAKE_TS_COLUMN: _RESAMPLER_TS_COLUMN})
+    if cutoff_min is not None and lake_rust_resample_enabled():
+        # The T11 session-tail fold (DEC-LAKE-RUST-RESAMPLE-DAILY-001, the
+        # #1913-named follow-up): with the flag ON, resample + cutoff run as
+        # ONE crate crossing; validation runs FIRST (the seam law), and the
+        # oracle every degrade path serves is the verbatim Python COMPOSITE
+        # below (resample body + the retained filter — the oracle arm).
+        validate_resample_frame(renamed, target_tf_minutes)
+        session_cutoff = cutoff_min
+
+        def _session_composite_oracle(df: pl.DataFrame, tf: int) -> pl.DataFrame:
+            return _forming_bucket_cutoff(_resample_1m_to_tf_python(df, tf), tf, session_cutoff)
+
+        return resample_session_frame_via_rust(
+            renamed, target_tf_minutes, cutoff_min, oracle=_session_composite_oracle
+        )
     resampled: pl.DataFrame = resample_1m_to_tf(renamed, target_tf_minutes)
     if cutoff_min is None or resampled.is_empty():
         return resampled
+    return _forming_bucket_cutoff(resampled, target_tf_minutes, cutoff_min)
+
+
+def _forming_bucket_cutoff(
+    resampled: pl.DataFrame, target_tf_minutes: int, cutoff_min: int
+) -> pl.DataFrame:
+    """The verbatim trailing forming-bucket filter — the retained ORACLE arm.
+
+    Extracted token-for-token from :func:`resample_session_to_tf`'s body by
+    DEC-LAKE-RUST-RESAMPLE-DAILY-001 so the flag-OFF path stays
+    byte-identical AND the flag-ON session seam can serve the exact
+    composite (resample + THIS filter) as its live parity oracle. The crate
+    twin is ``rust/brutex-lake/src/resample.rs::filter_forming_buckets``.
+    """
+    import polars as pl
+
     # Drop the trailing FORMING bucket: a bucket labelled at IST minute ``s`` closes at
     # ``s + M``; keep it only when fully closed at/under the cutoff (``s + M <= cutoff``).
     # IST minute-of-day of the bucket label = (ts_utc + 05:30) hour*60 + minute, Int32-cast

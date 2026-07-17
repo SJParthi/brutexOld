@@ -86,6 +86,10 @@ import structlog
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.lake_rust_resample_daily import (
+    lake_rust_resample_daily_enabled,
+    resample_daily_frame_via_rust,
+)
 from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
@@ -739,14 +743,41 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         ``df_1m``, ascending by timestamp. Prices stay full-precision ``Decimal``
         (the lake-write sink snaps to the 2-dp tick grid, DEC-SPOT-PRICE-2DP-001).
     """
+    if df_1m.is_empty():
+        return []
+
+    if lake_rust_resample_daily_enabled():
+        # The T11 daily seam (DEC-LAKE-RUST-RESAMPLE-DAILY-001): the crate
+        # runs aggregate + forming-session drop + midnight-IST restamp as
+        # ONE frame call (oi_aware=False — the spot OHLCV-6 law); validation
+        # runs FIRST (the seam law) and every degrade serves the verbatim
+        # frame body `_resample_daily_frame_python` below. The shared
+        # `frame_to_candle_bars` materialization is IDENTICAL on both arms.
+        from brutex.data.tf_resampler import validate_resample_frame
+
+        validate_resample_frame(df_1m, DAILY_TF_MINUTES)
+        complete = resample_daily_frame_via_rust(
+            df_1m, before, oi_aware=False, oracle=_resample_daily_frame_python
+        )
+    else:
+        complete = _resample_daily_frame_python(df_1m, before)
+    return frame_to_candle_bars(complete, absent_open_interest=None)
+
+
+def _resample_daily_frame_python(df_1m: pl.DataFrame, before: date) -> pl.DataFrame:
+    """The verbatim spot daily FRAME body — the Rust daily seam's live parity oracle.
+
+    Extracted token-for-token from :func:`resample_1m_to_daily` by
+    DEC-LAKE-RUST-RESAMPLE-DAILY-001 (the Slice-0-style decomposition) so
+    the flag-OFF (default) path stays byte-identical AND the seam's every
+    degrade path serves this exact composite. Assumes a non-empty,
+    resampler-valid frame (the public fn's contract).
+    """
     # Local imports keep polars out of this module's import graph for callers that
     # only need the dataclasses (CLAUDE.md §11 lazy dep, mirrors the materialiser).
     import polars as pl
 
     from brutex.data.tf_resampler import resample_1m_to_tf
-
-    if df_1m.is_empty():
-        return []
 
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
 
@@ -768,7 +799,7 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
     #    vendor-parsed "00:00:00 IST" one (the dedup identity; proven by the
     #    vectorize regression tests).
     ist_offset = _IST.utcoffset(None)  # timedelta(+05:30) — the ONE IST definition
-    complete = (
+    complete: pl.DataFrame = (
         daily.with_columns((pl.col("ts_utc") + ist_offset).dt.date().alias("_ist_date"))
         .filter(pl.col("_ist_date") < before)
         .with_columns(
@@ -781,7 +812,7 @@ def resample_1m_to_daily(df_1m: pl.DataFrame, *, before: date) -> list[CandleBar
         # regardless, the legacy loop's unconditional contract).
         .select("ts_utc", "open", "high", "low", "close", "volume")
     )
-    return frame_to_candle_bars(complete, absent_open_interest=None)
+    return complete
 
 
 def resample_1m_to_daily_default(df_1m: pl.DataFrame, before: date) -> list[CandleBar]:
