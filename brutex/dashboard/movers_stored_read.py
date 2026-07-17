@@ -84,6 +84,7 @@ from datetime import date as date_cls
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from brutex.calendars.nse import IST_TZ_NAME
 from brutex.data.lake_day_glob import read_day_intraday_frame, read_day_month_frame
 from brutex.data.session import is_session_exempt
 
@@ -94,9 +95,11 @@ if TYPE_CHECKING:
 
 __all__ = ["read_stored_day_frame"]
 
-#: IST is a fixed +05:30 (no DST) — mirrors ``movers_snapshot._IST`` (the lake
-#: stores bar time as tz-aware UTC; the day filter converts per bar).
-_IST = "Asia/Kolkata"
+#: IST is a fixed +05:30 (no DST) — the lake stores bar time as tz-aware UTC;
+#: the day filter converts per bar. The ONE canonical
+#: :data:`brutex.calendars.nse.IST_TZ_NAME` string root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_TZ_NAME
 
 
 def _prior_month_label_probe_applies(*, interval: str, day: date_cls, symbol: str) -> bool:
