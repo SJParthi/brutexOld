@@ -3082,7 +3082,13 @@ hostile-review pass._
   together (OFF ⇒ unscreened-vs-unscreened, the pre-parity compare, pinned);
   BOTH freshness consumers opt in on the 1-minute BASE read ONLY (the stored
   DERIVED partition is the prebuild's screened OUTPUT — never re-screened);
-  clean lakes verdict-identical (frame-equality + fresh-verdict parity pinned).
+  clean lakes verdict-identical (frame-equality + fresh-verdict parity pinned);
+  HONEST parity envelope (hostile-review MINOR-1 fold): "the SAME screened 1m"
+  is exact for dup-free / price-sane lakes — `read_lake_bars_frame` screens a
+  keep-first-DEDUPED frame while `make_lake_read_1m` screens a RAW frame after
+  `validate_frame_price_sanity`; those dedup + price-sanity pre-steps are
+  PRE-EXISTING asymmetries between the two readers, orthogonal to this change
+  (both no-ops on production keep-first, price-sane lakes).
   **B-2 (CONFIRMED MED, ghost buckets — assessed, pinned, prune DEFERRED):**
   a stored derived bucket whose SOLE 1m source is screened away survives even
   a forced full `incremental=False` re-prebuild (the latest-wins derived

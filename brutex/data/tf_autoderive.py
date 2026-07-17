@@ -88,6 +88,10 @@ def read_lake_bars_frame(
     partition is the prebuild's screened OUTPUT and must never be re-screened
     (a derived bucket's legitimate coarse move could false-trip the in-session
     ratio test). Default ``False`` keeps every other read byte-identical.
+    ``BRUTEX_BAD_TICK_SCREEN`` is resolved PER-PROCESS (read at call time from
+    THIS process's environment) — a prebuild and a later gate run executed
+    under DIFFERENT env settings can disagree, and converge via the printed
+    re-prebuild remedy (a transient ``"stale"``, never a permanent wedge).
     """
     import polars as pl
 
