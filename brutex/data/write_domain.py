@@ -124,8 +124,9 @@ LAKE-RELATIVE — a profile-free writer CONSTRUCTED with its ``lake_root``
 already INSIDE a feed subtree mints dests that are ``bars/``-relative to its
 OWN root, invisible to this pin. That construction shape is owned by the
 profile/slot layer (a feed vendor's writer is constructed WITH its domain —
-the ``vendor_job_slots`` force-injection law), and every primary maintenance
-lane is constructed at the primary root today.
+the force-injection law the per-vendor job-slot layer carries; that layer's
+salvage from the superseded PR #1570 stack rides its own PR), and every
+primary maintenance lane is constructed at the primary root today.
 
 ## Restore ordering across dual window ledgers (the coordinator-relayed WS-B
 ## obligation NG4E-2 — SETTLED per the operator ruling of 2026-07-15 as
