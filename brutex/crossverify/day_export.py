@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
 
-from brutex.calendars.nse import session_last_bar_complete
+from brutex.calendars.nse import IST_TZ_NAME, session_last_bar_complete
 from brutex.crossverify.csv_render import ExportContractError, ExportRow, render_day_csv
 from brutex.data.models import CandleBar
 from brutex.data.session import IST
@@ -177,7 +177,7 @@ def read_day_bars(
     if frame is None:
         return []
     df = frame.select(list(CANONICAL_COLUMNS)).sort("timestamp")
-    ist_date = pl.col("timestamp").dt.convert_time_zone("Asia/Kolkata").dt.date()
+    ist_date = pl.col("timestamp").dt.convert_time_zone(IST_TZ_NAME).dt.date()
     day_df = df.filter(ist_date == day)
     bars: list[CandleBar] = []
     for row in day_df.iter_rows(named=True):
