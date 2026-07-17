@@ -1,11 +1,12 @@
-//! # detectors — the cold data-integrity DETECTOR pure laws (SLICE T24, PR-1)
+//! # detectors — the cold data-integrity DETECTOR pure laws (SLICE T24)
 //!
-//! DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (MIGRATION.md #1948). Mirrors,
-//! token for token, THREE pure decision laws of the `brutex/data/`
-//! read-boundary detector family behind the default-OFF facade
-//! `brutex/data/detectors_rust.py` (three flags —
+//! DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (MIGRATION.md #1948 — PR-1 laws
+//! 1-3; PR-2 adds law 4). Mirrors, token for token, FOUR pure decision
+//! laws of the `brutex/data/` read-boundary detector family behind the
+//! default-OFF facade `brutex/data/detectors_rust.py` (four flags —
 //! `BRUTEX_LAKE_RUST_RAW_INTEGRITY` / `BRUTEX_LAKE_RUST_INTERIOR_GAP` /
-//! `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`):
+//! `BRUTEX_LAKE_RUST_PARTIAL_WINDOW` /
+//! `BRUTEX_LAKE_RUST_TODAY_COMPLETENESS`):
 //!
 //! 1. **Raw-integrity digest** — the `hashlib.blake2b(canonical,
 //!    digest_size=32).hexdigest()` leg of
@@ -34,17 +35,29 @@
 //!    Any walk stepping OFF the grid ABSTAINS (`None` — the
 //!    DEC-FEED-RUST-CORE-001 envelope contract; the facade serves the
 //!    Python oracle).
+//! 4. **Pre-settle TODAY minute-completeness verdict** (SLICE T24 PR-2) —
+//!    the per-class criteria decision tree of
+//!    `brutex/data/today_completeness.py::classify_today_completeness`
+//!    (DEC-PULL-TODAY-COMPLETENESS-GATE-001, #1774): distinct-minute
+//!    count + OI-null / zero-volume folds + the INDEX/CASH/FUT/OPTION
+//!    arm table over plain ints/bools. The three inert arms
+//!    (not-covering / coverage abstain / non-trading) are decided PYTHON
+//!    side BEFORE the route (calendar consults never cross); the
+//!    close-edge law (`session_last_bar_complete`, a calendar function)
+//!    crosses as a Python-computed bool; the verdict reason crosses as
+//!    an INDEX into the facade's frozen reason tuple.
 //!
 //! NO I/O, NO polars — the crate's polars REV pin is irrelevant to this
 //! module; the facade's engagement guard is the SYMBOL handshake (all
-//! three functions present + callable), never the polars version guard.
+//! four functions present + callable), never the polars version guard.
 //!
 //! HONESTY (ADR-0020 banner, verbatim): expected payoff ≈ 0 — conversion
-//! is for uniformity, not speed. All three laws run on cold pull-tail /
+//! is for uniformity, not speed. All four laws run on cold pull-tail /
 //! doctor diagnostics; the FFI hop plus the facade's payload prep is a
 //! small SLOWDOWN, accepted because the seams ship DEFAULT-OFF and the
 //! surrounding paths are vendor-I/O-dominated. These detectors gate REAL
-//! ledger demotions (#1031) — decision parity, not speed, is the bar.
+//! ledger demotions + the TODAY append WITHHOLD (#1031 / #1774) —
+//! decision parity, not speed, is the bar.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -468,6 +481,180 @@ pub(crate) fn classify_partial_window_verdict(
     })
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Law 4 — the pre-settle TODAY minute-completeness verdict (PR-2)
+// ────────────────────────────────────────────────────────────────────────
+
+/// `InstrumentClass.INDEX_SPOT` code (facade `_TODAY_CLASS_CODES` twin).
+pub const TODAY_CLASS_INDEX_SPOT: u8 = 0;
+/// `InstrumentClass.CASH_SPOT` code.
+pub const TODAY_CLASS_CASH_SPOT: u8 = 1;
+/// `InstrumentClass.FUT` code.
+pub const TODAY_CLASS_FUT: u8 = 2;
+/// `InstrumentClass.OPTION` code.
+pub const TODAY_CLASS_OPTION: u8 = 3;
+
+/// `REASON_COMPLETE` index (the facade's `_TODAY_REASONS` tuple order —
+/// the reason crosses as an INDEX, the facade owns the string tokens).
+pub const TODAY_REASON_COMPLETE: u8 = 0;
+/// `REASON_NO_TODAY_BARS` index.
+pub const TODAY_REASON_NO_TODAY_BARS: u8 = 1;
+/// `REASON_COUNT_SHORT` index.
+pub const TODAY_REASON_COUNT_SHORT: u8 = 2;
+/// `REASON_COUNT_EXCESS` index.
+pub const TODAY_REASON_COUNT_EXCESS: u8 = 3;
+/// `REASON_LAST_BAR_INCOMPLETE` index.
+pub const TODAY_REASON_LAST_BAR_INCOMPLETE: u8 = 4;
+/// `REASON_OI_NULL_SETTLING` index.
+pub const TODAY_REASON_OI_NULL_SETTLING: u8 = 5;
+/// `REASON_VOLUME_ALL_ZERO` index.
+pub const TODAY_REASON_VOLUME_ALL_ZERO: u8 = 6;
+
+/// The verdict fields crossing back to Python:
+/// `(incomplete, reason_idx, distinct_minutes, oi_null_count,
+/// zero_volume_count, count_short_observed)`. The facade materializes the
+/// `TodayCompletenessVerdict` (reason token from the index; the
+/// Python-computed `expected_minutes` / `last_bar_ist` never cross).
+pub type TodayCompletenessFields = (bool, u8, i64, i64, i64, bool);
+
+/// The per-class criteria decision tree of `classify_today_completeness`
+/// (`today_completeness.py:378-425`), arm for arm — consulted ONLY after
+/// the Python-side inert arms (not-covering / abstain / non-trading)
+/// resolved a real session:
+///
+/// * `minute_ordinals` — one ABSOLUTE IST minute ordinal per bar
+///   (`ist_date.toordinal() * 1440 + hour * 60 + minute`): distinct
+///   minute-ordinals ≡ the oracle's distinct IST minute-floor datetimes
+///   over EVERY input (date-preserving — a same-`HH:MM` pair on two IST
+///   dates counts 2, exactly like the Python set of minute-floored
+///   datetimes; a strict superset of the split-guarantee argument, so
+///   direct callers like the crossverify gate seam need no
+///   single-date precondition).
+/// * `zero_volume` / `oi_null` — per-bar `volume == 0` /
+///   `open_interest is None` flags (parallel to `minute_ordinals`).
+/// * `last_bar_complete` — the Python-computed
+///   `session_last_bar_complete(session, last_dt)` close-edge law
+///   (a calendar function — never re-derived here); consulted only by
+///   the INDEX arm at exactly-full count, mirroring the oracle's
+///   `last_dt is not None and not session_last_bar_complete(…)` guard
+///   (`n > 0` ⇔ `last_dt is not None`).
+///
+/// `Err` on a column-length divergence or an unknown class code (the
+/// PyO3 edge maps it to `ValueError` — a facade degrade member).
+pub fn classify_today_completeness_impl(
+    instrument_class: u8,
+    expected_minutes: i64,
+    minute_ordinals: &[i64],
+    zero_volume: &[bool],
+    oi_null: &[bool],
+    last_bar_complete: bool,
+) -> Result<TodayCompletenessFields, String> {
+    let n = minute_ordinals.len();
+    if zero_volume.len() != n || oi_null.len() != n {
+        return Err(format!(
+            "classify_today_completeness: column lengths diverge (minutes={}, zero_volume={}, oi_null={})",
+            n,
+            zero_volume.len(),
+            oi_null.len()
+        ));
+    }
+    if instrument_class > TODAY_CLASS_OPTION {
+        return Err(format!(
+            "classify_today_completeness: unknown instrument-class code {instrument_class}"
+        ));
+    }
+    let distinct = minute_ordinals
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<i64>>()
+        .len() as i64;
+    let oi_null_count = oi_null.iter().filter(|flag| **flag).count() as i64;
+    let zero_volume_count = zero_volume.iter().filter(|flag| **flag).count() as i64;
+    let bar_count = n as i64;
+    let mut reason = TODAY_REASON_COMPLETE;
+    let mut incomplete = false;
+    let mut count_short_observed = false;
+    if instrument_class == TODAY_CLASS_INDEX_SPOT {
+        // Count + close-edge demotion teeth (zero today bars FAIL here too:
+        // 0 != expected — indices always print). Reason precedence: count
+        // first (a short day cannot prove its close edge).
+        if distinct < expected_minutes {
+            reason = TODAY_REASON_COUNT_SHORT;
+            incomplete = true;
+        } else if distinct > expected_minutes {
+            reason = TODAY_REASON_COUNT_EXCESS;
+            incomplete = true;
+        } else if bar_count > 0 && !last_bar_complete {
+            // The oracle's `last_dt is not None and not
+            // session_last_bar_complete(session, last_dt)` — `last_dt` is
+            // not None ⇔ bars_today non-empty ⇔ `bar_count > 0`.
+            reason = TODAY_REASON_LAST_BAR_INCOMPLETE;
+            incomplete = true;
+        }
+    } else if bar_count == 0 {
+        // CASH/FUT/OPTION with zero today bars: ABSTAIN / vacuous pass.
+        reason = TODAY_REASON_NO_TODAY_BARS;
+    } else if instrument_class == TODAY_CLASS_CASH_SPOT {
+        if zero_volume_count == bar_count {
+            reason = TODAY_REASON_VOLUME_ALL_ZERO;
+            incomplete = true;
+        }
+    } else if instrument_class == TODAY_CLASS_FUT {
+        count_short_observed = distinct < expected_minutes;
+        if oi_null_count > 0 {
+            reason = TODAY_REASON_OI_NULL_SETTLING;
+            incomplete = true;
+        } else if zero_volume_count == bar_count {
+            reason = TODAY_REASON_VOLUME_ALL_ZERO;
+            incomplete = true;
+        }
+    } else if oi_null_count > 0 {
+        // TODAY_CLASS_OPTION — the OI-null shape only.
+        reason = TODAY_REASON_OI_NULL_SETTLING;
+        incomplete = true;
+    }
+    Ok((
+        incomplete,
+        reason,
+        distinct,
+        oi_null_count,
+        zero_volume_count,
+        count_short_observed,
+    ))
+}
+
+/// FFI face of [`classify_today_completeness_impl`] — ints/bools in, the
+/// verdict fields out (`ValueError` on a length/class precondition;
+/// `RuntimeError` on a caught panic, never a raw `PanicException` into
+/// the facade).
+#[pyfunction]
+#[pyo3(signature = (instrument_class, expected_minutes, minute_ordinals, zero_volume, oi_null, last_bar_complete))]
+pub(crate) fn classify_today_completeness_verdict(
+    instrument_class: u8,
+    expected_minutes: i64,
+    minute_ordinals: Vec<i64>,
+    zero_volume: Vec<bool>,
+    oi_null: Vec<bool>,
+    last_bar_complete: bool,
+) -> PyResult<TodayCompletenessFields> {
+    std::panic::catch_unwind(|| {
+        classify_today_completeness_impl(
+            instrument_class,
+            expected_minutes,
+            &minute_ordinals,
+            &zero_volume,
+            &oi_null,
+            last_bar_complete,
+        )
+    })
+    .map_err(|_| {
+        PyRuntimeError::new_err(
+            "brutex-lake classify_today_completeness_verdict panicked (caught at the FFI boundary)",
+        )
+    })?
+    .map_err(PyValueError::new_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,5 +1068,273 @@ mod tests {
         assert_eq!(grid.sessions_between(MON, MON + 100), None);
         // A day below the grid floor abstains.
         assert_eq!(grid.is_session(MON - 1), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Law 4 — the pre-settle TODAY minute-completeness verdict
+    // ------------------------------------------------------------------
+
+    /// One absolute IST minute ordinal per session minute of a synthetic
+    /// day (day ordinal `MON`, session open 09:15).
+    fn day_minutes(day: i64, count: usize) -> Vec<i64> {
+        (0..count as i64)
+            .map(|i| day * 1440 + 9 * 60 + 15 + i)
+            .collect()
+    }
+
+    fn classify_today(
+        class: u8,
+        expected: i64,
+        minutes: &[i64],
+        zero_volume: &[bool],
+        oi_null: &[bool],
+        last_bar_complete: bool,
+    ) -> TodayCompletenessFields {
+        classify_today_completeness_impl(
+            class,
+            expected,
+            minutes,
+            zero_volume,
+            oi_null,
+            last_bar_complete,
+        )
+        .expect("well-formed inputs classify")
+    }
+
+    #[test]
+    fn index_complete_full_count_close_edge_ok() {
+        let minutes = day_minutes(MON, 375);
+        let flags = vec![false; 375];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 375, &minutes, &flags, &flags, true),
+            (false, TODAY_REASON_COMPLETE, 375, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn index_count_short_fires_and_wins_over_close_edge() {
+        // 374 of 375 — count_short; the close-edge flag (false here) is
+        // NEVER consulted below full count (reason precedence pinned).
+        let minutes = day_minutes(MON, 374);
+        let flags = vec![false; 374];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 375, &minutes, &flags, &flags, false),
+            (true, TODAY_REASON_COUNT_SHORT, 374, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn index_muhurat_short_session_count() {
+        // A 60-minute Muhurat session with 59 distinct minutes → count_short.
+        let minutes = day_minutes(MON, 59);
+        let flags = vec![false; 59];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 60, &minutes, &flags, &flags, true),
+            (true, TODAY_REASON_COUNT_SHORT, 59, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn index_full_count_ending_early_is_last_bar_incomplete() {
+        // 60 distinct minutes == expected but the Python-computed close-edge
+        // law read False (the session's last stored bar is not the close-1).
+        let minutes = day_minutes(MON, 60);
+        let flags = vec![false; 60];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 60, &minutes, &flags, &flags, false),
+            (true, TODAY_REASON_LAST_BAR_INCOMPLETE, 60, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn index_count_excess_has_its_own_reason() {
+        let minutes = day_minutes(MON, 376);
+        let flags = vec![false; 376];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 375, &minutes, &flags, &flags, true),
+            (true, TODAY_REASON_COUNT_EXCESS, 376, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn index_zero_bars_fails_via_count() {
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 375, &[], &[], &[], true),
+            (true, TODAY_REASON_COUNT_SHORT, 0, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn duplicate_minutes_count_distinct() {
+        // Two bars in the same IST minute collapse to ONE distinct minute
+        // (the oracle's minute-floor set law).
+        let mut minutes = day_minutes(MON, 374);
+        minutes.push(minutes[0]);
+        let flags = vec![false; 375];
+        assert_eq!(
+            classify_today(TODAY_CLASS_INDEX_SPOT, 375, &minutes, &flags, &flags, true),
+            (true, TODAY_REASON_COUNT_SHORT, 374, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn same_wall_minute_on_two_ist_dates_counts_two() {
+        // The absolute-minute-ordinal law is DATE-preserving: 09:15 on two
+        // IST dates is TWO distinct minutes (exactly the oracle's
+        // minute-floor DATETIME set — never a wall-clock collapse).
+        let minutes = vec![MON * 1440 + 9 * 60 + 15, (MON + 1) * 1440 + 9 * 60 + 15];
+        let flags = vec![false; 2];
+        let got = classify_today(TODAY_CLASS_OPTION, 375, &minutes, &flags, &flags, true);
+        assert_eq!(got.2, 2);
+    }
+
+    #[test]
+    fn cash_all_zero_volume_fails_mixed_passes() {
+        let minutes = day_minutes(MON, 3);
+        let oi = vec![true; 3]; // OI carries no CASH signal — never consulted
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_CASH_SPOT,
+                375,
+                &minutes,
+                &[true, true, true],
+                &oi,
+                true
+            ),
+            (true, TODAY_REASON_VOLUME_ALL_ZERO, 3, 3, 3, false)
+        );
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_CASH_SPOT,
+                375,
+                &minutes,
+                &[true, false, true],
+                &oi,
+                true
+            ),
+            (false, TODAY_REASON_COMPLETE, 3, 3, 2, false)
+        );
+    }
+
+    #[test]
+    fn non_index_zero_bars_abstain_no_today_bars() {
+        for class in [TODAY_CLASS_CASH_SPOT, TODAY_CLASS_FUT, TODAY_CLASS_OPTION] {
+            assert_eq!(
+                classify_today(class, 375, &[], &[], &[], true),
+                (false, TODAY_REASON_NO_TODAY_BARS, 0, 0, 0, false)
+            );
+        }
+    }
+
+    #[test]
+    fn fut_any_oi_null_beats_all_zero_volume() {
+        // Arm ORDER pinned: with BOTH shapes present the OI-null reason wins.
+        let minutes = day_minutes(MON, 2);
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_FUT,
+                375,
+                &minutes,
+                &[true, true],
+                &[true, false],
+                true
+            ),
+            (true, TODAY_REASON_OI_NULL_SETTLING, 2, 1, 2, true)
+        );
+    }
+
+    #[test]
+    fn fut_all_zero_volume_fires_without_oi_null() {
+        let minutes = day_minutes(MON, 2);
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_FUT,
+                375,
+                &minutes,
+                &[true, true],
+                &[false, false],
+                true
+            ),
+            (true, TODAY_REASON_VOLUME_ALL_ZERO, 2, 0, 2, true)
+        );
+    }
+
+    #[test]
+    fn fut_sparse_settled_passes_with_observe_flag() {
+        // A far-serial-month future: sparse (count short) but settled —
+        // PASSES with `count_short_observed = true` (observe-only INFO).
+        let minutes = day_minutes(MON, 12);
+        let flags = vec![false; 12];
+        assert_eq!(
+            classify_today(TODAY_CLASS_FUT, 375, &minutes, &flags, &flags, true),
+            (false, TODAY_REASON_COMPLETE, 12, 0, 0, true)
+        );
+    }
+
+    #[test]
+    fn option_oi_null_fails_sparse_zero_volume_passes() {
+        let minutes = day_minutes(MON, 4);
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_OPTION,
+                375,
+                &minutes,
+                &[false; 4],
+                &[false, true, false, false],
+                true
+            ),
+            (true, TODAY_REASON_OI_NULL_SETTLING, 4, 1, 0, false)
+        );
+        // Zero-volume option minutes are routine; sparsity never demotes —
+        // and `count_short_observed` stays false (a FUT-only observe flag).
+        assert_eq!(
+            classify_today(
+                TODAY_CLASS_OPTION,
+                375,
+                &minutes,
+                &[true; 4],
+                &[false; 4],
+                true
+            ),
+            (false, TODAY_REASON_COMPLETE, 4, 0, 4, false)
+        );
+    }
+
+    #[test]
+    fn length_divergence_and_unknown_class_are_errors() {
+        let minutes = day_minutes(MON, 2);
+        assert!(
+            classify_today_completeness_impl(
+                TODAY_CLASS_FUT,
+                375,
+                &minutes,
+                &[true],
+                &[false, false],
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            classify_today_completeness_impl(
+                TODAY_CLASS_FUT,
+                375,
+                &minutes,
+                &[true, true],
+                &[false],
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            classify_today_completeness_impl(
+                4,
+                375,
+                &minutes,
+                &[true, true],
+                &[false, false],
+                true
+            )
+            .is_err()
+        );
     }
 }

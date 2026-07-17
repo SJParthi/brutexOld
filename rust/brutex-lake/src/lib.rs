@@ -585,6 +585,16 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
         detectors::classify_partial_window_verdict,
         m
     )?)?;
+    // SLICE T24 PR-2 — the FOURTH detector law (the pre-settle TODAY
+    // minute-completeness verdict, DEC-PULL-TODAY-COMPLETENESS-GATE-001
+    // #1774). The facade's `_CRATE_API` handshake grows 3 → 4
+    // all-or-nothing: a PR-1-era wheel latches `crate_stale` for ALL
+    // detector laws (the disclosed #1771 precedent). Appended after the
+    // PR-1 trio, never reordering it (the §4.1 additive-registration law).
+    m.add_function(wrap_pyfunction!(
+        detectors::classify_today_completeness_verdict,
+        m
+    )?)?;
     Ok(())
 }
 

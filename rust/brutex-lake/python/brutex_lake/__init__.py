@@ -25,10 +25,12 @@ DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
 (ADR-0020 Wave C-3 / G8, DEC-LAKE-RUST-WINDOW-LEDGER-001) — the
 window-ledger status + merge-key date laws (``classify_window_status`` /
-``date_isoformat``); and ``brutex/data/detectors_rust.py`` (SLICE T24 PR-1,
+``date_isoformat``); and ``brutex/data/detectors_rust.py`` (SLICE T24 —
+PR-1 laws + the PR-2 fourth law,
 DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948) — the T24
 detector laws (``raw_integrity_blake2b_hex`` / ``interior_barless_runs`` /
-``classify_partial_window_verdict``, behind three per-module flags).
+``classify_partial_window_verdict`` /
+``classify_today_completeness_verdict``, behind four per-module flags).
 Nothing else in ``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
@@ -49,6 +51,7 @@ from brutex_lake._brutex_lake import (
     __version__,
     atomic_commit_replace,
     classify_partial_window_verdict,
+    classify_today_completeness_verdict,
     classify_window_status,
     date_isoformat,
     interior_barless_runs,
@@ -69,6 +72,7 @@ __all__ = [
     "__version__",
     "atomic_commit_replace",
     "classify_partial_window_verdict",
+    "classify_today_completeness_verdict",
     "classify_window_status",
     "date_isoformat",
     "interior_barless_runs",

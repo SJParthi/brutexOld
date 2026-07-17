@@ -116,3 +116,59 @@ def date_isoformat(year: int, month: int, day: int) -> str:
     month 1..=12, day 1..=31 — structure only; production-unreachable
     through the facade, which passes real ``date`` fields).
     """
+
+def raw_integrity_blake2b_hex(data: bytes, digest_size: int) -> str:
+    """The unkeyed blake2b digest of *data* as lowercase hex (SLICE T24 PR-1).
+
+    The ``hashlib.blake2b(data, digest_size=n).hexdigest()`` twin (RFC 7693,
+    in-crate). ``ValueError`` for a ``digest_size`` outside ``1..=64``;
+    ``RuntimeError`` on a caught panic.
+    """
+
+def interior_barless_runs(
+    covered: tuple[int, ...] | list[int],
+    interior_sessions: tuple[int, ...] | list[int],
+) -> list[tuple[int, int, int]]:
+    """Maximal bar-less interior session runs over date ordinals (T24 PR-1).
+
+    Ints in, ``(run_first, run_last, run_sessions)`` 3-tuples out (bounds
+    inclusive, ascending). ``RuntimeError`` on a caught panic.
+    """
+
+def classify_partial_window_verdict(
+    last_bar_ordinal: int | None,
+    window_end_ordinal: int,
+    today_ordinal: int,
+    expiry_ordinal: int | None,
+    coverage_ok: bool,
+    tolerance: int,
+    live_edge: int,
+    span_start_ordinal: int,
+    trading_flags: tuple[bool, ...] | list[bool],
+) -> tuple[str, int | None, int | None, int] | None:
+    """The partial-window truncation verdict over a session grid (T24 PR-1).
+
+    ``None`` = a session walk stepped off the grid (the ABSTAIN contract —
+    the facade serves the Python oracle). ``RuntimeError`` on a caught
+    panic.
+    """
+
+def classify_today_completeness_verdict(
+    instrument_class: int,
+    expected_minutes: int,
+    minute_ordinals: tuple[int, ...] | list[int],
+    zero_volume: tuple[bool, ...] | list[bool],
+    oi_null: tuple[bool, ...] | list[bool],
+    last_bar_complete: bool,
+) -> tuple[bool, int, int, int, int, bool]:
+    """The pre-settle TODAY minute-completeness verdict (SLICE T24 PR-2).
+
+    The per-class criteria tree of
+    ``brutex/data/today_completeness.py::classify_today_completeness``
+    (#1774) over ints/bools: returns ``(incomplete, reason_idx,
+    distinct_minutes, oi_null_count, zero_volume_count,
+    count_short_observed)`` — the reason crosses as an index into the
+    facade's frozen reason tuple. ``ValueError`` on a column-length
+    divergence or an unknown class code; ``RuntimeError`` on a caught
+    panic.
+    """
