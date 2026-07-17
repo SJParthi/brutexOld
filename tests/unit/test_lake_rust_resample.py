@@ -713,3 +713,307 @@ class TestMutationHardening:
             '    schema_token = f"{df_1m.schema}|tf={target_tf_minutes}"',
         ):
             assert literal in source, f"pinned literal drifted: {literal!r}"
+
+
+# ---------------------------------------------------------------------------
+# T11 — the session + batch faces (DEC-LAKE-RUST-RESAMPLE-DAILY-001).
+# APPENDED classes only — every pre-existing test above is byte-unmodified.
+# ---------------------------------------------------------------------------
+
+
+def _fake_crate_t11(
+    *,
+    pinned: Any = pl.__version__,
+    session: Any = None,
+    batch: Any = None,
+    with_session_face: bool = True,
+) -> types.ModuleType:
+    """A T11-aware fake crate: the G5 four-name API + optional session face."""
+    module = _fake_crate(pinned=pinned)
+    if batch is not None:
+        module.resample_all_ipc = batch  # type: ignore[attr-defined]
+    if with_session_face:
+        if session is None:
+            session = lambda ipc, tf, oi, cutoff: _ipc(_ORACLE_DF)  # noqa: E731 - test stub
+        module.resample_session_ipc = session  # type: ignore[attr-defined]
+    return module
+
+
+class _CountingSessionOracle:
+    """Composite-oracle stub counting invocations (returns :data:`_ORACLE_DF`)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, df_1m: Any, target_tf_minutes: int) -> pl.DataFrame:
+        self.calls += 1
+        return _ORACLE_DF
+
+
+class TestSessionFace:
+    def test_stale_wheel_missing_the_face_serves_the_oracle_without_latching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pre-T11 wheel (G5 API present, no resample_session_ipc): the
+        # session face degrades with ONE crate_stale warn and NO latch —
+        # the proven single-TF face keeps serving (the disclosed deviation
+        # from the PR-2 all-or-nothing _CRATE_API growth).
+        module = _fake_crate_t11(with_session_face=False)
+        _install_crate(monkeypatch, module)
+        oracle = _CountingSessionOracle()
+        with capture_logs() as logs:
+            out = lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=oracle)
+            lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=oracle)
+        assert out.equals(_ORACLE_DF)
+        assert oracle.calls == 2
+        assert lrs.rust_resample_disabled() is False
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "crate_stale"
+        assert warns[0]["missing_face"] == "resample_session_ipc"
+        # The single-TF face still engages on the SAME stale wheel.
+        single = lrs.resample_frame_via_rust(_df_1m(), 5, oracle=_CountingOracle())
+        assert single.equals(_ORACLE_DF)
+        assert lrs.rust_resample_disabled() is False
+
+    def test_engaged_call_passes_tf_oi_true_and_cutoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[tuple[int, bool, int]] = []
+
+        def _spy(ipc: bytes, tf: int, oi: bool, cutoff: int) -> bytes:
+            seen.append((tf, oi, cutoff))
+            return _ipc(_ORACLE_DF)
+
+        _install_crate(monkeypatch, _fake_crate_t11(session=_spy))
+        out = lrs.resample_session_frame_via_rust(
+            _df_1m(), 15, 562, oracle=_CountingSessionOracle()
+        )
+        assert seen == [(15, True, 562)]
+        assert out.equals(_ORACLE_DF)
+
+    def test_latched_process_serves_the_oracle_before_any_crate_touch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _bomb(*_args: object) -> bytes:
+            raise AssertionError("crate must not be touched once latched")
+
+        lrs._disable("test_latch")
+        _install_crate(monkeypatch, _fake_crate_t11(session=_bomb))
+        oracle = _CountingSessionOracle()
+        out = lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=oracle)
+        assert out.equals(_ORACLE_DF)
+        assert oracle.calls == 1
+
+    def test_crate_raise_degrades_to_the_composite_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise(*_args: object) -> bytes:
+            raise ValueError("session face says no")
+
+        _install_crate(monkeypatch, _fake_crate_t11(session=_raise))
+        with capture_logs() as logs:
+            out = lrs.resample_session_frame_via_rust(
+                _df_1m(), 5, 560, oracle=_CountingSessionOracle()
+            )
+        assert out.equals(_ORACLE_DF)
+        assert lrs.rust_resample_disabled() is False
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert warns[0]["reason"] == "resample_error"
+
+    def test_non_bytes_session_result_is_refuse_poison(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(
+            monkeypatch, _fake_crate_t11(session=lambda ipc, tf, oi, cutoff: 0xBAD)
+        )
+        with capture_logs() as logs:
+            out = lrs.resample_session_frame_via_rust(
+                _df_1m(), 5, 560, oracle=_CountingSessionOracle()
+            )
+        assert out.equals(_ORACLE_DF)
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert warns[0]["reason"] == "resample_result_refused"
+
+    def test_zstd_metadata_raise_on_first_engagement_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom() -> str:
+            raise ValueError("no fingerprint")
+
+        module = _fake_crate_t11()
+        module.linked_zstd_version = _boom  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, module)
+        out = lrs.resample_session_frame_via_rust(
+            _df_1m(), 5, 560, oracle=_CountingSessionOracle()
+        )
+        assert out.equals(_ORACLE_DF)
+        assert lrs._DISABLED_REASON[0] == "crate_metadata_error"
+
+    def test_session_token_is_distinct_from_the_single_face_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # After the single face proved schema|tf=5, the session face's
+        # |session_cutoff-suffixed token is STILL unseen — the shape gate
+        # compares the fused law's first engagement of the same shape.
+        lrs.reset_lake_rust_resample_for_tests(remaining=1)
+        _install_crate(monkeypatch, _fake_crate_t11())
+        single_oracle = _CountingOracle()
+        lrs.resample_frame_via_rust(_df_1m(), 5, oracle=single_oracle)  # spends the budget
+        assert single_oracle.calls == 1
+        assert lrs._BURN_IN_REMAINING[0] == 0
+        session_oracle = _CountingSessionOracle()
+        lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=session_oracle)
+        assert session_oracle.calls == 1, "the session token must burn in independently"
+        # The SAME session token again is steady state — no oracle.
+        lrs.resample_session_frame_via_rust(_df_1m(), 5, 929, oracle=session_oracle)
+        assert session_oracle.calls == 1, "the token marks cutoff PRESENCE, not its value"
+
+    def test_burn_in_mismatch_autoreverts_and_ships_the_oracle_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(
+            monkeypatch,
+            _fake_crate_t11(session=lambda ipc, tf, oi, cutoff: _ipc(_WRONG_DF)),
+        )
+        out = lrs.resample_session_frame_via_rust(
+            _df_1m(), 5, 560, oracle=_CountingSessionOracle()
+        )
+        assert out.equals(_ORACLE_DF)
+        assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
+
+
+class TestBatchFace:
+    def test_one_crate_call_serves_every_requested_tf_in_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[int], bool]] = []
+
+        def _batch(ipc: bytes, tfs: list[int], oi: bool) -> list[bytes]:
+            calls.append((list(tfs), oi))
+            return [_ipc(_ORACLE_DF) for _ in tfs]
+
+        single_bomb_calls: list[int] = []
+
+        def _single_bomb(ipc: bytes, tf: int, oi: bool) -> bytes:
+            single_bomb_calls.append(tf)
+            raise AssertionError("the batch face must not fan out to resample_1m_ipc")
+
+        module = _fake_crate_t11(batch=_batch)
+        module.resample_1m_ipc = _single_bomb  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, module)
+        lrs.reset_lake_rust_resample_for_tests(remaining=0)
+        oracle = _CountingOracle()
+        out = lrs.resample_all_via_rust(_df_1m(), (5, 15, 375), oracle=oracle)
+        assert calls == [([5, 15, 375], True)], "ONE crossing, oi_aware=True, order kept"
+        assert single_bomb_calls == []
+        assert list(out.keys()) == [5, 15, 375]
+        assert all(frame.equals(_ORACLE_DF) for frame in out.values())
+        assert oracle.calls == 0, "steady state serves crate frames with no oracle"
+
+    def test_latched_process_serves_the_whole_oracle_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrs._disable("test_latch")
+        _install_crate(monkeypatch, _fake_crate_t11())
+        oracle = _CountingOracle()
+        out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
+        assert oracle.calls == 2
+        assert list(out.keys()) == [5, 15]
+
+    def test_crate_raise_serves_the_whole_oracle_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise(*_args: object) -> list[bytes]:
+            raise RuntimeError("batch panicked (caught at the FFI boundary)")
+
+        _install_crate(monkeypatch, _fake_crate_t11(batch=_raise))
+        oracle = _CountingOracle()
+        out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
+        assert oracle.calls == 2
+        assert all(frame.equals(_ORACLE_DF) for frame in out.values())
+        assert lrs.rust_resample_disabled() is False
+
+    def test_non_list_batch_result_is_refuse_poison(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: b"one blob"))
+        with capture_logs() as logs:
+            out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=_CountingOracle())
+        assert list(out.keys()) == [5, 15]
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert warns[0]["reason"] == "resample_result_refused"
+        assert warns[0]["result_type"] == "bytes"
+
+    def test_length_mismatched_batch_is_refuse_poison(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(
+            monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF)])
+        )
+        with capture_logs() as logs:
+            out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=_CountingOracle())
+        assert list(out.keys()) == [5, 15]
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert warns[0]["reason"] == "resample_result_refused"
+
+    def test_one_undecodable_payload_serves_the_whole_oracle_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(
+            monkeypatch,
+            _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF), b"garbage"]),
+        )
+        oracle = _CountingOracle()
+        with capture_logs() as logs:
+            out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
+        assert oracle.calls == 2, "never a partial mix — the WHOLE derive from the oracle"
+        assert all(frame.equals(_ORACLE_DF) for frame in out.values())
+        warns = [e for e in logs if e["event"] == "lake_rust_resample.fallback"]
+        assert warns[0]["reason"] == "result_decode_error"
+
+    def test_zstd_metadata_raise_serves_the_whole_oracle_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom() -> str:
+            raise ValueError("no fingerprint")
+
+        module = _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF)] * 2)
+        module.linked_zstd_version = _boom  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, module)
+        oracle = _CountingOracle()
+        out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
+        assert oracle.calls == 2
+        assert lrs._DISABLED_REASON[0] == "crate_metadata_error"
+
+    def test_mid_batch_burn_in_mismatch_serves_the_whole_oracle_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # tf 5's payload matches the oracle; tf 15's does NOT — the
+        # mismatch latches and the ENTIRE dict is rebuilt from the oracle
+        # (the never-a-partial-mix law).
+        _install_crate(
+            monkeypatch,
+            _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF), _ipc(_WRONG_DF)]),
+        )
+        with capture_logs() as logs:
+            out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=_CountingOracle())
+        assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
+        assert all(frame.equals(_ORACLE_DF) for frame in out.values())
+        errors = [e for e in logs if e["event"] == "lake_rust_resample.autoreverted"]
+        assert len(errors) == 1
+
+    def test_batch_tokens_share_the_single_face_token_space(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A shape proven through the SINGLE face is proven for the batch
+        # face too (same {schema}|tf={tf} tokens — same law).
+        lrs.reset_lake_rust_resample_for_tests(remaining=1)
+        _install_crate(monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF)]))
+        single_oracle = _CountingOracle()
+        lrs.resample_frame_via_rust(_df_1m(), 5, oracle=single_oracle)  # proves schema|tf=5
+        assert single_oracle.calls == 1
+        batch_oracle = _CountingOracle()
+        out = lrs.resample_all_via_rust(_df_1m(), (5,), oracle=batch_oracle)
+        assert batch_oracle.calls == 0, "tf=5's token was already proven"
+        assert out[5].equals(_ORACLE_DF)
