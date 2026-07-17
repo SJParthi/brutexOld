@@ -110,6 +110,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING, Final, Literal
 
+from brutex.config.feed_scope import note_feed_registered
 from brutex.data.write_domain import FEEDS_COMPONENT, WriteDomain, primary_write_domain
 from brutex.models import BruteXError
 
@@ -234,6 +235,52 @@ class IncrementalityCapability:
 
 
 @dataclass(frozen=True, slots=True)
+class UnderlyingScope:
+    """One admitted underlying in a vendor's scope DECLARATION.
+
+    DEC-UNIVERSE-INDEX-ONLY-001 (MIGRATION.md #1934) — the profile-level
+    declaration half of the scope law: ``underlying`` is the bare symbol
+    (``NIFTY`` / ``INDIAVIX``); ``fno_chain`` declares whether the vendor
+    pulls the underlying's derivative chain (``False`` for a reference-only
+    spot like INDIAVIX). The declaration is exchange-less by design — the
+    ADMISSION authority stays :mod:`brutex.config.feed_scope`'s
+    exchange-keyed :class:`~brutex.config.feed_scope.FeedScope`; a mirror-pin
+    test keeps the two in agreement for the Groww binding.
+    """
+
+    underlying: str
+    fno_chain: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FeedScopeBinding:
+    """A vendor profile's frozen universe-scope declaration (#1934).
+
+    ``admitted`` enumerates the underlyings the vendor's chain acts on. The
+    binding is a DECLARATION the orchestration layer can read off the profile
+    — admission predicates consult :func:`brutex.config.feed_scope.resolve_feed_scope`
+    (env-overridable), never this tuple, so the two never fight: the binding
+    documents the vendor's shipped default, the env law decides at runtime.
+    """
+
+    admitted: tuple[UnderlyingScope, ...]
+
+
+#: The Groww (and default) index4 scope binding — the 4 ``V1_INDICES``
+#: underlyings, F&O chains on the 3 brute-force indices only. Mirror-pinned to
+#: ``feed_scope.INDEX4_UNDERLYINGS`` / ``INDEX4_FNO_UNDERLYINGS`` by
+#: ``test_feeds_vendor_profile_scope.py`` (drift on either side fails CI).
+INDEX4_SCOPE_BINDING: Final[FeedScopeBinding] = FeedScopeBinding(
+    admitted=(
+        UnderlyingScope(underlying="NIFTY", fno_chain=True),
+        UnderlyingScope(underlying="BANKNIFTY", fno_chain=True),
+        UnderlyingScope(underlying="SENSEX", fno_chain=True),
+        UnderlyingScope(underlying="INDIAVIX", fno_chain=False),
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
 class VendorPullProfile:
     """One vendor's FROZEN pull-orchestration declaration (ADR-0021 Decision 4).
 
@@ -276,6 +323,12 @@ class VendorPullProfile:
     #: (capability absent). Opaque here for the same no-import-hub reason.
     greeks_seam: Callable[..., object] | None
     ledger_markets: tuple[str, ...] = field(default=())
+    #: The vendor's universe-scope DECLARATION (DEC-UNIVERSE-INDEX-ONLY-001,
+    #: #1934) — ``None`` = undeclared (a legacy/synthetic profile; admission
+    #: still resolves through ``feed_scope``'s fail-closed default). Appended
+    #: STRICTLY LAST + defaulted so every existing positional constructor call
+    #: is byte-identical (the ``ledger_markets`` additive precedent).
+    scope: FeedScopeBinding | None = None
 
     def assert_write_dest(self, dest: Path) -> None:
         """The Pin D1-1 enforcement HOOK: assert *dest* is inside THIS vendor's domain.
@@ -305,6 +358,7 @@ class VendorPullProfile:
                 "declaration, two spellings (ADR-0021 §12); a silent mismatch would bind "
                 "run_spot_daily off one field and gate it off the other"
             )
+        self._assert_scope_binding()
         if self.write_domain.primary:
             if self.lock_domain.kind != LOCK_TRIO_AT_PRIMARY_ROOT:
                 raise VendorProfileError(
@@ -318,6 +372,26 @@ class VendorPullProfile:
                 )
         else:
             self._assert_feed_profile_isolation()
+
+    def _assert_scope_binding(self) -> None:
+        """The #1934 scope-declaration construction arms (fail-loud, CONC-01 style)."""
+        if self.scope is None:
+            return
+        seen: set[str] = set()
+        for entry in self.scope.admitted:
+            if not entry.underlying or not entry.underlying.strip():
+                raise VendorProfileError(
+                    f"profile {self.vendor!r}: scope binding carries an EMPTY underlying "
+                    "token — every UnderlyingScope must name a non-blank symbol "
+                    "(DEC-UNIVERSE-INDEX-ONLY-001)"
+                )
+            if entry.underlying in seen:
+                raise VendorProfileError(
+                    f"profile {self.vendor!r}: scope binding lists underlying "
+                    f"{entry.underlying!r} TWICE — one UnderlyingScope per symbol "
+                    "(DEC-UNIVERSE-INDEX-ONLY-001)"
+                )
+            seen.add(entry.underlying)
 
     def _assert_feed_profile_isolation(self) -> None:
         """The CONC-01 profile-level arms for a NON-primary (feed) vendor."""
@@ -419,6 +493,13 @@ class VendorProfileRegistry:
             self._assert_disjoint(profile, other, product=product)
         self._profiles[profile.vendor] = profile
         self._rate_products[profile.vendor] = product
+        # The §2.5 ACTIVE-feed seam (DEC-UNIVERSE-INDEX-ONLY-001 / #1934):
+        # fires ONLY here — where profile state actually LANDS, strictly AFTER
+        # every refusal arm above — so a REFUSED registration can never grow
+        # ``feed_scope.active_feeds()`` and fold a never-operating feed's
+        # pre-laid wide binding into the read union (the seam-ordering law;
+        # import direction feeds → config ONLY).
+        note_feed_registered(profile.vendor)
 
     def _assert_disjoint(
         self, profile: VendorPullProfile, other: VendorPullProfile, *, product: object
@@ -618,12 +699,17 @@ def groww_pull_profile(
         incrementality=IncrementalityCapability(kind="durable_ledger", markets=ledger_markets),
         greeks_seam=run_greeks_enrich_pass,
         ledger_markets=ledger_markets,
+        # The #1934 universe-scope declaration: Groww ships index4 — the 4
+        # V1_INDICES underlyings, F&O chains on the 3 brute-force indices only
+        # (admission still resolves through feed_scope's env-overridable law).
+        scope=INDEX4_SCOPE_BINDING,
     )
 
 
 __all__ = [
     "INCR_DURABLE_LEDGER",
     "INCR_LAKE_TAIL_SCAN",
+    "INDEX4_SCOPE_BINDING",
     "LOCK_FEED_ROOT_FLOCK",
     "LOCK_TRIO_AT_PRIMARY_ROOT",
     "OPTIONS_PER_CONTRACT",
@@ -631,10 +717,12 @@ __all__ = [
     "PRIMARY_VENDOR",
     "TODAY_CLAMP_TO_PREV_SESSION",
     "TODAY_CLASSIFIER_GATE",
+    "FeedScopeBinding",
     "IncrementalityCapability",
     "LockDomain",
     "PagingProfile",
     "TodayCompletenessBinding",
+    "UnderlyingScope",
     "VendorCapability",
     "VendorProfileError",
     "VendorProfileRegistry",

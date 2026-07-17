@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from brutex.config.feed_scope import FEED_SCOPE_ENV
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome, PrebuildTarget
 from brutex.dashboard.pipeline_pull import PipelinePullReport
 from brutex.dashboard.pull_controller import SessionRateController
@@ -254,6 +255,11 @@ def test_metadata_years_injected_clock() -> None:
 
 
 def test_spot_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 migration Law 2): this
+    # test pins the closure-kwargs MECHANICS over the mixed 3-row store —
+    # the shipped index4 default's narrowed enumeration has its own arm
+    # (test_index4_default_narrows_enumeration_to_admitted_indices).
+    monkeypatch.setenv(FEED_SCOPE_ENV, "full")
     hp, spies, store = _wire(monkeypatch, tmp_path)
     assert hp.run_spot() == "SPOT-REPORT"
     args = spies.spot["args"]
@@ -294,7 +300,28 @@ def test_spot_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert hp.targets == 3
 
 
+def test_index4_default_narrows_enumeration_to_admitted_indices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shipped-default guard arm (DEC-UNIVERSE-INDEX-ONLY-001, P2 fails-before).
+
+    Under the forced ``index4`` conftest default, the nightly whole-universe
+    enumeration over a stale MIXED store (NIFTY + RELIANCE + REFONLY) narrows
+    to the admitted index rows ONLY — at merge-base all 3 enumerated (the
+    fails-before proof executed against the pre-change tree).
+    """
+    hp, spies, _store = _wire(monkeypatch, tmp_path)
+    assert hp.run_spot() == "SPOT-REPORT"
+    assert [inst.symbol_name for inst in spies.spot["args"][0]] == ["NIFTY"]
+    assert hp.targets == 1
+
+
 def test_metadata_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 migration Law 2): this
+    # test pins the closure-kwargs MECHANICS over the mixed 3-row store —
+    # the shipped index4 default's narrowed enumeration has its own arm
+    # (test_index4_default_narrows_enumeration_to_admitted_indices).
+    monkeypatch.setenv(FEED_SCOPE_ENV, "full")
     hp, spies, store = _wire(monkeypatch, tmp_path)
     assert hp.run_metadata() == "META-REPORT"
     args = spies.metadata["args"]
@@ -320,6 +347,11 @@ def test_metadata_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 def test_historical_closure_kwargs_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 migration Law 2): this
+    # test pins the closure-kwargs MECHANICS over the mixed 3-row store —
+    # the shipped index4 default's narrowed enumeration has its own arm
+    # (test_index4_default_narrows_enumeration_to_admitted_indices).
+    monkeypatch.setenv(FEED_SCOPE_ENV, "full")
     hp, spies, store = _wire(monkeypatch, tmp_path)
     assert hp.run_historical(cast(Any, "PRIOR-STEPS")) == "HIST-REPORT"
     args = spies.historical["args"]
@@ -417,6 +449,11 @@ def test_injected_session_rate_is_used(monkeypatch: pytest.MonkeyPatch, tmp_path
 def test_prebuild_closure_kwargs_and_materialize(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 migration Law 2): this
+    # test pins the closure-kwargs MECHANICS over the mixed 3-row store —
+    # the shipped index4 default's narrowed enumeration has its own arm
+    # (test_index4_default_narrows_enumeration_to_admitted_indices).
+    monkeypatch.setenv(FEED_SCOPE_ENV, "full")
     hp, spies, store = _wire(monkeypatch, tmp_path)
     outcome = hp.run_prebuild(frozenset({"BADSTOCK"}))
     assert outcome.ok is True
