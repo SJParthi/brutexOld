@@ -8512,11 +8512,12 @@ hostile-review pass._
    the 60-condition vocabulary itself is UNCHANGED (data-independent —
    the volume-bearing VWAP bits 52/53 now permanently abstain on every
    engine instrument, since no spot index carries volume) [the vocabulary
-   has SINCE grown 60→63 under the grow-only law — the Group-13
-   gap-midpoint bits 60-62, DEC-GAP-MIDPOINT-CONDITIONS-001, MIGRATION.md
-   #1900; additive — existing masks byte-identical, new runs re-key via
-   indicator_version; the spot-only ENGINE scope this retirement fixes is
-   untouched]; the futures
+   has SINCE grown under the grow-only law — the #1574 vocab-66 reshape
+   (60→66, DEC-VOCAB-66-RESHAPE-IMPL-001 #1804-#1806) then the Group-15
+   gap-midpoint bits 66-68 (66→69, DEC-GAP-MIDPOINT-CONDITIONS-001,
+   MIGRATION.md #1901; additive — existing masks byte-identical, new runs
+   re-key via indicator_version); the spot-only ENGINE scope this
+   retirement fixes is untouched]; the futures
    resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
    are RETAINED as tested lake-tooling internals below the scope gate,
    reachable only via the loud, audit-stamped `--allow-out-of-scope` CLI

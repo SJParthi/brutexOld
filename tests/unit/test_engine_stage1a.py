@@ -1067,7 +1067,7 @@ def test_one_day_shaped_stream_stays_dark_via_the_arming_ordinal() -> None:
     ]
     masks = build_bar_bits(bars)
     assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks)
-    # Teeth: the day-type gap bits DO fire (anchors warm; only 60-62 abstain).
+    # Teeth: the day-type gap bits DO fire (anchors warm; only 66-68 abstain).
     assert masks[1] & (1 << B.BIT_GAP_UP_DAY)
     assert masks[2] & (1 << B.BIT_GAP_DOWN_DAY)
 

@@ -243,7 +243,7 @@ def _pivot_dependent_bits() -> int:
 
 
 def _gap_mid_dependent_bits() -> int:
-    """Build the u128 mask of the Group-15 gap-midpoint bits (60-62).
+    """Build the u128 mask of the Group-15 gap-midpoint bits (66-68).
 
     The gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) needs BOTH the
     prior session's last-TF-bar edge (X1) AND the prior day's close (the gap

@@ -123,7 +123,7 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
-        # Group-13 gap-midpoint (appended-last FFI law,
+        # Group-15 gap-midpoint (appended-last FFI law,
         # DEC-GAP-MIDPOINT-CONDITIONS-001): the resolved level + its bps,
         # carried VERBATIM (not recomputable from pdh/pdl/pdc).
         case["gap_mid_paisa"],
@@ -161,7 +161,7 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
-        # Group-13 gap-midpoint (appended-last FFI law,
+        # Group-15 gap-midpoint (appended-last FFI law,
         # DEC-GAP-MIDPOINT-CONDITIONS-001): the resolved level + its bps,
         # carried VERBATIM (not recomputable from pdh/pdl/pdc).
         case["gap_mid_paisa"],

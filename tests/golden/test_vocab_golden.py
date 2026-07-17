@@ -81,7 +81,7 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bullish=ms["choch_bullish"],
             choch_bearish=ms["choch_bearish"],
         ),
-        # Group-13 gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) —
+        # Group-15 gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) —
         # carried VERBATIM like the VWAP.
         gap_mid_paisa=case["gap_mid_paisa"],
     )

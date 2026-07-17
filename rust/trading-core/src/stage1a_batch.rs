@@ -614,7 +614,7 @@ mod tests {
         );
     }
 
-    /// Resize every per-day table (incl. the Group-13 X1 tables) to `d` rows.
+    /// Resize every per-day table (incl. the Group-15 X1 tables) to `d` rows.
     fn resize_day_tables(c: &mut Cols, d: usize) {
         c.day_has_pivot = vec![false; d];
         c.day_has_fib = vec![false; d];
