@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 /
+_Last updated: 2026-07-17 (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931,
+branch `claude/movers-daily-freshness` — the `/movers` DAILY arm gains the
+VERIFY-EQUALITY freshness guard (the named follow-up of
+DEC-MOVERS-STORED-FRESHNESS-001 #1795a, which guarded only the INTRADAY
+stored-TF path): a stored derived `1day` day-row serves ONLY when it equals
+the in-memory `resample_1m_to_daily` of the day's UNCUT 1-minute base (the
+SAME production derivation the prebuild binds — imported, never re-minted;
+the #1795a equality law realised in the bar model); stale/MISSING ⇒ the
+just-computed 1m-derived daily bars + ONE capped
+`movers.stored_stale_fallback` WARN on the SHARED state; base-absent /
+date.max ⇒ the disclosed fail-open serve-stored (the executed repro — 1day
+served a stale ₹100.00 beside a fresh 1minute ₹200.00 after a 1m append
+with no re-prebuild — is CLOSED); `latest_movers_date` resolves from the
+1-MINUTE base (names-only max-month enumeration + one month-bound DuckDB
+MAX) unioned MAX with the kept 1day scan, so a post-prebuild 1m append
+moves the movers default day (a 1day-only legacy lake keeps its latest
+available day); + two folded MINOR display fixes — `compute_snapshot`'s
+`change` honors its None-on-zero-baseline docstring contract, and
+`/api/v1/movers` validates `?interval=` against the canonical
+`LAKE_INTERVAL_LABELS` vocabulary (unknown token = a clean 400 naming the
+parameter BEFORE any lake read on all three tabs — the false "No futures in
+the lake yet"/"No spot data" junk-interval notes are dead). Fresh
+(correctly-prebuilt) lakes byte-identical (parity-pinned); named follow-up
+DEC-MOVERS-BASELINE-FRESHNESS-001 (the prior-day baseline seam —
+deliberately not expanded). READ-side dashboard only — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1931.)
+Earlier: 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 /
 ADR-0023, branch `claude/fill-worst-case-only` — WORST-CASE IS THE ONLY FILL
 MODEL by operator directive: the interim PRECISE opt-out idea is DEAD —
 the absorbed PR #1522 FillMode-mode design never shipped; the mode axis is gone
@@ -3035,7 +3063,86 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/fill-worst-case-only` (**DEC-FILL-WORST-CASE-ONLY-001,
+- **Active branch:** `claude/movers-daily-freshness`
+  (**DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931** — the `/movers`
+  DAILY arm gains the VERIFY-EQUALITY freshness guard — the named follow-up
+  of DEC-MOVERS-STORED-FRESHNESS-001 (#1795a), which guarded only the
+  INTRADAY stored-TF path — plus the 1-minute-first movers default date and
+  two folded MINOR display fixes (ONE ledger entry per the #1749/#1779 fold
+  precedents; the entry number is queue-master-assigned against the
+  live-main ceiling #1825 at tip b81f017e). **(1) THE DAILY GUARD:**
+  `_read_daily_bars` serves a stored derived `1day` day-row ONLY when it
+  VERIFY-EQUALS the in-memory derivation of the day's UNCUT 1-minute base
+  via the SAME production derivation the prebuild binds —
+  `spot_daily_resample.resample_1m_to_daily` (imported, never re-minted;
+  one implementation ⇒ a fresh partition is byte-equal by the #1145
+  contract, parity-pinned) with the as-of READ-time cutoff `day + 1` (the
+  daily derivation emits BARS, so the #1795a equality law — value-exact,
+  column name+order-exact, dtype-INSENSITIVE — is realised in the bar model
+  over the intraday guard's exact REQUIRED_COLUMNS field set; the stored
+  side is screened BEFORE the compare, the #1811 CandleBar-ValueError
+  escape-class lesson). Arms mirror `_read_intraday_bars` exactly: FRESH ⇒
+  serve stored (`from_stored=True`, byte-identical on a correctly-prebuilt
+  lake); STALE or MISSING day row (the "new 1m day appended, no re-prebuild"
+  shape, which pre-fix silently DROPPED the symbol from the daily tab) ⇒
+  serve the just-computed 1m-derived daily bars (never re-read) + ONE capped
+  `movers.stored_stale_fallback` WARN per (exchange, symbol, 1day) on the
+  SHARED `_StoredStaleWarnState`; base-1m absent — or `day == date.max`, the
+  OverflowError boundary gated explicitly (mutant-verified killed) ⇒ the
+  disclosed FAIL-OPEN serve-stored (a 1day-only/legacy lake keeps its row).
+  The executed crosscut repro is CLOSED: 1day served a STALE ₹100.00 beside
+  a fresh 1minute ₹200.00 after a 1-minute append without a re-prebuild.
+  HONEST COST: +one month-bounded uncut 1-minute day read + one in-memory
+  ≤session-size daily derivation + a ≤1-bar compare per guarded daily
+  candidate (the 1day tab is the page default — the candidate cache bounds
+  it to one per coordinate per write generation). The daily path
+  deliberately takes no `prefer_resample` — the guard judges against the
+  LIVE base per read, so a mid-pull stale daily row self-heals. HONEST
+  residual (named follow-up **DEC-MOVERS-BASELINE-FRESHNESS-001**): the
+  prior-day prev_close/OI BASELINE reads (`resolve_prev_close` →
+  `_read_daily_partition` prior-tail + the 1-minute walk-back; the F&O OI
+  twins) are a DIFFERENT seam — a stale PRIOR day's stored row still
+  baselines the %-change unguarded; deliberately not expanded (scope-locked;
+  the #1539/#1649a contiguity stamps + the fresh LTP bound the blast
+  radius). **(2) WARM/DEFAULT DATE:** `latest_movers_date` resolves from the
+  1-MINUTE base (the source of truth — a names-only canonical-stem
+  max-(year,month) enumeration + ONE month-bound DuckDB MAX, the
+  `latest_movers_minute` month-prune idiom) unioned MAX with the KEPT
+  derived-1day scan through ONE shared guarded reduction (each source
+  degrades independently on corruption — one WARN, never a 500): a
+  post-prebuild 1m append MOVES the default day; a 1day-only legacy lake
+  keeps its latest AVAILABLE day; None only when both sources are empty
+  (the warm still warms nothing rather than an empty today). **(3) FOLDED
+  MINOR:** `compute_snapshot.change` is None when prev_close is None OR ZERO
+  (the MoverSnapshot docstring contract; pre-fix a raw-planted 0-close prior
+  bar served change == full LTP beside a None pct_change; futures/options
+  rows carry no `change` field — contract differs, nothing to fold).
+  **(4) FOLDED MINOR:** `/api/v1/movers` validates `?interval=` against the
+  canonical `LAKE_INTERVAL_LABELS` vocabulary — an unknown token is a clean
+  400 naming the parameter BEFORE any lake read (before even the
+  prebuild-gate flock probe; spy-pinned) on all three tabs, killing the
+  false "No futures in the lake yet"/"No spot data" notes for junk intervals
+  on a populated lake; the PURE compute-level degrade contracts are
+  unchanged (no route-level junk-interval pin existed — zero flips for this
+  fix; all 21 labels pinned still-accepted). FAILS-BEFORE proven: 13
+  integration + 6 unit regressions fail at the stash-reverted pre-fix
+  source; the deliberate both-tree parity/guard pins pass both trees by
+  design. Consciously reconciled tests: TestReadDailyBars (3 — the
+  `(bars, from_stored)` tuple; the seeds now also pin the fail-open arm) +
+  `test_spot_daily_path_counts_as_stored` (re-seeded onto the PRODUCTION
+  prebuild — the old hand-planted 1day IS stale under the guard; intent
+  preserved). GATES: `movers_warm.py` 100.00% line+branch on its ci.yml
+  discovery gate (39 tests); `movers_snapshot.py` 100.00% line+branch over
+  the movers unit+integration family (720 tests — its documented
+  discovery-gate exclusion stands); the full movers battery + route/warm
+  consumers 1061 passed; app.py's touched route lines covered by the route
+  suite; ruff/ruff-format clean; `mypy --strict` 0 new (the one
+  stage3_refine import-not-found is the venv's missing `optimize` extra,
+  identical at the origin/main baseline worktree); pyright 0 errors on
+  every touched file. READ-side dashboard only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/fill-worst-case-only` (**DEC-FILL-WORST-CASE-ONLY-001,
   MIGRATION.md #1825 / ADR-0023** — WORST-CASE IS THE ONLY FILL MODEL, PR-A of the
   worst-case-fills-only track (worktree base = PR #1522's head 95ee9ce5; the entry
   number is coordinator-assigned from the track's granted bands #1825–#1829 +
@@ -8860,7 +8967,30 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/fill-worst-case-only`
+- **Active feature branch:** `claude/movers-daily-freshness`
+  (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931 — the `/movers` DAILY
+  arm gains the VERIFY-EQUALITY freshness guard, the named follow-up of
+  DEC-MOVERS-STORED-FRESHNESS-001 #1795a (the intraday guard): a stored
+  derived `1day` day-row serves only when it equals the in-memory
+  `resample_1m_to_daily` of the day's uncut 1-minute base (the SAME
+  production derivation the prebuild binds — imported, never re-minted;
+  the #1795a equality law realised in the bar model); stale/MISSING ⇒ the
+  just-computed 1m-derived daily bars + ONE capped
+  `movers.stored_stale_fallback` WARN on the shared state; base-absent /
+  date.max ⇒ the disclosed fail-open serve-stored; `latest_movers_date`
+  resolves from the 1-MINUTE base unioned MAX with the kept 1day scan (a
+  post-prebuild 1m append moves the movers default day; a 1day-only legacy
+  lake keeps its latest available day); + two folded MINORs —
+  `compute_snapshot.change` None on a zero baseline (the docstring
+  contract) and the `/api/v1/movers` `?interval=` validation (unknown token
+  = a clean 400 naming the parameter before any lake read on all three
+  tabs — the false junk-interval "No futures in the lake yet"/"No spot
+  data" notes are dead); fresh prebuilt lakes byte-identical
+  (parity-pinned); named follow-up DEC-MOVERS-BASELINE-FRESHNESS-001 (the
+  prior-day baseline seam); READ-side dashboard only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1931 for the full blurb)
+  Earlier: `claude/fill-worst-case-only`
   (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023 — WORST-CASE
   IS THE ONLY FILL MODEL: the product moves from precise
   open-anchored fills to the one worst-case law in a single hop by operator
