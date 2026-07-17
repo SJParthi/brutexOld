@@ -203,6 +203,7 @@ def _fresh_daily_maps(
     segment: str,
     symbol: str,
     days: AbstractSet[date],
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> tuple[dict[date, Decimal], dict[date, Decimal]]:
     """Fresh per-session ``(open, close)`` maps resampled from the stored 1-minute base.
 
@@ -227,8 +228,12 @@ def _fresh_daily_maps(
     price-insane row refused by the reader's sanity gate, a resampler input
     violation) returns EMPTY maps — the caller then serves the stored values
     exactly as before this guard existed (disclosed limit; the failure arm
-    additionally logs ONE ``preopen.freshness_check_failed`` WARN naming the
-    error, so a degraded verification is visible, never silent). The caught
+    additionally surfaces ONE ``preopen.freshness_check_failed`` WARN naming
+    the error, so a degraded verification is visible, never silent —
+    *on_error* is the build-side seam that routes it through the SAME
+    capped/deduped per-build WARN idiom as the guard's other events
+    (hostile-review NIT fold); ``None`` — a direct call — logs directly).
+    The caught
     set is the KNOWN data-shape classes only — the COMMON unreadable-file set
     (:func:`~brutex.dashboard.movers_resilient.movers_read_skip_errors`,
     which already carries the reader's typed
@@ -271,14 +276,17 @@ def _fresh_daily_maps(
             return {}, {}
         bars = resample_1m_to_daily(frame, before=end)
     except read_errors as exc:
-        _LOG.warning(
-            "preopen.freshness_check_failed",
-            symbol=symbol,
-            exchange=exchange,
-            segment=segment,
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
+        if on_error is not None:
+            on_error(exc)
+        else:
+            _LOG.warning(
+                "preopen.freshness_check_failed",
+                symbol=symbol,
+                exchange=exchange,
+                segment=segment,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         return {}, {}
     fresh_open: dict[date, Decimal] = {}
     fresh_close: dict[date, Decimal] = {}
@@ -322,7 +330,10 @@ def _stale_day_row(
     * either session ABSENT from the fresh maps (no 1-minute base for it) →
       ``None`` — the row is NOT fully recomputable on the 1-minute scale, so
       it fails open to the stored pair verbatim (the TMPV shape lands here:
-      its 1-minute series covers the report day but not the prior session).
+      its 1-minute series covers the report day but not the prior session);
+      when the AVAILABLE evidence proves a divergence the fail-open is
+      observed by the sibling :func:`_stale_day_row_unrecomputable` WARN
+      (the hostile-review fold — serve behavior unchanged).
     * both fresh values present and EQUAL to the stored pair (full-precision
       ``Decimal`` numeric equality — the write-time stored ≡ resample law
       held, a FRESH lake) → ``None`` — serve stored, byte-identical.
@@ -342,6 +353,60 @@ def _stale_day_row(
     if f_open is None or f_close is None:
         return None
     if f_open == iep and f_close == anchor:
+        return None
+    return (expected, f_open, f_close)
+
+
+def _stale_day_row_unrecomputable(
+    iep: Decimal,
+    anchor: Decimal,
+    *,
+    day: date,
+    expected: date | None,
+    fresh_open: Mapping[date, Decimal],
+    fresh_close: Mapping[date, Decimal],
+) -> tuple[date, Decimal | None, Decimal | None] | None:
+    """The ``(expected, fresh_iep?, fresh_prev_close?)`` evidence when a row is
+    STALE-but-UNRECOMPUTABLE — the fail-open lane's observability twin.
+
+    The hostile-review MINOR fold on DEC-PREOPEN-DAY-FRESHNESS-001: the
+    row-atomic fail-open (:func:`_stale_day_row` returning ``None`` because
+    ONE of the two sessions has no 1-minute base) previously served the
+    stored pair SILENTLY even when the AVAILABLE fresh evidence proved a
+    divergence. This helper detects exactly that shape — the row is NOT
+    fully recomputable (so the serve stays the stored pair, unchanged — the
+    row-atomic law is untouched) but at least one available fresh value
+    DIFFERS from its stored counterpart — so the caller can emit ONE capped
+    ``preopen.stale_daily_unrecomputable`` WARN. OBSERVE-ONLY: no served
+    value changes in any arm. Honest limit (disclosed in the ledger entry):
+    the evidence cannot distinguish genuine staleness from a legitimately
+    ADJUSTED hand-built/vendor-era series on a different price scale (the
+    TMPV demerger shape) — such a lake now reads this observe-only WARN
+    where it was silent (the WARN's detail says "possibly a legitimately
+    adjusted series", never a false certainty).
+
+    Arms (each returns ``None`` = nothing to observe):
+
+    * *expected* ``None`` — total (production-unreachable via the caller; an
+      emitted row always resolved a prior session — the
+      :func:`_stale_day_row` precedent, directly unit-tested).
+    * BOTH sessions present in the fresh maps — the row is fully
+      recomputable, so the recompute lane (:func:`_stale_day_row`) owns the
+      verdict (a fresh equal pair correctly observes nothing here).
+    * no available fresh value differs — no divergence evidence (the
+      fail-open stays honestly silent: there is nothing to report).
+    * else → the evidence triple (the missing side reads ``None``).
+    """
+    if expected is None:
+        return None
+    f_open = fresh_open.get(day)
+    f_close = fresh_close.get(expected)
+    if f_open is not None and f_close is not None:
+        return None
+    divergent = (f_open is not None and f_open != iep) or (
+        f_close is not None and f_close != anchor
+    )
+    if not divergent:
         return None
     return (expected, f_open, f_close)
 
@@ -765,7 +830,13 @@ def build_preopen_rows(
     ``preopen.stale_daily_recomputed_suppressed`` summary past it). The
     guard NEVER adds or removes rows (the contiguity/session laws are
     untouched — values only); a symbol/session with no 1-minute base fails
-    OPEN to the stored values exactly as before (disclosed limit). The
+    OPEN to the stored values exactly as before (disclosed limit) —
+    since the hostile-review fold that fail-open is LOUD when the available
+    fresh evidence proves a divergence (ONE capped
+    ``preopen.stale_daily_unrecomputable`` WARN via
+    :func:`_stale_day_row_unrecomputable`; serve behavior unchanged) and the
+    verification-read failure WARN (``preopen.freshness_check_failed``)
+    rides the SAME cap/dedupe idiom. The
     MINUTE basis needs no guard — it already reads the 1-minute truth.
     """
     rows: list[PreOpenRow] = []
@@ -793,9 +864,82 @@ def build_preopen_rows(
 
     # Stale-derived-1day WARN state (DEC-PREOPEN-DAY-FRESHNESS-001): the exact
     # _warn_hole idiom — dedupe per (exchange, segment, symbol) triple, cap
-    # per build, one suppressed summary past the cap.
+    # per build, one suppressed summary past the cap. THREE sibling families
+    # under the ONE cap constant: recomputed (the guard fired), unrecomputable
+    # (divergence evidence but the row is not fully recomputable — the
+    # hostile-review MINOR fold; serve behavior unchanged) and check-failed
+    # (the verification read itself failed — the NIT fold bringing it under
+    # the same cap). Separate states so no family starves another.
     stale_keys: set[tuple[str, str, str]] = set()
     stale_suppressed = 0
+    unrec_keys: set[tuple[str, str, str]] = set()
+    unrec_suppressed = 0
+    check_failed_keys: set[tuple[str, str, str]] = set()
+    check_failed_suppressed = 0
+
+    def _warn_unrecomputable(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        day: date,
+        expected: date,
+        stored_iep: Decimal,
+        stored_prev_close: Decimal,
+        fresh_iep: Decimal | None,
+        fresh_prev_close: Decimal | None,
+    ) -> None:
+        nonlocal unrec_suppressed
+        key = (exchange, segment, symbol)
+        if key in unrec_keys:
+            return
+        unrec_keys.add(key)
+        if len(unrec_keys) > _STALE_WARN_CAP:
+            unrec_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.stale_daily_unrecomputable",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            day=day.isoformat(),
+            expected_session=expected.isoformat(),
+            stored_iep=str(stored_iep),
+            stored_prev_close=str(stored_prev_close),
+            fresh_iep=None if fresh_iep is None else str(fresh_iep),
+            fresh_prev_close=None if fresh_prev_close is None else str(fresh_prev_close),
+            detail=(
+                "a stored derived-1day value diverges from the available 1-minute "
+                "evidence but the row is NOT fully recomputable (the other session "
+                "has no 1-minute base) — the STORED pair is served verbatim (the "
+                "row-atomic law; possibly a legitimately adjusted series); re-pull "
+                "the missing session's 1-minute or run the pipeline prebuild"
+            ),
+        )
+
+    def _warn_check_failed(
+        symbol: str,
+        exchange: str,
+        segment: str,
+        exc: BaseException,
+    ) -> None:
+        nonlocal check_failed_suppressed
+        key = (exchange, segment, symbol)
+        if key in check_failed_keys:
+            return
+        check_failed_keys.add(key)
+        if len(check_failed_keys) > _STALE_WARN_CAP:
+            check_failed_suppressed += 1
+            return
+        _LOG.warning(
+            "preopen.freshness_check_failed",
+            basis=basis,
+            symbol=symbol,
+            exchange=exchange,
+            segment=segment,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
 
     def _warn_stale(
         symbol: str,
@@ -952,8 +1096,23 @@ def build_preopen_rows(
                 if prior is not None:
                     needed.add(prior)
             if needed:
+
+                def _on_check_failed(
+                    exc: BaseException,
+                    *,
+                    _symbol: str = symbol,
+                    _exchange: str = exchange,
+                    _segment: str = segment,
+                ) -> None:
+                    _warn_check_failed(_symbol, _exchange, _segment, exc)
+
                 fresh_open, fresh_close = _fresh_daily_maps(
-                    lake_root, exchange=exchange, segment=segment, symbol=symbol, days=needed
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    days=needed,
+                    on_error=_on_check_failed,
                 )
         for day in sorted(opens):
             if day < start or day > end:
@@ -1016,6 +1175,33 @@ def build_preopen_rows(
                         fresh_prev_close,
                     )
                     iep, anchor = fresh_iep, fresh_prev_close
+                else:
+                    # The fail-open lane's observability twin (the
+                    # hostile-review MINOR fold): divergence evidence on a
+                    # not-fully-recomputable row is WARNED, never silently
+                    # swallowed — the SERVE stays the stored pair verbatim
+                    # (observe-only; the row-atomic law untouched).
+                    unrec = _stale_day_row_unrecomputable(
+                        iep,
+                        anchor,
+                        day=day,
+                        expected=_expected_session(day),
+                        fresh_open=fresh_open,
+                        fresh_close=fresh_close,
+                    )
+                    if unrec is not None:
+                        unrec_expected, unrec_open, unrec_close = unrec
+                        _warn_unrecomputable(
+                            symbol,
+                            exchange,
+                            segment,
+                            day,
+                            unrec_expected,
+                            iep,
+                            anchor,
+                            unrec_open,
+                            unrec_close,
+                        )
             chng = iep - anchor
             rows.append(
                 PreOpenRow(
@@ -1039,6 +1225,20 @@ def build_preopen_rows(
             "preopen.stale_daily_recomputed_suppressed",
             basis=basis,
             suppressed_symbols=stale_suppressed,
+            cap=_STALE_WARN_CAP,
+        )
+    if unrec_suppressed:
+        _LOG.warning(
+            "preopen.stale_daily_unrecomputable_suppressed",
+            basis=basis,
+            suppressed_symbols=unrec_suppressed,
+            cap=_STALE_WARN_CAP,
+        )
+    if check_failed_suppressed:
+        _LOG.warning(
+            "preopen.freshness_check_failed_suppressed",
+            basis=basis,
+            suppressed_symbols=check_failed_suppressed,
             cap=_STALE_WARN_CAP,
         )
     rows.sort(key=lambda r: (r.day, r.symbol))

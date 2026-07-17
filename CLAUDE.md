@@ -3099,7 +3099,11 @@ hostile-review pass._
   whole-frame `.equals`, and exactly why the golden lake's hand-built
   volume-divergent daily bars stay byte-identical); fail-OPEN on a missing
   1m base / session / a verification-read failure (the movers base-absent
-  mirror; ONE `preopen.freshness_check_failed` WARN on the error arm —
+  mirror — SERVE behavior; since the hostile-review fold the fail-open is
+  OBSERVED, never fully silent: divergence-evidenced unrecomputable rows
+  emit ONE capped `preopen.stale_daily_unrecomputable` WARN, values
+  untouched; ONE capped `preopen.freshness_check_failed` WARN on the error
+  arm —
   caught set = `movers_read_skip_errors()` ∪ {ValueError, ArithmeticError},
   never the whole DataLakeError family, LakeWriteHalt never swallowed);
   row-SET-preserving (the sessions lane — contiguity/zero-anchor/skip laws —
@@ -3121,9 +3125,12 @@ hostile-review pass._
   roundtrip pin fails-before ([2012, 0, 2042] at merge base → [2012, None,
   2042]). PROOF (executed, the operator anti-fake rule): fail-before/
   pass-after captured for BOTH defects via standalone twins run at a
-  merge-base worktree + the repro script (evidence in the PR); GATES:
-  `preopen_report.py` 100.00% line+branch on its exact ci.yml gate (376/122,
-  141 tests) · `timeframe_materialize.py` 100.00% (176/56, 111 tests) ·
+  merge-base worktree + the repro script (evidence in the PR); the
+  HOSTILE-REVIEW ROUND folded (verdict SHIP — the unrecomputable-WARN
+  observability MINOR + the check-failed-cap and awkward-float-fixture NITs;
+  per-item record in MIGRATION.md #1930); GATES:
+  `preopen_report.py` 100.00% line+branch on its exact ci.yml gate (421/144,
+  151 tests) · `timeframe_materialize.py` 100.00% (176/56, 111 tests) ·
   consumer suites green · ruff/ruff-format clean · `mypy --strict` clean
   (the env-only `cma` import error is merge-base-identical) · pyright 0
   errors on touched files. Named sibling (open):
