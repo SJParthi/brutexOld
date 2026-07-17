@@ -62,12 +62,14 @@ from brutex.data.partition import (
     MIN_PARTITION_YEAR,
     MONTHS_PER_YEAR,
 )
+from brutex.data.scope_filter import scope_admits_fno_contract
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from structlog.typing import FilteringBoundLogger
 
+    from brutex.config.feed_scope import FeedScope
     from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 _LOG = structlog.get_logger("brutex.data.greeks_enrich_pass")
@@ -449,6 +451,86 @@ def _first_day_of_next_month(year: int, month: int) -> date:
     return date(year, month + 1, 1)
 
 
+def scoped_option_windows(
+    lake_root: Path,
+    *,
+    underlyings: frozenset[str] | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    scope: FeedScope | None = None,
+) -> tuple[tuple[DiscoveredOptionWindow, ...], int]:
+    """The R4 SCOPED twin of :func:`discover_option_windows` — windows + count.
+
+    DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the SAME one bounded directory
+    traversal (this IS the implementation — :func:`discover_option_windows`
+    delegates here with ``scope=None``), gating each decoded CE/PE contract on
+    :func:`~brutex.data.scope_filter.scope_admits_fno_contract`
+    (``admits_fno_underlying`` over the parsed pair; an uncoercible exchange
+    dir is excluded under a bounded scope — the §3.5 totality law) BEFORE its
+    month listing, so an excluded contract costs ZERO further I/O and is
+    COUNTED into the second element (the honest ``scope_excluded`` census
+    bucket). ``scope=None`` (the §2.4 read-default law) is byte-identical
+    legacy with a ``0`` count. Stored stock Greeks stamps stay INERT — never
+    re-targeted, never edited.
+    """
+    bars_root = lake_root / BAR_DIR_NAME
+    if not bars_root.is_dir():
+        return (), 0
+    scope_excluded = 0
+    groups: dict[tuple[str, str, date], tuple[set[tuple[int, int]], list[str]]] = {}
+    for exchange_dir in sorted(bars_root.iterdir()):
+        if not exchange_dir.is_dir():
+            continue
+        fno_dir = exchange_dir / FNO_CANDLE_LAKE_SEGMENT
+        if not fno_dir.is_dir():
+            continue
+        for contract_dir in sorted(fno_dir.iterdir()):
+            if not contract_dir.is_dir():
+                continue
+            parts = parse_fno_symbol(contract_dir.name)
+            if parts is None or parts.instrument_type not in OPTION_TYPES:
+                continue
+            if underlyings is not None and parts.underlying not in underlyings:
+                continue
+            if scope is not None and not scope_admits_fno_contract(
+                exchange_dir.name, parts.underlying, scope
+            ):
+                scope_excluded += 1
+                continue
+            months = _stored_months(contract_dir / _MINUTE_INTERVAL)
+            if not months:
+                continue
+            key = (exchange_dir.name, parts.underlying, parts.expiry)
+            month_union, symbols = groups.setdefault(key, (set(), []))
+            month_union.update(months)
+            symbols.append(contract_dir.name)
+    rows: list[DiscoveredOptionWindow] = []
+    for (exchange, underlying, expiry), (month_union, symbols) in groups.items():
+        min_year, min_month = min(month_union)
+        max_year, max_month = max(month_union)
+        span_start = date(min_year, min_month, 1)
+        span_end = _first_day_of_next_month(max_year, max_month)
+        if start is not None and start > span_start:
+            span_start = start
+        if end is not None and end < span_end:
+            span_end = end
+        if span_start >= span_end:
+            continue
+        rows.extend(
+            DiscoveredOptionWindow(
+                exchange=exchange,
+                symbol=symbol,
+                underlying=underlying,
+                expiry=expiry,
+                start=span_start,
+                end=span_end,
+            )
+            for symbol in symbols
+        )
+    rows.sort(key=lambda row: (row.exchange, row.underlying, row.expiry, row.symbol))
+    return tuple(rows), scope_excluded
+
+
 def discover_option_windows(
     lake_root: Path,
     *,
@@ -500,56 +582,10 @@ def discover_option_windows(
         ``(exchange, underlying, expiry, symbol)`` — independent of directory
         creation order (the driver re-sorts to its own key anyway).
     """
-    bars_root = lake_root / BAR_DIR_NAME
-    if not bars_root.is_dir():
-        return ()
-    groups: dict[tuple[str, str, date], tuple[set[tuple[int, int]], list[str]]] = {}
-    for exchange_dir in sorted(bars_root.iterdir()):
-        if not exchange_dir.is_dir():
-            continue
-        fno_dir = exchange_dir / FNO_CANDLE_LAKE_SEGMENT
-        if not fno_dir.is_dir():
-            continue
-        for contract_dir in sorted(fno_dir.iterdir()):
-            if not contract_dir.is_dir():
-                continue
-            parts = parse_fno_symbol(contract_dir.name)
-            if parts is None or parts.instrument_type not in OPTION_TYPES:
-                continue
-            if underlyings is not None and parts.underlying not in underlyings:
-                continue
-            months = _stored_months(contract_dir / _MINUTE_INTERVAL)
-            if not months:
-                continue
-            key = (exchange_dir.name, parts.underlying, parts.expiry)
-            month_union, symbols = groups.setdefault(key, (set(), []))
-            month_union.update(months)
-            symbols.append(contract_dir.name)
-    rows: list[DiscoveredOptionWindow] = []
-    for (exchange, underlying, expiry), (month_union, symbols) in groups.items():
-        min_year, min_month = min(month_union)
-        max_year, max_month = max(month_union)
-        span_start = date(min_year, min_month, 1)
-        span_end = _first_day_of_next_month(max_year, max_month)
-        if start is not None and start > span_start:
-            span_start = start
-        if end is not None and end < span_end:
-            span_end = end
-        if span_start >= span_end:
-            continue
-        rows.extend(
-            DiscoveredOptionWindow(
-                exchange=exchange,
-                symbol=symbol,
-                underlying=underlying,
-                expiry=expiry,
-                start=span_start,
-                end=span_end,
-            )
-            for symbol in symbols
-        )
-    rows.sort(key=lambda row: (row.exchange, row.underlying, row.expiry, row.symbol))
-    return tuple(rows)
+    windows, _ = scoped_option_windows(
+        lake_root, underlyings=underlyings, start=start, end=end, scope=None
+    )
+    return windows
 
 
 def lake_target_builder(
@@ -558,6 +594,8 @@ def lake_target_builder(
     underlyings: frozenset[str] | None = None,
     start: date | None = None,
     end: date | None = None,
+    scope: FeedScope | None = None,
+    on_scope_excluded: Callable[[int], None] | None = None,
 ) -> TargetBuilder:
     """Build a fence-safe target factory over the lake tree.
 
@@ -592,6 +630,15 @@ def lake_target_builder(
     def _build() -> Sequence[GreeksEnrichTarget]:
         from brutex.data.greeks_enrich import GreeksEnrichTarget
 
+        windows, scope_excluded = scoped_option_windows(
+            lake_root, underlyings=underlyings, start=start, end=end, scope=scope
+        )
+        if on_scope_excluded is not None:
+            # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the counted census
+            # seam — the CLI captures it for its honest stderr line. Fired
+            # INSIDE the fence like the walk itself (a raising callback rides
+            # the same ok=False degrade, never a crash class of its own).
+            on_scope_excluded(scope_excluded)
         return [
             GreeksEnrichTarget(
                 exchange=window.exchange,
@@ -599,9 +646,7 @@ def lake_target_builder(
                 start=window.start,
                 end=window.end,
             )
-            for window in discover_option_windows(
-                lake_root, underlyings=underlyings, start=start, end=end
-            )
+            for window in windows
         ]
 
     return _build

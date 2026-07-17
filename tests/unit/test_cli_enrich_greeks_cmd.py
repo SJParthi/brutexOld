@@ -36,6 +36,8 @@ from unittest import mock
 
 import pytest
 from brutex import cli
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
+from brutex.config.feed_scope import resolve_read_scope
 from brutex.config.credentials import CredentialsError
 from brutex.data import greeks_enrich_pass as gep
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
@@ -458,11 +460,37 @@ class TestEnrichGreeksDryRun:
         assert rc == cli.EXIT_OK
         assert "contracts=4 chains=3" in capsys.readouterr().out
 
+        # DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 — the BAJAJ-AUTO leg flipped to
+        # pin HEAD behavior: under the shipped index4 default the stored stock
+        # contract is scope-gated OUT of targeting (zero contracts, the honest
+        # counted stderr line); the merge-base behavior lives on in the
+        # full-arm twin below.
         rc = cli.cmd_enrich_greeks(
             tmp_path, underlying=["BAJAJ-AUTO"], start=None, end=None, dry_run=True
         )
         assert rc == cli.EXIT_OK
-        assert "contracts=1 chains=1" in capsys.readouterr().out
+        captured = capsys.readouterr()
+        assert "contracts=0 chains=0" in captured.out
+        assert (
+            "1 stored contract(s) excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)" in captured.err
+        )
+
+    def test_dry_run_hyphenated_underlying_matches_under_full_scope(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full-arm twin (§6 Law 2): a hyphenated underlying (BAJAJ-AUTO)
+        still matches intact when the scope admits stocks — the retained
+        recovery/filter machinery keeps its net verbatim."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        _seed_default_lake(tmp_path)
+        _seed_contract(tmp_path, _BAJAJ_CE, [(2024, 1)])
+        rc = cli.cmd_enrich_greeks(
+            tmp_path, underlying=["BAJAJ-AUTO"], start=None, end=None, dry_run=True
+        )
+        assert rc == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "contracts=1 chains=1" in captured.out
+        assert "excluded by scope" not in captured.err
 
     def test_dry_run_end_boundary_inclusive(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -507,7 +535,9 @@ class TestEnrichGreeksDryRun:
         def _boom(*_a: Any, **_k: Any) -> Any:
             raise RuntimeError("walk exploded")
 
-        monkeypatch.setattr(gep, "discover_option_windows", _boom)
+        # DEC-UNIVERSE-INDEX-ONLY-001: the dry-run arm now walks the SCOPED
+        # twin (discover_option_windows delegates to it).
+        monkeypatch.setattr(gep, "scoped_option_windows", _boom)
         rc = cli.cmd_enrich_greeks(tmp_path, underlying=None, start=None, end=None, dry_run=True)
         assert rc == cli.EXIT_INTERNAL_ERROR
         assert "enrich-greeks --dry-run discovery FAILED: walk exploded" in capsys.readouterr().err
@@ -571,9 +601,12 @@ class TestEnrichGreeksLive:
             ("keep_awake", "brutex enrich-greeks"),
             ("pass", tmp_path),
         ]
-        assert builder_calls == [
-            {"lake_root": tmp_path, "underlyings": None, "start": None, "end": None}
-        ]
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the CLI threads the
+        # read-union scope + the counting callback into the builder.
+        (call,) = builder_calls
+        assert call.pop("scope") == resolve_read_scope()
+        assert callable(call.pop("on_scope_excluded"))
+        assert [call] == [{"lake_root": tmp_path, "underlyings": None, "start": None, "end": None}]
         assert pass_calls == [{"targets": [], "lake_root": tmp_path}]
         assert sentinel_invocations == [None]  # the counting wrapper delegates ONCE
         captured = capsys.readouterr()
@@ -614,7 +647,11 @@ class TestEnrichGreeksLive:
             dry_run=False,
         )
         assert rc == cli.EXIT_OK
-        assert builder_calls == [
+        # DEC-UNIVERSE-INDEX-ONLY-001: the scope thread rides beside the filters.
+        (call,) = builder_calls
+        assert call.pop("scope") == resolve_read_scope()
+        assert callable(call.pop("on_scope_excluded"))
+        assert [call] == [
             {
                 "lake_root": tmp_path,
                 "underlyings": frozenset({"NIFTY", "BANKNIFTY"}),
@@ -751,9 +788,17 @@ class TestEnrichGreeksZeroMatchVisibility:
         """
 
         def _fake_builder(
-            lake_root: Path, *, underlyings: frozenset[str] | None, start: Any, end: Any
+            lake_root: Path,
+            *,
+            underlyings: frozenset[str] | None,
+            start: Any,
+            end: Any,
+            scope: Any = None,
+            on_scope_excluded: Any = None,
         ) -> Any:
             def _build() -> list[Any]:
+                if on_scope_excluded is not None:
+                    on_scope_excluded(0)  # faithful: the real builder fires the seam
                 if underlyings is None or stored in underlyings:
                     return [object()]
                 return []

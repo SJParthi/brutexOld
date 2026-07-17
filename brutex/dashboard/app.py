@@ -6051,12 +6051,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 failed=0,
                 current="scanning lake for stale Greeks stamps (O(files)) …",
             )
+            # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the dashboard
+            # backfill route is a THREADED production entry — the scan gates
+            # enumerated contracts on the read-union scope (counted
+            # `scope_excluded` on the report; stamps stay INERT).
             scan = scan_stale_greeks_targets(
                 lake_root,
                 rate_source=rate_source,
                 expired_only=expired_only,
                 force=force,
                 limit=limit,
+                scope=resolve_read_scope(),
             )
             plan = plan_greeks_backfill(
                 scan, rate_source=rate_source, force=force, expired_only=expired_only

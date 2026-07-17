@@ -1978,6 +1978,7 @@ class TestRunner:
         assert payload["note"] == report.note and payload["backfill_id"] == report.backfill_id
         assert set(payload) == {
             "backfill_id",
+            "scope_excluded",  # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4)
             "planned",
             "batches",
             "enriched",

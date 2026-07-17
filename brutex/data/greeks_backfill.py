@@ -190,6 +190,7 @@ from brutex.data.greeks_revision import (
     touch_greeks_revision_marker,
 )
 from brutex.data.lake_read import dedup_bars_frame
+from brutex.data.scope_filter import scope_admits_fno_contract
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
 from brutex.engine.sweep_checkpoint import (
     MAX_CHECKPOINT_BYTES,
@@ -206,6 +207,7 @@ from brutex.options.risk_free import (
 if TYPE_CHECKING:
     import polars as pl
 
+    from brutex.config.feed_scope import FeedScope
     from brutex.data.fno_symbol import FnoSymbolParts
     from brutex.engine.sweep_checkpoint import SweepCheckpoint
     from brutex.options.risk_free import RiskFreeSource
@@ -376,6 +378,10 @@ class BackfillScan:
     no_files: int = 0
     probe_failed: int = 0
     files_probed: int = 0
+    #: Decoded option contracts excluded by the read-scope gate at ENUMERATION
+    #: (DEC-UNIVERSE-INDEX-ONLY-001, design §3 R4) — never probed, never
+    #: targeted; their stored Greeks stamps stay INERT. Defaulted LAST.
+    scope_excluded: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +450,10 @@ class GreeksBackfillReport:
     resumed_from: int
     dry_run: bool
     note: str
+    #: The scan's DEC-UNIVERSE-INDEX-ONLY-001 exclusion census (design §3 R4)
+    #: — surfaced on the report / Telegram summary / CLI stderr. Defaulted
+    #: LAST so every existing constructor call site stays valid.
+    scope_excluded: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """The JSON-friendly projection (the dashboard job's return shape)."""
@@ -470,6 +480,7 @@ class GreeksBackfillReport:
             "resumed_from": self.resumed_from,
             "dry_run": self.dry_run,
             "note": self.note,
+            "scope_excluded": self.scope_excluded,
         }
 
 
@@ -1198,6 +1209,7 @@ def scan_stale_greeks_targets(
     today: date | None = None,
     per_file_pause: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
+    scope: FeedScope | None = None,
 ) -> BackfillScan:
     """Discover the option contracts whose stored Greeks stamps are STALE.
 
@@ -1287,7 +1299,7 @@ def scan_stale_greeks_targets(
     today_resolved = _today_ist() if today is None else today
     seen: set[tuple[str, str]] = set()
     decoded: list[tuple[FnoSymbolParts, str, str]] = []
-    futures_skipped = undecodable = live_skipped = 0
+    futures_skipped = undecodable = live_skipped = scope_excluded = 0
     for dataset in list_fno_candle_datasets(lake_root):
         if dataset["interval"] != _MINUTE_INTERVAL:
             continue
@@ -1303,6 +1315,14 @@ def scan_stale_greeks_targets(
             continue
         if not parts.is_option:
             futures_skipped += 1
+            continue
+        if scope is not None and not scope_admits_fno_contract(exchange, parts.underlying, scope):
+            # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): a scoped-out stored
+            # contract is never probed / never targeted — a bulk backfill must
+            # not spend hours re-probing ~10⁵ stored stock contracts the
+            # operator has scoped out. Counted honestly; stamps stay INERT.
+            # `scope=None` (the §2.4 read-default law) is byte-identical.
+            scope_excluded += 1
             continue
         if expired_only and parts.expiry >= today_resolved:
             live_skipped += 1
@@ -1415,6 +1435,7 @@ def scan_stale_greeks_targets(
         no_files=no_files,
         probe_failed=probe_failed,
         files_probed=files_probed,
+        scope_excluded=scope_excluded,
     )
     _LOG.info(
         "greeks_backfill.scan_done",
@@ -1430,6 +1451,7 @@ def scan_stale_greeks_targets(
         no_files=scan.no_files,
         probe_failed=scan.probe_failed,
         files_probed=scan.files_probed,
+        scope_excluded=scan.scope_excluded,
         force=force,
         expired_only=expired_only,
     )
@@ -1563,6 +1585,7 @@ def dry_run_backfill_report(plan: BackfillPlan) -> GreeksBackfillReport:
         resumed_from=0,
         dry_run=True,
         note=note,
+        scope_excluded=scan.scope_excluded,
     )
 
 
@@ -1875,6 +1898,7 @@ def run_greeks_backfill(
         resumed_from=resumed_from,
         dry_run=False,
         note=note,
+        scope_excluded=plan.scan.scope_excluded,
     )
     _LOG.info("greeks_backfill.done", **result.to_dict())
     return result

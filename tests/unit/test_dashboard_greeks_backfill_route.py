@@ -28,6 +28,7 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 pytest.importorskip("trading_core", reason="the backfill module needs the trading_core wheel")
 
+from brutex.config.feed_scope import resolve_read_scope
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.greeks_backfill import (
@@ -183,6 +184,9 @@ class TestPostTrigger:
         assert snap["detail"] == report.note  # the note IS the completion headline
         assert snap["total"] == 1 and snap["completed"] == 1 and snap["bars"] == 3
         assert emitted == [report]  # EXACTLY one completion summary
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the route threads the
+        # read-union scope into the scan.
+        assert captured["scan_kwargs"].pop("scope") == resolve_read_scope()
         assert captured["scan_kwargs"] == {
             "rate_source": captured["scan_kwargs"]["rate_source"],
             "expired_only": True,

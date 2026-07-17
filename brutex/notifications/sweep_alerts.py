@@ -328,6 +328,11 @@ class GreeksBackfillReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
+    def scope_excluded(self) -> int:
+        """Contracts excluded by the read scope (DEC-UNIVERSE-INDEX-ONLY-001)."""
+        ...
+
+    @property
     def stale_unfixable(self) -> int:
         """Contracts whose only staleness the driver cannot act on (fix round 4)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -1661,9 +1666,17 @@ class SweepAlerter:
                 f"✅ Greeks backfill complete — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2"
             )
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the honest EMIT-ON-NONZERO
+        # scope census — an unscoped/index-only scan's summary stays byte-identical.
+        scope_clause = (
+            f", scope-excluded={report.scope_excluded} (DEC-UNIVERSE-INDEX-ONLY-001)"
+            if report.scope_excluded > 0
+            else ""
+        )
         message = escape_markdown_v2(
             f"{head}; already current={report.already_current}, "
-            f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
+            f"bars written={report.bars_written}{scope_clause} "
+            f"(backfill {report.backfill_id[:12]})."
         )
         return self._publish(
             kind=TelegramEventKind.RUN_COMPLETE,

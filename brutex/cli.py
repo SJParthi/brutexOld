@@ -125,6 +125,23 @@ def _validate_feed_scope_env_cli() -> None:
         raise CliUserError(str(exc)) from exc
 
 
+def _print_greeks_scope_excluded(label: str, count: int) -> None:
+    """EMIT-ON-NONZERO stderr census of scope-gated Greeks targets (design §3 R4).
+
+    DEC-UNIVERSE-INDEX-ONLY-001: a bulk Greeks pass over a stock-bearing lake
+    names how many stored contracts the read-union scope gated out of
+    targeting (their stamps stay INERT); an unscoped / index-only run prints
+    NOTHING — stdout/stderr stay byte-identical.
+    """
+    if count <= 0:
+        return
+    print(
+        f"[brutex] {label} — {count} stored contract(s) excluded by scope "
+        "(DEC-UNIVERSE-INDEX-ONLY-001); their Greeks stamps stay inert",
+        file=sys.stderr,
+    )
+
+
 def _configure_sweep_logging() -> None:
     """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
 
@@ -2686,12 +2703,18 @@ def cmd_greeks_backfill(
         raise CliUserError(
             f"risk-free source misconfigured ($BRUTEX_RISK_FREE_CSV): {exc}"
         ) from exc
+    # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): `brutex greeks-backfill` is a
+    # THREADED production entry — the scan gates enumerated contracts on the
+    # read-union scope (counted `scope_excluded`; stamps stay INERT).
+    from brutex.config.feed_scope import resolve_read_scope
+
     scan = scan_stale_greeks_targets(
         resolved,
         rate_source=rate_source,
         expired_only=expired_only,
         force=force,
         limit=limit,
+        scope=resolve_read_scope(),
     )
     plan = plan_greeks_backfill(
         scan, rate_source=rate_source, force=force, expired_only=expired_only
@@ -2705,6 +2728,7 @@ def cmd_greeks_backfill(
         f"{scan.futures_skipped} futures, {scan.probe_failed} unreadable file(s) skipped; "
         f"scan cost: O(files) — {scan.files_probed} file(s) probed)"
     )
+    _print_greeks_scope_excluded("greeks-backfill", scan.scope_excluded)
     if scan.stale_unfixable > 0:
         # Honest loud census (fix rounds 4-7): these contracts carry stale/null
         # stamps the enrich driver cannot act on — rows it SKIPS by design
@@ -5758,9 +5782,9 @@ def cmd_enrich_greeks(
     # the single-flight lock + the O(files) discovery walk.
     _validate_feed_scope_env_cli()
     from brutex.data.greeks_enrich_pass import (
-        discover_option_windows,
         lake_target_builder,
         run_greeks_enrich_pass,
+        scoped_option_windows,
     )
 
     resolved = _resolve_lake_root(lake_root)
@@ -5799,10 +5823,17 @@ def cmd_enrich_greeks(
         f"{end_d.isoformat()})" if end_d else "lake-end)"
     )
 
+    # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): `brutex enrich-greeks` is a
+    # THREADED production entry — stored contracts outside the read-union scope
+    # are gated out at discovery (counted, stamps INERT); a bulk pass never
+    # re-probes scoped-out stock contracts.
+    from brutex.config.feed_scope import resolve_read_scope
+
+    read_scope = resolve_read_scope()
     if dry_run:
         try:
-            windows = discover_option_windows(
-                resolved, underlyings=tokens, start=start_d, end=end_d
+            windows, scope_excluded = scoped_option_windows(
+                resolved, underlyings=tokens, start=start_d, end=end_d, scope=read_scope
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             print(f"[brutex] enrich-greeks --dry-run discovery FAILED: {exc}", file=sys.stderr)
@@ -5812,12 +5843,26 @@ def cmd_enrich_greeks(
             f"[brutex] enrich-greeks --dry-run — contracts={len(windows)} "
             f"chains={chains} window={span} (nothing enriched)"
         )
+        _print_greeks_scope_excluded("enrich-greeks --dry-run", scope_excluded)
         return EXIT_OK
 
     from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
     from brutex.observability.power_keepawake import keep_awake
 
-    build_targets = lake_target_builder(resolved, underlyings=tokens, start=start_d, end=end_d)
+    scope_excluded_seen = -1
+
+    def _capture_scope_excluded(count: int) -> None:
+        nonlocal scope_excluded_seen
+        scope_excluded_seen = count
+
+    build_targets = lake_target_builder(
+        resolved,
+        underlyings=tokens,
+        start=start_d,
+        end=end_d,
+        scope=read_scope,
+        on_scope_excluded=_capture_scope_excluded,
+    )
     # contracts = how many targets the fenced build ACTUALLY put in scope,
     # captured by wrapping the builder — NEVER a second discovery walk
     # (discovery is O(option partition dirs); doubling it would be a hidden
@@ -5868,6 +5913,7 @@ def cmd_enrich_greeks(
     if outcome.ok is True and outcome.errored_targets == 0:
         shown = str(contracts) if contracts >= 0 else "?"
         print(f"[brutex] enrich-greeks done — contracts={shown} errored_targets=0")
+        _print_greeks_scope_excluded("enrich-greeks", max(scope_excluded_seen, 0))
         return EXIT_OK
     if outcome.ok is True:
         print(

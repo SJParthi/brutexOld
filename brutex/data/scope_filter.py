@@ -190,6 +190,26 @@ def window_scope_admit(
     return _admit
 
 
+def scope_admits_fno_contract(exchange: str, underlying: str, scope: FeedScope) -> bool:
+    """Judge one ALREADY-DECODED F&O contract's ``(exchange, underlying)`` pair.
+
+    The R4 greeks-discovery form of the scope law (design §3 R4 — the callers
+    have already run :func:`~brutex.data.fno_symbol.parse_fno_symbol`, so this
+    judges the decoded pair directly through
+    :meth:`~brutex.config.feed_scope.FeedScope.admits_fno_underlying` instead
+    of re-parsing). TOTAL + never-raising (the §3.5 totality law): an
+    uncoercible/junk *exchange* token is excluded (``False``) under a BOUNDED
+    scope — counted by the caller — and pass-through ``True`` under an
+    unbounded one.
+    """
+    if not scope.bounded():
+        return True
+    exch = _coerce_exchange(exchange)
+    if exch is None:
+        return False
+    return scope.admits_fno_underlying(exch, underlying)
+
+
 def scope_note_suffix(excluded: int) -> str:
     """Return the honest read-surface note fragment for scope exclusions.
 
@@ -233,6 +253,7 @@ __all__ = [
     "WINDOW_LEGACY_UNRESOLVED",
     "classify_window_row",
     "scope_admits_dataset",
+    "scope_admits_fno_contract",
     "scope_excluded_echo",
     "scope_note_suffix",
     "window_scope_admit",
