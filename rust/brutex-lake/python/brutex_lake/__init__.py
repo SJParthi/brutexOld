@@ -1,14 +1,22 @@
 """brutex_lake — BruteX data-lake Rust render seam (PyO3 bridge).
 
-ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1796). The
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891; the datalake
+conversion roadmap ADR). The
 compiled cdylib ships as the private submodule ``brutex_lake._brutex_lake``;
 this ``__init__.py`` re-exports its symbols (the fno-math DEC-P0-055 mixed
 layout) so callers write ``import brutex_lake;
 brutex_lake.render_parquet_from_ipc(...)``.
 
-The consumers are the four default-OFF facades:
+The consumers are the five default-OFF facades:
 ``brutex/data/lake_rust_render.py`` — version-guarded, burn-in-checked,
-wired into ``ParquetWriter._render_bytes``;
+wired into the two lake writers' render seams
+(``ParquetWriter._render_bytes`` — the bars profile, PR-1 — and
+``option_parquet_writer._atomic_write_parquet`` — the options-defaults
+profile, PR-2);
+``brutex/data/lake_rust_locks.py`` (ADR-0020 PR-4,
+DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912) — the partition-flock
+attempt/release + the atomic-write commit (chmod→fsync→rename) behind
+``BRUTEX_LAKE_RUST_LOCKS``;
 ``brutex/data/lake_rust_resample.py`` (ADR-0020 Wave B / G5,
 DEC-LAKE-RUST-RESAMPLE-001) — the tf_resampler seam
 (``resample_1m_ipc`` / ``resample_all_ipc``);
@@ -35,10 +43,15 @@ from __future__ import annotations
 
 from brutex_lake._brutex_lake import (
     __version__,
+    atomic_commit_replace,
     classify_window_status,
     date_isoformat,
     linked_zstd_version,
+    lock_release,
+    lock_try_exclusive,
+    merge_decision_from_ipc,
     pinned_polars_version,
+    render_parquet_defaults_from_ipc,
     render_parquet_from_ipc,
     render_stats_shard_json,
     resample_1m_ipc,
@@ -47,10 +60,15 @@ from brutex_lake._brutex_lake import (
 
 __all__ = [
     "__version__",
+    "atomic_commit_replace",
     "classify_window_status",
     "date_isoformat",
     "linked_zstd_version",
+    "lock_release",
+    "lock_try_exclusive",
+    "merge_decision_from_ipc",
     "pinned_polars_version",
+    "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",
     "resample_1m_ipc",

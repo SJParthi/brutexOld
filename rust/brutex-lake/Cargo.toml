@@ -56,6 +56,14 @@ crate-type = ["cdylib", "rlib"]
 # (rust/fno-math): abi3-py312 per CLAUDE.md §4's Python 3.12 baseline.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
 
+# ADR-0020 PR-4 (DEC-LAKE-RUST-LOCKS-ATOMIC-001): `flock(2)` for the
+# partition-lock primitive — std has no flock wrapper. libc is ALREADY a
+# transitive member of the committed Cargo.lock (zero new code pulled);
+# rustix is deliberately NOT taken as a direct dep here (the ADR names it
+# for Wave C's lake_stats_manifest port, and raw-fd interop needs one
+# tightly-scoped `unsafe` either way).
+libc = "0.2"
+
 # polars at the EXACT COMMIT the upstream tag `py-1.42.1` pointed at
 # (the tag matching the installed Python wheel 1.42.1; workspace crate
 # version 0.54.4). REV-pinned, not tag-pinned (review-round fold): git
