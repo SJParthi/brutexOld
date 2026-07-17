@@ -17,6 +17,7 @@ import io
 import sys
 import types
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -683,3 +684,25 @@ class TestMutationHardening:
             "_EPOCH: Final[date] = date(1970, 1, 1)",
         ):
             assert literal in source, f"pinned literal drifted: {literal!r}"
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The ``TestMutationWorkflowWiring`` precedent (#1614/#1797 pattern): the
+    module:suite pair sits in the workflow's per-module ``mutmut`` loop with
+    the EMPTY third (timeout) field — this deterministic pin fails if the
+    pair is ever dropped. HONEST: it pins the WIRING only; the weekly run
+    executes on its own schedule (DEC-LAKE-RUST-RESAMPLE-DAILY-001).
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        pair = (
+            '"brutex/data/lake_rust_resample_daily.py:tests/unit/test_lake_rust_resample_daily.py:"'
+        )
+        assert pair in text, (
+            "lake_rust_resample_daily.py is not wired into mutation.yml's per-module mutmut loop"
+        )
