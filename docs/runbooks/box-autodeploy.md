@@ -7,7 +7,10 @@
 > GREEN in a fresh scrubbed subprocess, then re-exec ONCE so the whole night
 > runs the deployed code. The leg is FAIL-OPEN outside the chain break law —
 > it NEVER blocks the nightly (a GitHub outage means one more night on old
-> code, never a missed pull).
+> code, never a missed pull). That law reaches CODING BUGS too: a defect in
+> the leg itself (or a raising `os.execv`) folds into ONE structlog ERROR
+> `box_update.leg_error` + a null `box_update` block, and the chain proceeds
+> on the existing checkout (§25 deviation 12).
 
 ## 1. What runs, when
 
@@ -65,7 +68,7 @@ fetches during the bare maturin builds).
 | `skip_reason=diverged` | local commits on `main` | rebase/remove them (the leg never merges/rebases for you) |
 | `skip_reason=fetch_failed` | network outage (FAIL-OPEN, ≤ ~125 s spent) | nothing — self-heals when the network returns |
 | `status=rolled_back`, `repair=not_needed/rebuilt` | the new tree failed the gate (or a required build failed); the box rolled back and is COHERENT on old code | nothing urgent — fix the upstream breakage; the leg retries next night |
-| `repair=failed_stale` (WARN) | the torn-version residual: tree=from_sha but a required wheel is still to_sha-built (`digest_ok=false`) | usually self-heals next night; manual: `cd rust/<crate> && maturin develop --release` |
+| `repair=failed_stale` (WARN) | the torn-version residual: tree=from_sha but a required wheel is still to_sha-built (`digest_ok=false`) | usually self-heals next night; manual: the wedge-rescue command below, per stale crate (the bare `maturin develop --release` needs the venv maturin + cargo PATH — a fresh shell hits maturin-not-found) |
 | `pip_restore=failed` (WARN) | deps may sit at to_sha against the from_sha tree | `pip install -e ".[data,ui,groww]"` from the repo root |
 | `status=error`, `repair=failed` (CRITICAL) | HARD CLI-DOWN: a required wheel is unloadable and the repair failed — the NEXT invocation cannot import | the wedge-rescue command below, NOW |
 | `status=error`, `skip_reason=rollback_failed` (CRITICAL) | `checkout -B` refused (a concurrent writer dirtied a tracked file mid-run) | inspect `git status`; restore the file; `git checkout -B main <from_sha>` manually |
