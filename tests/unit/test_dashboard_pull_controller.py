@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
@@ -62,6 +62,7 @@ from brutex.dashboard.pull_controller import (
     resolve_fetch_intervals,
     resolve_pull_symbols,
     resolve_pull_targets,
+    screen_pull_scope,
 )
 from brutex.data.instrument_store import open_instrument_store
 from brutex.data.models import CandleBar
@@ -1711,6 +1712,138 @@ class TestResolvePullTargets:
         assert source == "universe"
 
 
+class TestScreenPullScope:
+    """P7 — ``screen_pull_scope``, the ONE vendor-pull scope screen
+    (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3). Runs under the SHIPPED
+    ``index4`` default (the conftest-forced env) — deliberately NO
+    full-arm fixture: the shipped default IS the subject."""
+
+    def test_equity_refused_under_shipped_default(self) -> None:
+        # [FB] fails-before: at merge-base a stale-store stock id resolved and
+        # vendor-pulled; the screen now refuses it loudly naming the DEC.
+        with pytest.raises(ValueError, match="DEC-UNIVERSE-INDEX-ONLY-001"):
+            screen_pull_scope([_equity("RELIANCE")])
+
+    def test_out_of_scope_index_refused(self) -> None:
+        # [FB] a sectoral index outside the admitted 4 is refused too — the
+        # IDX arm judges via admits_underlying, never a blanket IDX pass.
+        with pytest.raises(ValueError, match="NIFTYIT"):
+            screen_pull_scope([_index("NIFTYIT")])
+
+    def test_all_four_admitted_indices_pass(self) -> None:
+        # NIFTY + BANKNIFTY + BSE-SENSEX + INDIAVIX — the full admitted set
+        # resolves without a refusal (a steady-state 4-row store request is
+        # byte-identical to the pre-#1934 behaviour).
+        admitted = [
+            _index("NIFTY"),
+            _index("BANKNIFTY"),
+            replace(_index("SENSEX"), exch_id=Exchange.BSE),
+            _index("INDIAVIX"),
+        ]
+        screen_pull_scope(admitted)  # no raise — all four admitted
+
+    def test_wrong_exchange_pair_refused(self) -> None:
+        # Admission is PAIR-keyed: NSE-SENSEX and BSE-NIFTY are junk pairs.
+        with pytest.raises(ValueError, match="SENSEX"):
+            screen_pull_scope([_index("SENSEX")])  # _index builds NSE
+        with pytest.raises(ValueError, match="NIFTY"):
+            screen_pull_scope([replace(_index("NIFTY"), exch_id=Exchange.BSE)])
+
+    def test_full_scope_is_a_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bounded-gate law: under an UNBOUNDED scope the screen never
+        # fires — a stock AND an out-of-scope index both pass (the §5.6 widen
+        # path; the legacy EQ admission rule owns stock admission there).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        screen_pull_scope([_equity("RELIANCE"), _index("NIFTYIT")])  # no raise
+
+    def test_message_names_dec_and_sorted_dedup(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            screen_pull_scope(
+                [_equity("TCS"), _equity("RELIANCE"), _equity("TCS"), _index("NIFTYIT")]
+            )
+        msg = str(exc.value)
+        # Sorted + de-duplicated offender list, the DEC, and the remediation.
+        assert "out-of-scope instrument(s) refused: NIFTYIT, RELIANCE, TCS" in msg
+        assert "DEC-UNIVERSE-INDEX-ONLY-001" in msg
+        assert "no vendor pull is issued" in msg
+
+    def test_bounded_scope_that_admits_stocks_passes_the_equity(self) -> None:
+        # Defensive-arm pin: a (hypothetical) BOUNDED scope whose token admits
+        # stocks passes an EQ row while still judging IDX rows by pair — the
+        # elif's False arm. NO shipped token produces this shape today
+        # (index4 excludes stocks; full is unbounded), so this constructs the
+        # FeedScope directly against the screen's structural contract.
+        from brutex.config.feed_scope import (
+            INDEX4_FNO_UNDERLYINGS,
+            INDEX4_UNDERLYINGS,
+            SCOPE_FULL,
+            FeedScope,
+        )
+
+        hybrid = FeedScope(
+            feed="synthetic",
+            token=SCOPE_FULL,  # admits_stocks() True …
+            admitted_underlyings=INDEX4_UNDERLYINGS,  # … yet bounded()
+            fno_underlyings=INDEX4_FNO_UNDERLYINGS,
+        )
+        screen_pull_scope([_equity("RELIANCE"), _index("NIFTY")], scope=hybrid)  # no raise
+        with pytest.raises(ValueError, match="NIFTYIT"):
+            screen_pull_scope([_index("NIFTYIT")], scope=hybrid)  # IDX still pair-judged
+
+    def test_explicit_scope_overrides_the_default_both_directions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.config.feed_scope import DEFAULT_FEED, resolve_feed_scope
+
+        bounded = resolve_feed_scope(DEFAULT_FEED)  # the shipped index4 default
+        assert bounded.bounded()
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        full = resolve_feed_scope(DEFAULT_FEED)
+        assert not full.bounded()
+        # An explicit BOUNDED scope refuses even while the env default is full …
+        with pytest.raises(ValueError, match="RELIANCE"):
+            screen_pull_scope([_equity("RELIANCE")], scope=bounded)
+        # … and an explicit FULL scope passes even under the index4 env default.
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "index4")
+        screen_pull_scope([_equity("RELIANCE")], scope=full)  # no raise
+
+
+class TestScreenPullScopeWired:
+    """P7 wiring — the screen fires at BOTH raw selection arms
+    (DEC-UNIVERSE-INDEX-ONLY-001): ``resolve_pull_symbols`` (arm i, the ONE
+    ?symbols= chokepoint) + ``resolve_pull_targets``'s single-?symbol= arm
+    (arm ii). Runs under the SHIPPED index4 default."""
+
+    def test_resolve_pull_symbols_refuses_a_stock(self) -> None:
+        # [FB] fails-before: at merge-base the ?symbols= arm resolved RELIANCE
+        # (a stale-store stock id would trigger REAL stock vendor pulls).
+        store = {"RELIANCE": _equity("RELIANCE")}
+        with pytest.raises(ValueError, match="DEC-UNIVERSE-INDEX-ONLY-001"):
+            resolve_pull_symbols("RELIANCE", store.get)
+
+    def test_resolve_pull_targets_single_refuses_a_stock(self) -> None:
+        # [FB] the single-?symbol= selection arm ditto.
+        store = {"RELIANCE": _equity("RELIANCE")}
+        with pytest.raises(ValueError, match="DEC-UNIVERSE-INDEX-ONLY-001"):
+            resolve_pull_targets(
+                symbols=None, symbol="RELIANCE", lookup=store.get, whole_universe=lambda: []
+            )
+
+    def test_full_scope_admits_the_stock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The §5.6 widen pin: under ``full`` BOTH arms resolve the stock
+        # unchanged (the screen is a pass-through — never a 400 for a
+        # legitimate stock selection under a full scope).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        store = {"RELIANCE": _equity("RELIANCE")}
+        (only,) = resolve_pull_symbols("RELIANCE", store.get)
+        assert only.symbol_name == "RELIANCE"
+        out, source = resolve_pull_targets(
+            symbols=None, symbol="RELIANCE", lookup=store.get, whole_universe=lambda: []
+        )
+        assert [i.symbol_name for i in out] == ["RELIANCE"]
+        assert source == "single"
+
+
 class TestPullPopulatesLedger:
     """DEC-WINDOW-LEDGER-001 (PR-4): a live pull records EVERY window in the ledger DB."""
 
@@ -3281,6 +3414,80 @@ class TestSkippedAuditWired:
             self._pull(tmp_path)  # a NEW pull_id → audits again, nothing left
         audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
         assert [a["reopened"] for a in audits] == [1, 0]
+
+
+class TestSkippedAuditScopeWired:
+    """P9 wiring (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3): ``pull_all_spot``
+    binds the ``window_scope_admit`` predicate over the acting scope — under
+    the SHIPPED index4 default the rotation audits ADMITTED window rows only;
+    excluded stock contracts + legacy ``sid|segment`` rows the admitted-sid
+    map cannot resolve burn NO budget, are NEVER demoted (a SKIPPED→FAILED
+    flip no producer would re-fetch is PERMANENT), and are COUNTED on the
+    ``pull.skipped_audit`` log line (``out_of_scope=N``)."""
+
+    @staticmethod
+    def _seed_scope_mix(tmp_path: Path) -> None:
+        """Three terminally-SKIPPED option-market rows: an admitted NIFTY leg,
+        an out-of-scope RELIANCE contract, and a legacy sid|segment row whose
+        sid ("12345") the pull's admitted-sid map cannot resolve."""
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        seeded = WindowLedger()
+        for sid in (
+            "NSE-NIFTY-25Jan24-21000-CE",  # admitted — (NSE, NIFTY) F&O leg
+            "NSE-RELIANCE-25Jan24-2500-CE",  # excluded — a stock contract
+            "12345|OPTSTK",  # legacy shape — unresolved sid
+        ):
+            seeded.record(
+                WindowKey(
+                    market="groww-option",
+                    security_id=sid,
+                    interval="1minute",
+                    start=date(2024, 1, 1),
+                    end=date(2024, 1, 26),
+                ),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_BULK_NOW,
+                settle_empty=True,
+            )
+        save_window_ledger(seeded, tmp_path)
+
+    def test_pull_reopens_only_the_admitted_row_and_counts_the_rest(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger import REOPENED_MARKER
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        self._seed_scope_mix(tmp_path)
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-01-01",
+                to_date="2024-01-31",
+                intervals=("1minute",),
+                adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
+            )
+        audits = [log for log in logs if log["event"] == "pull.skipped_audit"]
+        assert len(audits) == 1
+        assert audits[0]["reopened"] == 1  # ONLY the admitted NIFTY leg rotated
+        assert audits[0]["out_of_scope"] == 2  # the stock contract + the legacy row
+        persisted = load_window_ledger(tmp_path)
+        by_sid = {
+            r.security_id: r
+            for r in persisted.records()
+            if r.security_id
+            in {"NSE-NIFTY-25Jan24-21000-CE", "NSE-RELIANCE-25Jan24-2500-CE", "12345|OPTSTK"}
+        }
+        assert by_sid["NSE-NIFTY-25Jan24-21000-CE"].status == "FAILED"  # re-fetchable
+        assert by_sid["NSE-NIFTY-25Jan24-21000-CE"].last_error == REOPENED_MARKER
+        # The excluded + legacy rows stay terminally SKIPPED — never demoted.
+        assert by_sid["NSE-RELIANCE-25Jan24-2500-CE"].status == "SKIPPED"
+        assert by_sid["12345|OPTSTK"].status == "SKIPPED"
 
 
 # ────────────────────────────────────────────────────────────────────────

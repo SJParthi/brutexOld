@@ -1868,6 +1868,44 @@ class TestAuditReopenSkipped:
         assert ledger.is_expected_empty_recheck(_key("A")) is True  # REOPENED marker
         assert ledger.is_skippable(_key("A")) is False  # the next pull re-fetches
 
+    def test_admit_filters_rotation_and_burns_no_budget(self) -> None:
+        # P9 (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3): with cap=2 and A/C
+        # excluded by the predicate, the rotation still audits TWO admitted
+        # rows (B, D) — excluded rows consume NO budget (the unfiltered cap=2
+        # head pass would have selected A, B).
+        ledger = self._skipped_ledger(["A", "B", "C", "D"])
+        count, cursor = ledger.audit_reopen_skipped(
+            start_after=None, cap=2, admit=lambda wk: wk[1] in {"B", "D"}
+        )
+        assert count == 2
+        assert cursor is not None and cursor[1] == "D"  # last ADMITTED key selected
+        statuses = {r.security_id: r.status for r in ledger.records()}
+        assert statuses == {"A": SKIPPED, "B": FAILED, "C": SKIPPED, "D": FAILED}
+
+    def test_excluded_rows_are_never_demoted(self) -> None:
+        # An all-excluded population is a (0, None) no-op: a SKIPPED→FAILED
+        # flip on a window no producer will re-fetch would be a PERMANENT
+        # flip — the audit's own DATA-SAFE contract forbids it.
+        ledger = self._skipped_ledger(["A", "B"])
+        assert ledger.audit_reopen_skipped(start_after=None, cap=5, admit=lambda _wk: False) == (
+            0,
+            None,
+        )
+        assert all(r.status == SKIPPED for r in ledger.records())
+        assert ledger.reopened_keys() == frozenset()
+
+    def test_admit_none_is_the_legacy_rotation_byte_identical(self) -> None:
+        # None = the legacy unfiltered rotation — every existing caller
+        # byte-identical (the explicit-kwarg call equals the no-kwarg call).
+        legacy = self._skipped_ledger(["A", "B", "C"])
+        explicit = self._skipped_ledger(["A", "B", "C"])
+        assert legacy.audit_reopen_skipped(
+            start_after=None, cap=2
+        ) == explicit.audit_reopen_skipped(start_after=None, cap=2, admit=None)
+        assert [(r.security_id, r.status) for r in legacy.records()] == [
+            (r.security_id, r.status) for r in explicit.records()
+        ]
+
 
 class TestBarsNetNew:
     """DEC-INGEST-BOUNDARY-INTEGRITY-001: the persisted deduped net-new count."""

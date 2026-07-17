@@ -2638,6 +2638,37 @@ class TestSkippedAuditStore:
         assert [log["event"] for log in logs] == ["window_ledger.skipped_audit_cursor_save_failed"]
         assert store_module.load_skipped_audit_cursor(tmp_path) is None
 
+    def test_admit_counts_out_of_scope_on_the_log_line(self, tmp_path: Path) -> None:
+        # P9 (DEC-UNIVERSE-INDEX-ONLY-001): the counting wrapper surfaces the
+        # excluded population on the ONE ``pull.skipped_audit`` log line —
+        # the operator sees exactly how much of the durable SKIPPED set the
+        # scope excludes; excluded rows are never demoted.
+        from brutex.data.window_ledger_store import run_skipped_audit
+
+        ledger = self._skipped_ledger(["A", "B", "C"])
+        with capture_logs() as logs:
+            reopened = run_skipped_audit(
+                ledger, tmp_path, pull_id="p1", cap=5, admit=lambda wk: wk[1] == "B"
+            )
+        assert reopened == 1
+        audit = next(log for log in logs if log["event"] == "pull.skipped_audit")
+        assert audit["reopened"] == 1
+        assert audit["out_of_scope"] == 2  # A + C excluded — counted, not demoted
+        assert {r.security_id for r in ledger.records() if r.status == FAILED} == {"B"}
+
+    def test_guarded_wrapper_threads_admit(self, tmp_path: Path) -> None:
+        # The guarded pull-seam wrapper threads the #1934 predicate verbatim —
+        # a dropped ``admit`` thread would reopen BOTH rows.
+        from brutex.data.window_ledger_store import run_skipped_audit_guarded
+
+        ledger = self._skipped_ledger(["A", "B"])
+        reopened = run_skipped_audit_guarded(
+            ledger, tmp_path, pull_id="p1", admit=lambda wk: wk[1] == "A"
+        )
+        assert reopened == 1
+        statuses = {r.security_id: r.status for r in ledger.records()}
+        assert statuses == {"A": FAILED, "B": SKIPPED}
+
 
 class TestBarsNetNewBackwardCompat:
     """DEC-INGEST-BOUNDARY-INTEGRITY-001: ``bars_net_new`` follows the exact

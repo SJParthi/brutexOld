@@ -2169,6 +2169,38 @@ class TestStageAmpersand:
         assert '"event": "amp.call"' not in transcript  # zero probe evidence lines
 
 
+class TestStageAmpersandScopeGate:
+    """P10 (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3) — under the SHIPPED
+    ``index4`` default (the conftest-forced env; deliberately NO full-arm
+    fixture) every ``&``-underlying is a STOCK, so the stage SHORT-CIRCUITS
+    BEFORE family derivation: zero vendor calls, zero durable seeds, no
+    evidence sidecar, its OWN scope-naming skip reason."""
+
+    def test_short_circuits_with_zero_vendor_calls_and_zero_seeds(self, tmp_path: Path) -> None:
+        store = _AmpMetaStore()
+        deps, ctx, sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            contract_data=frozenset({"M%26M"}),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_SKIP
+        # The stage's OWN scope-naming reason — NEVER the "no &-underlying"
+        # text (the stage-4 master parse is untouched (A7): the master still
+        # LISTS the M&M family, so that wording would be false).
+        assert "DEC-UNIVERSE-INDEX-ONLY-001" in outcome.lines[0]
+        assert "no &-underlying" not in outcome.lines[0]
+        # ZERO vendor calls — neither API saw either symbol form …
+        assert sdk.expiry_forms == []
+        assert sdk.contract_forms == []
+        # … ZERO durable form-winner seeds + NO verdict stamp, and no
+        # evidence sidecar under the quarantined run tree.
+        assert store.rows == {}
+        assert store.set_calls == []
+        assert not (ctx.quarantine_root / "ampersand_verdict.json").exists()
+
+
 # ── runner ──────────────────────────────────────────────────────────────
 
 
