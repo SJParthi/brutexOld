@@ -25,7 +25,12 @@ DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
 (ADR-0020 Wave C-3 / G8, DEC-LAKE-RUST-WINDOW-LEDGER-001) — the
 window-ledger status + merge-key date laws (``classify_window_status`` /
-``date_isoformat``). Nothing else in ``brutex/`` imports this package, and
+``date_isoformat``); and ``brutex/data/lake_rust_ledger_render.py``
+(ADR-0020 G10 CONVERT, DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
+#1918) — the window-ledger parquet render
+(``render_ledger_parquet_from_ipc``; ROW-EQUIVALENCE standard, never bytes
+— the #1917 spike's measured-infeasible verdict). Nothing else in
+``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
 resample, a stats shard, or a ledger record.
@@ -51,6 +56,7 @@ from brutex_lake._brutex_lake import (
     lock_try_exclusive,
     merge_decision_from_ipc,
     pinned_polars_version,
+    render_ledger_parquet_from_ipc,
     render_parquet_defaults_from_ipc,
     render_parquet_from_ipc,
     render_stats_shard_json,
@@ -68,6 +74,7 @@ __all__ = [
     "lock_try_exclusive",
     "merge_decision_from_ipc",
     "pinned_polars_version",
+    "render_ledger_parquet_from_ipc",
     "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",
