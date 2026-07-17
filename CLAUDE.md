@@ -3047,7 +3047,16 @@ hostile-review pass._
   MANDATORY named follow-up before any sweep surface exposes it; optional follow-ups: the R3=2H−L
   pivot-variant bit (recommended against) + the VIX expected-move results LENS (display only,
   never a bit). NIFTY/BANKNIFTY/SENSEX spot-only scope + rate caps + lake/schema/routes untouched.
-  GATES_BLURB_PLACEHOLDER.)
+  GATES (the full battery on the REBASED tree): whole-engine ci.yml gate 100.00% line+branch
+  (TOTAL 10661/0/3010/0; 3780 passed); rust_stage1a (107/22) · conflicts (12/4) ·
+  indicators-gap_mid (6/0) · calendars-nse (204/52) standalone gates 100.00%; coverage-gate
+  discovery 5 touched modules at 100% (--base 696bf036a); tests/golden 557 passed ·
+  tests/property 539 passed (P-06 unmodified) · the vocab/FFI/lockstep family 459 passed · the
+  new ≥64 u128-path pins 6 passed; cargo fmt + clippy `-D warnings` clean; cargo test default
+  199 AND `--features python,serde` 279 passed; codegen/vocab-golden/truth-table `--check` modes
+  green; check_vocab_rust_parity 400/400 bit-identical; ruff/ruff-format clean; `mypy --strict
+  brutex` Success (466 files); pyright 0 errors on touched modules;
+  validate_ledger_numbering OK (1371 headers).)
   Earlier: `claude/vocab-66-reshape`
   (**DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804** — the 60→66 vocabulary
   reshape implementing `DEC-VOCAB-VWAP-VOLUME-WIPE-001` (decision PR in
