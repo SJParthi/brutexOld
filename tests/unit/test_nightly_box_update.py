@@ -1,0 +1,1640 @@
+"""Unit matrix for the nightly box auto-deploy leg (DEC-BOX-AUTODEPLOY-LANE-001).
+
+Harness style: the injectable :class:`CommandRunner` seam (the design §10 law —
+tests never exec git/maturin/pip; the scripted :class:`FakeRunner` records
+every argv).  Real-git integration lives in
+``tests/integration/test_box_update_git.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+from brutex.nightly import box_update as bu
+from brutex.nightly.box_update import (
+    BOX_UPDATE_STATE_ENV,
+    WHEEL_SET,
+    BoxUpdateEnvError,
+    BoxUpdateOutcome,
+    BoxUpdateStatus,
+    WheelBuildResult,
+    adopt_state,
+    classify_delta,
+    default_command_runner,
+    guard_skip_reason,
+    maybe_reexec,
+    resolve_box_update_enabled,
+    run_box_update,
+)
+from structlog.testing import capture_logs
+
+FROM_SHA = "a" * 40
+TO_SHA = "b" * 40
+
+_PASS_CHECKS = [
+    ["wheel_freshness", "PASS", "ok"],
+    ["wheel_freshness_fno_math", "PASS", "ok"],
+    ["wheel_source_digest", "PASS", "ok"],
+    ["wheel_source_digest_fno_math", "PASS", "ok"],
+]
+
+
+def _gate_stdout(checks: Sequence[Sequence[str]] = _PASS_CHECKS) -> str:
+    return f"{bu._IMPORT_OK_MARKER}\n{bu._CHECKS_MARKER}{json.dumps(list(checks))}\n"
+
+
+class FakeRunner:
+    """Scripted CommandRunner — records every call; rules matched newest-first."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.rules: list[
+            tuple[
+                Callable[[list[str]], bool],
+                tuple[int, str, str] | Callable[[list[str]], tuple[int, str, str]],
+            ]
+        ] = []
+        self.state: dict[str, Any] = {}
+
+    def on(
+        self,
+        pred: Callable[[list[str]], bool],
+        resp: tuple[int, str, str] | Callable[[list[str]], tuple[int, str, str]],
+    ) -> FakeRunner:
+        self.rules.insert(0, (pred, resp))
+        return self
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout_s: float,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        call_argv = [str(a) for a in argv]
+        self.calls.append({"argv": call_argv, "cwd": cwd, "timeout_s": timeout_s, "env": env})
+        for pred, resp in self.rules:
+            if pred(call_argv):
+                return resp(call_argv) if callable(resp) else resp
+        raise AssertionError(f"unscripted argv: {call_argv}")
+
+    # ── argv census helpers ──
+    def argvs(self) -> list[list[str]]:
+        return [c["argv"] for c in self.calls]
+
+    def git_calls(self, *prefix: str) -> list[list[str]]:
+        want = ["git", *prefix]
+        return [a for a in self.argvs() if a[: len(want)] == want]
+
+    def mutating_git_calls(self) -> list[list[str]]:
+        return [a for a in self.argvs() if a[0] == "git" and a[1] in ("merge", "checkout", "reset")]
+
+    def maturin_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.calls if c["argv"][0].endswith("maturin")]
+
+    def pip_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.calls if c["argv"][0].endswith("pip") and c["argv"][1] == "install"]
+
+    def child_calls(self, needle: str) -> list[dict[str, Any]]:
+        return [
+            c
+            for c in self.calls
+            if c["argv"][0] == sys.executable
+            and len(c["argv"]) >= 3
+            and c["argv"][1] == "-c"
+            and needle in c["argv"][2]
+        ]
+
+    def gate_calls(self) -> list[dict[str, Any]]:
+        # The §4.5 GATE child — the smoke-INCLUDING doctor subprocess.
+        return [
+            c for c in self.child_calls("brutex.doctor") if bu.GATE_SMOKE_IMPORTS in c["argv"][2]
+        ]
+
+    def coherence_calls(self) -> list[dict[str, Any]]:
+        # The §4.6 coherence-check child — the smoke-LESS doctor subprocess.
+        return [
+            c
+            for c in self.child_calls("brutex.doctor")
+            if bu.GATE_SMOKE_IMPORTS not in c["argv"][2]
+        ]
+
+    def smoke_calls(self) -> list[dict[str, Any]]:
+        return self.child_calls("import trading_core, fno_math")
+
+
+def _mk_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    for spec in WHEEL_SET:
+        lock = repo / spec.crate_dir / "Cargo.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(f"# lock {spec.name}\n", encoding="utf-8")
+    return repo
+
+
+def _std_runner(
+    repo: Path,
+    *,
+    diff_paths: Sequence[str] = ("src/x.py",),
+    gate: tuple[int, str, str] | None = None,
+) -> FakeRunner:
+    """The happy-path script: clean tree, origin ahead, everything green."""
+    r = FakeRunner()
+    r.state["head"] = FROM_SHA
+
+    def _merge(_a: list[str]) -> tuple[int, str, str]:
+        r.state["head"] = TO_SHA
+        return (0, "", "")
+
+    def _checkout_b(a: list[str]) -> tuple[int, str, str]:
+        r.state["head"] = a[3]
+        return (0, "", "")
+
+    r.on(lambda a: a[:3] == ["git", "rev-parse", "--show-toplevel"], (0, f"{repo}\n", ""))
+    r.on(
+        lambda a: a[:3] == ["git", "rev-parse", "HEAD"],
+        lambda _a: (0, str(r.state["head"]) + "\n", ""),
+    )
+    r.on(lambda a: a[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"], (0, "main\n", ""))
+    r.on(lambda a: a[:3] == ["git", "fetch", "origin"], (0, "", ""))
+    r.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, TO_SHA + "\n", ""))
+    r.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, "", ""))
+    r.on(lambda a: a[:3] == ["git", "merge-base", "--is-ancestor"], (0, "", ""))
+    r.on(lambda a: a[:3] == ["git", "merge", "--ff-only"], _merge)
+    r.on(
+        lambda a: a[:3] == ["git", "diff", "--name-only"],
+        (0, "\n".join(diff_paths) + "\n", ""),
+    )
+    r.on(lambda a: a[:4] == ["git", "checkout", "-B", "main"], _checkout_b)
+    r.on(lambda a: a[:3] == ["git", "checkout", "-f"], (0, "", ""))
+    r.on(lambda a: a[0].endswith("maturin"), (0, "", ""))
+    r.on(lambda a: a[0].endswith("pip"), (0, "", ""))
+    r.on(
+        lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+        gate if gate is not None else (0, _gate_stdout(), ""),
+    )
+    r.on(
+        lambda a: (
+            a[0] == sys.executable
+            and a[1] == "-c"
+            and a[2].startswith("import ")
+            and "brutex.doctor" not in a[2]
+        ),
+        (0, "", ""),
+    )
+    return r
+
+
+def _run(
+    repo: Path,
+    runner: FakeRunner,
+    *,
+    env: Mapping[str, str] | None = None,
+    state_dir: Path | None = None,
+) -> BoxUpdateOutcome:
+    return run_box_update(
+        repo_root=repo,
+        runner=runner,
+        env=dict(env or {}),
+        state_dir=state_dir,
+        sleep=lambda _s: None,
+    )
+
+
+# ── kill switch + env twins (§7; tests 9 + twins) ────────────────────────
+class TestKillSwitchAndTwins:
+    def test_unset_and_truthy_enable(self) -> None:
+        assert resolve_box_update_enabled({}) is True
+        for v in ("1", "true", "YES", " on "):
+            assert resolve_box_update_enabled({"BRUTEX_BOX_UPDATE": v}) is True
+
+    def test_falsy_disables(self) -> None:
+        for v in ("0", "false", "NO", " off "):
+            assert resolve_box_update_enabled({"BRUTEX_BOX_UPDATE": v}) is False
+
+    def test_junk_raises_env_error(self) -> None:
+        with pytest.raises(BoxUpdateEnvError):
+            resolve_box_update_enabled({"BRUTEX_BOX_UPDATE": "banana"})
+
+    def test_env_error_is_a_value_error(self) -> None:
+        # The FillModeRemovedError precedent — the CLI's existing
+        # (NightlyEnvError, ValueError) catch must always cover it.
+        assert issubclass(BoxUpdateEnvError, ValueError)
+
+    def test_truthy_falsy_twins_equality_pinned(self) -> None:
+        from brutex.engine import sweep_lookahead
+
+        assert bu._TRUTHY == sweep_lookahead._TRUTHY
+        assert bu._FALSY == sweep_lookahead._FALSY
+
+    @pytest.mark.parametrize("raw", [None, "", "  ", "junk", "-1", "0", "nan", "inf", "12.5"])
+    def test_resolve_env_seconds_twin_equality_pinned(self, raw: str | None) -> None:
+        from brutex.config.deadline import resolve_env_seconds
+
+        env = {} if raw is None else {"X_T": raw}
+        assert bu._resolve_env_seconds(env, "X_T", 60.0) == resolve_env_seconds(
+            "X_T", 60.0, raw=raw
+        )
+
+    def test_disabled_run_is_zero_actions(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = FakeRunner()  # any call would raise "unscripted argv"
+        out = _run(repo, runner, env={"BRUTEX_BOX_UPDATE": "off"}, state_dir=tmp_path / "s")
+        assert out.status is BoxUpdateStatus.DISABLED
+        assert runner.calls == []
+        assert out.gate == "skipped"
+        assert not (tmp_path / "s").exists()  # zero state-dir I/O
+
+
+# ── pure decision core ───────────────────────────────────────────────────
+class TestPureCore:
+    def test_guard_skip_reason_truth_table(self) -> None:
+        ok = {"branch": "main", "porcelain": [], "ancestor_rc": 0}
+        assert guard_skip_reason(**ok) is None  # type: ignore[arg-type]
+        assert guard_skip_reason(branch="HEAD", porcelain=[], ancestor_rc=0) == "detached_head"
+        assert guard_skip_reason(branch="dev", porcelain=[], ancestor_rc=0) == "not_on_main"
+        assert (
+            guard_skip_reason(branch="main", porcelain=[" M x.py"], ancestor_rc=0) == "dirty_tree"
+        )
+        assert (
+            guard_skip_reason(branch="main", porcelain=["?? scratch"], ancestor_rc=0) is None
+        )  # untracked-only never blocks (§2 G5)
+        assert guard_skip_reason(branch="main", porcelain=[], ancestor_rc=1) == "diverged"
+        assert (
+            guard_skip_reason(branch="main", porcelain=[], ancestor_rc=2) == "ancestor_check_failed"
+        )
+
+    def test_classify_delta_patterns(self) -> None:
+        assert classify_delta(["rust/trading-core/src/lib.rs"]) == bu.DeltaClass(True, False)
+        assert classify_delta(["rust/fno-math/Cargo.lock"]) == bu.DeltaClass(True, False)
+        assert classify_delta(["Cargo.lock"]) == bu.DeltaClass(True, False)  # belt
+        assert classify_delta(["sub/dir/Cargo.toml"]) == bu.DeltaClass(True, False)  # belt
+        assert classify_delta(["pyproject.toml"]) == bu.DeltaClass(False, True)
+        assert classify_delta(["rust/fno-math/pyproject.toml"]) == bu.DeltaClass(True, False)
+        # Deliberately NOT matched (§4.4).
+        assert classify_delta(["Makefile", "up.sh", ".github/workflows/ci.yml"]) == (
+            bu.DeltaClass(False, False)
+        )
+        assert classify_delta(["brutex/cli.py", "docs/x.md"]) == bu.DeltaClass(False, False)
+        # A crate-pyproject path is NOT the root pyproject.
+        assert classify_delta(["sub/pyproject.toml"]) == bu.DeltaClass(False, False)
+
+    def test_wheel_set_is_the_makefile_mirror(self) -> None:
+        # §10 test 16 — parse the Makefile run-raw maturin lines; set equality.
+        makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text(encoding="utf-8")
+        crates: dict[str, bool] = {}
+        for block in makefile.split("@$(VPY) -c")[1:]:
+            if "maturin" not in block or "cd rust/" not in block:
+                continue
+            crate_dir = "rust/" + block.split("cd rust/", 1)[1].split(" ", 1)[0]
+            warn_only = "|| echo" in block.split("maturin", 2)[-1]
+            crates[crate_dir] = not warn_only
+        assert crates == {s.crate_dir: s.required for s in WHEEL_SET}
+
+    def test_outcome_to_dict_key_order_and_derivations(self) -> None:
+        wheel = WheelBuildResult(
+            name="fno_math",
+            crate_dir="rust/fno-math",
+            required=True,
+            result="ok",
+            digest_ok=True,
+            duration_s=1.5,
+            detail="",
+        )
+        out = BoxUpdateOutcome(
+            status=BoxUpdateStatus.UPDATED,
+            from_sha=FROM_SHA,
+            to_sha=TO_SHA,
+            running_sha=FROM_SHA,
+            skip_reason=None,
+            delta_rust=True,
+            delta_pyproject=False,
+            wheels=(wheel,),
+            gate="ok",
+            repair="not_needed",
+            pip_restore="not_needed",
+            lock_restored=(),
+            quarantined=(),
+            alarm_signature=None,
+            alarm_repeats=0,
+            reexec=False,
+            duration_s=2.0,
+            detail="",
+        )
+        d = out.to_dict()
+        assert list(d) == [
+            "status",
+            "updated",
+            "from_sha",
+            "to_sha",
+            "running_sha",
+            "reexec",
+            "skip_reason",
+            "delta_rust",
+            "delta_pyproject",
+            "wheels",
+            "gate",
+            "repair",
+            "pip_restore",
+            "lock_restored",
+            "quarantined",
+            "alarm_signature",
+            "alarm_repeats",
+            "duration_s",
+            "detail",
+        ]
+        assert d["updated"] is True  # DERIVED: status == updated (§5 freeze)
+        wheels = d["wheels"]
+        assert isinstance(wheels, list)
+        assert list(wheels[0]) == [
+            "name",
+            "crate_dir",
+            "required",
+            "result",
+            "rebuilt",
+            "digest_ok",
+            "duration_s",
+            "detail",
+        ]
+        assert wheels[0]["rebuilt"] is True  # DERIVED: result == "ok"
+        failed = WheelBuildResult(
+            name="x",
+            crate_dir="y",
+            required=True,
+            result="failed",
+            digest_ok=None,
+            duration_s=0.0,
+            detail="boom",
+        )
+        assert failed.to_dict()["rebuilt"] is False
+
+
+# ── guard-refusal matrix (§10 test 1) ────────────────────────────────────
+class TestGuardMatrix:
+    def _assert_skip(self, out: BoxUpdateOutcome, runner: FakeRunner, reason: str) -> None:
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == reason
+        assert runner.mutating_git_calls() == []  # no merge/checkout/reset ever
+        assert runner.maturin_calls() == []
+        assert out.gate == "skipped"
+
+    def test_g1_toplevel_rc_nonzero(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "--show-toplevel"], (128, "", "fatal"))
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "not_a_repo_checkout")
+
+    def test_g1_toplevel_mismatch(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:3] == ["git", "rev-parse", "--show-toplevel"],
+            (0, f"{other}\n", ""),
+        )
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "not_a_repo_checkout")
+
+    def test_g2_detached_head(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            (0, "HEAD\n", ""),
+        )
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "detached_head")
+
+    def test_g2_not_on_main(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:4] == ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            (0, "claude/feature\n", ""),
+        )
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "not_on_main")
+        assert out.running_sha == FROM_SHA  # running_sha == from_sha on skips
+
+    @pytest.mark.parametrize("rc", [1, 124])
+    def test_g3_fetch_fails_twice_with_backoff(self, tmp_path: Path, rc: int) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "fetch", "origin"], (rc, "", "network down"))
+        sleeps: list[float] = []
+        out = run_box_update(
+            repo_root=repo, runner=runner, env={}, state_dir=None, sleep=sleeps.append
+        )
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == "fetch_failed"
+        assert len(runner.git_calls("fetch", "origin")) == bu.FETCH_ATTEMPTS
+        assert sleeps == [bu.FETCH_BACKOFF_S]  # backoff BETWEEN attempts only
+        assert runner.mutating_git_calls() == []
+
+    def test_g4_rev_parse_origin_fails(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (128, "", "x"))
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "rev_parse_failed")
+
+    def test_g5_dirty_tree_blocks_with_evidence(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M brutex/cli.py\n?? scratch.txt\n", ""),
+        )
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, "dirty_tree")
+        assert "brutex/cli.py" in out.detail
+
+    def test_g5_untracked_only_proceeds(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+
+        def _porcelain(_a: list[str]) -> tuple[int, str, str]:
+            # Clean AFTER the merge (post-merge verify), untracked-only before.
+            if runner.state.get("head") == TO_SHA:
+                return (0, "?? scratch.txt\n", "")
+            return (0, "?? scratch.txt\n", "")
+
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], _porcelain)
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert "untracked_files=1" in out.detail
+
+    @pytest.mark.parametrize(("rc", "reason"), [(1, "diverged"), (2, "ancestor_check_failed")])
+    def test_g6_ancestor_verdicts(self, tmp_path: Path, rc: int, reason: str) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "merge-base", "--is-ancestor"], (rc, "", ""))
+        out = _run(repo, runner)
+        self._assert_skip(out, runner, reason)
+
+    def test_merge_refused_is_a_skip_with_no_mutation_after(self, tmp_path: Path) -> None:
+        # §10 test 25 — the §3 arm, independent of the §2 guard matrix.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:3] == ["git", "merge", "--ff-only"],
+            (1, "", "error: untracked working tree files would be overwritten"),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == "merge_refused"
+        assert runner.git_calls("checkout") == []  # git aborted pre-mutation
+
+    def test_postmerge_verify_failure_rolls_back(self, tmp_path: Path) -> None:
+        # §10 test 1a — HEAD lands on the WRONG sha after the merge.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+
+        def _merge(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["head"] = "c" * 40  # NOT to_sha
+            return (0, "", "")
+
+        runner.on(lambda a: a[:3] == ["git", "merge", "--ff-only"], _merge)
+        out = _run(repo, runner)
+        assert out.skip_reason == "postmerge_verify_failed"
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert runner.git_calls("checkout", "-B", "main") != []
+
+    def test_delta_classify_failure_is_conservative(self, tmp_path: Path) -> None:
+        # §10 test 1b — rust+pyproject conservative; ALL builds + pip issued.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "diff", "--name-only"], (128, "", "boom"))
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert out.delta_rust is True and out.delta_pyproject is True
+        assert len(runner.maturin_calls()) == len(WHEEL_SET)
+        assert len(runner.pip_calls()) == 1
+        assert any(e["event"] == "box_update.delta_classify_failed" for e in logs)
+
+
+# ── wheel builds (§10 tests 5/6) ─────────────────────────────────────────
+class TestWheelBuilds:
+    def test_python_only_delta_builds_nothing_gate_still_runs(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("brutex/cli.py",))
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert runner.maturin_calls() == []
+        assert runner.pip_calls() == []
+        assert len(runner.gate_calls()) == 1  # the lockstep-hole closer (§4.5)
+        assert out.gate == "ok"
+
+    def test_rust_delta_builds_wheel_set_in_bootstrap_order(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        calls = runner.maturin_calls()
+        assert [c["cwd"] for c in calls] == [repo / s.crate_dir for s in WHEEL_SET]
+        for call in calls:
+            # BARE build — argv-exact; a --locked token anywhere FAILS the pin.
+            assert call["argv"][1:] == ["develop", "--release"]
+            assert "--locked" not in call["argv"]
+            env = call["env"]
+            assert env is not None
+            assert env["VIRTUAL_ENV"] == str(Path(sys.executable).parent.parent)
+            assert str(Path.home() / ".cargo" / "bin") in env["PATH"]
+        assert runner.pip_calls() == []
+        assert [w.result for w in out.wheels] == ["ok", "ok", "ok"]
+
+    def test_restore_porcelain_read_after_every_maturin_call(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        _run(repo, runner)
+        argvs = runner.argvs()
+        maturin_idx = [i for i, a in enumerate(argvs) if a[0].endswith("maturin")]
+        porcelain_idx = [
+            i for i, a in enumerate(argvs) if a[:3] == ["git", "status", "--porcelain"]
+        ]
+        for i in maturin_idx:
+            assert any(j > i for j in porcelain_idx)  # a fresh porcelain follows each build
+
+    def test_pyproject_delta_runs_pip_only(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("pyproject.toml",))
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert runner.maturin_calls() == []
+        pips = runner.pip_calls()
+        assert len(pips) == 1
+        assert pips[0]["argv"][1:] == ["install", "-e", ".[data,ui,groww]"]
+        assert pips[0]["cwd"] == repo
+
+    def test_optional_wheel_failure_never_rolls_back(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/brutex-feed/src/lib.rs",))
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (0, "", ""),
+        )
+
+        def _maturin(call_env: dict[str, Any]) -> tuple[int, str, str]:
+            return (0, "", "")
+
+        # brutex-feed (optional) fails; required crates build fine.
+        feed_dir = repo / "rust/brutex-feed"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "feed boom") if runner.calls[-1]["cwd"] == feed_dir else (0, "", ""),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert runner.git_calls("checkout", "-B") == []
+        by_name = {w.name: w for w in out.wheels}
+        assert by_name["brutex_feed"].result == "failed"
+        assert by_name["brutex_feed"].detail == "feed boom"
+
+    def test_required_wheel_failure_short_circuits_into_rollback(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "build boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.running_sha == FROM_SHA
+        # fno_math is FIRST in bootstrap order — the failure short-circuits
+        # trading_core/brutex_feed straight into the rollback (§4.5).
+        assert len(runner.maturin_calls()) == 1
+        assert runner.git_calls("checkout", "-B", "main") != []
+        # The §4.5 gate subprocess never ran ⇒ gate="skipped" (§1 emission law).
+        assert runner.gate_calls() == []
+        assert out.gate == "skipped"
+
+    def test_required_timeout_arm_reports_timeout(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (124, "", "") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        by_name = {w.name: w for w in out.wheels}
+        assert by_name["fno_math"].result == "timeout"
+
+
+# ── gate arms (§10 tests 7/17) ───────────────────────────────────────────
+class TestAssertGreenGate:
+    def test_import_failed_rolls_back(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, gate=(1, "", "ModuleNotFoundError: x"))
+        out = _run(repo, runner)
+        assert out.gate == "import_failed"
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert runner.git_calls("checkout", "-B", "main") != []
+
+    def test_doctor_warn_is_stale(self, tmp_path: Path) -> None:
+        checks = [
+            ["wheel_freshness", "WARN", "symbol drift"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "WARN", "digest mismatch"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, gate=(0, _gate_stdout(checks), ""))
+        # The post-rollback coherence check leg reads the SAME stale checks
+        # against the rolled-back tree → the mismatch repair fires; make the
+        # RE-check read PASS (the repaired-crate re-verify).
+        runner.state["checks_calls"] = 0
+
+        def _gate(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["checks_calls"] += 1
+            if runner.state["checks_calls"] == 1:
+                return (0, _gate_stdout(checks), "")
+            return (0, _gate_stdout(), "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _gate,
+        )
+        out = _run(repo, runner)
+        assert out.gate == "stale"
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+
+    def test_child_crash_after_clean_import_is_error(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, gate=(1, f"{bu._IMPORT_OK_MARKER}\n", "boom"))
+        out = _run(repo, runner)
+        assert out.gate == "error"
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+
+    def test_gate_timeout_is_error_not_import_failed(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, gate=(124, "", ""))
+        out = _run(repo, runner)
+        assert out.gate == "error"
+
+    def test_scrub_law_child_env_lacks_the_escape(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        env = {"BRUTEX_SKIP_WHEEL_FRESHNESS": "1", "KEEP": "yes"}
+        out = _run(repo, runner, env=env)
+        assert out.status is BoxUpdateStatus.UPDATED
+        gate_env = runner.gate_calls()[0]["env"]
+        assert gate_env is not None
+        assert "BRUTEX_SKIP_WHEEL_FRESHNESS" not in gate_env
+        assert gate_env["KEEP"] == "yes"
+
+    def test_skip_law_belt_forged_skip_is_stale(self, tmp_path: Path) -> None:
+        checks = [
+            ["wheel_freshness", "SKIP", "skipped via BRUTEX_SKIP_WHEEL_FRESHNESS=1"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "PASS", "ok"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        assert bu._fold_checks([(n, s, d) for n, s, d in checks]) == "stale"
+
+    def test_honesty_skips_fold_green(self, tmp_path: Path) -> None:
+        checks = [
+            (
+                "wheel_freshness",
+                "SKIP",
+                "no expected-fingerprint file at x — freshness not checkable",
+            ),
+            ("wheel_freshness_fno_math", "PASS", "ok"),
+            (
+                "wheel_source_digest",
+                "SKIP",
+                "no crate source tree at y — source digest not checkable",
+            ),
+            ("wheel_source_digest_fno_math", "PASS", "ok"),
+        ]
+        assert bu._fold_checks(checks) == "ok"
+
+    def test_doctor_detail_literals_drift_pin(self, tmp_path: Path) -> None:
+        # §10 test 7(h) — drive the REAL doctor checks; pin the literal detail
+        # strings the §4.5 law-3 fold matches on.
+        from brutex.doctor import check_wheel_freshness, check_wheel_source_digest
+
+        res = check_wheel_freshness(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "1"})
+        assert res.status == "SKIP"
+        assert res.detail == "skipped via BRUTEX_SKIP_WHEEL_FRESHNESS=1"
+        res2 = check_wheel_source_digest(env={"BRUTEX_SKIP_WHEEL_FRESHNESS": "1"})
+        assert res2.status == "SKIP"
+        assert res2.detail == "skipped via BRUTEX_SKIP_WHEEL_FRESHNESS=1"
+        res3 = check_wheel_freshness(
+            fingerprint_file=tmp_path / "absent" / "EXPECTED_BUILD.json", env={}
+        )
+        assert res3.status == "SKIP"
+        assert "freshness not checkable" in res3.detail
+        res4 = check_wheel_source_digest(crate_root=tmp_path / "absent-crate", env={})
+        assert res4.status == "SKIP"
+        assert "source digest not checkable" in res4.detail
+
+    def test_gate_skipped_emission_law(self, tmp_path: Path) -> None:
+        # §10 test 17 — gate=="skipped" ⇔ the subprocess never ran.
+        repo = _mk_repo(tmp_path)
+        # disabled
+        runner = FakeRunner()
+        out = _run(repo, runner, env={"BRUTEX_BOX_UPDATE": "0"})
+        assert out.gate == "skipped" and runner.gate_calls() == []
+        # dirty_tree skip
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, " M x\n", ""))
+        out = _run(repo, runner)
+        assert out.gate == "skipped" and runner.gate_calls() == []
+        # required-BUILD-failure rollback (row 10) — gate never ran
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out = _run(repo, runner)
+        assert out.gate == "skipped" and runner.gate_calls() == []
+        # negative twin: updated carries a real verdict
+        runner = _std_runner(repo)
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UPDATED and out.gate == "ok"
+
+    def test_up_to_date_still_runs_the_gate(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, FROM_SHA, ""))
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.UP_TO_DATE
+        assert out.gate == "ok"
+        assert len(runner.gate_calls()) == 1
+        assert runner.git_calls("merge") == []
+
+    def test_up_to_date_self_heal_rebuilds_on_stale_gate(self, tmp_path: Path) -> None:
+        # §7 — a stale gate on the UP_TO_DATE path triggers the rust=True
+        # rebuild + a re-run gate; green ⇒ status stays up_to_date.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, FROM_SHA, ""))
+        runner.state["gate_calls"] = 0
+
+        def _gate(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["gate_calls"] += 1
+            if runner.state["gate_calls"] == 1:
+                return (
+                    0,
+                    _gate_stdout(
+                        [
+                            ["wheel_freshness", "WARN", "stale"],
+                            ["wheel_freshness_fno_math", "PASS", "ok"],
+                            ["wheel_source_digest", "PASS", "ok"],
+                            ["wheel_source_digest_fno_math", "PASS", "ok"],
+                        ]
+                    ),
+                    "",
+                )
+            return (0, _gate_stdout(), "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _gate,
+        )
+        out = _run(repo, runner, state_dir=tmp_path / "state")
+        assert out.status is BoxUpdateStatus.UP_TO_DATE
+        assert len(runner.maturin_calls()) == len(WHEEL_SET)  # the self-heal rebuild
+        assert out.gate == "ok"
+        assert "self_heal" in out.detail
+
+
+# ── lock-artifact restore + marker + quarantine (§10 tests 6b/18/20/21) ──
+class TestRestoreMarkerQuarantine:
+    def _dirty_after_merge(self, runner: FakeRunner, dirty_line: str) -> None:
+        def _porcelain(_a: list[str]) -> tuple[int, str, str]:
+            if runner.state.get("restored"):
+                return (0, "", "")
+            if runner.state.get("head") == TO_SHA and runner.state.get("built"):
+                return (0, dirty_line + "\n", "")
+            return (0, "", "")
+
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], _porcelain)
+
+    def test_lock_rewrite_restored_after_successful_build(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        self._dirty_after_merge(runner, " M rust/fno-math/Cargo.lock")
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["built"] = True
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+
+        def _checkout_f(a: list[str]) -> tuple[int, str, str]:
+            runner.state["restored"] = True
+            return (0, "", "")
+
+        runner.on(lambda a: a[:3] == ["git", "checkout", "-f"], _checkout_f)
+        with capture_logs() as logs:
+            out = _run(repo, runner, state_dir=state)
+        assert out.status is BoxUpdateStatus.UPDATED  # a restore is NOT a failure
+        assert out.lock_restored == ("rust/fno-math/Cargo.lock",)
+        assert out.quarantined == ("rust/fno-math/Cargo.lock",)
+        restores = runner.git_calls("checkout", "-f")
+        assert restores == [["git", "checkout", "-f", "--", "rust/fno-math/Cargo.lock"]]
+        assert any(e["event"] == "box_update.lock_artifact_restored" for e in logs)
+        # The quarantine copy holds the pre-restore bytes.
+        qroot = state / "quarantine"
+        copies = list(qroot.rglob("rust__fno-math__Cargo.lock"))
+        assert len(copies) == 1
+        assert copies[0].read_bytes() == (repo / "rust/fno-math/Cargo.lock").read_bytes()
+        # The marker is CLEARED on the clean exit.
+        assert not (state / "build_marker.json").exists()
+
+    def test_marker_written_before_first_maturin(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        seen: dict[str, Any] = {}
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            if "marker" not in seen:
+                seen["marker"] = json.loads(
+                    (state / "build_marker.json").read_text(encoding="utf-8")
+                )
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        _run(repo, runner, state_dir=state)
+        assert seen["marker"]["schema"] == 1
+        assert seen["marker"]["lock_paths"] == [f"{s.crate_dir}/Cargo.lock" for s in WHEEL_SET]
+
+    def test_restore_pathset_is_marker_intersection(self, tmp_path: Path) -> None:
+        # §10 test 18(b) — a dirty lock NOT in lock_paths never restores.
+        repo = _mk_repo(tmp_path)
+        (repo / "rust/other/Cargo.lock").parent.mkdir(parents=True)
+        (repo / "rust/other/Cargo.lock").write_text("x", encoding="utf-8")
+        ctx = bu._Ctx(
+            runner=FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=tmp_path / "state",
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M rust/other/Cargo.lock\n M rust/fno-math/Cargo.lock\n", ""),
+        )
+        runner.on(lambda a: a[:3] == ["git", "checkout", "-f"], (0, "", ""))
+        bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        restores = runner.git_calls("checkout", "-f")
+        assert restores == [["git", "checkout", "-f", "--", "rust/fno-math/Cargo.lock"]]
+        assert "rust/other/Cargo.lock" not in ctx.lock_restored
+
+    def test_zero_intersection_issues_no_checkout(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        ctx = bu._Ctx(
+            runner=FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=tmp_path / "state",
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, "", ""))
+        bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        assert runner.git_calls("checkout") == []
+
+    def test_failed_checkout_leaves_path_dirty_no_retry(self, tmp_path: Path) -> None:
+        # §10 test 18(d) — rc≠0 restore: ONE WARN, one checkout argv total.
+        repo = _mk_repo(tmp_path)
+        ctx = bu._Ctx(
+            runner=FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=tmp_path / "state",
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M rust/fno-math/Cargo.lock\n", ""),
+        )
+        runner.on(lambda a: a[:3] == ["git", "checkout", "-f"], (1, "", "refused"))
+        with capture_logs() as logs:
+            bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        assert len(runner.git_calls("checkout", "-f")) == 1  # never force-retried
+        assert ctx.lock_restored == []
+        assert ctx.quarantined == ["rust/fno-math/Cargo.lock"]  # copy preceded
+        warns = [e for e in logs if e["event"] == "box_update.lock_restore_failed"]
+        assert len(warns) == 1
+
+    def test_quarantine_copy_fail_refuses_the_restore(self, tmp_path: Path) -> None:
+        # §10 test 21(b) — state_dir unwritable ⇒ NO checkout for that path.
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        # A regular FILE planted at quarantine/ makes every run-dir mkdir fail
+        # (mode-bit chmod is untrustworthy under a root test runner).
+        (state / "quarantine").write_text("not a dir", encoding="utf-8")
+        if True:
+            ctx = bu._Ctx(
+                runner=FakeRunner(),
+                env={},
+                repo_root=repo,
+                state_dir=state,
+                now=lambda: 0.0,
+                sleep=lambda _s: None,
+                started=0.0,
+                fetch_timeout=1.0,
+                build_timeout=1.0,
+                pip_timeout=1.0,
+            )
+            runner = ctx.runner
+            assert isinstance(runner, FakeRunner)
+            runner.on(
+                lambda a: a[:3] == ["git", "status", "--porcelain"],
+                (0, " M rust/fno-math/Cargo.lock\n", ""),
+            )
+            with capture_logs() as logs:
+                bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+            assert runner.git_calls("checkout") == []
+            assert ctx.lock_restored == [] and ctx.quarantined == []
+            assert any(e["event"] == "box_update.quarantine_copy_failed" for e in logs)
+
+    def test_state_dir_none_vacuous_fail_no_checkout_ever(self, tmp_path: Path) -> None:
+        # §10 tests 20(f)/21(c) — no state_dir ⇒ no quarantine ⇒ no restore.
+        repo = _mk_repo(tmp_path)
+        ctx = bu._Ctx(
+            runner=FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=None,
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M rust/fno-math/Cargo.lock\n", ""),
+        )
+        with capture_logs():
+            bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        assert runner.git_calls("checkout") == []
+
+    def test_quarantine_retention_prunes_to_newest_ten(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        qroot = state / "quarantine"
+        for i in range(12):
+            (qroot / f"20260101T0000{i:02d}Z").mkdir(parents=True)
+        sentinel = repo / "keepme.txt"
+        sentinel.write_text("safe", encoding="utf-8")
+        ctx = bu._Ctx(
+            runner=FakeRunner(),
+            env={},
+            repo_root=repo,
+            state_dir=state,
+            now=lambda: 0.0,
+            sleep=lambda _s: None,
+            started=0.0,
+            fetch_timeout=1.0,
+            build_timeout=1.0,
+            pip_timeout=1.0,
+        )
+        runner = ctx.runner
+        assert isinstance(runner, FakeRunner)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M rust/fno-math/Cargo.lock\n", ""),
+        )
+        runner.on(lambda a: a[:3] == ["git", "checkout", "-f"], (0, "", ""))
+        bu.restore_lane_lock_artifacts(ctx, ["rust/fno-math/Cargo.lock"])
+        remaining = sorted(p.name for p in qroot.iterdir())
+        assert len(remaining) == bu._QUARANTINE_KEEP
+        assert sentinel.exists()  # pruning deletes ONLY lane quarantine dirs
+
+    def test_corrupt_marker_treated_as_absent(self, tmp_path: Path) -> None:
+        # §10 test 20(d) — corrupt marker: NO restore on unproven provenance.
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "build_marker.json").write_text("{not json", encoding="utf-8")
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, " M x\n", ""))
+        with capture_logs() as logs:
+            out = _run(repo, runner, state_dir=state)
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == "dirty_tree"
+        assert runner.git_calls("checkout") == []
+        assert any(e["event"] == "box_update.build_marker_unreadable" for e in logs)
+
+    def test_prologue_consumes_marker_on_quiet_upstream_night(self, tmp_path: Path) -> None:
+        # §10 tests 6b/20(c) round-9 arm — planted marker + dirty lock + origin
+        # UNMOVED ⇒ restore + clear at the PROLOGUE, then status=up_to_date
+        # with lock_restored non-empty (the fails-before-round-9 oracle).
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "build_marker.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "lock_paths": ["rust/fno-math/Cargo.lock"],
+                    "started_utc": "2026-07-17T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "rev-parse", "origin/main"], (0, FROM_SHA, ""))
+
+        def _porcelain(_a: list[str]) -> tuple[int, str, str]:
+            if runner.state.get("restored"):
+                return (0, "", "")
+            return (0, " M rust/fno-math/Cargo.lock\n", "")
+
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], _porcelain)
+
+        def _checkout_f(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["restored"] = True
+            return (0, "", "")
+
+        runner.on(lambda a: a[:3] == ["git", "checkout", "-f"], _checkout_f)
+        out = _run(repo, runner, state_dir=state)
+        assert out.status is BoxUpdateStatus.UP_TO_DATE
+        assert out.lock_restored == ("rust/fno-math/Cargo.lock",)
+        assert not (state / "build_marker.json").exists()  # marker consumed
+        # Ordering: the restore checkout PRECEDES the origin/main consumption.
+        argvs = runner.argvs()
+        restore_i = next(i for i, a in enumerate(argvs) if a[:3] == ["git", "checkout", "-f"])
+        origin_i = next(
+            i for i, a in enumerate(argvs) if a[:3] == ["git", "rev-parse", "origin/main"]
+        )
+        assert restore_i < origin_i
+
+    def test_no_marker_operator_dirty_lock_takes_dirty_tree_skip(self, tmp_path: Path) -> None:
+        # §10 test 20(b) — the never-clobber invariant (no marker ⇒ no restore).
+        repo = _mk_repo(tmp_path)
+        lock = repo / "rust/fno-math/Cargo.lock"
+        lock.write_text("operator edit\n", encoding="utf-8")
+        before = lock.read_bytes()
+        runner = _std_runner(repo)
+        runner.on(
+            lambda a: a[:3] == ["git", "status", "--porcelain"],
+            (0, " M rust/fno-math/Cargo.lock\n", ""),
+        )
+        out = _run(repo, runner, state_dir=tmp_path / "state")
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert out.skip_reason == "dirty_tree"
+        assert runner.git_calls("checkout") == []
+        assert lock.read_bytes() == before
+
+
+# ── §4.6 rollback + repair + coherence + pip restore (§10 tests 6a/23/24) ─
+class TestRollbackRepairCoherence:
+    def _rollback_runner(self, repo: Path) -> FakeRunner:
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        return runner
+
+    def test_rollback_smoke_loadable_coherent_repair_not_needed(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.repair == "not_needed"
+        assert out.running_sha == FROM_SHA
+        # smoke ran, then the coherence check (fresh doctor child, no smoke line).
+        assert len(runner.smoke_calls()) >= 1
+        assert len(runner.coherence_calls()) == 1
+
+    def test_rollback_failure_is_error_with_critical(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        runner.on(lambda a: a[:4] == ["git", "checkout", "-B", "main"], (1, "", "refused"))
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ERROR
+        assert any(
+            e["event"] == "box_update.rollback_failed" and e["log_level"] == "critical"
+            for e in logs
+        )
+        assert out.pip_restore == "not_needed"  # row-12 arm: tree stayed at to_sha
+
+    def test_unloadable_smoke_repairs_then_falls_through(self, tmp_path: Path) -> None:
+        # §10 test 6a — unloadable → repair rebuild → re-smoke → coherence.
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        runner.state["smokes"] = 0
+
+        def _smoke(a: list[str]) -> tuple[int, str, str]:
+            if a[2] == "import trading_core, fno_math":
+                runner.state["smokes"] += 1
+                return (1, "", "broken") if runner.state["smokes"] == 1 else (0, "", "")
+            if a[2] == "import fno_math":
+                return (1, "", "broken")
+            return (0, "", "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and a[2].startswith("import "),
+            _smoke,
+        )
+        # After the rollback the repair rebuild must succeed (the failing rule
+        # above keyed on cwd fires for the FIRST forward build; make repairs ok).
+        calls_before = {"n": 0}
+        fno_dir = repo / "rust/fno-math"
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            calls_before["n"] += 1
+            if calls_before["n"] == 1 and runner.calls[-1]["cwd"] == fno_dir:
+                return (1, "", "boom")  # the forward build failure
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.repair == "rebuilt"
+        # The repair rebuilt exactly the unloadable crate (fno_math).
+        repair_builds = runner.maturin_calls()[1:]
+        assert [c["cwd"] for c in repair_builds] == [repo / "rust/fno-math"]
+
+    def test_still_unloadable_after_repair_is_critical_error(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and a[2].startswith("import "),
+            (1, "", "still broken"),
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ERROR
+        assert out.repair == "failed"
+        crits = [e for e in logs if e["event"] == "box_update.required_wheel_unloadable"]
+        assert len(crits) == 1 and crits[0]["log_level"] == "critical"
+        # The CRITICAL terminal SKIPS the coherence check (CLI-down outranks torn).
+        assert runner.coherence_calls() == []
+
+    def test_gate_stale_rollback_mismatch_repair_rebuilt(self, tmp_path: Path) -> None:
+        # §10 test 23(a) unit shape — build OK, gate stale, coherence WARN →
+        # mismatch repair for exactly the WARNing crate → digest re-check PASS.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        stale = [
+            ["wheel_freshness", "PASS", "ok"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "WARN", "digest mismatch"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.state["doctor_calls"] = 0
+
+        def _gate(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["doctor_calls"] += 1
+            # call 1 = the gate (stale); call 2 = coherence (still WARN);
+            # call 3 = the post-repair re-check (PASS).
+            if runner.state["doctor_calls"] <= 2:
+                return (0, _gate_stdout(stale), "")
+            return (0, _gate_stdout(), "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _gate,
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.gate == "stale"
+        assert out.repair == "rebuilt"
+        # The mismatch repair rebuilt EXACTLY trading_core (the WARNing crate).
+        repair_builds = runner.maturin_calls()[len(WHEEL_SET) :]
+        assert [c["cwd"] for c in repair_builds] == [repo / "rust/trading-core"]
+
+    def test_mismatch_repair_failure_is_failed_stale_warn_class(self, tmp_path: Path) -> None:
+        # §10 test 23(b) — repair rc≠0 ⇒ failed_stale, status ROLLED_BACK, no CRITICAL.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        stale = [
+            ["wheel_freshness", "PASS", "ok"],
+            ["wheel_freshness_fno_math", "PASS", "ok"],
+            ["wheel_source_digest", "WARN", "digest mismatch"],
+            ["wheel_source_digest_fno_math", "PASS", "ok"],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(stale), ""),
+        )
+        builds = {"n": 0}
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            builds["n"] += 1
+            # Forward builds (3) succeed; the mismatch repair build fails.
+            return (0, "", "") if builds["n"] <= len(WHEEL_SET) else (1, "", "repair boom")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.repair == "failed_stale"
+        events = {e["event"]: e for e in logs}
+        assert "box_update.repair_failed_stale" in events
+        assert events["box_update.repair_failed_stale"]["log_level"] == "warning"
+        assert "box_update.required_wheel_unloadable" not in events
+        by_name = {w.name: w for w in out.wheels}
+        assert by_name["trading_core"].digest_ok is False  # visible torn residual
+
+    def test_coherence_skip_abstain_never_rebuilds(self, tmp_path: Path) -> None:
+        # §10 test 23(e) — honesty-SKIP checks ⇒ repair not_needed, zero rebuilds.
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        skips = [
+            ["wheel_freshness", "SKIP", "no expected-fingerprint file — freshness not checkable"],
+            [
+                "wheel_freshness_fno_math",
+                "SKIP",
+                "no expected-fingerprint file — freshness not checkable",
+            ],
+            ["wheel_source_digest", "SKIP", "no crate source tree — source digest not checkable"],
+            [
+                "wheel_source_digest_fno_math",
+                "SKIP",
+                "no crate source tree — source digest not checkable",
+            ],
+        ]
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            (0, _gate_stdout(skips), ""),
+        )
+        out = _run(repo, runner)
+        assert out.repair == "not_needed"
+        assert len(runner.maturin_calls()) == 1  # ONLY the failed forward build
+
+    def test_pip_restore_ordering_and_tokens(self, tmp_path: Path) -> None:
+        # §10 test 24(a) — restore strictly AFTER checkout -B, BEFORE the smoke.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("pyproject.toml", "rust/fno-math/src/lib.rs"))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.pip_restore == "ok"
+        argvs = runner.argvs()
+        pip_idx = [i for i, a in enumerate(argvs) if a[0].endswith("pip") and "install" in a]
+        checkout_i = next(
+            i for i, a in enumerate(argvs) if a[:4] == ["git", "checkout", "-B", "main"]
+        )
+        smoke_i = next(
+            i
+            for i, a in enumerate(argvs)
+            if a[0] == sys.executable and a[1] == "-c" and a[2] == "import trading_core, fno_math"
+        )
+        assert len(pip_idx) == 2  # the forward refresh + the restore
+        assert checkout_i < pip_idx[1] < smoke_i
+
+    def test_pip_restore_failure_is_warn_and_proceeds(self, tmp_path: Path) -> None:
+        # §10 test 24(b) — restore rc≠0 ⇒ pip_restore=failed, WARN, smoke still runs.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("pyproject.toml", "rust/fno-math/src/lib.rs"))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        pips = {"n": 0}
+
+        def _pip(_a: list[str]) -> tuple[int, str, str]:
+            pips["n"] += 1
+            return (0, "", "") if pips["n"] == 1 else (1, "", "resolver boom")
+
+        runner.on(lambda a: a[0].endswith("pip"), _pip)
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.pip_restore == "failed"
+        warns = [e for e in logs if e["event"] == "box_update.pip_restore_failed"]
+        assert len(warns) == 1 and warns[0]["log_level"] == "warning"
+        assert len(runner.smoke_calls()) >= 1  # the proceed law
+
+    def test_rust_only_rollback_never_runs_pip(self, tmp_path: Path) -> None:
+        # §10 test 24(c) — no forward pip ⇒ zero pip argv, not_needed.
+        repo = _mk_repo(tmp_path)
+        runner = self._rollback_runner(repo)
+        out = _run(repo, runner)
+        assert out.pip_restore == "not_needed"
+        assert runner.pip_calls() == []
+
+    def test_forward_pip_failure_rolls_back_and_still_restores(self, tmp_path: Path) -> None:
+        # §10 test 24(d) — the attempted-law: forward pip rc≠0 ⇒ rollback ⇒
+        # the restore STILL runs (partially-moved deps re-resolved).
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("pyproject.toml",))
+        pips = {"n": 0}
+
+        def _pip(_a: list[str]) -> tuple[int, str, str]:
+            pips["n"] += 1
+            return (1, "", "dep boom") if pips["n"] == 1 else (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("pip"), _pip)
+        out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.pip_restore == "ok"
+        assert pips["n"] == 2
+        argvs = runner.argvs()
+        checkout_i = next(
+            i for i, a in enumerate(argvs) if a[:4] == ["git", "checkout", "-B", "main"]
+        )
+        second_pip_i = [i for i, a in enumerate(argvs) if a[0].endswith("pip")][1]
+        assert checkout_i < second_pip_i
+
+
+# ── alarm dedupe (§10 test 19) ───────────────────────────────────────────
+class TestAlarmDedupe:
+    def _fail_once(
+        self, repo: Path, state: Path, *, stderr: str = "boom"
+    ) -> tuple[BoxUpdateOutcome, list[dict[str, Any]]]:
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", stderr) if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner, state_dir=state)
+        return out, list(logs)
+
+    def test_first_night_full_severity_state_written(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        out, logs = self._fail_once(repo, state)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.alarm_repeats == 0
+        assert out.alarm_signature is not None
+        payload = json.loads((state / "last_alarm.json").read_text(encoding="utf-8"))
+        assert payload == {
+            "schema": 1,
+            "signature": out.alarm_signature,
+            "first_utc": payload["first_utc"],
+            "nights": 1,
+        }
+        rolled = [e for e in logs if e["event"] == "box_update.rolled_back"]
+        assert len(rolled) == 1 and "repeat" not in rolled[0]
+
+    def test_repeat_night_demotes_with_two_integer_law(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        self._fail_once(repo, state)
+        out, logs = self._fail_once(repo, state)
+        # Report integer = nights − 1; log integer = nights (§4.7 law 3).
+        assert out.alarm_repeats == 1
+        rolled = [e for e in logs if e["event"] == "box_update.rolled_back"]
+        assert rolled[0]["repeat"] == 2
+        assert rolled[0]["repeat"] == out.alarm_repeats + 1  # DISTINCT integers
+
+    def test_different_signature_rearms_full_severity(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        self._fail_once(repo, state)
+        # A DIFFERENT failure shape: timeout instead of failed.
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (124, "", "") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out = _run(repo, runner, state_dir=state)
+        assert out.alarm_repeats == 0  # full severity again
+        payload = json.loads((state / "last_alarm.json").read_text(encoding="utf-8"))
+        assert payload["nights"] == 1
+
+    def test_healthy_night_clears_the_state(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        self._fail_once(repo, state)
+        runner = _std_runner(repo, diff_paths=("brutex/cli.py",))
+        out = _run(repo, runner, state_dir=state)
+        assert out.status is BoxUpdateStatus.UPDATED
+        assert not (state / "last_alarm.json").exists()
+
+    def test_skipped_and_disabled_leave_state_untouched(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        self._fail_once(repo, state)
+        before = (state / "last_alarm.json").read_bytes()
+        runner = _std_runner(repo)
+        runner.on(lambda a: a[:3] == ["git", "status", "--porcelain"], (0, " M x\n", ""))
+        out = _run(repo, runner, state_dir=state)
+        assert out.status is BoxUpdateStatus.SKIPPED
+        assert (state / "last_alarm.json").read_bytes() == before
+        out = _run(repo, FakeRunner(), env={"BRUTEX_BOX_UPDATE": "0"}, state_dir=state)
+        assert out.status is BoxUpdateStatus.DISABLED
+        assert (state / "last_alarm.json").read_bytes() == before
+
+    def test_corrupt_state_fails_open_to_full_severity(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "last_alarm.json").write_text("{broken", encoding="utf-8")
+        out, logs = self._fail_once(repo, state)
+        assert out.alarm_repeats == 0
+        assert any(e["event"] == "box_update.alarm_state_unreadable" for e in logs)
+
+    def test_signature_is_machine_tokens_only(self, tmp_path: Path) -> None:
+        # §10 test 19(g) — two runs differing ONLY in stderr detail text
+        # produce the SAME signature (the dedupe-defeat regression).
+        repo = _mk_repo(tmp_path)
+        s1 = tmp_path / "s1"
+        s2 = tmp_path / "s2"
+        out1, _ = self._fail_once(repo, s1, stderr="boom at 12:01:07 fd=93")
+        out2, _ = self._fail_once(repo, s2, stderr="boom at 03:44:55 fd=11")
+        assert out1.alarm_signature == out2.alarm_signature
+
+    def test_state_dir_none_full_severity_no_io(self, tmp_path: Path) -> None:
+        repo = _mk_repo(tmp_path)
+        self._fail_once(repo, tmp_path / "unused_state")
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        out2 = _run(repo, runner, state_dir=None)
+        assert out2.alarm_signature is not None
+        assert out2.alarm_repeats == 0
+
+
+# ── re-exec + adopt_state (§10 tests 11/15) ──────────────────────────────
+class TestReexecAndAdopt:
+    def _outcome(self, status: BoxUpdateStatus = BoxUpdateStatus.UPDATED) -> BoxUpdateOutcome:
+        return BoxUpdateOutcome(
+            status=status,
+            from_sha=FROM_SHA,
+            to_sha=TO_SHA,
+            running_sha=FROM_SHA,
+            skip_reason=None,
+            delta_rust=True,
+            delta_pyproject=False,
+            wheels=(
+                WheelBuildResult(
+                    name="fno_math",
+                    crate_dir="rust/fno-math",
+                    required=True,
+                    result="ok",
+                    digest_ok=True,
+                    duration_s=1.0,
+                    detail="",
+                ),
+            ),
+            gate="ok",
+            repair="not_needed",
+            pip_restore="not_needed",
+            lock_restored=(),
+            quarantined=(),
+            alarm_signature=None,
+            alarm_repeats=0,
+            reexec=False,
+            duration_s=3.0,
+            detail="",
+        )
+
+    def test_updated_and_no_sentinel_execs_plain_argv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr(bu.os, "execv", lambda prog, argv: seen.update(prog=prog, argv=argv))
+        environ: dict[str, str] = {}
+        maybe_reexec(self._outcome(), argv=["nightly", "run", "--keep", "3"], environ=environ)
+        assert seen["prog"] == sys.executable
+        assert seen["argv"] == [sys.executable, "-m", "brutex", "nightly", "run", "--keep", "3"]
+        assert BOX_UPDATE_STATE_ENV in environ
+
+    def test_sentinel_present_never_execs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The #1712 fork-bomb regression shape — loop-proof.
+        def _boom(*_a: object) -> None:
+            raise AssertionError("os.execv must not be called")
+
+        monkeypatch.setattr(bu.os, "execv", _boom)
+        maybe_reexec(
+            self._outcome(),
+            argv=["nightly", "run"],
+            environ={BOX_UPDATE_STATE_ENV: "{}"},
+        )
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            BoxUpdateStatus.UP_TO_DATE,
+            BoxUpdateStatus.SKIPPED,
+            BoxUpdateStatus.ROLLED_BACK,
+            BoxUpdateStatus.ERROR,
+            BoxUpdateStatus.DISABLED,
+        ],
+    )
+    def test_non_updated_never_execs(
+        self, monkeypatch: pytest.MonkeyPatch, status: BoxUpdateStatus
+    ) -> None:
+        def _boom(*_a: object) -> None:
+            raise AssertionError("os.execv must not be called")
+
+        monkeypatch.setattr(bu.os, "execv", _boom)
+        maybe_reexec(self._outcome(status), argv=[], environ={})
+
+    def test_adopt_round_trips_and_deletes_the_sentinel(self) -> None:
+        outcome = self._outcome()
+        env = {BOX_UPDATE_STATE_ENV: json.dumps(outcome.to_dict()), "OTHER": "x"}
+        adopted = adopt_state(env)
+        assert adopted is not None
+        assert BOX_UPDATE_STATE_ENV not in env  # spawn workers never inherit it
+        assert adopted.reexec is True
+        assert adopted.running_sha == TO_SHA  # the child EXECUTES to_sha
+        assert adopted.status is BoxUpdateStatus.UPDATED
+        assert adopted.wheels[0].name == "fno_math"
+        assert adopted.wheels[0].digest_ok is True
+
+    def test_adopt_absent_sentinel_is_none(self) -> None:
+        assert adopt_state({}) is None
+
+    def test_adopt_corrupt_state_is_row_15(self) -> None:
+        with capture_logs() as logs:
+            adopted = adopt_state({BOX_UPDATE_STATE_ENV: "{not json"})
+        assert adopted is not None
+        assert adopted.status is BoxUpdateStatus.ERROR
+        assert adopted.detail == "state_unparseable"
+        assert adopted.gate == "skipped"
+        assert adopted.reexec is True
+        assert any(e["event"] == "box_update.state_unparseable" for e in logs)
+
+    def test_sentinel_never_written_to_dotenv_surfaces(self) -> None:
+        # §6 step 4 process-env-only invariant — grep-style pin: the sentinel
+        # name appears in NO dotenv/profile/plist writer surface.
+        root = Path(__file__).resolve().parents[2]
+        for rel in ("brutex/config/dotenv.py", "brutex/nightly/schedule.py"):
+            assert "BRUTEX_BOX_UPDATE_STATE" not in (root / rel).read_text(encoding="utf-8")
+
+
+# ── default runner (rc 124/127 law) ──────────────────────────────────────
+class TestDefaultRunner:
+    def test_timeout_synthesizes_rc_124(self) -> None:
+        rc, _, _ = default_command_runner(
+            [sys.executable, "-c", "import time; time.sleep(30)"], timeout_s=0.2
+        )
+        assert rc == 124
+
+    def test_oserror_synthesizes_rc_127(self, tmp_path: Path) -> None:
+        rc, _, err = default_command_runner([str(tmp_path / "no-such-binary")], timeout_s=5.0)
+        assert rc == 127
+        assert err != ""
+
+    def test_plain_success_passes_through(self) -> None:
+        rc, out, _ = default_command_runner([sys.executable, "-c", "print('hi')"], timeout_s=10.0)
+        assert (rc, out.strip()) == (0, "hi")
+
+
+# ── broken-wheel import law (§10 test 19(h)) ─────────────────────────────
+class TestBrokenWheelImport:
+    def test_box_update_imports_with_all_wheels_poisoned(self) -> None:
+        code = (
+            "import sys\n"
+            "for name in ('trading_core', 'fno_math', 'brutex_feed', 'brutex_lake'):\n"
+            "    sys.modules[name] = None\n"
+            "import brutex.nightly.box_update, brutex.nightly.env_preflight\n"
+            "print('WHEEL_FREE_IMPORT_OK')\n"
+        )
+        rc, out, err = default_command_runner([sys.executable, "-c", code], timeout_s=60.0)
+        assert rc == 0, err
+        assert "WHEEL_FREE_IMPORT_OK" in out
