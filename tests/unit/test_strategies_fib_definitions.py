@@ -139,12 +139,37 @@ def test_definition_rejects_retired_condition_scope() -> None:
 def test_definition_accepts_live_supertrend_scope() -> None:
     """The SuperTrend names construct — the vocab-66 implemented-flip
     ACCEPTANCE pin (crate 0.5.0; the former declared-only refusal for bits
-    64/65 is consciously retired — no LAYOUT-ONLY bit exists on today's
-    layout, so the refusal arm's teeth live in the RETIRED-tombstone test
-    above)."""
+    64/65 is consciously retired — the declared-but-NOT-YET-implemented
+    refusal ARM keeps its own teeth in the monkeypatched layout-only test
+    below)."""
     d = _defn(condition_scope=frozenset({"close_above_supertrend", "close_below_supertrend"}))
     assert d.candidate_mask == (1 << 64) | (1 << 65)
     assert d.candidate_mask & ~IMPLEMENTED_MASK == 0
+
+
+def test_definition_refuses_a_declared_unimplemented_scope_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared-but-NOT-YET-implemented (LAYOUT-ONLY) refusal arm keeps
+    its exact wording covered.
+
+    No LAYOUT-ONLY bit exists on today's 66-bit layout (the SuperTrend pair
+    left that class at the vocab-66 implemented-flip), so the arm is kept
+    honest by simulating a future manifest where an implemented, non-retired
+    bit (64) is layout-only — the
+    ``test_parse_condition_ids_refuses_a_declared_unimplemented_bit``
+    monkeypatch precedent (tests/unit/test_cli_user_error_hygiene.py).
+    """
+    monkeypatch.setattr(F, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 64))
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"'close_above_supertrend' \(bit 64\) is declared but "
+            r"NOT YET implemented \(LAYOUT-ONLY\)"
+        ),
+    ) as excinfo:
+        _defn(condition_scope=frozenset({"close_above_supertrend", "near_fib_50"}))
+    assert "RETIRED" not in str(excinfo.value)
 
 
 def test_definition_accepts_live_cpr_scope_and_mask_stays_implemented_subset() -> None:
