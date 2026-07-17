@@ -268,8 +268,7 @@ class CascadeTupleSpec:
             )
         if self.swing_proximity_bps < 0:
             raise CascadeWireError(
-                f"CascadeTupleSpec.swing_proximity_bps must be >= 0, "
-                f"got {self.swing_proximity_bps}"
+                f"CascadeTupleSpec.swing_proximity_bps must be >= 0, got {self.swing_proximity_bps}"
             )
         if self.proximity_bps is None and self.swing_proximity_bps != DEFAULT_SWING_PROXIMITY_BPS:
             raise CascadeWireError(
@@ -400,8 +399,7 @@ class Stage3CellRecord:
             )
         if self.swing_proximity_bps < 0:
             raise CascadeWireError(
-                f"Stage3CellRecord.swing_proximity_bps must be >= 0, "
-                f"got {self.swing_proximity_bps}"
+                f"Stage3CellRecord.swing_proximity_bps must be >= 0, got {self.swing_proximity_bps}"
             )
         if self.rel_path is not None and (
             not self.rel_path or PurePosixPath(self.rel_path).is_absolute()

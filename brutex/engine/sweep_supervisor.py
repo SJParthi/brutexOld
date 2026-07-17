@@ -401,9 +401,7 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     # checkpoint key is byte-identical to the pre-axis grid; the frozen
     # per-proximity 3-lists above never grow to 4. When present, the list is
     # index-aligned with ``proximities`` (``None`` for a ``None`` proximity).
-    swing_bps_list = [
-        None if p is None else p.swing_proximity_bps for p in grid.proximities
-    ]
+    swing_bps_list = [None if p is None else p.swing_proximity_bps for p in grid.proximities]
     if any(v is not None and v != DEFAULT_SWING_PROXIMITY_BPS for v in swing_bps_list):
         descriptor["swing_proximity_bps"] = swing_bps_list
     gate_config = _gate_config_fragment(grid)

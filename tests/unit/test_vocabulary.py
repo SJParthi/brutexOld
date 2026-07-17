@@ -28,6 +28,7 @@ from brutex.vocabulary import (
     PriorBarHistory,
     ProximityParams,
     evaluate_atoms,
+    swing_params_fragment,
 )
 from brutex.vocabulary import bits as B
 from brutex.vocabulary.conflicts import CONFLICT_PAIRS, count_conflicts, has_conflict
@@ -899,9 +900,7 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     # three DEC-FIB-TEMPLATE-EXPRESS-001 gap placeholders (bits 66-68,
     # reserved=true — dropped at the re-stack onto the gap-midpoint branch).
     assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == (
-        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND)
-        | (1 << B.BIT_CLOSE_BELOW_SUPERTREND)
-        | (0b111 << 66)
+        (1 << B.BIT_CLOSE_ABOVE_SUPERTREND) | (1 << B.BIT_CLOSE_BELOW_SUPERTREND) | (0b111 << 66)
     )
 
 
@@ -1414,3 +1413,25 @@ def test_abi_and_compute_fib_projections_are_distinct() -> None:
     assert abi[0] == fib.retrace_level_at_pdh_paisa
     assert fib.retrace_level_at_pdh_paisa not in compute_projection
     assert abi[0] != compute_projection[0]
+
+
+class TestSwingParamsFragment:
+    """The ONE COMMON default-omit identity fragment (DEC-FIB-TEMPLATE-EXPRESS-001).
+
+    Direct unit coverage of ``vocabulary.swing_params_fragment`` — the emit law
+    every identity builder (canonical_trade_params / _grid_descriptor /
+    _tuple_cache_params / _tuple_digest) delegates to.  The builder-side pins
+    live in the engine suites; this covers the fragment's own three arms so the
+    ci.yml ``brutex.vocabulary.evaluator`` 100% gate holds from this file alone.
+    """
+
+    def test_none_proximity_emits_nothing(self) -> None:
+        assert swing_params_fragment(None) == {}
+
+    def test_default_band_emits_nothing(self) -> None:
+        prox = ProximityParams(swing_proximity_bps=DEFAULT_SWING_PROXIMITY_BPS)
+        assert swing_params_fragment(prox) == {}
+
+    def test_non_default_band_emits_exactly_one_key(self) -> None:
+        prox = ProximityParams(swing_proximity_bps=25)
+        assert swing_params_fragment(prox) == {"swing_proximity_bps": 25}

@@ -47,7 +47,12 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    "candidate_mask_hex": "0000000000000000ffcfffffffffffff",
+    # Re-locked at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935): the
+    # candidate mask derives from IMPLEMENTED_MASK, so the five express bits
+    # 69-73 (0x3e0 << 64) join it by construction — the delta is EXACTLY that
+    # nibble pair; the low-word ffcf… (bits 0-51,54-63) is byte-unchanged and
+    # the reserved placeholders 66-68 stay OUT (implemented=false).
+    "candidate_mask_hex": "00000000000003e0ffcfffffffffffff",
     "spec_mask_hex": "00000000000000001000100000400010",
 }
 

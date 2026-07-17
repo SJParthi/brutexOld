@@ -653,15 +653,17 @@ class TestTupleDigestGateSelectionIdentity:
         while a swept 25-bps cell maps to a DIFFERENT Parquet address (two
         tuples differing only by the band evaluate different bits 72/73)."""
         from brutex.engine.sweep_orchestrator import _tuple_digest
-        from brutex.vocabulary import ProximityParams as _PP
+        from brutex.vocabulary import ProximityParams
 
-        base_prox = _PP(pivot_proximity_bps=12)
+        base_prox = ProximityParams(pivot_proximity_bps=12)
         d_implicit = _tuple_digest(_tuple(proximity=base_prox), _grid())
         d_explicit = _tuple_digest(
-            _tuple(proximity=_PP(pivot_proximity_bps=12, swing_proximity_bps=10)), _grid()
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=10)),
+            _grid(),
         )
         d_swept = _tuple_digest(
-            _tuple(proximity=_PP(pivot_proximity_bps=12, swing_proximity_bps=25)), _grid()
+            _tuple(proximity=ProximityParams(pivot_proximity_bps=12, swing_proximity_bps=25)),
+            _grid(),
         )
         assert d_implicit == d_explicit
         assert d_swept != d_implicit

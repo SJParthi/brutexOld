@@ -262,14 +262,12 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     PhraseEntry(
         72,
         "near_swing_high",
-        "price was back at the last confirmed swing high (a retest of the "
-        "structure level)",
+        "price was back at the last confirmed swing high (a retest of the structure level)",
     ),
     PhraseEntry(
         73,
         "near_swing_low",
-        "price was back at the last confirmed swing low (a retest of the "
-        "structure level)",
+        "price was back at the last confirmed swing low (a retest of the structure level)",
     ),
 )
 

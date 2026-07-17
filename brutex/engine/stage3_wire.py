@@ -963,9 +963,7 @@ def cascade_specs_for_refined_cells(
             )
         )
         swing_bps = (
-            DEFAULT_SWING_PROXIMITY_BPS
-            if proximity is None
-            else proximity.swing_proximity_bps
+            DEFAULT_SWING_PROXIMITY_BPS if proximity is None else proximity.swing_proximity_bps
         )
         spec = spec_from_store_rows(
             instrument=tuple_.instrument,
