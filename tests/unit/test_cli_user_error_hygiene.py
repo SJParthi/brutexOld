@@ -165,15 +165,34 @@ def test_parse_condition_ids_refuses_a_retired_tombstone_bit() -> None:
         cli.parse_condition_ids("53")
 
 
-def test_parse_condition_ids_refuses_a_declared_unimplemented_bit() -> None:
-    """G-U64U12-02/G-RETROT-03 — the layout-only SuperTrend bits (64/65) are
-    refused as declared-but-NOT-YET-implemented (never 'retired'), naming the
-    bit + name + the grow-only DEC family."""
+def test_parse_condition_ids_accepts_the_live_supertrend_bits() -> None:
+    """The vocab-66 SuperTrend implemented-flip (crate 0.5.0) ACCEPTANCE pin:
+    bits 64/65 joined IMPLEMENTED_MASK, so the former declared-only refusal
+    for them is consciously retired."""
+    assert cli.parse_condition_ids("64,65") == [64, 65]
+
+
+def test_parse_condition_ids_refuses_a_declared_unimplemented_bit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G-U64U12-02/G-RETROT-03 — a layout-only bit is refused as
+    declared-but-NOT-YET-implemented (never 'retired'), naming the bit +
+    name + the grow-only DEC family.
+
+    No LAYOUT-ONLY bit exists on today's 66-bit layout (the SuperTrend pair
+    left that class at the vocab-66 implemented-flip), so the arm is kept
+    honest by simulating a future manifest where an implemented, non-retired
+    bit (63) is layout-only — the ``test_default_excludes_layout_only_bits``
+    monkeypatch precedent.
+    """
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
+
+    monkeypatch.setattr(cli, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 63))
     with pytest.raises(cli.CliUserError) as excinfo:
-        cli.parse_condition_ids("64")
+        cli.parse_condition_ids("63")
     message = str(excinfo.value)
-    assert "bit 64" in message
-    assert "close_above_supertrend" in message
+    assert "bit 63" in message
+    assert "narrow_cpr_day" in message
     assert "NOT YET" in message and "RETIRED" not in message
     assert "DEC-VOCAB-U128-CODEGEN-001" in message
 
