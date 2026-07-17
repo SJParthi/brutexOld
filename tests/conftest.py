@@ -17,6 +17,7 @@ from brutex.data.today_completeness import (
     reset_today_gate_log_state,
 )
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.strategies.combo_rust import STRATEGIES_RUST_COMBO_ENV
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
 
@@ -109,6 +110,19 @@ os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
 # directly) — so this default disables ONLY the ambient repo read, never the
 # tested law.
 os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
+
+# DEC-STRATEGIES-RUST-COMBO-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the combo_rust
+# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default OFF) is read per call
+# from the REAL ``os.environ``, so a developer/CI runner with the flag
+# exported truthy would RED every OFF-asserting test (the flag-OFF bomb-crate
+# spy + the combo.py OFF-arm byte-identity pins). The suite therefore runs
+# with the flag explicitly OFF (`setdefault` so an explicit outer choice
+# wins). The facade's OWN tests stay fully armed on both arms — the ON-arm
+# tests set the flag EXPLICITLY via ``monkeypatch.setenv`` (which overrides
+# this setdefault) — so this default disables ONLY the ambient env read,
+# never the tested law.
+os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")
 
 
 @pytest.fixture(autouse=True)
