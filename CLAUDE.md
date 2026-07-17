@@ -18,8 +18,9 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1933
-(provisional — queue-master confirmation required; renumber-at-landing law),
+_Last updated: 2026-07-17 (DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1955
+(QM-confirmed — renumbered from the provisional #1933 at the 2026-07-17 QM
+ledger correction; #1933 taken by DEC-DERIVED-GHOST-BUCKET-PRUNE-001),
 branch `claude/rust-slice-t16-strategies` — T16 PR-1 of the Rust-first
 mandate: combo.py's TWO pure byte laws — the `\x1f` first-offender scan +
 the canonical-JSON render over the ALREADY-lowered tree — re-hosted on the
@@ -38,7 +39,7 @@ burn-in-coverage flip preconditions. The honesty banner holds verbatim —
 "expected payoff ≈ 0 — conversion is for uniformity, not speed". ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the full record lives in
-the §1 Active-branch blurb + MIGRATION.md #1933.)
+the §1 Active-branch blurb + MIGRATION.md #1955.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3265,9 +3266,11 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-slice-t16-strategies`
-  (**DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1933** — provisional,
-  queue-master confirmation required (renumber-at-landing law,
-  DEC-LEDGER-RENUMBER-001) — T16 PR-1 of the Rust-first mandate:
+  (**DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1955** — QM-confirmed;
+  renumbered from the provisional #1933 at the 2026-07-17 QM ledger
+  correction (#1933 taken by DEC-DERIVED-GHOST-BUCKET-PRUNE-001; DEC-IDs
+  are the stable handles per DEC-LEDGER-RENUMBER-001) — T16 PR-1 of the
+  Rust-first mandate:
   combo.py's TWO pure byte laws re-hosted on the NEW standalone
   `rust/brutex-strategies` crate (brutex-feed layout; the brutex-lake
   panic profile — NO `panic = "abort"`, `catch_unwind` at the FFI
@@ -3296,9 +3299,14 @@ hostile-review pass._
   divergences — follow-ups DEC-ENGINE-RUST-IDENTITY-JOINS-00x) and the
   T16 glue/deferred-portable rows under
   DEC-STRATEGIES-RUST-GLUE-DEFER-001 / -FIBDEF-001 / -SPEC-MIRROR-001 /
-  -RUNNER-001 (all proposed; the ADR-0020 §5-row-5 partition.py deferral
-  precedent — the §3:174/§4:227 net-loss language cited only as the
-  narrow precedent it is). RUN IDENTITY UNTOUCHED — every frozen golden
+  -RUNNER-001 (ALL FOUR + the escaper handle APPROVED as NON-TERMINAL
+  deferrals by the 2026-07-17 plan-authority ruling — two ratified
+  freezes ride the glue umbrella: fill_mode's `"worst_case"` token +
+  types.py's default-elision back-compat; SPEC-MIRROR + FIBDEF paired,
+  HELD behind the fib-express single-home closure; RUNNER last;
+  `strategies/library/` out-of-slice; the ADR-0020 §5-row-5 partition.py
+  deferral precedent — the §3:174/§4:227 net-loss language cited only as
+  the narrow precedent it is). RUN IDENTITY UNTOUCHED — every frozen golden
   passes UNMODIFIED on both arms (`_GOLDEN_RUN_ID`/content-hash + the
   combo-hash 10-digest corpus + the triple-route + spec goldens; the
   flag-ON wheel-gated WRAPPER re-drives them under an engagement spy;
@@ -9930,8 +9938,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-slice-t16-strategies`
-  (DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1933 — provisional,
-  queue-master confirmation required; T16 PR-1: combo.py's TWO pure byte
+  (DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1955 — QM-confirmed;
+  renumbered from the provisional #1933 at the 2026-07-17 QM ledger
+  correction; T16 PR-1: combo.py's TWO pure byte
   laws — the `\x1f` first-offender scan + the canonical-JSON render over
   the ALREADY-lowered tree — re-hosted on the NEW standalone
   `rust/brutex-strategies` crate behind the default-OFF
@@ -9941,12 +9950,14 @@ hostile-review pass._
   message bytes / the 9-field join + blake3 stay Python (the lowered-tree
   law — no `float.__repr__` twin ever crosses); run identity UNTOUCHED —
   every frozen golden UNMODIFIED on both arms, the vocab fixture
-  byte-untouched; the T16 non-PR-1 rows dispositioned under the proposed
-  GLUE-DEFER/FIBDEF/SPEC-MIRROR/RUNNER follow-up handles (queue-master
-  confirmation required); ships INERT — flag OFF byte-identical
+  byte-untouched; the T16 non-PR-1 rows dispositioned under the
+  GLUE-DEFER/FIBDEF/SPEC-MIRROR/RUNNER follow-up handles (approved
+  NON-TERMINAL deferrals per the 2026-07-17 plan-authority ruling;
+  SPEC-MIRROR + FIBDEF held behind the fib-express single-home closure,
+  RUNNER last); ships INERT — flag OFF byte-identical
   (bomb-spy-pinned), payoff ≈ 0 by the mandated banner; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1933 for the full blurb)
+  see §1 + MIGRATION.md #1955 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
