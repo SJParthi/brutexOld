@@ -39,8 +39,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+pub mod backupenv;
+pub mod dotenv;
 pub mod hwenv;
 pub mod money;
+pub mod paths;
 
 /// Crate version — surfaced as `brutex_core.__version__`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,11 +90,12 @@ fn format_inr_str(paisa: &str) -> PyResult<String> {
 }
 
 /// The generic FFI boundary shell for the hwenv derivation laws (milestone
-/// 2): run the pure core under `catch_unwind`, map `Err` → `ValueError`
-/// and a panic → `RuntimeError` (both facade degrade members). The money
-/// shell above stays untouched — its `fn(&str)` shape is milestone-1
-/// surface; this generic twin serves the mixed int/f64/string signatures.
-fn hwenv_ffi_shell<T>(name: &str, f: impl FnOnce() -> Result<T, String>) -> PyResult<T> {
+/// 2) AND the milestone-3 config laws (paths / dotenv / backupenv): run
+/// the pure core under `catch_unwind`, map `Err` → `ValueError` and a
+/// panic → `RuntimeError` (both facade degrade members). The money shell
+/// above stays untouched — its `fn(&str)` shape is milestone-1 surface;
+/// this generic twin serves every later mixed-signature seam.
+fn core_ffi_shell<T>(name: &str, f: impl FnOnce() -> Result<T, String>) -> PyResult<T> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(msg)) => Err(PyValueError::new_err(msg)),
@@ -112,7 +116,7 @@ fn hwenv_pool_workers(
     reserve: i64,
     cap: Option<i64>,
 ) -> PyResult<i64> {
-    hwenv_ffi_shell("hwenv_pool_workers", || {
+    core_ffi_shell("hwenv_pool_workers", || {
         hwenv::pool_workers(
             performance_cores,
             logical_cores,
@@ -126,7 +130,7 @@ fn hwenv_pool_workers(
 /// `library_thread_budget` derivation twin.
 #[pyfunction]
 fn hwenv_library_thread_budget(physical_cores: i64, workers: i64) -> PyResult<i64> {
-    hwenv_ffi_shell("hwenv_library_thread_budget", || {
+    core_ffi_shell("hwenv_library_thread_budget", || {
         hwenv::library_thread_budget(physical_cores, workers)
     })
 }
@@ -141,7 +145,7 @@ fn hwenv_memory_budget(
     floor_bytes: i64,
     workers: i64,
 ) -> PyResult<i64> {
-    hwenv_ffi_shell("hwenv_memory_budget", || {
+    core_ffi_shell("hwenv_memory_budget", || {
         hwenv::memory_budget(detected_ram_bytes, fraction, floor_bytes, workers)
     })
 }
@@ -156,7 +160,7 @@ fn hwenv_hardware_key(
     total_ram_gib: i64,
     arch: &str,
 ) -> PyResult<String> {
-    hwenv_ffi_shell("hwenv_hardware_key", || {
+    core_ffi_shell("hwenv_hardware_key", || {
         hwenv::hardware_key_render(
             model_slug,
             physical_cores,
@@ -165,6 +169,40 @@ fn hwenv_hardware_key(
             total_ram_gib,
             arch,
         )
+    })
+}
+
+/// `resolve_lake_root` decision twin (milestone 3 — `src/paths.rs`; the
+/// env lookup + `expanduser` stay Python).
+#[pyfunction]
+#[pyo3(signature = (override_value, home))]
+fn paths_lake_root_str(override_value: Option<&str>, home: &str) -> PyResult<String> {
+    core_ffi_shell("paths_lake_root_str", || {
+        paths::lake_root(override_value, home)
+    })
+}
+
+/// `lake_root_identity` volume-parent twin (milestone 3 — `""` = no
+/// volume parent; the mount/stat probes stay Python).
+#[pyfunction]
+fn paths_volume_parent_str(path: &str) -> PyResult<String> {
+    core_ffi_shell("paths_volume_parent_str", || paths::volume_parent(path))
+}
+
+/// `parse_dotenv` line-parse twin (milestone 3 — `src/dotenv.rs`; file
+/// reads + the never-override apply law stay Python). Returns the
+/// deduped ordered pairs, exactly `list(parse_dotenv(text).items())`.
+#[pyfunction]
+fn dotenv_parse_pairs(text: &str) -> PyResult<Vec<(String, String)>> {
+    core_ffi_shell("dotenv_parse_pairs", || dotenv::parse_pairs(text))
+}
+
+/// `_valid_verify_subset` shape twin (milestone 3 — `src/backupenv.rs`;
+/// the resolver's fail-safe WARN laws stay Python).
+#[pyfunction]
+fn backupenv_verify_subset_valid(value: &str) -> PyResult<bool> {
+    core_ffi_shell("backupenv_verify_subset_valid", || {
+        backupenv::verify_subset_valid(value)
     })
 }
 
@@ -190,6 +228,13 @@ fn _brutex_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hwenv_library_thread_budget, m)?)?;
     m.add_function(wrap_pyfunction!(hwenv_memory_budget, m)?)?;
     m.add_function(wrap_pyfunction!(hwenv_hardware_key, m)?)?;
+    // Milestone 3 — the plain-config-leaf seams (BRUTEX_CORE_RUST_PATHS /
+    // BRUTEX_CORE_RUST_DOTENV / BRUTEX_CORE_RUST_BACKUPENV;
+    // DEC-CONFIG-RUST-LEAVES-001 milestone 3).
+    m.add_function(wrap_pyfunction!(paths_lake_root_str, m)?)?;
+    m.add_function(wrap_pyfunction!(paths_volume_parent_str, m)?)?;
+    m.add_function(wrap_pyfunction!(dotenv_parse_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(backupenv_verify_subset_valid, m)?)?;
     Ok(())
 }
 
@@ -199,12 +244,12 @@ mod tests {
 
     #[test]
     fn version_matches_manifest() {
-        // 0.2.0: the wheel API grew (money-only -> money + hwenv) — a
-        // stale 0.1.0 wheel must not masquerade as the grown surface
-        // (review-r1 stale-wheel hazard; the facades' handshakes check
-        // callables, not versions, so the bump is the human-visible
-        // provenance marker).
-        assert_eq!(VERSION, "0.2.0");
+        // 0.3.0: the wheel API grew again (money + hwenv -> + the
+        // milestone-3 paths/dotenv/backupenv laws) — a stale wheel must
+        // not masquerade as the grown surface (review-r1 stale-wheel
+        // hazard; the facades' handshakes check callables, not versions,
+        // so the bump is the human-visible provenance marker).
+        assert_eq!(VERSION, "0.3.0");
     }
 
     #[test]

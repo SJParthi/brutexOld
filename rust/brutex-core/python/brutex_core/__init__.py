@@ -15,7 +15,15 @@ render, strings-only across the FFI — and milestone 2's
 — the hardware-envelope DERIVATION seam over
 ``brutex/config/hardware_envelope.py`` (pool-worker / library-thread /
 RAM-budget arithmetic + the hardware-key render; detection stays Python —
-the honest seam split recorded in that facade's docstring). Nothing else
+the honest seam split recorded in that facade's docstring) — and
+milestone 3's plain-config-leaf seams: ``brutex/config/paths_rust.py``
+(``BRUTEX_CORE_RUST_PATHS`` — the lake-root decision + volume-parent
+derivations; env lookups / ``expanduser`` / mount probes stay Python),
+``brutex/config/dotenv_rust.py`` (``BRUTEX_CORE_RUST_DOTENV`` — the
+``.env`` line-parse law; file reads + the never-override apply law stay
+Python) and ``brutex/config/backup_env_rust.py``
+(``BRUTEX_CORE_RUST_BACKUPENV`` — the restic ``--read-data-subset``
+shape law; the fail-safe WARN resolver stays Python). Nothing else
 in ``brutex/`` imports this package, and each facade treats an
 absent/stale install as "stay on the Python oracle" (one loud WARN), so a
 missing wheel can never change a served value.
@@ -28,24 +36,32 @@ from __future__ import annotations
 
 from brutex_core._brutex_core import (
     __version__,
+    backupenv_verify_subset_valid,
+    dotenv_parse_pairs,
     format_inr_str,
     hwenv_hardware_key,
     hwenv_library_thread_budget,
     hwenv_memory_budget,
     hwenv_pool_workers,
     paisa_to_rupees_str,
+    paths_lake_root_str,
+    paths_volume_parent_str,
     round_money_str,
     rupees_to_paisa_str,
 )
 
 __all__ = [
     "__version__",
+    "backupenv_verify_subset_valid",
+    "dotenv_parse_pairs",
     "format_inr_str",
     "hwenv_hardware_key",
     "hwenv_library_thread_budget",
     "hwenv_memory_budget",
     "hwenv_pool_workers",
     "paisa_to_rupees_str",
+    "paths_lake_root_str",
+    "paths_volume_parent_str",
     "round_money_str",
     "rupees_to_paisa_str",
 ]
