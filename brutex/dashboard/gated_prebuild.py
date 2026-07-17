@@ -50,7 +50,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.data.errors import ResampleInputError, parquet_read_skip_errors
+from brutex.data.errors import (
+    ResampleInputError,
+    datetime_out_of_range_escape_errors,
+    parquet_read_skip_errors,
+)
 from brutex.data.timeframe_materialize import NoStored1mBarsError, PrebuildKind
 from brutex.observability.progress_beat import emit_progress_beat
 
@@ -98,6 +102,21 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     stored bytes), and the symbol is always reported in ``failed`` with the
     error text, never silently.
 
+    :func:`~brutex.data.errors.datetime_out_of_range_escape_errors`
+    (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-18 idiom ported
+    to the SPOT derive path) adds ``pyo3_runtime.PanicException`` — a
+    **BaseException**: a stored out-of-``datetime``-range timestamp (e.g. a
+    planted ``2**62``-us stamp) panics the Rust→Python conversion at
+    ``frame_to_candle_bars``'s ``to_list()``, which pre-fix sailed PAST this
+    set (executed-repro'd: the WHOLE spot phase aborted, every later symbol
+    skipped). The read-boundary gate
+    (:func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range`)
+    refuses such a frame FIRST as a ``ResampleInputError``; this membership is
+    the defense-in-depth rail so any residual conversion panic is ONE
+    quarantined symbol, never a phase abort. ``KeyboardInterrupt`` /
+    ``SystemExit`` stay un-caught (the escape set is exactly
+    ``(OverflowError, PanicException)`` — never a blanket BaseException).
+
     DELIBERATELY narrow, NOT ``DataLakeError`` broadly:
     :class:`~brutex.data.errors.LakeWriteHalt` (a sibling ``DataLakeError`` —
     disk-full / OOM, a pull-wide global stop) must STILL propagate, never be
@@ -112,11 +131,15 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     (it lives in the optional ``[data]`` extra; the unit suite runs wheel-free)
     ``parquet_read_skip_errors`` raises ``ModuleNotFoundError`` — caught here,
     falling back to the file-level ``(OSError,)`` alone. Nothing is lost: with
-    no polars installed, no ``PolarsError`` can ever be raised, so the fallback
-    is NOT a swallowed signal.
+    no polars installed, no ``PolarsError`` (nor a polars conversion
+    ``PanicException``) can ever be raised, so the fallback is NOT a swallowed
+    signal.
     """
     try:
-        skip: tuple[type[BaseException], ...] = parquet_read_skip_errors()
+        skip: tuple[type[BaseException], ...] = (
+            *parquet_read_skip_errors(),
+            *datetime_out_of_range_escape_errors(),
+        )
     except ModuleNotFoundError:
         skip = (OSError,)
     return (ValueError, ArithmeticError, ResampleInputError, *skip)

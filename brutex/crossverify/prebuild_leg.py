@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import LakeWriteHalt, datetime_out_of_range_escape_errors
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports
     from collections.abc import Callable, Sequence
@@ -52,6 +52,36 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only imports
     from brutex.crossverify.canonical import CanonicalIdentity
 
 _LOG = structlog.get_logger("brutex.crossverify.prebuild_leg")
+
+
+def _quarantine_guard_errors() -> tuple[type[BaseException], ...]:
+    """The per-symbol quarantine guard: ``Exception`` PLUS the conversion-panic escapes.
+
+    DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — the #1594 round-18
+    ``_SWEEP_GUARD_ERRORS`` idiom ported to this leg: a stored
+    out-of-``datetime``-range timestamp (e.g. a planted ``2**62``-us stamp)
+    panics polars' Rust→Python conversion as ``pyo3_runtime.PanicException`` —
+    a **BaseException** that sailed PAST the bare ``except Exception``
+    per-symbol quarantine and aborted the WHOLE leg (executed-repro'd: every
+    symbol after the poisoned one was skipped). The read-boundary gate
+    (:func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range`)
+    refuses such a frame FIRST as a quarantining ``ResampleInputError``; this
+    guard is the defense-in-depth rail so any residual conversion panic is
+    ONE counted symbol, never a leg abort. ``KeyboardInterrupt`` /
+    ``SystemExit`` stay un-caught (the escape set is exactly
+    ``(OverflowError, PanicException)`` — never a blanket ``BaseException``).
+
+    Resolved lazily per run (``datetime_out_of_range_escape_errors`` imports
+    polars inside its call); the wheel-free fallback is honest — with no
+    polars installed, no conversion panic can ever be raised, so ``Exception``
+    alone loses nothing (the gated-prebuild fallback posture).
+    """
+    try:
+        escape: tuple[type[BaseException], ...] = datetime_out_of_range_escape_errors()
+    except ModuleNotFoundError:
+        escape = ()
+    return (Exception, *escape)
+
 
 #: Failed-name report cap (the true count always rides ``failed``).
 FAILED_NAMES_CAP: Final[int] = 10
@@ -146,7 +176,11 @@ def run_prebuild_leg(
     A per-symbol failure is counted + capped-logged
     (``crossverify.prebuild_symbol_failed``) and NEVER blocks the export (the
     export reads 1-minute only); :class:`LakeWriteHalt` re-raises. The
-    injectable callables default to the REAL primitives (lazy imports).
+    quarantine guard is :func:`_quarantine_guard_errors` — ``Exception`` PLUS
+    the out-of-range-timestamp conversion-panic escapes
+    (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001), so ONE poisoned stored
+    timestamp can never abort the whole leg. The injectable callables default
+    to the REAL primitives (lazy imports).
     """
     if materialize is None:
         from brutex.data.timeframe_materialize import materialize_lake_timeframes
@@ -169,6 +203,9 @@ def run_prebuild_leg(
     before = daily_derive_cutoff(now_ist())
     derived = 0
     failed_names: list[str] = []
+    # Resolved ONCE per run (never inside the unwinding except clause — a
+    # ModuleNotFoundError there would mask the original exception).
+    quarantine_errors = _quarantine_guard_errors()
     for identity in coordinates:
         try:
             _derive_one(
@@ -183,7 +220,7 @@ def run_prebuild_leg(
             )
         except LakeWriteHalt:
             raise  # a full disk is a pull-wide stop, never quarantined
-        except Exception as exc:  # per-symbol quarantine — counted, capped-logged
+        except quarantine_errors as exc:  # per-symbol quarantine — counted, capped-logged
             failed_names.append(identity.canonical_symbol)
             if len(failed_names) <= MAX_FAILURE_WARNS:
                 _LOG.warning(
