@@ -47,7 +47,11 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    "candidate_mask_hex": "0000000000000000ffcfffffffffffff",
+    # DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, crate 0.5.0): the
+    # empty condition_scope means "every IMPLEMENTED bit", so the candidate
+    # mask follows IMPLEMENTED_MASK — bits 64/65 joined it
+    # (old: 0000000000000000ffcfffffffffffff).
+    "candidate_mask_hex": "0000000000000003ffcfffffffffffff",
     "spec_mask_hex": "00000000000000001000100000400010",
 }
 

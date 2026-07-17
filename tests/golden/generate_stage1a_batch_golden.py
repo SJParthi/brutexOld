@@ -138,11 +138,16 @@ def generate() -> dict[str, object]:
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     masks = Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     return {
-        # v2: the 60→66 reshape — the five retired VWAP-feed columns
-        # (typical_paisa / volume / pre_open / session_key / session_day)
-        # are GONE from the batch ABI; masks may carry the CPR bits 60-63
-        # and never the tombstones 52/53.
-        "schema": "stage1a-batch-golden-v2",
+        # v3: the vocab-66 SuperTrend implemented-flip (crate 0.5.0) — the
+        # per-bar `supertrend_x2_paisa` column joins the batch ABI (the
+        # 26-bar day script warms the ATR-10 state at bar 9 of each roll
+        # segment, so the frozen corpus genuinely exercises bits 64/65 both
+        # ways + the warm-up restart at each D11 roll). v2 was the 60→66
+        # reshape — the five retired VWAP-feed columns (typical_paisa /
+        # volume / pre_open / session_key / session_day) are GONE from the
+        # batch ABI; masks may carry the CPR bits 60-63 and never the
+        # tombstones 52/53.
+        "schema": "stage1a-batch-golden-v3",
         "columns": {
             "open_paisa": inputs.open_paisa,
             "high_paisa": inputs.high_paisa,
@@ -153,6 +158,7 @@ def generate() -> dict[str, object]:
             "day_index": inputs.day_index,
             "ema20_paisa": inputs.ema20_paisa,
             "ema200_paisa": inputs.ema200_paisa,
+            "supertrend_x2_paisa": inputs.supertrend_x2_paisa,
         },
         "day_tables": {
             "day_pivot_levels": inputs.day_pivot_levels,

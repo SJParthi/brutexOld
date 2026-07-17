@@ -65,6 +65,9 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
+    /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
+    supertrend_x2_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -129,9 +132,9 @@ fn eval_case(c: &Case) -> u128 {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
-        // The FROZEN pre-reshape fixture carries no SuperTrend input — absent
-        // line ⇒ bits 64-65 clear ⇒ every expected mask byte-identical.
-        supertrend_x2_paisa: None,
+        // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
+        // carries the appended ST input per case — threaded verbatim.
+        supertrend_x2_paisa: c.supertrend_x2_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
@@ -176,18 +179,12 @@ fn rust_reproduces_every_golden_vector() {
 
 #[test]
 fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
-    // The both-ways gate is partitioned over the FIXTURE-COVERABLE implemented
-    // bits — 0..=51 and 54..=63 (R5-S5 since PR-2, BOS/CHoCH since
-    // DEC-NIFTY-BOS-CHOCH-001, CPR 60-63 since the 66-bit reshape; the VWAP
-    // pair 52-53 is TOMBSTONED). The Supertrend bits 64-65 became IMPLEMENTED
-    // in the PR-B flip, but the FROZEN pre-reshape fixture carries NO
-    // SuperTrend input (every case rebuilds with `supertrend_x2_paisa: None`,
-    // so 64-65 are structurally clear here — set-side coverage is owned by
-    // the proptests reachability battery + the deterministic Group-14 pins
-    // until the phase-2 fixture regen restores the full-mask gate); the
-    // CLEAR side (an ST bit is sometimes false) holds trivially and stays in
-    // the gate.
-    const FIXTURE_COVERABLE: u128 = IMPLEMENTED_MASK & !(0b11u128 << 64);
+    // The both-ways gate spans the FULL IMPLEMENTED_MASK — 0..=51 and
+    // 54..=65 (R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001,
+    // CPR 60-63 since the 66-bit reshape, SuperTrend 64-65 since the
+    // vocab-66 implemented-flip's version-4 fixture regen — the interim
+    // FIXTURE_COVERABLE scope-down is retired; the VWAP pair 52-53 stays
+    // TOMBSTONED outside the mask).
     let fixture = load_fixture();
     let mut set_any: u128 = 0;
     let mut clear_any: u128 = 0;
@@ -197,9 +194,8 @@ fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
         clear_any |= (!mask) & IMPLEMENTED_MASK;
     }
     assert_eq!(
-        set_any, FIXTURE_COVERABLE,
-        "an implemented condition never fires across the Rust evaluation \
-         (or an ST bit fired off the ST-less frozen fixture)"
+        set_any, IMPLEMENTED_MASK,
+        "an implemented condition never fires across the Rust evaluation"
     );
     assert_eq!(
         clear_any, IMPLEMENTED_MASK,

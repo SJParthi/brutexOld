@@ -73,6 +73,9 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
+    /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
+    supertrend_x2_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -134,9 +137,9 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
-        // The FROZEN pre-reshape fixture carries no SuperTrend input — absent
-        // line ⇒ bits 64-65 clear ⇒ every expected mask byte-identical.
-        supertrend_x2_paisa: None,
+        // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
+        // carries the appended ST input per case — threaded verbatim.
+        supertrend_x2_paisa: c.supertrend_x2_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,

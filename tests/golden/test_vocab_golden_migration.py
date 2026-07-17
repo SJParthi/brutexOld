@@ -1,34 +1,39 @@
-"""The 60→66 vocab-reshape migration invariant — the permanent back-compat harness.
+"""The vocab-reshape migration invariants — the permanent back-compat harness.
 
-The reshape (VWAP bits 52/53 tombstoned + their math deleted; CPR bits 60-63
-implemented; SuperTrend bits 64/65 declared layout-only) regenerated the frozen
-400-case oracle ``fixtures/vocab_golden_vectors.json`` under the
-FROZEN-INPUT migration discipline (GOLD-01 — never a free
+TWO chained frozen-input migrations over the 400-case oracle
+``fixtures/vocab_golden_vectors.json`` (GOLD-01 — never a free
 regenerate-and-trust):
 
-* the generator BURNS the retired VWAP RNG draw in its historical position, so
-  every case's INPUT fields are byte-identical to the pre-reshape (version-2)
-  fixture — pinned here per case via the committed
-  ``fixtures/vocab_golden_migration_v2_masks.json`` companion's per-case input
-  SHA-256s;
-* per case, the NEW mask relates to the OLD mask by EXACTLY the reshape:
-  bits 0-59 unchanged except the tombstones cleared
-  (``new & ((1<<60)-1) == old & ~((1<<52)|(1<<53))``) — **this is the reshape
-  back-compat harness: the 58 pre-existing active conditions (bits 0-51 +
-  54-59) evaluate bit-identically pre/post reshape over the frozen inputs**;
-* no bit at or above 64 is ever set (``new >> 64 == 0``);
-* the only NEW bits (60-63) are exactly justified by the CPR arithmetic
-  recomputed INDEPENDENTLY here from the case's own prev-day anchors (exact
-  integer/Decimal math — never the production helper).
+**v2→v3 (the 60→66 reshape):** VWAP bits 52/53 tombstoned + their math
+deleted; CPR bits 60-63 implemented; SuperTrend bits 64/65 then declared
+layout-only. The generator BURNS the retired VWAP RNG draw in its historical
+position, so every case's v2-era INPUT fields are byte-identical to the
+pre-reshape (version-2) fixture — pinned per case via the committed
+``fixtures/vocab_golden_migration_v2_masks.json`` companion. Per case:
+``new & ((1<<60)-1) == old & ~((1<<52)|(1<<53))`` (the 58 pre-existing active
+conditions evaluate bit-identically; the only in-span change is the tombstone
+clear), and bits 60-63 are exactly the CPR arithmetic recomputed
+INDEPENDENTLY here from the case's own anchors.
 
-The companion fixture is a committed copy of the OLD masks: its ``note`` field
-records the provenance prose, and its sibling ``source_fixture_sha256`` key
-records the pre-reshape fixture's WHOLE-FILE SHA-256
-(``19640054cb39…`` — verified against
-``git show d6ac9f850:tests/golden/fixtures/vocab_golden_vectors.json`` and
-pinned literally below), so this invariant stays verifiable forever — a later
-regeneration that silently moved an input or an old-vocabulary bit fails
-loudly here.
+**v3→v4 (the vocab-66 SuperTrend implemented-flip, crate 0.5.0):** bits 64/65
+went live. The v4 generator APPENDS the ``supertrend_x2_paisa`` draw strictly
+AFTER the ENTIRE historical draw stream (all 400 cases' v3 draws are consumed
+untouched first), so every v3-era input field is byte-identical — pinned per
+case via the committed ``fixtures/vocab_golden_migration_v3_masks.json``
+companion (input SHA over the case dict minus ``expected_mask`` AND minus the
+NEW ``supertrend_x2_paisa`` field) — and per case
+``new & ((1<<64)-1) == old`` (bits 0-63 bit-identical). The only NEW bits
+(64/65) are exactly the strict ×2-domain comparison recomputed INDEPENDENTLY
+here (``close×2`` vs the case's own ``supertrend_x2_paisa``; ``None`` /
+equality → both clear). No bit at or above 66 is ever set.
+
+Each companion is a committed copy of its era's masks: the ``note`` field
+records the provenance prose and ``source_fixture_sha256`` the source
+fixture's WHOLE-FILE SHA-256 (v2: ``19640054cb39…`` verified against
+``git show d6ac9f850:…``; v3: ``0f0f5f85b299…`` — the exact
+``_EXPECTED_SHA256`` the pre-flip ``test_vocab_golden.py`` pinned), so the
+chain stays verifiable forever — a later regeneration that silently moved an
+input or a settled-vocabulary bit fails loudly here.
 """
 
 from __future__ import annotations
@@ -44,24 +49,33 @@ _NEW = json.loads((_FIXTURE_DIR / "vocab_golden_vectors.json").read_text(encodin
 _OLD = json.loads(
     (_FIXTURE_DIR / "vocab_golden_migration_v2_masks.json").read_text(encoding="utf-8")
 )
+_OLD_V3 = json.loads(
+    (_FIXTURE_DIR / "vocab_golden_migration_v3_masks.json").read_text(encoding="utf-8")
+)
 
 #: The two RETIRED tombstone bits the reshape cleared.
 _TOMBSTONE_MASK = (1 << 52) | (1 << 53)
 #: The pre-reshape 60-bit vocabulary span.
 _LOW60 = (1 << 60) - 1
+#: The pre-SuperTrend-flip 64-bit span (bits 0-63 — frozen across v3→v4).
+_LOW64 = (1 << 64) - 1
 #: The narrow-CPR width threshold (basis points of P) — restated literally
 #: (the cross-pin against the wheel export lives in the vocabulary unit suite).
 _NARROW_BPS = 30
 
 
 def _input_sha(case: dict[str, Any]) -> str:
-    """SHA-256 of a case's INPUT fields (everything except ``expected_mask``).
+    """SHA-256 of a case's PRE-v4-era INPUT fields.
 
-    Canonical JSON — ``sort_keys`` + compact separators — exactly how the
-    companion fixture's ``inputs_sha256`` values were minted from the OLD
-    (version-2) fixture.
+    Everything except ``expected_mask`` AND the v4-appended
+    ``supertrend_x2_paisa`` field — canonical JSON (``sort_keys`` + compact
+    separators), exactly how BOTH companions' ``inputs_sha256`` values were
+    minted from their era's fixture (the v2 and v3 fixtures carried identical
+    input fields — the v2→v3 regen burned the VWAP draw in place; v4 only
+    APPENDED the SuperTrend field, so stripping it recovers the frozen v2/v3
+    input dict byte-for-byte).
     """
-    d = {k: v for k, v in case.items() if k != "expected_mask"}
+    d = {k: v for k, v in case.items() if k not in ("expected_mask", "supertrend_x2_paisa")}
     return hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -154,11 +168,129 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     assert tombstones_cleared > 0
 
 
-def test_no_bit_at_or_above_64_is_ever_set() -> None:
-    """The declared-only SuperTrend bits (64/65) + reserved headroom stay inert."""
+def test_no_bit_at_or_above_66_is_ever_set() -> None:
+    """The reserved headroom (bits >= 66) stays inert.
+
+    DELIBERATE law change at the vocab-66 SuperTrend implemented-flip
+    (crate 0.5.0): the former ``>> 64 == 0`` law is retired — bits 64/65 MAY
+    now fire (their exact justification is
+    :func:`test_new_supertrend_bits_are_exactly_the_independent_arithmetic`);
+    everything at or above the declared 66-bit layout must never fire.
+    """
     for case in _NEW["cases"]:
         mask = int(case["expected_mask"], 16)
-        assert mask >> 64 == 0, f"case {case['id']}: bit >= 64 fired ({mask:#034x})"
+        assert mask >> 66 == 0, f"case {case['id']}: bit >= 66 fired ({mask:#034x})"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# v3→v4 — the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _independent_supertrend_bits(case: dict[str, Any]) -> int:
+    """Recompute bits 64/65 from the case's own ST input — literal arithmetic.
+
+    The strict ×2-domain law (never the production evaluator): with
+    ``line = supertrend_x2_paisa`` (already ×2-scaled) and
+    ``close_x2 = close_paisa * 2`` — bit 64 iff ``close_x2 > line``; bit 65
+    iff ``close_x2 < line``; ``None`` or exact equality → both clear.
+    """
+    line = case["supertrend_x2_paisa"]
+    if line is None:
+        return 0
+    close_x2 = case["close_paisa"] * 2
+    if close_x2 > line:
+        return 1 << 64
+    if close_x2 < line:
+        return 1 << 65
+    return 0
+
+
+def _old_v3_by_id() -> dict[int, dict[str, Any]]:
+    return {c["id"]: c for c in _OLD_V3["cases"]}
+
+
+def test_v3_companion_covers_the_full_corpus() -> None:
+    """One v3-companion row per new-fixture case — same ids, both 400 strong."""
+    assert _OLD_V3["schema"] == "vocab-golden-migration-v3-masks"
+    assert len(_OLD_V3["cases"]) == len(_NEW["cases"]) == 400
+    assert {c["id"] for c in _OLD_V3["cases"]} == {c["id"] for c in _NEW["cases"]}
+
+
+def test_v3_companion_records_the_pre_flip_whole_file_sha() -> None:
+    """The v3 companion's provenance anchor is the v3 fixture's whole-file SHA.
+
+    Pinned to the exact ``_EXPECTED_SHA256`` the pre-flip
+    ``test_vocab_golden.py`` carried for the version-3 fixture (the committed
+    bytes the companion was minted from, immediately before the v4 regen) —
+    so the companion can never silently claim descent from a different
+    pre-flip corpus.
+    """
+    assert (
+        _OLD_V3["source_fixture_sha256"]
+        == "0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0"
+    )
+
+
+def test_v3_inputs_are_byte_identical_to_the_pre_flip_fixture() -> None:
+    """The appended-draw proof: stripping the NEW field recovers the v3 inputs."""
+    old = _old_v3_by_id()
+    mismatches = [c["id"] for c in _NEW["cases"] if _input_sha(c) != old[c["id"]]["inputs_sha256"]]
+    assert not mismatches, f"case INPUTS drifted from the frozen v3 corpus: {mismatches}"
+
+
+def test_every_case_carries_the_new_supertrend_field() -> None:
+    """v4 shape: every case has ``supertrend_x2_paisa`` (int or None)."""
+    for case in _NEW["cases"]:
+        assert "supertrend_x2_paisa" in case, f"case {case['id']} lacks the v4 field"
+        value = case["supertrend_x2_paisa"]
+        assert value is None or isinstance(value, int)
+
+
+def test_pre_flip_bits_are_back_compat_across_the_supertrend_flip() -> None:
+    """The v3→v4 back-compat harness: bits 0-63 bit-identical per case.
+
+    ``new & ((1<<64)-1) == old`` over the frozen inputs — every settled
+    condition (the 62 v3-active bits AND the inert tombstones/CPR span)
+    evaluates bit-identically pre/post flip; the ONLY change is above bit 63.
+    """
+    old = _old_v3_by_id()
+    violations: list[str] = []
+    for case in _NEW["cases"]:
+        new_mask = int(case["expected_mask"], 16)
+        old_mask = int(old[case["id"]]["old_mask"], 16)
+        if new_mask & _LOW64 != old_mask:
+            violations.append(f"case {case['id']}: old={old_mask:#034x} new={new_mask:#034x}")
+    assert not violations, "settled-vocabulary bit drift:\n" + "\n".join(violations[:20])
+
+
+def test_new_supertrend_bits_are_exactly_the_independent_arithmetic() -> None:
+    """Bits 64/65 equal the in-test strict ×2 recompute from the case's own input."""
+    mismatches: list[str] = []
+    fired = [0, 0]
+    none_cases = 0
+    equality_cases = 0
+    for case in _NEW["cases"]:
+        mask = int(case["expected_mask"], 16)
+        got = mask & (0b11 << 64)
+        expected = _independent_supertrend_bits(case)
+        if got != expected:
+            mismatches.append(f"case {case['id']}: got={got:#x} expected={expected:#x}")
+        for i in range(2):
+            fired[i] += (mask >> (64 + i)) & 1
+        if case["supertrend_x2_paisa"] is None:
+            none_cases += 1
+        elif case["supertrend_x2_paisa"] == case["close_paisa"] * 2:
+            equality_cases += 1
+    assert not mismatches, "SuperTrend bit drift from the arithmetic:\n" + "\n".join(
+        mismatches[:20]
+    )
+    # Anti-vacuity: both bits fire somewhere AND are clear somewhere, and the
+    # None (warm-up) + exact-equality both-clear arms are genuinely present.
+    n = len(_NEW["cases"])
+    assert all(0 < f < n for f in fired), f"degenerate SuperTrend coverage: {fired}"
+    assert none_cases > 0, "no warm-up (None) SuperTrend case in the corpus"
+    assert equality_cases > 0, "no exact-equality SuperTrend case in the corpus"
 
 
 def test_new_cpr_bits_are_exactly_the_independent_arithmetic() -> None:

@@ -15,7 +15,7 @@ in the calling test so any unintended drift is caught at test time.
 | 3 | SENSEX — circuit-close edge case | forced-exit (P-09) + simulator robustness | ✅ **landed** (see below) |
 | 4 | INDIA VIX — 1 week | reference-only data; no signal bits | ✅ **landed** (see below) |
 | 5 | Cross-instrument resample (1m → 5m) | resample associativity (P-08) | ✅ **landed** (see below) |
-| 7 | condition truth table (66 declared / 62 active) | per-condition determinism (G9) | ✅ **landed** (see below) |
+| 7 | condition truth table (66 declared / 64 active) | per-condition determinism (G9) | ✅ **landed** (see below) |
 | 8 | 12-fill paisa accounting | gross/net/Σ PnL (P-03, P-04) | ✅ **landed** (see below) |
 | 9 | combo-hash distinct inputs | hash uniqueness (P-01, P-02) | ✅ **landed** (see below) |
 
@@ -61,20 +61,21 @@ All six run under CI (3.12 + the `fno_math` / `trading_core` wheels); they were
 authored against a local 3.12 venv with both wheels built (the CI-equivalent
 oracle).
 
-### #7 — condition truth table (G9 per-condition determinism; 66 declared / 62 active bits)
+### #7 — condition truth table (G9 per-condition determinism; 66 declared / 64 active bits)
 
 `../condition_truth_table.csv` (DEC-PHASE2-TRUTH-TABLE-001, MIGRATION entry
 #538). A flat, human-auditable `(snippet_id, condition_name, bit_position,
 expected_bool, description)` table — the readable projection of the frozen
 `vocab_golden_vectors.json` `input → mask` oracle (a u128 layout; every
-IMPLEMENTED bit is <= 63 today). Every `expected_bool` is
+IMPLEMENTED bit is <= 65 today — the SuperTrend bits 64/65 joined at the
+vocab-66 implemented-flip, crate 0.5.0). Every `expected_bool` is
 **decoded from the already-proven `expected_mask`** (Golden Rule #1 — no
 hand-authored values); the bit↔name mapping comes from the single source of
 truth, `brutex/vocabulary/bits.py`.
 
 * Generator: `scripts/gen_condition_truth_table.py` (deterministic; greedy
-  both-ways set-cover of the 62 IMPLEMENTED bits — tombstoned/declared-only
-  bits carry no row — padded to ≥ 200 rows; currently 1,364).
+  both-ways set-cover of the 64 IMPLEMENTED bits — the tombstoned VWAP bits
+  carry no row — padded to ≥ 200 rows; currently 1,408).
 * Golden gate: `../test_condition_truth_table.py` — structure + registry
   agreement + oracle-decode match + G9 both-ways coverage + byte-for-byte
   no-drift (SHA-256 manifest pinned in the test).

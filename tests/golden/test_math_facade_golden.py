@@ -59,6 +59,9 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "NARROW_CPR_WIDTH_BPS",
         "PIVOT_LEVELS_LEN",
         "SPEC_SCHEMA_VERSION",
+        # The vocab-66 SuperTrend flip (crate 0.5.0) — the Group-14 state
+        # joined trading_core.__all__; a deliberate, reviewed surface change.
+        "SupertrendState",
         "TOTAL_CONDITIONS",
         "compute_ema",
         "compute_fib_levels",

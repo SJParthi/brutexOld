@@ -79,10 +79,12 @@ _BANDS = [
 _BARS_PER_DAY = len(_BANDS)
 
 #: SHA-256 of the frozen 16-mask matrix (the README "SHA-256 manifest" guard).
-# DELIBERATE RE-LOCK (the 60→66 reshape — days 2-4 gain the hand-derived
-# CPR bits 60+63; see the closed form). Old digest:
-# c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
-_EXPECTED_SHA256 = "a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3"
+# DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip — bars 9-11 gain the
+# hand-derived bit 65, bars 12-15 bit 64; see the closed form + the in-file
+# ×2-domain audit above). Old digests:
+# 60→66 reshape: a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3;
+# pre-reshape:  c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
+_EXPECTED_SHA256 = "3b56968a1807ca7ea2f29c089a90d3ff3a98f721e6c1f0ed523804a363f84a98"
 
 
 def _price(day_index: int) -> Decimal:
@@ -127,6 +129,14 @@ def _expected_mask(i: int) -> int:
         # prev price ⇒ close (1000 pts higher) is strictly above TC (60),
         # and width 0 ≤ 30 bps of P ⇒ narrow (63) — the 60→66 reshape.
         mask |= (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_NARROW_CPR_DAY)
+    # Group 14 (the vocab-66 SuperTrend flip) — the hand-derived ×2-domain
+    # walk in the module docstring: warm at bar 9 on the DOWN-seeded upper
+    # band above the flat close (bars 9-11), the day-4 gap-up breaks the
+    # ratcheted upper band at bar 12 → flip UP, lower band under the close.
+    if 9 <= i <= 11:
+        mask |= 1 << B.BIT_CLOSE_BELOW_SUPERTREND
+    elif i >= 12:
+        mask |= 1 << B.BIT_CLOSE_ABOVE_SUPERTREND
     return mask
 
 
