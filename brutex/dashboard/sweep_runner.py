@@ -63,8 +63,9 @@ DEFAULT_START: Final[str] = "2020-01-01"
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
 #: Max conditions-per-combo K — the route sweeps the DEFAULT condition set
 #: (``default_condition_bits()`` = every IMPLEMENTED bit), so ``k`` is bounded
-#: by the IMPLEMENTED count (62 on the 66-condition layout), not the declared
-#: layout width: a ``k`` above it can never form a combo (``C(62, 63) = 0`` —
+#: by the IMPLEMENTED count (64 on the 66-condition layout —
+#: DEC-SUPERTREND-CONDITIONS-001), not the declared
+#: layout width: a ``k`` above it can never form a combo (``C(64, 65) = 0`` —
 #: an empty-grid illusion, G-RETROT-08). ``IMPLEMENTED_MASK`` is the one
 #: source of truth, so vocab growth moves this bound automatically
 #: (DEC-VOCAB-U128-CODEGEN-001).

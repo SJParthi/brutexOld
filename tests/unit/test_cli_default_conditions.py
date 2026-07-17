@@ -161,7 +161,7 @@ def test_default_bits_low_k_within_cap() -> None:
 
 
 def test_default_bits_k3_within_cap() -> None:
-    """k=3 over the 62 active bits is C(62,3)=37,820 — still under the 100k cap."""
+    """k=3 over the 64 active bits is C(64,3)=41,664 — still under the 100k cap."""
     n = len(cli.default_condition_bits())
     assert comb(n, 3) <= DEFAULT_MAX_COMBOS
     grid = _grid(k_values=[3])
@@ -169,10 +169,10 @@ def test_default_bits_k3_within_cap() -> None:
 
 
 def test_default_bits_k4_hits_loud_refusal_cap() -> None:
-    """k=4 over the 62 active bits is C(62,4)=557,845 > 100k → loud refusal.
+    """k=4 over the 64 active bits is C(64,4)=635,376 > 100k → loud refusal.
 
     The broadened default does NOT weaken the safety envelope: the exact same
-    cap that refused C(52,4)=270,725 at n=52 refuses C(62,4) at n=62. The
+    cap that refused C(52,4)=270,725 at n=52 refuses C(64,4) at n=64. The
     refusal is a clear, raise-explicitly ValueError, never a silent blowup.
     """
     n = len(cli.default_condition_bits())

@@ -91,10 +91,11 @@ _MINUTES_PER_YEAR: Final[float] = 365.25 * 24.0 * 60.0
 #: Hard ceiling on the masks a single :func:`rank_sweep_over_bits` will enumerate
 #: without an explicit opt-in — the honest "this is a BIG sweep, raise the cap on
 #: purpose" guardrail (Golden Rule #10, no-illusion limits). For scale (over the
-#: 62 active bits): ``C(62,3)=37,820``; ``C(62,4)=557,845``;
-#: ``C(62,5)=6,471,002`` — so the default admits a full-vocab K≤3 sweep and
+#: 64 active bits — DEC-SUPERTREND-CONDITIONS-001): ``C(64,3)=41,664``;
+#: ``C(64,4)=635,376``;
+#: ``C(64,5)=7,624,512`` — so the default admits a full-vocab K≤3 sweep and
 #: forces a conscious choice beyond that (K=4
-#: over the full 62 already exceeds the cap and is loudly REFUSED — pinned by
+#: over the full 64 already exceeds the cap and is loudly REFUSED — pinned by
 #: ``test_default_bits_k4_hits_loud_refusal_cap``), rather than silently
 #: launching a multi-100k-combo run.
 DEFAULT_MAX_COMBOS: Final[int] = 100_000
