@@ -3817,7 +3817,15 @@ jobs:
             # PR_BASE_REF defaults to main (the pull_request trigger is
             # branches:[main]) so `set -u` cannot abort on an unset var —
             # behavior-preserving: on-main PRs expand to origin/main..HEAD.
-            LOG_OPTS="--no-merges origin/${PR_BASE_REF:-main}..HEAD"
+            # Explicit fail-closed: if the base ref is missing/unfetched,
+            # REFUSE rather than let a git error be the only backstop — a
+            # required security gate must never silently pass.
+            if git cat-file -e "origin/${PR_BASE_REF:-main}^{commit}" 2>/dev/null; then
+              LOG_OPTS="--no-merges origin/${PR_BASE_REF:-main}..HEAD"
+            else
+              echo "::error::pull_request: base ref origin/${PR_BASE_REF:-main} not found — refusing to scan (fail-closed)" >&2
+              exit 1
+            fi
           elif [ "$EVENT_NAME" = "push" ]; then
             # Diff-bounded: only the pushed commits. A new branch / forced
             # push reports an all-zero or unknown 'before' — fall back to
