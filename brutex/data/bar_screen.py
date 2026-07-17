@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 
+from brutex.calendars.nse import IST_TZ_NAME
 from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
 from brutex.data.price_sanity import price_row_insane
 
@@ -83,8 +84,10 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 _LOG = structlog.get_logger(__name__)
 
 #: The polars time-zone region used to derive a bar's IST SESSION date (matches
-#: the dashboard readers' own ``dt.convert_time_zone`` calls, CLAUDE.md §11).
-_IST_TZ: Final[str] = "Asia/Kolkata"
+#: the dashboard readers' own ``dt.convert_time_zone`` calls, CLAUDE.md §11) —
+#: the ONE canonical :data:`brutex.calendars.nse.IST_TZ_NAME` string root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST_TZ: Final[str] = IST_TZ_NAME
 
 
 class BarVerdict(Enum):
