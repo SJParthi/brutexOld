@@ -87,6 +87,7 @@ from __future__ import annotations
 import importlib
 import io
 import os
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -683,9 +684,7 @@ def resample_all_via_rust(
         return _oracle_all()
     crate, pinned = engaged
     tf_list = [int(tf) for tf in tfs]
-    result = _guarded_crate_call(
-        lambda: crate.resample_all_ipc(_ipc_payload(df_1m), tf_list, True)
-    )
+    result = _guarded_crate_call(lambda: crate.resample_all_ipc(_ipc_payload(df_1m), tf_list, True))
     if result is _DEGRADED:
         return _oracle_all()
     if not isinstance(result, list | tuple) or len(result) != len(tf_list):
@@ -701,9 +700,7 @@ def resample_all_via_rust(
         return _oracle_all()
     out: dict[int, pl.DataFrame] = {}
     for tf, rust_df in frames.items():
-        served = _burn_in_serve(
-            rust_df, f"{df_1m.schema}|tf={tf}", lambda tf=tf: oracle(df_1m, tf)
-        )
+        served = _burn_in_serve(rust_df, f"{df_1m.schema}|tf={tf}", partial(oracle, df_1m, tf))
         if rust_resample_disabled():
             # A burn-in mismatch latched mid-batch — never a partial mix.
             return _oracle_all()

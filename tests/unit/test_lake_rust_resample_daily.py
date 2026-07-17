@@ -441,9 +441,7 @@ class TestShapeGate:
         assert oracle.calls == 2
         # The SAME token again is steady state — no oracle; a DIFFERENT
         # `before` never re-tokens (value-independent law).
-        lrd.resample_daily_frame_via_rust(
-            _df_1m(), date(2025, 6, 6), oi_aware=False, oracle=oracle
-        )
+        lrd.resample_daily_frame_via_rust(_df_1m(), date(2025, 6, 6), oi_aware=False, oracle=oracle)
         assert oracle.calls == 2
 
     def test_shape_gate_mismatch_autoreverts_after_budget_spent(
@@ -674,10 +672,7 @@ class TestMutationHardening:
         from pathlib import Path
 
         source = (
-            Path(__file__).resolve().parents[2]
-            / "brutex"
-            / "data"
-            / "lake_rust_resample_daily.py"
+            Path(__file__).resolve().parents[2] / "brutex" / "data" / "lake_rust_resample_daily.py"
         ).read_text()
         for literal in (
             '_LOG = structlog.get_logger("brutex.data.lake_rust_resample_daily")',

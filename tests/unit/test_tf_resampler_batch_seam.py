@@ -62,9 +62,7 @@ def _python_all_21(df_1m: pl.DataFrame) -> dict[int, pl.DataFrame]:
 
 
 class TestBatchSeamWiring:
-    def test_flag_off_never_touches_the_batch_face(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_flag_off_never_touches_the_batch_face(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
 
         def _bomb(*_args: object, **_kwargs: object) -> dict[int, pl.DataFrame]:

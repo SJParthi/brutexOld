@@ -60,9 +60,7 @@ _BEFORE = date(2024, 1, 4)  # both sessions complete
 
 
 class TestFnoDailySeamWiring:
-    def test_flag_off_never_touches_the_daily_seam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_flag_off_never_touches_the_daily_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
@@ -80,9 +78,7 @@ class TestFnoDailySeamWiring:
         monkeypatch.setenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, "1")
         seen: list[tuple[date, bool]] = []
 
-        def _spy(
-            df: pl.DataFrame, before: date, *, oi_aware: bool, oracle: Any
-        ) -> pl.DataFrame:
+        def _spy(df: pl.DataFrame, before: date, *, oi_aware: bool, oracle: Any) -> pl.DataFrame:
             seen.append((before, oi_aware))
             assert oracle is fno_daily_resample._fno_daily_frame_python
             return oracle(df, before)

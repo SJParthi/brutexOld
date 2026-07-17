@@ -40,10 +40,14 @@ brutex_lake = pytest.importorskip(
 )
 pl = pytest.importorskip("polars")
 
-from brutex.data import fno_daily_resample, fno_resample, spot_daily_resample  # noqa: E402
+from brutex.data import (  # noqa: E402
+    fno_daily_resample,
+    fno_resample,
+    spot_daily_resample,
+    tf_resampler,
+)
 from brutex.data import lake_rust_resample as lrs  # noqa: E402
 from brutex.data import lake_rust_resample_daily as lrd  # noqa: E402
-from brutex.data import tf_resampler  # noqa: E402
 from brutex.data.timeframes import ALL_TF_MINUTES  # noqa: E402
 
 if TYPE_CHECKING:
@@ -167,9 +171,7 @@ def _assert_bars_equal(got: list[CandleBar], expected: list[CandleBar], label: s
 
 class TestDailyParity:
     @pytest.mark.parametrize("case", sorted(_daily_corpus()))
-    def test_spot_daily_on_equals_off(
-        self, monkeypatch: pytest.MonkeyPatch, case: str
-    ) -> None:
+    def test_spot_daily_on_equals_off(self, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
         df, before = _daily_corpus()[case]
         monkeypatch.delenv(lrd.LAKE_RUST_RESAMPLE_DAILY_ENV, raising=False)
         expected = spot_daily_resample.resample_1m_to_daily(df, before=before)
@@ -236,9 +238,7 @@ class TestDailyParity:
 
 class TestSessionCutoffParity:
     @pytest.mark.parametrize("tf", [2, 5, 15, 60])
-    def test_on_equals_off_across_cutoffs(
-        self, monkeypatch: pytest.MonkeyPatch, tf: int
-    ) -> None:
+    def test_on_equals_off_across_cutoffs(self, monkeypatch: pytest.MonkeyPatch, tf: int) -> None:
         instants = _minutes(_OPEN_UTC, 90)
         lake_df = _frame(instants, oi=[2_000 + i for i in range(90)]).rename(
             {"ts_utc": "timestamp"}
@@ -268,9 +268,7 @@ class TestSessionCutoffParity:
 
 
 class TestBatchFaceParity:
-    def test_resample_all_21_tfs_on_equals_off(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_resample_all_21_tfs_on_equals_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         df = _with_oi(_frame(_minutes(_OPEN_UTC, 375)))
         monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
         expected = tf_resampler.resample_all_21_tfs(df)

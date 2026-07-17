@@ -63,9 +63,7 @@ def _legacy_session(day_df: pl.DataFrame, tf: int, cutoff_min: int | None) -> pl
 
 
 class TestSessionSeamWiring:
-    def test_flag_off_never_touches_the_session_face(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_flag_off_never_touches_the_session_face(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
@@ -85,9 +83,7 @@ class TestSessionSeamWiring:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
         seen: list[tuple[int, int]] = []
 
-        def _spy(
-            df: pl.DataFrame, tf: int, cutoff: int, *, oracle: Any
-        ) -> pl.DataFrame:
+        def _spy(df: pl.DataFrame, tf: int, cutoff: int, *, oracle: Any) -> pl.DataFrame:
             seen.append((tf, cutoff))
             assert "ts_utc" in df.columns, "the lake frame is RENAMED before the seam"
             return oracle(df, tf)

@@ -824,9 +824,7 @@ class TestSessionFace:
     def test_non_bytes_session_result_is_refuse_poison(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_crate(
-            monkeypatch, _fake_crate_t11(session=lambda ipc, tf, oi, cutoff: 0xBAD)
-        )
+        _install_crate(monkeypatch, _fake_crate_t11(session=lambda ipc, tf, oi, cutoff: 0xBAD))
         with capture_logs() as logs:
             out = lrs.resample_session_frame_via_rust(
                 _df_1m(), 5, 560, oracle=_CountingSessionOracle()
@@ -844,9 +842,7 @@ class TestSessionFace:
         module = _fake_crate_t11()
         module.linked_zstd_version = _boom  # type: ignore[attr-defined]
         _install_crate(monkeypatch, module)
-        out = lrs.resample_session_frame_via_rust(
-            _df_1m(), 5, 560, oracle=_CountingSessionOracle()
-        )
+        out = lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=_CountingSessionOracle())
         assert out.equals(_ORACLE_DF)
         assert lrs._DISABLED_REASON[0] == "crate_metadata_error"
 
@@ -876,9 +872,7 @@ class TestSessionFace:
             monkeypatch,
             _fake_crate_t11(session=lambda ipc, tf, oi, cutoff: _ipc(_WRONG_DF)),
         )
-        out = lrs.resample_session_frame_via_rust(
-            _df_1m(), 5, 560, oracle=_CountingSessionOracle()
-        )
+        out = lrs.resample_session_frame_via_rust(_df_1m(), 5, 560, oracle=_CountingSessionOracle())
         assert out.equals(_ORACLE_DF)
         assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
 
@@ -934,9 +928,7 @@ class TestBatchFace:
         assert all(frame.equals(_ORACLE_DF) for frame in out.values())
         assert lrs.rust_resample_disabled() is False
 
-    def test_non_list_batch_result_is_refuse_poison(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_list_batch_result_is_refuse_poison(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_crate(monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: b"one blob"))
         with capture_logs() as logs:
             out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=_CountingOracle())
@@ -948,9 +940,7 @@ class TestBatchFace:
     def test_length_mismatched_batch_is_refuse_poison(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_crate(
-            monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF)])
-        )
+        _install_crate(monkeypatch, _fake_crate_t11(batch=lambda ipc, tfs, oi: [_ipc(_ORACLE_DF)]))
         with capture_logs() as logs:
             out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=_CountingOracle())
         assert list(out.keys()) == [5, 15]
@@ -982,7 +972,7 @@ class TestBatchFace:
         module.linked_zstd_version = _boom  # type: ignore[attr-defined]
         _install_crate(monkeypatch, module)
         oracle = _CountingOracle()
-        out = lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
+        lrs.resample_all_via_rust(_df_1m(), (5, 15), oracle=oracle)
         assert oracle.calls == 2
         assert lrs._DISABLED_REASON[0] == "crate_metadata_error"
 
