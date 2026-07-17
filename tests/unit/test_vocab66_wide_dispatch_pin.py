@@ -27,6 +27,22 @@ Exactly ONE arm runs per environment, selected by
 ``hasattr(fno_math, "ResidentBarsU128")`` alone — correctness is never
 skipped/xfailed on either arm (the skipif gates on kernel PRESENCE only).
 
+LANE INTERFACE (coordinator addendum — the lane's DRAFT PR #1633, head
+a97642a, unmerged): its documented supported test surface, once merged, is the
+free ``combo_mask.dispatch_kernel_kind(bar_bits, masks)``,
+``ResidentBarBuffer.kernel_kind`` / ``.wide_kernel_active``, the module
+constants ``KERNEL_RUST_U64`` / ``KERNEL_RUST_U128`` / ``KERNEL_NUMPY`` =
+``("rust-u64", "rust-u128", "numpy")``, and the typed
+``WideKernelUnavailableError`` (a RuntimeError subclass) on a ``>= 64``
+wheel-missing. Arm 1 PREFERS those documented observables when present
+(``kernel_kind == "rust-u128"`` on a >= 64 window, literal-string compares)
+and keeps the monkeypatch numpy spy as the defensive fallback law for a
+kernel-present-but-observables-absent build; today's tree has neither, so all
+of arm 1 stays cleanly gated off. The lane's own benches/parity suites
+(``tests/bench/test_engine_combo_mask_wide_kernel_o1.py`` +
+``tests/property/test_supermask_kernel_parity.py``) are deliberately NOT
+duplicated here — the end-to-end 66-bit grid bench composes above them.
+
 Plus the u64-fast-path RETIREMENT pins: a real Stage-1A window where bit 64/65
 fires produces ``bar_bits > 2**64 - 1`` (the u128 regime is LIVE post-flip),
 and :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim` serves such a
@@ -170,6 +186,34 @@ class TestWideDispatchRustFirst:
         self._spy_numpy_dead(monkeypatch)
         masks = [1 << 64, 0b1010, 0]
         assert buf.count_supermasks(masks) == _scalar_counts(window, masks) == [0, 2, 3]
+
+    def test_documented_lane_observables_classify_the_wide_window(self) -> None:
+        """PREFERRED probe (PR #1633 interface): the documented observables
+        classify a >= 64 window as Rust-u128-served, literal-string compared.
+
+        When the kernel is present but the observables are absent (a
+        kernel-present-but-pre-#1633 build), this test SKIPS with the reason
+        below and the monkeypatch-spy tests above remain the defensive
+        zero-fallback law — the coordinator-specified fallback ordering.
+        """
+        if not hasattr(combo_mask, "dispatch_kernel_kind"):
+            pytest.skip(
+                "kernel present but the #1633 observables "
+                "(dispatch_kernel_kind/kernel_kind/constants) are absent — "
+                "the monkeypatch-spy tests above are the defensive fallback law"
+            )
+        # Constants compared as the LITERAL documented strings.
+        assert getattr(combo_mask, "KERNEL_RUST_U64") == "rust-u64"  # noqa: B009
+        assert getattr(combo_mask, "KERNEL_RUST_U128") == "rust-u128"  # noqa: B009
+        assert getattr(combo_mask, "KERNEL_NUMPY") == "numpy"  # noqa: B009
+        dispatch = getattr(combo_mask, "dispatch_kernel_kind")  # noqa: B009
+        assert dispatch(list(_WINDOW), list(_MASKS)) == "rust-u128"
+        buf = ResidentBarBuffer(list(_WINDOW))
+        assert getattr(buf, "kernel_kind") == "rust-u128"  # noqa: B009
+        assert getattr(buf, "wide_kernel_active") is True  # noqa: B009
+        # The typed >= 64 wheel-missing raise is a RuntimeError subclass.
+        err = getattr(combo_mask, "WideKernelUnavailableError")  # noqa: B009
+        assert isinstance(err, type) and issubclass(err, RuntimeError)
 
 
 # ── arm 2: kernel ABSENT (today) — the numpy reference IS the documented law ─
