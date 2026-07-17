@@ -1,0 +1,58 @@
+SLUG: getlastquoteshortwithclose
+LINK: https:\/\/globaldatafeeds.in\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/getlastquoteshortwithclose\/
+TITLE: GetLastQuoteShortWithClose
+MODIFIED: 2026-05-04T16:34:28
+-----RAW-----
+<h3>GetLastQuoteShortWithClose : Returns LastTradePrice of Single Symbol (short) with Close of Previous Day<\/h3>\n
+<div><b><span style=\"color: #dd3333;\">Supported parameters<\/span><\/b><\/div>\n
+<table>\n
+<tbody>\n
+<tr>\n
+<td><b>Exchange<\/b><\/td>\n
+<td><i>String value like MCX<\/i><\/td>\n
+<td>Name of supported exchange. How to get list of supported exchanges you can find <a href=\"\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/function-getexchanges-2\/\">here<\/a><\/td>\n
+<\/tr>\n
+<tr>\n
+<td><b>InstrumentIdentifier<\/b><\/td>\n
+<td><i>Value of instrument identifier<\/i><\/td>\n
+<td>How to get list of available instruments and identifiers you can find <a href=\"\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/getinstruments\/\">here<\/a><\/td>\n
+<\/tr>\n
+<tr>\n
+<td><b>isShortIdentifier<\/b><\/td>\n
+<td><i>[true]\/[false], default = [false]<\/i><\/td>\n
+<td>Optional parameter. By default function will use long instrument identifier format. Functions will use short instrument identifier format if set as [true]. Example of ShortIdentifiers are NIFTY25MAR21FUT, RELIANCE25MAR21FUT, NIFTY25MAR2115000CE, etc.<\/td>\n
+<\/tr>\n
+<\/tbody>\n
+<\/table>\n
+<div><b><span style=\"color: #dd3333;\">What is returned ?<\/span><\/b><\/div>\n
+<table>\n
+<tbody>\n
+<tr>\n
+<td><strong>Exchange, InstrumentIdentifier<\/strong> (Symbol), <strong>LastTradeTime, BuyPrice<\/strong> (Bid Price), <strong>Close<\/strong> (Previous Trading Day&#8217;s Close), <strong>LastTradePrice, SellPrice<\/strong> (Ask Price)<\/td>\n
+<\/tr>\n
+<tr>\n
+<td>LastTradeTime : This value is expressed as no. of seconds since Epoch time (i.e. 1st January 1970). Also known as Unix Time. Please Visit <a href=\"https:\/\/www.epochconverter.com\/\" target=\"_blank\" rel=\"noopener noreferrer\">https:\/\/www.epochconverter.com\/<\/a> to get formulae to convert human readable time to Epoch and vice versa (scroll to end of their home page)<\/td>\n
+<\/tr>\n
+<\/tbody>\n
+<\/table>\n
+<div><b><span style=\"color: #dd3333;\">Sample request(JavaScript)<\/span><\/b><\/div>\n
+<pre lang=\"javascript\">            {\n
+                MessageType: \"GetLastQuoteShortWithClose\",\n
+                Exchange: \"NFO\",\n
+                InstrumentIdentifier: \"NIFTY26MAY26FUT\",\n
+\t\tisShortIdentifier: \"true\"\n
+            };\n
+     doSend(request);\n
+<\/pre>\n
+<div><b><span style=\"color: #dd3333;\">Example of returned data in JSON format<\/span><\/b><\/div>\n
+<pre lang=\"javascript\">{\n
+\"Exchange\":\"NFO\",\n
+\"InstrumentIdentifier\":\"NIFTY26MAY26FUT\",\n
+\"LastTradeTime\":1777888801,\n
+\"BuyPrice\":24190.0,\n
+\"Close\":24098.2,\n
+\"LastTradePrice\":24199.0,\n
+\"SellPrice\":24200.0,\n
+\"MessageType\":\"LastQuoteShortWithCloseResult\"\n
+}\n
+<\/pre>\n

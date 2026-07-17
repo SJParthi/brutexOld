@@ -68,7 +68,8 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     """The per-symbol DATA-fault quarantine set, resolved LAZILY at except time.
 
     (DEC-PREBUILD-SELECT-001; widened by DEC-LAKE-WRITE-UNIQUE-001 +
-    DEC-PREBUILD-CORRUPT-SKIP-001.) ``ValueError`` is the materialise core's
+    DEC-PREBUILD-CORRUPT-SKIP-001 + DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001.)
+    ``ValueError`` is the materialise core's
     historical data-error surface; :class:`~brutex.data.errors.ResampleInputError`
     is the canonical resampler's input tripwire (DEC-RESAMPLER-INPUT-GUARD-001) —
     raised when ONE symbol's stored 1-minute partition is POISONED (duplicate /
@@ -80,11 +81,28 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
     DEC-FETCH-PARSER-HARDENING-001 #1038). A quarantined symbol is reported in
     ``failed`` and every other symbol still runs.
 
+    ``ArithmeticError`` (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001) covers
+    ``decimal.InvalidOperation`` from the per-symbol Decimal price
+    conversion — a NaN-bearing stored partition previously raised a raw
+    ``InvalidOperation`` out of the ``CandleBar`` construction
+    (``frame_to_candle_bars`` / the engine read boundary's re-wrap belt),
+    which is NOT a ``ValueError``, so it ESCAPED this set and aborted the
+    WHOLE prebuild instead of quarantining the ONE symbol. Consumed ONLY at
+    the per-symbol data-fault boundaries (this module's three ``except``
+    sites + the parallel worker) — never wrapped around arbitrary code (the
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-18 escape-error discipline).
+    DISCLOSED breadth: an arithmetic fault (``ZeroDivisionError`` /
+    ``OverflowError``) inside ONE symbol's read→resample→write span now
+    quarantines-and-NAMES that symbol instead of aborting the run — at this
+    boundary such faults are overwhelmingly data-VALUE-driven (NaN/inf in
+    stored bytes), and the symbol is always reported in ``failed`` with the
+    error text, never silently.
+
     DELIBERATELY narrow, NOT ``DataLakeError`` broadly:
     :class:`~brutex.data.errors.LakeWriteHalt` (a sibling ``DataLakeError`` —
     disk-full / OOM, a pull-wide global stop) must STILL propagate, never be
-    miscounted as a per-symbol failure; a genuine code bug (``KeyError`` /
-    ``TypeError`` / …) propagates too.
+    miscounted as a per-symbol failure; a genuine non-arithmetic code bug
+    (``KeyError`` / ``TypeError`` / …) propagates too.
 
     A FUNCTION, not a module constant, because ``parquet_read_skip_errors``
     imports ``polars`` inside its call: the tuple is built only when an
@@ -101,7 +119,7 @@ def _per_symbol_data_errors() -> tuple[type[BaseException], ...]:
         skip: tuple[type[BaseException], ...] = parquet_read_skip_errors()
     except ModuleNotFoundError:
         skip = (OSError,)
-    return (ValueError, ResampleInputError, *skip)
+    return (ValueError, ArithmeticError, ResampleInputError, *skip)
 
 
 #: Public alias of :func:`_per_symbol_data_errors` (CLAUDE.md §11 COMMON) — the

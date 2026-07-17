@@ -43,6 +43,71 @@ OPERATOR DIRECTIVE (the ONE sanctioned exception to the standing posture) —
 scope/vocab/rate/lake-schema UNCHANGED; NIFTY/BANKNIFTY/SENSEX; this header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1825.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
+MIGRATION.md #1897, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
+non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries:
+`arrow_table_to_bars` gains the explicit finiteness gate (an inf-HIGH bar
+previously served `Decimal('Infinity')` into the engine SILENTLY — the
+positivity + ordering checks pass vacuously on inf) + the
+`(ValueError, ArithmeticError)` re-wrap belt (a NaN price's raw
+`decimal.InvalidOperation` previously escaped `except ValueError` and
+aborted the whole read); the vectorized `price_violation_expr` gains the
+per-column `~is_finite` arm (the `high ∈ {+inf, NaN}` blind spot) with the
+scalar twin widened `isnan` → `not isfinite` — scalar == vector over the
+FULL float plane, CLOSING the DEC-DASHBOARD-READ-SCREEN-001 round-2 named
+ENGINE-side follow-up; `make_lake_read_1m_window` (the heal-recall /
+post-pull / crossverify `1day` window reader) runs the strengthened gate
+for the FIRST time (Phase-1 finding #12) on the window-cut frame;
+`ArithmeticError` joins the prebuild per-symbol quarantine set (a NaN
+partition quarantines the SYMBOL, never a run abort). Both defects are
+PRE-EXISTING, executed-repro'd by the assurance session on planted/corrupt
+STORED data (the vendor parse rejects non-finite via `to_price` — verified);
+fails-before proven at merge-base 6b9947d9; healthy-lake byte-identity
+pinned + the frozen engine goldens pass UNMODIFIED. READ-boundary hardening
+only — ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. Named follow-up:
+DEC-DAILY-WINDOW-BADTICK-001 (bad-tick on the window reader). This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1897.)
+Earlier: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900,
+branch `claude/staged-sequencer-seams` — the STAGED SEQUENCER SEAMS
+(dual-vendor orchestration WS-B, per the frozen ADR-0021 design contract +
+the operator rulings relayed via the coordinator — not a direct-user approval
+in this session): the ONE `run_full_pipeline` gains ADDITIVE optional staged
+callables (`run_spot_daily` · `run_prebuild_spot` · `run_futures` ·
+`run_prebuild_futures` · `run_options` · `run_greeks` + the `vendor`
+stage-event token) over the canonical order SPOT-DAILY → SPOT-1M →
+SPOT-PREBUILD → METADATA → FUTURES → FUTURES-PREBUILD → OPTIONS → GREEKS,
+with the ABSENT-vs-FAILED contract (a None callable = an ABSENT stage —
+never invoked, vacuously settled under the DISTINCT `absent` token; the
+strict gate never withholds Greeks over absent stages; the
+second-vendor-shaped PARTIAL-absent parity case pinned), per-stage
+fail-closed gates (`stopped_after` sequencer-minted from stage position),
+the per-vendor-stage market-hours belt, and the `pipeline.stage.*` events
+(§10); stage callables are typed at the NEW STRUCTURAL `StageOutcome`
+protocol (leaf `dashboard/stage_outcome.py` — the five shipped Groww report
+shapes are satisfying instances via additive `.ok` properties the
+`spot_phase_ok`-family gates now delegate to); the F&O spine gains the
+additive `step_filter` bucket selection (futures-only / options-only stage
+invocations reuse the ONE spine — filtered buckets honestly ABSENT from
+execution + NAMED `contracts_step_filtered`, never fake-settled;
+`contracts_selected` stays the pre-filter selection-grammar count); NEW
+leaf `data/write_domain.py` ships the Pin D1-1 primitive
+(`WriteDomain` = allowed-subtree SET + the structural whole-`feeds/`-prefix
+primary exclusion, registration-independent; `assert_write_domain` = the
+typed cross-domain refusal, mount-shape law + the round-6 in-lake
+`feeds`-component swap rail ported at the assurance NG4E-2 MAJOR fold
+(fails-before-pinned); the component compare is
+byte/case-SENSITIVE, a documented + pinned defense-in-depth limit;
+negative-pin battery incl.
+nested-root + unregistered-feeds fixtures; the NG4E-1 maintenance-lane
+scoping + the NG4E-2 restore-ordering law documented SETTLED per the
+coordinator-relayed operator ruling of 2026-07-15). ALL-None
+defaults BYTE-IDENTICAL (frozen-parity + origin/main A/B pinned); NO
+production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the per-item record
+lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
 Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
@@ -3037,6 +3102,164 @@ hostile-review pass._
   line+branch; golden suite 541 passed; ruff/ruff-format clean; `mypy --strict`
   clean (456 files); pyright 52 errors vs the 53-error base measurement — one
   FEWER, 0 new.)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
+  (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897** —
+  renumbered #1832 → #1897 at the 2026-07-16 merge-reconcile per the
+  steward ledger map (#1832 taken on main by
+  DEC-DASHBOARD-COLD-IO-DEADLINE-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) —
+  non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries,
+  closing two PRE-EXISTING latent defects the assurance session
+  executed-repro'd on live main (base 6b9947d9) with planted/corrupt STORED
+  data (hostile/out-of-band input — no production writer emits a non-finite
+  price; the vendor parse rejects it via `candle_fields.to_price`, verified):
+  (#2, silent wrong-value corruption) `high ∈ {+inf, NaN}` passed the
+  positivity + ordering checks VACUOUSLY at both boundaries —
+  `arrow_table_to_bars` served `CandleBar(high=Decimal('Infinity'))` into
+  the engine feed and `make_lake_read_1m` returned the frame silently, the
+  5-minute max aggregation minting a poisoned derived bucket `high = inf`;
+  (#3, uncaught crash) a NaN price raised a raw `decimal.InvalidOperation`
+  (an ArithmeticError, NOT ValueError) escaping `arrow_table_to_bars`'
+  `except ValueError` AND the prebuild quarantine set — the whole
+  `Catalog.get_bars` read / prebuild aborted instead of quarantining the
+  symbol. THE FIX (four seams, one law): the engine boundary's explicit
+  `math.isfinite` gate over all four OHLC fields (the corrupt-bar ValueError
+  idiom, partition + bar ts named) + the `(ValueError, ArithmeticError)`
+  re-wrap; the per-column `~is_finite` arm in `price_violation_expr` + the
+  scalar twin widened `isnan` → `not isfinite` (scalar == vector over the
+  FULL float plane — the parity property consciously widened; CLOSES the
+  DEC-DASHBOARD-READ-SCREEN-001 round-2 "DELIBERATE NaN ASYMMETRY" named
+  ENGINE-side follow-up recorded in price_sanity's own docstring);
+  `make_lake_read_1m_window` runs the strengthened gate on the WINDOW-CUT
+  frame (Phase-1 finding #12 — pre-fix the heal-recall/post-pull/crossverify
+  `1day` window path ran NO screen at all; validate-what-you-return, a
+  corrupt row outside the window never blanks the read); `ArithmeticError`
+  joins `gated_prebuild._per_symbol_data_errors` (per-symbol boundaries
+  ONLY — the #1594 round-18 escape-error discipline, breadth disclosed).
+  Fails-before PROVEN at merge base (20 new tests fail on pre-fix source);
+  positive-evidence guardrails pin the already-refused shapes unchanged;
+  HEALTHY-LAKE byte-identity pinned (clean-table bars field-for-field,
+  both readers frame-equal to the raw parquet transform, the frozen
+  sweep/vocab/snapshot goldens pass UNMODIFIED). Consciously flipped pins:
+  the wheel-free quarantine-tuple equality + the parity strategy + the
+  "non-finite or non-positive" message wording. Named follow-up:
+  DEC-DAILY-WINDOW-BADTICK-001 (the bad-tick screen on the window reader —
+  deliberately not folded). READ-boundary hardening only — ENGINE UNCHANGED
+  on clean/healthy feeds — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no lake/schema/scope/vocab/rate change; no new routes, no new env vars;
+  all six touched modules 100.00% line+branch on their ci.yml gates;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors on
+  touched files. Shipped via the REPLACEMENT-PR remedy (the #1580
+  `+`-in-scope conventional-commit lesson — the original PR #1581 branch's
+  pushed `fix(data+feed)`/`docs(migration+claude)` subjects are
+  charset-illegal and pushed commits are never rewritten; tree rebuilt
+  verbatim under comma-form subjects, identity-proven); the independent
+  hostile review verdict is SHIP with its two honesty NITs folded
+  (transitive-consumer disclosure + the pre-existing null-price TypeError
+  limit — both recorded in MIGRATION.md #1897).)
+  Earlier: `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900** —
+  the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
+  AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
+  (`docs/adr/0021-dual-vendor-pull-orchestration.md` @ 5e0bad43, draft
+  PR #1555 — assurance CLEAR-TO-FREEZE 2026-07-15) + the operator rulings
+  relayed via the coordinator — NOT a direct-user approval in this session;
+  the design handle `DEC-DUAL-VENDOR-PIPELINE-001` stays unminted (ADR PR
+  unmerged). (1) `run_full_pipeline` gains ADDITIVE optional staged
+  callables — `run_spot_daily`/`run_prebuild_spot`/`run_futures`/
+  `run_prebuild_futures`/`run_options`/`run_greeks` + the `vendor` token —
+  over the canonical order SPOT-DAILY → SPOT-1M → SPOT-PREBUILD → METADATA
+  → FUTURES → FUTURES-PREBUILD → OPTIONS → GREEKS; the ABSENT-vs-FAILED
+  contract (an absent stage is NEVER invoked and scores VACUOUSLY-SETTLED
+  under the DISTINCT `absent` token — never conflated with `failed`; the
+  strict gate never withholds Greeks/post stages over absent stages; the
+  second-vendor-shaped PARTIAL-absent parity case pinned — metadata/futures/
+  futures-prebuild absent ⇒ Greeks NOT withheld, no crash, absent tokens on
+  the report); per-stage FAIL-CLOSED gates with `stopped_after`
+  SEQUENCER-minted from stage position (the N2 ruling); the market-hours
+  belt re-checked before every VENDOR stage (prebuilds/Greeks are local
+  compute); a stage exception emits ONE `pipeline.stage.halted` then
+  RE-RAISES (`LakeWriteHalt` never swallowed); §10 events
+  (`pipeline.stages.planned` + `pipeline.stage.started/settled/halted`,
+  vendor= + stage= tokens); the legacy-XOR-staged fail-loud junk-mix
+  refusal; the §4.1-supersession-4 staged movers-warm law (spot-prebuild ∧
+  futures-prebuild ∧ options each settled-or-absent). ALL-None defaults
+  BYTE-IDENTICAL — the existing suites pass UNMODIFIED, the frozen
+  report-dict parity test + the EXECUTED origin/main A/B on the all-None
+  LEGACY arm (report dicts equal — the byte-parity claim covers exactly
+  that arm; independently re-verified at the hostile review, delegation
+  shapes included) pin it. (2) the STRUCTURAL `StageOutcome`
+  protocol (NEW leaf `dashboard/stage_outcome.py`, the `pipeline_verdict`
+  placement): read-only `ok: bool | None` + the ONE gate law
+  `stage_outcome_ok` (only an explicit False fails; None = ran-but-nothing-
+  to-do); the five shipped Groww shapes are satisfying instances —
+  BulkSpotReport/MetadataPullReport/CompositePullReport/HistoricalPullReport
+  gained additive `.ok` properties (predicates MOVED verbatim onto the
+  reports — the no-copy/no-cycle placement; the sequencer gates are thin
+  delegators, byte-identical) and PrebuildOutcome/GreeksEnrichOutcome
+  already carried `ok`; pinned statically (mypy-checked assignments) + at
+  runtime. (3) the F&O spine `step_filter` on `pull_contract_candles`: a
+  PullStep bucket selection so futures-only ({3,4}) / options-only ({5,6})
+  stage invocations REUSE the one spine; filtered contracts are excluded
+  BEFORE any planning — zero vendor calls, zero ledger rows, never marked
+  complete, honestly ABSENT from pull EXECUTION and NAMED (the additive
+  `contracts_step_filtered` count + ONE `fno.step_filtered` INFO +
+  emit-on-nonzero note clause), NEVER fake-settled; `contracts_selected`
+  deliberately stays the PRE-filter selection-grammar count (filtered legs
+  included — the filter scopes execution, not the selection accounting;
+  the relationship test-pinned, the review MINOR-1 wording-narrowing
+  fold); default None
+  byte-identical (pinned); an empty filter is a typed refusal. (4) the
+  `WriteDomain` + Pin D1-1 primitive (NEW leaf `data/write_domain.py`): the
+  ALLOWED-SUBTREE-SET + foreign-domain-exclusion typing (the NG-3 law — the
+  single-Path form refuted by the nested-root false-pass); the PRIMARY
+  domain excludes the ENTIRE `feeds/` path-component prefix STRUCTURALLY,
+  registration-INDEPENDENT (fold #4 NG3-EDGE); `assert_write_domain` raises
+  the typed `WriteDomainError` on a cross-domain dest — never keep-first;
+  the `_assert_options_containment` resolution idiom (root resolved ONCE
+  at registration, subtree components literal — the mount-shape
+  symlinked-root case passes; guarded resolve) — since the assurance NG4E-2
+  MAJOR fold INCLUDING the precedent's round-6 IN-LAKE component-swap rail
+  (empirically reproduced fail-open: a symlinked `<root>/feeds` component
+  resolved the `feeds` token away, so a primary write to `feeds/<vendor>/`
+  PASSED while landing in the feed vendor's real bytes; the ported rail
+  probes the component and refuses both directions NAMING it,
+  fails-before-pinned 4/5; the sub-call probe→write TOCTOU is the disclosed
+  out-of-scope residual per the #1594 envelope); the component compare is
+  byte/case-SENSITIVE — the documented defense-in-depth limit (a
+  differently-cased `Feeds/` dest on a case-insensitive filesystem would
+  not be excluded; the production writers only ever mint the lowercase
+  `feeds` literal) with the current behavior test-pinned so a casefold can
+  never land silently; the REQUIRED negative-pin
+  battery (34 tests: nested-root · unregistered-feeds both profiles · both
+  directions · symlink escape/loop · mount-shape pass · typed refusal ·
+  the case-sensitivity pin · the 7-test swap-rail battery incl. the
+  KILL-gate real-feeds control + the mount-root-unprobed scoping pin);
+  NG4E-1 scoping documented (profile-bound vendor-chain writers ONLY —
+  maintenance/restore lanes profile-FREE by design; the assurance MINOR
+  fold names today's OTHER profile-free writers — lake_heal, Greeks
+  enrich + backfill, prebuild derive, crossverify staging — UNASSIGNED
+  with no masquerade pin; the real close is the WS-C-owned masquerade
+  pin, deliberately not built here) + the NG4E-2
+  dual-ledger restore-ordering law recorded SETTLED (per the operator
+  ruling of 2026-07-15 as relayed via the coordinator: per-domain
+  ledger-strictly-LAST is the MECHANICAL correctness law, carrying the
+  per-domain `window_ledger/deltas/` clear (each domain clears its own
+  manifest-extraneous deltas before its own base ledger copy — the
+  nightly Phase C generalized);
+  primary-ledger-last-overall is a labeled completion-sentinel CONVENTION,
+  not a correctness requirement; the real guarantee is the QUIESCED-BOX
+  precondition — no pulls in flight in any domain).
+  HONEST WS-B envelope: seams + primitives ONLY — NO
+  production caller binds them (profile registry/writer wiring/Pin D1-3
+  read twin = WS-C; the second-vendor binding = WS-D). GATES:
+  `pipeline_pull.py` (325/114) · `stage_outcome.py` (22/0) ·
+  `write_domain.py` (67/20) · `historical_pull.py` (551/130) ·
+  `pull_controller.py` (600/132) · `metadata_pull.py` (204/44) ·
+  `composite_pull.py` (85/20) ALL 100.00% line+branch on their exact ci
+  gates (discovery gate executed green); ruff/ruff-format clean; `mypy
+  --strict brutex` clean (461 files); pyright 0 errors on touched files.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
@@ -8655,6 +8878,43 @@ hostile-review pass._
   DECISION-TF bar until PR-B's 1-minute grid — conservative, never
   optimistic; matches §1's Active branch line — see §1 + MIGRATION.md #1825
   for the full blurb)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897 — renumbered
+  #1832 → #1897 at the 2026-07-16 merge-reconcile per the steward ledger
+  map — non-finite
+  OHLC (inf/-inf/NaN) rejected at BOTH lake-read boundaries: the engine read
+  boundary's explicit finiteness gate + the `(ValueError, ArithmeticError)`
+  re-wrap (a NaN's raw `decimal.InvalidOperation` no longer escapes), the
+  per-column `~is_finite` arm in the vectorized price-sanity mask (the
+  `high ∈ {+inf, NaN}` blind spot) with the scalar twin widened to match,
+  the window `1day` reader (`make_lake_read_1m_window`) running the
+  strengthened gate for the first time (finding #12), and `ArithmeticError`
+  in the prebuild per-symbol quarantine set; two pre-existing latent
+  defects, executed-repro'd on planted/corrupt STORED data, fails-before
+  proven at merge-base 6b9947d9, healthy-lake byte-identity + frozen engine
+  goldens pinned UNMODIFIED; named follow-up DEC-DAILY-WINDOW-BADTICK-001;
+  ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1897 for the full blurb)
+  Earlier: `claude/staged-sequencer-seams`
+  (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900 — the staged sequencer
+  seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design
+  contract + the coordinator-relayed operator rulings: additive staged
+  callables on the ONE `run_full_pipeline` (canonical order SPOT-DAILY →
+  SPOT-1M → SPOT-PREBUILD → METADATA → FUTURES → FUTURES-PREBUILD → OPTIONS
+  → GREEKS; ABSENT-vs-FAILED vacuously-settled contract with the distinct
+  `absent` token; per-stage fail-closed gates, sequencer-minted
+  `stopped_after`; per-vendor-stage market-hours belt; `pipeline.stage.*`
+  events) + the structural `StageOutcome` protocol (leaf
+  `dashboard/stage_outcome.py`; the five Groww report shapes are satisfying
+  instances via additive `.ok`) + the F&O spine `step_filter` (filtered
+  buckets honestly absent, never fake-settled) + the `WriteDomain`/Pin D1-1
+  cross-domain refusal primitive (leaf `data/write_domain.py`; allowed-set
+  typing, structural whole-`feeds/` primary exclusion, negative-pin
+  battery; NG4E-1 maintenance-lane scoping + NG4E-2 restore-ordering
+  proposal documented). ALL-None defaults byte-identical (frozen parity +
+  origin/main A/B); NO production caller binds the new seams — WS-C/WS-D;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1900 for the full blurb)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over

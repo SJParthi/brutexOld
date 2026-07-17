@@ -28,6 +28,16 @@ from brutex.data.price_sanity import (
 from hypothesis import given
 from hypothesis import strategies as st
 
+#: One price cell for the scalar==vector parity pin: None, a bounded finite
+#: float, OR an explicit non-finite special (hypothesis refuses
+#: ``allow_nan=True`` beside min/max bounds, so the specials are sampled
+#: explicitly — DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 widened the space).
+_PRICE_CELL = st.one_of(
+    st.none(),
+    st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False),
+    st.sampled_from([float("nan"), float("inf"), float("-inf")]),
+)
+
 
 class TestPriceRowInsaneScalar:
     """The scalar :func:`price_row_insane` — the twin of :func:`price_violation_expr`."""
@@ -64,14 +74,25 @@ class TestPriceRowInsaneScalar:
     def test_nan_price_is_insane_in_each_field(self, field: int) -> None:
         """The scalar NaN arm (round-2 refuter): a NaN price in ANY field is insane.
 
-        DELIBERATE scalar-vs-vector asymmetry — the vectorized
-        ``price_violation_expr`` is NaN-blind (every NaN comparison is False),
-        but the engine's CandleBar constructor raises decimal.InvalidOperation
-        on NaN, so without this arm the dashboard would SERVE what the engine
-        REFUSES.
+        Historically a DELIBERATE scalar-vs-vector asymmetry (the vectorized
+        ``price_violation_expr`` was NaN-blind in HIGH); since
+        DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 the vectorized twin carries the
+        mirrored per-column ``~is_finite`` arm, so this pin now guards a
+        BOTH-planes invariant (see ``test_scalar_equals_vector_row_wise``).
         """
         row: list[float] = [100.0, 101.0, 99.0, 100.5]
         row[field] = float("nan")
+        assert price_row_insane(*row) is True
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["+inf", "-inf"])
+    def test_infinite_price_is_insane_in_each_field(self, field: int, value: float) -> None:
+        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 (fails-before for ``+inf``
+        HIGH): a ``+inf`` HIGH passed EVERY scalar check — ``inf`` compares
+        fine, so ordering + positivity held vacuously and the row read SANE.
+        The widened ``isnan`` → ``not isfinite`` arm flags any ``±inf``."""
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = value
         assert price_row_insane(*row) is True
 
     @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
@@ -94,18 +115,14 @@ class TestPriceRowInsaneScalar:
         row[field] = True
         assert price_row_insane(*row) is True  # type: ignore[arg-type]
 
-    # NaN is DELIBERATELY excluded from this parity pin's input space
-    # (allow_nan=False): the scalar is STRICTER on NaN by design (see
-    # price_row_insane's deliberate-asymmetry note) — outcome-parity holds
-    # because the engine refuses NaN downstream at CandleBar construction.
+    # CONSCIOUSLY WIDENED input space (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001):
+    # NaN/±inf were historically excluded (allow_nan=False/allow_infinity=False)
+    # because the scalar was STRICTER on NaN by design; both planes now carry
+    # the non-finite arm, so scalar == vector holds over the FULL float plane
+    # and the parity pin covers it.
     @given(
         rows=st.lists(
-            st.tuples(
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
-            ),
+            st.tuples(_PRICE_CELL, _PRICE_CELL, _PRICE_CELL, _PRICE_CELL),
             min_size=1,
             max_size=25,
         )
@@ -176,6 +193,30 @@ class TestCountPriceViolations:
     ) -> None:
         assert count_price_violations(_frame([_CLEAN, row])) == 1
 
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    @pytest.mark.parametrize(
+        "value", [float("inf"), float("-inf"), float("nan")], ids=["+inf", "-inf", "nan"]
+    )
+    def test_nonfinite_price_counts_in_each_field(self, field: int, value: float) -> None:
+        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 — FAILS-BEFORE for
+        ``high ∈ {+inf, NaN}``: the pre-fix vectorized mask counted 0 there
+        (``high >= low`` holds vacuously for ``+inf``; polars' total float
+        ordering places NaN above everything, so no ordering/positivity arm
+        ever tripped) — the assurance session executed-repro'd the miss
+        laundering a derived 5-minute bucket ``high = inf``. Every other
+        column/value pair already tripped an ordering or ``<= 0`` arm; this
+        pins ALL twelve pairs so the guardrail can never narrow."""
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = value
+        assert count_price_violations(_frame([_CLEAN, (row[0], row[1], row[2], row[3])])) == 1
+
+    def test_nonfinite_mask_is_never_null(self) -> None:
+        """The non-finite arm keeps the no-null mask law intact."""
+        frame = _frame([(100.0, float("nan"), 99.0, 100.5), _CLEAN])
+        mask = frame.select(price_violation_expr().alias("bad")).get_column("bad")
+        assert mask.null_count() == 0
+        assert mask.to_list() == [True, False]
+
     def test_multiple_bad_rows_all_counted(self) -> None:
         frame = _frame([_CLEAN, (-1.0, -1.0, -1.0, -1.0), (100.0, 1.0, 50.0, 60.0)])
         assert count_price_violations(frame) == 2
@@ -208,6 +249,15 @@ class TestValidateFramePriceSanity:
         # First offender = the second row's ts_utc (polars extracts a
         # ZoneInfo-tz datetime, so pin the digits, not the stdlib repr).
         assert "2024, 1, 2, 3, 46" in message
+
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+    def test_nonfinite_high_frame_raises(self, value: float) -> None:
+        """FAILS-BEFORE (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): a frame whose
+        only defect is ``high ∈ {+inf, NaN}`` returned ``None`` (a MISS) —
+        the prebuild read boundary then served it to the resamplers."""
+        frame = _frame([_CLEAN, (100.0, value, 99.0, 100.5)])
+        with pytest.raises(ResampleInputError, match="1 price-insane"):
+            validate_frame_price_sanity(frame, context="NSE/INDEX/NIFTY/1minute")
 
     def test_corrupt_frame_without_context_keeps_bare_message(self) -> None:
         with pytest.raises(ResampleInputError) as excinfo:

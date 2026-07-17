@@ -1091,9 +1091,30 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
     fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
     last-of-day OI into the derived ``1day`` partition.
+
+    Price-sanity gate (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the returned
+    window-cut frame is validated by the SAME COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` gate
+    (finiteness + positivity + OHLC ordering, one vectorized pass) that
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` runs —
+    pre-fix this window twin ran NO screen at all, so a corrupt 1m bar
+    yielded a CLEAN derived ``1day`` via the full prebuild but a POISONED
+    ``1day`` via the heal-recall / post-pull / crossverify window path. The
+    gate runs on the WINDOW-CUT frame only (validate-what-you-return, the
+    DEC-READ-GUARD-PARITY-001 law), so a corrupt row strictly OUTSIDE
+    ``[start, end)`` never blanks this read. The raised
+    :class:`~brutex.data.errors.ResampleInputError` rides the per-target
+    ``except Exception`` quarantine of
+    :func:`derive_daily_for_targets` / :func:`reconcile_daily_from_minute`
+    (the target is counted ``errored`` + WARNed, never a pass abort). The
+    bad-tick screen is deliberately NOT wired here (a larger scope change —
+    the named follow-up DEC-DAILY-WINDOW-BADTICK-001 recorded in
+    MIGRATION.md's DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 entry).
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
+
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1140,13 +1161,22 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
-        return (
+        frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
             .select(*columns)
             .sort("ts_utc")
         )
+        # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: refuse to feed a price-insane
+        # (non-finite / non-positive / mis-ordered) window slice to the daily
+        # resampler — the window twin of make_lake_read_1m's gate, run on the
+        # WINDOW-CUT frame only (a corrupt row outside [start, end) never
+        # blanks this read). Raises the quarantining ResampleInputError.
+        validate_frame_price_sanity(
+            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+        )
+        return frame
 
     return _read
 
