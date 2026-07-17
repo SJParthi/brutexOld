@@ -219,7 +219,8 @@ class TestFeedGatedLaunch:
             created_at="2026-07-14T18:00:00+00:00",
             scope=None,
         )
-        assert primary_store.write(prior)
+        prior_written = primary_store.write(prior)
+        assert prior_written
         intent_path = lake / PULL_INTENT_FILENAME
         before = intent_path.read_bytes()
 
