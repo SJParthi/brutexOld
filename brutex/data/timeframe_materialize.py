@@ -1133,7 +1133,17 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
     the resampled frame when the OI-aware F&O futures resampler emitted it
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    have no OI column). A present-but-NULL OI bucket on an OI-carrying frame
+    is stored ``None`` (DEC-PREOPEN-DAY-FRESHNESS-001, the B-3 fold — ALIGNED
+    with the F&O DAILY derive, whose
+    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily` stores
+    ``None`` for a null carry-last OI, and with the canonical resampler's own
+    "a null OI source bar yields a null bucket OI — preserved, NEVER
+    fabricated as 0" law; the former unconditional default fabricated a
+    stored ``0`` — an un-ledgered divergence, /db-display-visible,
+    FUT-reachable since DEC-OPTIONS-PREBUILD-RETIRE-001 retired the options
+    derived TFs. Already-stored ``0``s stay inert until the next latest-wins
+    re-materialise — derived partitions are recomputable caches). The sink
     snaps prices to the 2-decimal tick grid + merges idempotently by
     ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
     **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
@@ -1165,7 +1175,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=frame_to_candle_bars(frame),
+            # OI-carrying (F&O) frames keep a null bucket OI as stored None —
+            # the F&O daily derive's law (DEC-PREOPEN-DAY-FRESHNESS-001 B-3
+            # fold; see the docstring). Spot frames (no OI column) keep the
+            # legacy stored-0 convention byte-identically.
+            bars=frame_to_candle_bars(
+                frame,
+                absent_open_interest=None if "open_interest" in frame.columns else 0,
+            ),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh
