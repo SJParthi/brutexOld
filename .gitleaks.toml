@@ -62,18 +62,6 @@ paths = [
   '''^docs/MIGRATION\.md$''',
   '''^brutex/dashboard/static/''',
 ]
-[[rules.allowlists]]
-# Audited false positive (2026-07-17, entropy 3.5176): the deterministic
-# hardware-fingerprint key slug (the CLAUDE.md §8 reference-box key, e.g.
-# "mac16-8-14c10p4e-48g-arm64" — DEC-CONFIG-RUST-LEAVES-001 /
-# DEC-BENCH-ABS-BASELINE-001), never a credential. Mirrors the existing
-# tests/-side path allowlist on this same rule for the same slug family;
-# the regex is anchored on the <cores>c<perf>p<eff>e-<ram|unk>g core-split/
-# RAM/arch shape so it cannot blunt the rule for real keys.
-regexTarget = "match"
-regexes = [
-  '''[a-z0-9][a-z0-9-]*-[0-9]+c[0-9]+p[0-9]+e-(?:[0-9]+|unk)g-[a-z0-9-]+''',
-]
 
 [[rules]]
 id = "curl-auth-header"
