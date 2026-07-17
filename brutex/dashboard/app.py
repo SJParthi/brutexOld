@@ -184,6 +184,7 @@ from brutex.dashboard.movers_snapshot import (
     asof_through_label,
     build_snapshot_payload,
     compute_spot_candidates,
+    interval_minutes,
     is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
@@ -348,6 +349,7 @@ from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
+from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -7443,7 +7445,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             weekday rule — Golden Rule #1); ``weekly`` = the rest.
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
-            vocab (1minute … 1day). An unknown label degrades to "pull spot first".
+            vocab (1minute … 1day). An unknown label is a clean 400 naming the
+            parameter, BEFORE any lake read, on all three tabs
+            (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR — the pre-fix degrade
+            served a FALSE "No futures in the lake yet" / "No spot data" note
+            for junk intervals on a POPULATED lake).
         date
             The single ISO ``YYYY-MM-DD`` snapshot day; blank ⇒ today (UTC). A
             malformed value is a 400.
@@ -7467,6 +7473,26 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # Interval VALIDATION (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR):
+        # an interval token outside the canonical lake vocabulary (the ONE
+        # `LAKE_INTERVAL_LABELS` source of truth `interval_minutes` inverts —
+        # exactly the set all three tabs accept) is a clean 400 naming the
+        # parameter, BEFORE any lake read (before even the prebuild-gate
+        # flock probe). Pre-fix the junk token flowed into the compute and
+        # collapsed to an EMPTY candidate set whose payload minted the FALSE
+        # "No futures in the lake yet — pull the F&O futures first" /
+        # "No spot data in the lake yet" note on a POPULATED lake (executed
+        # repro, `interval=banana`, instrument_count:0). The pure
+        # `compute_*_candidates` degrade contracts are unchanged — this kills
+        # the misleading note at the one wire chokepoint.
+        if interval_minutes(interval) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown interval {interval!r}; "
+                    f"allowed: {sorted(LAKE_INTERVAL_LABELS.values())}"
+                ),
+            )
         # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
         # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
         # IS the day, so the VALUE already ignores ``time``

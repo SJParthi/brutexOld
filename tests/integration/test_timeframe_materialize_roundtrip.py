@@ -1460,3 +1460,189 @@ class TestPrebuildBadTickScreen:
         monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
         _bt_materialize(lake_off)
         assert _hash_lake_parquet(lake_on) == _hash_lake_parquet(lake_off)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Read-boundary TIMESTAMP-range gate + bars-tree glob parity
+# (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: ~year 148108 as microseconds since epoch — within i64, far past
+#: ``datetime.max``; the executed repro's poison value.
+_OUT_OF_RANGE_TS_US = 2**62
+
+
+def _plant_out_of_range_ts_1m(lake_root: Path, symbol: str, *, segment: str = _SEGMENT) -> None:
+    """Raw-plant a 1-minute partition holding one out-of-datetime-range stamp.
+
+    Raw pyarrow (the ``_plant_corrupt_1m`` convention): no production writer can
+    mint the row — a ``CandleBar`` timestamp is a Python ``datetime``, which
+    cannot represent ``2**62`` us — so the plant models hostile / bit-rotted
+    STORED bytes. Prices on the poisoned row are SANE (the price gate is blind
+    to it; only the ts gate can refuse it).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / segment
+        / symbol
+        / "1minute"
+        / f"{_SESSION_OPEN_UTC.year:04d}"
+        / f"{_SESSION_OPEN_UTC.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = pa.array(
+        [
+            int(_SESSION_OPEN_UTC.timestamp() * 1_000_000),
+            int((_SESSION_OPEN_UTC + timedelta(minutes=1)).timestamp() * 1_000_000),
+            _OUT_OF_RANGE_TS_US,
+        ],
+        type=pa.int64(),
+    ).cast(pa.timestamp("us", tz="UTC"))
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": timestamps,
+                "open": pa.array([100.0] * 3, type=pa.float64()),
+                "high": pa.array([110.0] * 3, type=pa.float64()),
+                "low": pa.array([90.0] * 3, type=pa.float64()),
+                "close": pa.array([105.0] * 3, type=pa.float64()),
+                "volume": pa.array([10, 11, 12], type=pa.int64()),
+                "open_interest": pa.array([None, None, None], type=pa.int64()),
+            }
+        ),
+        dest,
+    )
+
+
+def test_out_of_range_ts_partition_refuses_to_derive(tmp_path: Path) -> None:
+    """FAILS-BEFORE: the 2**62-us stamp survived the vectorized resample and
+    PANICKED the Rust→Python conversion (``pyo3_runtime.PanicException``, a
+    BaseException) at ``frame_to_candle_bars``'s ``to_list()`` — past every
+    ``except Exception`` per-symbol quarantine (executed repro: ONE poisoned
+    symbol aborted the WHOLE crossverify prebuild leg). Now the read boundary
+    refuses it deterministically as the quarantining ResampleInputError."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_out_of_range_ts_1m(tmp_path, _SYMBOL)
+    with pytest.raises(ResampleInputError, match="outside the\\s+representable") as excinfo:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            months={(_SESSION_OPEN_UTC.year, _SESSION_OPEN_UTC.month)},
+            incremental=False,
+        )
+    message = str(excinfo.value)
+    assert f"{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute" in message  # names the symbol
+    assert str(_OUT_OF_RANGE_TS_US) in message  # names the offending physical value
+    # No derived partition was written — correct-or-absent.
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "5minute").exists()
+
+
+def test_out_of_range_ts_include_daily_also_refuses_at_read(tmp_path: Path) -> None:
+    """The include_daily=True (pipeline) shape refuses at the SAME read gate —
+    a deterministic ResampleInputError, never the OverflowError the
+    ``_last_ist_datetime`` max() happened to raise pre-fix."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_out_of_range_ts_1m(tmp_path, _SYMBOL)
+    with pytest.raises(ResampleInputError, match="outside the\\s+representable"):
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            include_daily=True,
+        )
+
+
+def test_healthy_lake_read_frame_is_byte_identical(tmp_path: Path) -> None:
+    """Healthy-lake byte-identity pin: the gated reader returns EXACTLY the raw
+    parquet transform — the new ts gate + glob=False change NOTHING on a clean
+    lake (the #1897 pin convention)."""
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    _write_1m_bars(tmp_path, n=30)
+    read = make_lake_read_1m(
+        lake_root=tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL
+    )
+    frame = read()
+    base = tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute"
+    expected = (
+        pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        .rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+    assert frame.equals(expected)
+    # And the months-bounded arm returns the identical frame too.
+    months_read = make_lake_read_1m(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        months={(_SESSION_OPEN_UTC.year, _SESSION_OPEN_UTC.month)},
+    )
+    assert months_read().equals(expected)
+
+
+def test_months_read_bracket_symbol_reads_literal_file_only(tmp_path: Path) -> None:
+    """FAILS-BEFORE (glob parity): a symbol dir named ``NSE-X[12]`` beside real
+    ``NSE-X1``/``NSE-X2`` siblings glob-read the SIBLINGS' bars into this
+    symbol (executed repro: 6 foreign rows). glob=False reads the literal
+    month file only."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    def _plant(symbol: str, close: float) -> None:
+        dest = (
+            tmp_path
+            / "bars"
+            / _EXCHANGE
+            / "CASH"
+            / symbol
+            / "1minute"
+            / f"{_SESSION_OPEN_UTC.year:04d}"
+            / f"{_SESSION_OPEN_UTC.month:02d}.parquet"
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        timestamps = [_SESSION_OPEN_UTC + timedelta(minutes=i) for i in range(3)]
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+                    "open": pa.array([100.0] * 3, type=pa.float64()),
+                    "high": pa.array([110.0] * 3, type=pa.float64()),
+                    "low": pa.array([90.0] * 3, type=pa.float64()),
+                    "close": pa.array([close] * 3, type=pa.float64()),
+                    "volume": pa.array([10, 11, 12], type=pa.int64()),
+                    "open_interest": pa.array([None] * 3, type=pa.int64()),
+                }
+            ),
+            dest,
+        )
+
+    _plant("NSE-X1", 100.11)
+    _plant("NSE-X2", 100.22)
+    _plant("NSE-X[12]", 100.55)  # the literal dir's OWN bars
+    read = make_lake_read_1m(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment="CASH",
+        symbol="NSE-X[12]",
+        months={(_SESSION_OPEN_UTC.year, _SESSION_OPEN_UTC.month)},
+    )
+    frame = read()
+    assert frame.height == 3
+    assert set(frame.get_column("close").to_list()) == {100.55}
