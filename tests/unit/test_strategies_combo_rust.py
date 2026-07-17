@@ -675,3 +675,59 @@ class TestConftestBelt:
         source = conftest.read_text(encoding="utf-8")
         assert 'os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")' in source
         assert "from brutex.strategies.combo_rust import STRATEGIES_RUST_COMBO_ENV" in source
+
+
+class TestMutationWorkflowWiring:
+    """Pin the DEC-STRATEGIES-RUST-COMBO-001 wiring INTO the mutation workflow.
+
+    A routing leaf shipped WITHOUT its weekly mutation wiring would repeat
+    the DEC-LAKE-STATS-MANIFEST-001 round-8 refuter class (an unwired gate
+    presented as a deferred one — Golden Rule #10), and the design's §4.4
+    round-1 fold proved the cargo-mutants JOB alone does not GATE: without
+    the verdict ``needs:`` fan-in + result clauses + the issue-open step a
+    red run would neither fail the verdict nor page. These deterministic
+    pins (the ``TestMutationWorkflowWiring`` precedent) fail the moment any
+    of the five touch points is dropped. HONEST: they pin the WIRING only —
+    the weekly run executes on its own schedule/push triggers.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def _text(self) -> str:
+        return self._WORKFLOW.read_text(encoding="utf-8")
+
+    def test_facade_pair_is_wired_into_the_mutmut_loop(self) -> None:
+        # 3-field ``module:testfile:timeout`` pair, EMPTY third field = the
+        # historical runner (the DEC-MUTATION-RUNTIME-003 pair format).
+        assert (
+            '"brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:"'
+            in self._text()
+        ), "combo_rust.py is not wired into mutation.yml's per-module mutmut loop"
+
+    def test_crate_path_trigger_is_wired(self) -> None:
+        assert '- "rust/brutex-strategies/**"' in self._text(), (
+            "rust/brutex-strategies/** is not a mutation.yml push path trigger"
+        )
+
+    def test_cargo_mutants_job_feeds_the_verdict_fan_in(self) -> None:
+        text = self._text()
+        assert "rust-mutation-brutex-strategies:" in text, (
+            "the rust-mutation-brutex-strategies cargo-mutants job is missing"
+        )
+        assert (
+            "needs: [python-mutation, rust-mutation, rust-mutation-trading-core, "
+            "rust-mutation-brutex-feed, rust-mutation-brutex-strategies]" in text
+        ), "the mutation-verdict needs: list does not fan in the brutex-strategies job"
+
+    def test_verdict_result_clauses_and_issue_step(self) -> None:
+        text = self._text()
+        # The issue-open step (a red/cancelled run must PAGE, with the honest
+        # timeout-vs-survivor split in the body).
+        assert "Open GitHub issue — brutex-strategies gate red" in text
+        # The success gate (auto-close) + the failure fold both consult the
+        # new job's result.
+        assert "needs.rust-mutation-brutex-strategies.result == 'success'" in text
+        assert (
+            'contains(fromJSON(\'["failure","cancelled"]\'), '
+            "needs.rust-mutation-brutex-strategies.result)" in text
+        )
