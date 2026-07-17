@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001,
+_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
+branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
+NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
+`BRUTEX_DATA_RUST` facade `brutex/data/fno_symbol_rust.py` routing
+`parse_fno_symbol` (integers-only FFI — spans + expiry y/m/d; the strike
+stays Python; non-ASCII routes to the oracle via the ASCII pre-gate; a
+fail-closed LOCALE guard — the version-guard analogue for the
+LC_TIME-driven `%b` law — keeps a non-English locale on the oracle; BruteX
+pins LC_TIME nowhere, so the OFF path was already locale-variable — a
+pre-existing envelope surfaced honestly, not widened); the verbatim Python
+law retained as the LIVE parity oracle; flag unset/falsy byte-identical
+(bomb-spy-pinned); built ONLY by the NEW non-required data-rust-parity.yml
+lane; expected payoff ≈ 0 — conversion is for uniformity, not speed; ships
+INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1940.)
+Earlier: 2026-07-17 (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001,
 MIGRATION.md #1932, branch `claude/derived-freshness-screen` — the
 derived-freshness gate (`tf_autoderive.lake_derived_freshness_verdicts` → the
 sweep preflight + the doctor probe) now re-derives from the SAME
@@ -3166,7 +3183,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/derived-freshness-screen`
+- **Active branch:** `claude/rust-slice-t10-data-purelaw` (**DEC-DATA-RUST-PURELAW-001,
+  MIGRATION.md #1940** — slice T10 PR-1: NEW stdlib-pure OPTIONAL crate `rust/brutex-data` +
+  the default-OFF `BRUTEX_DATA_RUST` facade `brutex/data/fno_symbol_rust.py` routing
+  `parse_fno_symbol` (integers-only FFI — spans + expiry y/m/d; strike stays Python; non-ASCII
+  routes to the oracle via the ASCII pre-gate; a fail-closed LOCALE guard — the version-guard
+  analogue for the LC_TIME-driven `%b` law — keeps a non-English locale on the oracle,
+  `locale_unsupported` (executed real-es_ES arm + the probe-synthesized arm + the
+  English-locale MUST-engage control); the structural refuse-poison gate fully enumerated,
+  honestly not a semantic net; strptime truth table probed + cargo-pinned incl. the boundary
+  twins — the `' [1-9]'` space-day arm's reject twin pinned Python-side);
+  verbatim Python law retained as the live oracle (`_parse_fno_symbol_python` — the #1913
+  extraction shape; zero call-site edits, all 20+ production callers inherit the seam);
+  flag unset/falsy byte-identical (bomb-spy-pinned; junk-SET = one warn-once then OFF);
+  built ONLY by the NEW non-required data-rust-parity.yml lane; OPTIONAL_KERNELS-registered
+  (never module-top imported, never in the turnkey build path); mutation.yml pair + wiring
+  pin; expected payoff ≈ 0 — uniformity, not speed (the sandbox measurement happened to read
+  the engaged arm FASTER — an observation, never an SLA); ships INERT — a default flip needs
+  its own DEC + a fresh green lane run. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; run identity untouched; the per-item record lives in
+  the §1 blurb + MIGRATION.md #1940 — this header carries the pointer, never the story.)
+  Earlier: `claude/derived-freshness-screen`
   (**DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, MIGRATION.md #1932** — the
   derived-freshness bad-tick SCREEN-PARITY fix, queue-master-allocated row.
   **B-1 (CONFIRMED MAJOR, the permanent sweep/doctor false wedge):** the
@@ -9579,7 +9616,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/derived-freshness-screen`
+- **Active feature branch:** `claude/rust-slice-t10-data-purelaw`
+  (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940 — ADR-0020 slice T10 PR-1:
+  the NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
+  `BRUTEX_DATA_RUST` facade routing `parse_fno_symbol` (integers-only FFI —
+  spans + expiry y/m/d; strike stays Python; ASCII pre-gate; the fail-closed
+  LOCALE guard latches a non-English LC_TIME onto the oracle —
+  `locale_unsupported`, real-es_ES + synthesized + MUST-engage-control
+  pinned); the verbatim Python law retained as the LIVE parity oracle; flag
+  unset/falsy byte-identical (bomb-spy-pinned); built ONLY by the NEW
+  non-required data-rust-parity.yml lane; expected payoff ≈ 0 — uniformity,
+  not speed; ships INERT — a default flip needs its own DEC; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1940 for the full blurb)
+  Earlier: `claude/derived-freshness-screen`
   (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, MIGRATION.md #1932 — the
   derived-freshness gate + doctor probe re-derive from the SAME
   bad-tick-SCREENED 1-minute the prebuild writes from (screened-vs-screened
