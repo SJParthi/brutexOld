@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-LAKE-RUST-WAVED-HARNESS-001, MIGRATION.md #1916 —
+_Last updated: 2026-07-17 (DEC-STAGE1A-RUST-DEFAULT-ON-001, MIGRATION.md #1938 —
+the batch Rust Stage-1A bar-bits seam is ON BY DEFAULT: `STAGE1A_RUST_DEFAULT`
+False → True (the ONE constant — the revert lever), the ADR-0017 /
+DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 #1531/#1532 two-step's second step for the
+DEC-STAGE1A-RUST-BATCH-001 (#1730) seam; `BRUTEX_SWEEP_RUST_STAGE1A=0` stays the
+per-process operator kill switch (junk still fails SAFE to OFF); the frozen
+goldens + the sweep `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` reproduce
+byte-identically under the DEFAULT (no-env) arm with the engaged-event witness,
+fixtures byte-untouched, and the SELF_CHECK_BUILDS=4 burn-in + ship-the-oracle
+autorevert latch guards the default arm unchanged. A UNIFORMITY flip beside the
+default-ON metrics kernel — NO new speedup claimed. ENGINE results UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. The per-item
+record lives in the §1 Active-branch blurb + MIGRATION.md #1938 — this header
+carries the pointer, never the story.)
+Earlier: 2026-07-16 (DEC-LAKE-RUST-WAVED-HARNESS-001, MIGRATION.md #1916 —
 the ADR-0020 Wave-D POISON-CORPUS DIFFERENTIAL harness (slice G9): a reusable
 27-case poisoned-lake corpus + a two-implementation differential runner with the
 Python-vs-Python identity self-test — the mechanical gate the future
@@ -3061,7 +3075,35 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-lake-locks-atomic` (**DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912 —
+- **Active branch:** `claude/stage1a-rust-default-on` (**DEC-STAGE1A-RUST-DEFAULT-ON-001, MIGRATION.md #1938 —
+  the batch Rust Stage-1A bar-bits seam is ON BY DEFAULT**: `STAGE1A_RUST_DEFAULT` False → True in
+  `brutex/engine/rust_stage1a.py` — the ONE constant (the revert lever), the reserved second step of the
+  #1531/#1532 two-step DEC-STAGE1A-RUST-BATCH-001 (#1730) deferred to, following the ADR-0017 /
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent exactly; `BRUTEX_SWEEP_RUST_STAGE1A=0` stays the
+  per-process operator kill switch (a junk value still fails SAFE to OFF — a typo'd kill switch still
+  KILLS); EVERY #1730 safety layer guards the default arm UNCHANGED (the per-call env tristate, the
+  SELF_CHECK_BUILDS=4 whole-series burn-in vs the frozen Python oracle + the ship-the-oracle
+  `kernel_autoreverted` latch, the blanket wheel/FFI fallback to the untouched Python builder — wheel
+  state can never change results or error behaviour). EXECUTED evidence: the #1730 golden battery
+  replayed as the DEFAULT (no-env) arm — every test pins genuine kernel ENGAGEMENT (exactly one
+  `rust_stage1a.engaged` event, the anti-vacuous-gate teeth) AND reproduces the frozen goldens against
+  BYTE-UNTOUCHED fixtures (empty fixture diff vs origin/main); the G-5 flip gate — the frozen sweep
+  `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` reproduced byte-for-byte under NO env with exactly one engaged
+  event (run identity untouched; NO indicator_version/crate bump — trading-core stays 0.3.2); the NEW
+  default-arm autorevert pin (no env + a bit-flipped kernel → the ORACLE matrix ships + one autoreverted
+  ERROR + the process latch holds); fails-before PROVEN (the 4 default-arm tests fail with the one
+  constant reverted, then pass restored); every OFF reference arm across the unit/golden/property/
+  integration/bench suites consciously moved delenv → the explicit "0" kill switch (each flip enumerated
+  in #1938 — an unset env is now the Rust arm, so the old delenv parities would silently compare Rust to
+  Rust). HONEST (Golden Rule #10): a UNIFORMITY flip beside the sibling default-ON metrics kernel — NO
+  new speedup claimed or measured at the flip (the #1730 sandbox ~1.85×/build figure is that DEC's
+  evidence; end-to-end sweep speedup stays UNKNOWN until a real-grid M4-Pro A/B); the burn-in tax (≤4
+  full Python oracle builds per process — the first 4 engaged builds are SLOWER than flag-OFF) now
+  applies to every DEFAULT process incl. every spawn worker; the burn-in stays a 4-sample SAMPLING gate,
+  NOT a proof — the golden/parity battery is the real correctness proof. ENGINE results UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new env
+  vars, no new routes.)
+  Earlier: `claude/rust-lake-locks-atomic` (**DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912 —
   allocator-final** — ADR-0020 PR-4: the lake lock/atomic-replace primitives gain a default-OFF Rust routing
   behind `BRUTEX_LAKE_RUST_LOCKS` — NEW `rust/brutex-lake/src/locks.rs` (`lock_try_exclusive` ·
   `lock_release` · `atomic_commit_replace`, ONE direct `libc` dep for flock — already transitive in the
@@ -9192,7 +9234,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-lake-locks-atomic`
+- **Active feature branch:** `claude/stage1a-rust-default-on`
+  (DEC-STAGE1A-RUST-DEFAULT-ON-001, MIGRATION.md #1938 — the batch Rust
+  Stage-1A seam default flip OFF→ON: `STAGE1A_RUST_DEFAULT` False → True in
+  `brutex/engine/rust_stage1a.py` — the one-constant revert lever, the
+  #1531/#1532 ADR-0017 precedent's second step for DEC-STAGE1A-RUST-BATCH-001
+  (#1730); `BRUTEX_SWEEP_RUST_STAGE1A=0` stays the per-process operator kill
+  switch; the #1730 golden battery replayed as the DEFAULT (no-env) arm with
+  the engaged-event witness + the frozen sweep `_GOLDEN_CONTENT_HASH`/
+  `_GOLDEN_RUN_ID` reproduced byte-identically + the NEW default-arm
+  autorevert pin; fails-before proven; a uniformity flip — NO speedup
+  claimed; ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1938 for the full blurb)
+  Earlier: `claude/rust-lake-locks-atomic`
   (DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912 — allocator-final; ADR-0020
   PR-4: the lake lock/atomic-replace primitives gain the default-OFF
   `BRUTEX_LAKE_RUST_LOCKS` Rust routing — `rust/brutex-lake/src/locks.rs`
