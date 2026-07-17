@@ -118,6 +118,19 @@ os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 # env/runner explicitly and stay armed on both arms.
 os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 
+# DEC-BOX-AUTODEPLOY-LANE-001 §12 hermeticity (the env_preflight REGISTRY
+# flags): a HOST env carrying `BRUTEX_SKIP_WHEEL_FRESHNESS` (the CI wheel
+# escape) or a stale `BRUTEX_FILL_MODE` would populate every pre-existing
+# nightly test's `env_preflight` block through `cmd_nightly_run`'s
+# `os.environ` scan (a host-env flake class — the #1380 hermeticity
+# philosophy), and a SET `BRUTEX_FILL_MODE` additionally trips the
+# DEC-FILL-WORST-CASE-ONLY-001 launch refusal across the engine suites.
+# POP both outright (never `setdefault` — no test relies on a
+# host-inherited value: the preflight/doctor/fill_mode suites all inject
+# `env=` or `monkeypatch.setenv` explicitly).
+os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
+os.environ.pop("BRUTEX_FILL_MODE", None)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_today_gate_log_state() -> None:
