@@ -115,6 +115,13 @@ pub struct Stage1aBatchInputs<'a> {
     pub ema20_paisa: &'a [Option<i64>],
     /// Prepass-computed EMA(200) column — see [`Stage1aBatchInputs::ema20_paisa`].
     pub ema200_paisa: &'a [Option<i64>],
+    /// Prepass-computed SuperTrend line column (×2-scaled paisa, `None` during
+    /// the 9-bar warm-up — `indicators::supertrend`), or `None` for NO column
+    /// (every bar absent — the pre-Supertrend caller shape; bits 64-65 stay
+    /// clear). When present, length `N` like every per-bar column. The prepass
+    /// owns the state lifecycle (incl. the D11 contract-roll recreation),
+    /// exactly as it owns the EMA columns.
+    pub supertrend_x2_paisa: Option<&'a [Option<i64>]>,
     /// `PIVOT_ROW_LEN * D` flattened pivot rows, evaluator ABI order.
     pub day_pivot_levels: &'a [i64],
     /// `FIB_ROW_LEN * D` flattened fib rows, evaluator ABI order.
@@ -153,7 +160,8 @@ pub struct Stage1aBatchInputs<'a> {
 /// `Err(String)` on any violation (never a panic — G-2: a marshal-desynced
 /// day table must never silently serve shifted anchors):
 ///
-/// * all 9 per-bar columns share one length `N`;
+/// * all 9 required per-bar columns (and the optional `supertrend_x2_paisa`
+///   column when supplied) share one length `N`;
 /// * `day_pivot_levels` / `day_fib_levels` / `day_has_fib` sizes agree with
 ///   `D = day_has_pivot.len()` (checked multiplication — total for any `D`);
 /// * `N == 0` requires empty day tables (and yields `Ok(0)`);
@@ -166,7 +174,7 @@ pub struct Stage1aBatchInputs<'a> {
 ///   unreachable; refuter RF-B F2).
 pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String> {
     let n = inp.open_paisa.len();
-    for (name, len) in [
+    let mut lengths = vec![
         ("high_paisa", inp.high_paisa.len()),
         ("low_paisa", inp.low_paisa.len()),
         ("close_paisa", inp.close_paisa.len()),
@@ -175,7 +183,11 @@ pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String>
         ("day_index", inp.day_index.len()),
         ("ema20_paisa", inp.ema20_paisa.len()),
         ("ema200_paisa", inp.ema200_paisa.len()),
-    ] {
+    ];
+    if let Some(st) = inp.supertrend_x2_paisa {
+        lengths.push(("supertrend_x2_paisa", st.len()));
+    }
+    for (name, len) in lengths {
         if len != n {
             return Err(format!(
                 "stage1a_batch: {name} length {len} != open_paisa length {n}"
@@ -331,7 +343,8 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
 ///    `high >= low` `Err` arm mirroring `DayExtremesState.update`'s
 ///    `ValueError` — unreachable through a validated `CandleBar`).
 /// 4. Feed the SAME core [`MarketStructureState`].
-/// 5. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate.
+/// 5. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate (the optional
+///    per-bar `supertrend_x2_paisa` value passes through verbatim, like EMA).
 /// 6. The clears, in `push()`'s exact order: cold pivot anchor ⇒
 ///    `mask &= !anchor_dependent_mask`; else cold fib ⇒
 ///    `mask &= !fib_dependent_mask`; then the optional D12
@@ -414,6 +427,7 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             day_low_paisa: day_low,
             open_of_day_paisa: open_of_day,
             market_structure,
+            supertrend_x2_paisa: inp.supertrend_x2_paisa.and_then(|col| col[i]),
         };
         let mut mask = evaluate_atoms(&snapshot, &proximity, &prior);
         let du = d as usize;
@@ -457,6 +471,7 @@ mod tests {
         day_fibs: Vec<i64>,
         day_has_pivot: Vec<bool>,
         day_has_fib: Vec<bool>,
+        supertrend_x2: Option<Vec<Option<i64>>>,
     }
 
     fn cols(n: usize) -> Cols {
@@ -476,6 +491,7 @@ mod tests {
             day_fibs: vec![0; FIB_ROW_LEN * n_days],
             day_has_pivot: vec![false; n_days],
             day_has_fib: vec![false; n_days],
+            supertrend_x2: None,
         }
     }
 
@@ -494,6 +510,7 @@ mod tests {
             day_fib_levels: &c.day_fibs,
             day_has_pivot: &c.day_has_pivot,
             day_has_fib: &c.day_has_fib,
+            supertrend_x2_paisa: c.supertrend_x2.as_deref(),
             pivot_bps: 10,
             pdh_pdl_bps: 10,
             fib_bps: 10,
@@ -1109,6 +1126,7 @@ mod tests {
             day_fibs: c.day_fibs[FIB_ROW_LEN..].to_vec(),
             day_has_pivot: vec![c.day_has_pivot[1]],
             day_has_fib: vec![c.day_has_fib[1]],
+            supertrend_x2: None,
         };
         let standalone = stage1a_bar_bits_batch_impl(&view(&b)).unwrap();
         assert_eq!(&full[2..], standalone.as_slice());
@@ -1153,9 +1171,76 @@ mod tests {
                 day_fibs: c.day_fibs[..FIB_ROW_LEN].to_vec(),
                 day_has_pivot: c.day_has_pivot[..1].to_vec(),
                 day_has_fib: c.day_has_fib[..1].to_vec(),
+                supertrend_x2: c.supertrend_x2.clone(),
             };
             let prefix = stage1a_bar_bits_batch_impl(&view(&p)).unwrap();
             assert_eq!(prefix.as_slice(), &full[..k], "prefix k={k}");
         }
+    }
+
+    // ── Supertrend column (bits 64-65) ─────────────────────────────────
+
+    #[test]
+    fn supertrend_column_length_is_validated() {
+        let mut c = cols(3);
+        c.supertrend_x2 = Some(vec![None; 2]); // desynced length
+        let err = stage1a_bar_bits_batch_impl(&view(&c)).unwrap_err();
+        assert!(err.contains("supertrend_x2_paisa"), "got: {err}");
+        assert!(err.contains("length"), "got: {err}");
+    }
+
+    #[test]
+    fn absent_supertrend_column_keeps_bits_64_65_clear() {
+        let c = cols(2); // supertrend_x2 = None (no column)
+        let masks = stage1a_bar_bits_batch_impl(&view(&c)).unwrap();
+        const ST_FAMILY: u128 = 0b11 << 64;
+        for (i, m) in masks.iter().enumerate() {
+            assert_eq!(m & ST_FAMILY, 0, "bar {i}: ST bits must stay clear");
+        }
+    }
+
+    #[test]
+    fn supertrend_column_drives_bits_64_65_per_bar() {
+        // close = 10_050 ⇒ close_x2 = 20_100. Bar 0: line BELOW the close ⇒
+        // bit 64 (above); bar 1: line ABOVE ⇒ bit 65 (below); bar 2: line
+        // EXACTLY equal ⇒ neither; bar 3: warm-up None ⇒ neither.
+        let mut c = cols(4);
+        c.supertrend_x2 = Some(vec![Some(20_099), Some(20_101), Some(20_100), None]);
+        let mut v = view(&c);
+        v.anchor_dependent_mask = 0; // ST is NOT anchor-dependent; disarm anyway
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        let above = 1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND;
+        let below = 1u128 << crate::bits::BIT_CLOSE_BELOW_SUPERTREND;
+        assert_eq!(masks[0] & (above | below), above);
+        assert_eq!(masks[1] & (above | below), below);
+        assert_eq!(masks[2] & (above | below), 0, "equality sets neither");
+        assert_eq!(masks[3] & (above | below), 0, "warm-up None sets neither");
+    }
+
+    #[test]
+    fn supertrend_bits_survive_a_cold_anchor_but_not_the_1day_clear_when_excluded() {
+        // ST is NOT anchor-dependent (the addendum law): a cold pivot day with
+        // the REAL anchor mask must keep bit 64 set.
+        let mut c = cols(1); // day_has_pivot = [false] — a COLD day
+        c.supertrend_x2 = Some(vec![Some(20_099)]);
+        let mut v = view(&c);
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP; // excludes bits 64-65
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(
+            masks[0] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND),
+            0,
+            "a cold pivot anchor must NOT clear the (anchor-independent) ST bit"
+        );
+        // The manifest declares 64-65 applies_to_1day=true, so the REAL 1day
+        // mask KEEPS them under the D12 AND.
+        v.apply_1day_mask = true;
+        v.applies_to_1day_mask = REAL_APPLIES_1DAY;
+        let masks_1d = stage1a_bar_bits_batch_impl(&v).unwrap();
+        assert_ne!(
+            masks_1d[0] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_SUPERTREND),
+            0,
+            "bits 64-65 are 1day-applicable in the manifest"
+        );
     }
 }

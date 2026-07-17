@@ -5,7 +5,7 @@
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
 //! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); every IMPLEMENTED bit
-//! (0..=51, 54..=63) can fire — bits 52-53 are the TOMBSTONED VWAP positions
+//! (0..=51, 54..=65) can fire — bits 52-53 are the TOMBSTONED VWAP positions
 //! (the VWAP/volume wipe: the engine is spot-only and spot indices carry no
 //! volume, so the VWAP math was DELETED; the positions are held forever per
 //! the grow-only law and the evaluator emits 0 for them). PR-2 added the pivot
@@ -13,7 +13,10 @@
 //! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
 //! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
 //! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
-//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. A u128 AND is
+//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. The Supertrend
+//! bits 64-65 read the resolved ×2-scaled line the stateful
+//! `indicators::supertrend::SupertrendState` produces upstream (threaded in via
+//! the snapshot exactly like the EMA values). A u128 AND is
 //! two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
@@ -65,6 +68,16 @@ pub struct IndicatorSnapshot {
     /// resolved `PriorBarHistory` flags. `default()` (all false) during warm-up
     /// (before any confirmed swing) so the Group-12 bits simply do not fire.
     pub market_structure: MarketStructureSignal,
+    /// The bar's resolved SuperTrend line (Group 14, bits 64-65) in the
+    /// **×2-scaled paisa domain** (= line value × 2 exactly — the hl2 source is
+    /// a half-paisa quantity, see [`crate::indicators::supertrend`]), produced
+    /// by the stateful [`crate::indicators::supertrend::SupertrendState`] the
+    /// engine holds per (instrument, timeframe, contract). `None` during the
+    /// 9-bar warm-up (or when no state is wired) — the Group-14 bits simply do
+    /// not fire. The evaluator's comparison is a pure i128 compare of
+    /// `close × 2` against this value, total for ANY i64 inputs — so this field
+    /// needs NO boundary magnitude bound.
+    pub supertrend_x2_paisa: Option<i64>,
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
@@ -126,11 +139,13 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// Every IMPLEMENTED bit (0..=51, 54..=63) can fire — the tombstoned VWAP
+/// Every IMPLEMENTED bit (0..=51, 54..=65) can fire — the tombstoned VWAP
 /// positions 52-53 are never set (their math was deleted; grow-only law). The
 /// BOS/CHoCH bits (56..=59) read the resolved `snapshot.market_structure`
 /// flags (DEC-NIFTY-BOS-CHOCH-001); the CPR bits (60..=63) derive from the
-/// SAME prev-day pivot anchor as Groups 2/3/9.
+/// SAME prev-day pivot anchor as Groups 2/3/9; the Supertrend bits (64..=65)
+/// compare the close against the resolved ×2-scaled `supertrend_x2_paisa`
+/// line (strict, exact — `None` clears both).
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -434,6 +449,26 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
             <= i128::from(pv.p_paisa) * i128::from(NARROW_CPR_WIDTH_BPS)
     {
         mask |= bit(bits::BIT_NARROW_CPR_DAY);
+    }
+
+    // ── Group 14: Supertrend (bits 64-65) ──
+    // The ×2-scaled line is RESOLVED upstream by the stateful
+    // `indicators::supertrend::SupertrendState` (ATR-10 Wilder, factor 3, hl2
+    // source — all in exact half-paisa integers) and threaded in via the
+    // snapshot like the EMA values. Both comparisons are STRICT in the exact
+    // ×2 domain (`close × 2` vs the line): equality sets NEITHER bit, `None`
+    // (warm-up / no state wired) sets neither — so the two bits are mutually
+    // exclusive by construction (the (64, 65) conflict pair). i128 keeps the
+    // ×2 product total for ANY i64 close — no overflow, no boundary bound.
+    if let Some(st_x2) = s.supertrend_x2_paisa {
+        let close_x2 = i128::from(close) * 2;
+        let st_x2 = i128::from(st_x2);
+        if close_x2 > st_x2 {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_SUPERTREND);
+        }
+        if close_x2 < st_x2 {
+            mask |= bit(bits::BIT_CLOSE_BELOW_SUPERTREND);
+        }
     }
 
     mask

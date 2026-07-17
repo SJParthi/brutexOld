@@ -134,6 +134,9 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        // The FROZEN pre-reshape fixture carries no SuperTrend input — absent
+        // line ⇒ bits 64-65 clear ⇒ every expected mask byte-identical.
+        supertrend_x2_paisa: None,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,

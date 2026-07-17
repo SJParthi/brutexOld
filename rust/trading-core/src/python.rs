@@ -23,6 +23,7 @@ use crate::indicators::market_structure::{
     MarketStructureSignal, MarketStructureState as CoreMarketStructureState,
 };
 use crate::indicators::pivots::{NARROW_CPR_WIDTH_BPS, PivotLevels, compute_pivot_levels};
+use crate::indicators::supertrend::SupertrendState as CoreSupertrendState;
 use crate::spec::{Direction, StrategySpec};
 
 /// Number of `pivot_levels` entries [`evaluate_with_levels`] expects.
@@ -274,6 +275,7 @@ fn check_evaluate_inputs(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    supertrend_x2_paisa = None,
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -298,6 +300,7 @@ fn evaluate_from_raw(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    supertrend_x2_paisa: Option<i64>,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
@@ -327,6 +330,7 @@ fn evaluate_from_raw(
             choch_bullish,
             choch_bearish,
         },
+        supertrend_x2_paisa,
     )
     .map_err(PyValueError::new_err)
 }
@@ -357,6 +361,7 @@ fn evaluate_from_raw_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    supertrend_x2_paisa: Option<i64>,
 ) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
@@ -398,6 +403,9 @@ fn evaluate_from_raw_impl(
         day_low_paisa,
         open_of_day_paisa,
         market_structure,
+        // Pure i128 comparison downstream — no boundary bound needed (see the
+        // snapshot field's docs); `None` = warm-up / unwired ⇒ bits 64-65 clear.
+        supertrend_x2_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -441,6 +449,7 @@ fn evaluate_from_raw_impl(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    supertrend_x2_paisa = None,
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -464,6 +473,7 @@ fn evaluate_with_levels(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    supertrend_x2_paisa: Option<i64>,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
@@ -493,6 +503,7 @@ fn evaluate_with_levels(
             choch_bullish,
             choch_bearish,
         },
+        supertrend_x2_paisa,
     )
     .map_err(PyValueError::new_err)
 }
@@ -522,6 +533,7 @@ fn evaluate_with_levels_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    supertrend_x2_paisa: Option<i64>,
 ) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
@@ -624,6 +636,9 @@ fn evaluate_with_levels_impl(
         day_low_paisa,
         open_of_day_paisa,
         market_structure,
+        // Pure i128 comparison downstream — no boundary bound needed (see the
+        // snapshot field's docs); `None` = warm-up / unwired ⇒ bits 64-65 clear.
+        supertrend_x2_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
@@ -663,6 +678,7 @@ fn evaluate_with_levels_impl(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    supertrend_x2_paisa = None,
 ))]
 fn evaluate_spec(
     condition_mask_hex: &str,
@@ -688,6 +704,7 @@ fn evaluate_spec(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    supertrend_x2_paisa: Option<i64>,
 ) -> PyResult<(u128, bool, u8)> {
     // Thin PyO3 wrapper: all logic + validation in the pure `_impl` (unit-tested
     // without a libpython link); the boundary maps `Err(String)` to a clean
@@ -718,6 +735,7 @@ fn evaluate_spec(
             choch_bullish,
             choch_bearish,
         },
+        supertrend_x2_paisa,
     )
     .map_err(PyValueError::new_err)
 }
@@ -749,6 +767,7 @@ fn evaluate_spec_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    supertrend_x2_paisa: Option<i64>,
 ) -> Result<(u128, bool, u8), String> {
     // Parse + validate the spec axes BEFORE the (more expensive) bar evaluate.
     let condition_mask = u128::from_str_radix(condition_mask_hex, 16)
@@ -783,6 +802,7 @@ fn evaluate_spec_impl(
         prior_n,
         prior_flags,
         market_structure,
+        supertrend_x2_paisa,
     )?;
     let fires = (bar_bits & condition_mask) == condition_mask;
     Ok((bar_bits, fires, dir.as_u8()))
@@ -1307,6 +1327,60 @@ impl PyMarketStructureState {
     }
 }
 
+#[pyclass(name = "SupertrendState", module = "trading_core")]
+struct PySupertrendState {
+    inner: CoreSupertrendState,
+}
+
+#[pymethods]
+impl PySupertrendState {
+    /// A fresh SuperTrend state. NO parameters: the ATR period (10) and the
+    /// band factor (3) are compile-time constants of the vocabulary
+    /// (`indicators::supertrend::{SUPERTREND_ATR_PERIOD, SUPERTREND_FACTOR}`),
+    /// never a sweep axis.
+    #[new]
+    fn new() -> Self {
+        PySupertrendState {
+            inner: CoreSupertrendState::new(),
+        }
+    }
+
+    /// Feed one bar (high/low/close in int64 paisa); return the bar's
+    /// SuperTrend line in the **×2-scaled paisa domain** (= line × 2 exactly —
+    /// the hl2 source is a half-paisa quantity), or `None` during the 9-bar
+    /// warm-up. This is EXACTLY the value the evaluate ABIs' appended
+    /// `supertrend_x2_paisa` argument expects.
+    ///
+    /// Delegates verbatim to the native [`CoreSupertrendState::update`] — the
+    /// integer TR/Wilder-ATR/band-ratchet/flip law all executes in Rust.
+    /// O(1) per bar. Total for any i64 inputs (never a panic → never a SIGABRT
+    /// under `panic = "abort"`).
+    #[pyo3(signature = (high, low, close))]
+    fn update(&mut self, high: i64, low: i64, close: i64) -> Option<i64> {
+        self.inner.update(high, low, close)
+    }
+
+    /// The current line (×2-scaled paisa), or `None` during warm-up.
+    #[getter]
+    fn supertrend_x2(&self) -> Option<i64> {
+        self.inner.supertrend_x2()
+    }
+
+    /// The current direction: `-1` = UP-trend (line = LOWER band), `+1` =
+    /// DOWN-trend (line = UPPER band) — Pine's inverted convention — or
+    /// `None` during warm-up.
+    #[getter]
+    fn direction(&self) -> Option<i8> {
+        self.inner.direction()
+    }
+
+    /// Bars processed so far.
+    #[getter]
+    fn bars_seen(&self) -> u64 {
+        self.inner.bars_seen()
+    }
+}
+
 /// Flat FFI shape of one Greeks tuple:
 /// `(iv, delta, gamma, theta, vega, rho, price, admissible)`.
 type GreeksTuple = (f64, f64, f64, f64, f64, f64, f64, bool);
@@ -1458,7 +1532,7 @@ fn check_stage1a_batch_values(
     ema20_paisa, ema200_paisa, day_pivot_levels, day_fib_levels, day_has_pivot, day_has_fib,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n,
     anchor_dependent_mask, fib_dependent_mask, applies_to_1day_mask,
-    apply_1day_mask, fractal_k = 2,
+    apply_1day_mask, fractal_k = 2, supertrend_x2_paisa = None,
 ))]
 fn stage1a_bar_bits_batch(
     open_paisa: Vec<i64>,
@@ -1483,6 +1557,7 @@ fn stage1a_bar_bits_batch(
     applies_to_1day_mask: u128,
     apply_1day_mask: bool,
     fractal_k: usize,
+    supertrend_x2_paisa: Option<Vec<Option<i64>>>,
 ) -> PyResult<Vec<u128>> {
     // Thin PyO3 wrapper: structure + value envelope validated by the pure
     // guard pass (unit-tested without a libpython link), then the feature-free
@@ -1501,6 +1576,10 @@ fn stage1a_bar_bits_batch(
         day_fib_levels: &day_fib_levels,
         day_has_pivot: &day_has_pivot,
         day_has_fib: &day_has_fib,
+        // The optional prepass-computed SuperTrend column (×2-scaled paisa;
+        // None = no column, bits 64-65 stay clear — the value guard is a pure
+        // i128 comparison downstream, so no magnitude bound is needed).
+        supertrend_x2_paisa: supertrend_x2_paisa.as_deref(),
         pivot_bps,
         pdh_pdl_bps,
         fib_bps,
@@ -1593,6 +1672,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // bits-52/53 tombstone (the VWAP/volume wipe), so registering it would not
     // compile. greeks_batch (DEC-GREEKS-RUST-BATCH-001) is kept intact.
     m.add_class::<PyMarketStructureState>()?;
+    m.add_class::<PySupertrendState>()?;
     Ok(())
 }
 
@@ -1759,6 +1839,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
     }
 
@@ -1815,6 +1896,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
     }
 
@@ -2023,6 +2105,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
     }
 
@@ -2087,6 +2170,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("overflow-safe"), "got: {err}");
@@ -2110,6 +2194,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
@@ -2180,6 +2265,7 @@ mod tests {
                 0,
                 vec![],
                 ms,
+                None,
             )
             .expect("valid raw");
             assert_eq!((raw >> bit) & 1, 1, "from_raw bit {bit} should be set");
@@ -2203,6 +2289,7 @@ mod tests {
                 0,
                 vec![],
                 ms,
+                None,
             )
             .expect("valid with_levels");
             assert_eq!((wl >> bit) & 1, 1, "with_levels bit {bit} should be set");
@@ -2250,6 +2337,7 @@ mod tests {
                 0,
                 vec![],
                 MarketStructureSignal::default(),
+                None,
             )
             .unwrap();
             acc = acc.wrapping_add(m);
@@ -2257,6 +2345,103 @@ mod tests {
         // Black-box the accumulator so the loop is not optimised away; the exact
         // value is incidental (the per-call parity asserts above are the point).
         std::hint::black_box(acc);
+    }
+
+    /// The appended `supertrend_x2_paisa` arg reaches the evaluator through
+    /// ALL THREE eval `_impl` paths: a line half a paisa below the close fires
+    /// bit 64, half above fires bit 65, and `evaluate_spec_impl` both ACCEPTS
+    /// a mask requiring the implemented bit 64 AND fires it when present
+    /// (the flip's ABI teeth — a dropped pass-through kills each case).
+    #[test]
+    fn supertrend_arg_reaches_all_three_eval_paths() {
+        let st_family: u128 = 0b11u128 << 64;
+        let above = 1u128 << 64;
+        let below = 1u128 << 65;
+        // PDC is the close in both fixtures ⇒ close_x2 = 2·PDC.
+        let raw = |st: Option<i64>| {
+            evaluate_from_raw_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                PDH,
+                PDL,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                MarketStructureSignal::default(),
+                st,
+            )
+            .expect("valid raw")
+        };
+        assert_eq!(raw(Some(2 * PDC - 1)) & st_family, above);
+        assert_eq!(raw(Some(2 * PDC + 1)) & st_family, below);
+        assert_eq!(raw(Some(2 * PDC)) & st_family, 0, "equality: neither");
+        assert_eq!(raw(None) & st_family, 0, "absent: neither");
+        let wl = |st: Option<i64>| {
+            evaluate_with_levels_impl(
+                10 * 3600,
+                PDC,
+                PDH,
+                PDL,
+                PDC,
+                None,
+                None,
+                vec![PDC; PIVOT_LEVELS_LEN],
+                vec![PDC; FIB_LEVELS_LEN],
+                PDH,
+                PDL,
+                PDC,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                MarketStructureSignal::default(),
+                st,
+            )
+            .expect("valid with_levels")
+        };
+        assert_eq!(wl(Some(2 * PDC - 1)) & st_family, above);
+        assert_eq!(wl(Some(2 * PDC + 1)) & st_family, below);
+        assert_eq!(wl(Some(2 * PDC)) & st_family, 0);
+        // evaluate_spec: a spec REQUIRING bit 64 fires iff the line puts the
+        // close strictly above it.
+        let (bits_fired, fires, _dir) = evaluate_spec_impl(
+            &format!("{above:032x}"),
+            0,
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            vec![PDC; PIVOT_LEVELS_LEN],
+            vec![PDC; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+            Some(2 * PDC - 1),
+        )
+        .expect("valid spec eval");
+        assert_eq!(bits_fired & st_family, above);
+        assert!(fires, "the required implemented ST bit is present");
     }
 
     // ── evaluate_spec_impl (strategy-as-data deploy binding) ───────────────
@@ -2287,6 +2472,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
     }
 
@@ -2323,14 +2509,23 @@ mod tests {
 
     #[test]
     fn spec_impl_rejects_a_reserved_bit() {
-        // Bit 64 (Supertrend) is declared LAYOUT-ONLY (implemented=false).
-        let declared_only = 1u128 << 64;
-        let err = spec_eval(&format!("{declared_only:032x}"), 0).unwrap_err();
+        // Bit 66 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 66).
+        let reserved = 1u128 << 66;
+        let err = spec_eval(&format!("{reserved:032x}"), 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
         // The tombstoned VWAP bit 52 is equally refused (the wipe).
         let tombstone = 1u128 << 52;
         let err = spec_eval(&format!("{tombstone:032x}"), 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // Bit 64 (Supertrend) is IMPLEMENTED since the vocab-66 flip — a mask
+        // requiring it is ACCEPTED at the boundary (and does not fire on this
+        // ST-less fixture bar, whose line is None).
+        let supertrend = 1u128 << 64;
+        let (_bits, fires, _dir) = spec_eval(&format!("{supertrend:032x}"), 0).unwrap();
+        assert!(
+            !fires,
+            "no ST line on the fixture bar ⇒ the required bit is absent"
+        );
     }
 
     #[test]
@@ -2363,6 +2558,7 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("pivot_levels must have"), "got: {err}");
@@ -2704,6 +2900,7 @@ mod tests {
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
                 MarketStructureSignal::default(),
+                None,
             );
             prop_assert!(mask.is_ok());
         }
@@ -2848,6 +3045,7 @@ mod tests {
             day_fib_levels: &fib_row,
             day_has_pivot: &[true],
             day_has_fib: &[true],
+            supertrend_x2_paisa: None,
             pivot_bps: bps.0,
             pdh_pdl_bps: bps.1,
             fib_bps: bps.2,
@@ -2920,6 +3118,7 @@ mod tests {
                 3,
                 Vec::new(),
                 MarketStructureSignal::default(),
+                None,
             )
             .unwrap();
             let got = one_bar_batch_masks(
@@ -3021,6 +3220,7 @@ mod tests {
             day_fib_levels: &[0; 15],
             day_has_pivot: &[false],
             day_has_fib: &[false],
+            supertrend_x2_paisa: None,
             pivot_bps: 10,
             pdh_pdl_bps: 10,
             fib_bps: 10,
@@ -3060,6 +3260,7 @@ mod tests {
             day_fib_levels: &two_day_fibs,
             day_has_pivot: &[true, true],
             day_has_fib: &[true, true],
+            supertrend_x2_paisa: None,
             pivot_bps: 10,
             pdh_pdl_bps: 10,
             fib_bps: 10,

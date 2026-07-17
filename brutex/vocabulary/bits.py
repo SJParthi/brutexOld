@@ -189,9 +189,7 @@ MASK_WIDTH: Final[int] = 128
 #: bits (``implemented=false``) are 0 here; the evaluator emits 0 for them.
 #: RETIRED (tombstone, never gets math): bit 52 ``BIT_CLOSE_ABOVE_VWAP``.
 #: RETIRED (tombstone, never gets math): bit 53 ``BIT_CLOSE_BELOW_VWAP``.
-#: LAYOUT-ONLY (math in a later PR): bit 64 ``BIT_CLOSE_ABOVE_SUPERTREND``.
-#: LAYOUT-ONLY (math in a later PR): bit 65 ``BIT_CLOSE_BELOW_SUPERTREND``.
-IMPLEMENTED_MASK: Final[int] = 18433233274827440127
+IMPLEMENTED_MASK: Final[int] = 73773465495956094975
 
 #: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
 #: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever

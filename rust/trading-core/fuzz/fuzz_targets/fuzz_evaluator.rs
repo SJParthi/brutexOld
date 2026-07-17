@@ -27,7 +27,9 @@
 //!    `else if` chain → at most one fires; the three CPR position bits
 //!    (60-62) form an exact partition — exactly ONE fires.
 //! 4. **Mirrors the resolved market-structure flags exactly** — the Group-12
-//!    bits (56-59) are a pure pass-through of `snapshot.market_structure`
+//!    bits (56-59) are a pure pass-through of `snapshot.market_structure`;
+//!    the Supertrend bits (64-65) mirror the strict close-vs-line compare of
+//!    the resolved `supertrend_x2_paisa` (`None` ⇒ both clear)
 //!    (the stateful machine resolves them upstream; the evaluator must never
 //!    invent or drop one).
 //!
@@ -145,6 +147,18 @@ fuzz_target!(|data: &[u8]| {
         choch_bearish: ms_raw & 0b0100 == 0 && ms_raw & 0b1000 != 0,
     };
 
+    // ── Resolved SuperTrend line (Group 14): None (warm-up / unwired) half
+    // the time, else an arbitrary in-domain ×2 value around the price band so
+    // the strict compare sees both sides and the exact tie.
+    let supertrend_x2_paisa = {
+        let v = r.u64();
+        match v & 0b11 {
+            0 => None,
+            1 => Some(close * 2), // the exact equality edge
+            _ => Some(1 + ((v >> 2) % (2 * MAX_PAISA) as u64) as i64),
+        }
+    };
+
     let snapshot = IndicatorSnapshot {
         tod_seconds: (r.u64() % 86_400) as u32,
         open_paisa: open,
@@ -159,6 +173,7 @@ fuzz_target!(|data: &[u8]| {
         day_low_paisa: day_low,
         open_of_day_paisa: open_of_day,
         market_structure,
+        supertrend_x2_paisa,
     };
     let params = ProximityParams {
         pivot_proximity_bps: r.bps(),
@@ -178,7 +193,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(
         mask & !trading_core::bits::IMPLEMENTED_MASK,
         0,
-        "evaluator set a non-implemented bit (tombstone 52-53 / Supertrend 64-65 / reserved >= 66)"
+        "evaluator set a non-implemented bit (tombstone 52-53 / reserved >= 66)"
     );
     // The tombstoned VWAP positions specifically (the wipe's permanent pin).
     assert_eq!(mask & (0b11 << 52), 0, "a tombstoned VWAP bit fired");
@@ -219,6 +234,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         !(has(mask, bits::BIT_CLOSE_IN_UPPER_THIRD) && has(mask, bits::BIT_CLOSE_IN_LOWER_THIRD)),
         "close cannot be in both the upper and lower third"
+    );
+    assert!(
+        !(has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND) && has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND)),
+        "close cannot be both above and below the Supertrend line"
     );
 
     // The three CPR position bits (60-62) form an EXACT PARTITION: the
@@ -267,4 +286,29 @@ fuzz_target!(|data: &[u8]| {
         market_structure.choch_bearish,
         "CHoCH-bearish bit must mirror the resolved flag"
     );
+
+    // ── 5. Group-14: the ST bits mirror the exact strict ×2 compare ──
+    match supertrend_x2_paisa {
+        None => {
+            assert!(
+                !has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND)
+                    && !has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND),
+                "an absent Supertrend line must clear both Group-14 bits"
+            );
+        }
+        Some(st) => {
+            let close_x2 = i128::from(close) * 2;
+            let st = i128::from(st);
+            assert_eq!(
+                has(mask, bits::BIT_CLOSE_ABOVE_SUPERTREND),
+                close_x2 > st,
+                "close-above-Supertrend must be the strict ×2 compare"
+            );
+            assert_eq!(
+                has(mask, bits::BIT_CLOSE_BELOW_SUPERTREND),
+                close_x2 < st,
+                "close-below-Supertrend must be the strict ×2 compare"
+            );
+        }
+    }
 });

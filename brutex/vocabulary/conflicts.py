@@ -36,12 +36,14 @@ from brutex.vocabulary.bits import (
     BIT_CLOSE_ABOVE_EMA200,
     BIT_CLOSE_ABOVE_PDH,
     BIT_CLOSE_ABOVE_PDL,
+    BIT_CLOSE_ABOVE_SUPERTREND,
     BIT_CLOSE_AT_DAY_HIGH,
     BIT_CLOSE_AT_DAY_LOW,
     BIT_CLOSE_BELOW_EMA20,
     BIT_CLOSE_BELOW_EMA200,
     BIT_CLOSE_BELOW_PDH,
     BIT_CLOSE_BELOW_PDL,
+    BIT_CLOSE_BELOW_SUPERTREND,
     BIT_CLOSE_IN_LOWER_THIRD,
     BIT_CLOSE_IN_UPPER_THIRD,
     BIT_EARLY_MORNING,
@@ -123,6 +125,14 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
         (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
         (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),
+        # Group 14: the Supertrend position bits are DIRECT OPPOSITION by the
+        # strict-inequality law (evaluator.rs Group 14 — close·2 > line fires
+        # 64, close·2 < line fires 65, equality/absent fires NEITHER), so the
+        # two can never co-occur — registered with the bits 64/65
+        # implemented-flip (the PR-B vocab-66 SuperTrend DEC; the rung-1
+        # layout-only declaration deliberately omitted the pair because an
+        # unimplemented bit never fires).
+        (BIT_CLOSE_ABOVE_SUPERTREND, BIT_CLOSE_BELOW_SUPERTREND),
     }
 )
 
