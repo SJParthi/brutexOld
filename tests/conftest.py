@@ -110,6 +110,14 @@ os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
 # tested law.
 os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
+# DEC-BOX-AUTODEPLOY-LANE-001 hermeticity belt: the nightly's pre-chain
+# box-update leg runs REAL git (incl. a network `git fetch origin main`) at
+# `cmd_nightly_run` time — the whole suite runs with the lane's kill switch
+# OFF (`BRUTEX_BOX_UPDATE=0`, `setdefault` so an explicit outer choice wins;
+# the #1692 market-hours-guard precedent). The lane's OWN tests inject their
+# env/runner explicitly and stay armed on both arms.
+os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
+
 
 @pytest.fixture(autouse=True)
 def _fresh_today_gate_log_state() -> None:

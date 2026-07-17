@@ -2084,6 +2084,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
 
+    # ── box-update (DEC-BOX-AUTODEPLOY-LANE-001) — the standalone mouth of
+    # the nightly auto-deploy leg (§8): one law, two mouths with the
+    # cmd_nightly_run pre-chain leg; no chain, no re-exec.
+    box_update_p = sub.add_parser(
+        "box-update",
+        help=(
+            "Run the nightly auto-deploy leg once — guarded ff-only update to "
+            "origin/main + wheel rebuild + assert-green gate (no chain, no "
+            "re-exec; DEC-BOX-AUTODEPLOY-LANE-001)"
+        ),
+    )
+    box_update_p.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+
     # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) ──
     # The daily TickVault cross-verification producer: post-close priority
     # pull → completeness gate → day-scoped prebuild → CSV export → idempotent
@@ -5899,6 +5912,14 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         resolve_backup_keep,
         resolve_backup_verify,
     )
+    from brutex.nightly.box_update import (
+        adopt_state,
+        default_command_runner,
+        maybe_reexec,
+        resolve_box_update_enabled,
+        run_box_update,
+    )
+    from brutex.nightly.env_preflight import run_env_preflight
     from brutex.nightly.probes import NightlyEnvError, resolve_sweep_fresh_seconds
     from brutex.nightly.report import summary_lines
     from brutex.nightly.run import NightlyPlan, run_nightly
@@ -5913,6 +5934,9 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         resolve_backup_verify()
         resolve_sweep_fresh_seconds()
         strict_gate_enabled()
+        # DEC-BOX-AUTODEPLOY-LANE-001: the ONE fail-loud box-update knob (the
+        # timeout knobs are FAIL-SAFE by the resolve_env_seconds law — §7).
+        box_enabled = resolve_box_update_enabled(os.environ)
         from_dt = date.fromisoformat(args.from_date) if args.from_date else None
         to_dt = date.fromisoformat(args.to_date) if args.to_date else None
         if from_dt is not None and to_dt is not None and from_dt > to_dt:
@@ -5924,6 +5948,65 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
     results_root = args.results_root if args.results_root is not None else resolved / "sweeps"
     backup_root = args.backup_root if args.backup_root is not None else default_backup_root()
     start_default, end_default = default_date_range()
+
+    # ── DEC-BOX-AUTODEPLOY-LANE-001 §6 shape (b): the pre-chain box-update
+    # leg (adopt-or-run, re-exec once) + the §12 env pre-flight. The leg is
+    # FAIL-OPEN outside the chain break law — it never blocks the nightly.
+    # A --dry-run nightly runs NEITHER (the zero-mutation tree-oracle
+    # contract outranks; the report block is honestly absent).
+    import brutex as _brutex_pkg
+    from brutex.config.dotenv import candidate_dotenv_paths
+
+    repo_root = Path(_brutex_pkg.__file__).resolve().parents[1]
+    box_outcome = None if args.dry_run else adopt_state(os.environ)
+    if box_outcome is None and not args.dry_run:
+        if box_enabled:
+            from brutex.adapters.groww.pull_singleflight import (
+                NightlyAlreadyRunningError,
+                nightly_singleflight_lock,
+            )
+
+            leg_lock = contextlib.ExitStack()
+            try:
+                leg_lock.enter_context(
+                    nightly_singleflight_lock(resolved, holder_note="box-update:nightly")
+                )
+            except NightlyAlreadyRunningError:
+                # A sibling holds the flock — the leg is SKIPPED (no block);
+                # run_nightly takes its standard COLLISION refusal moments later.
+                box_outcome = None
+            else:
+                try:
+                    box_outcome = run_box_update(
+                        repo_root=repo_root,
+                        runner=default_command_runner,
+                        env=os.environ,
+                        state_dir=resolved / ".box_update",
+                    )
+                finally:
+                    # EXPLICIT-RELEASE INVARIANT (§6 step 3): the flock is FULLY
+                    # released (LOCK_UN + fd close EXECUTED) strictly BEFORE
+                    # os.execv — exec never returns, so no context manager
+                    # could release it "after".
+                    leg_lock.close()
+                maybe_reexec(box_outcome, argv=sys.argv[1:], environ=os.environ)
+        else:
+            # Disabled kill switch: G0 performs ZERO actions — no lock needed;
+            # the honest `status=disabled` block is still written (§7).
+            box_outcome = run_box_update(
+                repo_root=repo_root,
+                runner=default_command_runner,
+                env=os.environ,
+                state_dir=resolved / ".box_update",
+            )
+    env_preflight_block: Mapping[str, object] | None = None
+    if not args.dry_run:
+        env_preflight_block = run_env_preflight(
+            env=os.environ,
+            dotenv_paths=candidate_dotenv_paths(
+                repo_root=repo_root, cwd=Path.cwd(), home=Path.home()
+            ),
+        ).to_dict()
     plan = NightlyPlan(
         lake_root=resolved,
         results_root=results_root,
@@ -5937,12 +6020,78 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         skip_backup=args.skip_backup,
         skip_sweep=args.skip_sweep,
         dry_run=args.dry_run,
+        box_update=None if box_outcome is None else box_outcome.to_dict(),
+        env_preflight=env_preflight_block,
     )
     report = run_nightly(plan)
     lines, _verdict = summary_lines(report)
     for line in lines:
         print(line)
     return report.exit_code
+
+
+def cmd_box_update(args: argparse.Namespace) -> int:
+    """Standalone ``brutex box-update`` — run the deploy leg once (§8).
+
+    No chain, no re-exec.  Exit law (DEC-BOX-AUTODEPLOY-LANE-001 §8):
+    ``EXIT_OK`` on updated/up_to_date/disabled (an honored kill switch is not
+    an error), ``EXIT_USER_ERROR`` on a guard skip or a junk kill-switch value
+    (fail-loud BEFORE any git argv) or flock contention (loud refusal, zero
+    git argv), ``EXIT_INTERNAL_ERROR`` on rolled_back/error.
+    """
+    import json as _json
+
+    from brutex.nightly.box_update import (
+        BoxUpdateEnvError,
+        BoxUpdateStatus,
+        default_command_runner,
+        resolve_box_update_enabled,
+        run_box_update,
+    )
+
+    try:
+        resolve_box_update_enabled(os.environ)
+    except BoxUpdateEnvError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    resolved = _resolve_lake_root(args.lake_root)
+    _require_lake_dir(resolved, command="box-update")
+    import brutex as _brutex_pkg
+
+    repo_root = Path(_brutex_pkg.__file__).resolve().parents[1]
+    from brutex.adapters.groww.pull_singleflight import (
+        NightlyAlreadyRunningError,
+        nightly_singleflight_lock,
+    )
+
+    # The SAME nightly single-flight flock (§8 flock posture) — acquired
+    # before ANY git command, fully released on exit, never nested inside a
+    # running nightly's own hold; contention = a loud refusal, zero git argv.
+    try:
+        with nightly_singleflight_lock(resolved, holder_note="box-update:manual"):
+            outcome = run_box_update(
+                repo_root=repo_root,
+                runner=default_command_runner,
+                env=os.environ,
+                state_dir=resolved / ".box_update",
+            )
+    except NightlyAlreadyRunningError as exc:
+        print(
+            "[brutex] box-update refused — a nightly/box-update sibling holds the "
+            f"single-flight lock ({exc}); nothing was run",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    print(_json.dumps(outcome.to_dict(), indent=2))
+    if outcome.status in (
+        BoxUpdateStatus.UPDATED,
+        BoxUpdateStatus.UP_TO_DATE,
+        BoxUpdateStatus.DISABLED,
+    ):
+        return EXIT_OK
+    if outcome.status is BoxUpdateStatus.SKIPPED:
+        return EXIT_USER_ERROR
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_nightly_backup(
@@ -10835,6 +10984,8 @@ def _dispatch(argv: list[str] | None) -> int:
             label=args.label,
             plist_dir=args.plist_dir,
         )
+    if args.command == "box-update":
+        return cmd_box_update(args)
     if args.command == "crossverify":
         if args.crossverify_command == "run":
             return cmd_crossverify_run(
