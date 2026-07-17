@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-FEED-REGISTRY-COMMON-001,
+_Last updated: 2026-07-17 (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001,
+MIGRATION.md #1932, branch `claude/derived-freshness-screen` — the
+derived-freshness gate (`tf_autoderive.lake_derived_freshness_verdicts` → the
+sweep preflight + the doctor probe) now re-derives from the SAME
+bad-tick-SCREENED 1-minute the prebuild writes from (screened-vs-screened via
+the REUSED `bad_tick.screen_frame_bad_ticks`; the ONE `BRUTEX_BAD_TICK_SCREEN`
+kill switch honored at the read site — OFF = the pre-parity unscreened
+compare, byte-preserved), killing the B-1 PERMANENT false wedge: a lake whose
+stored 1m legitimately holds a self-consistent ≥4x in-session spike (exactly
+the class the screen exists for; write-side guards accept it) previously read
+permanently "stale" — `cmd_sweep_all` hard-refused with NO escape flag and the
+printed remedy (re-run the prebuild) could NEVER clear it (executed-repro'd at
+merge base b81f017e). The B-2 ghost-bucket half (a stored derived bucket whose
+SOLE 1m source is screened away survives every re-prebuild — the latest-wins
+derived writer never deletes; the parity gate reads it HONESTLY stale) is
+executed-pinned, the refusal remediation + doctor FAIL detail NAME the working
+escape (delete the derived TF dirs + re-prebuild — executed-proven), and the
+prune itself is the named follow-up DEC-DERIVED-GHOST-BUCKET-PRUNE-001.
+READ-side gate parity only — the prebuild writer / resamplers / bad_tick.py /
+stored bytes untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1932.)
+Earlier: 2026-07-17 (DEC-FEED-REGISTRY-COMMON-001,
 MIGRATION.md #1903, branch `claude/feed-registry-common` — the COMMON
 N-feed (multi-vendor) registry lands at its leaf home `brutex/feeds/`:
 PR #1570's `VendorPullProfile` + instance `VendorProfileRegistry`
@@ -3117,7 +3140,65 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/feed-registry-common`
+- **Active branch:** `claude/derived-freshness-screen`
+  (**DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, MIGRATION.md #1932** — the
+  derived-freshness bad-tick SCREEN-PARITY fix, queue-master-allocated row.
+  **B-1 (CONFIRMED MAJOR, the permanent sweep/doctor false wedge):** the
+  prebuild writes every derived TF from the bad-tick-SCREENED 1-minute
+  (`make_lake_read_1m` runs `screen_frame_bad_ticks` — DEC-READ-GUARD-PARITY-001,
+  #1811) while the freshness gate (`tf_autoderive.lake_derived_freshness_verdicts`
+  → `sweep_preflight.preflight_derived_freshness`, consumed by `cmd_sweep_all`'s
+  NO-escape-flag refusal + the doctor's `check_derived_freshness`) re-derived
+  from the UNSCREENED raw 1m — so a lake whose stored 1m legitimately holds ONE
+  self-consistent ≥4x in-session spike (exactly the class the screen exists
+  for; positivity/ordering/finiteness write guards accept it) read PERMANENTLY
+  "stale", and the printed remedy (re-run the prebuild, incremental AND forced
+  full) could NEVER clear it — executed-repro'd at merge base b81f017e (verdict
+  `stale` → still `stale` after a forced full re-prebuild; doctor FAIL). THE
+  FIX: `read_lake_bars_frame` gains the kw-only opt-in `screen_bad_ticks`
+  (default False — every other read byte-identical; the seam census found
+  exactly TWO consumers, both edited) applying the REUSED
+  `bad_tick.screen_frame_bad_ticks` after the sort, gated by
+  `bad_tick_screen_enabled()` AT THE READ SITE — exactly `make_lake_read_1m`'s
+  gating, ONE `BRUTEX_BAD_TICK_SCREEN` switch flips every screened boundary
+  together (OFF ⇒ unscreened-vs-unscreened, the pre-parity compare, pinned);
+  BOTH freshness consumers opt in on the 1-minute BASE read ONLY (the stored
+  DERIVED partition is the prebuild's screened OUTPUT — never re-screened);
+  clean lakes verdict-identical (frame-equality + fresh-verdict parity pinned).
+  **B-2 (CONFIRMED MED, ghost buckets — assessed, pinned, prune DEFERRED):**
+  a stored derived bucket whose SOLE 1m source is screened away survives even
+  a forced full `incremental=False` re-prebuild (the latest-wins derived
+  writers never delete; executed-pinned) and /db serves the ghost raw; the
+  parity gate reads the ghost lake HONESTLY "stale" (pre-parity the unscreened
+  compare blessed the poison bucket "fresh" — the conscious honest flip), and
+  because the sweep gate has no escape flag the refusal remediation
+  (`FreshnessReport.remediation()`) + the doctor FAIL detail now NAME the
+  ghost shape + the executed-proven manual escape (delete the symbol's derived
+  TF partition dirs, then re-run the prebuild — the `_derived_dirs_present`
+  stamp guard forces the full re-derive; gate then reads "fresh") so the wedge
+  is never permanent; the prune itself (forced-full re-prebuild deleting
+  no-surviving-source buckets — the lake-heal recall DELETE-and-rebuild
+  precedent, #1175) is the named follow-up DEC-DERIVED-GHOST-BUCKET-PRUNE-001
+  (a production write-path change: quarantine + catalog delete + crash-window
+  semantics — deliberately NOT forced into this surgical fix). EXECUTED
+  fail-before: 9 new/extended tests fail at the merge-base source on the exact
+  defect assertions (stash-revert run captured, incl. the verbatim
+  `cmd_sweep_all` REFUSED line); pass-after green. TESTS:
+  `TestBadTickScreenParity` (5) in test_tf_autoderive.py ·
+  `test_pass_on_screened_spike_lake` + ghost-detail pins in test_doctor.py ·
+  the remediation ghost-clause pin in test_engine_sweep_preflight.py · the r10
+  e2e (`test_screened_spike_lake_production_prebuild_launches` — REAL
+  production prebuild + REAL `cmd_sweep_all` → EXIT_OK) in
+  tests/integration/test_cli_sweep_freshness_gate.py. GATES: `tf_autoderive.py`
+  (42/16) + `doctor.py` (249/72) + `sweep_preflight.py` (47/8) ALL 100.00%
+  line+branch on their exact ci.yml stanzas; 349 freshness/preflight/doctor/
+  bad-tick/materialize suite tests green; ruff/ruff-format clean; `mypy
+  --strict brutex` clean (467 files); pyright 0 errors on touched files.
+  READ-side gate parity only — prebuild writer/resamplers/bad_tick.py/cli.py/
+  stored bytes untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes, no
+  new env vars.)
+  Earlier: `claude/feed-registry-common`
   (**DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903** — entry number
   assigned by the queue master 2026-07-17; the renumber-at-landing law
   stands, the DEC-ID never changes, per DEC-LEDGER-RENUMBER-001 — the
@@ -9166,7 +9247,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/feed-registry-common`
+- **Active feature branch:** `claude/derived-freshness-screen`
+  (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001, MIGRATION.md #1932 — the
+  derived-freshness gate + doctor probe re-derive from the SAME
+  bad-tick-SCREENED 1-minute the prebuild writes from (screened-vs-screened
+  via the REUSED `screen_frame_bad_ticks`; ONE `BRUTEX_BAD_TICK_SCREEN`
+  switch, OFF = the pre-parity unscreened compare, byte-preserved) — the B-1
+  permanent sweep/doctor false wedge on a legitimately-stored ≥4x in-session
+  spike lake is dead (executed fail-before at merge base b81f017e); the B-2
+  ghost-bucket half is executed-pinned honest-stale with the working manual
+  escape named in the refusal remediation + doctor detail, prune deferred to
+  the named follow-up DEC-DERIVED-GHOST-BUCKET-PRUNE-001; READ-side gate
+  parity only, ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1932 for the full blurb)
+  Earlier: `claude/feed-registry-common`
   (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903 — the COMMON N-feed
   registry at its leaf home `brutex/feeds/` (PR #1570's profile+registry
   adopted-with-relocation — DEC-VENDOR-PROFILE-REGISTRY-001 #1833
