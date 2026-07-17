@@ -4635,7 +4635,14 @@ jobs:
     name: Proof bundle (aggregate CI artifacts)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    if: always()
+    # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001 (MIGRATION.md #1953): SKIP on a
+    # concurrency-cancelled/superseded run. This job is `if: !cancelled()`
+    # (runs on success OR failure to aggregate a partial proof), but must
+    # NOT run when the run was cancelled — a cancelled producer leaves no
+    # artifacts, `proof/` is never created, and the manifest step's
+    # `cat > proof/MANIFEST.txt` hard-fails → a spurious red "Proof bundle"
+    # check + false-red webhooks across the wave. Was `if: always()`.
+    if: ${{ !cancelled() }}
     needs:
       - test
       - bench
@@ -4673,6 +4680,11 @@ jobs:
       - name: Generate proof manifest
         if: always()
         run: |
+          # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001: belt-and-braces — even if the
+          # download-artifact steps found nothing (no producer artifacts on a
+          # failed/partial run), `proof/` may not exist yet, so `cat >
+          # proof/MANIFEST.txt` would hard-fail. Create it first.
+          mkdir -p proof
           cat > proof/MANIFEST.txt <<EOF
           BruteX CI Proof Bundle
           ======================
