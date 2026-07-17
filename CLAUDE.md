@@ -3100,8 +3100,9 @@ hostile-review pass._
   and is structurally unreachable as a silent >=64-bit production fallback (the silenced-loud-fail mutant
   hand-applied + verified KILLED). Second recorded deviation: NO `bar_bits_beyond_u128`/`mask_beyond_u128`
   oracle-fallback analogue — the numpy count oracle itself refuses beyond-u128 (`uint64` hi-limb cast), so
-  beyond-u128/negative keeps TODAY'S `OverflowError` class raised at the `Vec<u128>` FFI edge (no
-  triple-limb invention, pinned). OBSERVABLES (the PR-B interface, mirroring #1549's `rust_active`):
+  beyond-u128 keeps TODAY'S `OverflowError` class raised at the `Vec<u128>` FFI edge, while a negative
+  value routes narrow and refuses at the u64 FFI edge as before (no triple-limb invention, pinned).
+  OBSERVABLES (the PR-B interface, mirroring #1549's `rust_active`):
   `ResidentBarBuffer.kernel_kind` ∈ {rust-u64, rust-u128, numpy} + `wide_kernel_active` + the pure
   `dispatch_kernel_kind` classifier + the `KERNEL_*`/`U128_MASK` exports — a >=64-bit grid is verifiable
   Rust-served WITHOUT monkeypatching (documented supported test surface). U64 PATH BYTE-IDENTICAL: the u64
