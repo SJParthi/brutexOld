@@ -726,7 +726,8 @@ class ResidentBarBuffer:
     def _promote_wide_kernel(self) -> object:
         """Build (at most once) the u128 sibling kernel for >64-bit mask batches.
 
-        DEC-ENUM-KERNEL-U128-001 (the #1549 ``_promote_wide_kernel`` shape,
+        DEC-ENUM-KERNEL-U128-001 (the lazy wide-promotion shape of #1549 —
+        there via ``_derive_kernel_inputs``; here ``_promote_wide_kernel`` —
         under the inverted LOUD-FAIL law): a mask with a bit ``>= 64`` over a
         window whose resident kernel is not u128 promotes the WHOLE batch to
         ``fno_math.ResidentBarsU128`` — built lazily HERE from the kept raw

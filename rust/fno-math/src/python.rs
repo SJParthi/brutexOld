@@ -1205,7 +1205,7 @@ mod u128_kernel_tests {
 
     #[test]
     fn u128_kernel_equals_u64_kernel_on_u64_fit_inputs() {
-        // Anti-drift pin (the #1550 idiom): on u64-fitting inputs the u128
+        // Anti-drift pin (the #1549 idiom): on u64-fitting inputs the u128
         // monomorphization must agree with the u64 monomorphization exactly —
         // the shared width-generic core makes any future de-sharing loud.
         let bars64: Vec<u64> = vec![0b0011, 0b0111, 0b1000, 0b1011, 0, u64::MAX, 1 << 63];

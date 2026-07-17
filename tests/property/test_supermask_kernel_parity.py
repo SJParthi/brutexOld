@@ -355,7 +355,7 @@ def test_wide_kernel_agrees_with_u64_kernel_on_u64_domain(
 
     Both widths monomorphize the ONE width-generic ``MaskWord`` core
     (``rust/fno-math/src/mask_word.rs``); this pin makes any future
-    de-sharing loud (the #1550 anti-drift idiom applied to the count kernel).
+    de-sharing loud (the #1549 anti-drift idiom applied to the count kernel).
     """
     assert list(fno_math.count_supermasks_u128s(bars, masks)) == list(
         fno_math.count_supermasks_u64s(bars, masks)

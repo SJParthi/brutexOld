@@ -13,14 +13,14 @@ construction fallback). These tests pin:
 * the LOUD-FAIL law — a module missing the u128 twins at a >=64-bit dispatch
   raises the typed :class:`WideKernelUnavailableError` naming
   DEC-ENUM-KERNEL-U128-001 + the rebuild remediation, NEVER a silent numpy
-  demotion (the deliberate inversion of #1550's oracle degrade);
+  demotion (the deliberate inversion of #1549's oracle degrade);
 * the u64 path is untouched — the wide kernel is NEVER invoked for <=64-bit
   inputs (bomb-spy pinned) and the <=64-bit stale-wheel numpy construction
   fallback survives byte-identically;
 * the lazy wide-kernel promotion (one instance-level build + ONE
   ``combo_mask.wide_kernel_promoted`` INFO) and the ``kernel_kind`` /
   ``wide_kernel_active`` / ``dispatch_kernel_kind`` observables (the
-  supported no-monkeypatch test surface, mirrored from #1550's
+  supported no-monkeypatch test surface, mirrored from #1549's
   ``rust_active``).
 """
 
@@ -129,7 +129,7 @@ def test_dispatch_kernel_kind_classifier() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
-# The LOUD-FAIL law (DEC-ENUM-KERNEL-U128-001 — the #1550 inversion)
+# The LOUD-FAIL law (DEC-ENUM-KERNEL-U128-001 — the #1549 inversion)
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -267,7 +267,8 @@ def test_resident_buffer_wide_bars_serve_u64_masks_via_wide_kernel() -> None:
 def test_resident_buffer_rust_backed_promotes_on_wide_mask() -> None:
     """A u64-backed buffer asked for a u128 mask promotes to the wide kernel.
 
-    The lazy promotion (the #1550 ``_promote_wide_kernel`` shape): built at
+    The lazy promotion (the wide-promotion shape of #1549 — there via
+    ``_derive_kernel_inputs``; here ``_promote_wide_kernel``): built at
     most once from the kept raw bars, announced with ONE
     ``combo_mask.wide_kernel_promoted`` INFO, memoised for later batches —
     and ``kernel_kind`` stays u64 (the u64 arm keeps serving u64 batches).
