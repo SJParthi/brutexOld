@@ -156,32 +156,35 @@ def test_non_integer_k_raises() -> None:
         resolve_sweep_request(k="1,abc", today=_TODAY)
 
 
-@pytest.mark.parametrize("bad", ["0", "67", "-1"])
+@pytest.mark.parametrize("bad", ["0", "68", "-1"])
 def test_out_of_range_k_raises(bad: str) -> None:
     with pytest.raises(ValueError, match="k must be a whole number"):
         resolve_sweep_request(k=bad, today=_TODAY)
 
 
 def test_k_bound_is_the_implemented_condition_count() -> None:
-    """``_MAX_K`` tracks the IMPLEMENTED count (62) — never the declared layout.
+    """``_MAX_K`` tracks the IMPLEMENTED count (67) — never the declared layout.
 
     G-RETROT-08: the route sweeps ``default_condition_bits()`` (every
-    IMPLEMENTED bit — 62 on the 66-declared layout: the reshape tombstoned
-    VWAP 52/53 and declared SuperTrend 64/65 layout-only), so a ``k`` above 62
-    can never form a combo (``C(62, 63) = 0`` — an empty-grid illusion, not a
-    sweep). Pinned against ``IMPLEMENTED_MASK`` so vocab growth moves the
-    bound automatically (DEC-VOCAB-U128-CODEGEN-001).
+    IMPLEMENTED bit — 67 on the 74-declared layout: the reshape tombstoned
+    VWAP 52/53, SuperTrend 64/65 stays layout-only, the gap placeholders
+    66-68 are reserved-unimplemented, and DEC-FIB-TEMPLATE-EXPRESS-001
+    (MIGRATION.md #1935) implemented the five express bits 69-73), so a
+    ``k`` above 67 can never form a combo (``C(67, 68) = 0`` — an
+    empty-grid illusion, not a sweep). Pinned against ``IMPLEMENTED_MASK``
+    so vocab growth moves the bound automatically
+    (DEC-VOCAB-U128-CODEGEN-001).
     """
     from brutex.cli import default_condition_bits
     from brutex.dashboard.sweep_runner import _MAX_K
     from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
-    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 62
+    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 67
     assert len(default_condition_bits()) == _MAX_K
-    # The boundary: 53..62 ACCEPTED; 63 (an empty C(62,63) grid) refused.
-    assert resolve_sweep_request(k="53,62", today=_TODAY).k == "53,62"
-    with pytest.raises(ValueError, match="k must be a whole number 1..62"):
-        resolve_sweep_request(k="63", today=_TODAY)
+    # The boundary: 53..67 ACCEPTED; 68 (an empty C(67,68) grid) refused.
+    assert resolve_sweep_request(k="53,67", today=_TODAY).k == "53,67"
+    with pytest.raises(ValueError, match="k must be a whole number 1..67"):
+        resolve_sweep_request(k="68", today=_TODAY)
 
 
 def test_non_integer_sl_leg_raises() -> None:
