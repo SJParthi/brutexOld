@@ -105,6 +105,7 @@ on:
       - "tests/unit/test_raw_integrity_rust_seam.py"
       - "tests/unit/test_interior_gap_detect_rust_seam.py"
       - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/integration/test_detectors_rust_stored_outcome.py"
       - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
@@ -153,6 +154,7 @@ on:
       - "tests/unit/test_raw_integrity_rust_seam.py"
       - "tests/unit/test_interior_gap_detect_rust_seam.py"
       - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/integration/test_detectors_rust_stored_outcome.py"
       - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
@@ -369,7 +371,12 @@ jobs:
           # proves no flag-ON regression in the catching suites, but burn-in
           # autorevert means the ORACLE could be doing the catching here, so
           # the genuine Rust-parity gates are the seam suites' remaining=0
-          # hypothesis differentials + the cargo frozen vectors.
+          # hypothesis differentials + the cargo frozen vectors — PLUS the
+          # STORED-OUTCOME leg (test_detectors_rust_stored_outcome.py): a
+          # real-writer #1031 demotion pull + the raw-integrity sidecar,
+          # driven OFF then ON at remaining=0 against the REAL wheel, with
+          # stored parquet bytes + ledger records asserted identical and the
+          # demotions proven fired in BOTH arms.
           BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
           BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
           BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rs -q \
@@ -382,6 +389,7 @@ jobs:
             tests/unit/test_raw_integrity_rust_seam.py \
             tests/unit/test_interior_gap_detect_rust_seam.py \
             tests/unit/test_partial_window_detect_rust_seam.py \
+            tests/integration/test_detectors_rust_stored_outcome.py \
             2>&1 | tee /tmp/parity-t24-on.log \
             || { emit_failure_summary "t24-detectors-flag-on" /tmp/parity-t24-on.log; exit 1; }
 
