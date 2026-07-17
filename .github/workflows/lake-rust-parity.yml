@@ -248,6 +248,31 @@ jobs:
             sleep 10
           done
 
+      - name: Install trading_core Rust extension (leg-3 wiring suite dep)
+        # SLICE T24 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the flag-ON
+        # detector leg runs tests/integration/test_raw_integrity_wiring.py,
+        # whose test_cli_build_site_binds_capture imports brutex.cli →
+        # brutex/vocabulary → `import trading_core` — a HARD wheel import
+        # (DEC-SHARED-CORE-001 #441). Without it the leg fails with
+        # ModuleNotFoundError, so the lane installs the wheel exactly like
+        # ci.yml's test job does (same maturin/abi3 build; the lane's newer
+        # toolchain — LAKE_RUST_VERSION ≥ ci.yml's RUST_VERSION floor — is
+        # fine, the wheel is compiler-version independent). fno_math is
+        # deliberately NOT installed: no lane suite needs it (the one
+        # fno_math-gated mirror-pin test module-skips here by design and
+        # runs in main ci.yml). Same crates.io flake-retry idiom as above.
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Align the installed polars wheel to the crate pin
         # Review-round fold (supersedes the warn-only-drift-with-no-alignment
         # shape): `pip install -e ".[data,dev]"` resolves the HIGHEST polars
@@ -306,8 +331,10 @@ jobs:
 
       - name: Byte-parity corpora (BOTH profiles) + facade/seam suites
         # With the wheel force-aligned above, the corpus module-level
-        # version-guard skips cannot fire here — -rs still surfaces any skip
-        # reason in the log as belt-and-suspenders.
+        # version-guard skips cannot fire here — -rsfE surfaces skip reasons
+        # AND the FAILED/ERROR summary lines (the -s-only shape emitted NO
+        # `FAILED ` lines, so the annotation grep below had nothing to match)
+        # as belt-and-suspenders.
         #
         # FAILURE VISIBILITY (observability only — pass/fail semantics
         # byte-identical): this lane's raw logs are auth-gated on github.com,
@@ -319,6 +346,13 @@ jobs:
         run: |
           set -o pipefail
           emit_failure_summary() {
+            # The emitter runs ONLY on the already-failed path (right before
+            # `exit 1`), so errexit is disabled for its body: under the
+            # runner's `bash -e {0}` + pipefail, a no-match grep pipeline
+            # below would otherwise abort the emitter BEFORE the tail
+            # annotation / job summary land (locally proven) — the step
+            # stays red either way, but the diagnostics must always emit.
+            set +e
             leg="$1"; log="$2"
             # ::error annotations FIRST — annotations are the ONE failure
             # surface that renders on the run page without auth (the raw
@@ -328,7 +362,7 @@ jobs:
             grep -E "^(FAILED|ERROR) " "$log" | head -8 | while IFS= read -r line; do
               esc=$(printf '%s' "$line" | sed -e 's/%/%25/g')
               echo "::error title=lake-rust-parity ${leg}::${esc}"
-            done
+            done || true
             tail_line=$(tail -n 1 "$log" | sed -e 's/%/%25/g')
             echo "::error title=lake-rust-parity ${leg} tail::${tail_line}"
             {
@@ -346,7 +380,7 @@ jobs:
               echo "</details>"
             } >> "$GITHUB_STEP_SUMMARY"
           }
-          pytest -rs -q \
+          pytest -rsfE -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/golden/test_option_lake_rust_render_parity.py \
             tests/golden/test_lake_rust_merge_parity.py \
@@ -369,7 +403,7 @@ jobs:
             || { emit_failure_summary "corpora-facade-seam" /tmp/parity-corpora.log; exit 1; }
           # G8 window-ledger differential + affected suites, flag-ON arm
           # (the real wheel is installed + lockstep-aligned above).
-          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
+          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rsfE -q \
             tests/unit/test_window_ledger_rust.py \
             tests/unit/test_window_status.py \
             tests/unit/test_window_ledger.py \
@@ -390,7 +424,7 @@ jobs:
           # demotions proven fired in BOTH arms.
           BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
           BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
-          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rs -q \
+          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rsfE -q \
             tests/unit/test_detectors_rust.py \
             tests/unit/test_raw_integrity.py \
             tests/unit/test_raw_integrity_store.py \
