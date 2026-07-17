@@ -58,6 +58,25 @@ def test_u128_mask_constant() -> None:
     assert U128_MASK == (1 << 128) - 1
 
 
+def test_kernel_label_constants_literal_values() -> None:
+    """The three ``KERNEL_*`` labels are pinned at the VALUE level.
+
+    These strings are the PR-B-facing supported test surface (`__all__`
+    exports a downstream vocab-66 pin will compare against literally), so a
+    symbol-to-symbol comparison alone is not enough — a constant-value swap
+    (e.g. ``KERNEL_RUST_U128 = "rust-u64"``) would ship a lying
+    ``kernel_kind`` / ``dispatch_kernel_kind`` observable that no
+    symbol-level assertion catches (the round-2 P2/P9 surviving mutants).
+    Pin the literals AND their pairwise distinctness.
+    """
+    assert (KERNEL_RUST_U64, KERNEL_RUST_U128, KERNEL_NUMPY) == (
+        "rust-u64",
+        "rust-u128",
+        "numpy",
+    )
+    assert len({KERNEL_RUST_U64, KERNEL_RUST_U128, KERNEL_NUMPY}) == 3
+
+
 # ─────────────────────────────────────────────────────────────────
 # Free dispatch — >=64-bit inputs route to the u128 Rust kernel
 # ─────────────────────────────────────────────────────────────────

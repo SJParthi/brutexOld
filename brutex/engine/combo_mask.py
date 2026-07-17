@@ -696,9 +696,14 @@ class ResidentBarBuffer:
         One of :data:`KERNEL_RUST_U64` (the u64 Rust kernel — today's norm),
         :data:`KERNEL_RUST_U128` (the u128 Rust twin — a wide-bar window) or
         :data:`KERNEL_NUMPY` (the pre-existing <=64-bit stale-wheel numpy
-        degrade). Deterministic per instance: fixed at construction, never
-        changed by a later promotion (a promoted u64 window still serves
-        u64-fit batches on the u64 kernel — see :attr:`wide_kernel_active`).
+        degrade). Fixed for a rust-u64-constructed buffer: a later promotion
+        never changes it (the promoted u64 window still serves u64-fit
+        batches on the u64 kernel — see :attr:`wide_kernel_active`). A
+        numpy-DEGRADED buffer's ``kernel_kind`` truthfully upgrades
+        ``numpy`` -> ``rust-u128`` on wide promotion — the u128 kernel then
+        serves every batch and the numpy tail is dead code (reachable only
+        via a partial-symbol monkeypatch; a genuinely stale wheel fails at
+        ``import fno_math``).
         """
         if self._rust is not None:
             return KERNEL_RUST_U64
