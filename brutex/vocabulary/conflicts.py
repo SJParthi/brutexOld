@@ -113,7 +113,7 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # Group 9: Day type mutual exclusions
         (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
         (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
-        # Group 13: the CPR position bits form an EXACT partition by
+        # Group 15: the CPR position bits form an EXACT partition by
         # construction (evaluator.rs:422-431 — bit 60 strict `close > TC`,
         # bit 61 strict `close < BC`, bit 62 inclusive `BC <= close <= TC`
         # over the canonicalised `tc >= bc` pair of

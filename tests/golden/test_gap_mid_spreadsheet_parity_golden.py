@@ -1,4 +1,4 @@
-"""TF=3minute SPREADSHEET PARITY GOLDEN — the Group-13 gap-midpoint level.
+"""TF=3minute SPREADSHEET PARITY GOLDEN — the Group-15 gap-midpoint level.
 
 DEC-GAP-MIDPOINT-CONDITIONS-001 §3.7's BINDING golden: on TF=3minute the
 session-edge gap-midpoint must reproduce the ES Trading Academy spreadsheet's
@@ -81,7 +81,7 @@ def _session_3m(day: datetime, base: str, overrides: _OverrideMap) -> list[Candl
 
 
 def _gap_bits(mask: int) -> tuple[bool, bool, bool]:
-    """(above, below, near) — the Group-13 bit triple of *mask*."""
+    """(above, below, near) — the Group-15 bit triple of *mask*."""
     return (
         bool(mask >> B.BIT_CLOSE_ABOVE_GAP_MID & 1),
         bool(mask >> B.BIT_CLOSE_BELOW_GAP_MID & 1),

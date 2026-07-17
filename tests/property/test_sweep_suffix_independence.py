@@ -205,16 +205,16 @@ def test_kernel_bar_bits_immune_to_extreme_suffix_mutation(
 
 
 def test_gap_mid_bits_fire_within_the_property_series_shape() -> None:
-    """Non-vacuity teeth for bits 60-62 (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    """Non-vacuity teeth for bits 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001).
 
     The suffix-independence gates above compare FULL u128 truth-vectors, so
-    they cover the Group-13 gap-midpoint bits automatically — PROVIDED the
+    they cover the Group-15 gap-midpoint bits automatically — PROVIDED the
     generator's series shape can actually fire them. This deterministic case
     is built through the SAME ``_series_from_pairs`` shape the
     ``_bar_series`` strategy draws (multi-day, ``_BARS_PER_DAY`` bars per IST
     day, high/low spanning open/close): day 2 gaps up (open 150 > pdc 102 ⇒
     level = (X1_hi 10200 + X2_hi 15100) / 2 = ₹126.50) and its later closes
-    sit strictly above — bit 60 fires, so the property comparisons are
+    sit strictly above — bit 66 fires, so the property comparisons are
     provably NON-VACUOUS over the gap trio (any draw whose series spans two
     days with a nonzero gap exercises them the same way).
     """
@@ -229,7 +229,7 @@ def test_gap_mid_bits_fire_within_the_property_series_shape() -> None:
     pairs += [(150, 151)] + [(160, 161)] * (_BARS_PER_DAY - 1)  # day 2: gap-up
     bits = build_bar_bits(_series_from_pairs(pairs))
     fired = [i for i, m in enumerate(bits) if m & gap_trio]
-    assert fired  # the property-series shape genuinely reaches bits 60-62
+    assert fired  # the property-series shape genuinely reaches bits 66-68
     assert min(fired) >= _BARS_PER_DAY + 1  # …and only from day 2's SECOND bar
 
 

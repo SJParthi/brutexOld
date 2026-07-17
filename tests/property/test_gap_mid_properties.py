@@ -1,4 +1,4 @@
-"""Hypothesis properties for the Group-13 session-edge gap-midpoint level.
+"""Hypothesis properties for the Group-15 session-edge gap-midpoint level.
 
 DEC-GAP-MIDPOINT-CONDITIONS-001 §3.7 (property row):
 

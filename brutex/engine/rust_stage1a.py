@@ -153,7 +153,7 @@ class Stage1ABatchInputs:
     day_fib_levels: list[int]
     day_has_pivot: list[bool]
     day_has_fib: list[bool]
-    # Group-13 X1 day tables (DEC-GAP-MIDPOINT-CONDITIONS-001): the prior
+    # Group-15 X1 day tables (DEC-GAP-MIDPOINT-CONDITIONS-001): the prior
     # session's last-TF-bar high/low per day row (the `day_pivot_levels`
     # pattern — Muhurat skip + first-day/post-roll cold start stay PREPASS
     # decisions), plus the `near_gap_mid` bps knob. The values are (0, 0)
@@ -362,7 +362,7 @@ def rust_bar_bits_or_none(
             inputs.applies_to_1day_mask,
             inputs.apply_1day_mask,
             inputs.fractal_k,
-            # Group-13 gap-midpoint (appended-last FFI law,
+            # Group-15 gap-midpoint (appended-last FFI law,
             # DEC-GAP-MIDPOINT-CONDITIONS-001): the bps knob + the X1 day
             # tables the batch core mints the per-day level from.
             inputs.gap_mid_bps,

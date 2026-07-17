@@ -18,7 +18,7 @@ Modules:
 - `weekly_anchors` — Rolling-weekly + weekly-static Fib anchors (PR-2).
 - `pivots`         — Standard Pivot Points (P, R1-R5, S1-S5 — R5/S5 added PR-2).
 - `ema`            — EMA (alpha=2/(N+1), SMA-seed at bar N-1).
-- `gap_mid`        — Session-edge gap-midpoint level (Group 13, bits 60-62 —
+- `gap_mid`        — Session-edge gap-midpoint level (Group 15, bits 66-68 —
   DEC-GAP-MIDPOINT-CONDITIONS-001; the math lives in the shared Rust
   `trading_core` crate, this is the thin delegator).
 - `market_structure` — the resolved BOS/CHoCH signal container (the stateful

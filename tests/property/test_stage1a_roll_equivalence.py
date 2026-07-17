@@ -257,17 +257,17 @@ def test_daily_history_leak_mutant_is_killed_by_the_multi_day_anchor_cases() -> 
 
 
 def test_gap_mid_bits_ride_the_roll_equivalence() -> None:
-    """Group-13 coverage of the P1 oracle (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    """Group-15 coverage of the P1 oracle (DEC-GAP-MIDPOINT-CONDITIONS-001).
 
     Deterministic gap-day segments: each segment spans two IST days whose
     second day gaps UP hard, so the gap-midpoint bits genuinely FIRE inside
     both the stitched build and the per-segment fresh builds (asserted — the
-    oracle's full-mask compare is non-vacuous over bits 60-62), and the
+    oracle's full-mask compare is non-vacuous over bits 66-68), and the
     stitched build equals the fresh concat bit for bit — post-roll gap state
     == fresh-builder gap state.
 
     Honest blindness note (the ``_daily_history`` analysis class): a
-    SINGLE-member leak mutant on the three Group-13 members is structurally
+    SINGLE-member leak mutant on the three Group-15 members is structurally
     INVISIBLE to this oracle — `_gap_mid_paisa` is unconditionally re-minted
     at every day roll, `_session_edge` is overwritten at every push tail,
     and a preserved `_prev_session_edge` is masked by the (independently
@@ -283,7 +283,7 @@ def test_gap_mid_bits_ride_the_roll_equivalence() -> None:
         day1 = [_seg_bar(first_day, m, base + m, base + 1 + m, evening=False) for m in range(4)]
         day2_date = first_day + timedelta(days=1)
         # Day 2 opens ~50% above day 1's close — a hard gap-UP; later closes
-        # sit above the minted midpoint, so bit 60 fires from bar 2 onward.
+        # sit above the minted midpoint, so bit 66 fires from bar 2 onward.
         day2 = [
             _seg_bar(
                 day2_date, m, base + base // 2 + 2 * m, base + base // 2 + 1 + 2 * m, evening=False

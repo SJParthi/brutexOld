@@ -1,6 +1,6 @@
 """Session-edge gap-midpoint level — thin delegator to the shared Rust core.
 
-``DEC-GAP-MIDPOINT-CONDITIONS-001`` (Group 13, bits 60-62): after a gap
+``DEC-GAP-MIDPOINT-CONDITIONS-001`` (Group 15, bits 66-68): after a gap
 open, price tends to revert intraday toward the **midpoint of the opening
 gap measured between the two session-edge candle extremes** —
 
@@ -62,7 +62,7 @@ def compute_gap_mid(
         ``(gap_mid_paisa, direction)`` with ``direction`` ``1`` for a gap-UP
         day (the level is the round-half-even midpoint of the two HIGHs) and
         ``-1`` for gap-DOWN (the two LOWs) — or ``None`` on a zero gap
-        (``open_of_day == pdc``): no level exists and the Group-13 bits
+        (``open_of_day == pdc``): no level exists and the Group-15 bits
         stay 0 all day.
 
     Raises

@@ -91,7 +91,7 @@ class IndicatorSnapshot:
     # threaded in like the session VWAP. None on a zero-gap day, when X1/X2 are
     # not captured (first stream day / post-roll / Muhurat-skipped prior
     # session), on the session's FIRST TF bar (the arm-from-bar-2 law) and on
-    # the 1day timeframe — the Group-13 bits then simply do not fire. Defaulted
+    # the 1day timeframe — the Group-15 bits then simply do not fire. Defaulted
     # to None so every pre-existing snapshot caller keeps working unchanged.
     gap_mid_paisa: int | None = None
 

@@ -2851,19 +2851,29 @@ class TestU128EnvelopeThroughSweep:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Bit 0 FIRES on `_trending_bars` (the default-config masks produce real
-        # trades), bits 64/65 never do — the wide masks now PROMOTE the batch
-        # to the u128 kernel (no call fallback), and the byte-equality below
-        # compares stores with REAL trade rows, never two degenerate
-        # zero-trade stores (the vacuous-equality trap).
+        # trades), bits 64/65 never do — the wide masks are RUST-served with NO
+        # call fallback, and the byte-equality below compares stores with REAL
+        # trade rows, never two degenerate zero-trade stores (the
+        # vacuous-equality trap). RE-DERIVED at DEC-GAP-MIDPOINT-CONDITIONS-001:
+        # `_trending_bars` restarts every day at 100.0 while the prior day
+        # closes higher, so the IMPLEMENTED gap-midpoint bits 66-68 now FIRE in
+        # the window's own bar_bits — the window is u128-WIDE AT CONSTRUCTION
+        # (`ResidentSweepSimU128` built up front, `_rust_is_wide=True`), so the
+        # LAZY promotion event never occurs on this fixture (the lazy-promotion
+        # path itself stays covered by `test_engine_rust_trade_sim.py`'s
+        # controlled-bar_bits promotion suite).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
+        # The premise made explicit: the gap bits genuinely widen the window.
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # NOT a fallback any more: the wide sibling kernel was promoted once.
+        # NOT a fallback: the window is wide at construction — no call
+        # fallback AND no lazy promotion (already on the u128 sibling).
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert fallbacks == []
         promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
-        assert len(promotions) == 1
+        assert promotions == []
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True

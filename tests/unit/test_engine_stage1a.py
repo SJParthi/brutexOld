@@ -954,7 +954,7 @@ def test_collect_batch_inputs_beyond_schedule_raises_the_push_message() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Group-13 session-edge gap-midpoint wiring (DEC-GAP-MIDPOINT-CONDITIONS-001)
+# Group-15 session-edge gap-midpoint wiring (DEC-GAP-MIDPOINT-CONDITIONS-001)
 # ────────────────────────────────────────────────────────────────────────
 #
 # The STAGE-2 wiring pins: the X1/X2 capture + arm-from-bar-2 ordinal + the
@@ -966,7 +966,7 @@ from brutex.engine.stage1a import GAP_MID_DEPENDENT_MASK  # noqa: E402
 
 
 def _gap_bits(mask: int) -> tuple[bool, bool, bool]:
-    """(above, below, near) — the Group-13 bit triple of *mask*."""
+    """(above, below, near) — the Group-15 bit triple of *mask*."""
     return (
         bool(mask >> B.BIT_CLOSE_ABOVE_GAP_MID & 1),
         bool(mask >> B.BIT_CLOSE_BELOW_GAP_MID & 1),
@@ -1050,7 +1050,7 @@ def test_one_day_shaped_stream_stays_dark_via_the_arming_ordinal() -> None:
     """The load-bearing 1day abstain (design §3.2 mechanism correction).
 
     On a 1day-shaped stream EVERY bar is its session's FIRST TF bar, so the
-    arm-from-bar-2 ordinal keeps bits 60-62 dark — the manifest
+    arm-from-bar-2 ordinal keeps bits 66-68 dark — the manifest
     ``applies_to_1day`` flag is production-dormant on the spot-only engine,
     so the ordinal delivers the abstain, NOT the mask.
     """
@@ -1101,7 +1101,7 @@ def test_muhurat_session_never_becomes_x1() -> None:
 
 def test_sub_threshold_gap_still_mints_a_level() -> None:
     """The no-threshold direction law (design §3.1): a gap below the day-type
-    bits' 0.5% threshold still mints a gap-mid level — bits 60-62 and 48/49
+    bits' 0.5% threshold still mints a gap-mid level — bits 66-68 and 48/49
     legitimately disagree on sub-threshold days.
     """
     day1 = datetime(2024, 1, 2)
@@ -1120,7 +1120,7 @@ def test_sub_threshold_gap_still_mints_a_level() -> None:
 
 
 def test_contract_roll_clears_the_gap_mid_state_members() -> None:
-    """D11 total-reset membership: the three Group-13 members join the
+    """D11 total-reset membership: the three Group-15 members join the
     ``_roll_to_new_contract`` enumerated clear list — post-roll state ==
     fresh-builder state (the roll-segmentation equivalence oracle's premise).
     """
@@ -1139,7 +1139,7 @@ def test_contract_roll_clears_the_gap_mid_state_members() -> None:
 
 
 def test_collect_batch_inputs_emits_the_x1_day_tables() -> None:
-    """The prepass emits the Group-13 X1 day rows + the bps knob — the batch
+    """The prepass emits the Group-15 X1 day rows + the bps knob — the batch
     core's mint inputs (the lockstep half of the wiring; a missing emission
     would burn-in-mismatch and autorevert).
     """
@@ -1159,7 +1159,7 @@ def test_collect_batch_inputs_emits_the_x1_day_tables() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Group-13 §3.7 battery (the test stage, DEC-GAP-MIDPOINT-CONDITIONS-001)
+# Group-15 §3.7 battery (the test stage, DEC-GAP-MIDPOINT-CONDITIONS-001)
 # ────────────────────────────────────────────────────────────────────────
 
 from brutex.engine.combo_mask import mask_to_entry_signals  # noqa: E402
@@ -1183,7 +1183,7 @@ def _tf_bar(
 @pytest.mark.parametrize("tf_minutes", [3, 5, 15, 30])
 def test_gap_mid_arms_from_bar_2_on_each_tf(tf_minutes: int) -> None:
     """The arm-from-bar-2 law holds PER TIMEFRAME (design §3.3): on each of
-    several TF-shaped bar streams the Group-13 bits are 0 on the session's
+    several TF-shaped bar streams the Group-15 bits are 0 on the session's
     first TF bar and can arm from the second — the per-TF generalization the
     operator steer mandates (Stage-1A evaluates whatever TF bars the sweep
     loads; the arming ordinal is bucket-grid-agnostic).
@@ -1205,7 +1205,7 @@ def test_gap_mid_arms_from_bar_2_on_each_tf(tf_minutes: int) -> None:
 
 def test_first_stream_day_has_no_x1_and_stays_dark() -> None:
     """The dedicated first-stream-day pin (§3.7): with no prior session there
-    is NO X1, so bits 60-62 stay 0 on every bar of the stream's first day —
+    is NO X1, so bits 66-68 stay 0 on every bar of the stream's first day —
     including bars 2+ (the arming ordinal alone would have armed them)."""
     day = datetime(2024, 1, 2)
     bars = [
@@ -1338,7 +1338,7 @@ def _coarse_tf_gap_corpus(tf_minutes: int) -> list[CandleBar]:
 @pytest.mark.parametrize("tf_minutes", [180, 240])
 def test_gap_mid_gated_masks_are_zero_trade_on_coarse_tfs(tf_minutes: int) -> None:
     """The §3.4 disclosed inertness, pinned deterministically: every mask
-    whose ENTRY is gated by bits 60-62 is structurally ZERO-TRADE on TF=180
+    whose ENTRY is gated by bits 66-68 is structurally ZERO-TRADE on TF=180
     and TF=240.
 
     TF=240 has session buckets {09:15, 13:15} — the only armed bar (13:15)

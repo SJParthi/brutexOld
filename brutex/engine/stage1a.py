@@ -229,7 +229,7 @@ def _pivot_dependent_bits() -> int:
         B.BIT_GAP_DOWN_DAY,
         B.BIT_INSIDE_DAY,
         B.BIT_OUTSIDE_DAY,
-        # Group 13 — Central Pivot Range (bits 60-63): TC/BC derive from the
+        # Group 15 — Central Pivot Range (bits 60-63): TC/BC derive from the
         # SAME prev-day pivot anchor, so they ride the same first-day clear.
         B.BIT_ABOVE_CPR_TC,
         B.BIT_BELOW_CPR_BC,
@@ -243,7 +243,7 @@ def _pivot_dependent_bits() -> int:
 
 
 def _gap_mid_dependent_bits() -> int:
-    """Build the u128 mask of the Group-13 gap-midpoint bits (60-62).
+    """Build the u128 mask of the Group-15 gap-midpoint bits (60-62).
 
     The gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) needs BOTH the
     prior session's last-TF-bar edge (X1) AND the prior day's close (the gap
@@ -257,7 +257,7 @@ def _gap_mid_dependent_bits() -> int:
     Returns
     -------
     int
-        u128 bitmask with every Group-13 gap-midpoint bit set.
+        u128 bitmask with every Group-15 gap-midpoint bit set.
     """
     gap_bits = (
         B.BIT_CLOSE_ABOVE_GAP_MID,
@@ -276,15 +276,15 @@ FIB_DEPENDENT_MASK: Final[int] = _fib_dependent_bits()
 #: u128 mask of the prev-day pivot/PDH/day-type bits (cleared on the first day).
 PIVOT_DEPENDENT_MASK: Final[int] = _pivot_dependent_bits()
 
-#: u128 mask of the Group-13 gap-midpoint bits (cleared with the pivot anchor —
+#: u128 mask of the Group-15 gap-midpoint bits (cleared with the pivot anchor —
 #: no prior session ⇒ no X1 and no pdc ⇒ no level; DEC-GAP-MIDPOINT-CONDITIONS-001).
 GAP_MID_DEPENDENT_MASK: Final[int] = _gap_mid_dependent_bits()
 
 #: u128 mask of every bit cleared on the first (no-prior-day) IST day — the union
 #: of the prev-day pivot/PDH/day-type bits, the Fib-proximity bits AND the
-#: Group-13 gap-midpoint bits (DEC-GAP-MIDPOINT-CONDITIONS-001 — the gap trio
+#: Group-15 gap-midpoint bits (DEC-GAP-MIDPOINT-CONDITIONS-001 — the gap trio
 #: joined the set; the pre-gap first-day clear is unchanged in effect, since the
-#: evaluator leaves bits 60-62 at 0 whenever no level exists, so the golden
+#: evaluator leaves bits 66-68 at 0 whenever no level exists, so the golden
 #: fixtures (:mod:`tests.golden.test_engine_nifty_day_golden`) still pin the
 #: exact same matrix).
 ANCHOR_DEPENDENT_MASK: Final[int] = (
@@ -671,7 +671,7 @@ class Stage1AMatrixBuilder:
         self._daily_history: OrderedDict[date, DailyCandle] = OrderedDict()
         # Anchors broadcast across the current day, or None on the first day.
         self._anchors: _DayAnchors | None = None
-        # ── Group-13 session-edge gap-midpoint state (bits 60-62,
+        # ── Group-15 session-edge gap-midpoint state (bits 66-68,
         # DEC-GAP-MIDPOINT-CONDITIONS-001) ──
         # Running (hi, lo) of the CURRENT segment's most recent completed TF
         # bar — updated AFTER each bar's evaluation (the prior-history
@@ -687,7 +687,7 @@ class Stage1AMatrixBuilder:
         # The day's gap-midpoint level (int64 paisa), minted ONCE per day at
         # the roll via the shared Rust `compute_gap_mid` (Python never
         # re-implements the arithmetic). None ⇒ no level exists (zero gap /
-        # cold X1 / cold pdc) and the Group-13 bits stay 0. The session's
+        # cold X1 / cold pdc) and the Group-15 bits stay 0. The session's
         # FIRST TF bar additionally evaluates with NO level regardless (the
         # arm-from-bar-2 law — push() threads None on the roll branch).
         self._gap_mid_paisa: int | None = None
@@ -848,7 +848,7 @@ class Stage1AMatrixBuilder:
                 day_fib_levels.extend(fib_levels_list(fib))
                 day_has_pivot.append(has_pivot)
                 day_has_fib.append(has_fib)
-                # Group-13 X1 day row (DEC-GAP-MIDPOINT-CONDITIONS-001): the
+                # Group-15 X1 day row (DEC-GAP-MIDPOINT-CONDITIONS-001): the
                 # roll above already promoted the prior session's edge under
                 # the Muhurat skip law — project it into the batch core's day
                 # table (the `day_pivot_levels` pattern; the (0, 0) cold
@@ -889,7 +889,7 @@ class Stage1AMatrixBuilder:
             tod_col.append(tod_seconds)
             reset_col.append(contract_reset)
             day_index_col.append(len(day_has_pivot) - 1)
-            # push() tail position: the running Group-13 session-edge tracker
+            # push() tail position: the running Group-15 session-edge tracker
             # (read only by the NEXT bar's `_roll_to_new_day` as X1 — the
             # SAME builder state the streaming arm updates after evaluation).
             self._session_edge = (high_paisa, low_paisa)
@@ -1000,10 +1000,10 @@ class Stage1AMatrixBuilder:
                 bar_day, open_paisa, high_paisa, low_paisa, close_paisa
             )
             # This bar is the session's FIRST TF bar (a genuine IST day change,
-            # the stream's first bar, or the post-roll re-seed) — the Group-13
+            # the stream's first bar, or the post-roll re-seed) — the Group-15
             # arm-from-bar-2 law keys on exactly this branch
             # (DEC-GAP-MIDPOINT-CONDITIONS-001): on a 1day-shaped stream EVERY
-            # bar takes it, so bits 60-62 stay dark there BY CONSTRUCTION (the
+            # bar takes it, so bits 66-68 stay dark there BY CONSTRUCTION (the
             # load-bearing 1day abstain — the manifest applies_to_1day flag is
             # production-dormant on the spot-only engine).
             first_bar_of_day = True
@@ -1100,7 +1100,7 @@ class Stage1AMatrixBuilder:
 
         # Record this bar's flag AFTER evaluation (close == open → bearish).
         self._prior_history.update(close_paisa > open_paisa)
-        # Running session-edge tracker (Group 13): AFTER evaluation this bar
+        # Running session-edge tracker (Group 15): AFTER evaluation this bar
         # becomes the segment's most recent completed TF bar — read only at
         # the NEXT day roll as X1, never by its own evaluation (P-06).
         self._session_edge = (high_paisa, low_paisa)
@@ -1131,7 +1131,7 @@ class Stage1AMatrixBuilder:
         self._prev_day_ohlc = None  # → first-day _NON_ANCHOR_MASK clear fires
         self._daily_history.clear()  # weekly Fib anchors go cold → _NON_FIB_MASK
         self._anchors = None
-        # Group-13 gap-midpoint state joins the D11 enumerated clear list
+        # Group-15 gap-midpoint state joins the D11 enumerated clear list
         # (DEC-GAP-MIDPOINT-CONDITIONS-001): a stale pre-roll session edge /
         # level must never survive the roll — post-roll state == fresh-builder
         # state EXACTLY (the roll-segmentation equivalence oracle), and no
@@ -1185,7 +1185,7 @@ class Stage1AMatrixBuilder:
                 # carrying the last regular session forward. Look-ahead-clean: the
                 # decision keys ONLY on the just-completed day's own IST date. One
                 # WARN per skipped session (each completed day rolls exactly once).
-                # The Group-13 session edge rides the SAME skip
+                # The Group-15 session edge rides the SAME skip
                 # (DEC-GAP-MIDPOINT-CONDITIONS-001): `_prev_session_edge` is
                 # left UNTOUCHED, so a completed Muhurat session's last candle
                 # never becomes X1 — the prior REGULAR session's edge carries
@@ -1223,7 +1223,7 @@ class Stage1AMatrixBuilder:
         )
         self._today_ohlc = new_ohlc
         self._anchors = self._compute_anchors(bar_day, self._prev_day_ohlc)
-        # ── Group-13 gap-midpoint mint (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+        # ── Group-15 gap-midpoint mint (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
         # ONCE per day, from X1 (the promoted prior-session edge) + X2 (THIS
         # first bar's own high/low) + this bar's open + the prior day's close,
         # via the shared Rust `compute_gap_mid` (never re-implemented here).
