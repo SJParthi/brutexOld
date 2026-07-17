@@ -76,27 +76,56 @@ carries another casing. The current behavior is deliberately test-pinned
 compare would be a behavior change needing its own design pass on
 case-insensitive-filesystem semantics, never a silent edit.
 
-## Scoping (the coordinator-relayed WS-B obligation NG4E-1)
+## Scoping + the profile-free lane ASSIGNMENTS (NG4E-1 — the domain-less
+## arm CLOSED by the masquerade pin, DEC-WRITE-DOMAIN-CALLER-BINDING-001)
 
-The refusal binds **PROFILE-BOUND vendor-chain writers ONLY** — the staged
-pull chains a :class:`WriteDomain`-carrying vendor profile constructs.
-Maintenance / restore lanes are **profile-FREE by design** and never consult
-this module: the nightly restore (:mod:`brutex.nightly.restore` — its own
-verify-everything-then-write law) and the off-box restic restore
-(DEC-BACKUP-OFFBOX-001 — whole-root snapshots) legitimately write across the
-whole lake root, feed subtrees included; wrapping them in a per-vendor
-domain would break whole-lake disaster recovery for zero isolation gain
-(they never race a vendor chain — the restore runbooks stop the pulls
-first). HONEST ENUMERATION (the assurance MINOR fold): the restore lanes
-are not the only profile-free writers today — the lake healer
-(:mod:`brutex.data.lake_heal`), the Greeks enrich pass + bulk backfill
-(:mod:`brutex.data.greeks_enrich_pass` / :mod:`brutex.data.greeks_backfill`),
-the prebuild timeframe derive (:mod:`brutex.data.timeframe_materialize`) and
-the crossverify staging writer (:mod:`brutex.crossverify`) all write with NO
-profile and NO masquerade pin — they are UNASSIGNED, not exempted-by-law.
-The real close is the WS-C masquerade pin (a writer without a profile must
-not be able to silently write under ``feeds/``) — WS-C-owned, deliberately
-NOT built here.
+The refusal binds **PROFILE-BOUND vendor-chain writers** through
+:func:`assert_write_domain`; a profile-FREE
+:class:`~brutex.data.parquet_writer.ParquetWriter` now carries the MASQUERADE
+pin instead (:func:`assert_profile_free_dest` — a writer without a profile
+must not be able to silently write under ``feeds/``; every legitimate
+maintenance-lane dest today is outside ``feeds/``, so those lanes stay
+byte-identical). The RESTORE lanes stay wholly exempt: the nightly restore
+(:mod:`brutex.nightly.restore` — its own verify-everything-then-write law)
+and the off-box restic restore (DEC-BACKUP-OFFBOX-001 — whole-root
+snapshots) legitimately write across the whole lake root, feed subtrees
+included, and never route through :class:`ParquetWriter`; wrapping them in a
+per-vendor domain would break whole-lake disaster recovery for zero
+isolation gain (the restore runbooks stop the pulls first).
+
+LANE ASSIGNMENTS (the vendor-profile-registry deferral register's item (d)
+— PR #1570's on-branch ledger #1833, adopted-with-relocation by
+DEC-FEED-REGISTRY-COMMON-001 (MIGRATION.md #1903) — settled here):
+
+* the lake healer (:mod:`brutex.data.lake_heal`) — MAINTENANCE-EXEMPT:
+  its scanner walks only the primary ``bars/`` + ``options/`` trees (never
+  ``feeds/``), its heal rewrites carry their own containment rails
+  (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001), and its 1day recall derive routes
+  through the masquerade-covered shared writer;
+* the Greeks enrich pass + bulk backfill
+  (:mod:`brutex.data.greeks_enrich_pass` / :mod:`brutex.data.greeks_backfill`)
+  — MAINTENANCE-EXEMPT today (primary FNO tree, masquerade-covered);
+  VENDOR-CHAIN-TO-BE-WIRED when a feed vendor's Greeks binding lands
+  (ADR-0021 §17 WS-D / precondition P4 + the Pin D1-3 read twin — that
+  vendor's enrich writer is then constructed WITH its feed domain);
+* the prebuild timeframe derive (:mod:`brutex.data.timeframe_materialize` +
+  :mod:`brutex.data.spot_daily_resample`) — MAINTENANCE-EXEMPT today
+  (primary spot+futures trees, masquerade-covered);
+  VENDOR-CHAIN-TO-BE-WIRED when a feed vendor's prebuild stage lands
+  (ADR-0021 §12.1 — the feed prebuild writer is constructed with the feed
+  profile's domain over its feed root);
+* the crossverify staging writer (:mod:`brutex.crossverify`) —
+  MAINTENANCE-EXEMPT: reads the primary lake and stages CSV bytes under its
+  own ``.crossverify/`` staging tree (never a ``feeds/`` writer); its pull
+  legs ride the domain-bound live builders.
+
+Honest residual (disclosed, not claimed): the masquerade judgment is
+LAKE-RELATIVE — a profile-free writer CONSTRUCTED with its ``lake_root``
+already INSIDE a feed subtree mints dests that are ``bars/``-relative to its
+OWN root, invisible to this pin. That construction shape is owned by the
+profile/slot layer (a feed vendor's writer is constructed WITH its domain —
+the ``vendor_job_slots`` force-injection law), and every primary maintenance
+lane is constructed at the primary root today.
 
 ## Restore ordering across dual window ledgers (the coordinator-relayed WS-B
 ## obligation NG4E-2 — SETTLED per the operator ruling of 2026-07-15 as
@@ -138,15 +167,25 @@ vendor chain.
 No restore lane consumes this in WS-B (the wiring is WS-C+, alongside Pin
 D1-2's backup-allowlist add).
 
-## WS-B envelope (honest limits)
+## Consumption (the Pin D1-1 caller binding —
+## DEC-WRITE-DOMAIN-CALLER-BINDING-001)
 
-This module ships the PRIMITIVE + its negative-pin battery ONLY. NO writer
-consults it yet — wiring :func:`assert_write_domain` into the staged
-vendor-chain writers (and the Pin D1-3 read-side twin on the Greeks
-spot-join) is WS-C, alongside the ``VendorPullProfile`` registry that
-constructs the domains. Cost: one guarded ``Path.resolve`` + one ``lstat``
-swap-rail probe + O(subtrees) tuple-prefix compares per asserted dest —
-O(1) in lake size.
+The WS-B "NO writer consults it yet" envelope is CLOSED:
+:class:`~brutex.data.parquet_writer.ParquetWriter` consults this module at
+its ONE minted-dest chokepoint (``write()``, before any directory/lock/byte
+is touched) — a domain-carrying writer runs :func:`assert_write_domain`, a
+profile-FREE writer runs the :func:`assert_profile_free_dest` masquerade pin
+— and the three live production pull sink builders
+(``pull_controller._build_live_spot_adapter`` +
+``historical_pull._build_live_client`` + ``cli._build_live_groww_spot``,
+the last bound at the hostile-review MINOR-2 fold) bind
+:func:`primary_write_domain`.
+The binding landed under DIRECT in-session user approval (2026-07-16 — the
+operator's "accepted" on the explicit authorization request; the WS-B/WS-C
+relayed-authority deferral is thereby resolved). The Pin D1-3 read-side twin
+on the Greeks spot-join stays WS-D P4 (ADR-0021 §17). Cost: one guarded
+``Path.resolve`` + one ``lstat`` swap-rail probe + O(subtrees) tuple-prefix
+compares per asserted dest — O(1) in lake size.
 """
 
 from __future__ import annotations
@@ -164,6 +203,10 @@ FEEDS_COMPONENT: Final[str] = "feeds"
 
 #: The primary domain's profile token (the Groww-exclusive primary tree).
 PRIMARY_DOMAIN_NAME: Final[str] = "primary"
+
+#: The refusal-message token for a PROFILE-FREE writer (the masquerade pin —
+#: DEC-WRITE-DOMAIN-CALLER-BINDING-001; NG4E-1's domain-less-writer arm).
+PROFILE_FREE_NAME: Final[str] = "profile-free"
 
 #: A feed subtree must be at least ``feeds/<vendor>`` — two path components
 #: (ADR-0021 Decision 1: a bare ``feeds`` claims the whole feed root).
@@ -325,7 +368,9 @@ def _is_under(rel_parts: tuple[str, ...], subtree_parts: tuple[str, ...]) -> boo
     return rel_parts[: len(subtree_parts)] == subtree_parts
 
 
-def _assert_feeds_component_not_swapped(dest: Path, resolved: Path, domain: WriteDomain) -> None:
+def _assert_feeds_component_not_swapped(
+    dest: Path, resolved: Path, *, resolved_root: Path, domain_name: str
+) -> None:
     """The round-6 IN-LAKE component-swap rail (the assurance NG4E-2 MAJOR fold).
 
     The resolved-path judgment in :func:`assert_write_domain` FAILS OPEN when
@@ -348,9 +393,13 @@ def _assert_feeds_component_not_swapped(dest: Path, resolved: Path, domain: Writ
     resolve are GUARDED (the R5 idiom) — an unprobeable / unresolvable
     ``feeds`` component is the same typed fail-closed refusal, never a bare
     ``RuntimeError``. Cost: one ``lstat`` per asserted dest (+ one guarded
-    resolve ONLY when the component is actually a symlink).
+    resolve ONLY when the component is actually a symlink). Shared by
+    :func:`assert_write_domain` (per-domain) AND the profile-free
+    :func:`assert_profile_free_dest` masquerade pin — *resolved_root* /
+    *domain_name* are passed explicitly so the pin needs no
+    :class:`WriteDomain` (DEC-WRITE-DOMAIN-CALLER-BINDING-001).
     """
-    feeds_component = domain.resolved_root / FEEDS_COMPONENT
+    feeds_component = resolved_root / FEEDS_COMPONENT
     try:
         if not feeds_component.is_symlink():
             return
@@ -358,7 +407,7 @@ def _assert_feeds_component_not_swapped(dest: Path, resolved: Path, domain: Writ
     except (OSError, RuntimeError) as exc:
         raise WriteDomainError(
             f"cannot probe the '{FEEDS_COMPONENT}/' component under "
-            f"{domain.resolved_root} for the {domain.name!r} write-domain check: "
+            f"{resolved_root} for the {domain_name!r} write-domain check: "
             f"{exc} — refusing to touch {dest}"
         ) from exc
     if resolved.is_relative_to(swapped_target):
@@ -366,7 +415,7 @@ def _assert_feeds_component_not_swapped(dest: Path, resolved: Path, domain: Writ
             f"the '{FEEDS_COMPONENT}/' component under the lake root is a SYMLINK "
             f"(-> {swapped_target}) — the feed tree has been swapped out, and write "
             f"dest {dest} (resolved {resolved}) sits under its target; refused for "
-            f"the {domain.name!r} domain (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 "
+            f"the {domain_name!r} domain (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 "
             "round-6 in-lake swap rail; ADR-0021 Pin D1-1)"
         )
 
@@ -419,7 +468,9 @@ def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
     # judgment) so a swapped `feeds` component gets the NAMED refusal on
     # both profiles — including the out-of-lake-target shape, which would
     # otherwise fall into the generic outside-the-root arm.
-    _assert_feeds_component_not_swapped(dest, resolved, domain)
+    _assert_feeds_component_not_swapped(
+        dest, resolved, resolved_root=domain.resolved_root, domain_name=domain.name
+    )
     try:
         rel_parts = resolved.relative_to(domain.resolved_root).parts
     except ValueError as exc:
@@ -456,12 +507,90 @@ def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
             )
 
 
+def resolve_profile_free_root(lake_root: Path) -> Path:
+    """Resolve *lake_root* ONCE for repeated masquerade-pin asserts — fail-loud.
+
+    The profile-free twin of the registration-time resolve (the same guarded
+    idiom): a caller holding a profile-FREE writer resolves its lake root
+    once (cache it) and passes the result to every
+    :func:`assert_profile_free_dest` call — never a per-write root resolve
+    (DEC-WRITE-DOMAIN-CALLER-BINDING-001). An unresolvable root (symlink
+    loop / OS error) is the typed :class:`WriteDomainError`.
+    """
+    return _resolve_registration_root(lake_root)
+
+
+def assert_profile_free_dest(dest: Path, resolved_root: Path) -> None:
+    """The MASQUERADE pin: a PROFILE-FREE writer must never write under ``feeds/``.
+
+    DEC-WRITE-DOMAIN-CALLER-BINDING-001 — the close of NG4E-1's
+    domain-less-writer arm (the vendor-profile-registry deferral register's
+    item (b) — PR #1570's on-branch ledger #1833): a writer
+    constructed with NO :class:`WriteDomain` refuses, typed, any dest whose
+    path RELATIVE to *resolved_root* (the writer's own lake root, resolved
+    once via :func:`resolve_profile_free_root`) enters the ``feeds/``
+    subtree — a domain-less writer silently landing bytes in a feed vendor's
+    tree is the MASQUERADE class (it would wear the feed vendor's provenance
+    without its profile). Composes the round-6 in-lake swap rail
+    (:func:`_assert_feeds_component_not_swapped`), so a
+    ``bars/``-addressed dest that RESOLVES under a swapped
+    ``<root>/feeds`` symlink target refuses too.
+
+    Deliberately NARROW (the lane-assignment law in the module docstring —
+    every maintenance lane stays byte-identical today):
+
+    * a dest OUTSIDE *resolved_root* entirely is NOT the masquerade class —
+      it passes this pin unjudged (legacy behavior preserved; out-of-root
+      containment belongs to the per-writer rails, e.g. the option writer's
+      heal containment, never to this feeds-only pin);
+    * every component compare is byte/case-SENSITIVE (the module docstring's
+      case-sensitivity section — production writers mint only the lowercase
+      :data:`FEEDS_COMPONENT`);
+    * the LAKE-RELATIVE residual: a profile-free writer whose OWN root sits
+      inside a feed subtree is invisible here (see the module docstring's
+      honest-residual paragraph — the profile/slot layer owns that
+      construction shape).
+
+    O(1) in lake size: one guarded dest resolve + one ``lstat`` swap-rail
+    probe + one tuple-prefix compare.
+    """
+    try:
+        resolved = dest.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WriteDomainError(
+            f"cannot resolve write dest {dest} for the {PROFILE_FREE_NAME!r} "
+            f"masquerade check: {exc} — refusing to touch it"
+        ) from exc
+    _assert_feeds_component_not_swapped(
+        dest, resolved, resolved_root=resolved_root, domain_name=PROFILE_FREE_NAME
+    )
+    try:
+        rel_parts = resolved.relative_to(resolved_root).parts
+    except ValueError:
+        # Out-of-root is NOT the masquerade class — this pin judges ONLY the
+        # feeds/ subtree of the writer's own root (deliberately narrow; see
+        # the docstring). A profile-free writer's other dests keep today's
+        # behavior byte-identical.
+        return
+    if rel_parts[:1] == (FEEDS_COMPONENT,):
+        raise WriteDomainError(
+            f"write dest {dest} (resolved {resolved}) sits under the "
+            f"'{FEEDS_COMPONENT}/' feed prefix but the writer carries NO write "
+            "domain — the profile-free MASQUERADE class: a domain-less writer "
+            "must never silently write into a feed vendor's tree "
+            "(DEC-WRITE-DOMAIN-CALLER-BINDING-001; ADR-0021 Pin D1-1 / NG4E-1)"
+        )
+
+
 __all__ = [
     "FEEDS_COMPONENT",
     "PRIMARY_DOMAIN_NAME",
+    "PROFILE_FREE_NAME",
     "WriteDomain",
     "WriteDomainError",
+    "assert_profile_free_dest",
     "assert_write_domain",
     "feeds_write_domain",
     "primary_write_domain",
+    "resolve_profile_free_root",
 ]

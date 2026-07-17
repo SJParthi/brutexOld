@@ -674,6 +674,7 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
+    from brutex.data.write_domain import primary_write_domain
 
     del instruments  # the Groww adapter carries the whole master index (O(1) resolve)
     aws_creds = resolve_groww_aws_credentials()
@@ -694,7 +695,15 @@ def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SD
     adapter = GrowwMarketAdapter(
         client=client, index=index, capture_hook_factory=make_capture_hook_factory(lake_root)
     )
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    # Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001): the live
+    # spot pull writes under the PRIMARY (Groww-exclusive) write domain — a
+    # mis-rooted dest (e.g. under `feeds/<vendor>/`) refuses typed BEFORE any
+    # byte is touched; every legitimate primary dest passes silently (the A/B
+    # byte-identity pinned through the real writer path). Wiring pinned by
+    # tests/unit/test_write_domain_binding_pin.py.
+    sink = ParquetBarSink(
+        writer=ParquetWriter(lake_root=lake_root, write_domain=primary_write_domain(lake_root))
+    )
     return adapter, sink
 
 
