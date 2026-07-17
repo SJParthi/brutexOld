@@ -1296,7 +1296,7 @@ def test_kernel_matches_python_oracle_on_real_inputs() -> None:
 # min_sharpe=nextafter(S*, -inf) → it MUST pass) flips on ANY ≥1-ULP drift
 # of that fold's kernel Sharpe, in either direction. Fail-against-mutant-
 # wheel PROVEN for the op-order swap (M11) and the MIN_SAMPLES 2→1 mutant
-# (M10) — the MIGRATION.md #1728 round-5 record carries the transcript.
+# (M10) — the MIGRATION.md #1928 round-5 record carries the transcript.
 
 
 def _mutant_order_fold_sharpe(

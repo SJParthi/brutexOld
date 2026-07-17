@@ -652,7 +652,7 @@ def _check_one_wheel_freshness(
     bitwise-refold pins, cargo-mutants-gated) at the Rust-source level, plus
     the Python-side parity/golden suites whose ULP-boundary discriminators
     kill rounding-order drift in the shipped WHEEL itself (refuter round 5,
-    MIGRATION.md #1728 — value-level parity cases alone were proven blind to
+    MIGRATION.md #1928 — value-level parity cases alone were proven blind to
     a 1-ULP fold-op-order mutant wheel). Likewise, a NON-editable wheel install whose
     default fingerprint ships inside the wheel itself self-snapshots at
     build time; the check has teeth when the fingerprint read is the repo
@@ -782,7 +782,7 @@ def check_fno_math_wheel_freshness(
     CI nets: the in-crate cargo bit-level tests at the Rust-source level plus
     the Python-side parity/golden suites, whose ULP-boundary discriminators
     reach WHEEL-level rounding-order drift too (refuter round 5, MIGRATION.md
-    #1728 — value-level parity cases alone were proven blind to that class).
+    #1928 — value-level parity cases alone were proven blind to that class).
 
     Parameters
     ----------

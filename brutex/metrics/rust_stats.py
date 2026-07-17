@@ -422,7 +422,7 @@ def _valid_pass_count(result: object, n_total: int) -> TypeGuard[int]:
     (nextafter-bracketed thresholds at achieved fold Sharpes over
     NON-power-of-2 group counts) fail on any kernel whose fold arithmetic
     drifts by even one ULP on those fixtures, the class the value-level
-    parity cases alone were proven blind to (MIGRATION.md #1728 round 5).
+    parity cases alone were proven blind to (MIGRATION.md #1928 round 5).
     """
     return type(result) is int and 0 <= result <= n_total
 

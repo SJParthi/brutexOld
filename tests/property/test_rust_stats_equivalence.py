@@ -317,7 +317,7 @@ def test_ulp_bracket_non_pow2_group_counts_rate_level() -> None:
     """Non-power-of-2 group sizes (20 samples / 3 groups → 7/7/6) with the
     threshold ULP-bracketed at an achieved fold Sharpe — the deterministic
     rate-level discriminator that kills fold-op-order kernel drift in the
-    shipped wheel (fail-against-mutant-wheel proven — MIGRATION.md #1728
+    shipped wheel (fail-against-mutant-wheel proven — MIGRATION.md #1928
     round-5 record)."""
     returns = [
         1.2e-05, 0.002987, -0.002741, -0.008906, -0.004547,

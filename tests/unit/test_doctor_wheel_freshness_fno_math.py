@@ -26,7 +26,7 @@ drift — that class is covered by the SHIPPED source-digest handshake
 previously named here) plus the LAYERED CI correctness nets: the in-crate
 cargo bit-level tests at the Rust-source level and the Python-side
 parity/golden suites, whose ULP-boundary discriminators reach WHEEL-level
-rounding-order drift too (refuter round 5, MIGRATION.md #1728 — value-level
+rounding-order drift too (refuter round 5, MIGRATION.md #1928 — value-level
 parity cases alone were proven blind to a 1-ULP fold-op-order mutant wheel).
 """
 
