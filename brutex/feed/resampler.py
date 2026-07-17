@@ -57,34 +57,22 @@ from datetime import UTC, datetime
 from typing import Final
 
 from brutex.data.models import CandleBar
+from brutex.data.timeframes import ALL_TFS, TfAnchor
 from brutex.feed.errors import ResampleError
 
-#: The sub-day canonical candle intervals in seconds. Keep aligned with
-#: :data:`brutex.data.partition.VALID_INTERVALS` but note that
-#: ``1week`` and ``1month`` are absent on purpose — see module
-#: docstring (P3 calendar work).
+#: The sub-day canonical candle intervals in seconds — DERIVED from the
+#: ``brutex.data.timeframes.ALL_TFS`` registry (DEC-TF-REGISTRY-DYNAMIC-001),
+#: so this label vocabulary can never drift from the canonical 21. ``1week``
+#: and ``1month`` are absent on purpose — see module docstring (P3 calendar
+#: work). HONEST QUIRK (sync-test-pinned): ``1day`` maps to 86_400 WALL-CLOCK
+#: seconds here — THIS legacy epoch-anchored bucketer's calendar day — while
+#: the registry's daily TRADING duration is 22_500 s (the
+#: ``trading_minutes_for_lake_interval`` law); every production consumer of
+#: this dict uses it as a LABEL vocabulary only (the seconds values are read
+#: solely by the production-dead ``resample_bars``).
 INTERVAL_SECONDS: Final[dict[str, int]] = {
-    "1minute": 60,
-    "2minute": 120,
-    "3minute": 180,
-    "4minute": 240,
-    "5minute": 300,
-    "6minute": 360,
-    "7minute": 420,
-    "8minute": 480,
-    "9minute": 540,
-    "10minute": 600,
-    "11minute": 660,
-    "12minute": 720,
-    "13minute": 780,
-    "14minute": 840,
-    "15minute": 900,
-    "30minute": 1800,
-    "1hour": 3600,
-    "2hour": 7200,
-    "3hour": 10800,
-    "4hour": 14400,
-    "1day": 86400,
+    spec.lake_label: (86_400 if spec.anchor is TfAnchor.IST_DAY else spec.duration_s)
+    for spec in ALL_TFS
 }
 
 #: The subset of :data:`INTERVAL_SECONDS` that the v1 resampler accepts

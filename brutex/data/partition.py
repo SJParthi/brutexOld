@@ -32,7 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from brutex.data.errors import PartitionError
-from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+from brutex.data.timeframes import ALL_LAKE_INTERVAL_LABELS
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants
@@ -62,11 +62,12 @@ MONTHS_PER_YEAR: Final[int] = 12
 PARTITION_PATH_COMPONENTS: Final[int] = 7
 
 #: The 23 canonical candle intervals accepted in partition paths: the 21
-#: Track 1 timeframe labels (DEC-TF-VOCAB-21-001 — derived from the canonical
-#: ``brutex.data.timeframes.LAKE_INTERVAL_LABELS`` map, the single source of
-#: truth) plus the two calendar-aware labels (``1week``/``1month``, P3
-#: ADR-0014) that pre-date the 21-TF ladder.
-VALID_INTERVALS: Final[frozenset[str]] = frozenset(LAKE_INTERVAL_LABELS.values()) | frozenset(
+#: Track 1 timeframe lake labels (DEC-TF-REGISTRY-DYNAMIC-001 — derived from
+#: the canonical ``brutex.data.timeframes.ALL_TFS`` registry via
+#: ``ALL_LAKE_INTERVAL_LABELS``, so a newly registered TfSpec's lake_label is
+#: automatically a valid partition interval) plus the two calendar-aware
+#: labels (``1week``/``1month``, P3 ADR-0014) that pre-date the 21-TF ladder.
+VALID_INTERVALS: Final[frozenset[str]] = frozenset(ALL_LAKE_INTERVAL_LABELS) | frozenset(
     {
         "1week",
         "1month",

@@ -917,14 +917,14 @@ jobs:
           #       package — seeded deterministic generator + O(1)-per-bar candle
           #       maths + instrument index + MarketAdapter composition.
           if compgen -G "tests/unit/test_synthetic_adapter.py" > /dev/null; then
-            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py
+            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py tests/unit/test_synthetic_constants_registry_pin.py
           else
             echo "(brutex.adapters.synthetic test file not present yet — gate inactive)"
           fi
           # 13b · brutex.data.partition (79 stmts, 24 branches, 70 tests — DEC-MUTATION-RUNTIME-001 mutation pins)
           #       Lake partition path computation (year/month/symbol/tf)
           if compgen -G "tests/unit/test_data_partition.py" > /dev/null; then
-            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py
+            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py tests/unit/test_data_partition_registry_pin.py
           else
             echo "(brutex.data.partition test file not present yet — gate inactive)"
           fi
@@ -1500,7 +1500,7 @@ jobs:
           #       honest mark — code remains defensive in case the guard at
           #       143-144 is removed in the future.
           if compgen -G "tests/unit/test_feed_resampler.py" > /dev/null; then
-            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py
+            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py tests/unit/test_feed_resampler_registry_pin.py
           else
             echo "(brutex.feed.resampler test file not present yet — gate inactive)"
           fi
@@ -1549,7 +1549,7 @@ jobs:
           #       at import time, which is impossible to reach in normal
           #       test paths without monkey-patching pre-import.
           if compgen -G "tests/unit/test_timeframes.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py
+            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py tests/unit/test_timeframes_registry.py
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
@@ -1565,7 +1565,7 @@ jobs:
           #       OHLCV-only test_tf_resampler.py never grows that column).
           #       Both files are required to keep this module 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
