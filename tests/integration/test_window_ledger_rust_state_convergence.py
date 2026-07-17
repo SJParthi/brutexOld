@@ -44,7 +44,8 @@ brutex_lake = pytest.importorskip(
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
-from brutex.data import lake_rust_ledger_render, window_ledger_store as wls  # noqa: E402
+from brutex.data import lake_rust_ledger_render  # noqa: E402
+from brutex.data import window_ledger_store as wls  # noqa: E402
 from brutex.data.fetch_coverage import WindowKey  # noqa: E402
 from brutex.data.window_ledger import EMPTY, FAILED, PLANNED, SUCCESS, WindowLedger  # noqa: E402
 
@@ -152,9 +153,7 @@ def _drive_pull_with_crash(lake: Path, scenario: str) -> dict[str, Any]:
     resumed = wls.load_window_ledger(lake)
     assert resumed.load_failed is False
     reloaded_rows = resumed.to_rows()
-    resumed_keys = sorted(
-        int(r.security_id[3:]) for r in resumed.records() if r.status == PLANNED
-    )
+    resumed_keys = sorted(int(r.security_id[3:]) for r in resumed.records() if r.status == PLANNED)
     for i in resumed_keys:
         _record(resumed, i, minute=100 + i)
     if resumed.dirty_rows():
@@ -298,5 +297,7 @@ def test_repull_idempotence_over_rust_rendered_file(
     # non-empty by fixture construction) and the retries re-settled.
     statuses = {row[5] for row in control_rows}
     assert FAILED in statuses or SUCCESS in statuses
-    retried = [row for row in control_rows if str(row[10] or "").endswith("+00:00") and row[5] != PLANNED]
+    retried = [
+        row for row in control_rows if str(row[10] or "").endswith("+00:00") and row[5] != PLANNED
+    ]
     assert retried

@@ -85,11 +85,11 @@ from brutex.calendars.nse import IST
 from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.interior_gap_detect import interior_gap_runs
 from brutex.data.lake_rust_ledger_render import (
     lake_rust_ledger_render_enabled,
     render_ledger_parquet_bytes,
 )
-from brutex.data.interior_gap_detect import interior_gap_runs
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,

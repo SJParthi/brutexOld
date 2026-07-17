@@ -356,8 +356,7 @@ def _ledger_frame(rows: Sequence[tuple[Any, ...]], pl: ModuleType) -> Any:
     16-column frame (the empty-ledger save shape).
     """
     schema = {
-        name: (pl.String if name in _LEDGER_STRING_COLUMNS else pl.Int64)
-        for name in LEDGER_COLUMNS
+        name: (pl.String if name in _LEDGER_STRING_COLUMNS else pl.Int64) for name in LEDGER_COLUMNS
     }
     return pl.DataFrame(list(rows), schema=schema, orient="row", strict=True)
 

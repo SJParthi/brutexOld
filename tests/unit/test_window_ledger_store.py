@@ -3138,9 +3138,7 @@ class TestLedgerRustRenderSeam:
         ledger.plan(_key("SENSEX"), now=_NOW)  # the last_attempt_at None arm
         return ledger
 
-    def test_flag_off_bytes_identical_to_direct_pyarrow_path_write(
-        self, tmp_path: Path
-    ) -> None:
+    def test_flag_off_bytes_identical_to_direct_pyarrow_path_write(self, tmp_path: Path) -> None:
         # The seam restructure pin: the OFF arm renders to a BUFFER then
         # writes the bytes, where the pre-conversion writer ran
         # ``pq.write_table(table, tmp)`` straight at the temp PATH — the

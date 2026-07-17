@@ -49,7 +49,8 @@ pq = pytest.importorskip("pyarrow.parquet")
 duckdb = pytest.importorskip("duckdb")
 
 from brutex.dashboard import db_view  # noqa: E402
-from brutex.data import lake_rust_ledger_render, window_ledger_store as wls  # noqa: E402
+from brutex.data import lake_rust_ledger_render  # noqa: E402
+from brutex.data import window_ledger_store as wls  # noqa: E402
 from brutex.data.fetch_coverage import WindowKey  # noqa: E402
 from brutex.data.window_ledger import WindowLedger  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
@@ -99,7 +100,9 @@ def _seed_base(lake: Path) -> None:
 def _seed_deltas(lake: Path) -> None:
     """Two deltas: a brand-new key, then a FAILED demotion of a base SUCCESS."""
     live = wls.load_window_ledger(lake)
-    live.record(_key(7), raw_bars=7, error_type=None, bars_appended=7, now=_T0 + timedelta(minutes=30))
+    live.record(
+        _key(7), raw_bars=7, error_type=None, bars_appended=7, now=_T0 + timedelta(minutes=30)
+    )
     assert wls.append_ledger_delta(live, lake) == 1
     live.record(
         _key(1), raw_bars=0, error_type="timeout", bars_appended=0, now=_T0 + timedelta(minutes=40)
@@ -131,9 +134,7 @@ def _fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture
-def twin_lakes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Path, Path]:
+def twin_lakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """(py_lake, rust_lake) — identical records, opposite writer arms."""
     py_lake = _build_lake(tmp_path / "py", monkeypatch, base_rust=False, delta_rust=False)
     rust_lake = _build_lake(tmp_path / "rust", monkeypatch, base_rust=True, delta_rust=True)
@@ -224,9 +225,7 @@ class TestWindowLedgerPageParity:
         for name, lake in (("py", py_lake), ("rust", rust_lake)):
             monkeypatch.setattr(db_view, "_LEDGER_READ_CACHE", db_view._make_ledger_read_cache())
             with duckdb.connect() as conn, capture_logs() as logs:
-                page, total = db_view.query_window_ledger_page(
-                    conn, lake, limit=500, offset=0
-                )
+                page, total = db_view.query_window_ledger_page(conn, lake, limit=500, offset=0)
             # THE FALLBACK-ABSENCE PIN: a rust base must never silently defer
             # to the legacy parse (the perf-silent trap — a fallback would
             # STILL return correct rows, so only the LOG proves the fast path
@@ -248,9 +247,7 @@ class TestWindowLedgerPageParity:
             assert page == db_view.window_ledger_rows_cached(lake)
         assert pages["py"] == pages["rust"]
 
-    def test_counts_total_and_since_identical(
-        self, twin_lakes: tuple[Path, Path]
-    ) -> None:
+    def test_counts_total_and_since_identical(self, twin_lakes: tuple[Path, Path]) -> None:
         py_lake, rust_lake = twin_lakes
         # The since instant sits BETWEEN record stamps so the ISO-STRING
         # compare arm genuinely filters (anti-vacuous below).
@@ -298,9 +295,7 @@ class TestWindowLedgerPageParity:
 
 
 class TestLoadRoundTrip:
-    def test_load_window_ledger_rows_identical(
-        self, twin_lakes: tuple[Path, Path]
-    ) -> None:
+    def test_load_window_ledger_rows_identical(self, twin_lakes: tuple[Path, Path]) -> None:
         py_lake, rust_lake = twin_lakes
         py_rows = wls.load_window_ledger(py_lake).to_rows()
         rust_rows = wls.load_window_ledger(rust_lake).to_rows()
@@ -319,9 +314,7 @@ class TestLoadRoundTrip:
 
 
 class TestSchemaProbeAndFooterInertness:
-    def test_sixteen_col_probe_outcome_identical(
-        self, twin_lakes: tuple[Path, Path]
-    ) -> None:
+    def test_sixteen_col_probe_outcome_identical(self, twin_lakes: tuple[Path, Path]) -> None:
         # The legacy-12-col defer law: BOTH writers emit the full 16-column
         # schema, so the LIMIT 0 description passes the probe on both — the
         # probe OUTCOME (not just the row payload) is pinned equal.

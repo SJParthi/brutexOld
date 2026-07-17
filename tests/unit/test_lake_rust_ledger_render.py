@@ -153,8 +153,7 @@ class TestFlagParsing:
 
     def test_env_name_and_constants_pinned(self) -> None:
         assert (
-            lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV
-            == "BRUTEX_LAKE_RUST_LEDGER_RENDER"
+            lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV == "BRUTEX_LAKE_RUST_LEDGER_RENDER"
         )
         assert lake_rust_ledger_render.BURN_IN_SAMPLES == 16
         assert lake_rust_ledger_render._CRATE_API == (
@@ -188,16 +187,10 @@ class TestSchemaDriftPins:
         frame = lake_rust_ledger_render._ledger_frame(_rows(5), pl)
         assert frame.columns == list(lake_rust_ledger_render.LEDGER_COLUMNS)
         for name in lake_rust_ledger_render.LEDGER_COLUMNS:
-            want = (
-                pl.String
-                if name in lake_rust_ledger_render._LEDGER_STRING_COLUMNS
-                else pl.Int64
-            )
+            want = pl.String if name in lake_rust_ledger_render._LEDGER_STRING_COLUMNS else pl.Int64
             assert frame.schema[name] == want, name
         empty = lake_rust_ledger_render._ledger_frame([], pl)
-        assert empty.height == 0 and empty.columns == list(
-            lake_rust_ledger_render.LEDGER_COLUMNS
-        )
+        assert empty.height == 0 and empty.columns == list(lake_rust_ledger_render.LEDGER_COLUMNS)
 
 
 class TestResetSeamAndLatch:
@@ -207,10 +200,9 @@ class TestResetSeamAndLatch:
         lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
         assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
         assert (
-            lake_rust_ledger_render._BURN_IN_REMAINING[0]
-            == lake_rust_ledger_render.BURN_IN_SAMPLES
+            lake_rust_ledger_render._BURN_IN_REMAINING[0] == lake_rust_ledger_render.BURN_IN_SAMPLES
         )
-        assert lake_rust_ledger_render._OBSERVABILITY_MEMO == set()
+        assert set() == lake_rust_ledger_render._OBSERVABILITY_MEMO
 
     def test_reset_remaining_zero_is_steady_state(self) -> None:
         lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests(remaining=0)
@@ -238,9 +230,7 @@ class TestResetSeamAndLatch:
 
 
 class TestImportGuard:
-    def test_absent_wheel_latches_crate_unavailable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_absent_wheel_latches_crate_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, None)
         with capture_logs() as logs:
             served = _seam()
@@ -256,9 +246,7 @@ class TestImportGuard:
         assert served == _oracle_bytes(_rows())
         assert lake_rust_ledger_render._DISABLED_REASON[0] == "crate_stale"
 
-    def test_latched_seam_short_circuits_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_latched_seam_short_circuits_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[int] = []
 
         def _bomb(ipc: bytes) -> bytes:
@@ -302,9 +290,7 @@ class TestVersionGuard:
         with pytest.raises(MemoryError):
             _seam()
 
-    def test_version_mismatch_latches_naming_both(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_version_mismatch_latches_naming_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, _fake_crate(lambda ipc: b"x", pinned="9.99.9"))
         with capture_logs() as logs:
             assert _seam() == _oracle_bytes(_rows())
