@@ -1553,8 +1553,9 @@ jobs:
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
-          # 21c · brutex.data.tf_resampler (48 stmts, 20 branches —
-          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard)
+          # 21c · brutex.data.tf_resampler (57 stmts, 26 branches —
+          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard,
+          #       then the DEC-LAKE-RUST-RESAMPLE-001 seam branch)
           #       Closes 94.74→100% via 1 surgical test
           #       (`test_non_dataframe_input_raises_typeerror` covers line
           #       77 TypeError for non-polars.DataFrame input).
@@ -1563,9 +1564,12 @@ jobs:
           #       reachable ONLY from a frame carrying an `open_interest`
           #       column, which test_fno_resample.py provides (the
           #       OHLCV-only test_tf_resampler.py never grows that column).
-          #       Both files are required to keep this module 100%.
+          #       DEC-LAKE-RUST-RESAMPLE-001: the flag-ON seam branch is
+          #       reachable only via test_tf_resampler_rust_seam.py (the
+          #       stem-matched seam-wiring pins — the feed_replay_rust_seam
+          #       precedent). All the files are required for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_rust_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
