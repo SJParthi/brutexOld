@@ -77,16 +77,17 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
-from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
+from brutex.calendars.nse import IST_FIXED_OFFSET, SESSION_OPEN_IST, has_muhurat_session
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
+from brutex.data.session import ist_offset_duration
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
 
@@ -102,7 +103,9 @@ if TYPE_CHECKING:
 #: localize a vendor ``00:00:00 IST`` daily timestamp, so the re-stamped UTC instant
 #: of a resampled daily bar is byte-identical to a vendor-fetched one (the dedup
 #: identity). India has no DST, so a fixed offset is exact for the 2020+ scope.
-_IST = timezone(timedelta(hours=5, minutes=30))
+#: The ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_FIXED_OFFSET
 
 #: Structured logger — every degrade (no 1-minute to fill from / a quarantined
 #: window) is logged, so a resample-fill pass is visible in /logs (Golden Rule #10).
@@ -295,7 +298,7 @@ def detect_daily_open_substitutions(
 
     if df_1m.is_empty():
         return DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
-    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    ist = pl.col("ts_utc") + ist_offset_duration()
     firsts = (
         df_1m.select(ist.alias("_ist"))
         .with_columns(pl.col("_ist").dt.date().alias("_ist_date"))
@@ -1182,7 +1185,7 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         ).collect()
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
-        ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
+        ist_date = (pl.col("ts_utc") + ist_offset_duration()).dt.date()
         frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))

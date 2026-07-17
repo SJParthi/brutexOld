@@ -165,6 +165,20 @@ class Timeframe:
         if self.minutes < 1:
             raise ValueError(f"Timeframe.minutes must be >= 1, got {self.minutes}")
 
+    @property
+    def duration_s(self) -> int:
+        """The interval length in TRADING seconds (``minutes * 60``).
+
+        DEC-TF-REGISTRY-DYNAMIC-001: the seconds-keyed surface of the engine
+        timeframe. ``minutes`` deliberately STAYS the dataclass field — it is
+        constructed positionally at every launch site and serialized into the
+        grid identity / per-tuple digests, so inverting field<->property would
+        churn every construction site and risk a silent 60x digest drift for
+        zero functional gain. A sub-minute ENGINE timeframe is out of scope
+        (its own DEC + a sub-minute feed are prerequisites).
+        """
+        return self.minutes * 60
+
 
 @dataclass(frozen=True, slots=True)
 class SweepGridConfig:

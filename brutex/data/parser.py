@@ -24,15 +24,21 @@ canonical/legacy 7-field shape.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timezone
 from decimal import Decimal
 from typing import Any, Final
 
+from brutex.calendars.nse import IST_UTC_OFFSET
 from brutex.data.errors import DataLakeError
 from brutex.data.models import CandleBar
 
-#: India Standard Time offset (+05:30). No DST — IST is fixed.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30), name="IST")
+#: India Standard Time offset (+05:30). No DST — IST is fixed. The offset is
+#: DERIVED from the ONE canonical :data:`brutex.calendars.nse.IST_UTC_OFFSET`
+#: root (DEC-TIMESTAMP-IST-SINGLESOURCE-001); the ``name="IST"`` tzname is this
+#: module's pre-existing, test-pinned representation detail (kept byte-identical
+#: — deliberately NOT the unnamed shared :data:`~brutex.calendars.nse.IST_FIXED_OFFSET`,
+#: whose ``tzname()`` reads ``'UTC+05:30'``).
+_IST: Final[timezone] = timezone(IST_UTC_OFFSET, name="IST")
 
 #: Number of fields in a 7-element candle row: 7-tuple
 #: ``[timestamp, open, high, low, close, volume, open_interest]``.
