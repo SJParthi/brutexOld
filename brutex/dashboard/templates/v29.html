@@ -2417,7 +2417,7 @@
   <!-- Pre-first-poll STATIC default = main's wording (first-lander rule at
        the merge-up); renderTicker rewrites it with the plain-English strip
        ("sweep idle · no completed runs yet") on the first poll. -->
-  <span id="bxTickerStrip">no runs yet — awaiting real run artifact</span>
+  <span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span>
   <span class="oc-pill" id="ocRunPill">no run yet</span>
   <label>run
     <select id="ocRunSelect" title="completed runs, newest first"></select>
@@ -2433,7 +2433,7 @@
   <h3>▶ Run controls</h3>
   <div class="oc-sub">Start a brute-force sweep. Leave any field blank to use the defaults
     (all 3 indices · all 21 timeframes · 2020-01-01 → today). This button NEVER pulls
-    market data — pulls live on the Universe page.</div>
+    market data — that happens on the Universe page.</div>
   <div class="oc-controls-row">
     <label>SYMBOLS
       <select id="swSymbols" multiple size="3" title="blank = all 3, NIFTY-first">
@@ -3272,8 +3272,8 @@
        honest "—" for anything the artifact does not carry. Pro mode shows
        the numbers; Beginner sees the fixed plain-English summary (the
        jargon/plain-eng block convention). -->
-  <section aria-label="Deep stats — stored results-depth aggregates">
-    <h3>🔬 <span class="jargon">Deep stats — stored results-depth aggregates</span><span class="plain-eng">How rough was the ride?</span></h3>
+  <section aria-label="Deep stats">
+    <h3>🔬 <span class="jargon" title="Deep stats — stored results-depth aggregates">Deep stats — from this run's stored results</span><span class="plain-eng">How rough was the ride?</span></h3>
     <div class="plain-eng-block">
       <div class="note">Worst days, losing streaks, adverse moves and how trades ended — from the stored run. Switch to Pro for the numbers.</div>
     </div>
@@ -3304,7 +3304,7 @@
       <div class="story-cell"><div class="k">P&amp;L by trend regime</div><div class="v" id="stTrendSplit" data-explain="by_trend" style="font-size:13px">—</div></div>
       <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
     </div>
-    <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
+    <div class="note" title="family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).">strategy-family drill-down and richer Beginner phrasing arrive in later updates.</div>
   </section>
   </div>
 </aside>

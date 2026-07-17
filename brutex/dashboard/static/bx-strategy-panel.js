@@ -226,8 +226,13 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       anchor = parseTs(state.trades[0].entry_ts);
     }
     if (anchor === null) {
-      byId('stChartCoords').textContent =
+      /* Catalog remap at render (post-merge review round 1 — the literal
+         stays for the node harness + main's executed pins; the browser
+         shows plain English with the raw string in title="server: …"). */
+      var noAnchorCoords =
         'no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)';
+      if (window.BXCopy) { window.BXCopy.apply(byId('stChartCoords'), noAnchorCoords, {}); }
+      else { byId('stChartCoords').textContent = noAnchorCoords; }
       return;
     }
     // The session-day anchor is the IST calendar date of the entry instant
@@ -299,12 +304,39 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       tr.appendChild(td(String(r.exit_reason), null));
       tr.appendChild(td(pnl === null ? '—' : money(pnl), pnl !== null && pnl < 0 ? 'neg' : 'pos'));
       tr.appendChild(td(r.costs_paisa === undefined ? '—' : money(r.costs_paisa), null));
-      /* Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf"). */
-      var gran = typeof r.mae_granularity === 'string' ? ' (' + r.mae_granularity + ')' : '';
-      tr.appendChild(td(String(r.mae) + gran, null));
-      tr.appendChild(td(String(r.mfe) + gran, null));
-      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? 'null' : String(r.vix_entry), null));
-      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? 'null' : String(r.vix_exit), null));
+      /* Additive #1275 honesty flag: mae/mfe carry their granularity
+         ("1m"|"tf") — remapped for display (" · per-minute"/" · per-candle")
+         with the raw token in the cell title (Law 2); an unknown token (and
+         the node harness, no BXCopy) keeps the verbatim "(<token>)" shape —
+         the bx-oneclick.js trades-table twin. */
+      var gran = '';
+      var granTitle = '';
+      if (typeof r.mae_granularity === 'string') {
+        var granCopy = window.BXCopy ? window.BXCopy.token('granularity', r.mae_granularity) : null;
+        gran = granCopy && granCopy.matched ? granCopy.text : ' (' + r.mae_granularity + ')';
+        granTitle = granCopy && granCopy.matched ? 'server: ' + r.mae_granularity : '';
+      }
+      var maeCell = td(String(r.mae) + gran, null);
+      var mfeCell = td(String(r.mfe) + gran, null);
+      if (granTitle) {
+        maeCell.title = granTitle;
+        mfeCell.title = granTitle;
+      }
+      tr.appendChild(maeCell);
+      tr.appendChild(mfeCell);
+      /* R31 honest NULL: a missing VIX renders the em-dash absent-value
+         convention (absent is never 0) with the reason in the title — never
+         the literal string "null" (the bx-oneclick.js v29 trades twin). */
+      var vinCell = td(r.vix_entry === null || r.vix_entry === undefined ? '—' : String(r.vix_entry), null);
+      if (r.vix_entry === null || r.vix_entry === undefined) {
+        vinCell.title = 'VIX not recorded for this trade';
+      }
+      tr.appendChild(vinCell);
+      var voutCell = td(r.vix_exit === null || r.vix_exit === undefined ? '—' : String(r.vix_exit), null);
+      if (r.vix_exit === null || r.vix_exit === undefined) {
+        voutCell.title = 'VIX not recorded for this trade';
+      }
+      tr.appendChild(voutCell);
       var chartTd = document.createElement('td');
       var link = document.createElement('a');
       link.textContent = '📈 chart';
@@ -484,9 +516,26 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         state.trades = payload.rows || [];
         var total = payload.total === null || payload.total === undefined
           ? 'unknown total' : 'of ' + String(payload.total);
-        note.textContent = String(state.trades.length) + ' trade(s) shown ' + total +
-          ' · offset ' + String(state.offset) +
-          (payload.status === 'partial' ? ' — PARTIAL: ' + String(payload.detail) : '');
+        var baseNote = String(state.trades.length) + ' trade(s) shown ' + total +
+          ' · offset ' + String(state.offset);
+        if (payload.status === 'partial') {
+          /* The partial DETAIL rides the catalog (post-merge review round 1):
+             a KNOWN server detail renders plain English with the verbatim
+             string in title="server: …"; an UNKNOWN detail (and the node
+             harness, no BXCopy) keeps the verbatim " — PARTIAL: " shape. */
+          var rawPartial = String(payload.detail);
+          var partialCopy = window.BXCopy ? window.BXCopy.lookup(rawPartial) : null;
+          if (partialCopy && partialCopy.matched) {
+            note.textContent = baseNote + ' — partly readable: ' + partialCopy.text;
+            note.title = 'server: ' + rawPartial;
+          } else {
+            note.textContent = baseNote + ' — PARTIAL: ' + rawPartial;
+            note.removeAttribute('title');
+          }
+        } else {
+          note.textContent = baseNote;
+          note.removeAttribute('title');
+        }
       } else {
         state.trades = [];
         if (window.BXCopy) {
@@ -725,15 +774,25 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     }
     var note = byId('stTradesNote');
     if (note) {
-      note.textContent =
+      /* Catalog remap at render (post-merge review round 1): the literal
+         stays for the node harness + main's reset pins; the browser shows
+         the plain-English copy with the raw string in title="server: …". */
+      var awaitingTradesNote =
         "awaiting real run artifact — trades appear once the run's results-depth sidecars land";
+      if (window.BXCopy) { window.BXCopy.apply(note, awaitingTradesNote, {}); }
+      else { note.textContent = awaitingTradesNote; }
     }
     if (window.BXUI) {
       var chart = byId('stChartHost');
       if (chart) {
         window.BXUI.clear(chart);
-        chart.appendChild(window.BXUI.el('div', 'note',
-          'no candles loaded yet — awaiting run + stored 1-minute data'));
+        var chartNote = window.BXUI.el('div', 'note',
+          'no candles loaded yet — awaiting run + stored 1-minute data');
+        // Catalog remap at render (literal above stays for the node harness).
+        if (window.BXCopy) {
+          window.BXCopy.apply(chartNote, 'no candles loaded yet — awaiting run + stored 1-minute data', {});
+        }
+        chart.appendChild(chartNote);
       }
       var equity = byId('stEquityHost');
       if (equity) {

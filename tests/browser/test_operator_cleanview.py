@@ -152,11 +152,15 @@ def test_idle_page_is_calm_and_jargon_free(new_page: NewPageFactory, tmp_path: P
     # the timeline's raw event lines (the search-coherence contract) plus
     # the two PORTAL-folded blocks (#1796 winners section + strategy
     # drawer), whose STATIC defaults are main's pinned wording per the
-    # merge-up first-lander rule — the drawer is hidden and the winners
-    # body is collapsed until expand, when the panel fetch rewrites the
-    # copy through the BXCopy catalog. Everything else, the collapsed
-    # diagnostics AND the render-time-rewritten ticker strip included, is
-    # scanned via textContent (stricter than innerText).
+    # merge-up first-lander rule — hidden/collapsed until expand, so this
+    # textContent scan (which ignores visibility) would false-fail on the
+    # pinned pre-render statics. HONEST scope (post-merge review round 1):
+    # the exemption covers the STATICS only — the drawer's POST-FETCH
+    # visible state is scanned for real by
+    # test_winner_drawer_post_fetch_is_jargon_free below (innerText over
+    # the OPEN drawer after the panel fetches settle). Everything else,
+    # the collapsed diagnostics AND the render-time-rewritten ticker strip
+    # included, is scanned via textContent (stricter than innerText).
     visible = page.evaluate(
         "() => { const clone = document.body.cloneNode(true);"
         " clone.querySelectorAll('script, style, #ocTimeline,"
@@ -422,6 +426,45 @@ def test_rate_widget_idle_outage_amber_active_outage_red(
     expect(age).to_have_class("bxrm-stale")
     expect(age).to_contain_text("STALE")
     expect(page.locator("#bxRateMonitor")).to_have_class("bxrm-stale")
+
+
+# ── acceptance #1 on the winners drawer: post-fetch state is jargon-free ───
+
+
+def test_winner_drawer_post_fetch_is_jargon_free(new_page: NewPageFactory, tmp_path: Path) -> None:
+    """Post-merge review round 1 (MAJOR): the strategy drawer — the winners
+    section's primary row-click surface — must show NO banned jargon AFTER
+    its panel fetches settle over the committed fixture (the COMMON state:
+    a stored run whose trade sidecars are still awaiting). The idle scan
+    above exempts the drawer's pre-render STATICS (main's pinned wording);
+    this test covers the state the operator actually reads."""
+    session = new_page(build_operator_app(tmp_path))
+    page = session.page
+    freeze_page_clock(page)
+    session.goto("/")
+    # The portal learns the selected run from the runs poller first.
+    expect(page.locator("#ocRunSelect option")).to_have_count(1)
+    page.click("#ocWinnersToggle")
+    expect(page.locator("#scRows tr").first).to_be_visible()
+    page.locator("#scRows tr").first.click()
+    # The drawer's `.open` class lands on the next task — fire the timer.
+    page.clock.fast_forward(50)
+    drawer = page.locator("#ocStrategyDrawer")
+    expect(drawer).to_be_visible()
+    # Settle barriers: both notes provably LEFT their template defaults (the
+    # trades fetch completed and the catalog remaps ran on the live sinks).
+    expect(page.locator("#stTradesNote")).to_have_text(
+        "This run is from an older version — re-run the sweep to record trade detail."
+    )
+    expect(page.locator("#stChartCoords")).to_have_text(
+        "no trades to chart yet — the chart draws once this run records trades"
+    )
+    # The banned-token scan over the drawer's VISIBLE text only (innerText —
+    # the drawer is open; hidden siblings do not contribute).
+    visible = page.eval_on_selector("#ocStrategyDrawer", "el => el.innerText")
+    for token in _JARGON_TOKENS:
+        assert token not in visible, f"drawer visible jargon survived: {token!r}"
+    _screenshot(page, "after-drawer.png")
 
 
 # ── the copy catalog rides the real page (fixture-driven remap) ────────────

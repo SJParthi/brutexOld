@@ -82,6 +82,50 @@ var BX_COPY_EXACT = {
     text: "no trades yet — they appear after the first completed run",
     tier: "neutral"
   },
+  /* Strategy-panel client literals (post-merge review round 1 — the drawer's
+     LIVE no-anchor/reset sinks previously wrote these raw; the literals stay
+     in bx-strategy-panel.js for main's node-executed pins). */
+  "no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)": {
+    text: "no trades to chart yet — the chart draws once this run records trades",
+    tier: "neutral"
+  },
+  "awaiting real run artifact — trades appear once the run's results-depth sidecars land": {
+    text: "No trades recorded yet — they appear once the run stores its trade detail.",
+    tier: "neutral"
+  },
+  "no candles loaded yet — awaiting run + stored 1-minute data": {
+    text: "No chart yet — it appears once a run exists and its price data is pulled.",
+    tier: "neutral"
+  },
+  /* Health-hub KNOWN frozen lane strings (post-merge review round 1 — the
+     #1747 wire is frozen; these are deterministic server strings, not
+     genuinely-unknown payloads, so the pass-through law does not apply.
+     The two headline entries beat the generic "not wired — …" rule via the
+     exact-map-first lookup order. */
+  "not wired — no local doctor verdict artifact": {
+    text: "Not set up on this machine — the daily health check runs and reports in the cloud.",
+    tier: "neutral"
+  },
+  "not wired — no local mutation-gate artifact": {
+    text: "Not set up on this machine — the weekly deep test gate runs and reports in the cloud.",
+    tier: "neutral"
+  },
+  "the daily doctor runs in GitHub Actions (doctor-daily.yml, 07:30 IST) and files/close its own tracking issue; `brutex doctor` writes no local verdict file": {
+    text: "The daily health check runs in the cloud (GitHub) each morning and files its own reports — this machine keeps no local copy.",
+    tier: "neutral"
+  },
+  "the deep mutation gate runs in GitHub Actions (mutation.yml, weekly Mon 04:00 UTC) and files its own alert issues; no local verdict file exists": {
+    text: "The weekly deep test gate runs in the cloud (GitHub) and files its own reports — this machine keeps no local copy.",
+    tier: "neutral"
+  },
+  "the R9 nightly chain (`brutex nightly run`) has not produced a report here": {
+    text: "The nightly automation has not produced a report on this machine yet.",
+    tier: "neutral"
+  },
+  "nightly artifacts live under <lake>/sweeps/nightly/; no lake root is wired": {
+    text: "No data folder is set up on this machine, so nightly reports have nowhere to live.",
+    tier: "neutral"
+  },
   "awaiting real run artifact — no lake root wired for trades": {
     text: "Trade detail isn't connected on this server yet.",
     tier: "neutral"

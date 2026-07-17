@@ -60,9 +60,11 @@ _HOSTILE_RUN_ID = "r-hostile01"
 #: plain-English since DEC-OPERATOR-PAGE-CLEANVIEW-001).
 _AWAITING_V29 = "No completed run yet"
 
-#: The screener/strategy pages still carry the artifact-vocabulary phrase at
-#: non-ticker sites — their deep clean is the NAMED follow-up
-#: DEC-SCREENER-STRATEGY-CLEANVIEW-001, not silent scope expansion.
+#: The screener/strategy pages keep the artifact-vocabulary phrase in their
+#: pre-render STATICS (main's pinned wording — the merge-up first-lander
+#: rule); the runtime sinks remap it through the bx-copy catalog (the
+#: absorbed screener/strategy copy clean — pinned by
+#: test_dashboard_copy_catalog.py::TestPortalPanelCopyRouting).
 _AWAITING_SCREENER = "awaiting real run artifact"
 
 

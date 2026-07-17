@@ -125,6 +125,24 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "no trades yet — they appear after the first completed run",
         "neutral",
     ),
+    # Strategy-drawer client literals (post-merge review round 1 — the LIVE
+    # no-anchor/reset sinks previously wrote these raw; the literals stay in
+    # bx-strategy-panel.js for main's node-executed pins).
+    (
+        "no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)",
+        "no trades to chart yet — the chart draws once this run records trades",
+        "neutral",
+    ),
+    (
+        "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
+        "No trades recorded yet — they appear once the run stores its trade detail.",
+        "neutral",
+    ),
+    (
+        "no candles loaded yet — awaiting run + stored 1-minute data",
+        "No chart yet — it appears once a run exists and its price data is pulled.",
+        "neutral",
+    ),
     # Health-hub surfaces (merge-up round — the #1747 widget's copy routed
     # through the catalog; the wire stays frozen).
     (
@@ -135,6 +153,46 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
     (
         "not wired — no nightly report on this box",
         "Not set up on this machine yet — no nightly report on this box.",
+        "neutral",
+    ),
+    # Post-merge review round 1: the hub's KNOWN frozen lane strings —
+    # deterministic server strings (health_hub.py, untouchable under the
+    # display-only binding), so the pass-through law does not excuse them.
+    # The two headline entries beat the generic "not wired — …" rule via
+    # the exact-map-first lookup order; the doctor detail's server-side
+    # "files/close" grammar slip is remapped at render (raw kept in title).
+    (
+        "not wired — no local doctor verdict artifact",
+        "Not set up on this machine — the daily health check runs and reports in the cloud.",
+        "neutral",
+    ),
+    (
+        "not wired — no local mutation-gate artifact",
+        "Not set up on this machine — the weekly deep test gate runs and reports in the cloud.",
+        "neutral",
+    ),
+    (
+        "the daily doctor runs in GitHub Actions (doctor-daily.yml, 07:30 IST) "
+        "and files/close its own tracking issue; `brutex doctor` writes no local verdict file",
+        "The daily health check runs in the cloud (GitHub) each morning and files "
+        "its own reports — this machine keeps no local copy.",
+        "neutral",
+    ),
+    (
+        "the deep mutation gate runs in GitHub Actions (mutation.yml, weekly Mon 04:00 UTC) "
+        "and files its own alert issues; no local verdict file exists",
+        "The weekly deep test gate runs in the cloud (GitHub) and files its own "
+        "reports — this machine keeps no local copy.",
+        "neutral",
+    ),
+    (
+        "the R9 nightly chain (`brutex nightly run`) has not produced a report here",
+        "The nightly automation has not produced a report on this machine yet.",
+        "neutral",
+    ),
+    (
+        "nightly artifacts live under <lake>/sweeps/nightly/; no lake root is wired",
+        "No data folder is set up on this machine, so nightly reports have nowhere to live.",
         "neutral",
     ),
     (
@@ -544,13 +602,16 @@ class TestOperatorPageVisibleTextClean:
             assert needle not in html, f"v29 raw source still carries {needle!r}"
 
     def test_fixture_env_var_survives_only_inside_a_title_attribute(self) -> None:
-        """The badge stays LOUD but the env-var name lives in title= only."""
-        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
-        assert 'title="server: BRUTEX_ONECLICK_FIXTURE_ROOT active"' in html
-        stripped = _visible_text(html)
-        assert "BRUTEX_ONECLICK_FIXTURE_ROOT" not in stripped
-        # The badge itself stays purple/uppercase-loud (class + wording).
-        assert "TEST DATA — fixture override active (not real market results)" in html
+        """The badge stays LOUD but the env-var name lives in title= only —
+        on EVERY template carrying the badge (post-merge review round 1:
+        screener.html's copy still showed the raw env var in visible text)."""
+        for template in ("v29.html", "screener.html"):
+            html = (_TEMPLATES / template).read_text(encoding="utf-8")
+            assert 'title="server: BRUTEX_ONECLICK_FIXTURE_ROOT active"' in html, template
+            stripped = _visible_text(html)
+            assert "BRUTEX_ONECLICK_FIXTURE_ROOT" not in stripped, template
+            # The badge itself stays purple/uppercase-loud (class + wording).
+            assert "TEST DATA — fixture override active (not real market results)" in html, template
 
     def test_awaiting_banner_is_calm_not_amber(self) -> None:
         """Empty ≠ error: the .oc-awaiting rule carries no gold gradient or
@@ -814,6 +875,44 @@ class TestPortalPanelCopyRouting:
         assert "'server: ' + rawSource" in js
         # The two static no-trades notes are remapped at render.
         assert js.count("window.BXCopy.apply(") >= 5
+        # Post-merge review round 1: the drawer's LIVE no-anchor coords sink
+        # and the reset trades-note/chart-host sinks route through the
+        # catalog too (the literals stay for main's node-executed pins).
+        assert "window.BXCopy.apply(byId('stChartCoords'), noAnchorCoords, {});" in js
+        assert "window.BXCopy.apply(note, awaitingTradesNote, {});" in js
+        assert "window.BXCopy.apply(chartNote," in js
+
+    def test_strategy_panel_trades_rows_render_honest_null_vix(self) -> None:
+        """Post-merge review round 1: a null VIX renders the em-dash absent
+        convention with the reason in the cell title — never the literal
+        string "null" (the bx-oneclick.js v29 trades-table twin); mae/mfe
+        granularity remaps through the ONE token map with the raw token in
+        the cell title."""
+        js = self._js("bx-strategy-panel.js")
+        assert "? 'null'" not in js, "the literal 'null' VIX cell survived"
+        assert js.count("'VIX not recorded for this trade'") == 2
+        assert "window.BXCopy.token('granularity', r.mae_granularity)" in js
+        assert "'server: ' + r.mae_granularity" in js
+        # The partial-detail note classifies via the catalog; an UNKNOWN
+        # detail keeps the verbatim " — PARTIAL: " pass-through (Law 2).
+        assert "window.BXCopy.lookup(rawPartial)" in js
+        assert "' — PARTIAL: ' + rawPartial" in js
+
+    def test_drawer_statics_reworded_with_the_technical_wording_in_titles(self) -> None:
+        """Post-merge review round 1: the drawer's Pro-facing statics read
+        plain English on BOTH template copies; the pinned technical wording
+        (requirement ids included) survives only inside title attributes —
+        never as visible text."""
+        for template in ("v29.html", "strategy.html"):
+            html = (_TEMPLATES / template).read_text(encoding="utf-8")
+            assert "Deep stats — from this run's stored results" in html, template
+            assert (
+                "strategy-family drill-down and richer Beginner phrasing arrive in later updates."
+                in html
+            ), template
+            visible = _visible_text(html)
+            assert "stored results-depth aggregates" not in visible, template
+            assert "named later PR" not in visible, template
 
     def test_panel_visible_string_literals_carry_no_new_jargon(self) -> None:
         """Every NEW display string this routing introduces is jargon-free
