@@ -23,12 +23,13 @@ logic (Golden Rule #11 COMMON):
   engine drives, reused VERBATIM here so a corrupt bar is dropped identically;
 * :func:`~brutex.data.price_sanity.price_row_insane` — the scalar twin of the
   vectorized :func:`~brutex.data.price_sanity.price_violation_expr`
-  (positivity + ordering + a scalar-only NaN arm), the plane the engine
-  REFUSES: ``arrow_table_to_bars`` raises ``ValueError`` on a non-positive /
-  mis-ordered bar, and the ``CandleBar`` constructor raises
-  ``decimal.InvalidOperation`` on a NaN price (the NaN arm keeps outcome-parity
-  — neither surface ever serves a NaN bar; see ``price_row_insane``'s
-  deliberate-asymmetry note).
+  (finiteness + positivity + ordering — mirrored in BOTH planes since
+  DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 closed the old scalar-only NaN
+  asymmetry), the plane the engine REFUSES: ``arrow_table_to_bars`` raises
+  the corrupt-bar ``ValueError`` on a non-finite / non-positive / mis-ordered
+  bar (a NaN's ``decimal.InvalidOperation`` is re-wrapped into the SAME
+  error, never an uncaught escape) — neither surface ever serves a
+  non-finite bar; see ``price_row_insane``'s non-finite-arm note.
 
 :class:`SessionBarScreen` is the single causal per-session screen; two thin
 wrappers drive it — :func:`screen_frame` for the polars readers (``/movers``)
