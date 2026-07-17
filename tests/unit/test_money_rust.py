@@ -111,6 +111,25 @@ class TestFlagParsing:
         assert money_rust.MONEY_RUST_ENV == "BRUTEX_CORE_RUST_MONEY"
         assert money_rust.BURN_IN_SAMPLES == 16
 
+    def test_leaf_import_discipline_ast_pin(self) -> None:
+        # money_rust must stay a ROOT-leaf module: stdlib + structlog ONLY
+        # at module scope (brutex.data / brutex.engine would cycle or drag
+        # the fno_math wheel under every brutex.money importer). AST pin —
+        # the feed_rust precedent.
+        import ast
+        from pathlib import Path
+
+        source = Path(money_rust.__file__).read_text(encoding="utf-8")
+        allowed = {"importlib", "os", "decimal", "typing", "structlog", "__future__"}
+        allowed_from = allowed | {"collections.abc", "types"}
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name.split(".")[0] in allowed, alias.name
+            elif isinstance(node, ast.ImportFrom):
+                assert node.module is not None
+                assert node.module in allowed_from, node.module
+
     def test_truthy_falsy_mirror_sweep_lookahead(self) -> None:
         # The leaf may not IMPORT env_flag_tristate (money is a ROOT leaf —
         # brutex.data.parquet_writer imports brutex.money at module scope,
