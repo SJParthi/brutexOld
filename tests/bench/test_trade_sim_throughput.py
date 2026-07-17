@@ -357,8 +357,11 @@ def _per_combo_seconds_u128(n_bars: int, n_masks: int) -> float:
 def test_trade_sim_u128_kernel_per_combo_measured() -> None:
     """The u128 arm is MEASURED (printed) and floor-gated on every runner.
 
-    Honest envelope (Golden Rule #10): today's production vocabulary is 60
-    bits, so this arm is future headroom — the measurement documents the wide
+    Honest envelope (Golden Rule #10): since the SuperTrend implemented-flip
+    (DEC-SUPERTREND-CONDITIONS-001 — bits 64/65 LIVE) warm production windows
+    are genuinely >u64, so this arm is the PRODUCTION regime, no longer
+    future headroom (the same-window flip-shape ratio lives in
+    ``test_vocab66_wide_grid.py``) — the measurement documents the wide
     kernel's real cost (the 128-bit AND is a two-limb compare; expect the same
     order of magnitude as the u64 arm, never asserted equal).
     """
