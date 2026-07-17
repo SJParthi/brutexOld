@@ -301,6 +301,13 @@ class TestVersionGuard:
         disabled = [e for e in logs if e["event"] == "lake_rust_resample_daily.rust_path_disabled"]
         assert disabled[0]["installed_polars"] == pl.__version__
         assert disabled[0]["crate_pinned_polars"] == "9.99.9"
+        # Operator-guidance prose pinned EXACTLY (mutmut zero-survivor law —
+        # the remedy string is the operator's recovery path, not decoration).
+        assert disabled[0]["remedy"] == (
+            "align the wheel and the crate's pinned polars rev, then "
+            "re-run the parity corpus "
+            "(docs/runbooks/lake-rust-render-lockstep.md)"
+        )
 
     def test_matching_version_engages(self, monkeypatch: pytest.MonkeyPatch) -> None:
         lrd.reset_lake_rust_resample_daily_for_tests(remaining=0)
@@ -645,6 +652,8 @@ class TestMutationHardening:
         assert disabled[0]["error_detail"] == (
             "brutex_lake.resample_daily_ipc missing or not callable — foreign/stale install"
         )
+        # The not-callable arm's remedy pinned too (mutmut zero-survivor law).
+        assert disabled[0]["remedy"] == remedy
 
     def test_budget_arm_alone_triggers_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
         lrd.reset_lake_rust_resample_daily_for_tests(remaining=1)
