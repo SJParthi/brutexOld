@@ -17,15 +17,15 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, given, settings
-from hypothesis import strategies as st
-
 from brutex.data.write_domain import feeds_write_domain
 from brutex.feeds.vendor_profile import (
     VendorProfileError,
     VendorProfileRegistry,
     VendorPullProfile,
 )
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+
 from tests.fakes.vendor_profiles import synthetic_feed_profile
 
 #: One shared lake root for every generated example (the domains all anchor

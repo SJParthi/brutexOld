@@ -888,8 +888,7 @@ class TestVendorRegistryConsumer:
         assert hp.write_domain.primary is True
         assert hp.write_domain.name == PRIMARY_DOMAIN_NAME
         assert (
-            hp.write_domain.resolved_root
-            == primary_write_domain(tmp_path / "lake").resolved_root
+            hp.write_domain.resolved_root == primary_write_domain(tmp_path / "lake").resolved_root
         )
 
     def test_injected_registry_with_extra_feed_keeps_primary(
@@ -897,6 +896,7 @@ class TestVendorRegistryConsumer:
     ) -> None:
         """A testfeed extra in the injected registry leaves the PRIMARY resolution unchanged."""
         from brutex.feeds.registry_build import build_default_registry
+
         from tests.fakes.vendor_profiles import synthetic_feed_profile
 
         hp, _spies, _store = _wire(
@@ -914,6 +914,7 @@ class TestVendorRegistryConsumer:
     ) -> None:
         """A feed-only registry (no primary) refuses the build LOUDLY (typed)."""
         from brutex.feeds.vendor_profile import VendorProfileError, VendorProfileRegistry
+
         from tests.fakes.vendor_profiles import synthetic_feed_profile
 
         def _feed_only(lake: Path) -> VendorProfileRegistry:
@@ -940,9 +941,7 @@ class TestVendorRegistryConsumer:
         from brutex.feeds import registry_build as rb
 
         real_build = rb.build_default_registry
-        monkeypatch.setattr(
-            "brutex.feeds.registry_build.build_default_registry", _spy_build
-        )
+        monkeypatch.setattr("brutex.feeds.registry_build.build_default_registry", _spy_build)
         # _wire builds with session_rate=None → the function mints ONE holder;
         # rebuild here with an explicit holder to pin identity end-to-end.
         rate = SessionRateController()
@@ -989,8 +988,8 @@ class TestVendorRegistryConsumer:
             )
 
             return {
-                "run_spot": lambda: _spot(),
-                "run_metadata": lambda: _metadata(),
+                "run_spot": lambda: _spot(),  # noqa: PLW0108 — a FRESH report per call
+                "run_metadata": lambda: _metadata(),  # noqa: PLW0108 — a FRESH report per call
                 "run_historical": lambda _prior: _composite(historical=_historical_inner()),
                 "run_prebuild": lambda _exclude: _outcome(),
             }

@@ -26,7 +26,7 @@ parsing surface) — named follow-up ``DEC-FEED-REGISTRY-CONFIG-002``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING
 
 from brutex.feeds.vendor_profile import (
     VendorProfileError,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only imports (no runtime edge)
 
 #: A caller-config vendor entry: called with the ONE resolved lake root,
 #: returns that vendor's frozen profile (registered as-is — fail-loud).
-ProfileBuilder: TypeAlias = "Callable[[Path], VendorPullProfile]"
+type ProfileBuilder = Callable[[Path], VendorPullProfile]
 
 __all__ = ["ProfileBuilder", "build_default_registry"]
 

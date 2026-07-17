@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from brutex.data.write_domain import feeds_write_domain
 from brutex.feeds.vendor_profile import (
     IncrementalityCapability,
     LockDomain,
@@ -25,7 +26,6 @@ from brutex.feeds.vendor_profile import (
     VendorCapability,
     VendorPullProfile,
 )
-from brutex.data.write_domain import feeds_write_domain
 
 
 class FakeFeedRateController:

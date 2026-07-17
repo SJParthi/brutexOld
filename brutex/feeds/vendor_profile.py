@@ -338,7 +338,10 @@ class VendorPullProfile:
         # Groww-default hazard spellings live in heavy modules this leaf must
         # not import at module level.
         from brutex.calendars.market_hours import guard_active_default
-        from brutex.dashboard.pull_controller import SessionRateController, _build_live_controller
+        from brutex.dashboard.pull_controller import (
+            SessionRateController,
+            _build_live_controller,  # pyright: ignore[reportPrivateUsage]
+        )
 
         if self.market_hours_guard is guard_active_default:
             raise VendorProfileError(
@@ -369,9 +372,17 @@ def _probe_rate_product_is_groww_default(product: object) -> bool:
     deliberately (the holder exposes no public factory accessor; the probe is
     a construction-time guard, never a hot path).
     """
-    from brutex.dashboard.pull_controller import SessionRateController, _build_live_controller
+    from brutex.dashboard.pull_controller import (
+        SessionRateController,
+        _build_live_controller,  # pyright: ignore[reportPrivateUsage]
+    )
 
-    return isinstance(product, SessionRateController) and product._factory is _build_live_controller
+    return (
+        isinstance(product, SessionRateController)
+        # Friend access (DEC-P0-017 per-site ignore): the holder exposes no
+        # public factory accessor — the probe is a construction-time guard.
+        and product._factory is _build_live_controller  # pyright: ignore[reportPrivateUsage]
+    )
 
 
 class VendorProfileRegistry:
@@ -545,7 +556,9 @@ def groww_pull_profile(
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.calendars.market_hours import guard_active_default
     from brutex.dashboard.pull_controller import SessionRateController
-    from brutex.dashboard.pull_jobs import _default_account_key_resolver
+    from brutex.dashboard.pull_jobs import (
+        _default_account_key_resolver,  # pyright: ignore[reportPrivateUsage]
+    )
     from brutex.data.greeks_enrich_pass import run_greeks_enrich_pass
 
     ledger_markets = (

@@ -323,10 +323,10 @@ def build_headless_pipeline(
 
     def _run_metadata() -> MetadataPullReport:
         # app.py:3299-3314 minus on_progress.
-        with RegistryStore.open(registry_path) as registry:
+        with RegistryStore.open(registry_path) as fno_registry:
             return pull_expiries_contracts(
                 tradable,
-                registry=registry,
+                registry=fno_registry,
                 coverage_store=store,
                 years=years,
                 dry_run=dry_run,
@@ -341,11 +341,11 @@ def build_headless_pipeline(
         # optional UI-tally hooks); prior_steps threading preserved so the
         # strict gate's Greeks-withhold seam works headlessly unchanged;
         # heal-before-enrich lives INSIDE this spine.
-        with RegistryStore.open(registry_path) as registry:
+        with RegistryStore.open(registry_path) as fno_registry:
             return pull_historical_for_underlyings(
                 targets,
                 reference_only_ids=reference_only_ids,
-                registry=registry,
+                registry=fno_registry,
                 coverage_store=store,
                 lake_root=lake_root,
                 dry_run=dry_run,

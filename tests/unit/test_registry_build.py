@@ -17,6 +17,7 @@ from brutex.feeds.vendor_profile import (
     VendorProfileError,
     VendorPullProfile,
 )
+
 from tests.fakes.vendor_profiles import synthetic_feed_profile
 
 if TYPE_CHECKING:
@@ -98,6 +99,7 @@ class TestExtraProfiles:
         from dataclasses import replace
 
         from brutex.feeds.vendor_profile import groww_pull_profile
+
         from tests.fakes.vendor_profiles import FakeFeedRateController
 
         def _second_primary(lake_root: Path) -> VendorPullProfile:
@@ -120,7 +122,5 @@ class TestExtraProfiles:
         def _other(lake_root: Path) -> VendorPullProfile:
             return synthetic_feed_profile(lake_root, vendor="otherfeed")
 
-        registry = build_default_registry(
-            tmp_path, extra_profiles=[synthetic_feed_profile, _other]
-        )
+        registry = build_default_registry(tmp_path, extra_profiles=[synthetic_feed_profile, _other])
         assert registry.vendors() == (PRIMARY_VENDOR, "testfeed", "otherfeed")
