@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931,
+_Last updated: 2026-07-17 (DEC-FEED-REGISTRY-COMMON-001,
+MIGRATION.md #1903, branch `claude/feed-registry-common` — the COMMON
+N-feed (multi-vendor) registry lands at its leaf home `brutex/feeds/`:
+PR #1570's `VendorPullProfile` + instance `VendorProfileRegistry`
+adopted-with-relocation (DEC-VENDOR-PROFILE-REGISTRY-001 #1833
+supersedes-on-land — PR #1570 still OPEN, wording to be coordinated;
+the feed-vendor track's DEC-FEED-INTERFACE-001 #1782 package home
+survives, its static-dict registry superseded-in-part) + the NEW
+data-driven `registry_build.build_default_registry` (Groww registers by
+DEFAULT as the primary; extras ONLY via explicit config; junk fails
+loud) + the FIRST production consumer — `build_headless_pipeline` gains
+kw-only `registry=` and resolves `registry.primary()`, carrying the
+vendor token + typed write domain onto `HeadlessPipeline` and threading
+`vendor=` into `run_full_pipeline`. Refusal laws (typed, before any
+state lands): dup token · overlapping write-domains BOTH directions ·
+SECOND PRIMARY · shared rate/account stacks. DEFAULT-INERT: Groww-only
+⇒ byte-identical (real-sequencer report-dict parity pinned); the write
+domain is CARRIED, consulted by NOTHING (writer binding stays gated).
+NO second live vendor ships — operator-gated on creds + a servability
+probe; the test fixture is the synthetic `testfeed`. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1903.)
+Earlier: 2026-07-17 (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931,
 branch `claude/movers-daily-freshness` — the `/movers` DAILY arm gains the
 VERIFY-EQUALITY freshness guard (the named follow-up of
 DEC-MOVERS-STORED-FRESHNESS-001 #1795a, which guarded only the INTRADAY
@@ -3094,7 +3117,57 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-daily-freshness`
+- **Active branch:** `claude/feed-registry-common`
+  (**DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903** — entry number
+  assigned by the queue master 2026-07-17; the renumber-at-landing law
+  stands, the DEC-ID never changes, per DEC-LEDGER-RENUMBER-001 — the
+  COMMON N-feed (multi-vendor) registry at its leaf home `brutex/feeds/`:
+  NEW `brutex/feeds/vendor_profile.py` (the shape-verbatim
+  adoption-with-relocation of PR #1570's `VendorPullProfile` + instance
+  `VendorProfileRegistry` — DEC-VENDOR-PROFILE-REGISTRY-001 #1833
+  supersedes-on-land; PR #1570 is still OPEN in the orchestration wave,
+  final wording to be coordinated with that lane; the feed-vendor track's
+  DEC-FEED-INTERFACE-001 #1782 keeps the package home, its static-dict
+  registry superseded-in-part — filenames disjoint so that branch
+  converges file-disjointly) + NEW `brutex/feeds/registry_build.py`
+  (`build_default_registry(lake_root, *, rate_factory=None,
+  extra_profiles=())` — Groww registers by DEFAULT as the PRIMARY with
+  its rate stack CARRIED never re-tuned per DEC-GROWW-RATE-CEILING-8-002
+  / DEC-GROWW-RATE-PERMIN-001; additional vendors ONLY from explicit
+  caller config; a junk builder product is a typed refusal) + the FIRST
+  production consumer: `build_headless_pipeline` gains kw-only
+  `registry: VendorProfileRegistry | None = None`, resolves
+  `registry.primary()` over the chain's ONE rate holder, carries
+  `vendor` + the typed `write_domain` on `HeadlessPipeline`, and
+  `execute_headless_pipeline` threads `vendor=` into
+  `run_full_pipeline`. REFUSAL LAWS (typed `VendorProfileError`, fired
+  BEFORE any state lands, registration-order iteration): duplicate
+  vendor token · overlapping write-domain subtrees in EITHER direction
+  (component-wise prefix over the #1900 `WriteDomain`; nested shapes
+  included) · the named `second primary` law (exactly one primary
+  profile per lake) · shared rate factory/product + account-resolver
+  identity · split lake roots · the CONC-01 construction arms.
+  DEFAULT-INERT (proven): with only Groww registered the chain is
+  byte-identical — the real-sequencer report-dict parity pin
+  (`test_default_inert_report_parity_over_real_sequencer`) runs the
+  SAME real-shaped phase fakes through the pre-change call shape and
+  the registry path and pins the two `PipelinePullReport` dicts EQUAL;
+  the write domain is CARRIED for inspection, consulted by NOTHING (the
+  writer-side `assert_write_domain` binding stays GATED on direct user
+  approval — PR #1570's permission-refusal record). HONEST
+  operator-gated envelope: NO second live vendor ships in-repo (the
+  fixture is the synthetic `testfeed`); a real second-vendor profile
+  needs credentials + a servability probe; the dashboard route wiring
+  is a named follow-up; the env/file config loader is the named
+  follow-up DEC-FEED-REGISTRY-CONFIG-002. GATES: `vendor_profile.py`
+  (150/48) + `registry_build.py` (14/4) + `pipeline_binding.py`
+  (141/34) ALL 100.00% line+branch on the discovery gate; hypothesis
+  domain-disjointness properties; ruff/ruff-format clean; `mypy
+  --strict` clean (469 files); pyright 0 errors + 0 warnings on the new
+  package; the vendor-token guard exits 0. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/movers-daily-freshness`
   (**DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931** — the `/movers`
   DAILY arm gains the VERIFY-EQUALITY freshness guard — the named follow-up
   of DEC-MOVERS-STORED-FRESHNESS-001 (#1795a), which guarded only the
@@ -9093,7 +9166,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-daily-freshness`
+- **Active feature branch:** `claude/feed-registry-common`
+  (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903 — the COMMON N-feed
+  registry at its leaf home `brutex/feeds/` (PR #1570's profile+registry
+  adopted-with-relocation — DEC-VENDOR-PROFILE-REGISTRY-001 #1833
+  supersedes-on-land, PR #1570 still OPEN; DEC-FEED-INTERFACE-001 #1782's
+  package home kept, its static-dict registry superseded-in-part) + the
+  data-driven `build_default_registry` (Groww by default, extras only via
+  explicit config, junk fails loud) + the first production consumer —
+  `build_headless_pipeline(registry=…)` resolves the PRIMARY profile,
+  carries vendor + write domain, threads `vendor=` into
+  `run_full_pipeline`; default-inert (Groww-only ⇒ byte-identical,
+  real-sequencer report-dict parity-pinned); the write domain is carried,
+  consulted by nothing (writer binding stays gated); NO second live
+  vendor ships (operator-gated; the fixture is the synthetic `testfeed`);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1903 for the full blurb)
+  Earlier: `claude/movers-daily-freshness`
   (DEC-MOVERS-DAILY-FRESHNESS-001, MIGRATION.md #1931 — the `/movers` DAILY
   arm gains the VERIFY-EQUALITY freshness guard, the named follow-up of
   DEC-MOVERS-STORED-FRESHNESS-001 #1795a (the intraday guard): a stored
