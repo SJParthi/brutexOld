@@ -382,8 +382,10 @@ def classify_today_completeness(
     every calendar consult (``is_holiday_data_available`` / ``get_session``
     / ``session_last_bar_complete``) stay PYTHON on both arms — the routed
     payload carries only per-bar IST minute ordinals + shape bools + the
-    Python-computed close-edge flag; the crate is never consulted on an
-    inert arm (pinned). Flag OFF (the default) returns the oracle directly
+    Python-computed close-edge flag (consulted LAZILY, mirroring the
+    oracle: ``INDEX_SPOT`` only — every other class ships the neutral
+    ``True`` the crate ignores; round-1 review); the crate is never
+    consulted on an inert arm (pinned). Flag OFF (the default) returns the oracle directly
     — the crate is never imported, byte-identical to the pre-facade law.
     Every crate fault under the flag resolves to the ORACLE verdict — never
     a new exception class out of this classifier (the crossverify
@@ -419,9 +421,17 @@ def classify_today_completeness(
     if bars_today:
         last_dt_ist = max(b.timestamp for b in bars_today).astimezone(IST)
     last_bar_ist = last_dt_ist.strftime("%H:%M") if last_dt_ist is not None else None
-    last_bar_complete = (
-        session_last_bar_complete(session, last_dt_ist) if last_dt_ist is not None else True
-    )
+    # The close-edge CONSULT mirrors the oracle's laziness (round-1 review
+    # NIT): only the INDEX_SPOT arm ever reads `session_last_bar_complete`,
+    # and the crate ignores the bool for every other class — so non-INDEX
+    # classes ship the neutral ``True`` (the exact value the no-bars shape
+    # carries) with ZERO extra calendar consult, the FFI shape stays
+    # well-formed, and the verdicts are identical by construction.
+    # (`last_dt_ist` itself stays eager for ALL classes — it feeds the
+    # `last_bar_ist` display field exactly as the oracle does.)
+    last_bar_complete = True
+    if instrument_class is InstrumentClass.INDEX_SPOT and last_dt_ist is not None:
+        last_bar_complete = session_last_bar_complete(session, last_dt_ist)
 
     def _payload() -> TodayCompletenessPayload:
         minute_ordinals: list[int] = []

@@ -373,7 +373,70 @@ class TestPayloadFactory:
         assert expected_minutes == 375
         assert zero_volume == (True, False)
         assert oi_null == (True, False)
-        assert last_bar_complete is False  # 09:16 IST is nowhere near the close
+        # Non-INDEX ships the NEUTRAL True — the close-edge consult is
+        # INDEX-lazy (round-1 review NIT 1; the crate ignores the bool for
+        # every non-INDEX class, so the verdict is identical either way).
+        assert last_bar_complete is True
+
+    def test_close_edge_lazy_never_consulted_for_non_index(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-1 review NIT 1: the routed arm mirrors the ORACLE's laziness —
+        # `session_last_bar_complete` is consulted ONLY for INDEX_SPOT. A
+        # BOMBED calendar law + a FUT classify flag-ON must never fire it
+        # (the oracle's FUT arm never consults it either, so parity holds).
+        import brutex.data.today_completeness as tc
+
+        def _bomb(*_a: object) -> bool:
+            raise AssertionError("non-INDEX routed arm consulted session_last_bar_complete")
+
+        monkeypatch.setattr(tc, "session_last_bar_complete", _bomb)
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, fake_detectors_crate())
+        bars = [_minute(_TODAY, 0, volume=3, oi=9), _minute(_TODAY, 1, volume=4, oi=9)]
+        routed = _classify(bars, instrument_class=InstrumentClass.FUT)
+        assert routed.reason == "complete"
+        assert routed.last_bar_ist == "09:16"  # the display field stays eager
+
+    def test_close_edge_false_reaches_the_payload_for_index(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The INDEX arm still consults the REAL calendar law (the False pin
+        # moved here from the FUT payload test at the round-1 laziness fold):
+        # a 374-bar day's last stored bar is 15:28 — the close edge is short.
+        captured: list[tuple[Any, ...]] = []
+
+        def _spy(*args: Any) -> Any:
+            captured.append(args)
+            from tests.fakes.detectors_crate import fake_classify_today_completeness_verdict
+
+            return fake_classify_today_completeness_verdict(*args)
+
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, fake_detectors_crate(classify_today=_spy))
+        _classify(_full_day(_TODAY)[:-1], instrument_class=InstrumentClass.INDEX_SPOT)
+        (call,) = captured
+        assert call[5] is False  # session_last_bar_complete(15:28) — consulted
+
+    def test_poisoned_class_token_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-1 review NIT 3 (end-to-end): a poisoned `_TODAY_CLASS_CODES`
+        # map (an unknown class token — structurally unreachable today over
+        # the closed enum) raises KeyError from the payload factory; under
+        # the flag the classifier must serve the ORACLE verdict with ONE
+        # WARN — no raise, no `crate_panic` latch.
+        import brutex.data.today_completeness as tc
+
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, fake_detectors_crate())
+        monkeypatch.setattr(tc, "_TODAY_CLASS_CODES", {})
+        bars = _full_day(_TODAY)[:-1]
+        with capture_logs() as logs:
+            verdict = _classify(bars, instrument_class=InstrumentClass.INDEX_SPOT)
+        assert verdict.incomplete is True
+        assert verdict.reason == "count_short"  # the ORACLE verdict, verbatim
+        warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
+        assert [w["reason"] for w in warns] == ["today_completeness_payload_error"]
+        assert dr.rust_detectors_disabled() is False  # degrade, never a latch
 
     def test_close_edge_true_on_a_complete_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: list[tuple[Any, ...]] = []

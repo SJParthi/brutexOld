@@ -760,6 +760,27 @@ class TestTodayCompletenessRouting:
         assert warns[0]["reason"] == "today_completeness_error"
         assert dr.rust_detectors_disabled() is False  # degrade, never a latch
 
+    def test_payload_keyerror_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-1 review defense-in-depth (NIT 3): a poisoned/unknown class
+        # token in the target's `_TODAY_CLASS_CODES` lookup surfaces as a
+        # `KeyError` from the PAYLOAD factory — it must degrade to the ORACLE
+        # verdict with ONE warn-once WARN, never raise and never mis-latch
+        # `crate_panic` through the Exception-inclusive panic belt.
+        def _poisoned_payload() -> dr.TodayCompletenessPayload:
+            raise KeyError("unknown_class_token")
+
+        _install_crate(monkeypatch, fake_detectors_crate())
+        with capture_logs() as logs:
+            result = dr.routed_classify_today_completeness(
+                payload_factory=_poisoned_payload,
+                python_law=lambda: _TODAY_ORACLE,
+                materialize=_today_identity_materialize,
+            )
+        assert result == _TODAY_ORACLE
+        warns = [e for e in logs if e["event"] == "detectors_rust.fallback"]
+        assert [w["reason"] for w in warns] == ["today_completeness_payload_error"]
+        assert dr.rust_detectors_disabled() is False  # degrade, never a latch
+
     def test_memory_error_reraises_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _oom(*_a: object) -> object:
             raise MemoryError

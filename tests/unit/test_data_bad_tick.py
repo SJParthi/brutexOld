@@ -552,3 +552,38 @@ class TestScreenFrameBadTicks:
         # … while an explicit max_ratio=2.0 drops it.
         tight = screen_frame_bad_ticks(self._frame(rows), max_ratio=2.0)
         assert tight.get_column("close").to_list() == [100.0]
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    Round-1 review of SLICE T24 PR-2 (NIT 4): ``bad_tick.py`` gained the
+    extracted ``_screen_frame_sequential_python`` oracle + the
+    ``BRUTEX_FEED_RUST_FRAME`` flag branch — the predicate's ratio
+    boundaries, the screen's baseline-hold/session-reset state machine and
+    the flag gate are exactly the killable-mutant classes — so the
+    module:suite pair sits in the workflow's per-module ``mutmut`` loop
+    with the module's TWO-file stem field (this suite + the Rust-seam
+    suite, the ``today_completeness.py`` precedent) and this deterministic
+    pin (the ``test_lake_stats_manifest.py`` / ``TestBenchWorkflowWiring``
+    precedent) fails if the pair is ever dropped. HONEST: it pins the
+    WIRING only — the weekly run executes on its own schedule/push
+    triggers.
+
+    Pair format: the loop parses 3-field ``module:testfile:timeout`` pairs
+    (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597) — the trailing ``:``
+    (empty timeout) selects the exact historical runner (the module holds
+    NO ``while`` loops, so the spin-capable wedge class the 30 s wrap
+    exists for is absent); a 2-field form would mis-parse the TEST PATH as
+    the timeout.
+    """
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        from pathlib import Path
+
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+        text = workflow.read_text(encoding="utf-8")
+        assert (
+            '"brutex/data/bad_tick.py:tests/unit/test_data_bad_tick.py'
+            ' tests/unit/test_data_bad_tick_rust_seam.py:"' in text
+        ), "bad_tick.py is not wired into mutation.yml's per-module mutmut loop"

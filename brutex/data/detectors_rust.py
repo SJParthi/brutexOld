@@ -63,16 +63,24 @@ to import back into this module):
   four law callables is a pre-PR-2 (or foreign/broken) install and latches
   ``crate_stale`` for ALL laws (the all-or-nothing consequence, disclosed:
   a PR-1-era wheel serves the oracle for the PR-1 laws too until rebuilt).
-* **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
-  FFI error surface — NOTE: a Rust panic the crate's own ``catch_unwind``
+* **Degrade set** — the FIVE-member :data:`_DEGRADE_ERRORS` =
+  ``ValueError``/``RuntimeError``/``TypeError``/``OverflowError``/
+  ``AttributeError`` → oracle with one capped WARN per reason (the
+  round-1 review wording fold — the executed truth, never the two-member
+  shorthand: ``ValueError``/``RuntimeError`` are the crate's declared FFI
+  error surface — NOTE: a Rust panic the crate's own ``catch_unwind``
   boundary CATCHES surfaces as ``PyRuntimeError`` and lands in THIS arm,
-  a warn-once degrade with NO latch), ``TypeError``/``OverflowError``
-  (PyO3 argument conversion — an out-of-``i64`` ordinal lands here),
-  ``AttributeError`` (broken-crate-internals belt) → oracle with one
-  capped WARN per reason. ``MemoryError`` is DELIBERATELY absent — OOM
-  re-raises raw, identical to the pure-Python path;
-  ``KeyboardInterrupt``/``SystemExit`` likewise. The narrow panic belt
-  (:func:`_panic_belt_errors` — imported from the sibling facade, ONE
+  a warn-once degrade with NO latch; ``TypeError``/``OverflowError`` are
+  PyO3 argument conversion — an out-of-``i64`` ordinal lands here;
+  ``AttributeError`` is the broken-crate-internals belt). The TODAY law's
+  PAYLOAD call additionally degrades on ``KeyError`` (the target's
+  class-code lookup — structurally total today over the closed
+  ``InstrumentClass`` enum; defense-in-depth so a poisoned/unknown class
+  token resolves to the oracle with one WARN, never a ``crate_panic``
+  latch via the ``Exception``-inclusive panic belt). ``MemoryError`` is
+  DELIBERATELY absent — OOM re-raises raw, identical to the pure-Python
+  path; ``KeyboardInterrupt``/``SystemExit`` likewise. The narrow panic
+  belt (:func:`_panic_belt_errors` — imported from the sibling facade, ONE
   copy per §11 COMMON) latches ``crate_panic`` ONLY for a panic that
   ESCAPES ``catch_unwind`` as a ``pyo3_runtime.PanicException`` (the
   executed truth — the round-1 review wording fold).
@@ -182,6 +190,16 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
     AttributeError,
 )
 
+#: The TODAY law's PAYLOAD-call degrade set — :data:`_DEGRADE_ERRORS` +
+#: ``KeyError`` (the round-1 review payload-arm addition, module docstring:
+#: the target's class-code lookup is structurally total today; a
+#: poisoned/unknown class token must degrade warn-once to the oracle,
+#: never mis-latch ``crate_panic`` through the panic belt).
+_TODAY_PAYLOAD_DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
+    *_DEGRADE_ERRORS,
+    KeyError,
+)
+
 #: The production digest width (`raw_integrity._DIGEST_SIZE` twin — the
 #: routed call passes it explicitly so the two can never drift silently:
 #: the burn-in compares against the oracle's own digest).
@@ -251,8 +269,10 @@ class TodayCompletenessPayload:
     ``oi_null`` the parallel per-bar shape flags; ``last_bar_complete`` the
     Python-computed :func:`~brutex.calendars.nse.session_last_bar_complete`
     close-edge law (the calendar stays Python — never re-implemented in
-    Rust). ``instrument_class_code`` maps the target's ``InstrumentClass``
-    onto the crate's 0..3 codes.
+    Rust; the target consults it LAZILY, mirroring the oracle —
+    ``INDEX_SPOT`` only, every other class ships the neutral ``True`` the
+    crate ignores). ``instrument_class_code`` maps the target's
+    ``InstrumentClass`` onto the crate's 0..3 codes.
     """
 
     instrument_class_code: int
@@ -642,6 +662,11 @@ def routed_classify_today_completeness[VerdictT](
     a burn-in mismatch returns the ORACLE verdict + autoreverts — the
     crossverify fail-closed gate seam depends on exactly this
     never-a-new-exception-class discipline (module docstring, pinned).
+    The PAYLOAD call carries its OWN degrade arm including ``KeyError``
+    (the target's ``_TODAY_CLASS_CODES`` lookup — structurally total
+    today; round-1 review defense-in-depth) so a poisoned/unknown class
+    token degrades warn-once to the oracle instead of mis-latching
+    ``crate_panic`` through the ``Exception``-inclusive panic belt.
     """
     if rust_detectors_disabled():
         return python_law()
@@ -650,6 +675,19 @@ def routed_classify_today_completeness[VerdictT](
         return python_law()
     try:
         payload = payload_factory()
+    except _TODAY_PAYLOAD_DEGRADE_ERRORS as exc:
+        # The payload factory is pure Python (no FFI, no panic belt needed):
+        # a `KeyError` here is the target's class-code lookup missing a
+        # token — structurally unreachable today (the closed `InstrumentClass`
+        # enum makes `_TODAY_CLASS_CODES` total), but under the flag it must
+        # resolve to the ORACLE verdict with one WARN, never a `crate_panic`
+        # latch (the `Exception` member of the panic belt would otherwise
+        # swallow it) and never a new exception class out of the classifier
+        # (the crossverify gate-seam law). KeyboardInterrupt/SystemExit/
+        # MemoryError propagate structurally — none is a member of this set.
+        _warn_once("today_completeness_payload_error", error_detail=repr(exc))
+        return python_law()
+    try:
         fields = crate.classify_today_completeness_verdict(
             payload.instrument_class_code,
             payload.expected_minutes,
