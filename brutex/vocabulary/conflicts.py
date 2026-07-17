@@ -123,6 +123,15 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
         (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
         (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 (bits 69-73): deliberately NO new
+        # pairs — none exist. The bullish 23.6/78.6 retracements (69/70) are
+        # DISTINCT levels from the bearish ladder (proximity to one never
+        # excludes another under a wide band); the two-sided 424 bit (71) is
+        # a single OR'd bit; near-swing high/low (72/73) coincide only
+        # degenerately (a tight structure where both confirmed levels sit
+        # inside one band — legal, not impossible). The reserved gap
+        # placeholders (66-68) never fire, so — like the VWAP tombstones —
+        # they carry no pair. conflicts.py needs no functional change.
     }
 )
 

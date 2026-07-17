@@ -1,6 +1,6 @@
 """Golden byte-lock of the R33 phrase table (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-The 66 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
+The 74 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
 "written+reviewed once" law) — this digest makes any wording edit a
 DELIBERATE golden re-lock, never a silent drift.
 
@@ -21,11 +21,13 @@ import hashlib
 from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 
 #: Locked golden digest of the canonical ``bit|name|plain`` serialization.
-# DELIBERATE RE-LOCK (the 60→66 vocab reshape): 6 new rows (CPR 60-63 +
-# the declared-only SuperTrend 64-65) + the two VWAP rows reworded to the
-# honest RETIRED prose (bit positions unchanged). Old digest:
-# 92f9df06fa5b2b5aa7401505e664630ad22b56b2f53e982b611bc4a766346e79.
-_GOLDEN_TABLE_SHA256 = "221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883"
+# DELIBERATE RE-LOCK (DEC-FIB-TEMPLATE-EXPRESS-001, the 66→74 express): 8 new
+# rows — the 3 reserved gap placeholders (66-68, dropped at the re-stack onto
+# the gap branch) + the 5 express conditions (bull-236/786 retracements, the
+# two-sided 424 extension, near-swing high/low). Every pre-existing row
+# byte-unchanged. Old digest (the 60→66 reshape lock):
+# 221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883.
+_GOLDEN_TABLE_SHA256 = "91b58e0f1b959532e01e9118f3f5b7cdfac9392ac7ec60f5455692deade9f04d"
 
 
 def test_phrase_table_digest_locked() -> None:

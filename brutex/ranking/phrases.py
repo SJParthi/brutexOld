@@ -1,4 +1,4 @@
-"""The R33 dual-language trade-reason table — FIXED, hand-written, 66 entries.
+"""The R33 dual-language trade-reason table — FIXED, hand-written, 74 entries.
 
 DEC-SWEEP-RESULTS-DEPTH-001 (WP3). Every trade/combo shows WHY it entered in
 BOTH modes — technical (``PDH_CROSS_UP ∧ CLOSE>R2``-style condition names)
@@ -9,7 +9,7 @@ mask's fired-bit count (bench-pinned).
 
 ## The table's provenance + drift guards
 
-One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (66)
+One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (74)
 :class:`PhraseEntry` rows, ``bit == index``. Each ``plain`` phrase was
 hand-written ONCE from the condition's authoritative semantics — the
 ``description`` field of ``rust/trading-core/conditions.toml`` (the SINGLE
@@ -71,7 +71,7 @@ class PhraseEntry:
     plain: str
 
 
-#: The FIXED 66-entry phrase table (R33) — ``bit == index``, import-validated.
+#: The FIXED 74-entry phrase table (R33) — ``bit == index``, import-validated.
 PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     # ── EMA Position (bits 0-5) ──
     PhraseEntry(0, "close_above_ema20", "the candle closed above its 20-period average price"),
@@ -219,6 +219,57 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
         "close_below_supertrend",
         "the candle closed below the SuperTrend line (declared condition — math "
         "not yet active, never fires on current runs)",
+    ),
+    # ── Gap Placeholders (bits 66-68) — DEC-FIB-TEMPLATE-EXPRESS-001 reserved
+    # positions for the gap-midpoint conditions (#1901); dropped at the
+    # re-stack onto the gap branch, NEVER implemented here. The phrases exist
+    # because the table must cover every declared bit.
+    PhraseEntry(
+        66,
+        "placeholder_gap_66",
+        "reserved placeholder 66 for a gap-midpoint condition (never fires)",
+    ),
+    PhraseEntry(
+        67,
+        "placeholder_gap_67",
+        "reserved placeholder 67 for a gap-midpoint condition (never fires)",
+    ),
+    PhraseEntry(
+        68,
+        "placeholder_gap_68",
+        "reserved placeholder 68 for a gap-midpoint condition (never fires)",
+    ),
+    # ── Fibonacci Extended (bits 69-71) — DEC-FIB-TEMPLATE-EXPRESS-001 ──
+    PhraseEntry(
+        69,
+        "near_fib_bull_236",
+        "price was near the bullish 23.6% Fibonacci retracement (measured up "
+        "from the previous day's low)",
+    ),
+    PhraseEntry(
+        70,
+        "near_fib_bull_786",
+        "price was near the bullish 78.6% Fibonacci retracement (measured up "
+        "from the previous day's low)",
+    ),
+    PhraseEntry(
+        71,
+        "near_fib_424",
+        "price was near a 424% Fibonacci extension (the far breakout target, "
+        "above or below the previous day's range)",
+    ),
+    # ── Swing Proximity (bits 72-73) — DEC-FIB-TEMPLATE-EXPRESS-001 ──
+    PhraseEntry(
+        72,
+        "near_swing_high",
+        "price was back at the last confirmed swing high (a retest of the "
+        "structure level)",
+    ),
+    PhraseEntry(
+        73,
+        "near_swing_low",
+        "price was back at the last confirmed swing low (a retest of the "
+        "structure level)",
     ),
 )
 

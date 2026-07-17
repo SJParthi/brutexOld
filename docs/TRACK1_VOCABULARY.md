@@ -295,3 +295,32 @@ For Mode B, the exit-condition vocabulary is documented in
 `TRACK1_BACKTEST_SPEC.md §9` and is NOT part of the 52-bit pattern
 mask. The 10 exit conditions are stored as a separate 16-bit mask in
 the result row (`exit_mask_u16`).
+
+---
+
+## 16. Post-lock growth register (u128 era)
+
+The 52-condition lock above is the HISTORICAL Phase-1 record. The living
+single source of truth for the grown vocabulary is the manifest
+`rust/trading-core/conditions.toml` (codegen → `src/bits.rs` +
+`brutex/vocabulary/bits.py`); the mask is **u128** since
+DEC-VOCAB-U128-CODEGEN-001 (52→60), reshaped to 66 declared bits by the
+vocab-66 reshape (VWAP 52/53 tombstoned; CPR 60-63; SuperTrend 64/65
+layout-only) and to **74 declared bits** by
+**DEC-FIB-TEMPLATE-EXPRESS-001** (MIGRATION.md #1935):
+
+| Bit | Name | Group | Semantics | Band |
+|---|---|---|---|---|
+| 66-68 | `placeholder_gap_66..68` | Gap Placeholder | RESERVED for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — dropped at the re-stack, never implemented here | — |
+| 69 | `near_fib_bull_236` | Fibonacci Extended | close within tolerance of the bullish 23.6% retracement (PDL-anchored) | `fib_proximity_bps` |
+| 70 | `near_fib_bull_786` | Fibonacci Extended | close within tolerance of the bullish 78.6% retracement (PDL-anchored) | `fib_proximity_bps` |
+| 71 | `near_fib_424` | Fibonacci Extended | close within tolerance of the 424% extension (up OR down variant — the bits-26-29 pair convention) | `fib_proximity_bps` |
+| 72 | `near_swing_high` | Swing Proximity | close within tolerance of the last k-confirmed swing high (`None` ⇒ never fires) | `swing_proximity_bps` (default 10, default-omitted from run identity) |
+| 73 | `near_swing_low` | Swing Proximity | close within tolerance of the last k-confirmed swing low (`None` ⇒ never fires) | `swing_proximity_bps` |
+
+The swing anchors are read from the SAME look-ahead-clean
+`trading_core.MarketStructureState` that resolves the BOS/CHoCH flags
+(bits 56-59) — a swing confirms only k bars later, so at bar N the levels
+can only be highs/lows of bars ≤ N−k (the P-06 family + the dedicated
+suffix-independence property pin it). Bits 69-71 reuse the swept Group-4
+`fib_proximity_bps` band and clear with the fib family on anchor-cold days.
