@@ -149,6 +149,7 @@ class Stage1ABatchInputs:
     day_index: list[int]
     ema20_paisa: list[int | None]
     ema200_paisa: list[int | None]
+    supertrend_x2_paisa: list[int | None]
     day_pivot_levels: list[int]
     day_fib_levels: list[int]
     day_has_pivot: list[bool]
@@ -353,6 +354,7 @@ def rust_bar_bits_or_none(
             inputs.applies_to_1day_mask,
             inputs.apply_1day_mask,
             inputs.fractal_k,
+            inputs.supertrend_x2_paisa,
         )
     except (ValueError, TypeError, OverflowError) as exc:
         # The boundary's own guard ValueErrors + PyO3 conversion failures
