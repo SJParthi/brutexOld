@@ -66,6 +66,7 @@ from zoneinfo import ZoneInfo
 
 import lmdb
 
+from brutex.calendars.nse import IST
 from brutex.models import BruteXError
 
 #: LEGACY vendor-neutral DEFAULT daily limit — the PRIOR vendor's documented
@@ -87,10 +88,9 @@ _THRESHOLD_PCTS: Final[tuple[tuple[float, str], ...]] = (
 )
 
 #: IST timezone instance used by the production clock default. Held at
-#: module scope to avoid re-constructing on every call (ZoneInfo lookups
-#: cache internally but the construction allocation is still measurable
-#: at >1 µs per call per Agent 1 §F).
-_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+#: module scope to avoid re-constructing on every call — the ONE canonical
+#: :data:`brutex.calendars.nse.IST` root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[ZoneInfo] = IST
 
 #: LMDB key under which the quota state tuple is stored. Single key per
 #: env — single write txn per acquire — no torn writes possible.
