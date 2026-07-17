@@ -3110,3 +3110,132 @@ class TestSharedPullLedgerScope:
         assert holder[0] is not None
         after = begin_pull_ledger(tmp_path, dry_run=False)
         assert after is not holder[0]  # the finally reset ran
+
+
+class TestLedgerRustRenderSeam:
+    """DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 — the ONE shared render body.
+
+    Both write sites (``append_ledger_delta`` + ``save_window_ledger``) render
+    through ``_ledger_parquet_bytes``: flag OFF (the default) runs the verbatim
+    pyarrow oracle with the crate structurally unreachable (bomb-spy-pinned);
+    flag ON routes through the ``lake_rust_ledger_render`` facade. The
+    ENOSPC/OOM → ``LakeWriteHalt`` law covers the render on BOTH arms
+    (DEC-WINDOW-LEDGER-WRITE-HALT-001 — semantics byte-identical).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_facade(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        from brutex.data import lake_rust_ledger_render
+
+        monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
+        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+        yield
+        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+
+    def _ledger(self) -> WindowLedger:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        ledger.plan(_key("SENSEX"), now=_NOW)  # the last_attempt_at None arm
+        return ledger
+
+    def test_flag_off_bytes_identical_to_direct_pyarrow_path_write(
+        self, tmp_path: Path
+    ) -> None:
+        # The seam restructure pin: the OFF arm renders to a BUFFER then
+        # writes the bytes, where the pre-conversion writer ran
+        # ``pq.write_table(table, tmp)`` straight at the temp PATH — the
+        # file bytes must be identical (pyarrow's writer is destination-
+        # agnostic; the byte-determinism golden probe backs it).
+        import pyarrow.parquet as pq
+        from brutex.data import window_ledger_store as store_mod
+
+        save_window_ledger(self._ledger(), tmp_path)
+        rows = load_window_ledger(tmp_path).to_rows()
+        direct = tmp_path / "direct.parquet"
+        pq.write_table(store_mod._rows_to_table(rows), direct)  # type: ignore[no-untyped-call, unused-ignore]
+        assert ledger_path(tmp_path).read_bytes() == direct.read_bytes()
+        assert store_mod._render_ledger_parquet_python(rows) == direct.read_bytes()
+
+    def test_flag_off_never_routes_to_facade_and_never_imports_crate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bomb spy (the OFF-arm pin): the facade route AND the crate import
+        # are both structurally unreachable with the flag unset.
+        import sys as sys_mod
+
+        from brutex.data import lake_rust_ledger_render
+        from brutex.data import window_ledger_store as store_mod
+
+        def _bomb(**_kwargs: Any) -> bytes:
+            raise AssertionError("flag-OFF must never route through the facade")
+
+        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _bomb)
+        monkeypatch.setitem(sys_mod.modules, "brutex_lake", None)  # import would raise
+        ledger = self._ledger()
+        assert append_ledger_delta(ledger, tmp_path) == 2
+        ledger.record(_key("BANKNIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        assert load_window_ledger(tmp_path).to_rows() == ledger.to_rows()
+        assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
+
+    def test_flag_on_routes_both_write_sites_through_the_facade(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import lake_rust_ledger_render
+        from brutex.data import window_ledger_store as store_mod
+
+        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "1")
+        calls: list[int] = []
+
+        def _spy(*, rows: Any, python_render: Any) -> bytes:
+            calls.append(len(rows))
+            result = python_render()
+            assert isinstance(result, bytes)
+            return result
+
+        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _spy)
+        ledger = self._ledger()
+        assert append_ledger_delta(ledger, tmp_path) == 2  # site 1: the delta append
+        ledger.record(_key("BANKNIFTY"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        save_window_ledger(ledger, tmp_path)  # site 2: the full save
+        assert calls == [2, 3]
+        assert load_window_ledger(tmp_path).to_rows() == ledger.to_rows()
+
+    def test_flag_junk_env_stays_on_the_oracle_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data import lake_rust_ledger_render
+        from brutex.data import window_ledger_store as store_mod
+
+        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "onn")
+
+        def _bomb(**_kwargs: Any) -> bytes:
+            raise AssertionError("junk env must resolve loud-OFF, never route")
+
+        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _bomb)
+        save_window_ledger(self._ledger(), tmp_path)
+        assert len(load_window_ledger(tmp_path).to_rows()) == 2
+
+    def test_flag_on_render_memory_error_maps_to_lake_write_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The render runs INSIDE atomic_write_via's guarded callable, so a
+        # raw MemoryError out of the facade (its documented re-raise
+        # doctrine) still maps to LakeWriteHalt("out_of_memory") — the
+        # DEC-WINDOW-LEDGER-WRITE-HALT-001 law, byte-identical to the
+        # pre-conversion pq.write_table-in-place semantics.
+        from brutex.data import lake_rust_ledger_render
+        from brutex.data import window_ledger_store as store_mod
+
+        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "1")
+
+        def _oom(**_kwargs: Any) -> bytes:
+            raise MemoryError
+
+        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _oom)
+        ledger = self._ledger()
+        with pytest.raises(LakeWriteHalt) as excinfo:
+            append_ledger_delta(ledger, tmp_path)
+        assert excinfo.value.reason == "out_of_memory"
+        with pytest.raises(LakeWriteHalt):
+            save_window_ledger(ledger, tmp_path)
