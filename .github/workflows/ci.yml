@@ -1891,8 +1891,11 @@ jobs:
           # pre-settle TODAY minute-completeness gate — the pure classifier +
           # guarded observe wiring both ingest tails consult before sink.append
           # + ledger.record. 100% line+branch standalone from the start.
+          # SLICE T24 PR-2 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the
+          # Rust-seam suite joins the field — the routed arm's payload/
+          # materialize closures are exercised only with the seam armed.
           if compgen -G "tests/unit/test_today_completeness.py" > /dev/null; then
-            pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py
+            pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py tests/unit/test_today_completeness_rust_seam.py
           else
             echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
           fi

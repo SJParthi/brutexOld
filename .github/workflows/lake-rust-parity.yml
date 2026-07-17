@@ -107,6 +107,18 @@ on:
       - "tests/unit/test_partial_window_detect_rust_seam.py"
       - "tests/integration/test_detectors_rust_stored_outcome.py"
       - "tests/fakes/detectors_crate.py"
+      # SLICE T24 PR-2 — the today-completeness law + the frame bad-tick
+      # wheel-boundary reuse of brutex-feed's scan kernel.
+      - "brutex/data/today_completeness.py"
+      - "brutex/data/bad_tick.py"
+      - "brutex/data/bad_tick_rust.py"
+      - "tests/unit/test_today_completeness_rust_seam.py"
+      - "tests/unit/test_bad_tick_rust.py"
+      - "tests/unit/test_data_bad_tick_rust_seam.py"
+      - "tests/property/test_bad_tick_frame_equivalence.py"
+      - "tests/integration/test_today_completeness_rust_stored_outcome.py"
+      - "tests/integration/test_bad_tick_rust_stored_outcome.py"
+      - "tests/fakes/feed_scan_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
       # lake_invariants.py + their suites. The flag-ON heal twin step is
@@ -156,6 +168,18 @@ on:
       - "tests/unit/test_partial_window_detect_rust_seam.py"
       - "tests/integration/test_detectors_rust_stored_outcome.py"
       - "tests/fakes/detectors_crate.py"
+      # SLICE T24 PR-2 — the today-completeness law + the frame bad-tick
+      # wheel-boundary reuse of brutex-feed's scan kernel.
+      - "brutex/data/today_completeness.py"
+      - "brutex/data/bad_tick.py"
+      - "brutex/data/bad_tick_rust.py"
+      - "tests/unit/test_today_completeness_rust_seam.py"
+      - "tests/unit/test_bad_tick_rust.py"
+      - "tests/unit/test_data_bad_tick_rust_seam.py"
+      - "tests/property/test_bad_tick_frame_equivalence.py"
+      - "tests/integration/test_today_completeness_rust_stored_outcome.py"
+      - "tests/integration/test_bad_tick_rust_stored_outcome.py"
+      - "tests/fakes/feed_scan_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
       # same rationale as the push block above (render-seam-scoped twin).
@@ -270,6 +294,28 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install the brutex-feed kernel wheel (PR-2 frame bad-tick reuse)
+        # SLICE T24 PR-2 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the frame
+        # bad-tick routing reuses the EXISTING brutex-feed scan kernel at the
+        # wheel boundary (ZERO new Rust — DEC-FEED-RUST-CORE-001's scan.rs
+        # already compiles the whole BadTickScreen state machine). The
+        # BRUTEX_FEED_RUST_FRAME leg + the ["real"]-parametrized seam /
+        # property / stored-outcome arms need the wheel installed (they
+        # importorskip-degrade without it, which would make those arms
+        # silently vacuous in the ONE lane whose job is real-kernel parity).
+        # Same crates.io flake-retry idiom as the trading-core step above.
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
 
@@ -399,6 +445,10 @@ jobs:
             tests/unit/test_raw_integrity_rust_seam.py \
             tests/unit/test_interior_gap_detect_rust_seam.py \
             tests/unit/test_partial_window_detect_rust_seam.py \
+            tests/unit/test_today_completeness_rust_seam.py \
+            tests/unit/test_bad_tick_rust.py \
+            tests/unit/test_data_bad_tick_rust_seam.py \
+            tests/property/test_bad_tick_frame_equivalence.py \
             2>&1 | tee /tmp/parity-corpora.log \
             || { emit_failure_summary "corpora-facade-seam" /tmp/parity-corpora.log; exit 1; }
           # G8 window-ledger differential + affected suites, flag-ON arm
@@ -410,33 +460,58 @@ jobs:
             2>&1 | tee /tmp/parity-wledger-on.log \
             || { emit_failure_summary "window-ledger-flag-on" /tmp/parity-wledger-on.log; exit 1; }
           # SLICE T24 detector laws, flag-ON arm
-          # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the three EXISTING
-          # detector suites run VERBATIM under all three flags with the real
-          # wheel. HONEST framing (round-1 review): this leg is a BELT — it
-          # proves no flag-ON regression in the catching suites, but burn-in
-          # autorevert means the ORACLE could be doing the catching here, so
-          # the genuine Rust-parity gates are the seam suites' remaining=0
-          # hypothesis differentials + the cargo frozen vectors — PLUS the
-          # STORED-OUTCOME leg (test_detectors_rust_stored_outcome.py): a
-          # real-writer #1031 demotion pull + the raw-integrity sidecar,
-          # driven OFF then ON at remaining=0 against the REAL wheel, with
-          # stored parquet bytes + ledger records asserted identical and the
-          # demotions proven fired in BOTH arms.
+          # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the EXISTING detector +
+          # today-completeness suites run VERBATIM under all four brutex-lake
+          # flags with the real wheel. HONEST framing (round-1 review): this
+          # leg is a BELT — it proves no flag-ON regression in the catching
+          # suites, but burn-in autorevert means the ORACLE could be doing
+          # the catching here, so the genuine Rust-parity gates are the seam
+          # suites' remaining=0 hypothesis differentials + the cargo frozen
+          # vectors — PLUS the STORED-OUTCOME legs
+          # (test_detectors_rust_stored_outcome.py — the real-writer #1031
+          # demotion pull + the raw-integrity sidecar;
+          # test_today_completeness_rust_stored_outcome.py — the real-writer
+          # TODAY_INCOMPLETE withholds/demotions on BOTH ingest spines):
+          # each driven OFF then ON at remaining=0 against the REAL wheel,
+          # with stored parquet bytes + ledger records asserted identical
+          # and the withholds/demotions proven fired in BOTH arms.
           BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
           BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
-          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rsfE -q \
+          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 \
+          BRUTEX_LAKE_RUST_TODAY_COMPLETENESS=1 pytest -rsfE -q \
             tests/unit/test_detectors_rust.py \
             tests/unit/test_raw_integrity.py \
             tests/unit/test_raw_integrity_store.py \
             tests/integration/test_raw_integrity_wiring.py \
             tests/unit/test_interior_gap_detect.py \
             tests/unit/test_partial_window_detect.py \
+            tests/unit/test_today_completeness.py \
             tests/unit/test_raw_integrity_rust_seam.py \
             tests/unit/test_interior_gap_detect_rust_seam.py \
             tests/unit/test_partial_window_detect_rust_seam.py \
+            tests/unit/test_today_completeness_rust_seam.py \
             tests/integration/test_detectors_rust_stored_outcome.py \
+            tests/integration/test_today_completeness_rust_stored_outcome.py \
             2>&1 | tee /tmp/parity-t24-on.log \
             || { emit_failure_summary "t24-detectors-flag-on" /tmp/parity-t24-on.log; exit 1; }
+          # SLICE T24 PR-2 frame bad-tick, flag-ON arm: the EXISTING
+          # bad-tick unit battery + the #1932 freshness-screen catching
+          # suite run VERBATIM under BRUTEX_FEED_RUST_FRAME=1 with the real
+          # brutex-feed wheel (installed above), plus the seam/property
+          # suites and the STORED-OUTCOME leg
+          # (test_bad_tick_rust_stored_outcome.py — the derived-partition
+          # write path: screened frame → stored derived bytes sha256
+          # identical OFF vs ON, poisoned-kernel teeth). Same belt honesty
+          # as the leg above.
+          BRUTEX_FEED_RUST_FRAME=1 pytest -rsfE -q \
+            tests/unit/test_data_bad_tick.py \
+            tests/unit/test_bad_tick_rust.py \
+            tests/unit/test_data_bad_tick_rust_seam.py \
+            tests/unit/test_tf_autoderive.py \
+            tests/property/test_bad_tick_frame_equivalence.py \
+            tests/integration/test_bad_tick_rust_stored_outcome.py \
+            2>&1 | tee /tmp/parity-frame-on.log \
+            || { emit_failure_summary "frame-bad-tick-flag-on" /tmp/parity-frame-on.log; exit 1; }
 
       - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
         # The PR-2 non-perturbation leg: the 18-round
