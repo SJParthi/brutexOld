@@ -1303,3 +1303,15 @@ def test_box_update_block_rides_the_full_six_link_composition(
     assert any(n.startswith("📦 box-update: rolled_back") for n in report.honesty_notes)
     # The one Telegram summary still fired with its ordinary verdict.
     assert [s["verdict"] for s in alerter.summaries] == ["OK"]
+
+
+def test_box_update_note_quiet_statuses_are_silent() -> None:
+    """§5 — the 📦 note is SILENT on absent/up_to_date/disabled blocks (the
+    quiet statuses carry no operator-actionable news)."""
+    from brutex.nightly.run import _box_update_note
+
+    assert _box_update_note(None) is None
+    assert _box_update_note({"status": "up_to_date"}) is None
+    assert _box_update_note({"status": "disabled"}) is None
+    note = _box_update_note({"status": "updated", "wheels": "junk-not-a-list"})
+    assert note == "📦 box-update: updated ?→? · wheels ok 0/0 · gate skipped"
