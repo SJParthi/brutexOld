@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from types import ModuleType
 from typing import Final
 
 from brutex import cli
@@ -39,7 +40,7 @@ _BOUND_BUILDERS: Final = (
 )
 
 
-def _function_node(module: object, name: str) -> ast.FunctionDef:
+def _function_node(module: ModuleType, name: str) -> ast.FunctionDef:
     tree = ast.parse(inspect.getsource(module))
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
