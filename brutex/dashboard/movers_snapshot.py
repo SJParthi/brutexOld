@@ -66,6 +66,7 @@ from brutex.data.derive_lock import derive_in_progress
 from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.session import SESSION_CLOSE, SESSION_OPEN
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.money import format_inr, round_money, rupees_to_paisa
@@ -85,6 +86,7 @@ __all__ = [
     "compute_snapshot",
     "compute_spot_candidates",
     "filter_to_ist_minute",
+    "filter_to_ist_second",
     "info_prev_baseline_muhurat",
     "interval_minutes",
     "is_intraday_interval",
@@ -127,8 +129,9 @@ _INTERVAL_MINUTES: Final[dict[str, int]] = {
 
 #: NSE/BSE regular session bounds as minutes-from-midnight IST: 09:15 inclusive
 #: → 15:30 exclusive (CLAUDE.md §7 — `brutex.data.session` enforces the same).
-_SESSION_OPEN_MIN: Final[int] = 9 * 60 + 15
-_SESSION_CLOSE_MIN: Final[int] = 15 * 60 + 30
+#: DERIVED from the ONE COMMON session constants (db_view precedent; DEC-TF-REGISTRY-DYNAMIC-001 timestamp fold — values 555/930 byte-identical).
+_SESSION_OPEN_MIN: Final[int] = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute
+_SESSION_CLOSE_MIN: Final[int] = SESSION_CLOSE.hour * 60 + SESSION_CLOSE.minute
 
 #: A timeframe whose bar length spans the whole session (1day = 375 min) has no
 #: intraday time-of-day choice — the bar IS the day.
@@ -712,18 +715,40 @@ def parse_snapshot_date(date_str: str | None) -> date_cls:
         raise ValueError(f"malformed date {date_str!r} — expected ISO YYYY-MM-DD") from exc
 
 
-def _cutoff_minute(time_str: str | None) -> int | None:
-    """Parse an ``HH:MM`` IST time to a minute-of-day cutoff, or ``None`` for whole-day.
+def _cutoff_second(time_str: str | None) -> int | None:
+    """Parse an ``HH:MM`` or ``HH:MM:SS`` IST time to a second-of-day cutoff, or ``None`` for whole-day.
 
-    Raises :class:`ValueError` on a malformed time (the route maps it to a 400).
+    The seconds-capable single-copy parser (DEC-TF-REGISTRY-DYNAMIC-001):
+    ``HH:MM`` means ``HH:MM:00``. Raises :class:`ValueError` on a malformed
+    time (the route maps it to a 400).
     """
     if not time_str:
         return None
     try:
-        hh, mm = time_str.split(":")  # wrong arity → ValueError (unpack), as does a bad int.
-        return int(hh) * 60 + int(mm)
+        # A bad int → ValueError, as does a wrong arity below (structural match —
+        # no magic arity literals, the PLR2004 discipline).
+        match time_str.split(":"):
+            case [hh, mm]:
+                ss = "0"
+            case [hh, mm, ss]:
+                pass
+            case parts:
+                raise ValueError(f"expected 2 or 3 colon-separated fields, got {len(parts)}")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
     except ValueError as exc:
-        raise ValueError(f"malformed time {time_str!r} — expected HH:MM") from exc
+        raise ValueError(f"malformed time {time_str!r} — expected HH:MM or HH:MM:SS") from exc
+
+
+def _cutoff_minute(time_str: str | None) -> int | None:
+    """Parse an IST time to a minute-of-day cutoff, or ``None`` for whole-day.
+
+    Delegates to :func:`_cutoff_second` (DEC-TF-REGISTRY-DYNAMIC-001), so an
+    ``HH:MM:SS`` pick parses too and floors to its minute; the minute-of-day
+    contract for every ``HH:MM`` input is byte-identical. The malformed-time
+    error wording widened accordingly (sanctioned).
+    """
+    sec = _cutoff_second(time_str)
+    return None if sec is None else sec // 60
 
 
 def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
@@ -763,13 +788,26 @@ def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
 
     Raises :class:`ValueError` on a malformed *time* (propagated from
     :func:`_cutoff_minute`; the route maps it to a 400).
+
+    An ``HH:MM:SS`` pick with a NON-ZERO seconds component is always an
+    as-of INSTANT floored to its minute — never the bucket-anchor forward
+    resolution (resolving a mid-bucket seconds pick forward past the pick
+    would admit bars from AFTER the as-of instant — look-ahead;
+    DEC-TF-REGISTRY-DYNAMIC-001). ``HH:MM:00`` behaves exactly like ``HH:MM``.
     """
     minutes = interval_minutes(interval)
     if minutes is None or minutes >= _DAILY_MIN_FLOOR:
         return None
-    raw = _cutoff_minute(time)
-    if raw is None:
+    raw_s = _cutoff_second(time)
+    if raw_s is None:
         return None
+    raw = raw_s // 60
+    if raw_s % 60 != 0:
+        # A genuine seconds instant (DEC-TF-REGISTRY-DYNAMIC-001): NEVER the
+        # bucket-anchor forward resolution — resolving a mid-bucket seconds
+        # pick forward past the pick would admit bars from AFTER the as-of
+        # instant (look-ahead). As-of-instant law: floor to the minute.
+        return raw
     if _SESSION_OPEN_MIN <= raw < _SESSION_CLOSE_MIN and (raw - _SESSION_OPEN_MIN) % minutes == 0:
         return min(raw + minutes - 1, _SESSION_CLOSE_MIN - 1)
     return raw
@@ -858,6 +896,34 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
         The timestamp column name to convert + compare on.
     """
     return frame.filter(_ist_minute_of_day_expr(ts_col) <= cutoff_min)
+
+
+def _ist_second_of_day_expr(ts_col: str) -> pl.Expr:
+    """IST second-of-day expression for *ts_col* — the seconds twin of
+    :func:`_ist_minute_of_day_expr` (the single copy; DEC-TF-REGISTRY-DYNAMIC-001).
+
+    Int32 casts for the same narrow-int-overflow reason as the minute twin.
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    return (
+        ist.dt.hour().cast(pl.Int32) * 3600
+        + ist.dt.minute().cast(pl.Int32) * 60
+        + ist.dt.second().cast(pl.Int32)
+    )
+
+
+def filter_to_ist_second(frame: pl.DataFrame, cutoff_s: int, *, ts_col: str) -> pl.DataFrame:
+    """Keep only *frame*'s rows whose IST second-of-day is ``<= cutoff_s``.
+
+    The seconds-granular twin of :func:`filter_to_ist_minute` — the framework
+    seam for sub-minute-stamped bars (DEC-TF-REGISTRY-DYNAMIC-001). HONEST:
+    no production feed emits sub-minute bars today (Groww is 1-minute-only);
+    production consumers stay on the minute filter until a sub-minute feed +
+    its own DEC land.
+    """
+    return frame.filter(_ist_second_of_day_expr(ts_col) <= cutoff_s)
 
 
 def _read_cut_1m_frame(
