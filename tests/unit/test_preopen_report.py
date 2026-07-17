@@ -28,6 +28,7 @@ from brutex.dashboard.preopen_report import (
     _BASIS_INTERVAL,
     _COL_WIDTHS,
     _HOLE_WARN_CAP,
+    _STALE_WARN_CAP,
     _STYLE_GREEN,
     _STYLE_GREEN_BOLD,
     _STYLE_RED,
@@ -40,6 +41,7 @@ from brutex.dashboard.preopen_report import (
     _daily_close_by_date,
     _daily_open_by_date,
     _daily_prev_close_contiguous,
+    _fresh_daily_maps,
     _group_by_month,
     _hole_detail,
     _hole_shape,
@@ -47,6 +49,7 @@ from brutex.dashboard.preopen_report import (
     _month_label,
     _previous_trading_day,
     _row_fill_styles,
+    _stale_day_row,
     build_preopen_rows,
     render_month_workbook,
     render_report_zip,
@@ -59,6 +62,11 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.spot_daily_resample import (
+    fill_daily_from_minute,
+    make_lake_read_1m_window,
+    make_lake_write_1day,
+)
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
@@ -2548,3 +2556,818 @@ def test_prior_session_walk_is_memoised_per_unique_day(
     )
     assert len(rows) == 3  # one 03-04 row per symbol
     assert sorted(calls) == [date(2024, 3, 1), date(2024, 3, 4)]  # one walk per unique day
+
+
+# ── the day-basis derived-1day FRESHNESS guard (DEC-PREOPEN-DAY-FRESHNESS-001) ─
+
+
+def _prebuild_1day(lake: Path, symbol: str, *, start: date, end: date) -> None:
+    """Derive the symbol's ``1day`` partition from its stored 1-minute — the REAL
+    production prebuild builders (``make_lake_read_1m_window`` +
+    ``make_lake_write_1day`` through ``fill_daily_from_minute``), never a
+    hand-written daily bar, so the fixture's stored-vs-resample relationship is
+    exactly the production write-time law."""
+    fill_daily_from_minute(
+        read_1m=make_lake_read_1m_window(
+            lake_root=lake, exchange="NSE", segment="CASH", symbol=symbol, start=start, end=end
+        ),
+        write_1day=make_lake_write_1day(
+            lake_root=lake, exchange="NSE", segment="CASH", symbol=symbol
+        ),
+        before=end,
+    )
+
+
+def _stale_prev_close_lake(lake: Path, symbol: str = "STALE") -> None:
+    """The F-D1 executed-repro lake: prebuild from a PARTIAL session A, then a
+    later 1-minute pull lands A's true tail — the stored derived 1day close
+    (100.30) is now STALE vs the 1-minute truth (197.90)."""
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 4, 30, tzinfo=UTC), open_="100.10", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="103.90", close="104.00"),
+        ],
+    )
+    _prebuild_1day(lake, symbol, start=date(2024, 3, 5), end=date(2024, 3, 7))
+    # The LATER heal/re-pull: session A's true tail (new timestamps — the
+    # keep-first 1-minute law appends them; the derived 1day is not re-derived).
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [_bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="197.00", close="197.90")],
+    )
+
+
+def test_day_basis_recomputes_stale_prev_close_from_1m_truth(tmp_path: Path) -> None:
+    # THE F-D1 regression (DEC-PREOPEN-DAY-FRESHNESS-001, the executed refuter
+    # repro worker_d_probe2): stored-vs-resample equality is a WRITE-TIME
+    # guarantee, not an invariant — a 1-minute write AFTER the last prebuild
+    # left the derived 1day PREV. CLOSE stale, and the day basis (the DEFAULT
+    # report) served +3.49% where the 1-minute truth was −47.55%, with ZERO
+    # warnings. Now: the row is served RECOMPUTED from the 1-minute base +
+    # exactly ONE capped preopen.stale_daily_recomputed WARN.
+    _stale_prev_close_lake(tmp_path)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "STALE")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.day == date(2024, 3, 6)
+    assert row.prev_close == Decimal("197.90")  # the 1-minute truth, NOT the stale 100.30
+    assert row.iep == Decimal("103.80")
+    assert row.display_cells()[-1] == -47.55  # was +3.49 pre-fix (fails-before)
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "STALE"
+    assert events[0]["day"] == "2024-03-06"
+    assert events[0]["expected_session"] == "2024-03-05"
+    assert events[0]["stored_prev_close"] == "100.3"
+    assert events[0]["fresh_prev_close"] == "197.9"
+    assert [
+        log for log in logs if log["event"] == "preopen.stale_daily_recomputed_suppressed"
+    ] == []
+
+
+def test_day_basis_recomputes_stale_iep_from_1m_truth(tmp_path: Path) -> None:
+    # The IEP twin: the initial pull MISSED session B's 09:15 open minute, the
+    # prebuild stamped the 09:20 substitute open (104.50), then a heal re-pull
+    # landed the true 09:15 bar (open 103.80) — the stored 1day OPEN is stale.
+    _write(
+        tmp_path,
+        "STALEIEP",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 50, tzinfo=UTC), open_="104.50", close="104.60"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="104.70", close="104.80"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "STALEIEP", start=date(2024, 3, 5), end=date(2024, 3, 7))
+    _write(
+        tmp_path,
+        "STALEIEP",
+        "1minute",
+        [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.85")],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "STALEIEP")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == 1
+    assert rows[0].iep == Decimal("103.80")  # the true 09:15 open, not the stale 104.50
+    assert rows[0].prev_close == Decimal("100.30")  # equal on both sources (fresh pair served)
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1
+    assert events[0]["stored_iep"] == "104.5"
+    assert events[0]["fresh_iep"] == "103.8"
+
+
+def test_day_basis_fresh_lake_serves_stored_silently_and_byte_identically(
+    tmp_path: Path,
+) -> None:
+    # A FRESH lake (prebuild ran, no later 1-minute write): stored ≡ resample,
+    # so the guard serves the stored values with ZERO freshness events and the
+    # rendered workbook is byte-identical to the stored-value render (the
+    # fresh-lake byte-identity pin; the frozen golden suite is the cross-file
+    # oracle for the committed fixture lake). The 03-07 session carries an
+    # AWKWARD 2dp float (78521.45 — an 11-significant-digit shortest-repr
+    # class value) so a str-vs-polars float-format divergence could never
+    # silently read false-stale (the hostile-review NIT regression net).
+    _write(
+        tmp_path,
+        "FRESH",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            _bar(datetime(2024, 3, 6, 9, 59, tzinfo=UTC), open_="103.90", close="104.00"),
+            _bar(datetime(2024, 3, 7, 3, 45, tzinfo=UTC), open_="78521.45", close="78522.10"),
+            _bar(datetime(2024, 3, 7, 9, 59, tzinfo=UTC), open_="78522.15", close="78523.15"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "FRESH", start=date(2024, 3, 5), end=date(2024, 3, 8))
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "FRESH")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 7),
+            basis="day",
+        )
+    assert [(r.day, r.prev_close, r.iep) for r in rows] == [
+        (date(2024, 3, 6), Decimal("100.30"), Decimal("103.80")),
+        (date(2024, 3, 7), Decimal("104.00"), Decimal("78521.45")),
+    ]
+    assert [log for log in logs if "stale_daily" in log["event"]] == []
+    assert [log for log in logs if log["event"] == "preopen.freshness_check_failed"] == []
+
+    def _expected_row(day: date, prev_close: str, iep: str) -> PreOpenRow:
+        chng = Decimal(iep) - Decimal(prev_close)
+        return PreOpenRow(
+            day=day,
+            symbol="FRESH",
+            prev_close=Decimal(prev_close),
+            iep=Decimal(iep),
+            chng=chng,
+            pct_chng=chng / Decimal(prev_close) * 100,
+        )
+
+    expected = render_xlsx(
+        [
+            _expected_row(date(2024, 3, 6), "100.3", "103.8"),
+            _expected_row(date(2024, 3, 7), "104.0", "78521.45"),
+        ]
+    )
+    assert render_xlsx(rows) == expected  # byte-identical wire/export on a fresh lake
+
+
+def test_day_basis_no_1m_base_fails_open_to_stored(tmp_path: Path) -> None:
+    # A 1day-only symbol (no 1-minute partition at all — e.g. a vendor-era
+    # artifact): the guard has NO base to verify against, so the row serves the
+    # STORED values exactly as before this guard existed, silently (the movers
+    # base-absent fail-open mirror; disclosed limit).
+    _write(
+        tmp_path,
+        "ONLYDAY",
+        "1day",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.30"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="104.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "ONLYDAY")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("100.30"), Decimal("103.80"))]
+    assert [log for log in logs if "stale_daily" in log["event"]] == []
+
+
+def test_day_basis_partial_1m_base_fails_open_never_mixes_scales(tmp_path: Path) -> None:
+    # The TMPV shape at the guard level (row-ATOMICITY): the 1-minute series
+    # covers the report day (on a DIFFERENT price scale — the demerger-raw
+    # ~191.8 vs the adjusted daily ~116) but NOT the prior session. The row is
+    # NOT fully recomputable on the 1-minute scale, so it serves the stored
+    # pair VERBATIM — recomputing only the IEP would re-create the exact
+    # cross-basis %CHNG explosion DEC-PREOPEN-REPORT-1DAY-001 killed.
+    _write(
+        tmp_path,
+        "TMPVG",
+        "1day",
+        [
+            _bar(datetime(2021, 1, 1, 3, 45, tzinfo=UTC), open_="111.96", close="112.90"),
+            _bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="116.11", close="117.00"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "TMPVG",
+        "1minute",
+        [_bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="191.80", close="191.90")],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "TMPVG")],
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 4),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("112.90"), Decimal("116.11"))]
+    assert rows[0].display_cells()[-1] == 2.84  # never the 191.8-mixed +69.88 explosion
+    # NEVER recomputed — but since the hostile-review fold the divergence
+    # evidence (fresh open 191.80 vs stored 116.11) is OBSERVED, not silent:
+    # ONE stale_daily_unrecomputable WARN, serve behavior unchanged.
+    assert [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"] == []
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "TMPVG"
+    assert events[0]["stored_iep"] == "116.11"
+    assert events[0]["fresh_iep"] == "191.8"
+    assert events[0]["fresh_prev_close"] is None  # the missing side reads None
+
+
+def test_day_basis_coverage_abstain_day_skips_guard_cleanly(tmp_path: Path) -> None:
+    # 2020-01-01's prior-session walk crosses the published-holiday coverage
+    # floor → expected None → the row was always skipped; the guard's
+    # needed-day fold takes the prior-is-None arm and the build stays clean.
+    _write(
+        tmp_path,
+        "FLOOR",
+        "1day",
+        [_bar(datetime(2020, 1, 1, 3, 45, tzinfo=UTC), open_="100.00", close="101.00")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "FLOOR")],
+        start=date(2020, 1, 1),
+        end=date(2020, 1, 31),
+        basis="day",
+    )
+    assert rows == []
+
+
+def test_stale_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # TWO stale rows for ONE dataset triple → BOTH rows recomputed, exactly ONE
+    # preopen.stale_daily_recomputed WARN (per-(exchange, segment, symbol)
+    # dedupe — the _warn_hole idiom).
+    _write(
+        tmp_path,
+        "TWOSTALE",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="103.00", close="103.10"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="106.00", close="106.10"),
+        ],
+    )
+    _prebuild_1day(tmp_path, "TWOSTALE", start=date(2024, 3, 4), end=date(2024, 3, 7))
+    # Late tails for BOTH anchor sessions (03-04 and 03-05) — the 03-05 AND
+    # 03-06 rows' stored PREV. CLOSE anchors are now both stale.
+    _write(
+        tmp_path,
+        "TWOSTALE",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 4, 9, 59, tzinfo=UTC), open_="101.00", close="101.50"),
+            _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="104.00", close="104.50"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "TWOSTALE")],
+            start=date(2024, 3, 5),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert [(r.day, r.prev_close) for r in rows] == [
+        (date(2024, 3, 5), Decimal("101.50")),  # the 1-minute truth, not the stale 100.10
+        (date(2024, 3, 6), Decimal("104.50")),  # the 1-minute truth, not the stale 103.10
+    ]
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == 1  # deduped per dataset triple
+
+
+def test_stale_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 stale symbols in one build → exactly the cap emitted
+    # + ONE suppressed summary carrying the overflow count. The staleness is a
+    # hand-planted 1day/1m divergence (cheaper than 22 prebuilds — divergence
+    # is divergence to the guard).
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        symbol = f"STALE{i:02d}"
+        _write(
+            tmp_path,
+            symbol,
+            "1day",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+        _write(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                # 03-05's 1-minute truth closes at 105 — the stored 100 is stale.
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="105.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"STALE{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    assert all(r.prev_close == Decimal("105.00") for r in rows)  # every row recomputed
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.stale_daily_recomputed_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+    assert suppressed[0]["cap"] == _STALE_WARN_CAP
+
+
+def _unrec_lake(lake: Path, symbol: str, *, divergent_close_only: bool = False) -> None:
+    """A stale-but-UNRECOMPUTABLE lake: hand-divergent 1day vs a PARTIAL 1m base.
+
+    Default shape (``UNRECA``): 1day for Mar 1/4/5/6; 1m ONLY for Mar 4 + Mar 6
+    with divergent values — every in-span row has divergence EVIDENCE but is
+    never fully recomputable (each day's counterpart session lacks a 1m base).
+    ``divergent_close_only``: 1day for Mar 1/4/5; 1m ONLY for Mar 4 whose OPEN
+    EQUALS the stored open but whose close diverges — the Mar 5 row's evidence
+    is then the prior-session CLOSE alone (the fresh_iep-None WARN shape).
+    """
+    if divergent_close_only:
+        days_1day = [("2024-03-01", "99.00", "100.00"), ("2024-03-04", "103.00", "104.00")]
+        days_1day.append(("2024-03-05", "106.00", "107.00"))
+        minute = [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="103.00", close="304.50")]
+    else:
+        days_1day = [
+            ("2024-03-01", "99.00", "100.00"),
+            ("2024-03-04", "103.00", "104.00"),
+            ("2024-03-05", "106.00", "107.00"),
+            ("2024-03-06", "109.00", "110.00"),
+        ]
+        minute = [
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="203.00", close="204.50"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="209.00", close="210.00"),
+        ]
+    _write(
+        lake,
+        symbol,
+        "1day",
+        [
+            _bar(datetime.fromisoformat(f"{d}T03:45:00+00:00"), open_=o, close=c)
+            for d, o, c in days_1day
+        ],
+    )
+    _write(lake, symbol, "1minute", minute)
+
+
+def test_unrecomputable_stale_warns_once_and_serves_stored(tmp_path: Path) -> None:
+    # The hostile-review MINOR fold: divergence evidence on rows that are NOT
+    # fully recomputable is OBSERVED (one capped WARN per triple), while the
+    # serve stays the STORED pair verbatim (row-atomic law unchanged). THREE
+    # in-span rows each carry evidence → THREE attempts → ONE deduped WARN.
+    _unrec_lake(tmp_path, "UNRECA")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "UNRECA")],
+            start=date(2024, 3, 4),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    # Every row serves the STORED values (never a recompute, never a mix).
+    assert [(r.day, r.prev_close, r.iep) for r in rows] == [
+        (date(2024, 3, 4), Decimal("100.00"), Decimal("103.00")),
+        (date(2024, 3, 5), Decimal("104.00"), Decimal("106.00")),
+        (date(2024, 3, 6), Decimal("107.00"), Decimal("109.00")),
+    ]
+    assert [log for log in logs if log["event"] == "preopen.stale_daily_recomputed"] == []
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1  # deduped per dataset triple
+    assert events[0]["day"] == "2024-03-04"
+    assert events[0]["fresh_iep"] == "203.0"
+    assert events[0]["fresh_prev_close"] is None
+
+
+def test_unrecomputable_close_only_evidence_warns_with_null_iep(tmp_path: Path) -> None:
+    # The symmetric evidence shape: the report day has NO 1m base (fresh IEP
+    # None) but the prior session's fresh CLOSE diverges from the stored
+    # anchor — observed, served stored.
+    _unrec_lake(tmp_path, "UNRECB", divergent_close_only=True)
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "UNRECB")],
+            start=date(2024, 3, 5),
+            end=date(2024, 3, 5),
+            basis="day",
+        )
+    assert [(r.prev_close, r.iep) for r in rows] == [(Decimal("104.00"), Decimal("106.00"))]
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == 1
+    assert events[0]["fresh_iep"] is None
+    assert events[0]["fresh_prev_close"] == "304.5"
+    assert events[0]["stored_prev_close"] == "104.0"
+
+
+def test_unrecomputable_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 unrecomputable-stale symbols → the cap emitted + ONE
+    # suppressed summary (the sibling of the recomputed-family cap law).
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        symbol = f"UNREC{i:02d}"
+        _write(
+            tmp_path,
+            symbol,
+            "1day",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+            ],
+        )
+        # 1m ONLY for the report day, with a divergent open — evidence without
+        # recomputability (the prior session has no 1m base).
+        _write(
+            tmp_path,
+            symbol,
+            "1minute",
+            [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="210.00", close="211.00")],
+        )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"UNREC{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    assert all(r.iep == Decimal("110.00") for r in rows)  # stored served everywhere
+    events = [log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.stale_daily_unrecomputable_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+
+
+def _insane_1m_lake(lake: Path, symbol: str) -> None:
+    """A 1day pair + a price-INSANE (negative, self-consistent) 1m base — the
+    freshness verification read raises ``ResampleInputError`` (fail-open)."""
+    _write(
+        lake,
+        symbol,
+        "1day",
+        [
+            _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.00"),
+            _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+        ],
+    )
+    _write(
+        lake,
+        symbol,
+        "1minute",
+        [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="-5.00", close="-4.00")],
+    )
+
+
+def test_check_failed_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # The freshness-check-failed WARN rides the SAME per-triple dedupe (the
+    # hostile-review NIT fold): a duplicated dataset triple pays the failing
+    # verification read twice but warns ONCE; the rows still serve stored.
+    _insane_1m_lake(tmp_path, "BADREAD")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "BADREAD"), ("NSE", "CASH", "BADREAD")],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert all(r.iep == Decimal("110.00") for r in rows)  # fail-open: stored served
+    events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+    assert len(events) == 1
+    assert events[0]["error_type"] == "ResampleInputError"
+
+
+def test_check_failed_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:
+    # _STALE_WARN_CAP + 2 symbols whose verification read fails → the cap
+    # emitted + ONE suppressed summary; every row still serves stored.
+    n = _STALE_WARN_CAP + 2
+    for i in range(n):
+        _insane_1m_lake(tmp_path, f"BAD{i:02d}")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", f"BAD{i:02d}") for i in range(n)],
+            start=date(2024, 3, 6),
+            end=date(2024, 3, 6),
+            basis="day",
+        )
+    assert len(rows) == n
+    events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+    assert len(events) == _STALE_WARN_CAP
+    suppressed = [
+        log for log in logs if log["event"] == "preopen.freshness_check_failed_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["suppressed_symbols"] == 2
+
+
+class TestStaleDayRowUnrecomputable:
+    """Totality + observe-only semantics of the fail-open evidence verdict."""
+
+    _DAY = date(2024, 3, 6)
+    _EXPECTED = date(2024, 3, 5)
+
+    def _verdict(
+        self,
+        fresh_open: dict[date, Decimal],
+        fresh_close: dict[date, Decimal],
+        *,
+        expected: date | None = _EXPECTED,
+    ) -> tuple[date, Decimal | None, Decimal | None] | None:
+        from brutex.dashboard.preopen_report import _stale_day_row_unrecomputable
+
+        return _stale_day_row_unrecomputable(
+            Decimal("110"),
+            Decimal("100"),
+            day=self._DAY,
+            expected=expected,
+            fresh_open=fresh_open,
+            fresh_close=fresh_close,
+        )
+
+    def test_expected_none_is_total(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {}, expected=None) is None
+
+    def test_fully_recomputable_defers_to_the_recompute_lane(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {self._EXPECTED: Decimal("200")}) is None
+
+    def test_no_evidence_is_silent(self) -> None:
+        assert self._verdict({}, {}) is None
+        # Available-but-EQUAL evidence is not divergence either.
+        assert self._verdict({self._DAY: Decimal("110")}, {}) is None
+        assert self._verdict({}, {self._EXPECTED: Decimal("100")}) is None
+
+    def test_divergent_open_evidence(self) -> None:
+        assert self._verdict({self._DAY: Decimal("210")}, {}) == (
+            self._EXPECTED,
+            Decimal("210"),
+            None,
+        )
+
+    def test_divergent_close_evidence(self) -> None:
+        assert self._verdict({}, {self._EXPECTED: Decimal("200")}) == (
+            self._EXPECTED,
+            None,
+            Decimal("200"),
+        )
+
+
+def test_minute_basis_never_runs_the_freshness_guard(tmp_path: Path) -> None:
+    # The minute basis reads the 1-minute truth directly — the guard is
+    # day-basis only (its 1m read would be pure waste), pinned by a spy on the
+    # fresh-maps builder.
+    _coalindia(tmp_path)
+    calls: list[str] = []
+    real = preopen_report._fresh_daily_maps
+
+    def _spy(
+        lake_root: Path,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        days: Collection[date],
+        on_error: object = None,
+    ) -> tuple[dict[date, Decimal], dict[date, Decimal]]:
+        calls.append("called")
+        del on_error  # the spy only counts invocations
+        return real(lake_root, exchange=exchange, segment=segment, symbol=symbol, days=set(days))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(preopen_report, "_fresh_daily_maps", _spy)
+        build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "COALINDIA")],
+            start=date(2024, 1, 1),
+            end=date(2024, 12, 31),
+            basis="minute",
+        )
+    assert calls == []
+
+
+# ── _stale_day_row (the pure per-row verdict) ────────────────────────────────
+
+
+class TestStaleDayRow:
+    """Totality + row-atomicity of the pure per-row freshness verdict."""
+
+    _DAY = date(2024, 3, 6)
+    _EXPECTED = date(2024, 3, 5)
+
+    def test_expected_none_is_total_and_fails_open(self) -> None:
+        # Production-unreachable via the caller (an emitted row always resolved
+        # a prior session) — kept for totality, the _hole_shape precedent.
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=None,
+                fresh_open={self._DAY: Decimal("100")},
+                fresh_close={},
+            )
+            is None
+        )
+
+    def test_missing_fresh_open_fails_open(self) -> None:
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={},
+                fresh_close={self._EXPECTED: Decimal("99")},
+            )
+            is None
+        )
+
+    def test_missing_fresh_close_fails_open(self) -> None:
+        # The TMPV arm: the report day is recomputable but the anchor session
+        # is not → NEVER a mixed-scale pair.
+        assert (
+            _stale_day_row(
+                Decimal("100"),
+                Decimal("99"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={self._DAY: Decimal("191.8")},
+                fresh_close={},
+            )
+            is None
+        )
+
+    def test_equal_pair_is_fresh(self) -> None:
+        # Numeric Decimal equality — "100.30" vs "100.3" is the SAME value
+        # (stored floats and polars-rendered strings differ only in digits).
+        assert (
+            _stale_day_row(
+                Decimal("100.30"),
+                Decimal("99.00"),
+                day=self._DAY,
+                expected=self._EXPECTED,
+                fresh_open={self._DAY: Decimal("100.3")},
+                fresh_close={self._EXPECTED: Decimal("99")},
+            )
+            is None
+        )
+
+    def test_stale_open_serves_fresh_pair(self) -> None:
+        assert _stale_day_row(
+            Decimal("104.5"),
+            Decimal("100.3"),
+            day=self._DAY,
+            expected=self._EXPECTED,
+            fresh_open={self._DAY: Decimal("103.8")},
+            fresh_close={self._EXPECTED: Decimal("100.3")},
+        ) == (self._EXPECTED, Decimal("103.8"), Decimal("100.3"))
+
+    def test_stale_close_serves_fresh_pair(self) -> None:
+        assert _stale_day_row(
+            Decimal("103.8"),
+            Decimal("100.3"),
+            day=self._DAY,
+            expected=self._EXPECTED,
+            fresh_open={self._DAY: Decimal("103.8")},
+            fresh_close={self._EXPECTED: Decimal("197.9")},
+        ) == (self._EXPECTED, Decimal("103.8"), Decimal("197.9"))
+
+
+# ── _fresh_daily_maps (the 1-minute resample evidence source) ────────────────
+
+
+class TestFreshDailyMaps:
+    """The month-bounded 1-minute → daily evidence maps + every fail-open arm."""
+
+    def test_empty_days_is_a_no_read_no_op(self, tmp_path: Path) -> None:
+        assert _fresh_daily_maps(
+            tmp_path, exchange="NSE", segment="CASH", symbol="ANY", days=frozenset()
+        ) == ({}, {})
+
+    def test_no_1m_base_returns_empty_maps(self, tmp_path: Path) -> None:
+        assert _fresh_daily_maps(
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="ABSENT",
+            days={date(2024, 3, 6)},
+        ) == ({}, {})
+
+    def test_date_max_upper_bound_saturates(self, tmp_path: Path) -> None:
+        # The degenerate date.max day saturates the half-open read end instead
+        # of overflowing — fails open (empty maps), never an OverflowError.
+        assert _fresh_daily_maps(
+            tmp_path, exchange="NSE", segment="CASH", symbol="EDGE", days={date.max}
+        ) == ({}, {})
+
+    def test_happy_path_maps_per_session_open_and_close(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "MAPS",
+            "1minute",
+            [
+                _bar(datetime(2024, 3, 5, 3, 45, tzinfo=UTC), open_="100.00", close="100.10"),
+                _bar(datetime(2024, 3, 5, 9, 59, tzinfo=UTC), open_="100.20", close="100.30"),
+                _bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="103.80", close="103.90"),
+            ],
+        )
+        fresh_open, fresh_close = _fresh_daily_maps(
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="MAPS",
+            days={date(2024, 3, 5), date(2024, 3, 6)},
+        )
+        assert fresh_open == {
+            date(2024, 3, 5): Decimal("100.0"),
+            date(2024, 3, 6): Decimal("103.8"),
+        }
+        assert fresh_close == {
+            date(2024, 3, 5): Decimal("100.3"),
+            date(2024, 3, 6): Decimal("103.9"),
+        }
+
+    def test_price_insane_1m_row_fails_open_with_one_warn(self, tmp_path: Path) -> None:
+        # A NEGATIVE (self-consistent) stored 1-minute bar: the window reader's
+        # price-sanity gate refuses it (ResampleInputError) — the guard fails
+        # OPEN (empty maps → the build serves stored values) + ONE
+        # preopen.freshness_check_failed WARN, never a crashed/blanked export.
+        _write(
+            tmp_path,
+            "INSANE",
+            "1minute",
+            [_bar(datetime(2024, 3, 6, 3, 45, tzinfo=UTC), open_="-5.00", close="-4.00")],
+        )
+        with capture_logs() as logs:
+            result = _fresh_daily_maps(
+                tmp_path,
+                exchange="NSE",
+                segment="CASH",
+                symbol="INSANE",
+                days={date(2024, 3, 6)},
+            )
+        assert result == ({}, {})
+        events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
+        assert len(events) == 1
+        assert events[0]["error_type"] == "ResampleInputError"
