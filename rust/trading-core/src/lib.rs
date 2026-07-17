@@ -57,6 +57,10 @@ pub use indicators::metadata::{
 pub use indicators::pivots::{
     CprLevels, NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels, compute_pivot_levels,
 };
+pub use indicators::supertrend::{
+    SUPERTREND_ATR_PERIOD, SUPERTREND_DIR_DOWN, SUPERTREND_DIR_UP, SUPERTREND_FACTOR,
+    SupertrendState, compute_supertrend,
+};
 pub use spec::{Direction, SPEC_SCHEMA_VERSION, Signal, StrategySpec, evaluate};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),

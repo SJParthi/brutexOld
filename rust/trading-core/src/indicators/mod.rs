@@ -3,18 +3,21 @@
 //! Fibonacci levels, the EMA 20/200 recurrence (DEC-EMA-RUST-PORT-001), the
 //! BOS/CHoCH market-structure state (DEC-NIFTY-BOS-CHOCH-001), and the
 //! eval-path per-bar METADATA derivation + near-month roll decision (PR-3 —
-//! DEC-NIFTY-ROLL-METADATA-001 — `metadata`). EMA and market structure are
-//! STATE objects whose resolved (paisa) values are fed into the snapshot; the
-//! evaluator still consumes precomputed `ema20`/`ema200` paisa (BruteX's
-//! `_ema_to_paisa` snaps the Rust EMA's `f64` rupees to paisa). The former
-//! session-VWAP state (`vwap`) was DELETED with the bits 52-53 tombstone (the
-//! VWAP/volume wipe — the spot-only engine has no traded volume).
+//! DEC-NIFTY-ROLL-METADATA-001 — `metadata`), and the SuperTrend ATR-band
+//! trailing stop (bits 64-65 — `supertrend`). EMA, market structure and
+//! SuperTrend are STATE objects whose resolved (paisa) values are fed into the
+//! snapshot; the evaluator still consumes precomputed `ema20`/`ema200` paisa
+//! (BruteX's `_ema_to_paisa` snaps the Rust EMA's `f64` rupees to paisa) and
+//! the ×2-scaled SuperTrend line. The former session-VWAP state (`vwap`) was
+//! DELETED with the bits 52-53 tombstone (the VWAP/volume wipe — the spot-only
+//! engine has no traded volume).
 
 pub mod ema;
 pub mod fib;
 pub mod market_structure;
 pub mod metadata;
 pub mod pivots;
+pub mod supertrend;
 
 /// Round-half-to-even (banker's rounding) to `i64` — the exact match for
 /// Python's built-in `round()` used by `_round_half_even` in
