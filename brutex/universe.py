@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final, Literal
 
+from brutex.config.feed_scope import DEFAULT_FEED, FeedScope, resolve_feed_scope
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.models import Exchange, Instrument, InstrumentType
 
@@ -142,7 +143,9 @@ def _build_index_symbols() -> frozenset[tuple[Exchange, str]]:
     return frozenset((u.exchange, u.underlying_symbol) for u in V1_INDICES)
 
 
-#: ``(exchange, symbol)`` pairs for the 3 named spot indexes.
+#: ``(exchange, symbol)`` pairs for the 3 brute-force indices + INDIAVIX
+#: (4 pairs — the SAFE narrowing key, DEC-UNIVERSE-INDEX-ONLY-001; never
+#: ``BRUTE_FORCE_INDEX_UNDERLYINGS``, which drops INDIAVIX).
 INDEX_UNDERLYINGS: Final[frozenset[tuple[Exchange, str]]] = _build_index_symbols()
 
 
@@ -993,6 +996,8 @@ def is_universe_underlying(
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
     reference_security_ids: frozenset[int] = frozenset(),
     fno_eligible_security_ids: frozenset[int] = frozenset(),
+    *,
+    scope: FeedScope | None = None,
 ) -> bool:
     """Return True if *instrument* is a UNIVERSE underlying worth persisting.
 
@@ -1046,22 +1051,40 @@ def is_universe_underlying(
         ``underlying_symbol`` so the ticker key misses them, but whose genuine
         numeric vendor token matches an option leg's ``underlying_security_id``
         (defaults empty; DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
+    scope
+        The ACTING feed's universe scope (DEC-UNIVERSE-INDEX-ONLY-001 /
+        MIGRATION.md #1934 — the §2.4 admission law). ``None`` resolves the
+        default acting feed's scope (``resolve_feed_scope(DEFAULT_FEED)`` —
+        fail-closed narrow under the default config). A ``bounded()`` scope
+        narrows the IDX arm to its admitted set and gates the EQ arm on
+        ``admits_stocks()``; an unbounded (``full``) scope reproduces the
+        pre-#1934 legacy rules byte-identically (the widen-path pin).
 
     Returns
     -------
     bool
         ``True`` iff *instrument* is an admitted index, an F&O-eligible equity
-        (by ticker or token-join), or an admitted reference constituent;
+        (by ticker or token-join), or an admitted reference constituent —
+        each under the acting *scope*;
         ``False`` for every derivative leg or out-of-universe row.
     """
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
     instrument_type = instrument.instrument
     if instrument_type == InstrumentType.IDX:
-        # Same IDX rule as is_in_fetch_scope: all NSE indices; BSE only SENSEX.
+        if scope.bounded():
+            # DEC-UNIVERSE-INDEX-ONLY-001: the admitted-index set (keyed on the
+            # 4-pair V1_INDICES shape — NEVER the 3-symbol engine trio, which
+            # would silently kill INDIAVIX admission; prior-art C8).
+            return scope.admits_underlying(instrument.exch_id, instrument.symbol_name)
+        # Legacy IDX rule (the `full` scope): all NSE indices; BSE only SENSEX.
         return (
             instrument.exch_id == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
         )
     if instrument_type == InstrumentType.EQ:
-        # An NSE equity is a universe underlying if it is F&O-eligible by TICKER,
+        # An NSE equity is a universe underlying ONLY when the acting scope
+        # admits stocks at all (DEC-UNIVERSE-INDEX-ONLY-001 — index4 gates the
+        # whole EQ arm dormant), and then iff it is F&O-eligible by TICKER,
         # OR an admitted REFERENCE_ONLY constituent (by SECURITY_ID — its
         # SYMBOL_NAME is the long company name, not the ticker, so the ticker key
         # cannot match; DEC-NIFTY-TOTAL-MARKET-ADMIT-001), OR a TOKEN-JOIN F&O
@@ -1069,10 +1092,14 @@ def is_universe_underlying(
         # option leg's underlying_symbol so the ticker key misses it, but its
         # genuine numeric token matches a leg; DEC-FNO-EQ-TOKEN-JOIN-PERSIST-001).
         # Both id-keyed sets default empty → byte-identical to the F&O-only rule.
-        return instrument.exch_id == Exchange.NSE and (
-            (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
-            or instrument.security_id in reference_security_ids
-            or instrument.security_id in fno_eligible_security_ids
+        return (
+            scope.admits_stocks()
+            and instrument.exch_id == Exchange.NSE
+            and (
+                (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
+                or instrument.security_id in reference_security_ids
+                or instrument.security_id in fno_eligible_security_ids
+            )
         )
     # Every derivative leg (FUT / CE / PE) — parsed for eligibility, never stored.
     return False
@@ -1081,17 +1108,26 @@ def is_universe_underlying(
 def is_in_fetch_scope(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
+    *,
+    scope: FeedScope | None = None,
 ) -> bool:
     """Return True if *instrument* belongs to the broad fetch / lake tier.
 
-    The fetch tier (DEC-FETCH-ALL-001) admits, by instrument type:
+    The fetch tier (DEC-FETCH-ALL-001, narrowed by DEC-UNIVERSE-INDEX-ONLY-001)
+    admits, by instrument type, under a BOUNDED (``index4``) *scope*:
 
-    * **IDX** — every NSE index; from BSE only SENSEX.
-    * **FUT / CE / PE** — every NSE futures + option contract (no BSE
-      derivatives — BSE contributes only the SENSEX index).
-    * **EQ** — an NSE cash equity only if it is an F&O-eligible underlying
-      (i.e. ``(NSE, trading_symbol)`` is in *fno_eligible_underlyings*,
-      typically built via :func:`build_fno_eligible_underlyings`).
+    * **IDX** — the scope's admitted set (the 4 ``V1_INDICES`` pairs).
+    * **FUT / CE / PE** — a contract whose ``(exchange, underlying_symbol)``
+      the scope's F&O set admits (NIFTY/BANKNIFTY on NSE, SENSEX on BSE).
+    * **EQ** — never (``admits_stocks()`` is False).
+
+    Under an UNBOUNDED (``full``) *scope* the legacy rules apply, with ONE
+    conscious correction (design §3.1 A2, Rev 2): the stale legacy "no BSE
+    derivatives" clause is CORRECTED — ``full`` admits BSE legs too, because
+    the real pull already keys on the row's OWN exchange
+    (``metadata_pull.py`` — BSE-SENSEX legs ARE pulled), so keeping the clause
+    would make ``full`` NOT a superset of ``index4`` (an inverted lattice; the
+    monotonicity property ``admits(index4) ⇒ admits(full)`` is pinned).
 
     Parameters
     ----------
@@ -1099,19 +1135,33 @@ def is_in_fetch_scope(
         The candidate instrument-master row.
     fno_eligible_underlyings
         The set of NSE F&O-eligible ``(exchange, symbol)`` pairs.
+    scope
+        The ACTING feed's universe scope (``None`` → the default acting
+        feed's — the §2.4 admission law, mirrored from
+        :func:`is_universe_underlying`).
     """
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
     instrument_type = instrument.instrument
     exchange = instrument.exch_id
     if instrument_type == InstrumentType.IDX:
-        # All NSE indices; from BSE only SENSEX.
+        if scope.bounded():
+            return scope.admits_underlying(exchange, instrument.symbol_name)
+        # Legacy IDX rule: all NSE indices; from BSE only SENSEX.
         return exchange == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
     if instrument_type in _DERIVATIVE_TYPES:
-        # All NSE futures + options; no BSE derivatives.
-        return exchange == Exchange.NSE
-    # Remaining type is cash equity (EQ): in scope only if it is an
-    # F&O-eligible NSE underlying.
+        if scope.bounded():
+            return scope.admits_fno_underlying(exchange, instrument.underlying_symbol or "")
+        # The `full` arm CONSCIOUSLY admits BSE legs too (the pinned A2
+        # correction — full must be a superset of index4, which admits the
+        # (BSE, SENSEX) legs; the Exchange enum holds exactly NSE + BSE).
+        return True
+    # Remaining type is cash equity (EQ): in scope only when the scope admits
+    # stocks AND it is an F&O-eligible NSE underlying.
     return (
-        exchange == Exchange.NSE and (exchange, instrument.symbol_name) in fno_eligible_underlyings
+        scope.admits_stocks()
+        and exchange == Exchange.NSE
+        and (exchange, instrument.symbol_name) in fno_eligible_underlyings
     )
 
 

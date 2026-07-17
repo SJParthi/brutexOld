@@ -64,6 +64,7 @@ from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import IST as _IST_TZ
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
+from brutex.config.feed_scope import DEFAULT_FEED, FeedScope, FeedScopeError, resolve_feed_scope
 from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
@@ -232,6 +233,7 @@ from brutex.dashboard.pull_controller import (
     resolve_fetch_intervals,
     resolve_pull_symbols,
     resolve_pull_targets,
+    screen_pull_scope,
 )
 from brutex.dashboard.pull_intent import (
     PullIntent,
@@ -2963,6 +2965,25 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         from brutex.dashboard.constituents_cache import resolve_constituents
         from brutex.universe_constituents import held_members
 
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3.1 A5b): this route calls
+        # ``constituents_cache.resolve_constituents`` DIRECTLY — its own live
+        # niftyindices fetch path on cache-miss/refresh, bypassing the
+        # ``_ntm_admission`` gate — so it carries its OWN gate on the ACTING
+        # feed's ``admits_stocks()`` (the pull UI's feed, coherent with the P7
+        # pull screens: a live picker never offers picks the pull screen would
+        # refuse). Honest 200, ZERO network, dormancy-pinned.
+        if not resolve_feed_scope(DEFAULT_FEED).admits_stocks():
+            return JSONResponse(
+                {
+                    "members": [],
+                    "source": "scope_excluded",
+                    "as_of": None,
+                    "note": (
+                        "universe scope excludes stocks — index-constituent "
+                        "picking is dormant (DEC-UNIVERSE-INDEX-ONLY-001)"
+                    ),
+                }
+            )
         store = _require_store()
 
         def _held_universe() -> tuple[list[Instrument], list[str]]:
@@ -3131,6 +3152,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 status_code=400,
                 detail=f"unknown security_id {symbol!r} — not in the instrument store",
             )
+        # P7 arm (iv) — the direct off-job single-instrument vendor pull: a
+        # stale-store stock row must refuse loudly, never pull
+        # (DEC-UNIVERSE-INDEX-ONLY-001).
+        try:
+            screen_pull_scope([instrument])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             # Run the (blocking, often 20-30 s) single-symbol pull OFF the event
             # loop. This route is ``async`` but called the blocking ``pull_candles``
@@ -3637,6 +3665,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         status_code=400,
                         detail=f"unknown security_id {symbol!r} — not in the instrument store",
                     )
+                # P7 arm (v) — the /pull-all inline ?symbol= selection
+                # (DEC-UNIVERSE-INDEX-ONLY-001; the route's ValueError → 400
+                # mapping below carries the refusal).
+                screen_pull_scope([instrument])
                 return [instrument], f"{symbol} spot"
             if kind is not None:
                 return _select_bulk_targets(kind), f"{kind} spot"
@@ -3845,6 +3877,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         status_code=400,
                         detail=f"unknown security_id {symbol!r} — not in the instrument store",
                     )
+                # P7 arm (iii) — the metadata route's inline ?symbol= selection
+                # (DEC-UNIVERSE-INDEX-ONLY-001; the route's ValueError → 400
+                # mapping below carries the refusal).
+                screen_pull_scope([instrument])
                 selected = [instrument]
                 label = f"{symbol} metadata"
             elif kind is not None:
@@ -4223,8 +4259,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
         registry_path = lake_root / "registry.duckdb"
 
-        def _resolve_direct_selection() -> tuple[list[ContractRow], dict[str, bool]]:
+        def _resolve_direct_selection() -> tuple[list[ContractRow], dict[str, bool], int]:
             """Resolve the direct grammar to registry rows + the six-step kind map.
+
+            P8 (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3): the resolved rows
+            are scope-SCREENED before return — the durable ``registry.duckdb``
+            keeps every pre-cut stock chain (stored-data law: rows are never
+            deleted), so without the screen ``?all=true`` /
+            ``?underlying=RELIANCE`` / ``?contract=`` would enumerate + VENDOR-
+            PULL stale stock contracts. The bulk arms (``all``/``kind``)
+            FILTER + count (the third tuple member — surfaced in the launch
+            detail + one loud log); an EXPLICIT selection resolving ONLY
+            out-of-scope rows raises ``ValueError`` → 400 naming the DEC (an
+            explicit ask fails loud, never a silent shrink to "no match").
 
             DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class — the
             WORST offender): ``RegistryStore.open`` + ``_resolve_historical_contracts``
@@ -4260,14 +4307,25 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     all_cached=all,
                     select_kind=_select_bulk_targets,
                 )
+            rows, scope_excluded = _screen_historical_contracts(
+                rows,
+                explicit=contract is not None or contracts is not None or underlying is not None,
+            )
             if not rows:
-                return [], {}
-            return rows, _underlying_kind_map(
-                _select_bulk_targets("index") + _select_bulk_targets("stock")
+                return [], {}, scope_excluded
+            return (
+                rows,
+                _underlying_kind_map(_select_bulk_targets("index") + _select_bulk_targets("stock")),
+                scope_excluded,
             )
 
         try:
-            selected, underlying_kinds = await _run_lake(_resolve_direct_selection)
+            selected, underlying_kinds, scope_excluded = await _run_lake(_resolve_direct_selection)
+        except ValueError as exc:
+            # P8 explicit-arm refusal (DEC-UNIVERSE-INDEX-ONLY-001): an explicit
+            # contract/contracts/underlying ask resolving ONLY out-of-scope
+            # registry rows fails loud, never a silent "no match".
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RegistryError as exc:
             # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading this
             # resolution WIDENED the concurrency window on ``RegistryStore.open``
@@ -4284,6 +4342,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 detail=f"registry busy — retry (concurrent open on registry.duckdb): {exc}",
             ) from exc
         if not selected:
+            if scope_excluded:
+                # The bulk (all/kind) arms matched ONLY out-of-scope rows —
+                # name the exclusion honestly, never a misleading "no match"
+                # (DEC-UNIVERSE-INDEX-ONLY-001).
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"all {scope_excluded} cached contract(s) matched are outside the "
+                        "index-only universe scope (DEC-UNIVERSE-INDEX-ONLY-001) — "
+                        "stored data stays readable in /db, but no vendor pull is issued"
+                    ),
+                )
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -4292,6 +4362,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 ),
             )
         detail = f"{len(selected)} contracts historical"
+        if scope_excluded:
+            # P8 note (DEC-UNIVERSE-INDEX-ONLY-001): the bulk arms name the
+            # excluded count — never a silent shrink.
+            detail += (
+                f" · {scope_excluded} out-of-scope contract(s) excluded"
+                " (DEC-UNIVERSE-INDEX-ONLY-001)"
+            )
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
@@ -5882,6 +5959,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         at POST time, never a job-thread error AFTER the paid O(files) scan;
         the echoed ``batch`` is the resolved EFFECTIVE value.
         """
+        # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation (the
+        # #1558 eager-400 twin) — junk BRUTEX_FEED_SCOPE refuses at POST time,
+        # never a job-thread error after the paid O(files) scan.
+        try:
+            resolve_feed_scope(DEFAULT_FEED)
+        except FeedScopeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if batch is not None and batch < 1:
             raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
         if limit is not None and limit < 1:
@@ -10988,6 +11072,56 @@ def _resolve_historical_contracts(
     if all_cached:
         return registry.list_contracts()
     return []
+
+
+def _screen_historical_contracts(
+    rows: list[ContractRow],
+    *,
+    explicit: bool,
+    scope: FeedScope | None = None,
+) -> tuple[list[ContractRow], int]:
+    """P8 — scope-screen the historical-pull's resolved registry rows (#1934).
+
+    Each row must pass ``admits_fno_underlying`` over its Exchange-coerced
+    ``row.exch`` + ``row.underlying`` under the ACTING feed's *scope* (``None``
+    → the default acting feed's; an UNBOUNDED scope is a pass-through — the
+    §5.6 widen path). A junk ``exch`` token is refused under a bounded scope
+    (the §3.5 totality law — excluded + counted, never a raise). Returns
+    ``(kept_rows, excluded_count)``; when *explicit* (a
+    contract/contracts/underlying ask) and the selection resolved ONLY
+    out-of-scope rows, raises :class:`ValueError` naming the DEC (the route
+    maps it to a 400 — an explicit ask must fail loud, never silently shrink
+    to an empty "no match"). One loud log per screened call with a nonzero
+    exclusion (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3 P8).
+    """
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
+    if not scope.bounded():
+        return rows, 0
+    kept: list[ContractRow] = []
+    for row in rows:
+        try:
+            exch = Exchange(row.exch)
+        except ValueError:
+            continue  # junk exchange token — excluded under a bounded scope
+        if scope.admits_fno_underlying(exch, row.underlying):
+            kept.append(row)
+    excluded = len(rows) - len(kept)
+    if excluded and explicit and not kept:
+        raise ValueError(
+            f"the selected contract(s) resolve ONLY out-of-scope underlyings "
+            f"({excluded} registry row(s)) — the pull universe is index-only "
+            "(DEC-UNIVERSE-INDEX-ONLY-001); stored data stays readable in /db, "
+            "but no vendor pull is issued"
+        )
+    if excluded:
+        _LOG.warning(
+            "universe.pull_historical.scope_excluded",
+            excluded=excluded,
+            kept=len(kept),
+            dec="DEC-UNIVERSE-INDEX-ONLY-001",
+        )
+    return kept, excluded
 
 
 _DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"

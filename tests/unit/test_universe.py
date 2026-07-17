@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
     ALLOWED_UNDERLYINGS,
@@ -50,6 +51,19 @@ from brutex.universe import (
 # ────────────────────────────────────────────────────────────────────────
 # UnderlyingSpec
 # ────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the pre-#1934 admission MECHANICS over stock/sectoral
+    fixtures; under ``BRUTEX_FEED_SCOPE=full`` those legacy rules are
+    byte-identical (the parity half of the §6 widen-path pin — running this
+    suite full-arm IS that pin's permanent net). The shipped index4-default
+    guard arms live in ``test_universe_index_only_scope.py`` + the
+    scope-gate batteries (migration Law 1)."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 class TestUnderlyingSpec:
@@ -550,9 +564,16 @@ class TestIsInFetchScope:
         deriv = _make_derivative(Exchange.NSE, instrument_type, "RELIANCE")
         assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is True
 
-    def test_bse_derivative_rejected(self) -> None:
+    def test_bse_derivative_admitted_under_full(self) -> None:
+        """The A2 CONSCIOUS correction (DEC-UNIVERSE-INDEX-ONLY-001, design §3.1):
+
+        the stale legacy "no BSE derivatives" clause is corrected — `full`
+        admits BSE legs too (the real pull keys on the row's own exchange and
+        BSE-SENSEX legs ARE pulled; keeping the clause would make `full` NOT
+        a superset of `index4`, an inverted lattice). This flips the old
+        rejection pin to pin the correction."""
         deriv = _make_derivative(Exchange.BSE, InstrumentType.FUT, "SENSEX")
-        assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is False
+        assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is True
 
     def test_fno_eligible_equity_in_scope(self) -> None:
         eligible = frozenset({(Exchange.NSE, "RELIANCE")})

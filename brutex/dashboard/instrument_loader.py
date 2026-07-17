@@ -101,6 +101,7 @@ from brutex.adapters.groww.instruments import (
     parse_skip_threshold,
     parse_skip_verdict,
 )
+from brutex.config.feed_scope import DEFAULT_FEED, SCOPE_FULL, FeedScope, resolve_feed_scope
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
     CachedConstituents,
@@ -428,6 +429,7 @@ def _ntm_admission(
     constituent_opener: Callable[[str], str] | None,
     cache_dir: Path,
     revalidate_runner: Callable[[Callable[[], None]], None] | None = None,
+    scope: FeedScope | None = None,
 ) -> tuple[frozenset[int], dict[str, Any]]:
     """Resolve NIFTY-Total-Market constituents → REFERENCE_ONLY ``SECURITY_ID``s.
 
@@ -453,8 +455,22 @@ def _ntm_admission(
     NEVER invent constituents. ``require_full_coverage`` is implicitly ``False``
     here: a constituent the Groww master does not list is reported in ``unmatched``,
     not admitted.
+
+    **Scope gate (DEC-UNIVERSE-INDEX-ONLY-001, design §3.1 A5):** the FIRST
+    statement gates the whole NTM path DORMANT (not deleted — directive B)
+    when the acting *scope* (``None`` → the default acting feed's) does not
+    admit stocks: zero network, zero cache reads, an honest reason. The NTM
+    modules stay in-tree so a future ``full`` binding re-activates the path by
+    CONFIG, never re-architecture.
     """
     note: dict[str, Any] = {"admitted": False}
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
+    if not scope.admits_stocks():
+        note["reason"] = (
+            "universe scope excludes stocks (DEC-UNIVERSE-INDEX-ONLY-001) — NTM admission dormant"
+        )
+        return frozenset(), note
 
     # An NTM constituent can only ever be an NSE cash equity, so with none in the
     # master there is nothing to match — skip the niftyindices fetch entirely.
@@ -1019,7 +1035,8 @@ def _lean_universe(
     fno_eligible: frozenset[tuple[Exchange, str]],
     reference_security_ids: frozenset[int],
     fno_eligible_security_ids: frozenset[int],
-) -> tuple[list[Instrument], int]:
+    scope: FeedScope | None = None,
+) -> tuple[list[Instrument], int, dict[str, int]]:
     """Select the LEAN universe to persist + count the dropped derivative legs.
 
     The Groww :class:`InstrumentIndex` carries every in-scope row INCLUDING the
@@ -1030,20 +1047,37 @@ def _lean_universe(
     admitted REFERENCE_ONLY NTM constituent (an EQ whose ``security_id`` is in
     *reference_security_ids*) — and discards the legs
     (they are parsed only to discover which equities are F&O-eligible). Returns
-    ``(lean_rows, legs_dropped)`` where ``legs_dropped`` is the count of in-scope
-    rows NOT persisted (the legs + any non-admitted non-F&O equity), so the caller
-    can report the accounting. The admission rule is delegated to the COMMON
-    :func:`brutex.universe.is_universe_underlying` (CLAUDE.md §11 COMMON).
+    ``(lean_rows, legs_dropped, scope_excluded)`` where ``legs_dropped`` is the
+    count of in-scope rows NOT persisted (the legs + any non-admitted non-F&O
+    equity + the scope-excluded candidates) and ``scope_excluded`` counts the
+    IDX / EQ candidates a BOUNDED acting *scope* excluded that the legacy
+    (``full``) rules WOULD have admitted (``{"idx": N, "eq": N}`` — the A6
+    load-report accounting, DEC-UNIVERSE-INDEX-ONLY-001; both 0 under an
+    unbounded scope, zero double evaluation). The admission rule is delegated
+    to the COMMON :func:`brutex.universe.is_universe_underlying` (CLAUDE.md
+    §11 COMMON), threaded with the acting *scope* (``None`` → the default
+    acting feed's).
     """
-    lean = [
-        inst
-        for inst in index.universe
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
+    lean: list[Instrument] = []
+    scope_excluded = {"idx": 0, "eq": 0}
+    # The legacy-rule oracle for the exclusion count only (never admission).
+    full_scope = FeedScope(
+        feed=scope.feed, token=SCOPE_FULL, admitted_underlyings=None, fno_underlyings=None
+    )
+    for inst in index.universe:
         if is_universe_underlying(
-            inst, fno_eligible, reference_security_ids, fno_eligible_security_ids
-        )
-    ]
+            inst, fno_eligible, reference_security_ids, fno_eligible_security_ids, scope=scope
+        ):
+            lean.append(inst)
+        elif scope.bounded() and is_universe_underlying(
+            inst, fno_eligible, reference_security_ids, fno_eligible_security_ids, scope=full_scope
+        ):
+            kind = "idx" if inst.instrument == InstrumentType.IDX else "eq"
+            scope_excluded[kind] += 1
     legs_dropped = len(index.universe) - len(lean)
-    return lean, legs_dropped
+    return lean, legs_dropped, scope_excluded
 
 
 def _persist_master_integrity(
@@ -1246,6 +1280,12 @@ def load_instrument_master(
     # Serialise the whole refresh + read-back under the module lock so two
     # concurrent loads cannot interleave a snapshot wipe with another's insert
     # (DEC-UNDERLYING-ECONOMICS-001 — the "25 indices · 0 stocks" corruption).
+    # The ACTING feed's universe scope, resolved ONCE at entry
+    # (DEC-UNIVERSE-INDEX-ONLY-001, design §3.1 A6 — the loader acts as the
+    # groww/default feed; junk env raises FeedScopeError here, before any
+    # network or store I/O, per the §2.3 eager-validation law).
+    scope = resolve_feed_scope(DEFAULT_FEED)
+
     with _LOAD_LOCK:
         # Fetch + parse the master ONCE (the Groww loader SSRF-checks the URL and
         # builds the O(1) in-memory index). The header is enforced inside the
@@ -1301,6 +1341,7 @@ def load_instrument_master(
                 constituent_cache_dir if constituent_cache_dir is not None else default_cache_dir()
             ),
             revalidate_runner=ntm_revalidate_runner,
+            scope=scope,
         )
         if ntm_note.get("admitted"):
             _LOG.info("universe.load.ntm_admitted", **ntm_note)
@@ -1312,11 +1353,12 @@ def load_instrument_master(
         # constituents); the FUT / CE / PE legs are parsed for eligibility then
         # dropped. Full-snapshot replace so the day's rows are EXACTLY the lean
         # set (idempotent on re-pull).
-        lean, legs_dropped = _lean_universe(
+        lean, legs_dropped, scope_excluded = _lean_universe(
             index,
             fno_eligible=fno_eligible,
             reference_security_ids=reference_security_ids,
             fno_eligible_security_ids=fno_eligible_security_ids,
+            scope=scope,
         )
         # Stamp each underlying with its TRADABLE F&O lot + freeze from its legs
         # (DEC-GROWW-LEG-ECONOMICS-001) — the legs carry the real economics; the
@@ -1369,8 +1411,13 @@ def load_instrument_master(
         stock_count=summary["stock_count"],
         ntm_reference=ntm_note.get("reference", 0),
         security_id_collisions=upsert.security_id_collisions,
+        # The acting scope token (DEC-UNIVERSE-INDEX-ONLY-001 §5.6 — a
+        # divergent-env prune must be log-visible, never silent).
+        scope=scope.token,
+        scope_excluded_idx=scope_excluded["idx"],
+        scope_excluded_eq=scope_excluded["eq"],
     )
-    return {
+    report: dict[str, Any] = {
         "parsed": parsed,
         "persisted": len(lean),
         "legs_dropped": legs_dropped,
@@ -1410,7 +1457,17 @@ def load_instrument_master(
         # Parse-skip honesty report (DEC-PARSE-SKIP-REPORT-001) — the malformed
         # in-scope rows the parser skipped-and-counted, with the green/red verdict.
         "parse_skips": parse_skips,
+        # The acting universe-scope token (DEC-UNIVERSE-INDEX-ONLY-001 §3.1 A6)
+        # — always present so the /universe load message + the auto-heal log
+        # can name which scope pruned/admitted (the §5.6 divergence visibility).
+        "scope": scope.token,
     }
+    # Emit-on-nonzero (the house additive-key law): the IDX / EQ candidates a
+    # BOUNDED scope excluded that the legacy rules would have admitted.
+    if scope_excluded["idx"] or scope_excluded["eq"]:
+        report["scope_excluded_idx"] = scope_excluded["idx"]
+        report["scope_excluded_eq"] = scope_excluded["eq"]
+    return report
 
 
 def load_index_url() -> str:

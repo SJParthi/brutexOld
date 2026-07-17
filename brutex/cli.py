@@ -107,6 +107,24 @@ class CliUserError(Exception):
     """
 
 
+def _validate_feed_scope_env_cli() -> None:
+    """Eagerly validate ``BRUTEX_FEED_SCOPE`` at a CLI entry — junk = clean exit 1.
+
+    DEC-UNIVERSE-INDEX-ONLY-001 (design §2.3): every scope-consuming CLI entry
+    validates the env BEFORE any lock / O(files) scan / vendor work (the
+    #1558 r5/r6 eager-validation law + the #1779 ``cmd_nightly`` pre-lock
+    precedent), so a junk value is a one-line :class:`CliUserError` at boot —
+    never a mid-pull crash, and never a silent swallow inside the dashboard
+    autoload daemon's broad-except (§5.1's stated ordering dependency).
+    """
+    from brutex.config.feed_scope import FeedScopeError, validate_feed_scope_env
+
+    try:
+        validate_feed_scope_env()
+    except FeedScopeError as exc:
+        raise CliUserError(str(exc)) from exc
+
+
 def _configure_sweep_logging() -> None:
     """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
 
@@ -2595,6 +2613,9 @@ def cmd_greeks_backfill(
     composite token — a running dashboard serves the NEW Greeks on its next
     poll, no restart required.
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation — BEFORE
+    # the single-flight lock + the O(files) scan.
+    _validate_feed_scope_env_cli()
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
         pull_singleflight_lock,
@@ -2870,6 +2891,9 @@ def cmd_doctor(
     replay_action_filter: str = "add",
 ) -> int:
     """Run all doctor health checks and print the report."""
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation (the doctor
+    # is a scope consumer — P10 ampersand probe; R12 derived-freshness).
+    _validate_feed_scope_env_cli()
     from brutex.doctor import DEFAULT_AUDIT_DIR, DEFAULT_RUNTIME_FILE
     from brutex.doctor import main as doctor_main
 
@@ -2924,6 +2948,9 @@ def cmd_doctor_live(args: argparse.Namespace) -> int:  # pragma: no cover — re
     boto3 / SDK — the sandbox-blind surface), prints the report, and maps a
     kit-internal error to exit code 3 (kit spec §2.6).
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation (the live
+    # kit's P10 ampersand stage consults the acting scope).
+    _validate_feed_scope_env_cli()
     from brutex.doctor_live import (
         KitInternalError,
         KitOptions,
@@ -3221,32 +3248,27 @@ def _autoload_instrument_master(
     logs and the server keeps running on whatever the store already holds.
     """
     try:
-        from brutex.dashboard.auto_pull import should_reload_instrument_master
+        from brutex.dashboard.auto_pull import evaluate_master_reload_trigger
         from brutex.dashboard.instrument_loader import load_instrument_master
-        from brutex.dashboard.universe_query import universe_summary
 
-        # Lean-correct counts (DEC-INSTRUMENT-UNIVERSE-FAST-001): the IDX+EQ
-        # candidates plus the SQL-derived F&O-eligible set, so an EQ is classed a
-        # "stock" (the bare load_snapshot path left every equity unclassified).
-        summary = universe_summary(
-            store.list_index_equity_instruments(),
-            fno_eligible=store.fno_eligible_underlyings(),
-        )
-        # Auto-heal: reload on an empty lake, missing indices, leftover FUT/CE/PE
-        # legs (pre-lean), placeholder economics (lot_size=1), or stale option
-        # eligibility -- the lean refresh replaces + prunes to the enriched set.
-        if should_reload_instrument_master(
-            index_count=summary["index_count"],
-            stock_count=summary["stock_count"],
-            legs_present=store.has_derivative_legs(),
-            stale_economics=store.has_placeholder_stock_economics(),
-            stale_eligibility=store.has_stale_option_eligibility(),
-        ):
+        # Auto-heal trigger assembly (DEC-UNIVERSE-INDEX-ONLY-001 §5.1): the
+        # COVERED helper folds the lean-correct counts + every store probe +
+        # the SYMMETRIC store↔scope mismatch arms (narrow: stale wide rows
+        # under index4 → ONE pruning reload; widen: zero EQ rows under a
+        # persistent `full` env → ONE widening reload), keyed on the LOADER's
+        # OWN feed scope — never the read union. This call site's kwargs are
+        # source-pinned (tests/unit/test_cli_autoload_scope_pin.py, the #1645
+        # idiom) because this daemon body is pragma-no-cover.
+        should_reload, summary = evaluate_master_reload_trigger(store)
+        if should_reload:
             counts = load_instrument_master(store)
             log.info(
                 "instrument_master.autoloaded",
                 indices=counts["index_count"],
                 stocks=counts["stock_count"],
+                # The acting scope token (§5.6 — a divergent-env prune must be
+                # log-visible, never silent).
+                scope=counts.get("scope"),
             )
         else:
             log.info(
@@ -3562,6 +3584,13 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         _rust_front_on = resolve_rust_front()
     except RustFrontError as exc:
         raise CliUserError(str(exc)) from exc
+
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation at BOOT —
+    # BEFORE the instrument-autoload daemon starts. The §5.1 ordering
+    # dependency (stated + pinned): a FeedScopeError raised INSIDE that daemon
+    # thread would be swallowed into `autoload_skipped`, so junk must refuse
+    # HERE, at exit-1 boot, never silently downstream.
+    _validate_feed_scope_env_cli()
 
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
@@ -4846,6 +4875,8 @@ def cmd_fetch(
     count is bounded (NOT infinite), each round is one ``≤ 8 r/s`` pass, and the
     work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation, pre-lock.
+    _validate_feed_scope_env_cli()
     if max_retry_minutes is not None and max_retry_minutes < 1:
         print(
             f"[brutex] --max-retry-minutes must be >= 1; got {max_retry_minutes}",
@@ -5723,6 +5754,9 @@ def cmd_enrich_greeks(
         ``--lake-root`` must never read as a green zero-target run, nor
         materialise a phantom ``.locks/`` tree; review round-1 fix).
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation — BEFORE
+    # the single-flight lock + the O(files) discovery walk.
+    _validate_feed_scope_env_cli()
     from brutex.data.greeks_enrich_pass import (
         discover_option_windows,
         lake_target_builder,
@@ -5881,6 +5915,9 @@ def _default_plist_dir() -> Path:
 
 def cmd_nightly_run(args: argparse.Namespace) -> int:
     """Run the whole nightly chain once (the launchd/cron entry point)."""
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation — BEFORE
+    # the nightly flock (junk = clean exit 1, never a mid-chain break).
+    _validate_feed_scope_env_cli()
     for attr, flag in _NIGHTLY_FORBIDDEN_FLAGS:
         if getattr(args, attr, False):
             print(
@@ -6356,6 +6393,9 @@ def cmd_pull_all_spot(
     Every heavy dependency is injected for tests (builders, locks, tail,
     clock); production defaults are the real machinery.
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation, pre-lock.
+    _validate_feed_scope_env_cli()
+
     import structlog
 
     from brutex.calendars.auto_pull_gate import (
@@ -6656,6 +6696,8 @@ def cmd_crossverify_run(
     lock refusal / gate-module-absent · 2 halts/blocked/withheld-final/
     publish-failed/deadline-suspect/calendar-abstain (cron-red).
     """
+    # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation, pre-lock.
+    _validate_feed_scope_env_cli()
     resolved = _resolve_lake_root(lake_root)
     _require_lake_dir(resolved, command="crossverify run")
     parsed_day: date | None = None

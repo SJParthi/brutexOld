@@ -53,6 +53,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Final
 
+from brutex.config.feed_scope import FeedScope
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.universe import (
     build_fno_eligible_underlyings,
@@ -74,6 +75,8 @@ def classify_instrument(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
     reference_security_ids: frozenset[int] = frozenset(),
+    *,
+    scope: FeedScope | None = None,
 ) -> str | None:
     """Classify *instrument* into an explorer kind, or ``None``.
 
@@ -118,8 +121,15 @@ def classify_instrument(
     DEC-INSTRUMENT-UNIVERSE-FAST-001). This function only adds the
     KIND label (``"index"`` vs ``"stock"``) on top of that single rule:
     an admitted ``IDX`` → ``"index"``; an admitted ``EQ`` → ``"stock"``.
+    Since DEC-UNIVERSE-INDEX-ONLY-001 (#1934) that single rule is
+    scope-aware: *scope* (kw-only, ``None`` = the acting default feed's —
+    fail-closed narrow) is threaded through, so under the default ``index4``
+    map only the 4 ``V1_INDICES`` rows classify at all; display callers pass
+    ``resolve_read_scope()`` explicitly (the §2.4 consumer law).
     """
-    if not is_universe_underlying(instrument, fno_eligible_underlyings, reference_security_ids):
+    if not is_universe_underlying(
+        instrument, fno_eligible_underlyings, reference_security_ids, scope=scope
+    ):
         return None
     return KIND_INDEX if instrument.instrument == InstrumentType.IDX else KIND_STOCK
 

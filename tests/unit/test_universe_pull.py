@@ -11,8 +11,22 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the pre-#1934 admission MECHANICS over stock/sectoral
+    fixtures; under ``BRUTEX_FEED_SCOPE=full`` those legacy rules are
+    byte-identical (the parity half of the §6 widen-path pin — running this
+    suite full-arm IS that pin's permanent net). The shipped index4-default
+    guard arms live in ``test_universe_index_only_scope.py`` + the
+    scope-gate batteries (migration Law 1)."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 def _index(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:

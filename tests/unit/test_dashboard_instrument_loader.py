@@ -38,6 +38,7 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.adapters.groww.instruments import build_index
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard import instrument_loader as il
 from brutex.dashboard.instrument_loader import (
     FNO_INDEX_ALIASES_OVERRIDE_ENV,
@@ -53,6 +54,19 @@ from brutex.universe import build_options_eligible_underlyings, is_option_pullab
 from structlog.testing import capture_logs
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the pre-#1934 admission MECHANICS over stock/sectoral
+    fixtures; under ``BRUTEX_FEED_SCOPE=full`` those legacy rules are
+    byte-identical (the parity half of the §6 widen-path pin — running this
+    suite full-arm IS that pin's permanent net). The shipped index4-default
+    guard arms live in ``test_universe_index_only_scope.py`` + the
+    scope-gate batteries (migration Law 1)."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
@@ -533,6 +547,9 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     # Empty master → zero skips over zero in-scope rows, green (DEC-PARSE-SKIP-REPORT-001).
     ps = result.pop("parse_skips")
     assert ps["is_green"] is True and ps["skipped_count"] == 0 and ps["in_scope_rows"] == 0
+    # The additive acting-scope token (DEC-UNIVERSE-INDEX-ONLY-001 A6) rides
+    # every load report; this suite runs the full arm.
+    assert result.pop("scope") == "full"
     assert result == {
         "parsed": 0,
         "persisted": 0,
