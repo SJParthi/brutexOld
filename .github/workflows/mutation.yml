@@ -851,13 +851,16 @@ jobs:
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
-          #   evaluator.rs + spec.rs + python.rs + stage1a_batch.rs = 693 mutants
-          #   measured 2026-07-11 (`cargo mutants --list | wc -l` on the
-          #   DEC-STAGE1A-RUST-BATCH-001 tree — the batch slice adds
-          #   stage1a_batch.rs 54 + the python.rs wrapper 12, the wrapper's pdc
-          #   read made operator-free in the round-5 refuter fix so its former
-          #   arithmetic-mutant class is structurally absent; the prior
-          #   2026-07-08 measurement was 627); features python,serde
+          #   evaluator.rs + spec.rs + python.rs + stage1a_batch.rs = 714 mutants
+          #   measured 2026-07-17 (`cargo mutants --list | wc -l` on the
+          #   DEC-SUPERTREND-CONDITIONS-001 implemented-flip HEAD — evaluator.rs
+          #   264 + python.rs 383 + spec.rs 13 + stage1a_batch.rs 54: the
+          #   vocab-66 CPR groups + the flip's Group-14 SuperTrend compare grew
+          #   evaluator.rs, the reshape's VwapState deletion net-shrank
+          #   python.rs despite the appended supertrend arg + pyclass; the
+          #   new supertrend.rs STATE joins the indicators/ carve-out at 91
+          #   mutants — see the toml's disclosure block. Prior measurements:
+          #   693 on 2026-07-11, 627 on 2026-07-08); features python,serde
           #   (python.rs is feature-gated at lib.rs:66 — all 376 of its mutants —
           #   and spec.rs's mask_hex module is serde-gated — 3 of its 13; without
           #   the features those 376 + 3 = 379 mutants build a byte-identical
@@ -874,10 +877,12 @@ jobs:
           #   main's build.rs include!s ../source_digest_core.rs — both outside the
           #   crate dir, so copy-mode baselines break (#1258, measured).
           # - --in-place precludes --jobs (hard CLI error, measured) => the 120-min
-          #   budget is met by SHARDING: ceil(693/7)=99 mutants x 39-48 s/mutant
+          #   budget is met by SHARDING: ceil(714/7)=102 mutants x 39-48 s/mutant
           #   (measured serial: CI 34 s default features, +15% python feature,
-          #   ±20%) ~= 64-79 min + ~6 min baseline/setup ~= 70-85 min nominal,
-          #   ~102 at +20% -> >= 18 min margin per shard.
+          #   ±20%) ~= 66-82 min + ~6 min baseline/setup ~= 72-88 min nominal,
+          #   ~104 at +20% -> >= 16 min margin per shard (narrowed from the
+          #   693-mutant era's >= 18 min; the pre-decided dial on any observed
+          #   timeout-kill stays "+1 shard", never a scope cut).
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/7 \
