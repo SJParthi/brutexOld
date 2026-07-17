@@ -1565,7 +1565,7 @@ jobs:
           #       OHLCV-only test_tf_resampler.py never grows that column).
           #       Both files are required to keep this module 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
