@@ -121,8 +121,24 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "neutral",
     ),
     (
+        # Round 2 CAUSE-NEUTRAL rewrite: the string renders for a missing run
+        # AND for a COMPLETED pre-results-depth run — the old "after the
+        # first completed run" remap was false in the second state.
         "no trades yet — awaiting real run artifact",
-        "no trades yet — they appear after the first completed run",
+        "No trades recorded yet.",
+        "neutral",
+    ),
+    # The equity-label chooser's per-trade fallback literals (round 2 — the
+    # pure bxEquityLabelText keeps them for main's node goldens; the DOM
+    # label AND the note's first bit remap here).
+    (
+        "per-trade close equity (minute-path series empty for this run)",
+        "equity measured at each trade close (the minute-by-minute series is empty for this run)",
+        "neutral",
+    ),
+    (
+        "per-trade close equity (minute-path unavailable for this run)",
+        "equity measured at each trade close (minute-by-minute series not available for this run)",
         "neutral",
     ),
     # Strategy-drawer client literals (post-merge review round 1 — the LIVE
@@ -130,7 +146,7 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
     # bx-strategy-panel.js for main's node-executed pins).
     (
         "no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)",
-        "no trades to chart yet — the chart draws once this run records trades",
+        "No trades to chart yet — the chart draws once this run records trades.",
         "neutral",
     ),
     (
@@ -139,8 +155,11 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "neutral",
     ),
     (
+        # Round 2 CAUSE-NEUTRAL rewrite: renders before any run is selected
+        # AND under a selected COMPLETED run with no chartable trade
+        # timestamps — "once a run exists" was false in the second state.
         "no candles loaded yet — awaiting run + stored 1-minute data",
-        "No chart yet — it appears once a run exists and its price data is pulled.",
+        "No price chart loaded.",
         "neutral",
     ),
     # Health-hub surfaces (merge-up round — the #1747 widget's copy routed
@@ -161,29 +180,80 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
     # The two headline entries beat the generic "not wired — …" rule via
     # the exact-map-first lookup order; the doctor detail's server-side
     # "files/close" grammar slip is remapped at render (raw kept in title).
+    # Round 2 (finding 7): the doctor/mutation pairs are DE-DUPLICATED
+    # (headline = the by-design fact, detail = the where/when) and stop
+    # implying a pending local install — the lanes are cloud-only BY DESIGN.
     (
         "not wired — no local doctor verdict artifact",
-        "Not set up on this machine — the daily health check runs and reports in the cloud.",
+        "Nothing to set up here — the daily health check runs in the cloud.",
         "neutral",
     ),
     (
         "not wired — no local mutation-gate artifact",
-        "Not set up on this machine — the weekly deep test gate runs and reports in the cloud.",
+        "Nothing to set up here — the weekly deep test gate runs in the cloud.",
         "neutral",
     ),
     (
         "the daily doctor runs in GitHub Actions (doctor-daily.yml, 07:30 IST) "
         "and files/close its own tracking issue; `brutex doctor` writes no local verdict file",
-        "The daily health check runs in the cloud (GitHub) each morning and files "
-        "its own reports — this machine keeps no local copy.",
+        "It runs in GitHub each morning and files its own reports — results live "
+        "in the cloud, never on this machine.",
         "neutral",
     ),
     (
         "the deep mutation gate runs in GitHub Actions (mutation.yml, weekly Mon 04:00 UTC) "
         "and files its own alert issues; no local verdict file exists",
-        "The weekly deep test gate runs in the cloud (GitHub) and files its own "
-        "reports — this machine keeps no local copy.",
+        "It runs in GitHub weekly and files its own reports — results live in "
+        "the cloud, never on this machine.",
         "neutral",
+    ),
+    # Round 2 (finding 1): the nightly/backup OUTCOME arms — the round-1
+    # remediation covered only the idle/not-wired arms, but the failure
+    # headlines/details are equally deterministic health_hub.py strings.
+    (
+        "nightly SUSPECT — nightly-20260707T210000Z-ab12",
+        "Overnight run flagged for review — nightly-20260707T210000Z-ab12.",
+        "notice",
+    ),
+    (
+        "tripwire(s) fired — inspect the nightly bundle before trusting the run",
+        "Automated safety checks fired during the run — review it before trusting the results.",
+        "notice",
+    ),
+    (
+        "nightly FAILED — blocker: PULL",
+        "Overnight run FAILED — stopped at: PULL.",
+        "alert",
+    ),
+    (
+        # The raw filesystem path demotes to title="server: …" (the round-3
+        # cascade-refusal law: a path is never visible text).
+        "nightly-20260707T210000Z-ab12 — see "
+        "<results>/nightly/nightly-20260707T210000Z-ab12/report.json",
+        "Run nightly-20260707T210000Z-ab12 — the full report file is saved on "
+        "this machine (hover for its location).",
+        "neutral",
+    ),
+    (
+        "nightly OVERDUE — last ok 27.4 h ago",
+        "Overnight run overdue — last success 27.4 hours ago.",
+        "notice",
+    ),
+    (
+        "nightly-20260707T210000Z-ab12 (dry run) — threshold 26 h (the chain runs once per night)",
+        "Run nightly-20260707T210000Z-ab12 (dry run) — expected within 26 hours "
+        "(it runs once per night).",
+        "neutral",
+    ),
+    (
+        "every link green, zero tripwires",
+        "Every step completed and every safety check passed.",
+        "neutral",
+    ),
+    (
+        "backup dead-man ALARM — OVERDUE",
+        "Backup ALARM — the off-box backup needs attention (OVERDUE).",
+        "alert",
     ),
     (
         "the R9 nightly chain (`brutex nightly run`) has not produced a report here",
@@ -538,8 +608,8 @@ def _visible_text(html: str) -> str:
 
 
 def _strip_portal_static(html: str) -> str:
-    """Remove the two PORTAL-folded blocks (DEC-OPERATOR-PORTAL-REFOLD-001
-    #1796: the winners section + the strategy drawer) before the jargon scan.
+    """Remove the PORTAL-folded static blocks (DEC-OPERATOR-PORTAL-REFOLD-001
+    #1796: the winners section BODY + the strategy drawer) before the scan.
 
     Their STATIC default strings are main's, pinned verbatim by the landed
     ``test_dashboard_operator_portal.py`` suite — the first-lander-wins rule
@@ -547,8 +617,16 @@ def _strip_portal_static(html: str) -> str:
     that overwrite them route through the BXCopy catalog (pinned by
     ``TestPortalPanelCopyRouting`` below), so the literals are a pre-poll
     flash inside a collapsed/hidden container, never a steady-state render.
+
+    Post-merge review round 2: the strip NARROWS to ``#ocWinnersBody`` — the
+    winners section HEADER (the h3 toggle + the always-visible ``.oc-sub``
+    line, which renders even while the section is collapsed on the idle
+    page) is branch-owned copy and stays IN scope for every scan; only the
+    collapsible body carries main's pinned statics.
     """
-    text = re.sub(r'<section[^>]*id="ocWinnersSection".*?</section>', " ", html, flags=re.S)
+    text = re.sub(
+        r'<div class="winners-body" id="ocWinnersBody".*?</section>', " ", html, flags=re.S
+    )
     text = re.sub(r'<aside[^>]*id="ocStrategyDrawer".*?</aside>', " ", text, flags=re.S)
     # The ticker strip's pre-first-poll STATIC default is likewise main's
     # wording (the merge-up first-lander rule); renderTicker rewrites it with
@@ -574,6 +652,13 @@ class TestOperatorPageVisibleTextClean:
             "not_wired",
             "results_store",
             "results-depth",
+            # Round 2 (finding 5): the "artifact" vocabulary is out of the
+            # ALWAYS-visible prose (the winners header sub-line + the EDGE
+            # tile) — the sort-basis "artifact preset" line stays main's
+            # pinned wording (the ledger's named residue), so the ban is on
+            # the two reworded phrasings, not the bare word.
+            "artifact rows",
+            "run artifact",
         ):
             assert needle not in visible, f"v29 visible text still says {needle!r}"
 
@@ -921,5 +1006,100 @@ class TestPortalPanelCopyRouting:
             "waiting for run data",
             "Stored list partly readable — ",
             "winner list loaded",
+            # Round 2: the rewritten client-composed equity-note literals
+            # ("curve is gross of those costs" stays — the main-pinned #12
+            # honesty vocabulary, not jargon).
+            "equity from the stored minute-by-minute record",
+            "total too large to chart exactly — curve truncated",
+            " trade(s) carry no recorded costs yet (cost figures arrive in a later update) "
+            "— the curve is gross of those costs",
         ):
             _assert_no_jargon(s, "portal panel copy")
+
+
+class TestEquityNoteSinkHygiene:
+    """Post-merge review round 2 (MAJOR): the WITH-DATA equity-note sinks —
+    the v29 rank-1 equity note (bx-oneclick.js renderEquity) and the drawer
+    equity note (bx-strategy-panel.js renderEquity) — carry no developer
+    milestone/artifact vocabulary. These notes are CLIENT-composed display
+    text (never a server payload string), so the fix is plain English at the
+    source; the committed browser fixture has no trades, so these raw-source
+    pins are the mechanical regression teeth for the with-data state."""
+
+    def _js(self, name: str) -> str:
+        text = (_STATIC / name).read_text(encoding="utf-8")
+        assert text
+        return text
+
+    #: The killed with-data note literals — gone from BOTH equity renderers.
+    _KILLED = (
+        "carry null costs (by design until P5)",
+        "OVERFLOW: curve truncated at the safe-integer wall",
+        "minute-path equity from the results-depth sidecar",
+    )
+
+    @pytest.mark.parametrize("name", ["bx-oneclick.js", "bx-strategy-panel.js"])
+    def test_killed_with_data_note_literals_are_gone(self, name: str) -> None:
+        js = self._js(name)
+        for needle in self._KILLED:
+            assert needle not in js, f"{name} still composes {needle!r}"
+
+    def test_new_plain_note_literals_are_present_in_both_renderers(self) -> None:
+        needle = (
+            " trade(s) carry no recorded costs yet (cost figures arrive in a "
+            "later update) — the curve is gross of those costs"
+        )
+        for name in ("bx-oneclick.js", "bx-strategy-panel.js"):
+            assert needle in self._js(name), name
+        strategy = self._js("bx-strategy-panel.js")
+        assert "equity from the stored minute-by-minute record" in strategy
+        assert "total too large to chart exactly — curve truncated" in strategy
+
+    def test_fallback_label_note_bit_routes_through_the_catalog(self) -> None:
+        """The drawer note's FIRST bit reuses the label-chooser literal
+        (which carries "minute-path" for main's node goldens), so it must
+        ride the same BXCopy remap the label element gets — with the node
+        harness (no BXCopy) keeping the verbatim fallback."""
+        js = self._js("bx-strategy-panel.js")
+        assert "window.BXCopy.lookup(fallbackLabel)" in js
+        assert "fbCopy && fbCopy.matched ? fbCopy.text : fallbackLabel" in js
+
+    def test_gross_signal_wording_is_deliberately_kept(self) -> None:
+        """'gross signal' is the #12-sanctioned honesty vocabulary (a
+        signal-only total is never labeled net) — main pins the source line;
+        this pin records the retention as deliberate, not an oversight."""
+        assert "bits.push('gross signal ' + money(series.final_paisa));" in self._js(
+            "bx-strategy-panel.js"
+        )
+
+
+class TestHealthHubSinkDiscipline:
+    """Post-merge review round 2: the health-hub DOM sinks' Law-2 + framing
+    fixes (source pins — the widget layer is browser-only)."""
+
+    def _js(self) -> str:
+        text = (_STATIC / "bx-health-hub.js").read_text(encoding="utf-8")
+        assert text
+        return text
+
+    def test_fold_pill_titles_only_the_verbatim_server_headline(self) -> None:
+        """The fold pill text is CLIENT-composed (verdict head + the server
+        headline), so a "server: …" title on the composition mis-attributed
+        client words to the server; the title now carries ONLY the raw
+        fold.headline, and an unmatched/absent headline clears it."""
+        js = self._js()
+        assert "window.BXCopy.apply(foldPill" not in js, (
+            "the fold pill must not stamp the composed string as server-attributed"
+        )
+        assert 'foldPill.title = "server: " + foldHeadline;' in js
+        assert 'foldPill.removeAttribute("title");' in js
+
+    def test_cloud_lanes_get_the_by_design_badge(self) -> None:
+        """doctor_daily/mutation are CONSTANT not_wired by design (the gates
+        run in GitHub, never locally) — their badge names the design instead
+        of the shared pending-install framing; the CSS class + title stay
+        keyed on the RAW verdict token."""
+        js = self._js()
+        assert '(laneToken === "doctor_daily" || laneToken === "mutation")' in js
+        assert 'badge.textContent = "runs in the cloud";' in js
+        _assert_no_jargon("runs in the cloud", "health hub badge")

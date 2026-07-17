@@ -68,6 +68,14 @@ _FIXTURE_DIR: Final[Path] = _REPO / "tests" / "fixtures" / "oneclick" / "sweep_r
 _EVIDENCE_DIR: Final[Path] = ARTIFACT_ROOT / "operator-cleanview"
 
 #: Banned developer-jargon tokens for the VISIBLE-text scan (acceptance #1).
+#: Post-merge review round 2: the list gains the milestone/artifact tokens
+#: the equity-note sinks used to emit ("results-depth"/"minute-path"/
+#: "sidecar"/"OVERFLOW"/"null costs"/"until P5") — the committed fixture has
+#: no trades, so the with-data notes are additionally source-pinned by
+#: ``TestEquityNoteSinkHygiene`` (test_dashboard_copy_catalog.py); driving
+#: the drawer over a trades-carrying stub is a named follow-up.
+#: Deliberately NOT banned: "gross signal" (the #12-sanctioned honesty
+#: vocabulary — main pins it on the winner card and the equity note).
 _JARGON_TOKENS: Final[tuple[str, ...]] = (
     "awaiting real run artifact",
     "merge-integration",
@@ -78,6 +86,12 @@ _JARGON_TOKENS: Final[tuple[str, ...]] = (
     "BRUTEX_",
     "PROVISIONAL",
     "O(file)",
+    "results-depth",
+    "minute-path",
+    "sidecar",
+    "OVERFLOW",
+    "null costs",
+    "until P5",
 )
 
 #: bx-rate-monitor.js POLL_MS / the heartbeat pull cadence / the shared
@@ -150,13 +164,16 @@ def test_idle_page_is_calm_and_jargon_free(new_page: NewPageFactory, tmp_path: P
     # Acceptance #1: the page text carries none of the banned tokens —
     # scripts/styles removed, and the exempt-by-design surfaces excluded:
     # the timeline's raw event lines (the search-coherence contract) plus
-    # the two PORTAL-folded blocks (#1796 winners section + strategy
-    # drawer), whose STATIC defaults are main's pinned wording per the
-    # merge-up first-lander rule — hidden/collapsed until expand, so this
-    # textContent scan (which ignores visibility) would false-fail on the
-    # pinned pre-render statics. HONEST scope (post-merge review round 1):
-    # the exemption covers the STATICS only — the drawer's POST-FETCH
-    # visible state is scanned for real by
+    # the PORTAL-folded static blocks (#1796 winners section BODY +
+    # strategy drawer), whose STATIC defaults are main's pinned wording per
+    # the merge-up first-lander rule — hidden/collapsed until expand, so
+    # this textContent scan (which ignores visibility) would false-fail on
+    # the pinned pre-render statics. Post-merge review round 2: the winners
+    # exemption NARROWS to #ocWinnersBody — the section header (h3 toggle +
+    # the always-visible .oc-sub line, rendered even while collapsed) is
+    # branch-owned copy and IS scanned. HONEST scope (round 1): the
+    # exemption covers the STATICS only — the drawer's POST-FETCH visible
+    # state is scanned for real by
     # test_winner_drawer_post_fetch_is_jargon_free below (innerText over
     # the OPEN drawer after the panel fetches settle). Everything else,
     # the collapsed diagnostics AND the render-time-rewritten ticker strip
@@ -164,7 +181,7 @@ def test_idle_page_is_calm_and_jargon_free(new_page: NewPageFactory, tmp_path: P
     visible = page.evaluate(
         "() => { const clone = document.body.cloneNode(true);"
         " clone.querySelectorAll('script, style, #ocTimeline,"
-        " #ocWinnersSection, #ocStrategyDrawer')"
+        " #ocWinnersBody, #ocStrategyDrawer')"
         "   .forEach((n) => n.remove());"
         " return clone.textContent; }"
     )
@@ -457,7 +474,7 @@ def test_winner_drawer_post_fetch_is_jargon_free(new_page: NewPageFactory, tmp_p
         "This run is from an older version — re-run the sweep to record trade detail."
     )
     expect(page.locator("#stChartCoords")).to_have_text(
-        "no trades to chart yet — the chart draws once this run records trades"
+        "No trades to chart yet — the chart draws once this run records trades."
     )
     # The banned-token scan over the drawer's VISIBLE text only (innerText —
     # the drawer is open; hidden siblings do not contribute).

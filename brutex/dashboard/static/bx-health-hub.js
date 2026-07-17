@@ -150,8 +150,17 @@ function bxHealthHubInit() {
        pure helpers keep their node-goldened literals; the CSS class above
        stays keyed on the RAW verdict token. */
     var rawVerdict = String(lane.verdict);
+    var laneToken = String(lane.lane);
     var badgeCopy = window.BXCopy ? window.BXCopy.token("verify", rawVerdict) : null;
-    if (badgeCopy && badgeCopy.matched) {
+    if (rawVerdict === "not_wired" && (laneToken === "doctor_daily" || laneToken === "mutation")) {
+      /* By-design cloud lanes (post-merge review round 2): health_hub's
+         _doctor_lane/_mutation_lane are CONSTANT not_wired — the gates run
+         in GitHub and never report locally, so the shared "not available
+         yet" badge framed them as a pending install. The badge names the
+         design instead; the CSS class above stays keyed on the RAW token. */
+      badge.textContent = "runs in the cloud";
+      badge.title = "server: " + rawVerdict;
+    } else if (badgeCopy && badgeCopy.matched) {
       badge.textContent = badgeCopy.text;
       badge.title = "server: " + rawVerdict;
     } else {
@@ -191,12 +200,22 @@ function bxHealthHubInit() {
     if (sig !== lastSig) { // unchanged tick -> zero DOM writes (skip-render discipline)
       lastSig = sig;
       if (foldPill) {
-        // Copy catalog at render: the fold pill's "N not wired" segment
-        // remaps ("not available yet"); unknown compositions pass through.
-        if (window.BXCopy) {
-          window.BXCopy.apply(foldPill, bxHealthFoldText(payload.fold), {});
+        /* Copy catalog at render: the fold pill's "N not wired" segment
+           remaps ("not available yet"); unknown compositions pass through.
+           The pill text is CLIENT-composed (bxHealthFoldText = verdict head
+           + " — " + the server fold.headline), so stamping the composition
+           as "server: …" would attribute client words to the server (Law 2
+           — post-merge review round 2); the title carries ONLY the verbatim
+           server headline (the lane-note sink's discipline). */
+        var foldRaw = bxHealthFoldText(payload.fold);
+        var foldCopy = window.BXCopy ? window.BXCopy.lookup(foldRaw) : null;
+        foldPill.textContent = foldCopy && foldCopy.matched ? foldCopy.text : foldRaw;
+        var foldHeadline =
+          payload.fold && typeof payload.fold.headline === "string" ? payload.fold.headline : "";
+        if (foldCopy && foldCopy.matched && foldHeadline) {
+          foldPill.title = "server: " + foldHeadline;
         } else {
-          foldPill.textContent = bxHealthFoldText(payload.fold);
+          foldPill.removeAttribute("title");
         }
         foldPill.classList.remove("hh-fold-ok", "hh-fold-warn", "hh-fold-bad");
         var v = payload.fold && payload.fold.verdict;

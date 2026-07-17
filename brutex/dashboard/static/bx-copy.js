@@ -79,14 +79,30 @@ var BX_COPY_EXACT = {
     tier: "neutral"
   },
   "no trades yet — awaiting real run artifact": {
-    text: "no trades yet — they appear after the first completed run",
+    /* CAUSE-NEUTRAL (post-merge review round 2): this string renders for a
+       missing run AND for a COMPLETED pre-results-depth run, so the remap
+       may not assert a cause the server string never carried ("after the
+       first completed run" was false in the second state — the trades card
+       names the true cause + remedy). */
+    text: "No trades recorded yet.",
+    tier: "neutral"
+  },
+  /* The equity-label chooser's per-trade fallback literals (post-merge
+     review round 2 — bx-strategy-panel.js bxEquityLabelText keeps them for
+     main's node goldens; the DOM label + note remap here). */
+  "per-trade close equity (minute-path series empty for this run)": {
+    text: "equity measured at each trade close (the minute-by-minute series is empty for this run)",
+    tier: "neutral"
+  },
+  "per-trade close equity (minute-path unavailable for this run)": {
+    text: "equity measured at each trade close (minute-by-minute series not available for this run)",
     tier: "neutral"
   },
   /* Strategy-panel client literals (post-merge review round 1 — the drawer's
      LIVE no-anchor/reset sinks previously wrote these raw; the literals stay
      in bx-strategy-panel.js for main's node-executed pins). */
   "no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)": {
-    text: "no trades to chart yet — the chart draws once this run records trades",
+    text: "No trades to chart yet — the chart draws once this run records trades.",
     tier: "neutral"
   },
   "awaiting real run artifact — trades appear once the run's results-depth sidecars land": {
@@ -94,28 +110,48 @@ var BX_COPY_EXACT = {
     tier: "neutral"
   },
   "no candles loaded yet — awaiting run + stored 1-minute data": {
-    text: "No chart yet — it appears once a run exists and its price data is pulled.",
+    /* CAUSE-NEUTRAL (post-merge review round 2): this note renders both
+       before any run is selected AND under a selected COMPLETED run whose
+       trades carry no chartable timestamps — the old "once a run exists"
+       remap asserted a cause that was false in the second state (and
+       clashed with the stacked coords note above it). */
+    text: "No price chart loaded.",
     tier: "neutral"
   },
   /* Health-hub KNOWN frozen lane strings (post-merge review round 1 — the
      #1747 wire is frozen; these are deterministic server strings, not
      genuinely-unknown payloads, so the pass-through law does not apply.
      The two headline entries beat the generic "not wired — …" rule via the
-     exact-map-first lookup order. */
+     exact-map-first lookup order. Round 2: the doctor/mutation pairs are
+     DE-DUPLICATED (headline states the by-design fact, detail adds the
+     where/when) and stop implying a pending local install — these lanes
+     run in the cloud BY DESIGN and never report locally. */
   "not wired — no local doctor verdict artifact": {
-    text: "Not set up on this machine — the daily health check runs and reports in the cloud.",
+    text: "Nothing to set up here — the daily health check runs in the cloud.",
     tier: "neutral"
   },
   "not wired — no local mutation-gate artifact": {
-    text: "Not set up on this machine — the weekly deep test gate runs and reports in the cloud.",
+    text: "Nothing to set up here — the weekly deep test gate runs in the cloud.",
     tier: "neutral"
   },
   "the daily doctor runs in GitHub Actions (doctor-daily.yml, 07:30 IST) and files/close its own tracking issue; `brutex doctor` writes no local verdict file": {
-    text: "The daily health check runs in the cloud (GitHub) each morning and files its own reports — this machine keeps no local copy.",
+    text: "It runs in GitHub each morning and files its own reports — results live in the cloud, never on this machine.",
     tier: "neutral"
   },
   "the deep mutation gate runs in GitHub Actions (mutation.yml, weekly Mon 04:00 UTC) and files its own alert issues; no local verdict file exists": {
-    text: "The weekly deep test gate runs in the cloud (GitHub) and files its own reports — this machine keeps no local copy.",
+    text: "It runs in GitHub weekly and files its own reports — results live in the cloud, never on this machine.",
+    tier: "neutral"
+  },
+  /* Health-hub nightly-lane OUTCOME details (post-merge review round 2 —
+     the round-1 remediation covered only the idle/not-wired arms; the
+     failure/success arms are equally deterministic health_hub.py strings,
+     so the pass-through law never excused them either). */
+  "tripwire(s) fired — inspect the nightly bundle before trusting the run": {
+    text: "Automated safety checks fired during the run — review it before trusting the results.",
+    tier: "notice"
+  },
+  "every link green, zero tripwires": {
+    text: "Every step completed and every safety check passed.",
     tier: "neutral"
   },
   "the R9 nightly chain (`brutex nightly run`) has not produced a report here": {
@@ -185,6 +221,42 @@ var BX_COPY_RULES = [
     re: /^BRUTEX_[A-Z_]+ is unset\b.*$/,
     text: "A required setting is missing on this machine — hover for the exact name.",
     tier: "neutral"
+  },
+  {
+    /* Health-hub nightly/backup OUTCOME arms (post-merge review round 2 —
+       the round-1 remediation covered only the idle/not-wired arms; these
+       failure headlines are fixed health_hub.py f-string templates, as
+       deterministic as the idle strings). */
+    re: /^nightly SUSPECT — (.+)$/,
+    text: "Overnight run flagged for review — $1.",
+    tier: "notice"
+  },
+  {
+    re: /^nightly FAILED — blocker: (.+)$/,
+    text: "Overnight run FAILED — stopped at: $1.",
+    tier: "alert"
+  },
+  {
+    re: /^nightly OVERDUE — last ok ([\d.]+) h ago$/,
+    text: "Overnight run overdue — last success $1 hours ago.",
+    tier: "notice"
+  },
+  {
+    /* The FAILED detail's raw filesystem path demotes to title="server: …"
+       (the round-3 cascade-refusal law: a path is never visible text). */
+    re: /^(.+) — see <results>\/nightly\/.+\/report\.json$/,
+    text: "Run $1 — the full report file is saved on this machine (hover for its location).",
+    tier: "neutral"
+  },
+  {
+    re: /^(.+) — threshold ([\d.]+) h \(the chain runs once per night\)$/,
+    text: "Run $1 — expected within $2 hours (it runs once per night).",
+    tier: "neutral"
+  },
+  {
+    re: /^backup dead-man ALARM — (.+)$/,
+    text: "Backup ALARM — the off-box backup needs attention ($1).",
+    tier: "alert"
   },
   {
     re: /^awaiting real run artifact — top100 entry carries no results-depth reference/,

@@ -1330,11 +1330,13 @@ function bxFunnelProvenance(source, runId) {
       noteBits.push(String(series.invalid_rows) + " invalid row(s) skipped");
     }
     /* [W2-4] Ruling-18 null costs: counted at Rs 0 — the curve is honestly
-       labeled gross of those unverified costs, never an empty chart. */
+       labeled gross of those unrecorded costs, never an empty chart
+       (post-merge review round 2: plain English — the note is
+       client-composed display text, never a server payload string). */
     if (series.null_cost_rows) {
       noteBits.push(
         String(series.null_cost_rows) +
-          " row(s) carry null costs (by design until P5) — curve is gross of those costs"
+          " trade(s) carry no recorded costs yet (cost figures arrive in a later update) — the curve is gross of those costs"
       );
     }
     noteBits.push("net " + paisaText(series.final_paisa));

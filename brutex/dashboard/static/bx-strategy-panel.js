@@ -396,7 +396,10 @@ function bxEquityLabelText(hasSeries, okEmpty) {
           mpSvg.appendChild(mpPath);
         }
         host.appendChild(mpSvg);
-        var mpBits = ['minute-path equity from the results-depth sidecar'];
+        /* Post-merge review round 2: the note bits are CLIENT-composed
+           display text (never a server payload string), so they are written
+           plain-English directly — no milestone/artifact vocabulary. */
+        var mpBits = ['equity from the stored minute-by-minute record'];
         if (mp.invalid_rows) { mpBits.push(String(mp.invalid_rows) + ' invalid point(s) skipped'); }
         if (state.equityTotal !== null && state.equity.length < state.equityTotal) {
           mpBits.push('first ' + String(state.equity.length) + ' of ' + String(state.equityTotal) + ' sessions shown');
@@ -431,13 +434,18 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       svg.appendChild(path);
     }
     host.appendChild(svg);
-    var bits = [fallbackLabel];
-    if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
+    /* Post-merge review round 2: the note's first bit reuses the label
+       CHOOSER literal, so it rides the same catalog remap the label element
+       gets (the literal stays for main's node harness, which has no
+       BXCopy); the remaining bits are client-composed plain English. */
+    var fbCopy = window.BXCopy ? window.BXCopy.lookup(fallbackLabel) : null;
+    var bits = [fbCopy && fbCopy.matched ? fbCopy.text : fallbackLabel];
+    if (series.overflow) { bits.push('total too large to chart exactly — curve truncated'); }
     if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
     // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
-    // labeled gross of those unverified costs, never an empty chart.
+    // labeled gross of those unrecorded costs, never an empty chart.
     if (series.null_cost_rows) {
-      bits.push(String(series.null_cost_rows) + ' row(s) carry null costs (by design until P5) — curve is gross of those costs');
+      bits.push(String(series.null_cost_rows) + ' trade(s) carry no recorded costs yet (cost figures arrive in a later update) — the curve is gross of those costs');
     }
     // #12 vocabulary (audit re-break MINOR): the per-trade curve total is the
     // GROSS signal figure — never "net" while costs are structurally absent.
