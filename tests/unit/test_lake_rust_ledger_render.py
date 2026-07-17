@@ -83,7 +83,9 @@ def _fake_crate(
         module.render_ledger_parquet_from_ipc = render  # type: ignore[attr-defined]
     version = pl.__version__ if pinned is None else pinned
     module.pinned_polars_version = lambda: version  # type: ignore[attr-defined]
-    module.__version__ = "0.1.0-fake"
+    # ModuleType declares __version__ read-only to type checkers; the fake
+    # needs one for the engaged-INFO's crate_version field.
+    module.__dict__["__version__"] = "0.1.0-fake"
     return module
 
 
