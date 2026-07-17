@@ -15,8 +15,21 @@
 #                      below_parallel_threshold dispatch predicate extracted by
 #                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
 #                      boundary itself stays mutation-gated)
-# 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
-# dir on the post-merge HEAD: metrics 358 + trade_sim 167 + python 65 + lib 9).
+#   src/stats/*.rs   — Stage-3/4 statistics kernels (slice 6,
+#                      DEC-METRICS-RUST-STATS-001): the CPCV fold pass-count
+#                      in PR-1 (a silent mutant here flips cascade/candidate
+#                      verdicts); later slice PRs land inside the same glob.
+#                      Added EXPLICITLY — this file is an allowlist, so a new
+#                      module is NOT covered "automatically" (the #1614
+#                      unwired-gate lesson).
+# 680 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from
+# this dir with the slice-6 stats scope added: metrics 358 + trade_sim 167 +
+# python 65 + lib 9 + stats/cpcv 81 — the prior 599 was the 2026-07-08
+# pre-slice-6 measurement). The +81 (+13.5%) growth stays inside the 6-shard
+# matrix budget: the #1597 rehearsal's worst fno-math shard ran 65 min vs the
+# 120-min cap, and 680/6 ≈ 113 mutants/shard vs the prior 100 — an ~13% load
+# rise on a 55-min margin; re-shard only if a scheduled run approaches the
+# cap (the pre-decided +1-shard dial).
 # Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
 # extraction + .max() reshapes brought the pre-extraction 576 down to 556
@@ -35,4 +48,4 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
+examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs", "src/stats/*.rs"]

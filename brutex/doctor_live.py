@@ -60,7 +60,7 @@ from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -126,7 +126,7 @@ from brutex.data.bhavcopy import (
 from brutex.data.meta_kv import MetaKV
 from brutex.data.models import CandleBar
 from brutex.data.raw_integrity import RawIntegrityError, RawIntegrityRecord, build_record
-from brutex.data.session import IST, filter_intraday_session
+from brutex.data.session import IST, SESSION_OPEN, filter_intraday_session
 from brutex.models import BruteXError, InstrumentFormatError
 from brutex.observability.pull_journal import last_run, read_journal, sleep_gaps
 
@@ -1584,7 +1584,8 @@ def stage_spot1m(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     first_ist = bars[0].timestamp.astimezone(IST).strftime("%H:%M")
     drop_ratio = dropped / len(bars)
     first_session_ok = bool(session_bars) and (
-        session_bars[0].timestamp.astimezone(IST).time() == time(9, 15)
+        # SESSION_OPEN = the ONE 09:15 root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+        session_bars[0].timestamp.astimezone(IST).time() == SESSION_OPEN
     )
     ctx.transcript.event(
         "spot1m",
