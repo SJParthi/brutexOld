@@ -320,6 +320,17 @@ jobs:
           set -o pipefail
           emit_failure_summary() {
             leg="$1"; log="$2"
+            # ::error annotations FIRST — annotations are the ONE failure
+            # surface that renders on the run page without auth (the raw
+            # logs AND the job summary are auth-gated for anonymous views),
+            # so the failing test ids must land here. Cap 8 + the last
+            # output line (the 10-annotations-shown-per-step UI bound).
+            grep -E "^(FAILED|ERROR) " "$log" | head -8 | while IFS= read -r line; do
+              esc=$(printf '%s' "$line" | sed -e 's/%/%25/g')
+              echo "::error title=lake-rust-parity ${leg}::${esc}"
+            done
+            tail_line=$(tail -n 1 "$log" | sed -e 's/%/%25/g')
+            echo "::error title=lake-rust-parity ${leg} tail::${tail_line}"
             {
               echo "### lake-rust-parity FAILURE — leg: ${leg}"
               echo ""
