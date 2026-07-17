@@ -30,18 +30,18 @@ from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
 
 def test_default_includes_active_bits_and_excludes_dead_ones() -> None:
-    """The default sweeps the ACTIVE bits 54..63 and NEVER the dead ones.
+    """The default sweeps the ACTIVE bits 54..65 and NEVER the dead ones.
 
-    The 60→66 reshape: pivot R5/S5 (54/55), BOS/CHoCH (56-59) and the new
-    CPR bits (60-63) are swept by default; the RETIRED VWAP tombstones
-    (52/53) and the declared-only SuperTrend bits (64/65) are excluded —
-    a default sweep must never burn combos on a condition that can never
-    fire.
+    The 60→66 reshape gave pivot R5/S5 (54/55), BOS/CHoCH (56-59) and the
+    CPR bits (60-63); the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
+    added bits 64/65 to the default pool. Only the RETIRED VWAP tombstones
+    (52/53) stay excluded — a default sweep must never burn combos on a
+    condition that can never fire.
     """
     bits = cli.default_condition_bits()
-    for active_bit in range(54, 64):
+    for active_bit in range(54, 66):
         assert active_bit in bits, f"bit {active_bit} must be swept by default"
-    for dead_bit in (52, 53, 64, 65):
+    for dead_bit in (52, 53):
         assert dead_bit not in bits, f"dead bit {dead_bit} must NOT be swept"
 
 
@@ -58,16 +58,17 @@ def test_default_is_ascending_and_unique() -> None:
     assert len(bits) == len(set(bits))
 
 
-def test_default_length_is_the_62_active_bits() -> None:
-    """The 66-condition layout carries 62 ACTIVE bits — the default grid.
+def test_default_length_is_the_64_active_bits() -> None:
+    """The 66-condition layout carries 64 ACTIVE bits — the default grid.
 
-    (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the default
-    grid is now C(62, k) — the tombstones/declared-only bits are excluded.)
+    (The pre-reshape dense-``IMPLEMENTED_MASK`` era swept all 60; the 60→66
+    reshape swept 62; since the vocab-66 SuperTrend implemented-flip the
+    default grid is C(64, k) — only the tombstones are excluded.)
     """
     bits = cli.default_condition_bits()
-    assert IMPLEMENTED_MASK == ((1 << 64) - 1) ^ (1 << 52) ^ (1 << 53)
-    assert len(bits) == 62
-    assert bits == [*range(52), *range(54, 64)]
+    assert IMPLEMENTED_MASK == ((1 << 66) - 1) ^ (1 << 52) ^ (1 << 53)
+    assert len(bits) == 64
+    assert bits == [*range(52), *range(54, 66)]
 
 
 def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> None:

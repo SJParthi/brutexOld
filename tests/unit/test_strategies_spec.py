@@ -203,23 +203,38 @@ class TestStrategySpecValidation:
         [
             pytest.param(52, id="bit52-retired-vwap-above"),
             pytest.param(53, id="bit53-retired-vwap-below"),
-            pytest.param(64, id="bit64-declared-only-supertrend-above"),
-            pytest.param(65, id="bit65-declared-only-supertrend-below"),
         ],
     )
-    def test_retired_and_declared_only_bits_rejected(self, bit: int) -> None:
+    def test_retired_bits_rejected(self, bit: int) -> None:
         """The vocab-66 refusal pins (the Rust twin's Python mirror).
 
-        The RETIRED VWAP tombstones (52/53) and the declared-only SuperTrend
-        layout bits (64/65) are all outside ``IMPLEMENTED_MASK`` — a mask
-        requiring any of them must refuse at construction, alone AND mixed
-        with valid bits.
+        The RETIRED VWAP tombstones (52/53) are outside ``IMPLEMENTED_MASK``
+        — a mask requiring either must refuse at construction, alone AND
+        mixed with valid bits. (The SuperTrend bits 64/65 left this refusal
+        set at the vocab-66 implemented-flip — see
+        :meth:`test_live_supertrend_bits_accepted`.)
         """
         assert not (IMPLEMENTED_MASK >> bit) & 1  # genuinely unimplemented
         with pytest.raises(StrategyError, match="unimplemented/reserved"):
             make_spec(condition_mask=1 << bit)
         with pytest.raises(StrategyError, match="unimplemented/reserved"):
             make_spec(condition_mask=(1 << bit) | 0x1F)
+
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(64, id="bit64-live-supertrend-above"),
+            pytest.param(65, id="bit65-live-supertrend-below"),
+        ],
+    )
+    def test_live_supertrend_bits_accepted(self, bit: int) -> None:
+        """The vocab-66 SuperTrend implemented-flip ACCEPTANCE pins (crate
+        0.5.0): bits 64/65 joined ``IMPLEMENTED_MASK``, so a mask requiring
+        them constructs — alone AND mixed with valid bits (the former
+        declared-only refusal is consciously retired)."""
+        assert (IMPLEMENTED_MASK >> bit) & 1  # genuinely implemented now
+        mask = (1 << bit) | 0b101
+        assert make_spec(condition_mask=mask).condition_mask == mask
 
     @pytest.mark.parametrize(
         "bit",

@@ -136,13 +136,15 @@ def test_definition_rejects_retired_condition_scope() -> None:
         _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
 
 
-def test_definition_rejects_layout_only_condition_scope() -> None:
-    """A declared-only LAYOUT bit (SuperTrend 64) is refused with its status named."""
-    with pytest.raises(
-        ValueError,
-        match=r"'close_above_supertrend' \(bit 64\) is declared but NOT YET implemented",
-    ):
-        _defn(condition_scope=frozenset({"close_above_supertrend"}))
+def test_definition_accepts_live_supertrend_scope() -> None:
+    """The SuperTrend names construct — the vocab-66 implemented-flip
+    ACCEPTANCE pin (crate 0.5.0; the former declared-only refusal for bits
+    64/65 is consciously retired — no LAYOUT-ONLY bit exists on today's
+    layout, so the refusal arm's teeth live in the RETIRED-tombstone test
+    above)."""
+    d = _defn(condition_scope=frozenset({"close_above_supertrend", "close_below_supertrend"}))
+    assert d.candidate_mask == (1 << 64) | (1 << 65)
+    assert d.candidate_mask & ~IMPLEMENTED_MASK == 0
 
 
 def test_definition_accepts_live_cpr_scope_and_mask_stays_implemented_subset() -> None:
