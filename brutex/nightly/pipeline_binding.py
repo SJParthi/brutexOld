@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     from brutex.dashboard.pipeline_pull import PipelinePullReport, PriorStepsVerdict
     from brutex.dashboard.pull_controller import BulkSpotReport, SessionRateController
     from brutex.data.instrument_store import InstrumentStore
+    from brutex.data.write_domain import WriteDomain
+    from brutex.feeds.vendor_profile import VendorProfileRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -116,6 +118,18 @@ class HeadlessPipeline:
     #: the sequencer inside the NSE market-hours window skips the whole vendor chain.
     #: ``None`` (a dry-run build, or a directly-constructed test double) never gates.
     market_closed: Callable[[], bool] | None = None
+    #: The resolved feed-vendor token (DEC-FEED-REGISTRY-COMMON-001,
+    #: MIGRATION.md #1903): ``build_headless_pipeline`` resolves the
+    #: registry's PRIMARY profile and carries its token here; the sequencer
+    #: receives it verbatim. The default equals ``run_full_pipeline``'s own
+    #: default, so a directly-constructed test double stays byte-identical.
+    vendor: str = "groww"
+    #: The resolved profile's typed write domain — CARRIED for inspection
+    #: only; NO writer consults it in this pass (the writer-side
+    #: ``assert_write_domain`` binding stays GATED on direct user approval —
+    #: PR #1570's permission-refusal record). ``None`` = a directly-built
+    #: test double (nothing reads it).
+    write_domain: WriteDomain | None = None
 
 
 def build_headless_pipeline(
@@ -129,6 +143,7 @@ def build_headless_pipeline(
     session_rate: SessionRateController | None = None,
     now: Callable[[], datetime] = _utcnow,
     scope: str = "full",
+    registry: VendorProfileRegistry | None = None,
 ) -> HeadlessPipeline:
     """Bind the four pipeline phases headlessly (each item mirrors app.py).
 
@@ -146,6 +161,13 @@ def build_headless_pipeline(
     (``compose_market_closed`` — the guard module is untouched; a dry-run's
     ``None`` composes to ``None``; the belt honors the SAME
     ``BRUTEX_MARKET_HOURS_GUARD`` kill switch — guard off ⇒ belt off).
+
+    *registry* (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903): the
+    feed-vendor registry this chain resolves its PRIMARY profile from;
+    ``None`` builds the default (Groww-only) registry over THIS chain's one
+    rate holder. The resolved vendor token + write domain are carried on the
+    returned :class:`HeadlessPipeline`; with only Groww registered the
+    behavior is byte-identical to the pre-registry binding (parity-pinned).
 
     Raises
     ------
@@ -234,6 +256,22 @@ def build_headless_pipeline(
     fetch_intervals = resolve_fetch_intervals(None)  # ("1minute",)
     registry_path = lake_root / "registry.duckdb"
     rate = SessionRateController() if session_rate is None else session_rate
+
+    # Feed-vendor registry (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903):
+    # the chain resolves its vendor from the registry's PRIMARY profile —
+    # with only Groww registered (the default build) this is byte-identical
+    # to today (vendor="groww" == the sequencer default; the write domain is
+    # carried but consulted by NOTHING — parity-pinned). The default build
+    # threads THIS chain's one rate holder (ADR-0021 §12 invariant 2 — one
+    # rate stack per chain, never a second controller).
+    from brutex.feeds.registry_build import build_default_registry
+
+    vendor_registry = (
+        registry
+        if registry is not None
+        else build_default_registry(lake_root, rate_factory=lambda: rate)
+    )
+    profile = vendor_registry.primary()
 
     # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the nightly 01:30 IST
     # headless pull is the MOTIVATING case — it must STOP gracefully at 08:45 if it runs
@@ -391,6 +429,8 @@ def build_headless_pipeline(
         targets=len(targets),
         close=store.close,
         market_closed=_market_closed,
+        vendor=profile.vendor,
+        write_domain=profile.write_domain,
     )
 
 
@@ -405,6 +445,7 @@ def execute_headless_pipeline(hp: HeadlessPipeline) -> PipelinePullReport:
         run_prebuild=hp.run_prebuild,
         strict_gate=hp.strict_gate,
         market_closed=hp.market_closed,
+        vendor=hp.vendor,
     )
 
 

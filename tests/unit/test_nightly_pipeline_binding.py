@@ -115,6 +115,7 @@ def _wire(
     env: dict[str, str] | None = None,
     dry_run: bool = False,
     scope: str = "full",
+    registry_builder: Any = None,
 ) -> tuple[HeadlessPipeline, _Spies, _FakeStore]:
     """Build a fully spy-wired headless pipeline over a fake store."""
     spies = _Spies()
@@ -210,6 +211,9 @@ def _wire(
         store_opener=lambda _path: cast(Any, store),
         now=lambda: _FIXED_NOW,
         scope=scope,
+        # DEC-FEED-REGISTRY-COMMON-001: None keeps the default (Groww-only)
+        # registry build; a builder is called with THIS lake root.
+        registry=registry_builder(lake) if registry_builder is not None else None,
     )
     return hp, spies, store
 
@@ -709,6 +713,10 @@ def test_execute_threads_the_four_phases(monkeypatch: pytest.MonkeyPatch) -> Non
         # DEC-GROWW-MARKET-HOURS-GUARD-001: the guard is threaded through
         # (None here — the test double is built without one).
         "market_closed": None,
+        # DEC-FEED-REGISTRY-COMMON-001 (MIGRATION.md #1903): the resolved
+        # vendor token is threaded verbatim — a directly-built double carries
+        # the "groww" default, which equals the sequencer's own default.
+        "vendor": "groww",
     }
 
 
@@ -855,3 +863,150 @@ def test_scope_fno_only_refused_no_headless_binding(
 def test_scope_unknown_token_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown pull scope"):
         _wire(monkeypatch, tmp_path, scope="spotonly")
+
+
+# ── the feed-vendor registry consumer (DEC-FEED-REGISTRY-COMMON-001) ─────
+#
+# MIGRATION.md #1903: build_headless_pipeline resolves its vendor from the
+# registry's PRIMARY profile. With only Groww registered (the default build)
+# the behavior is BYTE-IDENTICAL to the pre-registry binding — the parity pin
+# below proves it over the REAL run_full_pipeline sequencer.
+
+
+class TestVendorRegistryConsumer:
+    """The nightly/CLI chain is the FIRST production registry consumer."""
+
+    def test_default_build_resolves_groww_primary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """registry=None → the default (Groww-only) build; vendor + domain carried."""
+        from brutex.data.write_domain import PRIMARY_DOMAIN_NAME, primary_write_domain
+
+        hp, _spies, _store = _wire(monkeypatch, tmp_path)
+        assert hp.vendor == "groww"
+        assert hp.write_domain is not None
+        assert hp.write_domain.primary is True
+        assert hp.write_domain.name == PRIMARY_DOMAIN_NAME
+        assert (
+            hp.write_domain.resolved_root
+            == primary_write_domain(tmp_path / "lake").resolved_root
+        )
+
+    def test_injected_registry_with_extra_feed_keeps_primary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A testfeed extra in the injected registry leaves the PRIMARY resolution unchanged."""
+        from brutex.feeds.registry_build import build_default_registry
+        from tests.fakes.vendor_profiles import synthetic_feed_profile
+
+        hp, _spies, _store = _wire(
+            monkeypatch,
+            tmp_path,
+            registry_builder=lambda lake: build_default_registry(
+                lake, extra_profiles=[synthetic_feed_profile]
+            ),
+        )
+        assert hp.vendor == "groww"
+        assert hp.write_domain is not None and hp.write_domain.primary is True
+
+    def test_primaryless_injected_registry_is_typed_refusal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A feed-only registry (no primary) refuses the build LOUDLY (typed)."""
+        from brutex.feeds.vendor_profile import VendorProfileError, VendorProfileRegistry
+        from tests.fakes.vendor_profiles import synthetic_feed_profile
+
+        def _feed_only(lake: Path) -> VendorProfileRegistry:
+            registry = VendorProfileRegistry()
+            registry.register(synthetic_feed_profile(lake))
+            return registry
+
+        with pytest.raises(VendorProfileError, match="no PRIMARY profile registered"):
+            _wire(monkeypatch, tmp_path, registry_builder=_feed_only)
+
+    def test_default_registry_threads_the_chain_rate_holder(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """ADR-0021 §12 invariant 2: ONE rate stack per chain — the injected
+        session_rate holder IS the profile's rate-factory product (identity)."""
+        captured: dict[str, Any] = {}
+        real_build: Any = None
+
+        def _spy_build(lake_root: Path, **kwargs: Any) -> Any:
+            registry = real_build(lake_root, **kwargs)
+            captured["product"] = registry.primary().rate_factory()
+            return registry
+
+        from brutex.feeds import registry_build as rb
+
+        real_build = rb.build_default_registry
+        monkeypatch.setattr(
+            "brutex.feeds.registry_build.build_default_registry", _spy_build
+        )
+        # _wire builds with session_rate=None → the function mints ONE holder;
+        # rebuild here with an explicit holder to pin identity end-to-end.
+        rate = SessionRateController()
+        lake = tmp_path / "lake"
+        lake.mkdir(exist_ok=True)
+        (lake / "instruments.duckdb").write_bytes(b"placeholder")
+        store = _FakeStore(
+            [_instrument("NIFTY", idx=True, security_id=1)], reference_only=frozenset()
+        )
+        hp = build_headless_pipeline(
+            lake_root=lake,
+            dry_run=True,
+            env={},
+            store_opener=lambda _p: cast(Any, store),
+            now=lambda: _FIXED_NOW,
+            session_rate=rate,
+        )
+        assert hp.vendor == "groww"
+        assert captured["product"] is rate
+
+    def test_default_inert_report_parity_over_real_sequencer(self, tmp_path: Path) -> None:
+        """THE DEFAULT-INERT PARITY PIN (the WS-B frozen-parity pattern).
+
+        The SAME real-shaped phase fakes are run (a) through the PRE-change
+        call shape — ``run_full_pipeline`` with NO ``vendor`` kwarg — and
+        (b) through the post-change consumer path — ``execute_headless_pipeline``
+        over a :class:`HeadlessPipeline` whose vendor was resolved from the
+        default (Groww-only) registry. The two ``PipelinePullReport`` dicts
+        must be EQUAL: with only Groww registered the registry wiring is
+        byte-inert (vendor="groww" == the sequencer's own default).
+        """
+        from dataclasses import asdict
+
+        from brutex.dashboard.pipeline_pull import run_full_pipeline
+        from brutex.feeds.registry_build import build_default_registry
+
+        def _phases() -> dict[str, Any]:
+            from tests.unit.test_pipeline_pull import (
+                _composite,
+                _historical_inner,
+                _metadata,
+                _outcome,
+                _spot,
+            )
+
+            return {
+                "run_spot": lambda: _spot(),
+                "run_metadata": lambda: _metadata(),
+                "run_historical": lambda _prior: _composite(historical=_historical_inner()),
+                "run_prebuild": lambda _exclude: _outcome(),
+            }
+
+        pre_change = run_full_pipeline(**_phases(), strict_gate=False, market_closed=None)
+
+        profile = build_default_registry(tmp_path).primary()
+        hp = HeadlessPipeline(
+            **_phases(),
+            strict_gate=False,
+            targets=1,
+            close=lambda: None,
+            market_closed=None,
+            vendor=profile.vendor,
+            write_domain=profile.write_domain,
+        )
+        post_change = execute_headless_pipeline(hp)
+
+        assert asdict(post_change) == asdict(pre_change)
