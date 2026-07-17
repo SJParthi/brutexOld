@@ -49,6 +49,7 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 pytest.importorskip("duckdb", reason="the report reads the lake via duckdb")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
@@ -58,6 +59,16 @@ from fastapi.testclient import TestClient
 # ────────────────────────────────────────────────────────────────────────
 # Independent recomputation helpers — NO production imports, by design.
 # ────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm_1934(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEC-UNIVERSE-INDEX-ONLY-001 §6 migration law — explicit FULL arm:
+        the surface trial needs 6 distinct synthetic symbols — more than the 4
+    admitted names, so a Law-3 rename cannot map it (Law 2 full-arm);
+        the shipped index4 default keeps its own route serve arms in the
+        dedicated scope suites."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 def _half_up_2dp(x: Fraction) -> Fraction:

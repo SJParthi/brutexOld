@@ -33,6 +33,7 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
+from brutex.config.feed_scope import scope_revision
 from brutex.dashboard.app import DashboardState, _preopen_rows_key, build_app
 from brutex.dashboard.preopen_report import build_preopen_rows as _real_build_preopen_rows
 from brutex.dashboard.summary_cache import SummaryCache
@@ -60,7 +61,7 @@ def _bar(ts: datetime, *, open_: str, close: str) -> CandleBar:
 def _seed_lake(lake: Path) -> None:
     """Two symbols × (1day + 1minute) across TWO months — real writers."""
     writer = ParquetWriter(lake_root=lake)
-    for symbol in ("COALINDIA", "RELIANCE"):
+    for symbol in ("BANKNIFTY", "NIFTY"):
         for interval in ("1day", "1minute"):
             # One write per (year, month) partition — the writer's grouping law.
             writer.write(
@@ -197,7 +198,7 @@ class TestPreopenExportCache:
         builds = _count_builds(monkeypatch)
         assert client.get(_XLSX).status_code == 200
         assert client.get(_XLSX + "&basis=minute").status_code == 200
-        assert client.get(_XLSX + "&symbols=COALINDIA").status_code == 200
+        assert client.get(_XLSX + "&symbols=BANKNIFTY").status_code == 200
         assert (
             client.get("/api/v1/reports/preopen.xlsx?from=2024-03-01&to=2024-03-04").status_code
             == 200
@@ -208,7 +209,9 @@ class TestPreopenExportCache:
 class TestPreopenRowsKey:
     def test_key_folds_every_row_shaping_input(self) -> None:
         base = _preopen_rows_key("day", date(2024, 3, 1), date(2024, 3, 8), None)
-        assert base == "preopen-rows|day|2024-03-01|2024-03-08|None"
+        # DEC-UNIVERSE-INDEX-ONLY-001: the scope revision is folded LAST (the
+        # R3 memo law) — a registration widening re-keys with no generation bump.
+        assert base == (f"preopen-rows|day|2024-03-01|2024-03-08|None|s={scope_revision()}")
         assert _preopen_rows_key("minute", date(2024, 3, 1), date(2024, 3, 8), None) != base
         assert _preopen_rows_key("day", date(2024, 3, 2), date(2024, 3, 8), None) != base
         assert _preopen_rows_key("day", date(2024, 3, 1), date(2024, 3, 9), None) != base

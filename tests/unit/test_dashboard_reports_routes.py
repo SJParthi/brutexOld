@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.models import CandleBar
@@ -36,6 +37,15 @@ _EXPECTED_PATHS = frozenset(
         "/reports",
     }
 )
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm_1934(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEC-UNIVERSE-INDEX-ONLY-001 §6 migration law — explicit FULL arm:
+    the COALINDIA/F&O-pullability route pins are stock-machinery (Law 2);
+    the shipped index4 default keeps its own route serve arms in the
+    dedicated scope suites."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 def _bar(ts: datetime, *, open_: str, close: str) -> CandleBar:

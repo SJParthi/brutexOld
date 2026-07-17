@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.config.feed_scope import resolve_read_scope, scope_revision
 from brutex.dashboard import discovery_warm as dw
 from brutex.dashboard.discovery_warm import (
     DB_DATASETS_KEY,
@@ -222,14 +223,20 @@ class TestPreopenMemos:
         def _poison() -> Any:
             raise AssertionError("a seeded preopen memo must be a clean hit — no re-walk")
 
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): the warm seeds the SAME
+        # scope-token-folded composite key the /reports route probes.
         seeded = {
             basis: caches["db_datasets_cache"].get_or_compute(
-                preopen_datasets_key(basis), generation=7, compute=_poison
+                preopen_datasets_key(basis, scope_token=scope_revision()),
+                generation=7,
+                compute=_poison,
             )
             for basis in REPORT_BASES
         }
         for basis in REPORT_BASES:
-            assert seeded[basis] == resolve_report_datasets(lake, basis=basis)
+            assert seeded[basis] == resolve_report_datasets(
+                lake, basis=basis, scope=resolve_read_scope()
+            )
         assert seeded["day"] == []  # the fixture holds no 1day partition
         # The F&O contract partition is excluded — only the spot INDEX symbol.
         assert seeded["minute"] == [("NSE", "INDEX", "NIFTY")]

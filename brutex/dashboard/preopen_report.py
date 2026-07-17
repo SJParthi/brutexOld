@@ -51,7 +51,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import duckdb
 import structlog
@@ -69,8 +69,12 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
+from brutex.data.scope_filter import scope_admits_dataset
 from brutex.data.session import IST
 from brutex.data.spot_daily_resample import make_lake_read_1m_window, resample_1m_to_daily
+
+if TYPE_CHECKING:
+    from brutex.config.feed_scope import FeedScope
 
 #: Module logger — surfaces a per-symbol skip (DEC-PREOPEN-SPACE-SYMBOL-001) so a
 #: degraded export is visible in ``/logs``, never silent.
@@ -417,6 +421,7 @@ def resolve_report_datasets(
     *,
     basis: ReportBasis = "day",
     datasets: Sequence[Mapping[str, str]] | None = None,
+    scope: FeedScope | None = None,
 ) -> list[tuple[str, str, str]]:
     """Resolve the ``(exchange, segment, symbol)`` triples the report can build.
 
@@ -446,6 +451,17 @@ def resolve_report_datasets(
     walk result so the preopen memos are seeded with zero extra walks; the
     in-loop screens below then produce a result byte-identical to the
     filtered-walk path (test-pinned).
+
+    *scope* is the DEC-UNIVERSE-INDEX-ONLY-001 read-scope seam (design §3 R3):
+    ``None`` (the §2.4 read-default law — every direct caller) is
+    byte-identical legacy; the /reports + preopen-export routes thread
+    ``resolve_read_scope()``, and the screen below is ONE more in-loop check
+    beside the segment/interval screens through the ONE
+    :func:`~brutex.data.scope_filter.scope_admits_dataset` predicate (drift
+    recovery BEFORE scope — a legacy drifted ``NSE-NIFTY`` INDEX dir is
+    recovered-then-admitted). Byte-identical on an index-only lake (pinned);
+    an excluded symbol is simply ABSENT from the report picker/rows — the
+    honest read-side view of a scoped-out stored partition.
     """
     required = _BASIS_INTERVAL[basis]
     wanted = set(symbols) if symbols else None
@@ -463,6 +479,10 @@ def resolve_report_datasets(
         if ds["segment"] in REPORT_EXCLUDED_SEGMENTS or ds["interval"] != required:
             continue
         if wanted is not None and ds["symbol"] not in wanted:
+            continue
+        if scope is not None and not scope_admits_dataset(
+            ds["exchange"], ds["segment"], ds["symbol"], scope
+        ):
             continue
         resolved.setdefault((ds["exchange"], ds["segment"], ds["symbol"]), None)
     return sorted(resolved, key=lambda k: k[2])

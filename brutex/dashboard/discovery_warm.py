@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.config.feed_scope import resolve_read_scope, scope_revision
 from brutex.dashboard.db_view import (
     fno_candle_lake_schema,
     list_candle_datasets,
@@ -117,9 +118,20 @@ LATEST_MOVERS_MINUTE_KEY_PREFIX: Final[str] = "latest_movers_minute"
 PREOPEN_DATASETS_KEY_PREFIX: Final[str] = "preopen_datasets"
 
 
-def preopen_datasets_key(basis: str) -> str:
-    """The generation-memo key of one basis's pre-open symbol triples."""
-    return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}"
+def preopen_datasets_key(basis: str, *, scope_token: str | None = None) -> str:
+    """The generation-memo key of one basis's pre-open symbol triples.
+
+    *scope_token* is the DEC-UNIVERSE-INDEX-ONLY-001 fold (design §3 R1's memo
+    law applied to R3's discovery memo): the production sites — the /reports
+    symbol route + this module's warm seeding — pass
+    :func:`~brutex.config.feed_scope.scope_revision`, so a registration
+    widening re-keys the memo with NO generation bump. ``None`` (a direct /
+    legacy caller) keys the UNFILTERED compute separately — one entry can
+    never serve two divergent computes.
+    """
+    if scope_token is None:
+        return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}"
+    return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}|s={scope_token}"
 
 
 def latest_movers_minute_key(date_str: str) -> str:
@@ -253,13 +265,22 @@ def warm_discovery_memos(
             MOVERS_DATASETS_KEY, generation=generation, compute=lambda: candles, force_fresh=True
         )
 
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): the warm seeding threads
+        # the SAME read-union scope + folds the SAME scope_revision() token the
+        # /reports route folds — key parity, or the seeded memo would never be
+        # hit (and a registration widening re-keys it with NO generation bump).
+        read_scope = resolve_read_scope()
+        scope_token = scope_revision()
+
         def _preopen_compute(b: ReportBasis) -> Callable[[], list[tuple[str, str, str]]]:
             """Bind one basis's compute over the SHARED pre-walked candle list."""
-            return lambda: resolve_report_datasets(lake_root, basis=b, datasets=candles)
+            return lambda: resolve_report_datasets(
+                lake_root, basis=b, datasets=candles, scope=read_scope
+            )
 
         for report_basis in REPORT_BASES:
             db_datasets_cache.get_or_compute(
-                preopen_datasets_key(report_basis),
+                preopen_datasets_key(report_basis, scope_token=scope_token),
                 generation=generation,
                 compute=_preopen_compute(report_basis),
                 force_fresh=True,

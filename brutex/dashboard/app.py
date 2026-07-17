@@ -8127,10 +8127,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
             # sweeps-tree digest) runs HERE on the threadpool worker, never the loop.
             gen = _summary_cache.generation
+            # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): thread the read-union
+            # scope + fold scope_revision() into the memo key (warm parity —
+            # discovery_warm seeds the SAME composite key).
+            read_scope = resolve_read_scope()
             triples = _db_datasets_cache.get_or_compute(
-                preopen_datasets_key(report_basis),
+                preopen_datasets_key(report_basis, scope_token=scope_revision()),
                 generation=gen,
-                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis, scope=read_scope),
             )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
@@ -8213,7 +8217,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 compute=lambda: build_preopen_rows(
                     store.connection,
                     lake,
-                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    datasets=resolve_report_datasets(
+                        lake, wanted, basis=report_basis, scope=resolve_read_scope()
+                    ),
                     start=start_d,
                     end=end_d,
                     basis=report_basis,
@@ -8301,7 +8307,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 compute=lambda: build_preopen_rows(
                     store.connection,
                     lake,
-                    datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
+                    datasets=resolve_report_datasets(
+                        lake, wanted, basis=report_basis, scope=resolve_read_scope()
+                    ),
                     start=start_d,
                     end=end_d,
                     basis=report_basis,
@@ -10960,7 +10968,14 @@ def _preopen_rows_key(basis: str, start: date, end: date, wanted: Sequence[str] 
     ``None``, distinct from any explicit tuple.
     """
     filter_token = None if wanted is None else tuple(wanted)
-    return f"preopen-rows|{basis}|{start.isoformat()}|{end.isoformat()}|{filter_token!r}"
+    # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1's memo law on R3's rows memo):
+    # the scope revision is IN the key, so a registration widening over a
+    # stale stock-bearing lake re-keys the memo with NO generation bump —
+    # never a pre-widening narrow row set served until an unrelated write.
+    return (
+        f"preopen-rows|{basis}|{start.isoformat()}|{end.isoformat()}|{filter_token!r}"
+        f"|s={scope_revision()}"
+    )
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
