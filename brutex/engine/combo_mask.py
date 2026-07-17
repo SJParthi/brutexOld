@@ -38,7 +38,7 @@ the two widths cannot drift. ``ResidentBarBuffer`` lazily PROMOTES a
 u64-resident window to the u128 sibling on the first >64-bit mask batch (one
 ``combo_mask.wide_kernel_promoted`` INFO per instance).
 
-**The LOUD-FAIL law (the deliberate INVERSION of #1550's silent-oracle
+**The LOUD-FAIL law (the deliberate INVERSION of #1549's silent-oracle
 degrade):** once the vocabulary crosses 64 bits the wide kernel is the ACTIVE
 production path — not future headroom — so a wheel missing the u128 twins at
 a >=64-bit dispatch raises the typed :class:`WideKernelUnavailableError`
@@ -64,7 +64,7 @@ dispatch (the LOUD-FAIL law above). A value beyond u128 (bit >= 128) or a
 negative value raises ``OverflowError`` at the ``Vec<u128>`` FFI extraction
 edge — the SAME exception class the numpy two-limb split raised for that
 shape before this DEC (there is no oracle for beyond-u128 either: the numpy
-``uint64`` hi-limb cast rejects it identically, which is why the #1550
+``uint64`` hi-limb cast rejects it identically, which is why the #1549
 ``bar_bits_beyond_u128`` / ``mask_beyond_u128`` oracle-fallback reasons have
 no analogue here — beyond-u128 refuses on BOTH paths, never a triple-limb
 invention).
@@ -76,7 +76,7 @@ invention).
 ``ResidentBarBuffer.wide_kernel_active`` flag + the pure
 :func:`dispatch_kernel_kind` classifier let a test (or PR-B's vocab-66 CI
 pin) verify a >=64-bit grid is genuinely Rust-kernel-served WITHOUT
-monkeypatching — the #1550 ``rust_active`` observable shape, widened to name
+monkeypatching — the #1549 ``rust_active`` observable shape, widened to name
 WHICH kernel serves (the new VWAP/R5-S5/BOS/CHoCH bits 52-59 still fit u64;
 the >=64-bit paths are exercised by tests until the vocabulary grows).
 
@@ -193,7 +193,7 @@ class WideKernelUnavailableError(RuntimeError):
     """The >=64-bit dispatch found no u128 Rust kernel — REFUSING loudly.
 
     DEC-ENUM-KERNEL-U128-001's LOUD-FAIL law (the deliberate inversion of the
-    #1550 trade-sim seam's silent-oracle degrade): once any mask/bar sets a
+    #1549 trade-sim seam's silent-oracle degrade): once any mask/bar sets a
     bit ``>= 64`` the u128 kernel is the ACTIVE production path, so a wheel
     missing ``count_supermasks_u128s`` / ``ResidentBarsU128`` must never
     silently demote a grid sweep to the numpy oracle — it raises THIS typed,
@@ -587,7 +587,7 @@ class ResidentBarBuffer:
     (<= u128) bars build ``fno_math.ResidentBarsU128``; a >64-bit MASK batch
     over a u64-resident window lazily PROMOTES the window to the u128 sibling
     (built at most once from the kept raw bars, announced with ONE
-    ``combo_mask.wide_kernel_promoted`` INFO per instance — the #1550
+    ``combo_mask.wide_kernel_promoted`` INFO per instance — the #1549
     trade-sim promotion shape; both "at most once" laws are SINGLE-THREAD
     invariants — see :meth:`_promote_wide_kernel`'s honest threading
     envelope; production never thread-shares a buffer).
@@ -715,7 +715,7 @@ class ResidentBarBuffer:
     def wide_kernel_active(self) -> bool:
         """``True`` iff the resident u128 Rust kernel exists on this buffer.
 
-        Supported test surface (the #1550 ``rust_active`` observable shape):
+        Supported test surface (the #1549 ``rust_active`` observable shape):
         ``True`` for a wide-bar window from construction, and for a
         u64/numpy window after its first >64-bit mask batch lazily promoted
         it. Every >=64-bit batch on this buffer is served by that kernel —
@@ -726,7 +726,7 @@ class ResidentBarBuffer:
     def _promote_wide_kernel(self) -> object:
         """Build (at most once) the u128 sibling kernel for >64-bit mask batches.
 
-        DEC-ENUM-KERNEL-U128-001 (the #1550 ``_promote_wide_kernel`` shape,
+        DEC-ENUM-KERNEL-U128-001 (the #1549 ``_promote_wide_kernel`` shape,
         under the inverted LOUD-FAIL law): a mask with a bit ``>= 64`` over a
         window whose resident kernel is not u128 promotes the WHOLE batch to
         ``fno_math.ResidentBarsU128`` — built lazily HERE from the kept raw

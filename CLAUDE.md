@@ -23,7 +23,7 @@ the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
 + the `combo_mask.py` >=64-bit width dispatch with lazy wide-kernel
-promotion and the LOUD-FAIL inversion vs #1550 — a missing wide kernel at a
+promotion and the LOUD-FAIL inversion vs #1549 — a missing wide kernel at a
 >=64-bit dispatch raises the typed `WideKernelUnavailableError`, NEVER a
 silent numpy degrade; the u64 path byte-identical (goldens unmodified,
 bomb-spy-pinned). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
@@ -3090,8 +3090,8 @@ hostile-review pass._
   sibling fno-math lanes; crate stays 0.3.0). THE DISPATCH (`combo_mask.py`): `count_supermasks` routes any
   wide (>64-bit) bar/mask batch to the u128 kernel; `ResidentBarBuffer` builds `ResidentBarsU128` for wide
   bars and lazily PROMOTES a u64-resident window on its first wide mask batch (built once from the kept raw
-  bars, ONE `combo_mask.wide_kernel_promoted` INFO per instance — the #1550 promotion shape). **THE
-  LOUD-FAIL INVERSION vs #1550 (the recorded design deviation):** #1550's trade-sim twin is future headroom
+  bars, ONE `combo_mask.wide_kernel_promoted` INFO per instance — the #1549 promotion shape). **THE
+  LOUD-FAIL INVERSION vs #1549 (the recorded design deviation):** #1549's trade-sim twin is future headroom
   and silently serves its Python oracle on wheel-missing; THIS kernel is the ACTIVE production path once the
   vocabulary crosses 64 bits, so wheel-missing at ANY >=64-bit dispatch raises the NEW typed greppable
   `WideKernelUnavailableError(RuntimeError)` naming the DEC + reason `wheel_missing_u128` + the
@@ -3101,7 +3101,7 @@ hostile-review pass._
   hand-applied + verified KILLED). Second recorded deviation: NO `bar_bits_beyond_u128`/`mask_beyond_u128`
   oracle-fallback analogue — the numpy count oracle itself refuses beyond-u128 (`uint64` hi-limb cast), so
   beyond-u128/negative keeps TODAY'S `OverflowError` class raised at the `Vec<u128>` FFI edge (no
-  triple-limb invention, pinned). OBSERVABLES (the PR-B interface, mirroring #1550's `rust_active`):
+  triple-limb invention, pinned). OBSERVABLES (the PR-B interface, mirroring #1549's `rust_active`):
   `ResidentBarBuffer.kernel_kind` ∈ {rust-u64, rust-u128, numpy} + `wide_kernel_active` + the pure
   `dispatch_kernel_kind` classifier + the `KERNEL_*`/`U128_MASK` exports — a >=64-bit grid is verifiable
   Rust-served WITHOUT monkeypatching (documented supported test surface). U64 PATH BYTE-IDENTICAL: the u64
@@ -9262,12 +9262,12 @@ hostile-review pass._
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
   `rust/fno-math/src/mask_word.rs` (pure move, its own severable first commit;
-  #1550's cargo suite unmodified-green) + the native-`Vec<u128>` count twins
+  #1549's cargo suite unmodified-green) + the native-`Vec<u128>` count twins
   `count_supermasks_u128s`/`count_supermask_u128s`/`ResidentBarsU128` over ONE
   width-generic core/dispatch (u64 names kept as thin delegators — every
   pre-existing call site + test unchanged) + the `combo_mask.py` >=64-bit
   width dispatch with lazy wide-kernel promotion and the LOUD-FAIL inversion
-  vs #1550 (wheel-missing at a >=64-bit dispatch raises the typed
+  vs #1549 (wheel-missing at a >=64-bit dispatch raises the typed
   `WideKernelUnavailableError` naming the DEC + `wheel_missing_u128` + the
   maturin remediation — the numpy two-limb reference is retained strictly as
   the tests-side parity oracle, structurally unreachable as a silent >=64-bit
