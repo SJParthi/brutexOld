@@ -82,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
-from brutex.calendars.nse import daily_derive_cutoff
+from brutex.calendars.nse import IST_FIXED_OFFSET, daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -146,8 +146,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
 
-#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone;
+#: the ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 # ── mode + throttle env ──────────────────────────────────────────────────────
 

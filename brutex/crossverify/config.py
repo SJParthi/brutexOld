@@ -19,8 +19,12 @@ from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo
 
-#: India Standard Time — the producer's "today" is the IST calendar date.
-_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+from brutex.calendars.nse import IST
+
+#: India Standard Time — the producer's "today" is the IST calendar date. The
+#: ONE canonical :data:`brutex.calendars.nse.IST` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[ZoneInfo] = IST
 
 #: Tokens accepted as "on" (unset/blank → the default, which is ON for both switches).
 _ENV_ON_TOKENS: Final[frozenset[str]] = frozenset({"", "1", "on", "true", "yes"})
