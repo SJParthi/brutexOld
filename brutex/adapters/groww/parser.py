@@ -22,12 +22,13 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Final
 
 import structlog
 
 from brutex.adapters.groww.epoch_verdict import classify_epoch_timestamps
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.data.candle_fields import (
     CandleParseError,
     EmptyCandleRow,
@@ -41,7 +42,9 @@ from brutex.observability.correlation import current_pull_id
 _LOG = structlog.get_logger("brutex.adapters.groww.parser")
 
 #: India Standard Time — a FIXED +05:30 offset (no DST), so no tzdata needed.
-_IST = timezone(timedelta(hours=5, minutes=30))
+#: The ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_FIXED_OFFSET
 
 #: Guards the once-per-pull epoch-timestamp WARNING dedup set below. The parser
 #: is called from PARALLEL window workers (both ingest spines fan out), so the

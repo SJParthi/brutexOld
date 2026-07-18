@@ -375,6 +375,22 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--price-source-cells",
+        default="hlc3:close",
+        dest="price_source_cells",
+        help=(
+            "Comma-separated VWAP/EMA price-source cells '<vwap>:<ema>' — "
+            "open/high/low/close/hlc3 (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Default "
+            "'hlc3:close' (byte-identical to the pre-axis sweep — the axis is "
+            "dormant at cardinality 1). The 5-cell OFAT lattice is "
+            "'hlc3:close,open:close,close:close,hlc3:open,hlc3:hlc3'. HONEST BUDGET "
+            "(Golden Rule #10): a combined 5-cell run does NOT fit the ≤2-day bar "
+            "(≈2.3-7.4 M4-days); run each non-default cell as a SEPARATE "
+            "cardinality-1 invocation (≈baseline ≤2 days each). VWAP-source cells "
+            "are only meaningful on NIFTY futures (spot indices carry no volume)"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -2075,6 +2091,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="plist_dir",
         help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
+
+    # ── box-update (DEC-BOX-AUTODEPLOY-LANE-001) — the standalone mouth of
+    # the nightly auto-deploy leg (§8): one law, two mouths with the
+    # cmd_nightly_run pre-chain leg; no chain, no re-exec.
+    box_update_p = sub.add_parser(
+        "box-update",
+        help=(
+            "Run the nightly auto-deploy leg once — guarded ff-only update to "
+            "origin/main + wheel rebuild + assert-green gate (no chain, no "
+            "re-exec; DEC-BOX-AUTODEPLOY-LANE-001)"
+        ),
+    )
+    box_update_p.add_argument("--lake-root", type=Path, default=None, help="Lake root")
 
     # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) ──
     # The daily TickVault cross-verification producer: post-close priority
@@ -6112,6 +6141,15 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         resolve_backup_keep,
         resolve_backup_verify,
     )
+    from brutex.nightly.box_update import (
+        adopt_state,
+        default_command_runner,
+        default_repo_root,
+        maybe_reexec,
+        resolve_box_update_enabled,
+        run_box_update,
+    )
+    from brutex.nightly.env_preflight import run_env_preflight
     from brutex.nightly.probes import NightlyEnvError, resolve_sweep_fresh_seconds
     from brutex.nightly.report import summary_lines
     from brutex.nightly.run import NightlyPlan, run_nightly
@@ -6126,6 +6164,9 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         resolve_backup_verify()
         resolve_sweep_fresh_seconds()
         strict_gate_enabled()
+        # DEC-BOX-AUTODEPLOY-LANE-001: the ONE fail-loud box-update knob (the
+        # timeout knobs are FAIL-SAFE by the resolve_env_seconds law — §7).
+        box_enabled = resolve_box_update_enabled(os.environ)
         from_dt = date.fromisoformat(args.from_date) if args.from_date else None
         to_dt = date.fromisoformat(args.to_date) if args.to_date else None
         if from_dt is not None and to_dt is not None and from_dt > to_dt:
@@ -6137,6 +6178,90 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
     results_root = args.results_root if args.results_root is not None else resolved / "sweeps"
     backup_root = args.backup_root if args.backup_root is not None else default_backup_root()
     start_default, end_default = default_date_range()
+
+    # ── DEC-BOX-AUTODEPLOY-LANE-001 §6 shape (b): the pre-chain box-update
+    # leg (adopt-or-run, re-exec once) + the §12 env pre-flight. The leg is
+    # FAIL-OPEN outside the chain break law — it never blocks the nightly.
+    # A --dry-run nightly runs NEITHER (the zero-mutation tree-oracle
+    # contract outranks; the report block is honestly absent).
+    from brutex.config.dotenv import candidate_dotenv_paths
+
+    repo_root = default_repo_root()
+    box_outcome = None if args.dry_run else adopt_state(os.environ)
+    if box_outcome is None and not args.dry_run:
+        # THE DEFENSIVE LEG WRAP (§25 deviation 12 — supersedes the traceback
+        # posture): the never-block law must hold against CODING BUGS too —
+        # `run_box_update`'s own never-raise posture covers OPERATIONAL
+        # failures, this belt covers a defect in the leg itself (and a
+        # RAISING `os.execv`, e.g. OSError).  One structlog ERROR
+        # `box_update.leg_error`, block honestly None, the nightly proceeds
+        # on the existing checkout.  `KeyboardInterrupt`/`SystemExit`
+        # propagate raw (excluded by `except Exception`); `MemoryError` is
+        # explicitly RE-RAISED, never swallowed into a silent leg skip.  A
+        # SUCCESSFUL exec never returns, so the wrap cannot affect it.
+        try:
+            if box_enabled:
+                from brutex.adapters.groww.pull_singleflight import (
+                    NightlyAlreadyRunningError,
+                    nightly_singleflight_lock,
+                )
+
+                leg_lock = contextlib.ExitStack()
+                try:
+                    leg_lock.enter_context(
+                        nightly_singleflight_lock(resolved, holder_note="box-update:nightly")
+                    )
+                except NightlyAlreadyRunningError:
+                    # A sibling holds the flock — the leg is SKIPPED (no block);
+                    # run_nightly takes its standard COLLISION refusal moments later.
+                    box_outcome = None
+                else:
+                    try:
+                        box_outcome = run_box_update(
+                            repo_root=repo_root,
+                            runner=default_command_runner,
+                            env=os.environ,
+                            state_dir=resolved / ".box_update",
+                        )
+                    finally:
+                        # EXPLICIT-RELEASE INVARIANT (§6 step 3): the flock is FULLY
+                        # released (LOCK_UN + fd close EXECUTED) strictly BEFORE
+                        # os.execv — exec never returns, so no context manager
+                        # could release it "after".
+                        leg_lock.close()
+                    maybe_reexec(box_outcome, argv=sys.argv[1:], environ=os.environ)
+            else:
+                # Disabled kill switch: G0 performs ZERO actions — no lock needed;
+                # the honest `status=disabled` block is still written (§7).
+                box_outcome = run_box_update(
+                    repo_root=repo_root,
+                    runner=default_command_runner,
+                    env=os.environ,
+                    state_dir=resolved / ".box_update",
+                )
+        except MemoryError:
+            raise
+        except Exception as exc:  # pylint: disable=broad-exception-caught — never block the night
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "box_update.leg_error",
+                error=repr(str(exc)),
+                error_type=type(exc).__name__,
+                detail=(
+                    "the box-update leg crashed — the nightly proceeds on the "
+                    "existing checkout (box_update block absent)"
+                ),
+            )
+            box_outcome = None
+    env_preflight_block: Mapping[str, object] | None = None
+    if not args.dry_run:
+        env_preflight_block = run_env_preflight(
+            env=os.environ,
+            dotenv_paths=candidate_dotenv_paths(
+                repo_root=repo_root, cwd=Path.cwd(), home=Path.home()
+            ),
+        ).to_dict()
     plan = NightlyPlan(
         lake_root=resolved,
         results_root=results_root,
@@ -6150,12 +6275,77 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         skip_backup=args.skip_backup,
         skip_sweep=args.skip_sweep,
         dry_run=args.dry_run,
+        box_update=None if box_outcome is None else box_outcome.to_dict(),
+        env_preflight=env_preflight_block,
     )
     report = run_nightly(plan)
     lines, _verdict = summary_lines(report)
     for line in lines:
         print(line)
     return report.exit_code
+
+
+def cmd_box_update(args: argparse.Namespace) -> int:
+    """Standalone ``brutex box-update`` — run the deploy leg once (§8).
+
+    No chain, no re-exec.  Exit law (DEC-BOX-AUTODEPLOY-LANE-001 §8):
+    ``EXIT_OK`` on updated/up_to_date/disabled (an honored kill switch is not
+    an error), ``EXIT_USER_ERROR`` on a guard skip or a junk kill-switch value
+    (fail-loud BEFORE any git argv) or flock contention (loud refusal, zero
+    git argv), ``EXIT_INTERNAL_ERROR`` on rolled_back/error.
+    """
+    import json as _json
+
+    from brutex.nightly.box_update import (
+        BoxUpdateEnvError,
+        BoxUpdateStatus,
+        default_command_runner,
+        default_repo_root,
+        resolve_box_update_enabled,
+        run_box_update,
+    )
+
+    try:
+        resolve_box_update_enabled(os.environ)
+    except BoxUpdateEnvError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    resolved = _resolve_lake_root(args.lake_root)
+    _require_lake_dir(resolved, command="box-update")
+    repo_root = default_repo_root()
+    from brutex.adapters.groww.pull_singleflight import (
+        NightlyAlreadyRunningError,
+        nightly_singleflight_lock,
+    )
+
+    # The SAME nightly single-flight flock (§8 flock posture) — acquired
+    # before ANY git command, fully released on exit, never nested inside a
+    # running nightly's own hold; contention = a loud refusal, zero git argv.
+    try:
+        with nightly_singleflight_lock(resolved, holder_note="box-update:manual"):
+            outcome = run_box_update(
+                repo_root=repo_root,
+                runner=default_command_runner,
+                env=os.environ,
+                state_dir=resolved / ".box_update",
+            )
+    except NightlyAlreadyRunningError as exc:
+        print(
+            "[brutex] box-update refused — a nightly/box-update sibling holds the "
+            f"single-flight lock ({exc}); nothing was run",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    print(_json.dumps(outcome.to_dict(), indent=2))
+    if outcome.status in (
+        BoxUpdateStatus.UPDATED,
+        BoxUpdateStatus.UP_TO_DATE,
+        BoxUpdateStatus.DISABLED,
+    ):
+        return EXIT_OK
+    if outcome.status is BoxUpdateStatus.SKIPPED:
+        return EXIT_USER_ERROR
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_nightly_backup(
@@ -7482,6 +7672,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_combos: int | None,
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
     options_sim: bool = True,
@@ -7687,6 +7878,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = _parse_int_csv(k, flag="--k")
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
@@ -7731,6 +7937,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         results_depth_enabled = resolve_results_depth_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
+    # BRUTEX_FILL_MODE — ANY value, even the literal "worst_case" — is a
+    # stale launch config from the deleted mode machinery and REFUSES loudly
+    # pre-sweep (fail-loud beats silently tolerating a dead knob).
+    from brutex.execution.fill_mode import FillMode, require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
     # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
@@ -7956,6 +8174,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": _indicator_version(),
@@ -8284,6 +8503,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
+                    # DEC-FILL-WORST-CASE-ONLY-001: the launch context line
+                    # records the one fill law ALWAYS AND EXPLICITLY —
+                    # matching canonical_trade_params' unconditional emit —
+                    # so sweep-verify's precise-era refusal can judge any
+                    # generation from its own audit lines.
+                    launch_params: dict[str, object] = {
+                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
+                        "fill_mode": FillMode.WORST_CASE.value,
+                    }
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,
                         subject=f"sweep-all:launch:{fut_instrument}",
@@ -8292,9 +8520,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             "data_snapshot_hash": grid.data_snapshot_hash,
                             "indicator_version": grid.indicator_version,
                             "code_commit_sha": grid.code_commit_sha,
-                            "params": {
-                                "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
-                            },
+                            "params": launch_params,
                         },
                     )
             dedup = plan_launch_dedup(grid, digest_path=True)
@@ -9213,6 +9439,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -9381,6 +9608,21 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = _parse_int_csv(k, flag="--k")
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
@@ -9402,6 +9644,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": indicator,
@@ -9660,7 +9903,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             inconclusive_only = True
         else:
-            scratch = (
+            import dataclasses as _dataclasses
+
+            scratch_base = (
                 scratch_root
                 if scratch_root is not None
                 else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
@@ -9670,8 +9915,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # RECORDED (STAGE_3_PASS_START audit payloads — condition B1);
             # operator --stage3-* flags are the audit-less fallback only
             # (condition B8), and a disagreement refuses cells, never silently
-            # prefers either side.
-            stage3_grid = None
+            # prefers either side. Resolved ONCE — mode-independent — then
+            # folded into each recount mode's grid inside the loop below.
+            stage3_ready = False
             cells_note: str | None = None
             cell_evidence = False
             knobs_from_audit = False
@@ -9728,8 +9974,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         "no recorded Stage-3 knobs in the audit and no --stage3-* flags supplied"
                     )
                 if cells_note is None and stage3_kwargs is not None:
-                    import dataclasses as _dataclasses
-
                     from brutex.engine.stage3_wire import (
                         Stage3WireError,
                         ensure_stage3_runtime,
@@ -9739,9 +9983,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         current_versions = ensure_stage3_runtime()
                     except Stage3WireError as exc:
                         cells_note = f"stage3 runtime unavailable: {exc}"
-                        stage3_grid = None
                     else:
-                        stage3_grid = _dataclasses.replace(grid, **stage3_kwargs)
+                        stage3_ready = True
                         versions_ok = stage3_audit.optimizer_versions in (
                             (),
                             (current_versions,),
@@ -9755,9 +9998,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                             )
                 if cells_note is not None:
                     print(f"[brutex] stage3 cells degraded to INCONCLUSIVE: {cells_note}")
-            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
-            audit_path = scratch / "audit.jsonl"
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
             # The shadow re-sweep must stamp EXACTLY like the launcher did
             # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
             # the window-bounded India-VIX stamper into every persisted row,
@@ -9782,6 +10022,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 end=_parse_dt(end),
                 catalog_path=catalog,
             )
+            # DEC-FILL-WORST-CASE-ONLY-001: ONE fill law → ONE recount plan
+            # (the per-mode union loop is deleted with the mode vocabulary; a
+            # precise-era generation was already refused by
+            # recorded_audit_facts before any tier ran).
+            mode_grid = grid
+            scratch = scratch_base
+            stage3_grid = (
+                _dataclasses.replace(mode_grid, **stage3_kwargs)
+                if stage3_ready and stage3_kwargs is not None
+                else None
+            )
+            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
+            audit_path = scratch / "audit.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -9793,10 +10047,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # plan_launch_dedup returns the no-alloc raising sink instead.
             with AuditWriter.open(audit_path) as audit:
                 resweep_summary = run_sweep_grid(
-                    grid,
+                    mode_grid,
                     bars_for=lambda s, i: slices.get((s, i), []),
-                    store_for=make_store_for(scratch, grid),
-                    dedup=plan_launch_dedup(grid, digest_path=True),
+                    store_for=make_store_for(scratch, mode_grid),
+                    dedup=plan_launch_dedup(mode_grid, digest_path=True),
                     audit=audit,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=recount_stamper,
@@ -9853,7 +10107,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     out_root,
                     scratch,
                     plan_expected_stores(
-                        out_root, grid, stage3=stage3 if stage3_grid is not None else None
+                        out_root, mode_grid, stage3=stage3 if stage3_grid is not None else None
                     ),
                     context_match=context_match,
                     cell_evidence=cell_evidence,
@@ -9871,7 +10125,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 inconclusive_only = True
             # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
             # evidence exists ONLY under a matched context — the plan freezes
-            # the condemnation-time hashes for `brutex sweep-heal`.
+            # the condemnation-time hashes for `brutex sweep-heal`. The plan
+            # filename folds the grid identity, which carries the
+            # unconditional worst-case fill key.
             if emit_heal_plan:
                 if not context_match:
                     print(
@@ -9887,9 +10143,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
                     heal_plan = build_heal_plan(
                         rec_report,
-                        plan_expected_stores(out_root, grid),
+                        plan_expected_stores(out_root, mode_grid),
                         root=out_root,
-                        grid_identity=grid_identity(grid),
+                        grid_identity=grid_identity(mode_grid),
                         context=RecordedContext(
                             data_snapshot_hash=snapshot,
                             indicator_version=indicator,
@@ -10395,6 +10651,15 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
 
     if not bars:
         return []
+    # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
+    # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
+    # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
+    # the (vwap, ema) source as a column. So this options-translation replay is
+    # BASELINE-SOURCE ONLY: a survivor swept under a non-default fib_anchor or
+    # price-source cell replays here with the wrong Group-4 / VWAP-EMA bits. This is
+    # a PRE-EXISTING limitation (equally true for fib_anchor since #1011) — threading
+    # the source in would require ResultRow to carry it; documented in
+    # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
@@ -10417,6 +10682,11 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-WORST-CASE-ONLY-001: the replay simulates under the ONE
+        # hardcoded worst-case fill law — the same law the winners were
+        # swept under by construction. NOTE the honest pre-existing
+        # envelope: this replay carries NO sl/tp either — it is an
+        # entry/exit-instant approximation, not a byte-parity re-simulation.
         reference_stamper=None,
     )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
@@ -10573,6 +10843,16 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model — a set
+    # BRUTEX_FILL_MODE (any value) is a stale launch config from the deleted
+    # mode machinery and REFUSES loudly at this executor launch too.
+    from brutex.execution.fill_mode import require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] options-sim config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # replay's stamps were provably discarded at the SpotSignal conversion —
     # see the sanctioned literal-None site in _replay_spot_signals_for_row —
@@ -11080,6 +11360,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -11135,6 +11416,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -11222,6 +11504,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -11286,6 +11569,8 @@ def _dispatch(argv: list[str] | None) -> int:
             label=args.label,
             plist_dir=args.plist_dir,
         )
+    if args.command == "box-update":
+        return cmd_box_update(args)
     if args.command == "crossverify":
         if args.crossverify_command == "run":
             return cmd_crossverify_run(

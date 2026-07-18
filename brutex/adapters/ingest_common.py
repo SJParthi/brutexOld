@@ -65,6 +65,7 @@ from brutex.adapters.protocol import (
     MarketCapabilities,
     single_instrument_page,
 )
+from brutex.calendars.nse import IST, IST_TZ_NAME, SESSION_CLOSE_IST, SESSION_OPEN_IST
 from brutex.data.models import CandleBar
 from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES
 from brutex.models import BruteXError, Exchange, Instrument
@@ -160,8 +161,10 @@ DAILY_INTERVAL: str = _DAILY
 
 #: IST clock pieces for the settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001). The
 #: NSE/BSE market is the same for every vendor, so the clamp reality is shared.
-_IST_ZONE = ZoneInfo("Asia/Kolkata")
-_MARKET_CLOSE_IST: time = time(15, 30)
+#: Both derive from the ONE :mod:`brutex.calendars.nse` roots
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001) — never re-minted here.
+_IST_ZONE = IST
+_MARKET_CLOSE_IST: time = SESSION_CLOSE_IST
 
 
 def now_ist() -> datetime:
@@ -619,11 +622,14 @@ def retry_failed_windows(
 # Synthetic spot source (relocated from the original vendor ``synthetic`` +
 # ``synthetic_adapter`` modules in PR-J4a — the dry-run, offline data source).
 # --------------------------------------------------------------------------- #
-#: India Standard Time — the synthetic bars use the NSE/BSE wall clock.
-_IST: ZoneInfo = ZoneInfo("Asia/Kolkata")
+#: India Standard Time — the synthetic bars use the NSE/BSE wall clock (the ONE
+#: canonical :data:`brutex.calendars.nse.IST` root,
+#: DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: ZoneInfo = IST
 
-#: Session open (09:15 IST) — the first synthetic bar's wall-clock time.
-_SESSION_OPEN: time = time(9, 15)
+#: Session open (09:15 IST) — the first synthetic bar's wall-clock time
+#: (DERIVED from :data:`brutex.calendars.nse.SESSION_OPEN_IST`).
+_SESSION_OPEN: time = SESSION_OPEN_IST
 
 
 def synthetic_spot_bars(
@@ -695,7 +701,7 @@ _SYNTHETIC_CAPABILITIES: MarketCapabilities = MarketCapabilities(
     has_option_chains=False,
     supports_intraday=True,
     earliest_history=date(2020, 1, 1),
-    native_timezone="Asia/Kolkata",
+    native_timezone=IST_TZ_NAME,
     rate_limit_rps=5.0,
     supported_intervals=frozenset({"1minute", "1day"}),
 )

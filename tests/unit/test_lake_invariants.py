@@ -2432,6 +2432,27 @@ class TestPriceSanityFindings:
         report = scan_lake_invariants(tmp_path)
         assert report.findings == ()
 
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+    def test_nonfinite_high_row_counts_as_price_finding(self, tmp_path: Path, value: float) -> None:
+        """FAILS-BEFORE (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the census
+        scanner rides ``count_price_violations``, whose pre-fix mask was BLIND
+        to ``high ∈ {+inf, NaN}`` — a file whose ONLY defect is a non-finite
+        HIGH read a "0 findings" verdict. The strengthened per-column
+        ``~is_finite`` arm flows here transitively, so the census/heal sweeps
+        now COUNT it (one PriceSanityRows finding, the bad row tallied)."""
+        _plant_raw_ohlc(
+            _dest(tmp_path),
+            [
+                (_ts(1), 100.0, 101.0, 99.0, 100.5),  # clean
+                (_ts(2), 100.0, value, 99.0, 100.5),  # non-finite HIGH only
+            ],
+        )
+        report = scan_lake_invariants(tmp_path)
+        price_findings = [f for f in report.findings if isinstance(f, li.PriceSanityRows)]
+        assert len(price_findings) == 1
+        assert price_findings[0].bad_rows == 1
+        assert price_findings[0].coords == _NIFTY_COORDS
+
     def test_census_counts_price_files_and_flips_engine_verdict(self, tmp_path: Path) -> None:
         # NIFTY is an ENGINE_INDEX_COORDS series — a price finding on it must
         # flip engine_clean (the census verdict is no longer blind).

@@ -791,6 +791,29 @@ class BulkSpotReport:
     an honest partial, never an ``error``."""
 
     @property
+    def ok(self) -> bool:
+        """The spot stage verdict — the ONE home of the spot phase-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): this report
+        SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol, and the
+        sequencer's :func:`~brutex.dashboard.pipeline_pull.spot_phase_ok` gate
+        DELEGATES here (the predicate cannot live on the sequencer side — this
+        module sits BELOW it in the import graph, so housing it there while the
+        protocol needs it here would be either a copy or a cycle; CLAUDE.md
+        §11 COMMON — expression MOVED verbatim, semantics byte-identical).
+        ``True`` iff the pull neither died on auth, paused on the daily quota,
+        left any window still failing, nor halted on the mass-empty breaker —
+        the full law + rationale lives on the gate's docstring.
+        """
+        return (
+            not self.auth_aborted
+            and not self.quota_exhausted
+            and self.still_failed_windows == 0
+            and self.mass_empty_cause is None
+        )
+
+    @property
     def total_symbols(self) -> int:
         """Number of instruments pulled."""
         return len(self.symbols)

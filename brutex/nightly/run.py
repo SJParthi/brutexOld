@@ -137,6 +137,12 @@ class NightlyPlan:
     skip_backup: bool = False
     skip_sweep: bool = False
     dry_run: bool = False
+    #: The pre-chain box-update leg's outcome block (DEC-BOX-AUTODEPLOY-LANE-001
+    #: §5/§6 step 5 — threaded at CONSTRUCTION, the plan is frozen); ``None`` =
+    #: the leg never ran (disabled kill switch pre-resolution / dry-run / no leg).
+    box_update: Mapping[str, object] | None = None
+    #: The §12 env-preflight block; ``None`` = the pre-flight never ran.
+    env_preflight: Mapping[str, object] | None = None
 
 
 def _default_keep_awake(reason: str) -> AbstractContextManager[bool]:
@@ -747,8 +753,18 @@ def _assemble_report(
     absent_artifacts: tuple[str, ...],
     extra_notes: tuple[str, ...],
 ) -> NightlyReport:
-    """Assemble the NightlyReport from the collected link outcomes."""
+    """Assemble the NightlyReport from the collected link outcomes.
+
+    The box-update / env-preflight blocks ride the PLAN (construction-time
+    threading, DEC-BOX-AUTODEPLOY-LANE-001 §6 step 5) into the report; a
+    box-update status outside ``{up_to_date, disabled}`` appends the ONE
+    §5 summary line via the honesty-notes mechanism (the cheapest carrier —
+    zero new alert methods).
+    """
     notes = [R48_DIVERGENCE_NOTE, *extra_notes]
+    box_note = _box_update_note(plan.box_update)
+    if box_note is not None:
+        notes.append(box_note)
     return NightlyReport(
         schema_version=REPORT_SCHEMA_VERSION,
         nightly_id=nightly_id,
@@ -764,6 +780,30 @@ def _assemble_report(
         absent_artifacts=absent_artifacts,
         honesty_notes=tuple(notes),
         dry_run=plan.dry_run,
+        box_update=plan.box_update,
+        env_preflight=plan.env_preflight,
+    )
+
+
+def _box_update_note(block: Mapping[str, object] | None) -> str | None:
+    """The §5 one-line box-update summary (silent on up_to_date/disabled/absent)."""
+    if block is None:
+        return None
+    status = str(block.get("status", "unknown"))
+    if status in ("up_to_date", "disabled"):
+        return None
+
+    def _sha7(key: str) -> str:
+        value = block.get(key)
+        return str(value)[:7] if isinstance(value, str) and value else "?"
+
+    wheels = block.get("wheels")
+    wheel_list = wheels if isinstance(wheels, list) else []
+    ok_count = sum(1 for w in wheel_list if isinstance(w, dict) and w.get("result") == "ok")
+    gate = str(block.get("gate", "skipped"))
+    return (
+        f"📦 box-update: {status} {_sha7('from_sha')}→{_sha7('to_sha')} · "
+        f"wheels ok {ok_count}/{len(wheel_list)} · gate {gate}"
     )
 
 

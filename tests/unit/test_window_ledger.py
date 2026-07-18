@@ -3221,3 +3221,29 @@ class TestStreakExemptDemotion:
 
         assert TODAY_INCOMPLETE in DEMOTED_SETTLE_REASONS
         assert frozenset({TODAY_INCOMPLETE}) == STREAK_EXEMPT_DEGRADED_REASONS
+
+
+class TestG8KeyDelegationPin:
+    """DEC-LAKE-RUST-WINDOW-LEDGER-001 — ``WindowLedger._key`` delegates to the ONE law."""
+
+    def test_key_matches_window_key_python(self) -> None:
+        from datetime import date
+
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_status import window_key_python
+
+        key = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-30Sep25-24000-CE",
+            interval="1minute",
+            start=date(2025, 8, 31),
+            end=date(2025, 9, 30),
+        )
+        assert WindowLedger._key(key) == window_key_python(key)
+        assert WindowLedger._key(key) == (
+            "groww-option",
+            "NSE-NIFTY-30Sep25-24000-CE",
+            "1minute",
+            "2025-08-31",
+            "2025-09-30",
+        )

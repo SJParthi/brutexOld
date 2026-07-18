@@ -990,17 +990,32 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
 
-    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001; finiteness added by
+    DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the collected frame is
     validated by the COMMON
-    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
-    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
-    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
-    self-consistent-looking derived buckets across all 19 TFs + ``1day``
-    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (finiteness
+    + positivity + OHLC ordering, one vectorized pass) BEFORE it reaches any
+    resampler — a corrupt 1m bar (e.g. ``high < low``, or a planted
+    ``high = inf``/``NaN`` the pre-fix mask was blind to) previously LAUNDERED
+    into self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``; the assurance session's
+    executed repro: a derived 5-minute bucket ``high = inf``). The raised
     :class:`~brutex.data.errors.ResampleInputError` is already in the
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
+
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): BEFORE the
+    price gate the collected frame's ``ts_utc`` is validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` — a
+    stored out-of-``datetime``-range timestamp (e.g. a planted ``2**62``-us
+    stamp) survives the vectorized resample and then PANICS the Rust→Python
+    conversion (``pyo3_runtime.PanicException``, a BaseException) at
+    ``frame_to_candle_bars``'s ``to_list()``, past every ``except Exception``
+    per-symbol quarantine (executed-repro'd: ONE poisoned symbol aborted the
+    WHOLE crossverify prebuild leg). The gate raises the SAME quarantining
+    :class:`~brutex.data.errors.ResampleInputError` deterministically at the
+    read boundary instead; clean frames pay one vectorized i64 min/max pass.
 
     Bad-tick screen (DEC-READ-GUARD-PARITY-001): after the sanity gate the
     frame is screened by :func:`~brutex.data.bad_tick.screen_frame_bad_ticks`
@@ -1014,7 +1029,10 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     import polars as pl
 
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
-    from brutex.data.price_sanity import validate_frame_price_sanity
+    from brutex.data.price_sanity import (
+        validate_frame_price_sanity,
+        validate_frame_ts_datetime_range,
+    )
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
@@ -1063,9 +1081,23 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             source,
             missing_columns="insert",
             extra_columns="ignore",
+            # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
+            # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
+            # siblings otherwise glob-reads the SIBLINGS' bars into this
+            # symbol. The whole-tree branch is deliberate `**` discovery and
+            # keeps glob; the writer additionally refuses to mint such dirs
+            # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
+            glob=isinstance(source, str),
         ).collect()
         frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
         context = f"{exchange}/{segment}/{symbol}/1minute"
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
+        # range stored timestamp FIRST (a 2**62-us stamp panics the Rust→Python
+        # conversion downstream — a BaseException past every except Exception;
+        # the price gate's own first-offender message indexes ts too). Raises
+        # the quarantining ResampleInputError.
+        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
         # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
         # frame to the resamplers (raises the quarantining ResampleInputError).
         validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
@@ -1101,7 +1133,17 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
     the resampled frame when the OI-aware F&O futures resampler emitted it
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    have no OI column). A present-but-NULL OI bucket on an OI-carrying frame
+    is stored ``None`` (DEC-PREOPEN-DAY-FRESHNESS-001, the B-3 fold — ALIGNED
+    with the F&O DAILY derive, whose
+    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily` stores
+    ``None`` for a null carry-last OI, and with the canonical resampler's own
+    "a null OI source bar yields a null bucket OI — preserved, NEVER
+    fabricated as 0" law; the former unconditional default fabricated a
+    stored ``0`` — an un-ledgered divergence, /db-display-visible,
+    FUT-reachable since DEC-OPTIONS-PREBUILD-RETIRE-001 retired the options
+    derived TFs. Already-stored ``0``s stay inert until the next latest-wins
+    re-materialise — derived partitions are recomputable caches). The sink
     snaps prices to the 2-decimal tick grid + merges idempotently by
     ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
     **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
@@ -1133,7 +1175,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=frame_to_candle_bars(frame),
+            # OI-carrying (F&O) frames keep a null bucket OI as stored None —
+            # the F&O daily derive's law (DEC-PREOPEN-DAY-FRESHNESS-001 B-3
+            # fold; see the docstring). Spot frames (no OI column) keep the
+            # legacy stored-0 convention byte-identically.
+            bars=frame_to_candle_bars(
+                frame,
+                absent_open_interest=None if "open_interest" in frame.columns else 0,
+            ),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh

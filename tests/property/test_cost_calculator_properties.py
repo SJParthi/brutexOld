@@ -68,7 +68,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Final
 
 import pytest
@@ -125,8 +125,19 @@ def trade_inputs(
     draw: st.DrawFn,
     entry_dates: st.SearchStrategy[date] = _entry_dates,
 ) -> TradeInput:
-    """Draw a VALID Track 2 ``TradeInput`` (long-only, NORMAL_CLOSE)."""
+    """Draw a VALID Track 2 ``TradeInput`` (long-only, NORMAL_CLOSE).
+
+    FLAT-EXTREMES idiom (DEC-FILL-WORST-CASE-ONLY-001): the one worst-case
+    fill law requires the fill-bar extremes, and a FLAT bar
+    (high == low == open) fills exactly at the open — so every property
+    below keeps its original cost-model arithmetic (P-10 STT invariance,
+    P-12 flat brokerage, the ETC refusal window) while satisfying the
+    required-anchors validator. The fill LAW itself is pinned elsewhere
+    (test_trade_sim_worst_case_floor / the F&O floor properties).
+    """
     entry_date = draw(entry_dates)
+    entry_open = draw(_open_paisa)
+    exit_open = draw(_open_paisa)
     return TradeInput(
         entry_dt_ist=datetime.combine(entry_date, time(10, 0)),
         # Track 2 forced 15:20 IST same-day exit (DEC-RISK-011) — always
@@ -136,8 +147,12 @@ def trade_inputs(
         option_type=draw(st.sampled_from(_OPTION_TYPES)),
         strike=draw(st.integers(min_value=1, max_value=20_000_000)),
         expiry_date=entry_date + timedelta(days=draw(st.integers(min_value=0, max_value=35))),
-        entry_bar_open_paisa=draw(_open_paisa),
-        exit_bar_open_paisa=draw(_open_paisa),
+        entry_bar_open_paisa=entry_open,
+        exit_bar_open_paisa=exit_open,
+        entry_bar_high_paisa=entry_open,
+        entry_bar_low_paisa=entry_open,
+        exit_bar_high_paisa=exit_open,
+        exit_bar_low_paisa=exit_open,
         side=draw(st.sampled_from(_LONG_SIDES)),
         n_lots=draw(_n_lots),
         broker=draw(st.sampled_from(_BROKERS)),
@@ -146,19 +161,22 @@ def trade_inputs(
 
 
 # ────────────────────────────────────────────────────────────────────
-# Test-side oracle rounder (INDEPENDENT of calculator._round_to_rupee)
+# Test-side oracle rounder (INDEPENDENT of calculator._round_levy_rupee)
 # ────────────────────────────────────────────────────────────────────
 
 
-def _half_up_rupee(paisa: int) -> int:
-    """Round non-negative paise to the nearest whole rupee, half-up.
+def _ceil_rupee(paisa: int) -> int:
+    """Round non-negative paise UP to the next whole rupee (adverse ceiling).
 
-    Built from :mod:`decimal` (``ROUND_HALF_UP``) so it shares NO code with
-    the calculator's private integer-arithmetic ``_round_to_rupee`` — an
-    independent oracle per the promotion spec. Returns paise (a multiple
-    of 100). Only non-negative inputs occur here (premium notionals).
+    The permanent adverse statutory-levy rounding law of
+    DEC-FILL-WORST-CASE-ONLY-001 (the retired PRECISE nearest-rupee half-up
+    arm is deleted with its mode). Built from :mod:`decimal`
+    (``ROUND_CEILING``) so it shares NO code with the calculator's private
+    integer-arithmetic ``_round_levy_rupee`` — an independent oracle per the
+    promotion spec. Returns paise (a multiple of 100). Only non-negative
+    inputs occur here (premium notionals).
     """
-    rupees = (Decimal(paisa) / Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    rupees = (Decimal(paisa) / Decimal(100)).quantize(Decimal("1"), rounding=ROUND_CEILING)
     return int(rupees) * 100
 
 
@@ -173,7 +191,16 @@ def test_p_10a_stt_invariant_in_buy_leg_price(trade: TradeInput, other_entry_ope
     """P-10(a): varying ONLY ``entry_bar_open_paisa`` (the buy-leg bar for a
     long side) never changes ``stt_paisa`` — STT reads the sell leg only."""
     base = compute_trade_cost(trade)
-    varied = compute_trade_cost(replace(trade, entry_bar_open_paisa=other_entry_open))
+    varied = compute_trade_cost(
+        # Move the FLAT extremes with the open (the strategy's flat-bar
+        # idiom) so the required-anchors ordering validator stays satisfied.
+        replace(
+            trade,
+            entry_bar_open_paisa=other_entry_open,
+            entry_bar_high_paisa=other_entry_open,
+            entry_bar_low_paisa=other_entry_open,
+        )
+    )
     assert varied.stt_paisa == base.stt_paisa
 
 
@@ -182,11 +209,12 @@ def test_p_10a_stt_invariant_in_buy_leg_price(trade: TradeInput, other_entry_ope
 def test_p_10b_stt_independent_recomputation(trade: TradeInput) -> None:
     """P-10(b): ``stt_paisa`` equals an INDEPENDENT test-side recomputation
     from the sell notional alone — the regime rate for ``entry_dt_ist.date()``
-    (DEC-COST-002/003), floor-scaled by the rate encoding, then rounded
-    half-up to the rupee by the test's own :func:`_half_up_rupee` oracle."""
+    (DEC-COST-002/003), floor-scaled by the rate encoding, then CEILED to
+    the whole rupee by the test's own :func:`_ceil_rupee` oracle (the
+    permanent adverse levy rounding — DEC-FILL-WORST-CASE-ONLY-001)."""
     breakdown = compute_trade_cost(trade)
     rate_bps_x100 = cost_constants.stt_options_rate_bps_x100(trade.entry_dt_ist.date())
-    expected = _half_up_rupee((breakdown.sell_notional_paisa * rate_bps_x100) // 10_000_000)
+    expected = _ceil_rupee((breakdown.sell_notional_paisa * rate_bps_x100) // 10_000_000)
     assert breakdown.stt_paisa == expected
 
 
@@ -198,7 +226,15 @@ def test_p_10c_stamp_invariant_in_sell_leg_price(trade: TradeInput, other_exit_o
     ``exit_bar_open_paisa`` (the sell-leg bar for a long side) varies —
     cementing the "only" of P-10 in both directions."""
     base = compute_trade_cost(trade)
-    varied = compute_trade_cost(replace(trade, exit_bar_open_paisa=other_exit_open))
+    varied = compute_trade_cost(
+        # Flat extremes move with the open (see test_p_10a).
+        replace(
+            trade,
+            exit_bar_open_paisa=other_exit_open,
+            exit_bar_high_paisa=other_exit_open,
+            exit_bar_low_paisa=other_exit_open,
+        )
+    )
     assert varied.stamp_paisa == base.stamp_paisa
 
 
@@ -240,6 +276,11 @@ def test_p_12_brokerage_pairwise_monotone_in_notional(
         trade,
         entry_bar_open_paisa=entry_open_b,
         exit_bar_open_paisa=exit_open_b,
+        # Flat extremes move with the opens (see test_p_10a).
+        entry_bar_high_paisa=entry_open_b,
+        entry_bar_low_paisa=entry_open_b,
+        exit_bar_high_paisa=exit_open_b,
+        exit_bar_low_paisa=exit_open_b,
         n_lots=n_lots_b,
     )
     breakdown_a = compute_trade_cost(trade)

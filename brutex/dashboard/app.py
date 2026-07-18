@@ -48,7 +48,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -62,6 +61,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.calendars.auto_pull_gate import compose_market_closed
 from brutex.calendars.market_hours import resolve_market_closed
+from brutex.calendars.nse import IST as _IST_TZ
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.hardware_envelope import memory_budget_bytes
@@ -187,6 +187,7 @@ from brutex.dashboard.movers_snapshot import (
     asof_through_label,
     build_snapshot_payload,
     compute_spot_candidates,
+    interval_minutes,
     is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
@@ -281,7 +282,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache, SummaryColdWaitTimeout
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
 if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
@@ -353,6 +354,7 @@ from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
+from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -2436,6 +2438,31 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             status_code=503,
         )
 
+    def _summary_warming_response(kind: str) -> JSONResponse:
+        """Honest 503 for a cold summary whose FIRST scan blew the wait budget.
+
+        DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-1), the
+        :func:`_store_outage_response` structural twin: a truly COLD kind has
+        NOTHING last-known, so a labeled empty 200 would fabricate an empty
+        lake (the ``_store_outage_response`` Golden-Rule-#1 argument,
+        verbatim) — the honest degrade is a machine-readable "first scan
+        still running — retry shortly" at 503. Reachable ONLY cold + past the
+        ``BRUTEX_SUMMARY_COLD_WAIT_S`` budget (previously an indefinite
+        threadpool-worker hang). The body is byte-STABLE across polls
+        (constant strings — the skip-render poller discipline); the pollers
+        already treat a non-ok tick as a counted failure + backoff
+        (DEC-PULL-UI-STALENESS-001), so no JS edits ride this.
+        """
+        return JSONResponse(
+            {
+                "available": False,
+                "error": "first lake summary scan still running — retry shortly",
+                "error_type": "summary_scan_pending",
+                "kind": kind,
+            },
+            status_code=503,
+        )
+
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -2581,6 +2608,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         if bridge_lake_root is None:
             bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
         else:
+            # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — the
+            # deadline-guarded RateBridgeCache memo (#1522) caps the worker hold per
+            # outage, and this liveness poll must stay startable through a lake
+            # outage; sanctioned in the threadpool pin allowlist (#1757).
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
@@ -6346,8 +6377,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         completed verdict — the no-owed payload stays byte-identical.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
-        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
-        owed_days = await run_in_threadpool(_crossverify_owed_days)
+        # Both `.crossverify/` sidecar reads ride the 32-token lake limiter, not
+        # the bare default pool (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — the same
+        # re-route the limiter applied to every other lake-touching closure;
+        # still off the event loop, DEC-CROSSVERIFY-PRODUCER-001 unchanged).
+        snapshot["last_run"] = await _run_lake(_crossverify_last_run)
+        owed_days = await _run_lake(_crossverify_owed_days)
         if owed_days:
             # EMIT-ON-PRESENT + additive-only (DEC-CROSSVERIFY-OWED-SENTINEL-001):
             # the no-owed wire stays BYTE-IDENTICAL to the pre-change payload
@@ -6665,6 +6700,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         app.py offload doctrine) so the event loop never touches the
         filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
         """
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter): the
+        # payload is a bounded scandir + three tiny local JSON reads (nightly
+        # report.json / backup deadman.json / in-process pull outcome), NEVER a
+        # lake scan (DEC-OPERATOR-HEALTH-TRUTH-001, #1747) — the api_logs
+        # non-lake precedent. Routing it through `_run_lake` would consume the
+        # 32-token lake budget for a poll that never touches the lake.
         return JSONResponse(await run_in_threadpool(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")
@@ -6903,7 +6944,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await _run_lake(_rows_and_rollup))
+        try:
+            return JSONResponse(await _run_lake(_rows_and_rollup))
+        except SummaryColdWaitTimeout:
+            # COLD + first scan past the wait budget: nothing last-known
+            # exists — the honest 503, never a fabricated empty lake
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
 
     @app.get("/api/v1/coverage/missing-sessions")
     async def api_coverage_missing_sessions(
@@ -7019,7 +7066,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         pulled-counts + stability, never an invented percentage. No lake root wired → an
         empty (well-shaped) scoreboard, never a 500.
         """
-        return JSONResponse(await _completeness_board())
+        try:
+            return JSONResponse(await _completeness_board())
+        except SummaryColdWaitTimeout:
+            # The scoreboard rides the SAME cached SPOT scan — the same honest
+            # cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
 
     # Per-app fingerprint gate for the reconcile diagnostic (DEC-TELEMETRY-RECONCILE-
     # LEDGERSAVE-001): suppresses byte-identical repeats of the mismatch WARNING / the
@@ -7143,7 +7195,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         -underlying DETAIL) so the operator can answer "how many indices vs equities have the
         full set?" in Excel. READ-ONLY; an empty (well-shaped) report when no lake is wired.
         """
-        content = await _completeness_csv()
+        try:
+            content = await _completeness_csv()
+        except SummaryColdWaitTimeout:
+            # A fake-EMPTY CSV would fabricate an empty lake for a one-shot
+            # curl/Excel reader — the honest text/plain 503 instead
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return Response(
+                "first lake summary scan still running — retry shortly",
+                status_code=503,
+                media_type="text/plain",
+            )
         return Response(
             content=content,
             media_type="text/csv; charset=utf-8",
@@ -7205,6 +7267,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             per_symbol = await _run_lake(_cached_per_symbol)
         except UniverseStoreOutageError:
             return _store_outage_response()
+        except SummaryColdWaitTimeout:
+            # The per-symbol map rides the SAME cached SPOT scan — the same
+            # honest cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001);
+            # narrower store-outage arm kept BESIDE this one.
+            return _summary_warming_response("spot")
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -7225,6 +7292,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         eligible set is scoped to TRADABLE F&O underlyings (``tradable_only=True``), so the
         ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) never inflate
         the gate (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+
+        DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the PRIMARY
+        F&O underlying form (``metadata_pull._resolve_underlying_forms`` —
+        ``BAJAJ-AUTO`` rows land under ``BAJAJAUTO``), while the eligible set is
+        SPOT-spelled — so the builder injects the ordered forms superset per eligible
+        symbol (``key_forms``, built through the ONE COMMON ``fno_underlying_forms``)
+        and the reconciler unions coverage / matches attempts across the forms. The
+        fold lives INSIDE the cached compute (one reconcile per
+        (generation, master-revision) token; aliases resolved ONCE per compute, never
+        per row; zero new store reads).
         """
         store = _require_store()
         eligible = [
@@ -7232,6 +7309,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             for exch, sym in store.fno_eligible_underlyings(tradable_only=True)
         ]
         coverage = store.list_coverage()
+        # DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the
+        # PRIMARY F&O form (metadata_pull._resolve_underlying_forms — "BAJAJAUTO");
+        # the eligible set is SPOT-spelled ("BAJAJ-AUTO"). Inject the ordered forms
+        # superset per eligible symbol (alias / normalized / raw — the app.py
+        # _resolve_historical_contracts idiom, DEC-PULL-FORENSIC-WAVE2-001) so the
+        # reconciler's compare crosses the keyspace: hyphenated/aliased names read
+        # their real coverage and the attempted-and-zero alarm can fire. Aliases
+        # resolved ONCE per cached compute (never per row).
+        aliases = resolve_fno_index_aliases()
+        key_forms = {
+            spot.symbol: fno_underlying_forms(spot.symbol, aliases=aliases) for spot in eligible
+        }
         return reconcile_mapping_integrity(
             eligible_spots=eligible,
             covered_years=coverage_years_from_records(coverage),
@@ -7239,6 +7328,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             attempted=attempted_pairs_from_records(coverage),
             whitelist=(),
             now=datetime.now(UTC),
+            key_forms=key_forms,
         )
 
     def _build_mapping_integrity_report_cached() -> tuple[MappingIntegrityReport, bool, bool]:
@@ -7283,7 +7373,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         (``store.fno_eligible_underlyings``) against the coverage ledger
         (``store.list_coverage``) and returns the honest integrity verdict: each eligible spot
         that pulled ZERO expiries (gating RED — e.g. M&M, the special-character options-fetch
-        bug F2 fixes) or only PART of the 2020→today span (amber — e.g. BAJAJ-AUTO's 2024-only).
+        bug F2 fixes) or only PART of the 2020→today span (amber — a genuine late listing).
+        The compare crosses the eligible set's SPOT spellings into the coverage writer's
+        PRIMARY-F&O-form keyspace via the injected ``key_forms`` map
+        (DEC-MAPPING-INTEGRITY-FORM-KEY-001 — ``BAJAJ-AUTO`` reads its real ``BAJAJAUTO``
+        coverage instead of ``not_attempted`` forever).
         This is the real-time, self-checking guarantee that the core spot↔options mapping is
         precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
@@ -7764,7 +7858,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        try:
+            rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        except SummaryColdWaitTimeout:
+            # COLD + first OPTIONS scan past the wait budget — the honest 503
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("options")
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(
@@ -7830,7 +7929,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             weekday rule — Golden Rule #1); ``weekly`` = the rest.
         interval
             The lake timeframe to snapshot (default ``1day``); the 21-timeframe
-            vocab (1minute … 1day). An unknown label degrades to "pull spot first".
+            vocab (1minute … 1day). An unknown label is a clean 400 naming the
+            parameter, BEFORE any lake read, on all three tabs
+            (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR — the pre-fix degrade
+            served a FALSE "No futures in the lake yet" / "No spot data" note
+            for junk intervals on a POPULATED lake).
         date
             The single ISO ``YYYY-MM-DD`` snapshot day; blank ⇒ today (UTC). A
             malformed value is a 400.
@@ -7854,6 +7957,26 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         day's close; volume/value are the cumulative FRESH session from 09:15.
         """
         store = _require_store()
+        # Interval VALIDATION (DEC-MOVERS-DAILY-FRESHNESS-001 folded MINOR):
+        # an interval token outside the canonical lake vocabulary (the ONE
+        # `LAKE_INTERVAL_LABELS` source of truth `interval_minutes` inverts —
+        # exactly the set all three tabs accept) is a clean 400 naming the
+        # parameter, BEFORE any lake read (before even the prebuild-gate
+        # flock probe). Pre-fix the junk token flowed into the compute and
+        # collapsed to an EMPTY candidate set whose payload minted the FALSE
+        # "No futures in the lake yet — pull the F&O futures first" /
+        # "No spot data in the lake yet" note on a POPULATED lake (executed
+        # repro, `interval=banana`, instrument_count:0). The pure
+        # `compute_*_candidates` degrade contracts are unchanged — this kills
+        # the misleading note at the one wire chokepoint.
+        if interval_minutes(interval) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown interval {interval!r}; "
+                    f"allowed: {sorted(LAKE_INTERVAL_LABELS.values())}"
+                ),
+            )
         # ECHO HONESTY (DEC-MOVERS-DAILY-ASOF-ECHO-HONEST-001): a non-intraday
         # interval (``1day`` / any unknown label) has NO intraday as-of — the bar
         # IS the day, so the VALUE already ignores ``time``
@@ -8468,6 +8591,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         # The workbook serialisation is CPU-bound over every report row — off the
         # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         return Response(
             content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -8543,6 +8669,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         blob = await run_in_threadpool(
             render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
         )
@@ -9038,8 +9167,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # The ONE integration-adapter surface over the sweep-oneclick artifact
     # CONTRACTS (manifest.json / top100.json / events.jsonl / trades pages) —
     # thin closures over the 100%-unit-tested `oneclick_artifacts` +
-    # `oneclick_view` modules, offloaded via `run_in_threadpool` (the app.py
-    # doctrine). Unknown run dirs are HONEST 200 `status:"awaiting"` payloads
+    # `oneclick_view` modules, offloaded via the app's 32-token `_run_lake`
+    # lake limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — every artifact
+    # read lives under the lake root, so a wedged lake volume pins lake
+    # tokens, never the default pool). Unknown run dirs are HONEST 200
+    # `status:"awaiting"` payloads
     # (polls must never error-loop); ONLY a genuinely bad request — missing/
     # unsafe run_id, a junk BRUTEX_ONECLICK_FIXTURE_ROOT — is a 400.
 
@@ -9452,7 +9584,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -9588,8 +9720,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         path = resolve_log_file()
         # A bounded read, but still DISK I/O — on a stalled/contended volume a
         # synchronous tail would wedge the event loop with every other request
-        # behind it, so it rides the same threadpool offload as the lake reads
-        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # behind it, so it runs off the loop on a threadpool worker
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001). Deliberately on the DEFAULT
+        # AnyIO pool (not the lake limiter) — resolve_log_file() tails the LOCAL
+        # rotating log under ~/.brutex/logs, not lake I/O, and riding _run_lake
+        # would let a lake outage starve the log route; sanctioned in the
+        # threadpool pin allowlist (#1757).
         records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
@@ -10465,7 +10601,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # INTERIM Run-Sweep launch page (DEC-SWEEP-LAUNCH-BUTTON-INTERIM-001):
     # strictly additive registration — /launch + /api/v1/launch/* live in
     # brutex/dashboard/launch_button.py (single-flight detached CLI launch).
-    register_launch_routes(app, lake_root_resolver=store_lake_root_resolver(instrument_store))
+    register_launch_routes(
+        app,
+        lake_root_resolver=store_lake_root_resolver(instrument_store),
+        run_lake=_run_lake,
+    )
 
     return app
 
@@ -10975,7 +11115,8 @@ def _fill_default_dates(html: str) -> str:
     # (DEC-UNIVERSE-SELECTION-PRECISE-001); the browser now refuses it. The
     # settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001) still governs what a
     # today-inclusive range actually fetches.
-    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
+    # The ONE canonical IST root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+    max_iso = datetime.now(tz=_IST_TZ).date().isoformat()
     return (
         html.replace("__BRUTEX_DATE_FROM__", from_iso)
         .replace("__BRUTEX_DATE_TO__", to_iso)

@@ -113,6 +113,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model —
+        # SweepGridConfig carries no fill_mode field; the R45 closure runs
+        # under the one hardcoded law on both legs.
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1421,6 +1424,9 @@ def test_diffcheck_disabled_is_none(tmp_path: Path) -> None:
 
 
 def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001: the R45 parity holds under the ONE
+    # worst-case law — the production leg simulates it and the naive
+    # reference independently re-derives the SAME law.
     from brutex.engine.stage1a import build_bar_bits
 
     grid = _grid()
@@ -1438,6 +1444,29 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     payload = cast("dict[str, Any]", ok_rows[0]["payload"])
     assert payload["checked"] == 2
     assert payload["mismatches"] == 0
+
+
+def test_diffcheck_enabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001 (the Stage-1 disable-bridge regression,
+    # REPURPOSED): worst-case is the ONLY law, so every grid gets a REAL
+    # diffcheck closure — no skip, no diffcheck_disabled_fill_mode WARN —
+    # and the bridge token is GONE from the run core's source.
+    import inspect
+
+    from brutex.engine import sweep_run_core as run_core_module
+    from structlog.testing import capture_logs
+
+    grid = _grid()
+    with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        assert core.suspect is False
+    assert not [
+        log for log in logs if log.get("event") == "sweep_run_core.diffcheck_disabled_fill_mode"
+    ]
+    # Source-negative pin: the Stage-1 bridge's WARN event token no longer
+    # exists as an emitted event (this test file is its ONLY remaining home).
+    source = inspect.getsource(run_core_module)
+    assert "diffcheck_disabled_fill_mode" not in source
 
 
 def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(

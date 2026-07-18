@@ -133,6 +133,53 @@ def _bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
     return _BARS
 
 
+def _rankable_bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+    """The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001).
+
+    The log-volume spawn tests need PERSISTED finalists — the per-trade
+    ``trade_sim.entry``/``trade_sim.exit`` DEBUG events fire in the WORKER's
+    finalist projection (the Python walker), and under the one worst-case
+    law the plain ``_BARS`` drift ranks nothing (a tight SL/TP over its
+    wide-range bars always fills at the adverse extreme and loses).
+    """
+    bars: list[CandleBar] = []
+    cycle = 0
+    for d in range(12):
+        price = 100.0
+        for m in range(60):
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c = o - 0.3
+                h, lo = o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c = o - 0.65
+                h, lo = o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c = o + 0.3
+                h, lo = o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = c
+    return bars
+
+
 def _grid(**overrides: object) -> SweepGridConfig:
     base: dict[str, object] = {
         "instruments": ["NIFTY"],
@@ -209,7 +256,12 @@ def _run_sequential(tmp: Path, grid: SweepGridConfig) -> tuple[Path, Path, int]:
     return out, tmp / "ingest.jsonl", ckpt
 
 
-def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[Path, Path, int]:
+def _run_parallel(
+    tmp: Path,
+    grid: SweepGridConfig,
+    workers: int = 4,
+    bars_for: Callable[[str, str], list[CandleBar]] = _bars_for,
+) -> tuple[Path, Path, int]:
     """Run the parallel grid; return (results_root, ingest_audit, ckpt)."""
     out = tmp / "out"
     with (
@@ -218,7 +270,7 @@ def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[P
     ):
         mod.run_parallel_grid(
             grid,
-            bars_for=_bars_for,
+            bars_for=bars_for,
             root=out,
             ingest_audit=ingest,
             guards=guards,
@@ -628,7 +680,7 @@ class TestWorkerLogVolumeGuardSpawn:
         capfd: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
-        _run_parallel(tmp_path, _grid(), workers=2)
+        _run_parallel(tmp_path, _grid(), workers=2, bars_for=_rankable_bars_for)
         captured = capfd.readouterr()
         # The guarded class is the PER-TRADE DEBUG storm (entry/exit — the
         # #1630 disk-fill events); the mask-independent capped WARN
@@ -647,7 +699,7 @@ class TestWorkerLogVolumeGuardSpawn:
         capfd: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv(LOG_LEVEL_ENV, "DEBUG")
-        _run_parallel(tmp_path, _grid(), workers=2)
+        _run_parallel(tmp_path, _grid(), workers=2, bars_for=_rankable_bars_for)
         captured = capfd.readouterr()
         combined = captured.err + captured.out
         assert "trade_sim.entry" in combined

@@ -44,7 +44,14 @@ from brutex.data.interior_gap_detect import INTERIOR_GAP
 from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
 from brutex.data.session import ALL_FILTERED
 from brutex.data.today_completeness import TODAY_INCOMPLETE
-from brutex.data.window_status import EMPTY, FAILED, SUCCESS, classify_window_status
+from brutex.data.window_ledger_rust import routed_window_merge_key
+from brutex.data.window_status import (
+    EMPTY,
+    FAILED,
+    SUCCESS,
+    classify_window_status,
+    window_key_python,
+)
 
 __all__ = [
     "ALL_FILTERED_MASS_RESCINDED",
@@ -645,14 +652,14 @@ class WindowLedger:
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
-        """The 5-tuple identity of a window (market, symbol, interval, start, end)."""
-        return (
-            key.market,
-            key.security_id,
-            key.interval,
-            key.start.isoformat(),
-            key.end.isoformat(),
-        )
+        """The 5-tuple identity of a window (market, symbol, interval, start, end).
+
+        Delegates through the G8 routing facade with
+        :func:`~brutex.data.window_status.window_key_python` as the live
+        parity oracle (DEC-LAKE-RUST-WINDOW-LEDGER-001; flag OFF = the
+        oracle verbatim).
+        """
+        return routed_window_merge_key(key, python_law=window_key_python)
 
     def plan(self, key: WindowKey, *, now: datetime) -> None:
         """Upsert *key* as ``PLANNED`` if absent — **O(1)**, atomic, idempotent.

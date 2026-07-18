@@ -82,6 +82,11 @@ from datetime import date, datetime, timedelta
 
 from brutex.calendars.nse import IST, is_holiday_data_available
 from brutex.calendars.observed_sessions import is_trading_day_observed
+from brutex.data.detectors_rust import (
+    PartialWindowPayload,
+    partial_window_rust_enabled,
+    routed_classify_partial_window,
+)
 
 __all__ = [
     "NOT_TRUNCATED",
@@ -286,6 +291,166 @@ def classify_partial_window(
         )
     )
 
+    def _oracle() -> PartialWindowVerdict:
+        return _classify_partial_window_python(
+            last_bar_ts=last_bar_ts,
+            window_end=window_end,
+            now=now,
+            expiry=expiry,
+            tolerance=tolerance,
+            live_edge=live_edge,
+            observed=observed,
+        )
+
+    if not partial_window_rust_enabled():
+        return _oracle()
+
+    def _payload() -> PartialWindowPayload:
+        return _partial_window_payload(
+            last_bar_ts=last_bar_ts,
+            window_end=window_end,
+            now=now,
+            expiry=expiry,
+            tolerance=tolerance,
+            live_edge=live_edge,
+            observed=observed,
+        )
+
+    return routed_classify_partial_window(
+        payload_factory=_payload, python_law=_oracle, materialize=_verdict_from_fields
+    )
+
+
+#: The session-grid back-walk margin, in DAYS, below the earliest walked
+#: anchor (SLICE T24 PR-1). 45 days dwarfs any real NSE non-session run
+#: (the longest festival+weekend cluster is ~5 days; the DETECTOR-written
+#: observed overlay is capped at 8 days/year) — and correctness NEVER
+#: depends on it: a walk stepping below the grid ABSTAINS to the oracle.
+_SPAN_BACKWALK_MARGIN_DAYS = 45
+
+#: The session-grid size cap, in DAYS. A span this wide (a far-future /
+#: far-past expiry, a degenerate hypothesis input) is never materialised —
+#: the payload carries an EMPTY grid, so the crate's first walk abstains
+#: and the oracle serves (whose per-walk cost is tiny on those shapes,
+#: unlike a multi-million-flag grid).
+_SPAN_CAP_DAYS = 9_000
+
+
+def _partial_window_payload(
+    *,
+    last_bar_ts: datetime | None,
+    window_end: date,
+    now: datetime,
+    expiry: date | None,
+    tolerance: int,
+    live_edge: int,
+    observed: AbstractSet[date],
+) -> PartialWindowPayload:
+    """Build the ints-only FFI payload for the routed classifier (flag-ON only).
+
+    Python computes every CALENDAR fact — the IST dates, the three-way
+    ``is_holiday_data_available`` conjunction (folded to ``coverage_ok``;
+    computed only when a last bar exists, mirroring the oracle's EMPTY-first
+    arm order) and the per-day ``is_trading_day_observed`` SESSION GRID —
+    and Rust decides the verdict from plain data (the honest split: the NSE
+    calendar is never re-implemented in Rust). The grid spans every session
+    walk the law can make, floored :data:`_SPAN_BACKWALK_MARGIN_DAYS` below
+    the earliest anchor; a span past :data:`_SPAN_CAP_DAYS` ships an EMPTY
+    grid (→ the crate abstains, the oracle serves).
+    """
+    if last_bar_ts is None:
+        return PartialWindowPayload(
+            last_bar_ordinal=None,
+            window_end_ordinal=window_end.toordinal(),
+            today_ordinal=now.astimezone(IST).date().toordinal(),
+            expiry_ordinal=expiry.toordinal() if expiry is not None else None,
+            coverage_ok=False,  # unused — the crate's EMPTY arm returns first
+            tolerance=tolerance,
+            live_edge=live_edge,
+            span_start_ordinal=0,
+            trading_flags=(),
+        )
+    last_bar_date = last_bar_ts.astimezone(IST).date()
+    today = now.astimezone(IST).date()
+    coverage_ok = (
+        is_holiday_data_available(window_end)
+        and is_holiday_data_available(last_bar_date)
+        and is_holiday_data_available(today)
+    )
+    low_anchors = [last_bar_date, window_end - timedelta(days=1), today]
+    if expiry is not None:
+        low_anchors.append(expiry)
+    span_low = min(low_anchors) - timedelta(days=_SPAN_BACKWALK_MARGIN_DAYS)
+    span_high = max(today, expiry) if expiry is not None else today
+    span_days = (span_high - span_low).days + 1
+    if coverage_ok and span_days <= _SPAN_CAP_DAYS:
+        flags = tuple(
+            is_trading_day_observed(span_low + timedelta(days=i), observed=observed)
+            for i in range(span_days)
+        )
+    else:
+        # Out-of-coverage (the crate returns before any walk) or an
+        # over-cap span (the crate's first walk abstains → oracle) — never
+        # pay a giant grid.
+        flags = ()
+    return PartialWindowPayload(
+        last_bar_ordinal=last_bar_date.toordinal(),
+        window_end_ordinal=window_end.toordinal(),
+        today_ordinal=today.toordinal(),
+        expiry_ordinal=expiry.toordinal() if expiry is not None else None,
+        coverage_ok=coverage_ok,
+        tolerance=tolerance,
+        live_edge=live_edge,
+        span_start_ordinal=span_low.toordinal(),
+        trading_flags=flags,
+    )
+
+
+def _verdict_from_fields(
+    reason: str,
+    last_bar_ordinal: int | None,
+    expected_end_ordinal: int | None,
+    missing_sessions: int,
+) -> PartialWindowVerdict:
+    """Materialize the crate's verdict fields into a :class:`PartialWindowVerdict`.
+
+    The verdict string derives from the reason token exactly as the oracle
+    assigns it — ``"truncated"`` is the ONE :data:`SUSPECTED_PARTIAL`
+    reason, every other arm is :data:`NOT_TRUNCATED`. Defined target-side
+    so the facade never imports this module's dataclass (no import cycle).
+    """
+    return PartialWindowVerdict(
+        verdict=SUSPECTED_PARTIAL if reason == "truncated" else NOT_TRUNCATED,
+        last_bar_date=(
+            date.fromordinal(last_bar_ordinal) if last_bar_ordinal is not None else None
+        ),
+        expected_end_date=(
+            date.fromordinal(expected_end_ordinal) if expected_end_ordinal is not None else None
+        ),
+        missing_sessions=missing_sessions,
+        reason=reason,
+    )
+
+
+def _classify_partial_window_python(
+    *,
+    last_bar_ts: datetime | None,
+    window_end: date,
+    now: datetime,
+    expiry: date | None,
+    tolerance: int,
+    live_edge: int,
+    observed: AbstractSet[date],
+) -> PartialWindowVerdict:
+    """The verbatim classifier body — the LIVE parity oracle (SLICE T24 PR-1).
+
+    Extracted token-for-token from :func:`classify_partial_window` for the
+    DEC-DATA-RUST-INTEGRITY-DETECTORS-001 routing, MINUS the two
+    env-resolution blocks (which stay at the public composition root — the
+    Slice-0 precedent — so both arms consume ONE resolved
+    *tolerance*/*live_edge*). Flag OFF (the default) runs exactly this
+    body, byte-identical to the pre-facade law.
+    """
     # EMPTY window — no stored bars to be "truncated"; the EMPTY status already owns it.
     if last_bar_ts is None:
         return PartialWindowVerdict(
