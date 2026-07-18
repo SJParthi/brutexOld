@@ -26,10 +26,14 @@
 #               silently; else an EXISTING lake is auto-detected (the app
 #               default ~/.brutex/lake, or an environment-pointed path) and
 #               recorded permanently; else the default is created and recorded.
-#               The operator NEVER types a path. BRUTEX_AUTO_RESUME_ON_BOOT=1
-#               is persisted the same way — all in ~/.brutex/.env (brutex loads
-#               that file at every boot via brutex/config/dotenv.py). No
-#               per-session exports ever again.
+#               The operator NEVER types a path. The auto-resume gates are
+#               recorded the same way — the legacy sub-gate pre-armed
+#               (BRUTEX_AUTO_RESUME_ON_BOOT=1) and the BRUTEX_AUTO_RESUME
+#               master opt-in DOCUMENTED as a commented line, never armed
+#               (boot auto-resume is OFF by default,
+#               DEC-AUTO-RESUME-DEFAULT-OFF-001) — all in ~/.brutex/.env
+#               (brutex loads that file at every boot via
+#               brutex/config/dotenv.py). No per-session exports ever again.
 #   Step 5/6  — self-check chain, each line PASS or exact-cause+fix, never a stack
 #               trace: deps importable → AWS identity (sts get-caller-identity via
 #               boto3) → Groww daily access token READABLE from AWS SSM (read-only
@@ -405,16 +409,27 @@ esac
 mkdir -p "$LAKE_ROOT" 2>/dev/null \
   || failhard "cannot create the lake directory $LAKE_ROOT — fix: check the disk mount/permissions, then re-run ./up.sh"
 
-# Auto-resume-on-boot: enable by default, ONCE. Honest wiring: the flag makes
-# the dashboard boot resume an interrupted pull ONLY when the durable window
-# ledger shows unfinished work (brutex/orchestrator/auto_resume.py,
+# Auto-resume gates (DEC-AUTO-RESUME-DEFAULT-OFF-001): boot auto-resume is OFF
+# by default by operator directive — an auto-pull must NEVER launch without an
+# explicit opt-in. up.sh pre-arms ONLY the legacy SUB-gate
+# (BRUTEX_AUTO_RESUME_ON_BOOT=1, inert on its own) so that ONE flip — the
+# BRUTEX_AUTO_RESUME=1 master gate — restores the full prior behaviour; the
+# master gate itself is written as a COMMENTED documentation line, never armed
+# here. Honest wiring: even opted in, the resume fires ONLY when the durable
+# window ledger shows unfinished work (brutex/orchestrator/auto_resume.py,
 # DEC-AUTO-RESUME-ON-BOOT-001) — a clean ledger boots idle, never a surprise
 # pull. An operator's explicit setting in $CONF is respected, never rewritten.
 if grep -q '^BRUTEX_AUTO_RESUME_ON_BOOT=' "$CONF"; then
-  pass "auto-resume-on-boot already configured: $(grep '^BRUTEX_AUTO_RESUME_ON_BOOT=' "$CONF" | head -1)"
+  pass "auto-resume sub-gate already configured: $(grep '^BRUTEX_AUTO_RESUME_ON_BOOT=' "$CONF" | head -1)"
 else
   printf 'BRUTEX_AUTO_RESUME_ON_BOOT=1\n' >> "$CONF"
-  pass "auto-resume-on-boot enabled (BRUTEX_AUTO_RESUME_ON_BOOT=1 in $CONF): an interrupted pull resumes when the dashboard boots — only when the window ledger shows unfinished work; set it to 0 there to disable"
+  pass "auto-resume sub-gate pre-armed (BRUTEX_AUTO_RESUME_ON_BOOT=1 in $CONF) — inert until the master gate is enabled"
+fi
+if grep -q 'BRUTEX_AUTO_RESUME=' "$CONF"; then
+  pass "auto-resume master gate already configured: $(grep 'BRUTEX_AUTO_RESUME=' "$CONF" | head -1)"
+else
+  printf '# BRUTEX_AUTO_RESUME=1   # uncomment to enable boot auto-resume (master opt-in; default OFF)\n' >> "$CONF"
+  pass "auto-resume is OFF by default (operator directive): to enable crash-recovery auto-resume set BRUTEX_AUTO_RESUME=1 in $CONF — the legacy sub-gate is pre-armed, so that one flip suffices"
 fi
 
 # ── Step 5/6 — self-check chain (PASS or exact-cause+fix, never a stack trace) ─

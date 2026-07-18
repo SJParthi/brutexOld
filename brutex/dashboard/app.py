@@ -90,6 +90,7 @@ from brutex.dashboard.composite_pull import (
     _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.coverage_missing import build_missing_sessions_payload
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -98,6 +99,7 @@ from brutex.dashboard.coverage_view import (
 from brutex.dashboard.db_view import (
     REGISTRY_CONTRACT_COLUMNS,
     REGISTRY_EXPIRY_COLUMNS,
+    SPOT_VERDICT_INTERVALS,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -115,6 +117,7 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
+    summarize_spot_datasets,
     summarize_spot_verdict_datasets,
     table_summary,
 )
@@ -265,6 +268,7 @@ from brutex.dashboard.pull_scope import (
     spot_only_metadata_report,
 )
 from brutex.dashboard.rate_bridge_cache import (
+    BRIDGE_SOURCE_UNVERIFIED,
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
     RateBridgeCache,
@@ -345,6 +349,7 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.spot_drift import load_stock_drift_map
@@ -875,7 +880,14 @@ class DashboardState:
 
         A missing / malformed progress file falls through to (2)/(3) — never an
         error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
-        which returns the idle view on any read/parse failure).
+        which returns the idle view on any read/parse failure). A file whose
+        ``running=True`` claim is STALE — its ``wall_time`` stamp older than
+        :data:`~brutex.engine.sweep_supervisor.SWEEP_PROGRESS_MAX_AGE_S` (or
+        missing) — is DEAD EVIDENCE ≡ absent (the #1593 rate-bridge posture):
+        a SIGKILLed/power-lost ``brutex sweep-all`` can never leave a phantom
+        "running" view (+ Stop button) on the dashboard forever
+        (DEC-JOB-COOPERATIVE-CANCEL-001 review fold). Terminal files
+        (done/cancelled/error) never decay — a finished sweep's record stands.
 
         *file_read* is the DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 seam: the
         route injects :meth:`SweepProgressCache.read
@@ -884,7 +896,8 @@ class DashboardState:
         lake volume serves the last-known payload labelled ``unverified``
         instead of blocking) — it returns the file payload to serve, or
         ``None`` to fall through to (2)/(3), exactly like the direct
-        ``exists()`` check. Post-flip that read's serve-arm DECISION is the
+        ``exists()`` check (the staleness law above applies to BOTH arms).
+        Post-flip that read's serve-arm DECISION is the
         fail-closed Rust kernel (DEC-RUST-PULL-STATE-001), so a wheel-absent/
         stale/poisoned kernel raises its typed error
         (:class:`brutex.pull_state_rust.PullStateKernelError` /
@@ -893,7 +906,11 @@ class DashboardState:
         the direct, byte-identical legacy read (the in-process test/consumer
         contract), which never raises.
         """
-        from brutex.engine.sweep_supervisor import idle_progress, read_progress
+        from brutex.engine.sweep_supervisor import (
+            idle_progress,
+            progress_bridge_stale,
+            read_progress,
+        )
 
         with self._lock:
             path = self.sweep_progress_path
@@ -901,10 +918,12 @@ class DashboardState:
         if path is not None:
             if file_read is not None:
                 payload = file_read(path)
-                if payload is not None:
+                if payload is not None and not progress_bridge_stale(payload):
                     return payload
             elif path.exists():
-                return read_progress(path)
+                parsed = read_progress(path)
+                if not progress_bridge_stale(parsed):
+                    return parsed
         if in_process is not None:
             return dict(in_process)
         return idle_progress()
@@ -1839,6 +1858,15 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _run_lake = lake_offload if lake_offload is not None else _LakeOffload()
 
+    # Dedup baseline for the dead-bridge WARN (GET /api/v1/pull/rate). A dead CLI
+    # bridge (a stuck +inf/NaN/future wall_time, OR a live publisher with a badly-future
+    # clock rewriting a fresh future stamp each second) is PERSISTENT and the widget polls
+    # site-wide every ~3 s, so the WARN is emitted ONCE per persistent dead-CLASS episode
+    # and re-armed to None when the bridge is healthy/absent (DEC-PULL-RATE-BRIDGE-
+    # NONBLOCK-CACHE-001; see the route body). Touched only on the event loop, so no
+    # lock. App-instance state (no module-global mutable state — CLAUDE.md §4).
+    _last_warned_dead_class: str | None = None
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -2263,6 +2291,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # same envelope the discovery memos above accept). REUSES the COMMON
     # generation-stamped LRU `MoversSnapshotCache` (no new class).
     _coverage_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    # The /coverage/missing-sessions drill cache (DEC-COVERAGE-MISSING-SESSIONS-001): the
+    # session_dates-enriched spot scan is a SEPARATE execution of the same scan SHAPE
+    # /coverage runs (the array_agg(DISTINCT ist_date) rides one pass WITHIN the drill's
+    # own scan) — HONEST: it is NOT shared with the /coverage SPOT `_summary_cache` entry
+    # (whose rows carry no session dates), so an operator using both surfaces pays TWO
+    # full O(bars) spot scans per write-generation, one each. Memoised here per
+    # write-generation — HONEST scope (fix round 4, Golden Rule #10): only the O(bars)
+    # SCAN rows are memoised; a repeat drill re-uses them in O(1) but re-pays the
+    # O(datasets × sessions) set-difference + payload build per request (the filters +
+    # range override vary per request, so the built payload is deliberately not cached).
+    # A pull re-derives the scan; the resident cost is the per-dataset distinct-date set.
+    _missing_sessions_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
@@ -2529,8 +2569,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         {``live``, ``cached``, ``unverified``, ``unwired``} + ``bridge_probe_age_s`` —
         stamped by the ONE :func:`~brutex.dashboard.rate_bridge_cache.stamp_bridge_freshness`.
         """
-        from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
+        from brutex.dashboard.pull_rate_view import (
+            bridge_age_seconds,
+            build_pull_rate_view_merged,
+            dead_bridge_class,
+            should_warn_dead_bridge,
+        )
 
+        nonlocal _last_warned_dead_class
         now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
             panel = state.rate_limit
@@ -2577,7 +2623,53 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
-            bridge_age = max(0.0, time.time() - snapshot.wall_time)
+            # DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened: a non-finite or
+            # materially-FUTURE ``wall_time`` is DEAD EVIDENCE. The old
+            # ``max(0.0, now - wall_time)`` CLAMPED such a stamp to a maximally-fresh
+            # ``0.0`` FOREVER (it can never grow past ``BRIDGE_MAX_AGE_S``), so the
+            # ``build_pull_rate_view_merged`` ``isfinite`` dead-evidence guard never
+            # acted and a SIGKILLed CLI's stuck ``pull_active=True`` +inf/NaN/future
+            # bridge fabricated a permanent "flowing". ``bridge_age_seconds`` yields an
+            # ``inf`` age (⇒ the merged guard treats the bridge as ABSENT ⇒ idle) for
+            # that class while tolerating a few seconds of ordinary cross-host clock
+            # skew; a fresh (past) ``wall_time`` is byte-identical to the old clamp.
+            now_wall = time.time()
+            bridge_age, bridge_dead_evidence = bridge_age_seconds(now_wall, snapshot.wall_time)
+            if bridge_dead_evidence:
+                # Label the served provenance ``unverified`` (never a trusted "live")
+                # so a corrupt/skewed publisher is visible, not silent. The WARN is
+                # DEDUPED per persistent dead-CLASS episode: the widget polls this route
+                # site-wide every ~3 s and a dead bridge (a SIGKILLed CLI's stuck
+                # +inf/NaN/future stamp, OR a live publisher whose badly-future clock
+                # rewrites a DISTINCT future stamp each second) is a PERSISTENT condition,
+                # so an unthrottled WARN would fire ~20/min forever. Keying the dedup on
+                # the dead CLASS (via ``dead_bridge_class``) — not the exact stamp —
+                # collapses that live-rewriting-future subcase to ONE warn too;
+                # ``should_warn_dead_bridge`` fires once per persistent class, re-warns on
+                # a class transition, and the healthy/absent arms below re-arm the dedup so
+                # a NEW dead episode after a recovery re-warns (CLAUDE.md §11 deduped-per-key
+                # WARN convention). ``_last_warned_dead_class`` is touched only on the event
+                # loop between awaits, so it needs no lock.
+                current_dead_class = dead_bridge_class(now_wall, snapshot.wall_time)
+                bridge_result = BridgeReadResult(
+                    snapshot, BRIDGE_SOURCE_UNVERIFIED, bridge_result.probe_age_s
+                )
+                if should_warn_dead_bridge(current_dead_class, _last_warned_dead_class):
+                    _LOG.warning(
+                        "pull_rate.bridge_dead_wall_time",
+                        wall_time=snapshot.wall_time,
+                        dead_class=current_dead_class,
+                        detail=(
+                            "CLI rate-bridge wall_time is non-finite or materially in the "
+                            "future — DEAD EVIDENCE, treated as absent (idle), never a "
+                            "fabricated 'flowing'"
+                        ),
+                    )
+                _last_warned_dead_class = current_dead_class
+            else:
+                # Bridge healthy again → re-arm the dead-bridge WARN dedup so a NEW
+                # dead episode after this recovery re-warns exactly once.
+                _last_warned_dead_class = None
             bridge_effective_rps = snapshot.effective_rps
             bridge_current_rps = snapshot.current_rps
             bridge_recent_minute = snapshot.recent_minute
@@ -2586,6 +2678,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             bridge_recent_600s = snapshot.recent_600s
             bridge_recent_3600s = snapshot.recent_3600s
             bridge_pull_active = snapshot.pull_active
+        else:
+            # No bridge snapshot (unwired / missing / unreadable) → re-arm the
+            # dead-bridge WARN dedup: a later dead episode is a fresh one.
+            _last_warned_dead_class = None
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -3741,6 +3837,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 until_clean=True,
                 on_ledger_sync=_ledger_sync,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this surface was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
                 # into the NSE market-hours window (the shared-account belt). The env
                 # kill switch is parsed ONCE here (fail-loud); the bound predicate then
@@ -3749,7 +3849,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 market_closed=resolve_market_closed(),
             )
             _stamp_pull_verdict(report.verdict.to_dict())
-            return report
+            # Return the Mapping shape so _finish_detail can surface the report's
+            # emit-on-cancel "note" as the job's completion headline — a cancelled
+            # pull reads CANCELLED, never the bare back-compat "done"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3; an uncancelled
+            # payload carries no note, so its headline stays "done" verbatim).
+            return report.to_dict()
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
         # placeholder the first per-WINDOW ledger sync re-scales to the planned window
@@ -3978,11 +4083,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
         # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
         # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
+        # cancellable=False (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): the
+        # metadata spine (pull_expiries_contracts) has NO should_stop seam, so a
+        # cancel token would never be observed — /api/v1/pull/cancel refuses
+        # HONESTLY for this surface instead of fabricating {"cancelling": true}.
         started = _pull_job.start(
             _work,
             total=len(instruments),
             detail=detail,
             ledger_synced=True,
+            cancellable=False,
             # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
             market_hours_exempt=dry_run,
         )
@@ -4115,6 +4225,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             return report.to_dict()
 
@@ -4361,6 +4476,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     form_preference=PersistentSymbolFormPreference(
                         None if dry_run else instrument_store
                     ),
+                    # Cooperative cancel at the F&O (contract, interval) window
+                    # boundary (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: this
+                    # surface was un-wired, so the cancel route fabricated
+                    # success for it).
+                    should_stop=_pull_job.cancel_requested,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -4719,6 +4839,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
                     floor_store=instrument_store,
+                    # Cooperative cancel at the spot WINDOW boundary
+                    # (DEC-JOB-COOPERATIVE-CANCEL-001).
+                    should_stop=_pull_job.cancel_requested,
                     # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull
                     # crosses into the NSE market-hours window (shared-account belt).
                     market_closed=_market_closed,
@@ -4796,6 +4919,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         on_ledger_sync=_hist_ledger_sync,
                         form_preference=form_preference,
                         prior_steps=prior_steps,
+                        # Cooperative cancel at the F&O (contract, interval)
+                        # window boundary (DEC-JOB-COOPERATIVE-CANCEL-001).
+                        should_stop=_pull_job.cancel_requested,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -5295,6 +5421,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         warm_options_movers=None if spot_only else _warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001):
+                        # the sequencer probes the job's per-run token BETWEEN
+                        # phases; the spot/historical bodies below thread the
+                        # SAME probe to their window boundaries. A cancelled
+                        # pull settles via the NORMAL path (amber partial with
+                        # the honest "(cancelled)" stop — never a red error,
+                        # never a fabricated green).
+                        should_stop=_pull_job.cancel_requested,
                         # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
                         # reaches the sequencer inside the NSE market-hours window,
                         # skip the whole vendor chain (spot/metadata/historical), and
@@ -5821,6 +5955,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 auto_retry=True,
                 until_clean=until_clean,
                 floor_store=instrument_store,
+                # Cooperative cancel at the spot WINDOW boundary
+                # (DEC-JOB-COOPERATIVE-CANCEL-001 review fold: retry-failed was
+                # un-wired, so the cancel route fabricated success for it).
+                should_stop=_pull_job.cancel_requested,
                 # DEC-GROWW-MARKET-HOURS-GUARD-001: mid-run halt if the pull crosses
                 # into the NSE market-hours window (the shared-account belt). The env
                 # kill switch is parsed ONCE here (fail-loud); the bound predicate then
@@ -5829,7 +5967,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 market_closed=resolve_market_closed(),
             )
             _stamp_pull_verdict(report.verdict.to_dict())
-            return report
+            # Mapping shape → _finish_detail surfaces the emit-on-cancel "note"
+            # (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): a cancelled
+            # retry-failed run headlines CANCELLED, never a bare "done".
+            return report.to_dict()
 
         unit_total = len(instruments) * len(fetch_intervals)
         started = _pull_job.start(
@@ -5981,9 +6122,24 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 batch_size=batch,
                 pause_s=pause_s,
                 on_progress=_sync,
+                # Cooperative cancel at the BETWEEN-BATCHES boundary
+                # (DEC-JOB-CANCEL-CONTROL-001 — the Greeks-backfill arm of the
+                # DEC-JOB-COOPERATIVE-CANCEL-001 mechanism): the runner probes
+                # the job's per-run token before each batch; a cancelled run
+                # RETURNS its honest CANCELLED report (resume correct — the
+                # frozen checkpoint when one was recorded, the stored stamps
+                # otherwise) — never a raise, so the job settles "done" with
+                # the cancelled note as its headline and the alert below still
+                # fires the ⏹ summary. HONEST cancel-blind span: the O(files)
+                # scan above has no interior probe — a Stop acked mid-scan is
+                # honored at the FIRST batch boundary (the #1369 metadata-
+                # phase precedent; a per-contract scan probe is a named
+                # follow-up, not claimed).
+                should_stop=_greeks_backfill_job.cancel_requested,
             )
             # EXACTLY-ONCE completion summary — the one dashboard chokepoint
-            # (the halt path is covered by the job's is_pull_halt handling).
+            # (the halt path is covered by the job's is_pull_halt handling; a
+            # CANCELLED run reads the honest ⏹ head under a distinct dedupe key).
             emit_greeks_backfill_complete_alert(report)
             return report.to_dict()
 
@@ -5998,6 +6154,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # cancellable=not dry_run (DEC-JOB-CANCEL-CONTROL-001, the #1369
+            # standalone-metadata-pull precedent): the DRY-RUN work is scan +
+            # report ONLY — it never observes the cancel token — so the cancel
+            # route refuses HONESTLY ("uncancellable") instead of fabricating a
+            # {"cancelling": true} the run could never act on. The WET run
+            # genuinely observes it at every between-batches boundary.
+            cancellable=not dry_run,
             # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
             # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
             # from the market-hours start gate (safe to run in the trading window).
@@ -6030,9 +6193,55 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         The backfill job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
         (state / total / completed / failed / bars / current / detail / percent …)
-        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
+        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001). The
+        ADDITIVE ``cancelling`` key (DEC-JOB-CANCEL-CONTROL-001, the
+        pull-progress idiom) reads ``True`` while the CURRENT run's cooperative
+        cancel token is set — the panel shows "stopping · finishing current
+        batch…" until the job settles; every pre-existing key is byte-identical.
         """
-        return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
+        snap = _greeks_backfill_job.snapshot().to_dict()
+        snap["cancelling"] = _greeks_backfill_job.cancel_requested()
+        return JSONResponse(snap)
+
+    @app.post("/api/v1/universe/greeks-backfill-cancel")
+    async def api_universe_greeks_backfill_cancel() -> JSONResponse:
+        """POST /api/v1/universe/greeks-backfill-cancel — cooperative backfill Stop.
+
+        DEC-JOB-CANCEL-CONTROL-001 (the Stop button on the ``universe.html``
+        backfill panel) — the Greeks-backfill arm of the
+        DEC-JOB-COOPERATIVE-CANCEL-001 mechanism, on the SAME
+        ``request_cancel_verdict`` core and the SAME
+        ``{"cancelling": bool, "reason"?}`` wire as ``/api/v1/pull/cancel``.
+        NO ``expected_kind`` gate, deliberately: ``_greeks_backfill_job`` is a
+        DEDICATED job instance only this route family ever starts (unlike the
+        shared pull/sweep job the pull route must kind-gate), so a kind
+        compare would be vacuous. The verdict likewise carries NO
+        run-identity token (the ``/api/v1/pull/cancel`` wire, kept
+        deliberately): if run A finishes AND the operator restarts within the
+        ONE HTTP round-trip a Stop POST is in flight, the cancel lands on the
+        fresh run — an accepted, disclosed window (hostile-review #1748;
+        the cancel is graceful + lossless and the run trivially restarts).
+        Refusal reasons: ``"idle"`` (no run in
+        flight — a between-runs or after-finish request can never pre-poison a
+        later run, the fresh-Event-per-start identity gate) and
+        ``"uncancellable"`` (a DRY-RUN is scan + report only, started
+        ``cancellable=False`` — its work never observes the token, so the
+        refusal is honest, never a fabricated ack). A double-Stop on a live
+        wet run is an idempotent ``{"cancelling": true}``. HONEST latency
+        (Golden Rule #10): cooperative — the in-flight batch (default 25
+        contracts) completes its driver writes + checkpoint record first, and
+        the O(files) SCAN phase has NO interior probe (a Stop acked mid-scan
+        is honored at the FIRST batch boundary — the #1369 metadata-phase
+        cancel-blind-span precedent). The stopped run settles as an honest
+        "done" whose headline reads CANCELLED + resumable; a frozen
+        checkpoint (when one was recorded) makes the next same-plan run
+        fast-resume, and the stored stamps keep resume correct regardless.
+        """
+        cancelling, reason = _greeks_backfill_job.request_cancel_verdict()
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
 
     @app.post("/api/v1/crossverify/run")
     async def api_crossverify_run(
@@ -6248,7 +6457,187 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         snap["phases"] = await _run_lake(_phases)
+        # ADDITIVE cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): True while
+        # the CURRENT run's cooperative-cancel token is set — the frontend shows
+        # "cancelling — finishing current window…" until the job settles. Every
+        # pre-existing snapshot key is unchanged.
+        snap["cancelling"] = _pull_job.cancel_requested()
+        # ADDITIVE job kind (review fold — the on-load Stop-button attach):
+        # "pull"/"sweep" while the shared single-flight job runs, null when
+        # idle, so a freshly-loaded /universe attaches its watch (and shows the
+        # Stop button) ONLY to a PULL-kind run — a running dashboard SWEEP on
+        # the same job never fabricates a pull watch.
+        snap["job_kind"] = _pull_job.running_job_kind
         return JSONResponse(snap)
+
+    @app.post("/api/v1/pull/cancel")
+    async def api_pull_cancel() -> JSONResponse:
+        """POST /api/v1/pull/cancel — request a COOPERATIVE cancel of the running pull.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside the pull/pipeline
+        Run buttons). Kind-gated: cancels ONLY a running PULL-kind job — a
+        running SWEEP is never cancelled through this route (use
+        ``/api/v1/sweep/cancel``), and an idle job is a ``{"cancelling": false}``
+        no-op. The kind gate is a COMPARE-AND-SET inside
+        ``request_cancel(expected_kind=…)`` — ONE lock hold, so a run
+        transition between a separate kind read and the cancel can never land
+        the request on the wrong run (review fold). HONEST scope: the
+        standalone metadata pull (``/universe/pull-expiries-contracts``) has NO
+        cancel seam in its spine, so it starts ``cancellable=False`` and this
+        route returns an honest ``{"cancelling": false}`` for it — never a
+        fabricated true the run could not observe. A refusal additionally
+        carries the ADDITIVE ``reason`` key (fix round 4 — the wire previously
+        conflated "idle" with "running-but-uncancellable", so the UI rendered
+        "No running pull to cancel" above a visibly-running metadata pull):
+        ``"idle"`` / ``"wrong_kind"`` / ``"uncancellable"`` — the label seam
+        ``universe.html`` renders distinctly; a successful ack omits it.
+        HONEST latency (Golden Rule
+        #10): cooperative — WITHIN a fetch phase the stop lands at the window
+        boundary: the in-flight window's fetch completes, the async
+        pipeline's already-queued tail writes DRAIN (each bounded by the 90 s
+        write deadline), and the ledger persists first; the F&O post-pull tail
+        (the O(pulled-scope) L2 heal + the FULL Greeks-enrichment pass) is
+        WITHHELD on cancel (combined-PR fix round 2 — the note reads "withheld
+        (cancelled) — re-attempted next pull"; the next pull heals + re-enriches,
+        nothing is lost), and the SPOT post-drain L2 heal is likewise WITHHELD
+        (continuation-v2 — one ``pull.cancel_heal_skipped`` WARN; the next
+        pull's L2 heal, plus L1/L3, covers the slice). CANCEL-BLIND SPANS (review fold — the pipeline probes
+        only BETWEEN phases): a Stop acked mid-METADATA (~750 underlyings ×
+        ``get_expiries``+``get_contracts`` at the paced vendor rate — minutes)
+        is observed only once that WHOLE phase settles (its spine has no
+        interior probe), and a Stop arriving after the PREBUILD stage launches
+        is NOT observed by the prebuild at all (the pipeline's last probe runs
+        before it starts, so the prebuild + movers warm run to completion and
+        the pipeline settles un-attributed). Threading per-underlying /
+        per-symbol probes into those two spans is a NAMED follow-up, not
+        claimed. Then the job settles via the NORMAL path as an honest
+        amber partial ("(cancelled)" stop) — never a red ✕, never a fabricated
+        green; the durable ledger makes the next pull resume exactly the
+        unsettled remainder.
+        """
+        cancelling, reason = _pull_job.request_cancel_verdict(expected_kind=JOB_KIND_PULL)
+        payload: dict[str, object] = {"cancelling": bool(cancelling)}
+        if reason is not None:
+            payload["reason"] = reason
+        return JSONResponse(payload)
+
+    @app.post("/api/v1/sweep/cancel")
+    async def api_sweep_cancel() -> JSONResponse:
+        """POST /api/v1/sweep/cancel — request a COOPERATIVE cancel of the running sweep.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside 🚀 Run Sweep).
+        Writes the DURABLE cancel sidecar ``<results_root>/.sweep_cancel.json``
+        the engine probes at the tuple boundary — ONE mechanism covering the
+        dashboard's in-process sweep (``target: "in-process"``), a DETACHED
+        launch-page sweep whose live pid the launch state names
+        (``target: "detached"``), AND a terminal-launched DEFAULT-root
+        ``brutex sweep-all`` visible only through the FRESH running progress
+        file bridge (``target: "bridge"`` — the sidecar lands at the default
+        ``<lake>/sweeps`` root that run probes; review fold — previously this
+        case was a false "nothing to cancel" refusal while the Stop button,
+        keyed on the same bridge, was showing). Nothing running — including a
+        STALE running bridge claim (a SIGKILLed writer's frozen file, decayed
+        per ``SWEEP_PROGRESS_MAX_AGE_S``) ⇒ ``{"cancelling": false}``
+        and NO sidecar is written (a stray request must never pre-poison the
+        next launch — which also clears stale sidecars itself). HONEST latency
+        (Golden Rule #10): cooperative — the in-flight tuple (sequential) / the
+        drain of up to ``workers-1`` in-flight tuples (parallel) completes its
+        durable write chain first; a heavy k=5 tuple legitimately runs many
+        minutes, and a wedged worker ignores it (the stall watchdog remains
+        that class's terminal). A cancelled sweep's checkpoint is a CLEAN
+        resumable boundary — run again to resume. HONEST race windows
+        (DISCLOSED, combined-PR fix round 2 — Golden Rule #10): (a) a Stop
+        POSTed in the ``_pull_job.start()`` → ``cmd_sweep_all`` LAUNCH window
+        is deleted by the launch-time stale-sidecar guard (indistinguishable
+        from a prior run's leftover — the guard exists so a leftover can never
+        kill a fresh/resumed run), so that acked cancel is LOST; (b) the
+        running-check → sidecar-write sequence here can ack a JUST-SETTLED
+        sweep with ``{"cancelling": true}`` (the orphan sidecar is then
+        harmlessly cleared by the next launch). Remedy for both: press Stop
+        again once the run is visibly underway — DURING THE GRID the sidecar
+        is probed at EVERY tuple boundary, so a re-press always lands there.
+        POST-GRID TAIL scope (fix round 4 — Golden Rule #10): after the grid
+        completes, ``cmd_sweep_all`` probes the sidecar BETWEEN each remaining
+        pass (before options-sim, before the cascade, before results-depth) —
+        a Stop landing in the tail skips every later pass (the grid results
+        are already durable; re-run to rebuild the skipped passes) — but a
+        pass ALREADY RUNNING is never interrupted, and a request arriving
+        after the LAST probe is unobservable: the run completes normally and
+        clears the orphan sidecar at exit. A sidecar WRITE failure (ENOSPC /
+        read-only / wedged lake) is an honest ``{"cancelling": false,
+        "error": …}`` refusal, never a 500.
+        """
+        from brutex.dashboard.launch_button import read_launch_state, state_liveness
+        from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
+        from brutex.engine.sweep_supervisor import progress_bridge_stale, read_progress
+
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        root = default_results_root(lake)
+
+        def _request(target_root: Path, *, source: str, target: str) -> dict[str, object]:
+            """Write the cancel sidecar; degrade a filesystem failure HONESTLY.
+
+            Fix round 4: ``request_cancel`` mkdirs the root + writes via the
+            guard-free ``atomic_write_simple`` (DEC-ATOMIC-WRITE-CONSOLIDATE-001
+            — raw ``OSError`` propagates), so an ENOSPC / read-only / wedged
+            lake previously 500'd the route at precisely the moment an operator
+            pressed Stop. One WARN + an actionable ``{"cancelling": false,
+            "error": …}`` refusal instead (the pull twin is lock-only and
+            cannot fail this way).
+            """
+            try:
+                request_sweep_cancel(target_root, source=source)
+            except OSError as exc:
+                _LOG.warning(
+                    "sweep_cancel.request_write_failed",
+                    root=str(target_root),
+                    source=source,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return {
+                    "cancelling": False,
+                    "error": f"cancel sidecar write failed: {type(exc).__name__}",
+                }
+            return {"cancelling": True, "target": target}
+
+        def _cancel() -> dict[str, object]:
+            """Resolve the running-sweep target + write the sidecar (threadpool)."""
+            if _pull_job.running_job_kind == JOB_KIND_SWEEP:
+                return _request(root, source="route", target="in-process")
+            detached = read_launch_state(lake)
+            if detached is not None and state_liveness(detached) == "running":
+                # Write the sidecar at the root the DETACHED run actually
+                # probes — the launch state's recorded results_root
+                # (<lake>/sweeps/launch-<stamp>-<card>), confined under
+                # <lake>/sweeps; NOT the default root, which that run's
+                # cmd_sweep_all(out_root=…) would never stat (review fold —
+                # the fabricated-success class).
+                return _request(
+                    _detached_sweep_cancel_root(detached, lake, default=root),
+                    source="route-detached",
+                    target="detached",
+                )
+            # THIRD arm (review fold — the false-refusal class): a DEFAULT-root
+            # terminal `brutex sweep-all` (no in-process job, no launch state)
+            # is visible ONLY through the progress FILE bridge — exactly the
+            # source the Stop button keys on — so refusing here contradicted
+            # the button ("No running sweep to cancel." while a sidecar at the
+            # default root WOULD cancel that run). A FRESH running bridge file
+            # at the default root ⇒ write the sidecar there (the run's
+            # cmd_sweep_all probes <default root>/.sweep_cancel.json at every
+            # tuple boundary). A STALE running claim (SIGKILLed writer) is dead
+            # evidence — honest {"cancelling": false}, mirroring the button's
+            # own decayed view.
+            bridge = read_progress(sweep_progress_file(root))
+            if bridge.get("running") and not progress_bridge_stale(bridge):
+                return _request(root, source="route-bridge", target="bridge")
+            return {"cancelling": False}
+
+        return JSONResponse(await _run_lake(_cancel))
 
     @app.get("/api/v1/universe/pull-verdict")
     async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
@@ -6573,6 +6962,101 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # exists — the honest 503, never a fabricated empty lake
             # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
             return _summary_warming_response("spot")
+
+    @app.get("/api/v1/coverage/missing-sessions")
+    async def api_coverage_missing_sessions(
+        symbol: str | None = None,
+        exchange: str | None = None,
+        interval: str | None = None,
+        range_start: str | None = None,
+        range_end: str | None = None,
+    ) -> JSONResponse:
+        """GET /api/v1/coverage/missing-sessions — the per-date trading-day gap drill.
+
+        DEC-COVERAGE-MISSING-SESSIONS-001 — closes the long-disclaimed *"per-window gap
+        audit not claimed"* hole: for every fetched-``1minute`` spot dataset it lists the
+        EXACT NSE/BSE trading sessions with no stored bar over the audited range, so the
+        operator can re-pull precisely the missing dates BEFORE committing a 2-4 day sweep
+        (this also feeds the night-pull short-day check). Optional ``?symbol=``/
+        ``?exchange=``/``?interval=`` filters (case-insensitive exact) narrow the drill;
+        ``?range_start=``/``?range_end=`` (ISO ``YYYY-MM-DD``) override the default
+        ``[first_date, last_date]`` interior-gap range (e.g. to audit against the 2020 pull
+        floor). CAVEAT on that floor audit (combined-PR fix round 2): a ``range_start``
+        earlier than a symbol's FIRST stored session counts dates the lake never held —
+        for a late-listed symbol those are un-pullable pre-listing dates, NOT vendor
+        holes; each row's ``missing_before_first_stored`` (+ the payload's
+        ``total_missing_before_first_stored``) splits them out of the "sessions to
+        re-pull" counts so the two classes are never conflated. TODAY/future-end
+        clamp (continuation-v2 fix + the continuation-v3 residue fix): a
+        ``range_end`` AT OR LATER than today-IST would count not-yet-occurred
+        sessions — and TODAY's own un-pullable session (pre-close it has not
+        occurred; post-close ``resolve_candle_range`` still caps at the previous
+        day) — as re-pullable vendor holes, so the audit end is clamped to
+        ``now_ist().date() − 1 day`` with the clamp NAMED per row
+        (``range_end_clamped_to_today`` + the clamped ``range_end`` echo), never
+        silently applied. READ-ONLY — no pull logic.
+
+        **Honest envelope (Golden Rule #10):** the distinct stored dates come from a
+        SEPARATE ``session_dates``-enriched execution of the same scan SHAPE
+        ``/coverage`` runs (the ``array_agg(DISTINCT ist_date)`` rides one pass WITHIN
+        the drill's own scan) — ONE additional O(bars) pass per write-generation on the
+        first drill use, cached in the drill's own memo, deliberately NOT shared with
+        the ``/coverage`` SPOT cache (whose rows carry no session dates); the
+        set-difference per dataset is O(sessions), NOT O(1), with the expected-session
+        calendar walk memoised per distinct range within one payload build. Muhurat
+        evening sessions fall on holidays, so
+        they are never *expected* and never flagged missing. The audit ABSTAINS (an honest
+        ``abstain_reason``, never a fabricated "0 gaps") on an unparseable EXPLICIT
+        range override (``bad_range_override`` — never a silent fall-back to the stored
+        span), an out-of-coverage
+        range or missing stored dates. No filesystem-backed store → a well-shaped empty
+        payload, never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse(build_missing_sessions_payload([]))
+        lake = lake_root.parent
+
+        def _recompute() -> list[dict[str, Any]]:
+            """The session_dates-enriched spot scan (cache-miss / dirty path only).
+
+            Runs on a threadpool worker, building ``store.connection`` here so the store
+            RLock stays on one thread. FNO-pruned + bounded to the spot verdict intervals
+            (the ~10⁵-10⁶ F&O contract partitions never carry a spot gap audit); the
+            ``session_date_segments`` opt-in adds the DISTINCT-ist-date ``array_agg`` to the
+            existing single per-session CTE — no second lake pass.
+            """
+            return summarize_spot_datasets(
+                store.connection,
+                lake,
+                exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+                intervals=SPOT_VERDICT_INTERVALS,
+                session_date_segments=frozenset(SPOT_PROBE_SEGMENTS),
+            )
+
+        def _work() -> dict[str, Any]:
+            rows = _missing_sessions_cache.get_or_compute(
+                "coverage_missing_sessions",
+                generation=_summary_cache.generation,
+                compute=_recompute,
+            )
+            return build_missing_sessions_payload(
+                rows,
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                range_start=range_start,
+                range_end=range_end,
+                # The IST audit clock (continuation-v2 fix + the v3 residue
+                # fix): an at/after-today range_end is clamped to today − 1 so
+                # neither a not-yet-occurred session nor today's still
+                # un-pullable one reads as a re-pullable hole; the pure module
+                # takes it injected.
+                today=now_ist().date(),
+            )
+
+        return JSONResponse(await _run_lake(_work))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -9788,7 +10272,8 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
         security_id / interval /
         window dates / status / bars / attempts / last_error / streak / in-pull
-        fetches / deduped net-new bars). READ-ONLY:
+        fetches / deduped net-new bars / streak provenance —
+        DEC-STREAK-PROVENANCE-001). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
         matches the DuckDB-table grid so the /db viewer renders it identically.
@@ -9839,6 +10324,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             "bars_net_new",
             "empty_retries",
             "transient_retries",
+            # The per-bump streak lineage (DEC-STREAK-PROVENANCE-001) — a trailing
+            # append, so the positional IST cells (idx 9/10) are untouched and the
+            # column-generic /db grid renders it with ZERO JS change.
+            "streak_provenance",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -10147,6 +10636,44 @@ def _metadata_progress_sync(
     fail a test, not pass CI green) instead of being pragma-hidden.
     """
     job.sync_from_ledger(completed=completed, total=total, bars=None, failed=0, current=current)
+
+
+def _detached_sweep_cancel_root(state: Mapping[str, Any], lake: Path, *, default: Path) -> Path:
+    """Resolve the results root a DETACHED launch-page sweep actually PROBES.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold: the launch page spawns
+    ``brutex sweep-all --results-root <lake>/sweeps/launch-<stamp>-<card>``
+    (:func:`brutex.dashboard.launch_button.launch` records that path in the
+    launch state), and ``cmd_sweep_all`` builds its cancel probe over ITS OWN
+    ``out_root`` — so a sidecar written at the DEFAULT ``<lake>/sweeps`` root
+    would never be observed by the detached run (a fabricated
+    ``{"cancelling": true}``). This helper returns the state's recorded
+    ``results_root`` iff it is a string path CONFINED under ``<lake>/sweeps``
+    (a hostile / relocated / non-string value falls back to *default* — the
+    route never writes a sidecar outside the lake's sweeps tree), else
+    *default* (a legacy state with no recorded root).
+    """
+    raw = state.get("results_root")
+    if not isinstance(raw, str) or not raw.strip():
+        return default
+    candidate = Path(raw)
+    sweeps = (lake / "sweeps").resolve(strict=False)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        # Pathological path resolution (e.g. an ELOOP symlink cycle) — the
+        # recorded root is unusable, fall back to the default (pragma LIFTED,
+        # combined-PR fix round 2 — directly unit-tested, the #1614/#1524
+        # killable-mutant-suppression purge precedent).
+        return default
+    if resolved == sweeps or sweeps in resolved.parents:
+        return candidate
+    _LOG.warning(
+        "sweep_cancel.detached_root_rejected",
+        recorded_root=raw,
+        note="launch-state results_root escapes <lake>/sweeps — using the default root",
+    )
+    return default
 
 
 def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | None] | None:

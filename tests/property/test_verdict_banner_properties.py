@@ -31,6 +31,7 @@ _KINDS = (
     "credentials_missing",
     "auth_expired",
     "mass_empty_halt",
+    "cancelled",
     "transient_residual",
     "known_gap_only",
     "clean",
@@ -41,6 +42,9 @@ _EXPECTED = {
     "credentials_missing": ("verdict--red", "red"),
     "auth_expired": ("verdict--red", "red"),
     "mass_empty_halt": ("verdict--red", "red"),
+    # The operator's cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001
+    # continuation-v3): an honest amber "re-run to resume" partial — never green.
+    "cancelled": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),
     "known_gap_only": ("verdict--grey", "grey"),
     "clean": ("verdict--green", "green"),
@@ -52,6 +56,7 @@ _NEEDS_OPERATOR = {
     "auth_expired",
     "mass_empty_halt",
     "quota_exhausted",
+    "cancelled",
     "transient_residual",
 }
 

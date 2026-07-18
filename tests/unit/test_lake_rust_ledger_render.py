@@ -35,7 +35,7 @@ _NOW_ISO = "2026-06-08T12:00:00.000001+00:00"
 
 
 def _rows(n: int = 3) -> list[tuple[Any, ...]]:
-    """*n* well-formed 16-field ledger row tuples (the ``to_rows`` shape)."""
+    """*n* well-formed 17-field ledger row tuples (the ``to_rows`` shape)."""
     out: list[tuple[Any, ...]] = []
     for i in range(n):
         out.append(
@@ -56,6 +56,7 @@ def _rows(n: int = 3) -> list[tuple[Any, ...]]:
                 (None if i % 3 == 1 else i),
                 (None if i % 3 == 1 else 0),
                 (None if i % 3 == 1 else 0),
+                (None if i % 3 == 1 else "live"),
             )
         )
     return out
