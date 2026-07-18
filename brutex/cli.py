@@ -62,7 +62,7 @@ import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -5924,6 +5924,28 @@ def cmd_enrich_greeks(
     return EXIT_INTERNAL_ERROR
 
 
+def _run_id_escapes(run_id: str) -> bool:
+    """True when an operator ``--run-id`` could escape ``sweep_runs/``.
+
+    :func:`brutex.engine.trade_store.sweep_run_dir` joins *run_id* verbatim
+    with NO containment check — its other callers pass engine grid-identity
+    digests, so the shared seam deliberately stays unchanged (refuter
+    round-3 I3-1) and the ONE operator-input caller
+    (:func:`cmd_meta_annotate`) refuses any value that is not a single
+    plain directory name: an absolute path (POSIX root or Windows
+    drive/UNC — ``PureWindowsPath`` probed for completeness), any path
+    separator (``/`` or ``\\`` — covering ``os.sep``/``os.altsep`` on
+    every platform), or a ``..`` component.
+    """
+    if Path(run_id).is_absolute() or PureWindowsPath(run_id).is_absolute():
+        return True
+    if "/" in run_id or "\\" in run_id:
+        return True
+    # Separators are refused above, so the residual ``..`` component shape
+    # is the bare value — PureWindowsPath.parts covers both flavors anyway.
+    return ".." in PureWindowsPath(run_id).parts
+
+
 def cmd_meta_annotate(
     lake_root: Path | None,
     *,
@@ -5952,7 +5974,16 @@ def cmd_meta_annotate(
     iff every discovered stem annotated (or dry-run);
     :data:`EXIT_INTERNAL_ERROR` when any WET-run stem was skipped (the
     summary names each reason); :data:`EXIT_USER_ERROR` on a bad lake
-    root / unknown run id / malformed lens dates.
+    root / a path-escaping ``--run-id`` / unknown run id / malformed lens
+    dates. RUN-ID CONTAINMENT (refuter round-3 I3-1): the operator
+    ``--run-id`` is refused BEFORE any path join when it is absolute,
+    carries a path separator (``/`` or ``\\``) or has a ``..`` component
+    (:func:`_run_id_escapes`) — so the run-summary write can never land
+    outside ``sweep_runs/``; the shared
+    :func:`~brutex.engine.trade_store.sweep_run_dir` seam itself is
+    deliberately UNCHANGED (its other callers pass engine grid-identity
+    digests — the operator-trust boundary lives at this ONE
+    operator-input caller).
 
     The trend/event lens loads each instrument's derived-1day bars through
     the SAME best-effort :func:`_depth_reference_loader` shim the run-end
@@ -5971,6 +6002,14 @@ def cmd_meta_annotate(
     resolved = _resolve_lake_root(lake_root)
     _require_lake_dir(resolved, command="meta-annotate")
     results = results_root if results_root is not None else resolved / "sweeps"
+    if _run_id_escapes(run_id):
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "is a single sweep_runs/<run_id> directory name (never absolute, "
+            "no path separators, no '..' components)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     run_dir = sweep_run_dir(results, run_id)
     if not run_dir.is_dir():
         print(
@@ -5980,12 +6019,19 @@ def cmd_meta_annotate(
         )
         return EXIT_USER_ERROR
     lens_end_value = lens_end if lens_end is not None else datetime.now(tz=UTC).date().isoformat()
-    try:
-        _parse_dt(lens_start)
-        _parse_dt(lens_end_value)
-    except CliUserError as exc:
-        print(f"[brutex] meta-annotate: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
+    for flag, value in (("--lens-start", lens_start), ("--lens-end", lens_end_value)):
+        try:
+            _parse_dt(value)
+        except CliUserError as exc:
+            # _parse_dt is the SHARED date parser whose message names its
+            # dominant callers' --start/--end flags; re-label with the flag
+            # the operator actually typed (refuter round-3 I3-2) — the
+            # helper's own message stays untouched for its other callers.
+            print(
+                f"[brutex] meta-annotate: {str(exc).replace('--start/--end', flag)}",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
     daily_bars_for = None
     if not no_lens and not dry_run:
         daily_bars_for = _depth_reference_loader(

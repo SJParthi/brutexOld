@@ -51,6 +51,11 @@ class TauPoint:
     ``n_kept == 0`` — never a 0-fabrication). Unscored trades (p_win
     ``None`` — no out-of-fold coverage) are EXCLUDED from both denominators
     and counted once at the curve level by the caller.
+
+    UNITS (refuter round-3 I3-3): ``kept_pct`` and ``precision`` are RAW
+    0–1 FRACTIONS, never 0–100 percents — the house ``cpcv_pass_pct``
+    artifact convention (raw fraction in artifacts, ×100 only at display);
+    the ``_pct`` name is deliberately kept for that convention's sake.
     """
 
     tau: float

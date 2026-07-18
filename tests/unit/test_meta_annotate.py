@@ -179,6 +179,10 @@ class TestAnnotateRun:
         # N-8: the two kept_pct denominators are documented IN the sidecar.
         assert "n_scored" in combo["kept_pct_denominators"]
         assert "ALL extracted trades" in combo["kept_pct_denominators"]
+        # Round-3 I3-3: the units clause — kept_pct is a RAW 0-1 fraction
+        # (the cpcv_pass_pct raw-fraction artifact convention, no rename).
+        assert "RAW 0-1 fraction" in combo["kept_pct_denominators"]
+        assert "cpcv_pass_pct" in combo["kept_pct_denominators"]
         # MAJOR-2: the winners' band is recorded informationally (null here —
         # the seeded aggs carries no rows) WITH the verbatim disclosure.
         band = combo["vix_band_winners_p10_p90"]

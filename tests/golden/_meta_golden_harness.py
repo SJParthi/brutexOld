@@ -23,6 +23,13 @@ the sidecar gained the informational ``vix_band_winners_p10_p90`` +
 band disclosure + the same-box byte-identity qualifier). Every frozen
 value stayed float-free; the pre-fold bytes were never a value oracle for
 the renamed schema.
+
+RE-FREEZE 2 (refuter round-3 I3-3, MIGRATION.md #1984/#1985): the
+``kept_pct_denominators`` note string gained the explicit RAW-0-1-FRACTION
+units clause (the ``cpcv_pass_pct`` raw-fraction artifact convention —
+deliberately no field rename), so ONLY the ``.meta.json`` note text moved;
+schema, keys and every frozen VALUE are unchanged, and the summary +
+scorer/abstain vector fixtures re-froze byte-identical.
 """
 
 from __future__ import annotations

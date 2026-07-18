@@ -106,11 +106,17 @@ _VIX_BAND_DISCLOSURE: Final[str] = (
     "config adopting a band requires its own validation."
 )
 
-#: The two kept_pct denominators, documented IN the sidecar (round-1 N-8).
+#: The two kept_pct denominators, documented IN the sidecar (round-1 N-8);
+#: the units clause (refuter round-3 I3-3): every ``kept_pct`` is a RAW
+#: 0-1 FRACTION — the house ``cpcv_pass_pct`` artifact convention
+#: (MIGRATION.md #1749: raw fraction in artifacts, x100 only at display) —
+#: deliberately NOT renamed.
 _KEPT_PCT_DENOMINATORS_NOTE: Final[str] = (
     "tau_curve.kept_pct / kept_pct_at: n_kept over n_scored (trades "
     "carrying an out-of-fold p_win); abstain.kept_pct: kept_trades over "
-    "ALL extracted trades (unscored trades included)."
+    "ALL extracted trades (unscored trades included); every kept_pct is a "
+    "RAW 0-1 fraction, never a 0-100 percent (the cpcv_pass_pct "
+    "raw-fraction artifact convention - scaled to percent only at display)."
 )
 
 #: The honest-limits notes every sidecar carries VERBATIM (wire-stable).

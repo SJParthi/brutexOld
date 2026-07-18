@@ -191,7 +191,32 @@ class TestCliOverSeededRun:
             ]
         )
         assert rc == EXIT_USER_ERROR
-        assert "meta-annotate:" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "meta-annotate:" in err
+        # Round-3 I3-2: the error names the flag the operator actually
+        # typed, never the shared helper's --start/--end wording.
+        assert "--lens-start" in err
+        assert "--start/--end" not in err
+
+    def test_malformed_lens_end_names_the_lens_end_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        lake = _seed_run(tmp_path / "lake")
+        rc = cli.main(
+            [
+                "meta-annotate",
+                "--lake-root",
+                str(lake),
+                "--run-id",
+                RUN_ID,
+                "--lens-end",
+                "31-12-2024",
+            ]
+        )
+        assert rc == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "--lens-end" in err
+        assert "--start/--end" not in err
 
     def test_explicit_lens_end_is_honored(self, tmp_path: Path) -> None:
         lake = _seed_run(tmp_path / "lake")
@@ -226,6 +251,65 @@ class TestCliOverSeededRun:
         assert "stamp_invalid" in err
         meta, _summary = _artifacts(lake)
         assert not meta.exists()
+
+
+class TestRunIdContainment:
+    """Round-3 I3-1: a path-escaping ``--run-id`` is refused BEFORE any join.
+
+    ``sweep_run_dir`` joins the id verbatim, so pre-fix an absolute or
+    ``..``-carrying ``--run-id`` whose target dir pre-existed WROTE
+    ``meta_annotation.json`` OUTSIDE ``sweep_runs/`` (the executed refuter
+    repro shapes) — both shapes are pinned refused + NOTHING-written, and
+    a plain id still annotates (the happy-path guard).
+    """
+
+    def test_absolute_run_id_refused_and_nothing_written(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        lake = _seed_run(tmp_path / "lake")
+        escape = tmp_path / "escape_abs"
+        escape.mkdir()  # the pre-existing target of the executed repro
+        rc = cli.main(
+            ["meta-annotate", "--lake-root", str(lake), "--run-id", str(escape), "--no-lens"]
+        )
+        assert rc == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "--run-id" in err
+        assert list(escape.iterdir()) == []
+
+    def test_dotdot_run_id_refused_and_nothing_written(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        lake = _seed_run(tmp_path / "lake")
+        # sweep_run_dir joins <lake>/sweep_runs/<run_id>, so "../escape_rel"
+        # would land at <lake>/escape_rel — pre-create it (the repro shape).
+        escape = lake / "escape_rel"
+        escape.mkdir()
+        rc = cli.main(
+            ["meta-annotate", "--lake-root", str(lake), "--run-id", "../escape_rel", "--no-lens"]
+        )
+        assert rc == EXIT_USER_ERROR
+        assert "--run-id" in capsys.readouterr().err
+        assert list(escape.iterdir()) == []
+
+    def test_windows_style_and_bare_dotdot_run_ids_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The bare ".." is the one component shape with no separator — it
+        # exercises the final `..`-component arm of _run_id_escapes.
+        lake = _seed_run(tmp_path / "lake")
+        for bad in (r"..\escape", r"C:\escape", "a\\b", ".."):
+            rc = cli.main(["meta-annotate", "--lake-root", str(lake), "--run-id", bad, "--no-lens"])
+            assert rc == EXIT_USER_ERROR, bad
+            assert "--run-id" in capsys.readouterr().err
+
+    def test_plain_run_id_still_annotates(self, tmp_path: Path) -> None:
+        # The happy-path guard: containment never blocks a legitimate id.
+        lake = _seed_run(tmp_path / "lake")
+        rc = cli.main(["meta-annotate", "--lake-root", str(lake), "--run-id", RUN_ID, "--no-lens"])
+        assert rc == EXIT_OK
+        meta, _summary = _artifacts(lake)
+        assert meta.is_file()
 
 
 # ── the REAL sweep chain + the dormant in-sim gate refusal ──────────────────
