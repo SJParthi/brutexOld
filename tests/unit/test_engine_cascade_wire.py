@@ -2512,8 +2512,7 @@ class TestSpecUnionAdmission:
         # `not_validated` forever (no DSR/CPCV/WFO/MC evidence). The union
         # admits it via the DD/preset sources at the SAME total K.
         rows = [
-            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=22.0)
-            for i in range(1, 6)
+            _result_row(i, mask=i, sharpe=float(10 + i), max_drawdown_pct=22.0) for i in range(1, 6)
         ]
         dd_optimal = _result_row(99, mask=99, sharpe=0.8, max_drawdown_pct=3.0, win_rate=0.9)
         rows.append(dd_optimal)
@@ -2550,8 +2549,7 @@ class TestSpecUnionAdmission:
     def test_pool_at_or_below_cap_is_union_inert(self) -> None:
         rows = [_result_row(1, mask=1, sharpe=0.5), _result_row(2, mask=2, sharpe=1.5)]
         assert (
-            self._spec(rows, top_k=5).winners
-            == self._spec(rows, top_k=5, multi_axis=False).winners
+            self._spec(rows, top_k=5).winners == self._spec(rows, top_k=5, multi_axis=False).winners
         )
 
 
@@ -2564,9 +2562,7 @@ class TestTrialNUnchangedByPoolWidening:
     evaluates MORE candidates against the SAME N.
     """
 
-    def test_trial_n_is_identical_across_pool_widths_and_union_arms(
-        self, tmp_path: Path
-    ) -> None:
+    def test_trial_n_is_identical_across_pool_widths_and_union_arms(self, tmp_path: Path) -> None:
         grid = _swept_tree(tmp_path)
         baseline = cw.build_leaderboard_trials(tmp_path, grid)
         # Build cascade specs at BOTH pool widths and BOTH admission arms —

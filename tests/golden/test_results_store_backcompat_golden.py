@@ -79,9 +79,10 @@ def test_generator_reproduces_the_committed_bytes() -> None:
     assert render_legacy_store_bytes(rows, with_deflated_sharpe=False) == (
         PRE_DEFLATED_FIXTURE.read_bytes()
     )
-    assert render_legacy_store_bytes(
-        fixture_rows_with_vix(), with_deflated_sharpe=True, with_vix=True
-    ) == PRE_SELECTION_FIXTURE.read_bytes()
+    assert (
+        render_legacy_store_bytes(fixture_rows_with_vix(), with_deflated_sharpe=True, with_vix=True)
+        == PRE_SELECTION_FIXTURE.read_bytes()
+    )
 
 
 def test_pre_vix_store_loads_with_none_trio() -> None:

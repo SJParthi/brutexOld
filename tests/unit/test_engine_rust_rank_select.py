@@ -56,35 +56,33 @@ def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_observability_memo_for_tests()
 
 
-_POOL = {
-    "net_pnl": [1_000_000, 100, 90, 500_000],
-    "win_rate": [0.9, 0.1, 0.1, 0.5],
-    "dd": [1.0, 30.0, 30.0, 15.0],
-    "losing": [0, 50, 50, 10],
-}
-_QUOTA = {
-    "composite": [1.0, 2.0, 3.0],
-    "masks": [1, 2, (1 << 90) | 3],
-    "dd": [10.0, 20.0, 5.0],
-    "losing": [5, 3, 8],
-    "win_rate": [0.5, 0.6, 0.4],
-    "expectancy": [100, 300, 200],
-}
+# Typed per-column fixture constants (pyright-exact: a mixed-value dict
+# would widen every column to `list[int] | list[float]`).
+_POOL_NET_PNL: list[int] = [1_000_000, 100, 90, 500_000]
+_POOL_WIN_RATE: list[float] = [0.9, 0.1, 0.1, 0.5]
+_POOL_DD: list[float] = [1.0, 30.0, 30.0, 15.0]
+_POOL_LOSING: list[int] = [0, 50, 50, 10]
+_QUOTA_COMPOSITE: list[float] = [1.0, 2.0, 3.0]
+_QUOTA_MASKS: list[int] = [1, 2, (1 << 90) | 3]
+_QUOTA_DD: list[float] = [10.0, 20.0, 5.0]
+_QUOTA_LOSING: list[int] = [5, 3, 8]
+_QUOTA_WIN_RATE: list[float] = [0.5, 0.6, 0.4]
+_QUOTA_EXPECTANCY: list[int] = [100, 300, 200]
 
 
 def _frontier() -> list[int]:
-    return frontier_select(_POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"])
+    return frontier_select(_POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING)
 
 
 def _quota(m: int = 2) -> tuple[list[int], ...]:
     return axis_quota_select(
         m,
-        _QUOTA["composite"],
-        _QUOTA["masks"],
-        _QUOTA["dd"],
-        _QUOTA["losing"],
-        _QUOTA["win_rate"],
-        _QUOTA["expectancy"],
+        _QUOTA_COMPOSITE,
+        _QUOTA_MASKS,
+        _QUOTA_DD,
+        _QUOTA_LOSING,
+        _QUOTA_WIN_RATE,
+        _QUOTA_EXPECTANCY,
     )
 
 
@@ -187,14 +185,14 @@ class TestFrontierSelectArms:
 
         monkeypatch.setattr(seam, "_resolve_kernel", bomb)
         assert _frontier() == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
 
     def test_on_serves_kernel_result_and_engages(self) -> None:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         assert any(log["event"] == "rust_rank_select.engaged" for log in logs)
 
@@ -203,7 +201,7 @@ class TestFrontierSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         warns = [log for log in logs if log.get("reason") == "kernel_disabled"]
         assert len(warns) == 1
@@ -213,7 +211,7 @@ class TestFrontierSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         assert any(log.get("reason") == "wheel_missing" for log in logs)
 
@@ -222,7 +220,7 @@ class TestFrontierSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         assert any(log.get("reason") == "wheel_stale" for log in logs)
 
@@ -234,7 +232,7 @@ class TestFrontierSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         assert any(log.get("reason") == "kernel_error" for log in logs)
 
@@ -258,7 +256,7 @@ class TestFrontierSelectArms:
             result
             == result_again
             == pareto_frontier_indices(
-                _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+                _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
             )
         )
         refusals = [log for log in logs if log["event"] == "rust_rank_select.kernel_result_refused"]
@@ -274,7 +272,7 @@ class TestFrontierSelectArms:
 
         monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace(rank_pareto_frontier=wrong))
         expected = pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
         assert expected != [1]
         with structlog.testing.capture_logs() as logs:
@@ -296,7 +294,7 @@ class TestFrontierSelectArms:
         result = _frontier()
         assert calls == []  # steady state: kernel only, no oracle double-run
         assert result == pareto_frontier_indices(
-            _POOL["net_pnl"], _POOL["win_rate"], _POOL["dd"], _POOL["losing"]
+            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
         )
 
     def test_burn_in_budget_decrements_per_passed_call(self) -> None:
@@ -309,48 +307,48 @@ class TestQuotaSelectArms:
     def test_on_matches_oracle(self) -> None:
         assert _quota() == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
 
     def test_off_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(RANK_RUST_SELECT_ENV, "false")
         assert _quota() == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
 
     def test_latched_serves_oracle(self) -> None:
         disable_kernel("x")
         assert _quota() == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
 
     def test_wheel_stale_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace())
         assert _quota() == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
 
     def test_kernel_error_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,12 +358,12 @@ class TestQuotaSelectArms:
         monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace(rank_axis_topm=raising))
         assert _quota() == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
 
     def test_memory_error_reraises_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,12 +394,12 @@ class TestQuotaSelectArms:
             result = _quota()
         assert result == axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
         assert any(log["event"] == "rust_rank_select.kernel_result_refused" for log in logs)
 
@@ -412,12 +410,12 @@ class TestQuotaSelectArms:
         monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace(rank_axis_topm=wrong))
         expected = axis_topm_indices(
             2,
-            _QUOTA["composite"],
-            _QUOTA["masks"],
-            _QUOTA["dd"],
-            _QUOTA["losing"],
-            _QUOTA["win_rate"],
-            _QUOTA["expectancy"],
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
         )
         result = _quota()
         assert result == expected
@@ -427,6 +425,64 @@ class TestQuotaSelectArms:
         before = seam._SELF_CHECK_REMAINING["quota"]
         _quota()
         assert seam._SELF_CHECK_REMAINING["quota"] == before - 1
+
+    def test_poison_refusal_logs_once_per_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The quota twin of the frontier's warn-once refusal memo: a SECOND
+        # refused kernel result skips the ERROR log (memo hit) yet still
+        # serves the oracle.
+        monkeypatch.setitem(
+            sys.modules, "fno_math", SimpleNamespace(rank_axis_topm=lambda *_a: "junk")
+        )
+        with structlog.testing.capture_logs() as logs:
+            first = _quota()
+            second = _quota()
+        expected = axis_topm_indices(
+            2,
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
+        )
+        assert first == second == expected
+        refusals = [log for log in logs if log["event"] == "rust_rank_select.kernel_result_refused"]
+        assert len(refusals) == 1  # warn-once per function
+
+    def test_post_burn_in_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The quota twin of the frontier steady-state pin: with the burn-in
+        # budget exhausted the kernel serves WITHOUT the oracle double-run.
+        reset_self_check_for_tests(remaining=0)
+        calls: list[int] = []
+        real_oracle = seam.axis_topm_indices
+
+        def counting_oracle(*args: object, **kwargs: object) -> object:
+            calls.append(1)
+            return real_oracle(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(seam, "axis_topm_indices", counting_oracle)
+        result = _quota()
+        assert calls == []  # steady state: kernel only
+        assert result == axis_topm_indices(
+            2,
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
+        )
+
+
+class TestBurnInBookkeeping:
+    def test_burn_in_passed_is_a_noop_at_zero_budget(self) -> None:
+        # The `_burn_in_passed` floor guard: at an exhausted budget the
+        # decrement is skipped (the budget can never go negative). Direct
+        # call — production gates it behind `_consume_burn_in`, so this
+        # branch is the defensive floor, pinned here.
+        reset_self_check_for_tests(remaining=0)
+        seam._burn_in_passed("frontier")
+        assert seam._SELF_CHECK_REMAINING["frontier"] == 0
 
 
 class TestUnionSelection:
@@ -549,3 +605,22 @@ class TestHypothesisDifferential:
         edges = [0.0, 0.25, 0.49999999999, 0.5, 0.75, 0.99999999999999, 1.0, 4.99, 5.0, 5.01]
         kernel = fno_math.rank_dd_band_indices(edges, DD_BAND_PCT)
         assert kernel == [math.floor(value / DD_BAND_PCT) for value in edges]
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The DEC-LAKE-STATS-MANIFEST-001 round-8 lesson (an unwired mutation gate
+    presented as deferred is a Golden-Rule-#10 defect). HONEST: pins the
+    WIRING only — the weekly run executes on its own schedule.
+    """
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        from pathlib import Path
+
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+        text = workflow.read_text(encoding="utf-8")
+        assert (
+            '"brutex/engine/rust_rank_select.py:tests/unit/test_engine_rust_rank_select.py:"'
+            in text
+        ), "rust_rank_select.py is not wired into mutation.yml's per-module mutmut loop"

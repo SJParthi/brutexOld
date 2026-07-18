@@ -145,9 +145,7 @@ def axis_better_key(
     raise ValueError(f"pool_union: unknown admission source {source!r}")
 
 
-def round_robin_union(
-    ordered_sources: Sequence[Sequence[int]], *, cap: int
-) -> set[int]:
+def round_robin_union(ordered_sources: Sequence[Sequence[int]], *, cap: int) -> set[int]:
     """Interleaved round-robin dedup-union over best-first candidate id lists.
 
     Per round, each source in order admits its best NOT-YET-ADMITTED

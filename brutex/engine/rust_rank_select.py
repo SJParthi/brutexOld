@@ -49,7 +49,7 @@ different row set than the oracle would.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
@@ -184,11 +184,12 @@ def _resolve_kernel(name: str) -> Callable[..., object] | None:
     return kernel
 
 
-def _valid_index_list(result: object, n: int, *, ascending: bool) -> bool:
+def _valid_index_list(result: object, n: int, *, ascending: bool) -> TypeGuard[list[int]]:
     """Refuse-poison gate: a kernel index list must be in-range ints, no dups.
 
     ``ascending=True`` additionally demands strictly-ascending order (the
-    frontier contract). O(len) — never re-runs the oracle.
+    frontier contract). O(len) — never re-runs the oracle. A ``TypeGuard`` so
+    the callers' post-gate ``result`` narrows to ``list[int]`` (no ignores).
     """
     if not isinstance(result, list):
         return False
@@ -263,7 +264,7 @@ def frontier_select(
             _OBSERVABILITY_MEMO.add("kernel_result_refused_frontier")
             _LOG.error("rust_rank_select.kernel_result_refused", function="frontier")
         return oracle()
-    kernel_indices = [int(value) for value in result]  # type: ignore[union-attr]
+    kernel_indices = [int(value) for value in result]
     if _consume_burn_in("frontier"):
         expected = oracle()
         if kernel_indices != expected:
@@ -320,8 +321,10 @@ def axis_quota_select(
     if not (
         isinstance(result, tuple)
         and len(result) == _QUOTA_AXES_ARITY
-        and all(_valid_index_list(axis, n, ascending=False) for axis in result)
-        and all(len(axis) <= max(m, 0) for axis in result)  # type: ignore[arg-type]
+        and all(
+            _valid_index_list(axis, n, ascending=False) and len(axis) <= max(m, 0)
+            for axis in result
+        )
     ):
         if "kernel_result_refused_quota" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("kernel_result_refused_quota")

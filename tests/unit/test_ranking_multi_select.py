@@ -444,3 +444,21 @@ class TestComputeUnionSelection:
         first = compute_union_selection(_inputs(rows), top_k=1)
         second = compute_union_selection(_inputs(rows), top_k=1)
         assert first == second
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The DEC-LAKE-STATS-MANIFEST-001 round-8 lesson (an unwired mutation gate
+    presented as deferred is a Golden-Rule-#10 defect). HONEST: pins the
+    WIRING only — the weekly run executes on its own schedule.
+    """
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        from pathlib import Path
+
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+        text = workflow.read_text(encoding="utf-8")
+        assert (
+            '"brutex/ranking/multi_select.py:tests/unit/test_ranking_multi_select.py:"' in text
+        ), "multi_select.py is not wired into mutation.yml's per-module mutmut loop"

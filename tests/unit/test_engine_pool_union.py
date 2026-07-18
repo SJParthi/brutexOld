@@ -184,7 +184,9 @@ class TestUnionSelectRows:
         assert sharpes == sorted(sharpes, reverse=True)
 
     def test_frontier_source_included_and_nonmembers_filtered(self) -> None:
-        rows = [_row(i, sharpe=float(10 + i), max_drawdown_pct=2.0, win_rate=0.9) for i in range(1, 7)]
+        rows = [
+            _row(i, sharpe=float(10 + i), max_drawdown_pct=2.0, win_rate=0.9) for i in range(1, 7)
+        ]
         frontier = _row(50, sharpe=0.1, max_drawdown_pct=28.0, win_rate=0.1, pareto_member=True)
         rows.append(frontier)
         assert frontier in union_select_rows(rows, cap=5)
@@ -223,3 +225,21 @@ class TestUnionSelectRows:
         for _ in range(5):
             rng.shuffle(rows)
             assert union_select_rows(rows, cap=7) == baseline
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The DEC-LAKE-STATS-MANIFEST-001 round-8 lesson: an unwired mutation gate
+    presented as a deferred one is a Golden-Rule-#10 defect. HONEST: this
+    pins the WIRING only — the weekly run executes on its own schedule.
+    """
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        from pathlib import Path
+
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+        text = workflow.read_text(encoding="utf-8")
+        assert '"brutex/engine/pool_union.py:tests/unit/test_engine_pool_union.py:"' in text, (
+            "pool_union.py is not wired into mutation.yml's per-module mutmut loop"
+        )

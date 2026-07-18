@@ -211,8 +211,17 @@ def test_golden_run_id_is_byte_stable() -> None:
 # THIS tree (2026-07-15; determinism pinned by the two-run byte-equality
 # test below; mask 0b101's stream teeth: 203 trades = 181 × +50 TP wins +
 # 22 × −115 deep-bar stop-outs → net +6_520 — hand-derived in
-# `test_golden_trade_stream_exact`).
-_GOLDEN_CONTENT_HASH = "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
+# `test_golden_trade_stream_exact`) → **DEC-RANK-PARETO-PERSIST-001 /
+# DEC-RANK-QUOTA-PERSIST-1000-001 (THIS re-lock, 2026-07-18)**: the persisted
+# schema gained the two appended nullable selection-provenance columns
+# (`pareto_member` Boolean + `selection_basis` Utf8, after the VIX trio) and
+# the persist union now STAMPS them (this fixture runs at `top_k=None`, so
+# the row SET is provably unchanged — the union adds TAGS, never rows:
+# `ranked == persisted == 5` is asserted unchanged above/below, and
+# `_GOLDEN_RUN_ID` is byte-identical — run identity untouched, the
+# persist-side-only law). Prior hash `ee874356…c0789`; regenerated on THIS
+# tree, two-run byte-determinism pinned below.
+_GOLDEN_CONTENT_HASH = "76c9e8f9dc03ff1b6aa315e72c22c95db13eaee89c21d90211c5d08079a6e0ed"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

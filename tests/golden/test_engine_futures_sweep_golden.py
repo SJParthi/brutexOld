@@ -96,7 +96,14 @@ _EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce0
 # RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
 # over the re-crafted fixture — regenerated on THIS tree, two-run
 # byte-determinism pinned in the literal test below.
-_EXPECTED_STORE_HASH = "8670c7f65404068c1090d30db9381494374f7c182fc57a8a7bacc5126ca074a0"
+# RE-LOCKED for DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001
+# (2026-07-18): the persisted schema gained the two appended nullable
+# selection-provenance columns (`pareto_member` Boolean + `selection_basis`
+# Utf8, after the VIX trio) and the persist union stamps them — the byte
+# stream moved by design while `_EXPECTED_RUN_ID` above is byte-identical
+# (run identity untouched; persistence-side only). Prior hash
+# `8670c7f6…74a0`; regenerated on THIS tree, determinism pinned below.
+_EXPECTED_STORE_HASH = "e98221de104c5cb082d8e8598e847dbd13eb4a23050c919d8a3c7e4560aa68d5"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
