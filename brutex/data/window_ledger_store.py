@@ -86,6 +86,10 @@ from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import interior_gap_runs
+from brutex.data.lake_rust_ledger_render import (
+    lake_rust_ledger_render_enabled,
+    render_ledger_parquet_bytes,
+)
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
     EMPTY,
@@ -699,6 +703,58 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
     return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
 
 
+def _render_ledger_parquet_python(rows: Sequence[LedgerRowTuple]) -> bytes:
+    """The VERBATIM pyarrow ledger render — the retained live oracle.
+
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (MIGRATION.md #1918): the exact
+    render both write sites ran inline pre-conversion —
+    :func:`_rows_to_table` then a zero-kwarg ``pq.write_table`` — extracted
+    to ONE place, rendering to BYTES (``pq.write_table`` writes identical
+    bytes to a buffer and to a path — pinned in the store suite beside the
+    byte-determinism golden probe; "byte-identical" is scoped to the BYTES —
+    the buffer hop adds a bounded one-render peak-memory delta on the default
+    path, the full parquet buffer held in RAM before the temp write, KB–MB at
+    ledger scale beside the already-materialised pyarrow table). Flag-OFF
+    production runs exactly this;
+    flag-ON it is the ROW-EQUIVALENCE burn-in oracle the facade compares
+    the crate render against (never bytes — the #1917 measured-infeasible
+    verdict; see :mod:`brutex.data.lake_rust_ledger_render`).
+    """
+    import io
+
+    import pyarrow.parquet as pq
+
+    table = _rows_to_table(rows)
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer)  # type: ignore[no-untyped-call, unused-ignore]
+    return buffer.getvalue()
+
+
+def _ledger_parquet_bytes(rows: Sequence[LedgerRowTuple]) -> bytes:
+    """The ONE shared ledger render body — base save + delta append, flag-gated.
+
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001: both write sites
+    (:func:`append_ledger_delta` + :func:`save_window_ledger`) render their
+    parquet bytes HERE, so the default-OFF ``BRUTEX_LAKE_RUST_LEDGER_RENDER``
+    seam has exactly one home. Flag OFF (the default) runs the verbatim
+    pyarrow oracle directly — the crate is never imported (bomb-spy-pinned
+    in the facade suite); flag ON routes through
+    :func:`~brutex.data.lake_rust_ledger_render.render_ledger_parquet_bytes`,
+    whose EVERY path still returns valid parquet bytes (guarded / degraded /
+    burn-in-mismatched calls serve the oracle). Callers run this INSIDE
+    :func:`~brutex.data.atomic_io.atomic_write_via`'s guarded callable, so
+    the ENOSPC/OOM → :class:`~brutex.data.errors.LakeWriteHalt` law
+    (DEC-WINDOW-LEDGER-WRITE-HALT-001) covers the render on BOTH arms,
+    byte-identical to the pre-conversion semantics.
+    """
+    if lake_rust_ledger_render_enabled():
+        return render_ledger_parquet_bytes(
+            rows=rows,
+            python_render=lambda: _render_ledger_parquet_python(rows),
+        )
+    return _render_ledger_parquet_python(rows)
+
+
 def _next_delta_path(directory: Path) -> Path:
     """Mint the next delta filename — call ONLY while holding the ledger flock.
 
@@ -765,8 +821,6 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
 
     Returns the number of rows appended (0 for a no-op / a skipped flush).
     """
-    import pyarrow.parquet as pq
-
     rows = ledger.dirty_rows()
     if not rows:
         return 0
@@ -789,10 +843,13 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
             # let a later-locking writer carry an earlier filename under
             # contention, inverting the newer-file-wins fold order.
             path = _next_delta_path(directory)
-            table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
-                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+                # The ONE shared render body (flag-gated Rust seam,
+                # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) runs INSIDE the
+                # guarded callable, so a render-time ENOSPC/OOM still maps to
+                # LakeWriteHalt exactly as the inline pq.write_table did.
+                tmp.write_bytes(_ledger_parquet_bytes(rows))
 
             atomic_write_via(path, _write_parquet)
     except PartitionLockTimeout as exc:
@@ -873,8 +930,6 @@ def save_window_ledger(
     """
     import contextlib
 
-    import pyarrow.parquet as pq
-
     # Liveness beats around the whole synchronous save body
     # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the drain-time full save is a single
     # multi-second synchronous read-merge-write (a forensically-measured
@@ -921,10 +976,12 @@ def save_window_ledger(
                 reopened_keys=ledger.reopened_keys(),
                 degraded_keys=ledger.degraded_keys(),
             )
-            table = _rows_to_table(rows)
 
             def _write_parquet(tmp: Path) -> None:
-                pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
+                # The ONE shared render body (flag-gated Rust seam,
+                # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) runs INSIDE the
+                # guarded callable — see the delta twin above.
+                tmp.write_bytes(_ledger_parquet_bytes(rows))
 
             # COMMON lake-safe atomic write (tmp→fsync→os.replace→cleanup, CLAUDE.md §11,
             # DEC-WINDOW-LEDGER-WRITE-HALT-001): the ledger is a LAKE write (it lives under

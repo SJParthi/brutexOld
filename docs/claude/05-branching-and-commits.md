@@ -1,6 +1,97 @@
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/rust-u128-enum-kernel`
+  (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
+  v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
+  `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
+  `rust/fno-math/src/mask_word.rs` (pure move, its own severable first commit;
+  #1549's cargo suite unmodified-green) + the native-`Vec<u128>` count twins
+  `count_supermasks_u128s`/`count_supermask_u128s`/`ResidentBarsU128` over ONE
+  width-generic core/dispatch (u64 names kept as thin delegators — every
+  pre-existing call site + test unchanged) + the `combo_mask.py` >=64-bit
+  width dispatch with lazy wide-kernel promotion and the LOUD-FAIL inversion
+  vs #1549 (wheel-missing at a >=64-bit dispatch raises the typed
+  `WideKernelUnavailableError` naming the DEC + `wheel_missing_u128` + the
+  maturin remediation — the numpy two-limb reference is retained strictly as
+  the tests-side parity oracle, structurally unreachable as a silent >=64-bit
+  production fallback); observables `kernel_kind`/`wide_kernel_active`/
+  `dispatch_kernel_kind` are the supported no-monkeypatch test surface; u64
+  path byte-identical (u64 goldens + frozen run-identity goldens unmodified,
+  bomb-spy-pinned incl. the exact `U64_MASK` boundary); measured sandbox
+  179.5 ms numpy vs 27.7/20.0 ms Rust free/resident at 94k×1k — observed,
+  never asserted; ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1942 for the full blurb)
+  Earlier: `claude/rust-lake-ledgerstore-convert`
+  (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918 — ADR-0020 slice
+  G10 CONVERT: the `window_ledger_store` parquet render routed through
+  `rust/brutex-lake` behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_LEDGER_RENDER` flag under the ROW-EQUIVALENCE +
+  reader-parity standard, never bytes (byte-identity measured-infeasible per
+  the #1917 spike — the operator ruling of 2026-07-16 as relayed via the
+  coordinator; golden re-baseline forbidden); NEW
+  `rust/brutex-lake/src/window_ledger_render.rs`
+  (`render_ledger_parquet_from_ipc`; `last_attempt_at` stays a String —
+  cargo-pinned) + the NEW facade `brutex/data/lake_rust_ledger_render.py`
+  (PR-1 guard set; the 16-render burn-in compares ROW EQUIVALENCE via pyarrow
+  readback — the normalized-string-family fold is the ONE documented
+  deviation — shipping the oracle bytes + latching on any mismatch); the
+  store's two write sites consolidate onto the ONE shared render body with
+  the verbatim pyarrow oracle retained LIVE, the render inside
+  `atomic_write_via`'s guarded callable (flock/atomic/LakeWriteHalt semantics
+  byte-identical); flag OFF byte-identical + never-imports-crate
+  (bomb-spy-pinned); the twin-lake reader-parity battery + the
+  crash/resume/re-pull state-convergence NAMED MERGE GATE EXECUTED on the
+  real merged wheel; the #1917 bytes-probe pins reconciled not broken; ships
+  INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1918 for the full blurb)
+  Earlier: `claude/box-autodeploy-lane`
+  (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939 — the nightly BOX
+  AUTO-DEPLOY leg + the standalone `brutex box-update` mouth: the pre-chain
+  ff-only self-update of the box checkout under fail-safe guards
+  (kill switch `BRUTEX_BOX_UPDATE`; dirty/diverged/fetch-failed skips),
+  delta-classified BARE maturin wheel rebuilds over the Makefile-mirrored
+  `WHEEL_SET` (brutex-lake excluded pending DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  drift-pinned), the fresh-subprocess assert-green gate (import smoke +
+  scrubbed-env doctor checks; `gate="skipped"` ⇔ never ran), rollback +
+  required-wheel repair + the always-once-loadable version-coherence
+  repair, crash-marker-provenance-scoped PRESERVE-FIRST quarantined lock
+  restores (operator locks never clobbered), the repeated-failure alarm
+  dedupe (two-integer law), re-exec ONCE (flock released strictly before
+  execv; process-env-only sentinel), the additive report blocks + 📦
+  honesty note, and the §12 removed-env-flag startup pre-flight; FAIL-OPEN
+  — never blocks the nightly; wedge-asymmetry disclosed with the named
+  follow-up DEC-BOX-WEDGE-RESCUE-001; both new modules 100.00%
+  line+branch on NEW ci.yml stanzas + mutation pairs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1939 for the full blurb)
+  Earlier: `claude/rust-slice-t24-integrity`
+  (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948 — SLICE T24 PR-1:
+  the THREE cold data-integrity detector pure laws — the raw-integrity blake2b
+  digest (in-crate from RFC 7693, ZERO new deps — Cargo.toml/Cargo.lock
+  byte-untouched), the interior bar-less run walker, and the partial-window
+  truncation verdict — routed through `rust/brutex-lake`
+  (NEW `src/detectors.rs`) behind THREE default-OFF flags via the NEW facade
+  `brutex/data/detectors_rust.py` (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` ·
+  `BRUTEX_LAKE_RUST_INTERIOR_GAP` · `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`;
+  per-law 16-call burn-in + ship-the-ORACLE autorevert over ONE shared latch;
+  narrow degrade set + imported panic belt; refuse-poison shape gates; NO
+  polars version guard — polars-free laws, the G8 deviation); the G6
+  flag-gate-in-target routing (zero-arg payload/oracle callables + a
+  target-side materialize — the facade never imports PartialWindowVerdict);
+  json canonicalisation + the NSE calendar stay PYTHON (payload factories
+  compute session ordinals/flags; off-grid walks ABSTAIN → oracle; span cap
+  9000 days); flag OFF byte-identical + crate-never-imported (bomb-spy
+  pinned); `window_status` EXCLUDED from the slice (write-retired) + the
+  bad_tick COMMON-reuse ruling recorded in #1948; cargo 90 passed
+  --release --locked, the new 97-test battery + the existing detector suites
+  flag-ON 96 passed (+45 store/wiring) + consumer suites flag-OFF 391
+  passed, all four modules 100.00%
+  line+branch; round-1 review folded (both lenses SHIP, 0 MINOR+ — see §1 +
+  MIGRATION.md #1948); ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1948 for the full
+  blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample

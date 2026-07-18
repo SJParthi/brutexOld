@@ -1,4 +1,58 @@
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
+twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
+`MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
++ the `combo_mask.py` >=64-bit width dispatch with lazy wide-kernel
+promotion and the LOUD-FAIL inversion vs #1549 — a missing wide kernel at a
+>=64-bit dispatch raises the typed `WideKernelUnavailableError`, NEVER a
+silent numpy degrade; the u64 path byte-identical (goldens unmodified,
+bomb-spy-pinned). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1942 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
+#1918 — ADR-0020 slice G10 CONVERT: the `window_ledger_store` parquet render
+routed through `rust/brutex-lake` behind the default-OFF
+`BRUTEX_LAKE_RUST_LEDGER_RENDER` seam under the ROW-EQUIVALENCE +
+reader-parity standard, never bytes (byte-identity measured-infeasible per the
+#1917 spike; the operator ruling of 2026-07-16 as relayed via the coordinator;
+golden re-baseline forbidden); the verbatim pyarrow render stays the LIVE
+oracle, flag OFF is byte-identical + never-imports-crate; twin-lake
+reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
+on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939,
+branch `claude/box-autodeploy-lane` — the nightly BOX AUTO-DEPLOY leg + the
+standalone `brutex box-update` mouth: `cmd_nightly_run` gains a PRE-CHAIN
+leg that fast-forwards the box checkout to `origin/main` under FAIL-SAFE
+guards, rebuilds the maturin wheels on a rust/build-config delta (the
+Makefile-mirrored `WHEEL_SET`, drift-pinned; brutex-lake EXCLUDED pending
+DEC-BRUTEX-LAKE-BOX-WHEEL-001), asserts the doctor wheel-freshness law
+GREEN in a fresh scrubbed subprocess BEFORE the new tree is ever executed,
+rolls back + repairs on any failure (preserve-first quarantined lock
+restores; the §4.7 repeated-failure alarm dedupe), re-execs ONCE, and adds
+the removed-env-flag startup PRE-FLIGHT (`env_preflight.py`). FAIL-OPEN
+outside the chain break law — the leg never blocks the nightly; the
+network envelope is the coordinator-amended "no network beyond the git
+remote + the canonical wheel-build fetches". ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1939.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001,
+MIGRATION.md #1948 — SLICE T24 PR-1: the THREE cold data-integrity detector
+pure laws (raw-integrity blake2b digest · interior bar-less run walker ·
+partial-window truncation verdict) routed through `rust/brutex-lake` behind
+THREE default-OFF flags (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` /
+`BRUTEX_LAKE_RUST_INTERIOR_GAP` / `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`) with the
+verbatim Python law as the LIVE parity oracle; flag OFF is byte-identical +
+crate-never-imported (spy-pinned); calendar + json canonicalisation stay
+Python; blake2b in-crate from RFC 7693 — Cargo.toml/Cargo.lock byte-untouched;
+`window_status` EXCLUDED from the slice (write-retired) + the bad_tick
+COMMON-reuse ruling recorded. Ships INERT — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1948 — this header carries the pointer, never the
+story.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
