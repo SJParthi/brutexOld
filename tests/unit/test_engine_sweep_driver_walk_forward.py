@@ -162,6 +162,7 @@ def test_evaluate_combo_reraises_on_leak(monkeypatch: pytest.MonkeyPatch) -> Non
             0,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_stream(20),
             train_days=10,
             test_days=5,
             step_days=5,
@@ -183,6 +184,7 @@ def test_walk_forward_sweep_reraises_on_leak(monkeypatch: pytest.MonkeyPatch) ->
             [0],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=_stream(20),
             train_days=10,
             test_days=5,
             step_days=5,
@@ -382,6 +384,7 @@ def test_evaluate_combo_walk_forward_end_to_end() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_stream(25),
         train_days=10,
         test_days=5,
         step_days=5,
@@ -405,6 +408,7 @@ def test_evaluate_combo_walk_forward_with_explicit_proximity_and_sltp() -> None:
         required_mask=0,
         direction=Side.SELL,
         tf_minutes=1,
+        exec_bars_1m=_stream(25),
         stop_loss_paisa=20,
         take_profit_paisa=20,
         proximity=ProximityParams(),
@@ -424,6 +428,7 @@ def test_walk_forward_sweep_end_to_end_matches_single() -> None:
         masks,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -435,6 +440,7 @@ def test_walk_forward_sweep_end_to_end_matches_single() -> None:
             required_mask=mask,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             train_days=10,
             test_days=5,
             step_days=5,
@@ -455,6 +461,7 @@ def test_walk_forward_roll_schedule_threads_and_rekeys_the_run_hash() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -464,6 +471,7 @@ def test_walk_forward_roll_schedule_threads_and_rekeys_the_run_hash() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -475,6 +483,7 @@ def test_walk_forward_roll_schedule_threads_and_rekeys_the_run_hash() -> None:
         required_mask=0,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -488,6 +497,7 @@ def test_walk_forward_roll_schedule_threads_and_rekeys_the_run_hash() -> None:
         [0],
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=bars,
         train_days=10,
         test_days=5,
         step_days=5,
@@ -511,6 +521,7 @@ def test_walk_forward_schedule_reaches_the_stage1a_build(entry: str) -> None:
                 required_mask=0,
                 direction=Side.BUY,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 train_days=10,
                 test_days=5,
                 step_days=5,
@@ -521,6 +532,7 @@ def test_walk_forward_schedule_reaches_the_stage1a_build(entry: str) -> None:
             [0],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             train_days=10,
             test_days=5,
             step_days=5,
@@ -537,6 +549,7 @@ def test_no_trade_mask_aggregates_to_zero() -> None:
         required_mask=_IMPOSSIBLE_MASK,
         direction=Side.BUY,
         tf_minutes=1,
+        exec_bars_1m=_stream(25),
         train_days=10,
         test_days=5,
         step_days=5,
@@ -549,9 +562,11 @@ def test_no_trade_mask_aggregates_to_zero() -> None:
 
 def test_evaluate_and_sweep_empty_bars_raise() -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        evaluate_combo_walk_forward([], required_mask=0, direction=Side.BUY, tf_minutes=1)
+        evaluate_combo_walk_forward(
+            [], required_mask=0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[]
+        )
     with pytest.raises(ValueError, match="non-empty"):
-        walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1)
+        walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
 
 def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
@@ -572,6 +587,7 @@ def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
             0,
             direction=Side.SELL,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=20,
             take_profit_paisa=20,
             train_days=10,

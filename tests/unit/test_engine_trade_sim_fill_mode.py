@@ -358,13 +358,15 @@ class TestRunIdentityEmitLaw:
         "start_equity_paisa": 10_000_000,
     }
 
-    def test_worst_case_params_add_exactly_the_one_key(self) -> None:
-        # DEC-FILL-WORST-CASE-ONLY-001: the key is emitted UNCONDITIONALLY —
-        # removing it would alias every worst-case run_id with the frozen
-        # precise-era identities. There is no parameter to vary: the builder
-        # emits the one law on EVERY call.
+    def test_worst_case_params_add_exactly_the_two_permanent_keys(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001: BOTH law
+        # keys are emitted UNCONDITIONALLY — eliding either would alias a
+        # post-law run_id with a frozen earlier-era identity (fill_mode vs
+        # the precise era; execution_grid vs the PR-A decision-TF era). There
+        # is no parameter to vary: the builder emits both laws on EVERY call.
         params = canonical_trade_params(**self._KW)
         assert params["fill_mode"] == "worst_case"
+        assert params["execution_grid"] == "1m_next_bar"
         assert list(params) == [
             "sl_paisa",
             "tp_paisa",
@@ -373,6 +375,7 @@ class TestRunIdentityEmitLaw:
             "fib_anchor",
             "start_equity_paisa",
             "fill_mode",
+            "execution_grid",
         ]
 
     def test_no_fill_mode_parameter_exists(self) -> None:

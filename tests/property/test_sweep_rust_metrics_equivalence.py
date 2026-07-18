@@ -128,9 +128,13 @@ def test_metrics_from_trades_flag_arms_are_bit_identical(
     prior = os.environ.pop(SWEEP_RUST_METRICS_ENV, None)
     try:
         os.environ[SWEEP_RUST_METRICS_ENV] = "0"
-        off = metrics_from_trades(_BARS, trades, start_equity_paisa=start_equity, tf_minutes=1)
+        off = metrics_from_trades(
+            _BARS, trades, start_equity_paisa=start_equity, tf_minutes=1, exec_bars_1m=_BARS
+        )
         os.environ[SWEEP_RUST_METRICS_ENV] = "1"
-        on = metrics_from_trades(_BARS, trades, start_equity_paisa=start_equity, tf_minutes=1)
+        on = metrics_from_trades(
+            _BARS, trades, start_equity_paisa=start_equity, tf_minutes=1, exec_bars_1m=_BARS
+        )
     finally:
         if prior is None:
             os.environ.pop(SWEEP_RUST_METRICS_ENV, None)
@@ -185,7 +189,11 @@ def test_near_envelope_boundary_stays_bit_identical(
         trades = _trades_from(raw)
         assert exceeds_exact_equity_envelope(start, trades) is exceeds
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
-        off = metrics_from_trades(_BARS, trades, start_equity_paisa=start, tf_minutes=1)
+        off = metrics_from_trades(
+            _BARS, trades, start_equity_paisa=start, tf_minutes=1, exec_bars_1m=_BARS
+        )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
-        on = metrics_from_trades(_BARS, trades, start_equity_paisa=start, tf_minutes=1)
+        on = metrics_from_trades(
+            _BARS, trades, start_equity_paisa=start, tf_minutes=1, exec_bars_1m=_BARS
+        )
         _assert_bit_identical(off, on)
