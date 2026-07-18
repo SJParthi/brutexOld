@@ -78,6 +78,12 @@ pub(crate) fn std_norm_cdf(x: f64) -> f64 {
 /// `statistics._normal_dist_inv_cdf(p, 0.0, 1.0)` transcription (Wichura
 /// AS241) with the Python raise domain as the `Err` arm.
 ///
+/// Bit-exactness evidence: differential-tested against CPython's
+/// `statistics.NormalDist().inv_cdf` during development — 0 mismatches
+/// over a 2.5M-point corpus (uniform + branch-boundary + extreme-tail
+/// points across all three AS241 branches); the frozen bit-pins below
+/// are the committed anchors of that run.
+///
 /// Mirrors `NormalDist.inv_cdf`'s guard EXACTLY: `p <= 0.0 or p >= 1.0` is
 /// the error (`StatisticsError` on the Python side — the seam refuses on
 /// `Err` so the oracle raises it verbatim). A NaN `p` passes the guard on

@@ -142,7 +142,7 @@ pub fn pbo_cscv_checked(
         })?;
 
     let count_f = is_count as f64; // == oos_count (equal halves)
-    let denom_rank = (n_strat as f64) + 1.0; // float(n_strat + 1) — exact for any real N
+    let denom_rank = (n_strat as f64) + 1.0; // float(n_strat + 1) — exact for n_strat < 2^53
     let mut in_is = vec![false; n_splits];
     let mut is_stat = vec![0.0_f64; n_strat];
     let mut oos_stat = vec![0.0_f64; n_strat];
