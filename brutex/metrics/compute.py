@@ -216,6 +216,12 @@ class ResultMetrics:
     winning_trades: int
     losing_trades: int
     win_rate: float
+    #: The mirror of ``win_rate`` for the LOSING side
+    #: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001): ``losing_trades /
+    #: total_trades`` as a fraction — first-class so ranking/display never
+    #: re-derive it (scratch trades make ``1 − win_rate`` WRONG). ``0.0``
+    #: for the zero-trade row, exactly like ``win_rate``.
+    loss_rate: float
     profit_factor: float | None
     avg_winning_trade_paisa: int
     avg_losing_trade_paisa: int  # absolute, per spec line 564
@@ -234,6 +240,24 @@ class ResultMetrics:
     skewness: float | None
     kurtosis: float | None
     returns_std_dev: float | None
+
+    # ── Growth metrics (DEC-METRICS-KELLY-GROWTH-001) ────────────────
+    #: Kelly criterion fraction ``p − q/b`` (p = win probability over ALL
+    #: trades, q = 1 − p, b = avg win / avg loss payoff ratio). ``None``
+    #: when degenerate — no winners, no losers, or a zero avg-win/avg-loss
+    #: magnitude (no real payoff ratio exists). COMBINE-side by the
+    #: fold/combine libm law (DEC-METRICS-RUST-COMPUTE-FOLD-001): derived
+    #: from fold scalars only, NO new fold state.
+    kelly_fraction: float | None
+    #: Expected per-trade log growth at HALF Kelly staking — the scalar
+    #: closed form ``g(f) = p·ln(1 + f·b) + q·ln(1 − f)`` at ``f = f*/2``.
+    #: The fractional-staking growth rate the ``growth`` ranking preset
+    #: orders on. ``None`` when ``kelly_fraction`` is ``None`` or either
+    #: log argument is non-positive (a defensive totality arm — provably
+    #: dead for real fold outputs, see :func:`_kelly_growth`). COMBINE-side:
+    #: ``math.log`` is libm territory and MUST stay Python (the
+    #: fold/combine split's exactness law).
+    log_growth_at_half_kelly: float | None
 
     # ── Statistical validity (Stage 4 only — NULL before then; spec 581-583) ──
     # Filled by with_stage4_statistics(); left None (NULL) by compute_metrics,
@@ -401,6 +425,7 @@ def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
         winning_trades=0,
         losing_trades=0,
         win_rate=0.0,
+        loss_rate=0.0,
         profit_factor=None,
         avg_winning_trade_paisa=0,
         avg_losing_trade_paisa=0,
@@ -415,7 +440,71 @@ def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
         skewness=None,
         kurtosis=None,
         returns_std_dev=None,
+        kelly_fraction=None,
+        log_growth_at_half_kelly=None,
     )
+
+
+def _kelly_growth(
+    n_trades: int,
+    winners: int,
+    losers: int,
+    gross_profit_paisa: int,
+    gross_loss_abs_paisa: int,
+) -> tuple[float | None, float | None]:
+    """Return ``(kelly_fraction, log_growth_at_half_kelly)`` from fold scalars.
+
+    DEC-METRICS-KELLY-GROWTH-001. The Kelly criterion in the map's PINNED
+    sizing-overlay form ``f* = W − (1−W)/R`` with ``W`` the win rate and
+    ``R`` the win/loss (payoff) ratio — computed here in the algebraically
+    identical fold-scalar spelling: ``p = winners / n`` (ALL trades in the
+    denominator — scratch trades dilute the win probability exactly as they
+    dilute ``win_rate``), ``q = 1 − p``, ``b = (gross_profit / winners) /
+    (gross_loss / losers)``, ``kelly_fraction = p − q / b``. The companion
+    growth figure is the SCALAR CLOSED FORM ``g(f) = p·ln(1 + f·b) +
+    q·ln(1 − f)`` evaluated at half-Kelly ``f = f*/2`` (the standard
+    estimation-error safety factor) — O(1) per combo BY CONSTRUCTION, never
+    an O(trades) pass.
+
+    Degenerate arms (honest ``None``, never a fabricated number — Golden
+    Rule #1):
+
+    * no winners OR no losers → no payoff ratio ``b`` exists →
+      ``(None, None)``;
+    * a zero avg-win or avg-loss magnitude (reachable only through the
+      PUBLIC :func:`combine_metrics_from_folds` on a hand-built
+      :class:`TradeFolds` — :func:`_fold_trades` guarantees a winner has
+      ``pnl > 0`` and a loser ``pnl < 0``) → ``(None, None)``;
+    * either half-Kelly log argument non-positive →
+      ``(kelly_fraction, None)``. PROVABLY DEAD for any real fold output
+      (``p ∈ [0, 1]``, ``b > 0`` ⇒ ``1 + (f/2)·b = (1 + p + p·b)/2 ≥ 1/2``
+      and ``1 − f/2 ≥ 1/2`` since ``f ≤ p ≤ 1``) — kept as a DEFENSIVE
+      totality guard because :func:`combine_metrics_from_folds` is PUBLIC
+      over arbitrary hand-built folds (e.g. ``winners > n_trades`` puts
+      ``p > 1`` and can push either argument non-positive).
+
+    COMBINE-side by the fold/combine split's exactness law
+    (DEC-METRICS-RUST-COMPUTE-FOLD-001): ``math.log`` is libm territory
+    with no cross-libm bit guarantee, so it MUST stay Python; every input
+    is an existing fold scalar — NO new fold state, the Rust fold wire is
+    untouched.
+    """
+    if winners == 0 or losers == 0:
+        return None, None
+    avg_win = gross_profit_paisa / winners
+    avg_loss = gross_loss_abs_paisa / losers
+    if avg_win == 0.0 or avg_loss == 0.0:
+        return None, None
+    b = avg_win / avg_loss
+    p = winners / n_trades
+    q = 1.0 - p
+    kelly = p - q / b
+    half = kelly / 2.0
+    arg_win = 1.0 + half * b
+    arg_loss = 1.0 - half
+    if arg_win <= 0.0 or arg_loss <= 0.0:
+        return kelly, None
+    return kelly, p * math.log(arg_win) + q * math.log(arg_loss)
 
 
 def _skewness(moments: Moments) -> float | None:
@@ -718,10 +807,15 @@ def combine_metrics_from_folds(
     """COMBINE a :class:`TradeFolds` into the :class:`ResultMetrics` row.
 
     The verbatim scalar tail of the pre-decomposition
-    :func:`_compute_metrics_impl` body — every expression below is
-    token-for-token the original, reading the fold intermediates from
+    :func:`_compute_metrics_impl` body — every pre-existing expression below
+    is token-for-token the original, reading the fold intermediates from
     ``folds`` instead of inline locals (the byte-parity golden suite pins
-    bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). Requires
+    bit-identity; DEC-SWEEP-COMPUTE-FOLD-DECOMP-001). The ADDITIVE
+    ``loss_rate`` + Kelly/growth expressions
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001) are
+    combine-side by the same law — pure functions of existing fold scalars
+    (NO new fold state; the Rust fold wire is untouched), with the libm
+    ``math.log`` staying Python per the fold/combine exactness split. Requires
     ``folds.n_trades >= 1`` — the zero-trade row is
     :func:`_empty_metrics`, the caller's own arm (mirroring the sweep
     core's ``zero_trade`` arm in the design) — and that requirement is
@@ -803,6 +897,10 @@ def combine_metrics_from_folds(
 
     # ── Trade quality (spec lines 557-568) ───────────────────────────
     win_rate = winners / n_trades  # fraction, per spec line 561
+    # loss_rate: the losing-side mirror of win_rate — same denominator, same
+    # fraction convention (DEC-METRICS-LOSSRATE-FIRSTCLASS-001; scratch
+    # trades count in neither numerator, so 1 − win_rate would be WRONG).
+    loss_rate = losers / n_trades
     # profit_factor = gross_profit / gross_loss (spec line 562). None when
     # there are no losing trades (no real denominator).
     profit_factor = _safe_ratio(float(gross_profit), float(gross_loss_abs))
@@ -867,6 +965,13 @@ def combine_metrics_from_folds(
     skewness = _skewness(moments)
     kurtosis = _excess_kurtosis(moments)
 
+    # ── Growth metrics (DEC-METRICS-KELLY-GROWTH-001) ────────────────
+    # Kelly fraction + half-Kelly log growth from the SAME fold scalars —
+    # combine-side by the libm law (math.log; see _kelly_growth).
+    kelly_fraction, log_growth_at_half_kelly = _kelly_growth(
+        n_trades, winners, losers, gross_profit, gross_loss_abs
+    )
+
     return ResultMetrics(
         net_pnl_paisa=net_pnl,
         total_return_pct=total_return_pct,
@@ -891,6 +996,7 @@ def combine_metrics_from_folds(
         winning_trades=winners,
         losing_trades=losers,
         win_rate=win_rate,
+        loss_rate=loss_rate,
         profit_factor=profit_factor,
         avg_winning_trade_paisa=avg_win,
         avg_losing_trade_paisa=avg_loss_abs,
@@ -905,6 +1011,8 @@ def combine_metrics_from_folds(
         skewness=skewness,
         kurtosis=kurtosis,
         returns_std_dev=std_dev,
+        kelly_fraction=kelly_fraction,
+        log_growth_at_half_kelly=log_growth_at_half_kelly,
     )
 
 

@@ -296,6 +296,7 @@ def _metrics(sharpe: float | None) -> ResultMetrics:
         winning_trades=0,
         losing_trades=0,
         win_rate=0.0,
+        loss_rate=0.0,
         profit_factor=None,
         avg_winning_trade_paisa=0,
         avg_losing_trade_paisa=0,
@@ -310,6 +311,8 @@ def _metrics(sharpe: float | None) -> ResultMetrics:
         skewness=None,
         kurtosis=None,
         returns_std_dev=None,
+        kelly_fraction=None,
+        log_growth_at_half_kelly=None,
         deflated_sharpe_ratio=None,
         pbo_probability=None,
     )

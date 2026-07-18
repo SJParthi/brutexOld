@@ -55,6 +55,11 @@ def _metrics(draw: st.DrawFn) -> ResultMetrics:
         profit_factor=draw(_maybe_ratio),
         max_drawdown_pct=draw(_pct),
         win_rate=draw(_rate),
+        # loss_rate joined the gate inputs with the derived Door 5
+        # (DEC-METRICS-KELLY-GROWTH-001) — drawn over the SAME hostile
+        # envelope (incl. NaN/±inf for the fail-closed guard and 1.0 for the
+        # all-loss degenerate arm).
+        loss_rate=draw(_rate),
         win_loss_ratio=draw(_maybe_ratio),
         max_consecutive_losses=draw(st.integers(min_value=0, max_value=50)),
     )
