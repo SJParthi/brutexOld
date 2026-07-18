@@ -32,6 +32,23 @@
 //! ADR-0020 honesty-banner posture: expected payoff ≈ 0); the FFI hop is a
 //! small SLOWDOWN, acceptable because the seam runs a handful of times per
 //! pull start / per mid-run window check, never on a hot path.
+//!
+//! ## Panic posture (round-5 review, MINOR)
+//!
+//! `Cargo.toml` sets `panic = "abort"` for this crate DELIBERATELY. An
+//! aborting kernel panic IS fail-closed — the process dies, no guarded pull
+//! is ever issued, the same safe direction as the typed
+//! `PullStateKernelError` raise the facade's `_call_kernel` belt maps a
+//! Python-level kernel raise to. The facade contract advertises exactly two
+//! catchable classes — a kernel RAISE (a Python `Exception`) and a
+//! wheel-absent/stale resolve — and NEVER promises that a kernel PANIC
+//! degrades catchably (a `pyo3_runtime.PanicException` is a `BaseException`,
+//! outside the `except Exception` belt; and under `abort` a panic never
+//! unwinds for `catch_unwind` to catch), so no behavior is owed. This is
+//! sound because the kernel is Result-based with NO reachable panic: no
+//! `unwrap`/`expect`/`panic!`/index-panic outside `#[cfg(test)]`, and the one
+//! multiply is provably `< 2^57`. Matches the shipped `brutex-feed`
+//! precedent (`panic = "abort"` in its `Cargo.toml`).
 
 // Wave 2D (DEC-RUST-PULL-STATE-001): the --auto pull-gate ladder +
 // Muhurat margined-window + settle-token verdict kernels — codes only;

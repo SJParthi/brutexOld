@@ -70,6 +70,16 @@ blake3 = "1.5"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+# panic = "abort" is DELIBERATE for this fail-closed decision plane (round-5
+# review, MINOR): a kernel panic aborting the process IS fail-closed — no pull
+# is issued (a dead dashboard cannot allow a guarded pull), which is the same
+# safe direction as the typed PullStateKernelError raise. No reachable panic
+# exists (Result-based; no unwrap/expect/panic!/index-panic outside #[cfg(test)];
+# the one multiply is provably < 2^57), and the facade contract advertises only
+# a kernel RAISE (a Python-level Exception, caught by _call_kernel's belt) and
+# wheel-absent/stale as catchable — NEVER a panic. Matches the shipped
+# brutex-feed precedent (its Cargo.toml also sets panic = "abort"). See
+# src/lib.rs for the full rationale.
 panic = "abort"
 strip = "symbols"
 overflow-checks = true # Finance code — an overflow must never be silent.

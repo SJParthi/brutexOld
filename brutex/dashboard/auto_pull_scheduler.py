@@ -328,12 +328,15 @@ def _state_from_payload(payload: object) -> AutoPullState:
 class AutoPullStateStore:
     """The atomic ``.pull_all_spot_auto.json`` sidecar — best-effort I/O.
 
-    Every method is boot-safe: :meth:`load` NEVER raises (a corrupt /
-    unreadable file reads as the DISARMED default with ONE
-    ``auto_pull.state_corrupt`` WARN — the once-flag resets on the next clean
-    load, so a persistently-corrupt file warns once per corruption sighting,
-    never per poll) and :meth:`save` logs-and-returns-``False`` on a failed
-    write (the dashboard is never blocked by its own convenience sidecar).
+    Every method is boot-safe: :meth:`load` never raises for any FILE /
+    corruption shape (a corrupt / unreadable file reads as the DISARMED
+    default with ONE ``auto_pull.state_corrupt`` WARN — the once-flag resets
+    on the next clean load, so a persistently-corrupt file warns once per
+    corruption sighting, never per poll) — the flip-phase kernel/flag errors
+    propagate fail-closed (see :meth:`load` for the
+    ``PullStateKernelError`` / ``PullStateFlagRemovedError`` contract) — and
+    :meth:`save` logs-and-returns-``False`` on a failed write (the dashboard
+    is never blocked by its own convenience sidecar).
     """
 
     def __init__(self, lake_root: Path) -> None:

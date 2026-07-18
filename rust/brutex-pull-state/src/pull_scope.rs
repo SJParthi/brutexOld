@@ -14,6 +14,18 @@
 //! self-synchronizing property guarantees a valid needle only ever matches
 //! on char boundaries).
 //!
+//! DESIGN CARVE-OUT ("kernel returns CODES, Python composes messages"): the
+//! safety-critical DECISION plane of this crate returns integer/token codes —
+//! `pull_allowed_us` → bool, [`scope_token`] → u8, `classify_pull_outcome` →
+//! machine tokens, the census → identifier pairs, the intent/state shape
+//! verdicts — so Python never parses kernel PROSE to decide anything. These
+//! three note-surgery functions are the deliberate EXCEPTION: a byte-EXACT
+//! report-note RENDER seam where the string IS the code (the human-prose
+//! completion/deferral note is the whole output, byte-exactness the contract)
+//! — the same shipped pattern as the `brutex-lake` parquet render seam and the
+//! `stats_shard` JSON escaper. Drift-pinned three ways (golden + Python-source
+//! cross-language pin + differential — see below), never a silent desync.
+//!
 //! The anchor literals are DUPLICATED from Python by design (a Rust crate
 //! cannot import them) and drift-pinned three ways: the committed golden
 //! fixture (`tests/golden/fixtures/pull_scope_note_surgery_rust.tsv`,
