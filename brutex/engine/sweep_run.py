@@ -974,6 +974,16 @@ def ranked_combo_to_result_row(
         vix_mean=vix_mean,
         vix_min=vix_min,
         vix_max=vix_max,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate is total on ResultMetrics;
+        # the Kelly pair rides the SAME _metric_or_zero None → 0.0 coercion
+        # the rankable profit_factor column has always ridden (the mirrored
+        # precedent — design-pack ruling), so a row written by current code
+        # always carries concrete floats and a stored None can only mean a
+        # pre-extension file (the Ruling-5 read boundary).
+        loss_rate=m.loss_rate,
+        kelly_fraction=_metric_or_zero(m.kelly_fraction),
+        log_growth_at_half_kelly=_metric_or_zero(m.log_growth_at_half_kelly),
     )
 
 

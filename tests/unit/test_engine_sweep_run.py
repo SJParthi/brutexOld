@@ -503,6 +503,17 @@ class TestRankedComboToResultRow:
         # Prices are 2dp-snapped Decimals drawn from real OHLC.
         assert row.avg_entry_price == row.avg_entry_price.quantize(Decimal("0.01"))
         assert row.avg_entry_price > 0
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate maps 1:1 (total on
+        # metrics); the Kelly pair rides the SAME _metric_or_zero None → 0.0
+        # coercion the rankable profit_factor column has always ridden, so a
+        # row written by current code always carries concrete floats.
+        assert row.loss_rate == rc.metrics.loss_rate
+        m = rc.metrics
+        assert row.kelly_fraction == (m.kelly_fraction if m.kelly_fraction is not None else 0.0)
+        assert row.log_growth_at_half_kelly == (
+            m.log_growth_at_half_kelly if m.log_growth_at_half_kelly is not None else 0.0
+        )
 
     def test_short_direction_uses_sell_side(self) -> None:
         bars = _trending_bars()

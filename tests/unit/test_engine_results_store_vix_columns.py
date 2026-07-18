@@ -314,7 +314,19 @@ class TestVixFlushLoad:
         store.append(_row())
         store.flush()
         schema = pl.read_parquet_schema(path)
-        assert [*schema][-3:] == ["vix_mean", "vix_min", "vix_max"]
+        # Ruling-5 generation order: the VIX trio, then the growth trio
+        # STRICTLY AFTER it (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001 — each optional-column generation is
+        # appended after the previous one; the pre-change pin ended at the
+        # VIX trio and was consciously extended, not weakened).
+        assert [*schema][-6:] == [
+            "vix_mean",
+            "vix_min",
+            "vix_max",
+            "loss_rate",
+            "kelly_fraction",
+            "log_growth_at_half_kelly",
+        ]
         assert all(schema[name] == pl.Float64 for name in VIX_FIELDS)
 
     def test_store_without_the_columns_loads_none_trio(self, tmp_path: Path) -> None:

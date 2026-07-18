@@ -174,7 +174,18 @@ def test_golden_run_id_is_byte_stable() -> None:
 # the summary tally are unchanged (pinned by test_golden_summary_is_stable +
 # test_golden_run_id_is_byte_stable; the pre-column layout itself stays pinned
 # by tests/golden/test_results_store_backcompat_golden.py's frozen fixture).
-_GOLDEN_CONTENT_HASH = "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
+# Re-locked AGAIN for DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+# DEC-METRICS-KELLY-GROWTH-001 (schema-additive, the #1743 audited-re-lock
+# precedent): the persisted schema gained the three appended nullable
+# loss_rate/kelly_fraction/log_growth_at_half_kelly columns (concrete values on
+# this fixture — loss_rate always; the Kelly pair through the projector's
+# _metric_or_zero coercion), so the byte stream moved by design. AUDIT: the
+# ROW SET is UNCHANGED — enumerated/evaluated/ranked/persisted stay 5/5/5/5
+# (test_golden_summary_is_stable passed UNMODIFIED, so the Door-5 binomial-null
+# loosening admitted NO new combo on this fixture) and every run_id is
+# byte-stable (test_golden_run_id_is_byte_stable UNMODIFIED — run identity
+# untouched); ONLY the three appended columns differ.
+_GOLDEN_CONTENT_HASH = "60d3949461975101bf4075dac3f78ae6e1433b4d2905cefab071ab3d4a09dd4d"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

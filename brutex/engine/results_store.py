@@ -56,9 +56,12 @@ Optional-column back-compat (the ``WindowLedger.bars_net_new`` template)
 Columns added AFTER a store format ships are **appended LAST** in the Parquet
 column order and read back via :func:`_optional_float`: a store written before
 the column existed loads that field as ``None`` — the honest unknown, never a
-fabricated value. Two such generations exist today: ``deflated_sharpe``
-(DEC-SWEEP-WINNERS-BY-NAME-001 era) and the ``vix_mean``/``vix_min``/``vix_max``
-trio (DEC-VIX-STAMP-WIRE-001), each pinned by a committed pre-column fixture in
+fabricated value. Three such generations exist today: ``deflated_sharpe``
+(DEC-SWEEP-WINNERS-BY-NAME-001 era), the ``vix_mean``/``vix_min``/``vix_max``
+trio (DEC-VIX-STAMP-WIRE-001), and the loss/growth trio
+``loss_rate``/``kelly_fraction``/``log_growth_at_half_kelly``
+(:data:`GROWTH_FIELDS` — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+DEC-METRICS-KELLY-GROWTH-001), pinned by the committed pre-column fixtures in
 ``tests/golden/fixtures/``.
 
 Idempotence + byte-determinism (Golden Rule #4 / #7, mirrors
@@ -225,14 +228,61 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: VIX-attribution imports it — never a mirrored literal — so adding a fourth
 #: field here can never silently desync the attribution's nulling/schema gates.
 VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
+#: Float64 **nullable** loss/growth metric columns
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001):
+#: ``loss_rate`` (the losing-side mirror of ``win_rate``) plus the Kelly
+#: pair ``kelly_fraction`` / ``log_growth_at_half_kelly``, written from
+#: :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector
+#: (``sweep_run.ranked_combo_to_result_row``) — the Kelly pair through the
+#: SAME ``_metric_or_zero`` ``None`` → ``0.0`` coercion the rankable
+#: ``profit_factor`` column already rides (the mirrored precedent,
+#: DEC-METRICS-KELLY-GROWTH-001 design-pack ruling), so a row written by
+#: CURRENT code always carries concrete floats and ``None`` appears ONLY
+#: when reading a store written BEFORE the columns existed (the Ruling-5
+#: presence-tolerant boundary — the honest unknown). Full precision, NEVER
+#: rounded. Appended LAST in the on-disk column order, AFTER the VIX trio (the
+#: optional-column back-compat template, gap-register ruling 5). Unlike
+#: VIX these ARE rankable — under the explicit NULLS-LAST total order of
+#: :data:`_NULLABLE_RANKABLE_FIELDS` — and, unlike VIX, each is a PURE
+#: FUNCTION of other stored columns + the run's code (which is inside the
+#: BLAKE3 run identity via ``code_commit_sha``), so a value-vs-value
+#: conflict under one ``run_id`` is a genuine reproducibility breach.
+#: PUBLIC for the same reason as :data:`VIX_FIELDS` — the ONE cross-module
+#: source of truth for the column names (CLAUDE.md §2 Rule 11 COMMON).
+GROWTH_FIELDS: Final[tuple[str, ...]] = (
+    "loss_rate",
+    "kelly_fraction",
+    "log_growth_at_half_kelly",
+)
 
-#: Numeric columns a leaderboard may rank by (metrics + money + counts).
-#: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
-#: deliberately NOT rankable — VIX must never drive strategy ranking
-#: (CLAUDE.md §2 Rule 3) and a nullable column has no total order.
+#: Nullable fields that ride the DIRECTIONAL ``None`` → value backfill lane
+#: of :meth:`ResultsStore.append` (the DEC-VIX-STAMP-WIRE-001 law, extended
+#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001): a redo into a
+#: pre-extension store (``load_or_create_store`` PRE-LOADS the old file)
+#: appends rows that now CARRY values where the stored row honestly holds
+#: ``None`` — an upgrade, never a conflict. Value-vs-value disagreement
+#: still raises (typed per family — see :func:`_merge_nullable_backfill`).
+_BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(VIX_FIELDS + GROWTH_FIELDS)
+
+#: Non-nullable numeric columns a leaderboard may rank by (metrics + money +
+#: counts). The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio
+#: are deliberately NOT rankable — VIX must never drive strategy ranking
+#: (CLAUDE.md §2 Rule 3), and a nullable column has no total order UNLESS an
+#: explicit null-placement law is defined for it: the growth trio ranks under
+#: the NULLS-LAST law of :data:`_NULLABLE_RANKABLE_FIELDS` below
+#: (DEC-METRICS-KELLY-GROWTH-001 — a conscious, documented extension;
+#: ``deflated_sharpe`` + VIX keep their legacy non-rankable status).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
+
+#: NULLABLE columns :meth:`ResultsStore.top_k` may rank by, under the ONE
+#: explicit null-placement law (DEC-METRICS-KELLY-GROWTH-001): a ``None``
+#: value ranks AFTER every real value in BOTH directions (nulls-LAST — an
+#: unmeasurable metric never outranks a measured one), with the same stable
+#: ``run_id``-ASC tie-break as :data:`_RANKABLE_FIELDS`. Kept a SEPARATE set
+#: so every pre-existing rankable column's behaviour stays byte-identical.
+_NULLABLE_RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(GROWTH_FIELDS)
 
 
 class ResultsStoreError(BruteXError):
@@ -400,6 +450,18 @@ class ResultRow:
         order law ``vix_min <= vix_mean <= vix_max``. Round-trips as a Parquet
         null when ``None``. NEVER rankable, NEVER in the run identity
         (CLAUDE.md §2 Rule 3).
+    loss_rate, kelly_fraction, log_growth_at_half_kelly
+        The nullable loss/growth metric trio (:data:`GROWTH_FIELDS` —
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001),
+        written from the combo's :class:`~brutex.metrics.compute.ResultMetrics`
+        by the ONE projector (``loss_rate`` is total there; the Kelly pair
+        rides the projector's ``_metric_or_zero`` ``None`` → ``0.0`` coercion
+        — the mirrored ``profit_factor`` precedent). Full precision, NEVER
+        rounded; each present value must be finite. ``None`` (the default)
+        appears only when a pre-extension store loads presence-tolerantly
+        (the honest unknown — Ruling 5). Round-trips as a Parquet null.
+        Rankable under the NULLS-LAST law
+        (:data:`_NULLABLE_RANKABLE_FIELDS`); NEVER in the run identity.
 
     Raises
     ------
@@ -436,6 +498,9 @@ class ResultRow:
     vix_mean: float | None = None
     vix_min: float | None = None
     vix_max: float | None = None
+    loss_rate: float | None = None
+    kelly_fraction: float | None = None
+    log_growth_at_half_kelly: float | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -492,7 +557,7 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS):
+        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS, *GROWTH_FIELDS):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -586,21 +651,30 @@ class ResultsStore:
         """Insert *row* keyed by its ``run_id``, idempotently (O(1)).
 
         A re-append under an already-stored ``run_id`` follows the DIRECTIONAL
-        three-branch rule (DEC-VIX-STAMP-WIRE-001) on the nullable
-        REFERENCE-ONLY VIX trio (:data:`VIX_FIELDS`), per field:
+        three-branch rule (DEC-VIX-STAMP-WIRE-001, extended to the growth trio
+        by DEC-METRICS-KELLY-GROWTH-001) on the nullable backfillable fields
+        (:data:`_BACKFILLABLE_FIELDS` — the REFERENCE-ONLY VIX trio +
+        :data:`GROWTH_FIELDS`), per field:
 
         1. **Identical value** (including both-``None``) → OK, a silent no-op.
         2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
            the union (a stamped redo may fill in what an unstamped run
-           honestly didn't know; the reverse direction ``value → None`` never
-           erases — an unstamped redo is *less* informed, not conflicting).
-        3. **Two different known values** → :class:`VixTrioConflictError` —
-           NOT a run-identity breach (VIX is deliberately outside the
-           identity): the India-VIX lake moved between the two runs, so the
-           typed raise names that cause + remedy and the grid drivers demote
-           it to a #904 tuple-skip instead of a grid abort.
+           honestly didn't know — for the growth trio: a redo of a
+           PRE-EXTENSION tuple carries values the old store honestly lacked;
+           the reverse direction ``value → None`` never erases — a
+           less-informed redo is *less* informed, not conflicting).
+        3. **Two different known values** → typed per family: on a VIX field,
+           :class:`VixTrioConflictError` — NOT a run-identity breach (VIX is
+           deliberately outside the identity): the India-VIX lake moved
+           between the two runs, so the typed raise names that cause + remedy
+           and the grid drivers demote it to a #904 tuple-skip instead of a
+           grid abort. On a growth field, the PLAIN
+           :class:`ResultsStoreError` — the growth trio is a pure function of
+           the OTHER stored columns + the run's code (inside the run identity
+           via ``code_commit_sha``), so two known values under one ``run_id``
+           ARE a genuine reproducibility breach, never a lake-moved story.
 
-        Every NON-VIX field keeps the strict rule: any difference raises the
+        Every other field keeps the strict rule: any difference raises the
         plain :class:`ResultsStoreError` run-identity conflict (a genuine
         reproducibility breach — the backfill never masks it).
 
@@ -613,8 +687,9 @@ class ResultsStore:
         -------
         bool
             ``True`` if the store content changed — the row was newly added OR
-            an existing row was VIX-backfill-upgraded; ``False`` if the stored
-            row already carried everything *row* knows (the idempotent no-op).
+            an existing row was backfill-upgraded (VIX and/or growth fields);
+            ``False`` if the stored row already carried everything *row* knows
+            (the idempotent no-op).
 
         Raises
         ------
@@ -636,7 +711,7 @@ class ResultsStore:
                 for f in fields(ResultRow)
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
-            if any(name not in VIX_FIELDS for name in differing):
+            if any(name not in _BACKFILLABLE_FIELDS for name in differing):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
                     # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
@@ -659,21 +734,34 @@ class ResultsStore:
                     f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
-            merged = _merge_vix_backfill(existing, row)
+            merged = _merge_nullable_backfill(existing, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
-                # (it only turns known VIX values into None) — the stored row
-                # already carries the union, nothing changes.
+                # (it only turns known backfillable values into None) — the
+                # stored row already carries the union, nothing changes.
                 return False
-            _LOG.info(
-                "results_store.vix_backfill",
-                run_id=row.run_id,
-                backfilled_fields=tuple(
-                    name
-                    for name in VIX_FIELDS
-                    if getattr(existing, name) is None and getattr(merged, name) is not None
-                ),
+            vix_backfilled = tuple(
+                name
+                for name in VIX_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
             )
+            growth_backfilled = tuple(
+                name
+                for name in GROWTH_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
+            if vix_backfilled:
+                _LOG.info(
+                    "results_store.vix_backfill",
+                    run_id=row.run_id,
+                    backfilled_fields=vix_backfilled,
+                )
+            if growth_backfilled:
+                _LOG.info(
+                    "results_store.growth_backfill",
+                    run_id=row.run_id,
+                    backfilled_fields=growth_backfilled,
+                )
             self._rows[row.run_id] = merged
             return True
         self._rows[row.run_id] = row
@@ -704,15 +792,25 @@ class ResultsStore:
         broken by ``run_id`` ascending, so the leaderboard is identical for any
         insertion order. Returns fewer than *k* rows if the store holds fewer.
 
+        A NULLABLE rankable column (:data:`_NULLABLE_RANKABLE_FIELDS` — the
+        growth trio, DEC-METRICS-KELLY-GROWTH-001) ranks under the explicit
+        NULLS-LAST total order: a ``None`` value (a pre-extension store's
+        honest unknown) ranks AFTER every real value in BOTH directions —
+        an unmeasurable metric never outranks a measured one — with the same
+        stable ``run_id``-ASC tie-break. Every pre-existing
+        :data:`_RANKABLE_FIELDS` column's behaviour is byte-identical.
+
         Parameters
         ----------
         k
             Number of leaders to return (``>= 1``).
         by
             Column to rank by — one of the metric, money or count columns
-            (see :data:`_RANKABLE_FIELDS`).
+            (see :data:`_RANKABLE_FIELDS`) or a nullable rankable column
+            (see :data:`_NULLABLE_RANKABLE_FIELDS`).
         descending
             ``True`` (default) ranks largest-first; ``False`` smallest-first.
+            ``None`` values rank LAST either way.
 
         Raises
         ------
@@ -721,11 +819,16 @@ class ResultsStore:
         """
         if k < 1:
             raise ResultsStoreError(f"top_k: k must be >= 1, got {k}")
-        if by not in _RANKABLE_FIELDS:
+        getter: Callable[[ResultRow], float] | Callable[[ResultRow], tuple[int, float]]
+        if by in _NULLABLE_RANKABLE_FIELDS:
+            getter = _nullable_field_getter(by, descending=descending)
+        elif by in _RANKABLE_FIELDS:
+            getter = _field_getter(by)
+        else:
             raise ResultsStoreError(
-                f"top_k: unknown ranking field {by!r}; choose one of {sorted(_RANKABLE_FIELDS)}"
+                f"top_k: unknown ranking field {by!r}; choose one of "
+                f"{sorted(_RANKABLE_FIELDS | _NULLABLE_RANKABLE_FIELDS)}"
             )
-        getter = _field_getter(by)
         # Stable two-pass sort: run_id asc first (the tie-break), then by the
         # ranking column — Python's stable sort preserves run_id order in ties.
         ordered = sorted(self._rows.values(), key=lambda r: r.run_id)
@@ -853,16 +956,18 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
-        for name in VIX_FIELDS:
-            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
-            # optional-column back-compat template); None → Parquet null.
+        for name in (*VIX_FIELDS, *GROWTH_FIELDS):
+            # The nullable REFERENCE-ONLY VIX trio + the nullable growth trio
+            # — appended LAST, in that order (the optional-column back-compat
+            # template, each generation strictly after the previous one);
+            # None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices → the VIX trio LAST for legacy-file
-        # back-compat) for a reproducible byte stream.
+        # metrics → deflated → prices → the VIX trio → the growth trio LAST
+        # for legacy-file back-compat) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
@@ -871,7 +976,13 @@ class ResultsStore:
                     (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
                 ),
                 **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
+                    (
+                        *_METRIC_FIELDS,
+                        *_NULLABLE_METRIC_FIELDS,
+                        *_PRICE_FIELDS,
+                        *VIX_FIELDS,
+                        *GROWTH_FIELDS,
+                    ),
                     pl.Float64,
                 ),
             },
@@ -916,17 +1027,20 @@ def _validate_run_id(run_id: str) -> None:
         raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
 
 
-def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
-    """Union-merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
+    """Union-merge two same-``run_id`` rows differing ONLY in backfillable fields.
 
     The resolution is a per-field UNION under the directional law of
-    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
-    :data:`VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
-    *honestly unknown*, never a conflicting fact — so a stamped redo backfills
-    an unstamped row and an unstamped redo never erases a stamp. The caller
-    (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
-    field is equal — a non-VIX difference is the plain run-identity conflict
-    and never reaches this merge.
+    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001, extended to the
+    growth trio by DEC-METRICS-KELLY-GROWTH-001): for each of
+    :data:`_BACKFILLABLE_FIELDS` the known (non-``None``) value wins —
+    ``None`` means *honestly unknown*, never a conflicting fact — so a
+    more-informed redo backfills a less-informed row (a stamped redo fills
+    the VIX trio; a post-extension redo fills the growth trio of a
+    pre-extension store) and a less-informed redo never erases. The caller
+    (:meth:`ResultsStore.append`) has ALREADY established that every
+    non-backfillable field is equal — any other difference is the plain
+    run-identity conflict and never reaches this merge.
 
     Raises
     ------
@@ -938,7 +1052,38 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
         a merged trio violating ``min <= mean <= max`` — still raises the
         plain order-law :class:`ResultsStoreError` from the merged row's own
         construction.)
+    ResultsStoreError
+        When one GROWTH field carries two DIFFERENT known values: the growth
+        trio is a pure function of the other stored columns + the run's code
+        (inside the BLAKE3 run identity via ``code_commit_sha``), so — unlike
+        VIX — two known values under one ``run_id`` with every other column
+        equal ARE a genuine reproducibility breach (a formula drift without a
+        code-identity re-key), refused loudly (Golden Rule #4).
     """
+    growth_conflicting = tuple(
+        name
+        for name in GROWTH_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if growth_conflicting:
+        _LOG.error(
+            "results_store.growth_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=growth_conflicting,
+            stored={name: getattr(existing, name) for name in GROWTH_FIELDS},
+            incoming={name: getattr(incoming, name) for name in GROWTH_FIELDS},
+        )
+        raise ResultsStoreError(
+            f"growth-metric conflict for {existing.run_id}: the stored row and the "
+            f"redo carry different known values for {', '.join(growth_conflicting)} "
+            f"while every non-backfillable column is identical. The growth trio is a "
+            f"pure function of the other stored columns + the run's code (which is "
+            f"inside the BLAKE3 run identity via code_commit_sha), so this is a "
+            f"genuine reproducibility breach — a metric-formula drift without a "
+            f"code-identity re-key. Refusing to overwrite (Golden Rule #4)."
+        )
     conflicting = tuple(
         name
         for name in VIX_FIELDS
@@ -973,7 +1118,7 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
             if getattr(existing, name) is not None
             else getattr(incoming, name)
         )
-        for name in VIX_FIELDS
+        for name in _BACKFILLABLE_FIELDS
     }
     # Explicit keywords (not a **splat) so mypy checks each against its field type.
     return replace(
@@ -981,7 +1126,37 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
         vix_mean=resolved["vix_mean"],
         vix_min=resolved["vix_min"],
         vix_max=resolved["vix_max"],
+        loss_rate=resolved["loss_rate"],
+        kelly_fraction=resolved["kelly_fraction"],
+        log_growth_at_half_kelly=resolved["log_growth_at_half_kelly"],
     )
+
+
+def _nullable_field_getter(
+    name: str, *, descending: bool
+) -> Callable[[ResultRow], tuple[int, float]]:
+    """Return a NULLS-LAST sort-key accessor for a nullable rankable column.
+
+    The ONE null-placement law (DEC-METRICS-KELLY-GROWTH-001): the key is a
+    ``(presence, value)`` pair whose presence flag is chosen so that — under
+    the caller's single ``reverse=descending`` sort — a ``None`` value lands
+    AFTER every real value in BOTH directions (an unmeasurable metric never
+    outranks a measured one). Descending (``reverse=True``): present rows key
+    ``(1, value)`` and ``None`` keys ``(0, 0.0)`` — reversed, every present
+    row precedes it. Ascending (``reverse=False``): present rows key
+    ``(0, value)`` and ``None`` keys ``(1, 0.0)`` — un-reversed, ``None``
+    sorts last. Ties (equal values, and all-``None``) fall through to the
+    caller's stable ``run_id``-ASC pre-sort.
+    """
+    present_flag = 1 if descending else 0
+
+    def _get(row: ResultRow) -> tuple[int, float]:
+        value: float | None = getattr(row, name)
+        if value is None:
+            return (1 - present_flag, 0.0)
+        return (present_flag, value)
+
+    return _get
 
 
 def _field_getter(name: str) -> Callable[[ResultRow], float]:
@@ -1077,6 +1252,9 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         vix_mean=_optional_float(record, "vix_mean"),
         vix_min=_optional_float(record, "vix_min"),
         vix_max=_optional_float(record, "vix_max"),
+        loss_rate=_optional_float(record, "loss_rate"),
+        kelly_fraction=_optional_float(record, "kelly_fraction"),
+        log_growth_at_half_kelly=_optional_float(record, "log_growth_at_half_kelly"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1111,6 +1289,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 __all__ = [
     "CONDITION_NAME_SEP",
+    "GROWTH_FIELDS",
     "MASK_BITS_MAX",
     "VIX_FIELDS",
     "FlushResult",

@@ -95,9 +95,11 @@ def test_pre_deflated_store_loads_with_none_deflated_and_none_trio() -> None:
 def test_legacy_load_reflushes_to_the_current_schema_losslessly(tmp_path: Path) -> None:
     """Load-old → flush-new → load-new round-trips every row unchanged.
 
-    The re-flushed file carries the CURRENT schema — the VIX trio present as
-    Parquet nulls (checked structurally, not by byte pin) — so a migrated
-    store is immediately backfillable by a stamped redo.
+    The re-flushed file carries the CURRENT schema — the VIX trio + the
+    growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+    DEC-METRICS-KELLY-GROWTH-001) present as Parquet nulls (checked
+    structurally, not by byte pin) — so a migrated store is immediately
+    backfillable by a stamped redo.
     """
     pl = pytest.importorskip("polars")
     legacy = ResultsStore.load(PRE_VIX_FIXTURE)
@@ -108,4 +110,12 @@ def test_legacy_load_reflushes_to_the_current_schema_losslessly(tmp_path: Path) 
     migrated.flush()
     assert ResultsStore.load(migrated_path).rows() == legacy.rows()
     schema = pl.read_parquet_schema(migrated_path)
-    assert [*schema][-3:] == ["vix_mean", "vix_min", "vix_max"]  # appended LAST
+    # Ruling-5 appended-LAST order: the VIX trio, then the growth trio.
+    assert [*schema][-6:] == [
+        "vix_mean",
+        "vix_min",
+        "vix_max",
+        "loss_rate",
+        "kelly_fraction",
+        "log_growth_at_half_kelly",
+    ]
