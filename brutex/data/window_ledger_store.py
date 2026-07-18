@@ -350,6 +350,7 @@ def load_window_ledger(
     (~40% of the measured 794 B/row logical decode cost). Values byte-identical
     — only object identity changes; the memo dies with this call.
     """
+    require_ledger_render_env_unset()
     path = ledger_path(lake_root)
     delta_files = list_ledger_deltas(lake_root)
     load_failed = False
@@ -517,6 +518,68 @@ def render_ledger_parquet(rows: Sequence[LedgerRow]) -> bytes:
     return bytes(brutex_identity.render_ledger_parquet(rows))
 
 
+#: The RETIRED render-seam env flag (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+#: MIGRATION.md #1918 — its render-plane arm SUPERSEDED-IN-PART by
+#: DEC-RUST-RUNID-STORES-001 per the coordinator ruling of 2026-07-18): the
+#: ``brutex.data.lake_rust_ledger_render`` facade + the pyarrow oracle are
+#: GONE — the ``brutex_identity`` kernel render above is unconditionally the
+#: ONE writer. The name survives ONLY so :func:`require_ledger_render_env_unset`
+#: can refuse a stale deployment config that still exports it (the FillMode
+#: ``require_fill_mode_env_unset`` precedent).
+LEDGER_RENDER_ENV: Final[str] = "BRUTEX_LAKE_RUST_LEDGER_RENDER"
+
+
+class LedgerRenderFlagRemovedError(ValueError):
+    """An entry point found the removed ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob SET.
+
+    DEC-RUST-RUNID-STORES-001 (supersedes-in-part
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane): the
+    window-ledger parquet render is no longer flag-selectable — the
+    ``brutex_identity`` kernel render is canonical and the pyarrow/brutex-lake
+    arms are retired. Raised (never warned) so a stale config that still
+    exports the variable — in ANY spelling, its old truthy AND falsy forms
+    included — fails LOUD at the store entry instead of silently pretending
+    the knob is honoured.
+    """
+
+
+def require_ledger_render_env_unset(env: Mapping[str, str] | None = None) -> None:
+    """Refuse LOUDLY when the removed ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob is set.
+
+    Wired at ALL THREE store entries (:func:`load_window_ledger` /
+    :func:`save_window_ledger` / :func:`append_ledger_delta`) — exactly where
+    the retired seam's resolver used to read the env — so the refusal fires
+    before any lake I/O.
+
+    Parameters
+    ----------
+    env
+        The environment mapping to read (defaults to ``os.environ`` — the
+        injection seam keeps the guard pure for tests).
+
+    Raises
+    ------
+    LedgerRenderFlagRemovedError
+        When the variable is present with ANY non-empty value — the old
+        truthy forms AND the old falsy forms alike: the knob itself is
+        removed (DEC-RUST-RUNID-STORES-001), and accepting the spelling that
+        happens to match today's one render would silently bless stale
+        configs. An UNSET or empty-string variable passes (empty = the
+        common ``VAR= cmd`` unset idiom; nothing was configured).
+    """
+    source = os.environ if env is None else env
+    raw = source.get(LEDGER_RENDER_ENV, "")
+    if raw.strip():
+        raise LedgerRenderFlagRemovedError(
+            f"${LEDGER_RENDER_ENV}={raw!r} is set, but the window-ledger render "
+            f"is no longer flag-selectable — the brutex_identity kernel render "
+            f"is canonical (DEC-RUST-RUNID-STORES-001, superseding-in-part "
+            f"DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane). "
+            f"Unset the variable; the removed knob is refused for EVERY value, "
+            f"its old truthy and falsy spellings included."
+        )
+
+
 def _next_delta_path(directory: Path) -> Path:
     """Mint the next delta filename — call ONLY while holding the ledger flock.
 
@@ -583,6 +646,7 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
 
     Returns the number of rows appended (0 for a no-op / a skipped flush).
     """
+    require_ledger_render_env_unset()
     rows = ledger.dirty_rows()
     if not rows:
         return 0
@@ -687,6 +751,7 @@ def save_window_ledger(
     behind would newer-wins-override this fresher base on the next load until a
     later successful save prunes it.
     """
+    require_ledger_render_env_unset()
     import contextlib
 
     # Liveness beats around the whole synchronous save body
@@ -1814,10 +1879,12 @@ __all__ = [
     "DELTAS_DIRNAME",
     "LEDGER_DIRNAME",
     "LEDGER_FILENAME",
+    "LEDGER_RENDER_ENV",
     "LEDGER_SAVE_SLOW_WARN_ENV",
     "LIVE_FLUSH_MIN_INTERVAL_S",
     "SKIPPED_AUDIT_CURSOR_FILENAME",
     "LakeSpanIndex",
+    "LedgerRenderFlagRemovedError",
     "LedgerRow",
     "append_ledger_delta",
     "begin_pull_ledger",
@@ -1836,6 +1903,7 @@ __all__ = [
     "reconcile_ledger_windows",
     "reconcile_ledger_with_lake",
     "render_ledger_parquet",
+    "require_ledger_render_env_unset",
     "resolve_ledger_save_slow_warn_seconds",
     "run_skipped_audit",
     "run_skipped_audit_guarded",

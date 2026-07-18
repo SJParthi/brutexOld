@@ -42,7 +42,9 @@ from brutex.data.window_ledger import (
 )
 from brutex.data.window_ledger_store import (
     DEFAULT_LEDGER_SAVE_SLOW_WARN_S,
+    LEDGER_RENDER_ENV,
     LEDGER_SAVE_SLOW_WARN_ENV,
+    LedgerRenderFlagRemovedError,
     LedgerRow,
     append_ledger_delta,
     begin_pull_ledger,
@@ -60,6 +62,7 @@ from brutex.data.window_ledger_store import (
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
+    require_ledger_render_env_unset,
     resolve_ledger_save_slow_warn_seconds,
     save_window_ledger,
     seed_enclosed_windows,
@@ -3276,3 +3279,111 @@ class TestCorruptParquetNeverAborts:
         ]
         assert len(warnings) == 1
         assert "parquet decode panicked" in str(warnings[0].get("error"))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# RETIRED: TestLedgerRustRenderSeam (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+# MIGRATION.md #1918). The flag-gated ``_ledger_parquet_bytes`` render seam
+# it pinned (pyarrow oracle default / BRUTEX_LAKE_RUST_LEDGER_RENDER →
+# brutex-lake crate arm) was SUPERSEDED-IN-PART on the render plane by
+# DEC-RUST-RUNID-STORES-001 (#1954) per the coordinator ruling of 2026-07-18:
+# the ``brutex_identity`` kernel render is unconditionally the ONE writer, so
+# the seam class's intent is void — its substance survives as (a) the kernel
+# canonical-bytes goldens (``tests/golden/test_window_ledger_bytes_probe.py``
+# + ``test_runid_stores_oracle_golden.py``), (b) the adapted row-fixed-point +
+# state-convergence integration gates
+# (``tests/integration/test_window_ledger_rust_reader_parity.py`` /
+# ``..._state_convergence.py``), and (c) ``TestLedgerRenderEnvGuard`` below —
+# a SET flag now REFUSES loudly instead of selecting a retired render arm.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLedgerRenderEnvGuard:
+    """The removed ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob REFUSES loudly.
+
+    DEC-RUST-RUNID-STORES-001 (supersedes-in-part
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane) — the
+    FillMode ``require_fill_mode_env_unset`` precedent: the render is no
+    longer flag-selectable, so a stale config that still exports the retired
+    variable — its old truthy AND falsy spellings alike — must fail LOUD at
+    every store entry (load / save / append) instead of silently pretending
+    the knob is honoured. Unset (and the ``VAR= cmd`` empty-string unset
+    idiom) stays the normal, guard-silent path.
+    """
+
+    @staticmethod
+    def _ledger() -> WindowLedger:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        return ledger
+
+    def test_unset_env_passes_and_all_three_entries_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(LEDGER_RENDER_ENV, raising=False)
+        ledger = self._ledger()
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        save_window_ledger(ledger, tmp_path)
+        assert load_window_ledger(tmp_path).count == 1
+
+    def test_empty_string_is_the_unset_idiom_and_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``VAR= cmd`` — nothing was configured; the guard stays silent
+        # (the FillMode precedent's documented envelope).
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "")
+        require_ledger_render_env_unset()
+        save_window_ledger(self._ledger(), tmp_path)
+        assert load_window_ledger(tmp_path).count == 1
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "1",  # the old truthy arm — would have selected the retired crate render
+            "true",
+            "0",  # the old falsy arm — even the spelling matching today's one render refuses
+            "false",
+            "off",
+            "definitely-not-a-flag",  # junk (the old resolver's loud-OFF class)
+            "  1  ",  # whitespace-padded still refuses (strip() finds content)
+        ],
+    )
+    def test_any_set_value_refuses_at_every_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(LEDGER_RENDER_ENV, value)
+        ledger = self._ledger()
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            append_ledger_delta(ledger, tmp_path)
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            save_window_ledger(ledger, tmp_path)
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            load_window_ledger(tmp_path)
+        # The refusal fired BEFORE any lake I/O — nothing was created.
+        assert not (tmp_path / "window_ledger").exists()
+
+    def test_refusal_names_the_dec_and_the_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "1")
+        with pytest.raises(LedgerRenderFlagRemovedError) as exc_info:
+            require_ledger_render_env_unset()
+        message = str(exc_info.value)
+        assert "DEC-RUST-RUNID-STORES-001" in message
+        assert "DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001" in message
+        assert LEDGER_RENDER_ENV in message
+        assert "'1'" in message  # the offending value is repr()'d into the refusal
+
+    def test_injection_seam_reads_the_given_mapping_not_os_environ(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pure-guard seam: an explicit mapping wins over os.environ (and an
+        # os.environ-set value is invisible when a clean mapping is passed).
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "1")
+        require_ledger_render_env_unset(env={})
+        monkeypatch.delenv(LEDGER_RENDER_ENV)
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            require_ledger_render_env_unset(env={LEDGER_RENDER_ENV: "1"})
+
+    def test_error_type_is_a_value_error(self) -> None:
+        # The typed refusal follows the FillModeRemovedError precedent
+        # (ValueError subclass — a config error, catchable narrowly).
+        assert issubclass(LedgerRenderFlagRemovedError, ValueError)

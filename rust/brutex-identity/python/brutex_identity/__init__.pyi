@@ -17,9 +17,11 @@ SOURCE_DIGEST: Final[str]
 _EXPECTED_COMPILED_SYMBOLS: Final[tuple[str, ...]]
 
 #: The fixed 16-column window-ledger schema order (the ONE schema authority).
-LEDGER_COLUMNS: Final[tuple[str, ...]]
+#: The pyo3 runtime exports a Python LIST (the store docstring says so) —
+#: the stub matches the runtime type exactly (refuter NIT, 2026-07-18).
+LEDGER_COLUMNS: Final[list[str]]
 #: The 11 required core columns (the read-side wrong-shape guard).
-LEDGER_CORE_COLUMNS: Final[tuple[str, ...]]
+LEDGER_CORE_COLUMNS: Final[list[str]]
 
 #: One serialised window-ledger row — the 16-field tuple of
 #: `WindowLedger.to_rows` (`LedgerRowTuple` on the brutex side).

@@ -7,7 +7,7 @@ this ``__init__.py`` re-exports its symbols (the fno-math DEC-P0-055 mixed
 layout) so callers write ``import brutex_lake;
 brutex_lake.render_parquet_from_ipc(...)``.
 
-The consumers are the five default-OFF facades:
+The consumers are the seven default-OFF facades:
 ``brutex/data/lake_rust_render.py`` — version-guarded, burn-in-checked,
 wired into the two lake writers' render seams
 (``ParquetWriter._render_bytes`` — the bars profile, PR-1 — and
@@ -25,7 +25,11 @@ DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
 (ADR-0020 Wave C-3 / G8, DEC-LAKE-RUST-WINDOW-LEDGER-001) — the
 window-ledger status + merge-key date laws (``classify_window_status`` /
-``date_isoformat``). Nothing else in ``brutex/`` imports this package, and
+``date_isoformat``); and ``brutex/data/detectors_rust.py`` (SLICE T24 PR-1,
+DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948) — the T24
+detector laws (``raw_integrity_blake2b_hex`` / ``interior_barless_runs`` /
+``classify_partial_window_verdict``, behind three per-module flags).
+Nothing else in ``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
 resample, a stats shard, or a ledger record.
@@ -44,13 +48,16 @@ from __future__ import annotations
 from brutex_lake._brutex_lake import (
     __version__,
     atomic_commit_replace,
+    classify_partial_window_verdict,
     classify_window_status,
     date_isoformat,
+    interior_barless_runs,
     linked_zstd_version,
     lock_release,
     lock_try_exclusive,
     merge_decision_from_ipc,
     pinned_polars_version,
+    raw_integrity_blake2b_hex,
     render_parquet_defaults_from_ipc,
     render_parquet_from_ipc,
     render_stats_shard_json,
@@ -61,13 +68,16 @@ from brutex_lake._brutex_lake import (
 __all__ = [
     "__version__",
     "atomic_commit_replace",
+    "classify_partial_window_verdict",
     "classify_window_status",
     "date_isoformat",
+    "interior_barless_runs",
     "linked_zstd_version",
     "lock_release",
     "lock_try_exclusive",
     "merge_decision_from_ipc",
     "pinned_polars_version",
+    "raw_integrity_blake2b_hex",
     "render_parquet_defaults_from_ipc",
     "render_parquet_from_ipc",
     "render_stats_shard_json",

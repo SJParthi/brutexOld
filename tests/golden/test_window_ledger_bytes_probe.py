@@ -43,6 +43,7 @@ import brutex_identity
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -58,6 +59,21 @@ from brutex.data.window_ledger_store import (
 _COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _retired_render_flag_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetically UNSET the retired ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob.
+
+    DEC-RUST-RUNID-STORES-001 (supersedes-in-part
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane): the
+    writer is unconditionally the ``brutex_identity`` kernel render — there
+    is no flag arm to pin any more, and a runner still exporting the retired
+    variable would trip the store's LOUD ``require_ledger_render_env_unset``
+    refusal (its own suite: ``TestLedgerRenderEnvGuard``). This golden is
+    about the CANONICAL BYTES, so the stale-env refusal is kept out of frame.
+    """
+    monkeypatch.delenv("BRUTEX_LAKE_RUST_LEDGER_RENDER", raising=False)
 
 
 def _key(security_id: str) -> WindowKey:
