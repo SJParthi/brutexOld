@@ -33,7 +33,7 @@ import sys
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "runid_stores_oracle_v1.json"
 
@@ -552,12 +552,20 @@ def _ledger_row(
     )
 
 
+class _SecurityKw(TypedDict):
+    """The one splatted `_ledger_row` kwarg — typed so `**k1` splats stay
+    precisely checked (a bare `dict[str, str]` splat would type every int
+    parameter as str under pyright strict)."""
+
+    security_id: str
+
+
 def ledger_merge_inputs() -> list[tuple[str, dict[str, Any]]]:
     """The merge-law corpus INPUTS — ONE source shared with the golden test
     (CLAUDE.md §11 COMMON)."""
-    k1 = {"security_id": "NSE-A"}
-    k2 = {"security_id": "NSE-B"}
-    k3 = {"security_id": "NSE-C"}
+    k1: _SecurityKw = {"security_id": "NSE-A"}
+    k2: _SecurityKw = {"security_id": "NSE-B"}
+    k3: _SecurityKw = {"security_id": "NSE-C"}
     cases: list[tuple[str, dict[str, Any]]] = [
         ("both_empty", {"memory_rows": [], "disk_rows": []}),
         (

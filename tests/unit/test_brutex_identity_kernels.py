@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import json
 import math
+from abc import ABCMeta
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import blake3
 import brutex_identity
@@ -70,12 +71,18 @@ def _canonicalise_params_oracle(params: dict[str, Any]) -> str:
     )
 
 
+#: One (symbol, interval) → bars slice map — annotated at each literal build
+#: site too, so a homogeneous literal (all-None / all-int OI) does not infer
+#: an invariant-incompatible dict value type under pyright strict.
+type _SliceMap = dict[tuple[str, str], list[tuple[datetime, str, str, str, str, int, int | None]]]
+
+
 def _snapshot_oracle(
     exchange: str,
     segment: str,
     start: str,
     end: str,
-    slices: dict[tuple[str, str], list[tuple[datetime, str, str, str, str, int, int | None]]],
+    slices: _SliceMap,
 ) -> str:
     """The retired ``data_snapshot_hash`` streaming body, verbatim."""
     hasher = blake3.blake3()
@@ -191,8 +198,14 @@ class TestCanonicalDifferential:
 
         from collections.abc import Mapping
 
-        Mapping.register(Dupes)
-        assert brutex_identity.canonicalise_params_json(Dupes()) == '{"k":2}'
+        # Virtual-subclass registration (the kernel gates on
+        # `isinstance(params, collections.abc.Mapping)`): `Mapping` IS an
+        # ABCMeta instance at runtime, and a registered `Dupes()` IS a Mapping
+        # per isinstance — both facts are invisible to static checkers by
+        # design (PEP 3119), so each is asserted via one honest cast.
+        cast(ABCMeta, Mapping).register(Dupes)
+        params = cast("Mapping[str, Any]", Dupes())
+        assert brutex_identity.canonicalise_params_json(params) == '{"k":2}'
 
     def test_lone_surrogate_is_rejected_typed(self) -> None:
         # The DISCLOSED narrowing: the retired body hashed the raw code point;
@@ -232,7 +245,9 @@ class TestSnapshotDifferential:
         for i, tz in enumerate(_TZ_SHAPES):
             for micro in (0, 1, 123456):
                 ts = datetime(2024, 3, 5, 9, 15, 7, micro, tzinfo=tz)
-                slices = {("SYM", "1minute"): [(ts, "1.00", "2.00", "0.50", "1.50", i, None)]}
+                slices: _SliceMap = {
+                    ("SYM", "1minute"): [(ts, "1.00", "2.00", "0.50", "1.50", i, None)]
+                }
                 hasher = brutex_identity.SnapshotHasher("NSE", "INDEX", "2024-01-01", "2024-12-31")
                 hasher.add_slice("SYM", "1minute", 1)
                 hasher.add_bar(ts, "1.00", "2.00", "0.50", "1.50", i, None)
@@ -262,7 +277,7 @@ class TestSnapshotDifferential:
         # Whole-second-offset zones only (the CandleBar reality; chrono
         # FixedOffset is second-granular). st.timezones() yields real IANA
         # zones — all whole-second offsets.
-        slices = {("S", "1minute"): [(ts, "1", "1", "1", "1", 1, 7)]}
+        slices: _SliceMap = {("S", "1minute"): [(ts, "1", "1", "1", "1", 1, 7)]}
         h = brutex_identity.SnapshotHasher("E", "S", "a", "b")
         h.add_slice("S", "1minute", 1)
         h.add_bar(ts, "1", "1", "1", "1", 1, 7)
@@ -452,7 +467,7 @@ class TestMergeLawDifferential:
         reopened_ids: set[str],
         degraded_ids: set[str],
     ) -> None:
-        def keys_for(ids: set[str], market: str) -> frozenset[tuple[str, ...]]:
+        def keys_for(ids: set[str], market: str) -> frozenset[tuple[str, str, str, str, str]]:
             return frozenset((market, sid, "1minute", "2024-01-01", "2024-01-31") for sid in ids)
 
         pruned = keys_for(pruned_ids, "groww")

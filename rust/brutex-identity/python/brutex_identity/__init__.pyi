@@ -12,6 +12,10 @@ __build_crate_version__: Final[str]
 __source_digest__: Final[str]
 SOURCE_DIGEST: Final[str]
 
+#: The shim's compiled-surface symbol roster (the fno_math stub precedent —
+#: the wheel-handshake suite reads it, so the stub must declare it).
+_EXPECTED_COMPILED_SYMBOLS: Final[tuple[str, ...]]
+
 #: The fixed 16-column window-ledger schema order (`_COLUMNS` source).
 LEDGER_COLUMNS: Final[tuple[str, ...]]
 #: The 11 required core columns (`_CORE_COLUMNS` source).
