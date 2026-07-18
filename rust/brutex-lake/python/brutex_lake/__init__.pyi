@@ -116,3 +116,16 @@ def date_isoformat(year: int, month: int, day: int) -> str:
     month 1..=12, day 1..=31 — structure only; production-unreachable
     through the facade, which passes real ``date`` fields).
     """
+
+def render_ledger_parquet_from_ipc(ipc_bytes: bytes) -> bytes:
+    """Render the 16-column window-ledger frame (Arrow IPC bytes) to parquet bytes.
+
+    ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001). The
+    ROW-EQUIVALENCE standard's render — never byte-identical to the pyarrow
+    oracle (the #1917 measured-infeasible verdict); the facade's burn-in
+    compares rows, and the reader-parity gates are the contract. A 0-row
+    frame is valid (an empty ledger save — zero row groups). Raises
+    ``ValueError`` on an empty/undecodable payload or a polars render
+    error; ``RuntimeError`` if the render panicked (caught at the FFI
+    boundary — a panic never crosses raw).
+    """

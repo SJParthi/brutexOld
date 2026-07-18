@@ -40,6 +40,60 @@ burn-in-coverage flip preconditions. The honesty banner holds verbatim —
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the full record lives in
 the §1 Active-branch blurb + MIGRATION.md #1955.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
+twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
+`MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
++ the `combo_mask.py` >=64-bit width dispatch with lazy wide-kernel
+promotion and the LOUD-FAIL inversion vs #1549 — a missing wide kernel at a
+>=64-bit dispatch raises the typed `WideKernelUnavailableError`, NEVER a
+silent numpy degrade; the u64 path byte-identical (goldens unmodified,
+bomb-spy-pinned). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1942 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
+#1918 — ADR-0020 slice G10 CONVERT: the `window_ledger_store` parquet render
+routed through `rust/brutex-lake` behind the default-OFF
+`BRUTEX_LAKE_RUST_LEDGER_RENDER` seam under the ROW-EQUIVALENCE +
+reader-parity standard, never bytes (byte-identity measured-infeasible per the
+#1917 spike; the operator ruling of 2026-07-16 as relayed via the coordinator;
+golden re-baseline forbidden); the verbatim pyarrow render stays the LIVE
+oracle, flag OFF is byte-identical + never-imports-crate; twin-lake
+reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
+on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939,
+branch `claude/box-autodeploy-lane` — the nightly BOX AUTO-DEPLOY leg + the
+standalone `brutex box-update` mouth: `cmd_nightly_run` gains a PRE-CHAIN
+leg that fast-forwards the box checkout to `origin/main` under FAIL-SAFE
+guards, rebuilds the maturin wheels on a rust/build-config delta (the
+Makefile-mirrored `WHEEL_SET`, drift-pinned; brutex-lake EXCLUDED pending
+DEC-BRUTEX-LAKE-BOX-WHEEL-001), asserts the doctor wheel-freshness law
+GREEN in a fresh scrubbed subprocess BEFORE the new tree is ever executed,
+rolls back + repairs on any failure (preserve-first quarantined lock
+restores; the §4.7 repeated-failure alarm dedupe), re-execs ONCE, and adds
+the removed-env-flag startup PRE-FLIGHT (`env_preflight.py`). FAIL-OPEN
+outside the chain break law — the leg never blocks the nightly; the
+network envelope is the coordinator-amended "no network beyond the git
+remote + the canonical wheel-build fetches". ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1939.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001,
+MIGRATION.md #1948 — SLICE T24 PR-1: the THREE cold data-integrity detector
+pure laws (raw-integrity blake2b digest · interior bar-less run walker ·
+partial-window truncation verdict) routed through `rust/brutex-lake` behind
+THREE default-OFF flags (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` /
+`BRUTEX_LAKE_RUST_INTERIOR_GAP` / `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`) with the
+verbatim Python law as the LIVE parity oracle; flag OFF is byte-identical +
+crate-never-imported (spy-pinned); calendar + json canonicalisation stay
+Python; blake2b in-crate from RFC 7693 — Cargo.toml/Cargo.lock byte-untouched;
+`window_status` EXCLUDED from the slice (write-retired) + the bad_tick
+COMMON-reuse ruling recorded. Ships INERT — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1948 — this header carries the pointer, never the
+story.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3339,6 +3393,270 @@ hostile-review pass._
   fib-express collision surface (trading-core/fno-math/brutex-lake/
   conditions.toml/spec.py/fib_definitions.py/generated bits) ZERO-diff
   by construction.)
+  Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+  queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
+  DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
+  first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
+  u64/u128 impls move VERBATIM from `trade_sim.rs` to the NEW first-class shared
+  `rust/fno-math/src/mask_word.rs` (`trait` → `pub(crate) trait` is the one widening; a PURE MOVE —
+  frozen-behaviour-gated by the pre-existing fno-math cargo suite passing UNMODIFIED, 582/0). THE KERNEL:
+  `count_supermasks_u128s` · `count_supermask_u128s` · `ResidentBarsU128` — the native-`Vec<u128>` twins of
+  the u64 Stage-2 SUPERSET-count kernels (the #1549 probe-verified FFI crossing, REUSED — no new probe); the
+  count inner loop + serial/parallel batch dispatch genericize as `count_one_core<W>` /
+  `count_supermasks_dispatch_core<W>` over the hoisted trait, the u64 names kept as thin `W = u64`
+  delegators (the trade-sim `simulate_one_core` idiom — every pre-existing call site + test compiles
+  UNCHANGED); ONE dispatch boundary + order-preserving collect for both widths (Golden Rule #4 pure-integer
+  determinism); fenced additive lib.rs registration + additive facade entries (`_EXPECTED_COMPILED_SYMBOLS`
+  / `.pyi` / `EXPECTED_BUILD.json` / the frozen `brutex.math` facade golden — keep-both union seams with the
+  sibling fno-math lanes; crate stays 0.3.0). THE DISPATCH (`combo_mask.py`): `count_supermasks` routes any
+  wide (>64-bit) bar/mask batch to the u128 kernel; `ResidentBarBuffer` builds `ResidentBarsU128` for wide
+  bars and lazily PROMOTES a u64-resident window on its first wide mask batch (built once from the kept raw
+  bars, ONE `combo_mask.wide_kernel_promoted` INFO per instance — the #1549 promotion shape). **THE
+  LOUD-FAIL INVERSION vs #1549 (the recorded design deviation):** #1549's trade-sim twin is future headroom
+  and silently serves its Python oracle on wheel-missing; THIS kernel is the ACTIVE production path once the
+  vocabulary crosses 64 bits, so wheel-missing at ANY >=64-bit dispatch raises the NEW typed greppable
+  `WideKernelUnavailableError(RuntimeError)` naming the DEC + reason `wheel_missing_u128` + the
+  `maturin develop --release` remediation — the numpy two-limb reference is RETAINED strictly as the
+  tests-side parity ORACLE (+ the pre-existing <=64-bit stale-wheel construction fallback, byte-identical)
+  and is structurally unreachable as a silent >=64-bit production fallback (the silenced-loud-fail mutant
+  hand-applied + verified KILLED). Second recorded deviation: NO `bar_bits_beyond_u128`/`mask_beyond_u128`
+  oracle-fallback analogue — the numpy count oracle itself refuses beyond-u128 (`uint64` hi-limb cast), so
+  beyond-u128 keeps TODAY'S `OverflowError` class raised at the `Vec<u128>` FFI edge, while a negative
+  value routes narrow and refuses at the u64 FFI edge as before (no triple-limb invention, pinned).
+  OBSERVABLES (the PR-B interface, mirroring #1549's `rust_active`):
+  `ResidentBarBuffer.kernel_kind` ∈ {rust-u64, rust-u128, numpy} + `wide_kernel_active` + the pure
+  `dispatch_kernel_kind` classifier + the `KERNEL_*`/`U128_MASK` exports — a >=64-bit grid is verifiable
+  Rust-served WITHOUT monkeypatching (documented supported test surface). U64 PATH BYTE-IDENTICAL: the u64
+  golden corpus + the frozen run-identity/sweep-run/combo-digest goldens pass UNMODIFIED (fixtures
+  byte-untouched); a bomb-spy pins the wide twins never invoked for <=64-bit inputs incl. the exact
+  `U64_MASK` boundary. MEASURED (sandbox 2026-07-17, best-of-5, 94k dense-120-bit bars × 1k two-limb masks,
+  outputs bit-identical): numpy oracle 179.5 ms · Rust free 27.7 ms (6.5×) · Rust resident 20.0 ms (9.0×) —
+  observed, NO SLA claimed, nothing asserted on it (the M4-Pro figure rides bench-m4pro later). HONEST:
+  test-only-reachable at today's 60-bit vocabulary (the u64 path stays the norm until the vocab-66 lane
+  lands); each batch stays O(N_masks · N_bars) compute — O(1) is strictly per-mask amortised; the
+  in-session cargo-mutants sweep was PARTIAL (10/10 MaskWord + 5/5 lib.rs dispatch mutants caught; its two
+  missed `Walker::levels` arithmetic mutants are PRE-EXISTING #1825-era main debt, named as a follow-up
+  observation, not fixed in-scope); the u64 suite's inert sys.modules-poison fallback idiom is a
+  pre-existing observed blind spot (out of scope — the real coverage lives in the u128 file's
+  attr-monkeypatch tests). GATES: cargo 597/0 --locked + fmt + clippy -D warnings; `combo_mask.py` 100.00%
+  line+branch on the ci-exact two-file gate (183/72; ci.yml 19i comment updated); the wide-kernel hypothesis
+  differential (hostile corpus: hi-limb-only · bit-63/64 straddles · sign-bit 63+127 · random wide grids) +
+  the u128==u64-on-u64-domain anti-drift property; NEW bench
+  `tests/bench/test_engine_combo_mask_wide_kernel_o1.py` (O(1)-per-mask ratio via `cache_tier_ceiling` + the
+  measured-never-asserted comparison); 6/6 hand-applied dispatch mutants killed (combo_mask stays out of the
+  mutmut loop — the hand-kill precedent); consumer/golden batteries 179 + 335 + 57 green;
+  ruff/ruff-format clean; `mypy --strict` clean (472 files); pyright 0 errors (baseline 0; +3 house
+  `reportPrivateUsage` test warnings). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run identity untouched; no new routes/env vars.)
+  Earlier: `claude/rust-lake-ledgerstore-convert`
+  (**DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+  MIGRATION.md #1918** — ADR-0020 slice G10 CONVERT: the `window_ledger_store`
+  parquet render routed through `rust/brutex-lake` behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_LEDGER_RENDER` flag under the **ROW-EQUIVALENCE +
+  reader-parity standard, never bytes** (byte-identity MEASURED-INFEASIBLE per
+  the #1917 spike — the operator ruling of 2026-07-16 as relayed via the
+  coordinator; golden re-baseline FORBIDDEN; the two entries COEXIST — #1917
+  is the measurement record + the priced `DEC-LAKE-EXACT-PIN-001` escalation,
+  #1918 the ruled conversion). NEW `rust/brutex-lake/src/window_ledger_render.rs`
+  (`render_ledger_parquet_from_ipc` over the crate's ONE shared streaming-sink
+  core; 16-col schema exactness cargo-pinned with EXACT dtypes —
+  `last_attempt_at` MUST stay a String, the DuckDB `>= ?` VARCHAR-compare
+  watch-item; crate stays 0.1.0, Cargo.lock byte-untouched) + the NEW facade
+  `brutex/data/lake_rust_ledger_render.py` (the PR-1 guard set: tristate flag ·
+  import guard + the G8 `crate_stale` SYMBOL handshake · the polars-lockstep
+  VERSION guard · refuse-poison · the sibling's imported degrade set + panic
+  belt · MemoryError re-raises RAW) whose 16-render burn-in compares ROW
+  EQUIVALENCE via pyarrow readback — normalized-STRING-FAMILY schema compare
+  (`large_string`/`string_view` → `string`, the measured polars `ARROW:schema`
+  artifact — the ONE documented fold; a timestamp-typed column still
+  autoreverts) + ordered `to_pylist()` equality — shipping the ORACLE bytes +
+  latching on ANY mismatch. The store's two `pq.write_table` closures
+  consolidate onto ONE shared render body (`_ledger_parquet_bytes`; the
+  verbatim pyarrow oracle `_render_ledger_parquet_python` retained LIVE); the
+  render runs INSIDE `atomic_write_via`'s guarded callable so
+  flock/atomic/`PartitionLockTimeout`/ENOSPC-OOM→`LakeWriteHalt` semantics are
+  byte-identical; flag OFF is byte-identical + never-imports-crate
+  (bomb-spy-pinned). PROOF (executed on the real merged wheel — pyarrow 25.0.0
+  · polars 1.42.1 · duckdb 1.5.4): the twin-lake READER-PARITY battery (11
+  tests — tri-reader ordered rows; the `dedup_latest_source_sql` fold across
+  ALL FOUR base/delta writer-arm mixes; `query_window_ledger_page`
+  payload-identical + the FALLBACK-ABSENCE pin; `_window_counts_total` + the
+  `_window_counts_since` ISO-string arm; load round-trips; the 16-col probe
+  outcome; footer inertness + the anti-vacuous bytes-differ assert; the
+  EMPTY-ledger 0-vs-1-row-group watch-item MEASURED PASS — the pre-authorized
+  empty-input narrowing NOT needed; stat-token EXPECTED-move; torn-read retry
+  self-heal) + the NAMED MERGE GATE
+  (`tests/integration/test_window_ledger_rust_state_convergence.py` — 3 crash
+  scenarios + re-pull idempotence, control-OFF vs subject-ON converging
+  identically through the REAL WindowLedger + store machinery); facade 100.00%
+  line+branch standalone; the store stanza re-measured 100.00% with the 164
+  pre-existing tests UNMODIFIED + the flag-ON twin green; cargo
+  fmt/clippy(-D warnings)/test --release --locked 73 passed; the #1917
+  bytes-probe pins RECONCILED not broken (oracle-arm-hermetic, no golden
+  regenerated). HONEST: expected payoff ≈ 0 — conversion is for uniformity,
+  not speed; ships INERT — a default flip needs its own DEC; the gate class is
+  deliberately WEAKER than PR-1's byte gate for this ONE module (the ruled
+  standard, disclosed). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; run identity untouched.)
+  Earlier: `claude/box-autodeploy-lane`
+  (**DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939** — entry
+  coordinator-reserved above the live-main ceiling #1932 at tip c220870;
+  gaps are legal per DEC-LEDGER-RENUMBER-001 — the nightly BOX AUTO-DEPLOY
+  leg + the standalone `brutex box-update` mouth. NEW
+  `brutex/nightly/box_update.py` (stdlib + structlog + exactly ONE audited
+  in-repo import — `atomic_write_simple`; imports with every wheel BROKEN,
+  poisoned-`sys.modules`-pinned; env vocabulary + seconds-parse as LOCAL
+  equality-pinned twins): the G0-G6 guard truth table (kill switch
+  `BRUTEX_BOX_UPDATE` — the ONE fail-loud knob, junk =
+  `BoxUpdateEnvError(ValueError)` ⇒ the EXISTING pre-chain catch's clean
+  `EXIT_USER_ERROR`; dirty-tree/diverged/detached/fetch-failed skips with
+  repr()'d evidence, untracked-only proceeds) → ff-only merge + post-merge
+  verify → §4.4 delta classification (failed diff ⇒ CONSERVATIVE
+  rust+pyproject) → the canonical extras-qualified pip refresh on a
+  pyproject delta → BARE per-crate `maturin develop --release` over the
+  Makefile-MIRRORED `WHEEL_SET` (fno_math + trading_core required,
+  brutex-feed optional; brutex-lake ABSENT pending
+  DEC-BRUTEX-LAKE-BOX-WHEEL-001 — the Makefile-parse drift pin forces the
+  one-line append when its target lands, automatic pickup; BARE not
+  `--locked` — no CI gate enforces lock↔manifest for the box crates, a
+  locked lane would wedge-loop on a repo-legal stale lock;
+  DEC-CRATE-LOCK-CI-GATE-001 = the rejected-for-now repo-wide option) →
+  the ASSERT-GREEN GATE (ONE fresh subprocess: FULL import smoke incl.
+  BOTH required wheels explicitly, then the four doctor wheel checks with
+  the child env SCRUBBED of `BRUTEX_SKIP_WHEEL_FRESHNESS` + the forged-SKIP
+  fold belt + the doctor-detail drift pins; `gate="skipped"` ⇔ the
+  subprocess never ran — never a fabricated ok) → on non-green the §4.6
+  ROLLBACK (checkout -B from_sha; the pip-dep RESTORE when the forward pip
+  ran — WARN-class on failure, proceed; the required-wheel smoke →
+  per-crate-probed REPAIR rebuild on unloadable, re-verified by the
+  IDENTICAL smoke never build-rc — still-unloadable ⇒ `repair=failed`,
+  `status=error` + the CRITICAL HARD-CLI-DOWN alarm; ONCE LOADABLE the
+  VERSION-COHERENCE check ALWAYS runs — the torn to_sha-installed SIBLING
+  is digest-caught + mismatch-repaired, both role orders test-pinned;
+  rebuild-fail/digest-still-warn ⇒ `repair=failed_stale`, WARN-class,
+  status stays rolled_back). Restores are crash-marker PROVENANCE-scoped
+  (`build_marker.json` written atomically pre-build; pathset = marker ∩
+  fresh porcelain; NO marker ⇒ an operator-dirty lock takes the visible
+  `dirty_tree` skip, NEVER a clobber — byte-identity-pinned; the marker
+  PROLOGUE runs pre-G4a so a quiet-upstream night still consumes it) and
+  PRESERVE-FIRST quarantined (pre-restore bytes copied + CONTENT-verified
+  to `<lake>/.box_update/quarantine/<UTC-ts>/` before any `checkout -f`;
+  copy-fail ⇒ NO restore; newest-10 retention, lane-files-only pruning).
+  Alarm dedupe: `last_alarm.json` machine-token signatures — night 1 full
+  severity, same-signature repeats demote to WARN with log `repeat=nights`
+  vs report `alarm_repeats=nights−1` (the two-integer law), healthy nights
+  clear, corrupt state fails OPEN louder. Re-exec ONCE (§6 shape (b)): the
+  flock is FULLY RELEASED strictly before `os.execv` (proven by a
+  genuinely-second-process LOCK_NB probe inside the pre-exec window); the
+  PROCESS-ENV-ONLY sentinel `BRUTEX_BOX_UPDATE_STATE` is the loop brake,
+  consumed + deleted by `adopt_state`; lock contention ⇒ leg skipped +
+  the chain's own standard COLLISION refusal. NOT a chain link — a
+  report-level block (`NightlyReport.box_update` + `env_preflight`,
+  additive, emitted always; the 📦 honesty-note line; report golden
+  consciously re-locked; the #1747 hub tolerance pinned); the six R42
+  links byte-untouched, six-link-composition-pinned. The §12 env
+  PRE-FLIGHT (`env_preflight.py`): registry-driven removed-flag detection
+  (`BRUTEX_FILL_MODE` removed-tier + `BRUTEX_SKIP_WHEEL_FRESHNESS`
+  active_escape-tier) over process env AND dotenv candidates, FIFO-safe,
+  detect+WARN only. HONEST: worst-case leg wall time ≈ 4.3 h (the mixed
+  gate-rollback ceiling; build-timeout arm ≈ 3.6 h; typical rust-delta
+  night = minutes, python-only ~seconds; three FAIL-SAFE timeout knobs);
+  the self-heal reach is ASYMMETRIC — an UNLOADABLE `trading_core` crashes
+  the CLI PRE-leg (a process death inside its install window = a hard
+  nightly wedge-loop with NO lane alarm; external signals = launchd +
+  the #1747 hub; manual `maturin develop --release` remediation; the
+  wheel-free rescue entrypoint = named follow-up
+  DEC-BOX-WEDGE-RESCUE-001, deliberately NOT built); every deploy night
+  FULL-re-sweeps (`code_commit_sha` re-key — the documented #1612
+  behavior at higher frequency, not a regression); lake-family Rust flips
+  get ZERO box soak telemetry until the lake wheel DEC lands; torn-version
+  `failed_stale` + torn-dep `pip_restore=failed` are the disclosed
+  residuals (visible, deduped, re-attempted nightly); Q5 CLOSED AS
+  SHIPPED — structlog + report block, NO new Telegram lane (11
+  implementation deviations recorded in the design §25 + MIGRATION.md
+  #1939). GATES: `box_update.py` 100.00% line+branch standalone (702/276,
+  137 tests) + `env_preflight.py` 100.00% (53/10, 14) on NEW ci.yml
+  stanzas; mutation.yml pairs + wiring pins; 19 CLI wiring + 12 real-git
+  integration tests + the run_nightly composition ride; touched `run.py`
+  315/60 + `chain.py` 201/52 at 100.00% on their discovery gates;
+  runbook `docs/runbooks/box-autodeploy.md`. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes.)
+  Earlier: `claude/rust-slice-t24-integrity`
+  (**DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948** — SLICE T24
+  PR-1: the THREE cold data-integrity detector pure laws routed through
+  `rust/brutex-lake` behind THREE default-OFF flags, the verbatim Python law
+  retained as the LIVE parity oracle on every path. NEW
+  `rust/brutex-lake/src/detectors.rs` — the raw-integrity BLAKE2b digest
+  implemented in-crate from RFC 7693 (ZERO new dependencies —
+  Cargo.toml/Cargo.lock byte-UNTOUCHED; RFC appendix-A + 11 hashlib-frozen
+  vectors), the interior bar-less run walker (token-for-token: a run breaks
+  ONLY at a covered session; `< 2` covered → `[]`), and the partial-window
+  truncation verdict (arm-for-arm over a Python-built `SessionGrid`; reason
+  tokens byte-equal; off-grid session walks ABSTAIN → oracle — the
+  DEC-FEED-RUST-CORE-001 abstain law); three `#[pyfunction]`s under the panic
+  belt; 23 new cargo tests. NEW facade `brutex/data/detectors_rust.py` —
+  `BRUTEX_LAKE_RUST_RAW_INTEGRITY` · `BRUTEX_LAKE_RUST_INTERIOR_GAP` ·
+  `BRUTEX_LAKE_RUST_PARTIAL_WINDOW` (Pattern-A tristate via the imported
+  `env_flag_tristate` — §11 COMMON, identity-pinned), all-or-nothing 3-symbol
+  `_CRATE_API` handshake (`crate_unavailable`/`crate_stale`; NO polars
+  version guard — the laws are polars-free, the G8 disclosed deviation),
+  per-law 16-call burn-in bit-compare with ship-the-ORACLE autorevert over
+  ONE SHARED process latch across the three laws (the PR-2 precedent,
+  disclosed), narrow degrade set → oracle with capped WARNs,
+  MemoryError/KeyboardInterrupt/SystemExit re-raise RAW above the imported
+  panic belt, refuse-poison result-shape gates, `reset_detectors_rust_for_tests`
+  seam. ROUTING is the G6 flag-gate-in-target shape (solves the
+  verdict-dataclass import cycle): each target gates its own flag and hands
+  the facade zero-arg `payload_factory`/`python_law` callables (+ a
+  target-side `materialize` for the partial-window verdict);
+  `raw_integrity.hash_payload` canonicalizes ONCE in Python (the CPython
+  `float.__repr__` byte law — only the digest of the already-canonical bytes
+  moves) then routes vs the verbatim `_hash_canonical_python` oracle;
+  `interior_gap_detect._interior_barless_runs` routes vs the verbatim
+  `_interior_barless_runs_python` walker (the whole verdict inherits parity);
+  `partial_window_detect.classify_partial_window` keeps its env-tunable
+  resolution at the composition root (the Slice-0 extraction — a disclosed
+  deviation) then routes vs `_classify_partial_window_python`, with the NSE
+  calendar staying PYTHON (`_partial_window_payload` computes session
+  ordinals/flags; 45-day back-walk margin, `_SPAN_CAP_DAYS=9000` — over-cap
+  ships an EMPTY grid so the crate abstains, never a giant flags list). Flag
+  OFF (the default) = byte-identical AND crate-never-imported (bomb-crate spy
+  pins on all three targets). SLICE RULINGS recorded in #1948: T24 is a
+  mandate-added slice beyond ADR-0020's original 17-module table;
+  `window_status` EXCLUDED from the whole slice (write-retired — its classify
+  law already moved under #1915, the residual is Stage-6 deletion); the
+  bad-tick predicate is COMMON-reuse territory (a future hot-path PR reuses
+  the `rust/brutex-feed` scan.rs predicate, never a second copy). EVIDENCE
+  (executed): cargo fmt/clippy(-D warnings)/`test --release --locked` 90
+  passed; the NEW 97-test Python battery green against the REAL wheel
+  (53-facade matrix + 3 stem-matched seam suites incl. 4 hypothesis
+  differentials + the frozen raw-integrity golden re-driven flag-ON + the
+  7-reason partial-window parity matrix on the REAL 2024 NSE calendar); the
+  three EXISTING detector suites re-run flag-ON UNMODIFIED 96 passed (+ the
+  raw-integrity store/wiring consumers 45 flag-ON in the same lane leg —
+  the recorded 140 was a mis-count of that 141 union, the round-1
+  re-measure) (the
+  flag-ON BELT — no regression in the catching suites under the flags; the
+  genuine parity gates are the seam remaining=0 differentials + the cargo
+  frozen vectors, the round-1 reframe); consumer suites
+  flag-OFF 391 passed; COVERAGE 100.00% line+branch on all four modules
+  (`detectors_rust.py` 204/64 · `raw_integrity.py` 63/6 ·
+  `interior_gap_detect.py` 105/34 · `partial_window_detect.py` 114/38);
+  ruff/ruff-format clean; `mypy --strict` clean (473 files); pyright FULL
+  0 errors; mutation.yml pair + lake-rust-parity.yml T24 paths/flag-ON leg
+  wired. HOSTILE-REVIEW ROUND 1 folded (both lenses SHIP, 0 MINOR+ — the
+  four NITs: the ledger count re-measured, the panic-belt docstring
+  reworded to the executed truth (a catch_unwind-caught panic lands in the
+  RuntimeError DEGRADE arm, no latch), the parity-lane belt reframe, + the
+  `_KNOWN_PARTIAL_REASONS` reason-token refuse-poison hardening; the
+  shared-latch NIT stays already-disclosed — per-item record in
+  MIGRATION.md #1948). HONEST (the ADR-0020 banner verbatim): expected payoff ≈ 0 —
+  conversion is for uniformity, not speed; cold paths, the FFI hop is a
+  small slowdown; ships INERT — a default flip needs its own DEC; none of
+  the three laws is in run identity. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -9958,6 +10276,97 @@ hostile-review pass._
   (bomb-spy-pinned), payoff ≈ 0 by the mandated banner; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1955 for the full blurb)
+  Earlier: `claude/rust-u128-enum-kernel`
+  (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
+  v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
+  `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
+  `rust/fno-math/src/mask_word.rs` (pure move, its own severable first commit;
+  #1549's cargo suite unmodified-green) + the native-`Vec<u128>` count twins
+  `count_supermasks_u128s`/`count_supermask_u128s`/`ResidentBarsU128` over ONE
+  width-generic core/dispatch (u64 names kept as thin delegators — every
+  pre-existing call site + test unchanged) + the `combo_mask.py` >=64-bit
+  width dispatch with lazy wide-kernel promotion and the LOUD-FAIL inversion
+  vs #1549 (wheel-missing at a >=64-bit dispatch raises the typed
+  `WideKernelUnavailableError` naming the DEC + `wheel_missing_u128` + the
+  maturin remediation — the numpy two-limb reference is retained strictly as
+  the tests-side parity oracle, structurally unreachable as a silent >=64-bit
+  production fallback); observables `kernel_kind`/`wide_kernel_active`/
+  `dispatch_kernel_kind` are the supported no-monkeypatch test surface; u64
+  path byte-identical (u64 goldens + frozen run-identity goldens unmodified,
+  bomb-spy-pinned incl. the exact `U64_MASK` boundary); measured sandbox
+  179.5 ms numpy vs 27.7/20.0 ms Rust free/resident at 94k×1k — observed,
+  never asserted; ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1942 for the full blurb)
+  Earlier: `claude/rust-lake-ledgerstore-convert`
+  (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918 — ADR-0020 slice
+  G10 CONVERT: the `window_ledger_store` parquet render routed through
+  `rust/brutex-lake` behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_LEDGER_RENDER` flag under the ROW-EQUIVALENCE +
+  reader-parity standard, never bytes (byte-identity measured-infeasible per
+  the #1917 spike — the operator ruling of 2026-07-16 as relayed via the
+  coordinator; golden re-baseline forbidden); NEW
+  `rust/brutex-lake/src/window_ledger_render.rs`
+  (`render_ledger_parquet_from_ipc`; `last_attempt_at` stays a String —
+  cargo-pinned) + the NEW facade `brutex/data/lake_rust_ledger_render.py`
+  (PR-1 guard set; the 16-render burn-in compares ROW EQUIVALENCE via pyarrow
+  readback — the normalized-string-family fold is the ONE documented
+  deviation — shipping the oracle bytes + latching on any mismatch); the
+  store's two write sites consolidate onto the ONE shared render body with
+  the verbatim pyarrow oracle retained LIVE, the render inside
+  `atomic_write_via`'s guarded callable (flock/atomic/LakeWriteHalt semantics
+  byte-identical); flag OFF byte-identical + never-imports-crate
+  (bomb-spy-pinned); the twin-lake reader-parity battery + the
+  crash/resume/re-pull state-convergence NAMED MERGE GATE EXECUTED on the
+  real merged wheel; the #1917 bytes-probe pins reconciled not broken; ships
+  INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1918 for the full blurb)
+  Earlier: `claude/box-autodeploy-lane`
+  (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939 — the nightly BOX
+  AUTO-DEPLOY leg + the standalone `brutex box-update` mouth: the pre-chain
+  ff-only self-update of the box checkout under fail-safe guards
+  (kill switch `BRUTEX_BOX_UPDATE`; dirty/diverged/fetch-failed skips),
+  delta-classified BARE maturin wheel rebuilds over the Makefile-mirrored
+  `WHEEL_SET` (brutex-lake excluded pending DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  drift-pinned), the fresh-subprocess assert-green gate (import smoke +
+  scrubbed-env doctor checks; `gate="skipped"` ⇔ never ran), rollback +
+  required-wheel repair + the always-once-loadable version-coherence
+  repair, crash-marker-provenance-scoped PRESERVE-FIRST quarantined lock
+  restores (operator locks never clobbered), the repeated-failure alarm
+  dedupe (two-integer law), re-exec ONCE (flock released strictly before
+  execv; process-env-only sentinel), the additive report blocks + 📦
+  honesty note, and the §12 removed-env-flag startup pre-flight; FAIL-OPEN
+  — never blocks the nightly; wedge-asymmetry disclosed with the named
+  follow-up DEC-BOX-WEDGE-RESCUE-001; both new modules 100.00%
+  line+branch on NEW ci.yml stanzas + mutation pairs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1939 for the full blurb)
+  Earlier: `claude/rust-slice-t24-integrity`
+  (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948 — SLICE T24 PR-1:
+  the THREE cold data-integrity detector pure laws — the raw-integrity blake2b
+  digest (in-crate from RFC 7693, ZERO new deps — Cargo.toml/Cargo.lock
+  byte-untouched), the interior bar-less run walker, and the partial-window
+  truncation verdict — routed through `rust/brutex-lake`
+  (NEW `src/detectors.rs`) behind THREE default-OFF flags via the NEW facade
+  `brutex/data/detectors_rust.py` (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` ·
+  `BRUTEX_LAKE_RUST_INTERIOR_GAP` · `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`;
+  per-law 16-call burn-in + ship-the-ORACLE autorevert over ONE shared latch;
+  narrow degrade set + imported panic belt; refuse-poison shape gates; NO
+  polars version guard — polars-free laws, the G8 deviation); the G6
+  flag-gate-in-target routing (zero-arg payload/oracle callables + a
+  target-side materialize — the facade never imports PartialWindowVerdict);
+  json canonicalisation + the NSE calendar stay PYTHON (payload factories
+  compute session ordinals/flags; off-grid walks ABSTAIN → oracle; span cap
+  9000 days); flag OFF byte-identical + crate-never-imported (bomb-spy
+  pinned); `window_status` EXCLUDED from the slice (write-retired) + the
+  bad_tick COMMON-reuse ruling recorded in #1948; cargo 90 passed
+  --release --locked, the new 97-test battery + the existing detector suites
+  flag-ON 96 passed (+45 store/wiring) + consumer suites flag-OFF 391
+  passed, all four modules 100.00%
+  line+branch; round-1 review folded (both lenses SHIP, 0 MINOR+ — see §1 +
+  MIGRATION.md #1948); ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1948 for the full
+  blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
