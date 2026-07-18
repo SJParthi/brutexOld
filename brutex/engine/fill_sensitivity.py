@@ -8,8 +8,13 @@ object that discloses how much of the P&L the worst-case pricing itself costs
 versus an INDEPENDENT open-anchored re-price of the SAME legs — the exact
 reference law the frozen floor property
 (``tests/property/test_trade_sim_worst_case_floor.py``) audits the walker
-against, promoted here into ONE production home so the test oracle and the
-shipped annotation can never fork:
+against. The floor property DELIBERATELY keeps its own in-test restatement
+of the law (oracle independence — its walker-floor assertions never import
+this module); this module is the production home of the SHIPPED annotation,
+and the two copies are cross-verification-PINNED byte-equal over the FULL
+Decimal price domain — non-2dp inputs included (``CandleBar`` does not snap
+to 2dp; the snap is a lake-WRITE invariant) — by that property file's
+cross-law parity tests, so a silent fork fails loud:
 
 * entry = the entry 1m bar's OPEN;
 * ``take_profit`` / ``stop_loss`` = the level anchored on that OPEN entry
@@ -22,7 +27,12 @@ shipped annotation can never fork:
 Pure arithmetic over the SAME 1m bars the worst-case trade filled on — no
 simulation, so trigger timing cannot diverge from the trade under audit. By
 the per-trade dominance law (worst ≤ open-anchored, property-pinned) the
-folded ``haircut_paisa`` is ``>= 0`` by construction.
+folded ``haircut_paisa`` is ``>= 0`` whenever ``pnl_paisa`` comes from the
+worst-case walker — pinned END-TO-END (``simulate_trades`` →
+``CapturedTrade`` → :func:`fill_sensitivity_verdict`) by the floor property
+file's dominance test; the fold itself never guards or clamps, so a
+hand-built trade list decoupled from the walker CAN read negative (honest
+arithmetic disclosure, never a silent correction).
 
 R13: the annotation NEVER re-ranks or hides an entry — a sign-flipped rank-1
 stays rank-1, flagged by the display layer. Degrades are NAMED (``not_priced``
@@ -125,8 +135,9 @@ def open_anchored_trade_pnl(
     """Re-price ONE captured trade's legs under the open-anchored reference law.
 
     The floor property's ``_open_anchored_pnl`` restated over the captured-trade
-    record (module docstring — one law, one home). *bars_by_ts* is the
-    keep-first 1m EXECUTION-bar index the trade filled on.
+    record (module docstring — two deliberately-separate copies, cross-pinned
+    byte-equal). *bars_by_ts* is the keep-first 1m EXECUTION-bar index the
+    trade filled on.
 
     Raises
     ------
@@ -173,8 +184,10 @@ def fill_sensitivity_verdict(
          "n_trades": N,
          "worst_case_net_pnl_paisa": …,   # Σ trade.pnl_paisa (the shipped law)
          "reference_net_pnl_paisa": …,    # Σ open-anchored re-price
-         "haircut_paisa": …,              # reference − worst_case (>= 0 by the
-                                          # per-trade dominance law)
+         "haircut_paisa": …,              # reference − worst_case (>= 0 on
+                                          # real walker input — the dominance
+                                          # law, pinned end-to-end; the fold
+                                          # itself never guards or clamps)
          "sign_flip": …}                  # reference > 0 AND worst_case <= 0;
                                           # null when n_trades == 0 (no verdict)
 

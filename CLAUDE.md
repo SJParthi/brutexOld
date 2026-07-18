@@ -319,7 +319,10 @@ every golden re-locked with in-file hand-derivations, the vocab fixture
 byte-untouched (empty diff pinned). INTERIM HONESTY: until PR-B's 1-minute
 execution grid lands (its OWN DEC+ADR), the adverse extreme is the
 DECISION-TF bar's — strictly MORE pessimistic than the operator's
-next-1m-bar target law, never optimistic. ENGINE SEMANTICS CHANGED BY
+next-1m-bar target law, never optimistic [SUPERSEDED by
+DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md #1979 — PR-B has landed: every fill
+now resolves on the 1-minute execution grid; the #1825 goldens survive only
+as frozen anti-alias pins]. ENGINE SEMANTICS CHANGED BY
 OPERATOR DIRECTIVE (the ONE sanctioned exception to the standing posture) —
 scope/vocab/rate/lake-schema UNCHANGED; NIFTY/BANKNIFTY/SENSEX; this header
 carries the pointer, never the story — the full record lives in the §1
@@ -3341,8 +3344,10 @@ hostile-review pass._
   single-feed shape survives; tf=1minute = the fixed point whose ONE delta is the deferral)
   and the Rust u64/u128 kernels (FULL REWRITE over the #1942 `MaskWord` core — decision OHLC
   drops OUT of the FFI; 1m exec columns + `arm_source` in; DECISION-length bar_bits projected
-  per mask in-kernel; the `next_arm` flat-skip jump table — per-mask cost O(#signals +
-  Σ in-position minutes + #trades), jump-vs-full-walk parity-pinned) walk the EXECUTION
+  per mask in-kernel; the `next_arm` flat-skip jump table — per-mask cost O(#arm-points +
+  Σ in-position minutes + #trades), the table mask-independent so the flat walker visits
+  every arm point ≈ N_1m/tf firing or not (the round-1 review correction of the earlier
+  O(#signals) wording), jump-vs-full-walk parity-pinned) walk the EXECUTION
   stream; the seam gains the `_kernel_exec_grid_current` stale-wheel probe (a pre-PR-B wheel
   demotes to the dual-feed Python oracle warn-once `exec_grid_kernel_stale`, never a
   wrong-law kernel answer). THE RATIFIED LAWS: entry at `exec_idx(N)`'s adverse extreme
@@ -3421,15 +3426,22 @@ hostile-review pass._
   #1749 `_cascade_payload` precedent; the executors' own Rust conversion is a separate
   totality-law slice). HONEST: the exec sims replay ONLY the persisted winners (bounded
   run-end, entries outside the set read `not_in_replay_set`); the CandleBar-list memory
-  figure stays UNMEASURED (named); the design §7.5 dedicated bench teeth are a named
-  residual (existing benches re-shaped dual-feed, 24 passed); the two #1825/ADR-0023
+  figure stays UNMEASURED (named); the design §7.5 dedicated bench teeth SHIPPED same
+  branch (`tests/bench/test_exec_grid_dual_feed_bench.py` — the literal PR-A-tree A/B
+  baseline stays the disclosed same-binary cost-shape emulation); the two #1825/ADR-0023
   honest-limits rider sentences owed by the reclaim audit stay UNWRITTEN (verbatim source
-  unavailable — named follow-up). GATES (executed at head 639c445c9): whole-engine glob gate
-  100.00% (10,925/3,156; 3,949 passed); exec_grid 110/60 · trade_sim 234/74 · rust_trade_sim
-  249/98 · fill_sensitivity 55/22 · results_depth_pass 329/76 · exec_verdict 30/10 · futures
+  unavailable — named follow-up). ROUND-1 HOSTILE-REVIEW FIX PACK folded (3 MINOR + 2 NIT,
+  0 refuted — the O(#signals)→O(#arm-points) flat-skip bound correction at every doc site,
+  the fill-sensitivity cross-law byte-equality + real-walker haircut>=0 dominance pins with
+  the docstring over-claims reworded to the enforced truth, the stale GATES tallies
+  corrected, the futures_exec.suspect display wording + the #1825 riders — per-item record
+  in MIGRATION.md #1979). GATES (executed 2026-07-18; tallies re-measured at the round-1
+  fix commit): whole-engine glob gate
+  100.00% (10,925/3,156; 3,949 passed); exec_grid 126/62 · trade_sim 234/74 · rust_trade_sim
+  252/98 · fill_sensitivity 55/22 · results_depth_pass 329/76 · exec_verdict 30/10 · futures
   executor+leaderboard · ranking package 286/74 · oneclick_artifacts (332) ·
   sweep_results_view 304/102 ALL 100.00%; cargo fno-math 623+4+1 `--locked` + fmt + clippy
-  `-D warnings` clean; golden tree 547 passed · property belt 549 passed · heavy CLI-chain
+  `-D warnings` clean; golden tree 547 passed · property belt 555 passed · heavy CLI-chain
   batches green; ruff/ruff-format clean; `mypy --strict` = the 9 env-only baselines; pyright
   0 errors on touched files; `node --check` clean; ledger validators green. ENGINE SEMANTICS
   CHANGED BY OPERATOR DIRECTIVE (PR-B of the fills-track sanctioned exception) —
@@ -4532,7 +4544,10 @@ hostile-review pass._
   1-minute execution grid lands (dual-feed, run-identity re-key, SL/TP on the 1m
   grid — its OWN DEC+ADR), the adverse extreme is the DECISION-TF bar's — a
   5-minute entry takes the whole 5-minute range's adverse depth, strictly MORE
-  pessimistic than the operator's next-1m-bar target law, never optimistic.
+  pessimistic than the operator's next-1m-bar target law, never optimistic
+  [SUPERSEDED by DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md #1979 — PR-B has
+  landed: every fill now resolves on the 1-minute execution grid; the #1825
+  goldens survive only as frozen anti-alias pins].
   ENGINE SEMANTICS CHANGED BY OPERATOR DIRECTIVE (the ONE sanctioned exception
   to the standing ENGINE-UNCHANGED posture) — scope/vocab/rate/lake-schema UNCHANGED — NIFTY/BANKNIFTY/SENSEX.
   GATES: fill_mode 15/2 · costs 483/92 · options executor 235/64 · futures

@@ -7,10 +7,13 @@ number is printed (observed, never asserted-as-SLA):
 
 * **(a) sparse per-mask cost FLAT vs N_1m** — flat-skip (the ``next_arm`` jump
   table) bounds a sparse mask's per-mask cost by
-  ``O(#signals + Σ in-position minutes + #trades)``, so growing the 1-minute
-  execution stream with FLAT span (a fixed armed region + a growing unarmed
-  tail) must not grow the per-mask cost. Ratio tier per
-  ``tests/bench/_o1_tiers.py`` (broken flat-skip walks the tail → ~8× here).
+  ``O(#arm-points + Σ in-position minutes + #trades)`` (the table is
+  mask-independent — the flat walker visits every ARM POINT, firing or not,
+  never only the firing signals), so growing the 1-minute execution stream
+  with FLAT, ARMLESS span (a fixed armed region + a growing unarmed tail —
+  zero arm points in the growth) must not grow the per-mask cost. Ratio tier
+  per ``tests/bench/_o1_tiers.py`` (broken flat-skip walks the tail → ~8×
+  here).
 * **(b) the A/B tuple-throughput ACCEPTANCE THRESHOLD** — a sparse-mask
   rehearsal batch at tf=5m must land within **≤ 2.0×** the single-feed
   (PR-A-shape) wall-clock per tuple. A >2× degradation means flat-skip is

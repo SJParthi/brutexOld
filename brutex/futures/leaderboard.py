@@ -275,7 +275,9 @@ def futures_exec_verdict(
 
     * ``suspect`` / ``differential_checked`` — the R45 differential verdict
       now PERSISTED on the row (flagged, never hidden — a suspect result
-      still ships, the display renders it red);
+      still ships with the flag on the wire; a downstream consumer MAY
+      render it red, but today's one display surface, the /screener
+      "Fut net" column, reads only ``net_pnl_paisa`` — honestly stated);
     * ``priced_trade_pct`` — the exact float unit projection
       ``n_accepted / n_signals * 100.0`` (the ``options_exec`` law; ``null``
       when ``n_signals == 0``);

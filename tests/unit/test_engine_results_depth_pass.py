@@ -1104,6 +1104,12 @@ class TestExecProviderAndFillSensitivityThreading:
                 verdict["haircut_paisa"]
                 == verdict["reference_net_pnl_paisa"] - verdict["worst_case_net_pnl_paisa"]
             )
+            # Dominance on REAL walker output (round-1 review fold): the
+            # worst-case law never overstates the open-anchored reference,
+            # so the shipped haircut is >= 0 here — the fold never guards.
+            haircut = verdict["haircut_paisa"]
+            assert isinstance(haircut, int)
+            assert haircut >= 0
         assert loaded.source["fill_sensitivity_wired"] is True
         # The captured resolver degrades HONESTLY on an out-of-band candidate
         # (a run_id no pooled tuple recorded) — the named reason, never a crash.

@@ -315,11 +315,16 @@ NOTHING can happen until the next 1m bar j with `arm_source[j] >= 0`
 with a position or pending entry — `trade_sim.py:533`, `trade_sim.rs:484`).
 The kernel precomputes `next_arm[j]` (next index with an arm point) once per
 tuple and jumps flat spans, making the per-mask cost
-**O(#decision-signals + Σ minutes-in-position + #trades)** instead of
-O(N_1m). In-position spans must walk every minute (SL/TP law). Sparse masks —
-the overwhelming majority under Stage-1B `min_hits` prefiltering
-(`sweep_run.py:523-525`) — pay far below N_1m; dense long-hold masks approach
-it honestly. The pure-Python walker and the diffcheck reference deliberately
+**O(#arm-points + Σ minutes-in-position + #trades)** instead of
+O(N_1m) — `next_arm` is mask-INDEPENDENT, so the flat walker visits EVERY
+arm point (≈ N_decision ≈ N_1m/tf), firing or not, never only the firing
+signals (the round-1 review correction of the earlier `O(#signals)`
+wording; the kernel docstring always said arm-points). In-position spans
+must walk every minute (SL/TP law). Sparse masks — the overwhelming
+majority under Stage-1B `min_hits` prefiltering (`sweep_run.py:523-525`) —
+pay the arm-point walk (far below N_1m at coarse TFs) plus their few
+in-position spans; dense long-hold masks approach N_1m honestly.
+The pure-Python walker and the diffcheck reference deliberately
 do NOT implement flat-skip (naive full walk = the independence oracle);
 a jump-vs-full-walk parity property pins behavior identity.
 **Construction-cost ownership (assurance minor folded, NAMED):** the 1m
@@ -1309,15 +1314,18 @@ Memory: §1.4 (≈6.0×10⁵ 1m bars/instrument ≈ 30 MB kernel-resident +
 an UNVERIFIED-estimate 250-420 MB as Python `CandleBar`s; measure at build).
 Compute: the trade-sim leg is O(N_masks · N_1m) naive — up to tf_minutes×
 today's leg — mitigated by the flat-skip design to
-O(#signals + Σ in-position minutes + #trades) per mask (§1.5), with a
+O(#arm-points + Σ in-position minutes + #trades) per mask (§1.5 — the flat
+walker visits every mask-independent arm point ≈ N_1m/tf, firing or
+not), with a
 jump-vs-full-walk parity property and NEW bench gates **WITH TEETH
 (assurance minor folded — thresholds are REFUSAL gates, not claims)**:
 (a) per-mask cost flat vs N_1m for a sparse mask (ratio tier per
 `tests/bench/_o1_tiers.py`); (b) the A/B tuple-throughput bench vs the
 PR-A tree gains an ACCEPTANCE THRESHOLD — a sparse-mask rehearsal grid at
 tf=5m must land within **≤ 2.0× PR-A wall-clock per tuple**
-(justification: flat-skip bounds per-mask work by #signals + in-position
-minutes — both tf-invariant for a fixed strategy — and the
+(justification: flat-skip bounds the flat-walk term by #arm-points ≤
+N_decision — the same order the single-feed walk already pays per mask —
+a sparse mask's Σ in-position minutes stays small, and the
 once-per-coordinate column/map build amortizes across the grid's masks and
 tuples, so a >2× degradation means flat-skip is broken or a hidden
 O(N_1m)-per-mask term crept in; the measured number is STILL recorded in

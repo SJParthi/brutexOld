@@ -125,8 +125,11 @@ the session-bounded SLIDE, ratified and unified with PR-A's shipped walker.
 
 ## Honest envelope
 
-- Per-mask kernel cost is O(#signals + Σ in-position minutes + #trades)
-  via the flat-skip jump table — NOT O(1)-total; the Python walker and the
+- Per-mask kernel cost is O(#arm-points + Σ in-position minutes + #trades)
+  via the flat-skip jump table — NOT O(1)-total, and NOT O(#signals): the
+  `next_arm` table is mask-independent, so the flat walker visits every arm
+  point (≈ N_1m/tf), firing or not (the round-1 review correction — the
+  kernel docstring always said arm-points); the Python walker and the
   diffcheck reference deliberately do not flat-skip (independence oracles).
 - The kernel-resident exec columns are ≈30 MB per index instrument by
   derivation; the Python CandleBar-list footprint remains UNMEASURED (the

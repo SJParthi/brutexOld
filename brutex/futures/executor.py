@@ -809,7 +809,8 @@ class FuturesRuleResult:
     #: every existing constructor call is unchanged;
     #: :func:`execute_futures_sim` stamps them via ``dataclasses.replace``.
     #: A ``suspect=True`` result still persists, FLAGGED (the R13
-    #: annotation-never-hides analog) — the display renders it red.
+    #: annotation-never-hides analog) — the flag ships on the wire for a
+    #: downstream consumer to render (no display reads it today).
     suspect: bool = False
     differential_checked: int = 0
 
