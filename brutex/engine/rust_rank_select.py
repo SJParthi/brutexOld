@@ -74,14 +74,17 @@ _LOG = structlog.get_logger("brutex.engine.rust_rank_select")
 #: The env flag over :data:`RANK_RUST_SELECT_DEFAULT` (module docstring).
 RANK_RUST_SELECT_ENV: Final[str] = "BRUTEX_RANK_RUST_SELECT"
 
-#: The ONE default-arm constant (the flip lever). Ships OFF while the parity
-#: battery lands, then flips **ON** in the same PR's final commit per the
-#: 2026-07-18 greenfield flip-ON ruling (coordinator-relayed; see the module
-#: docstring + the MIGRATION.md #1970/#1971 disclosure). Revert = this one
-#: constant; ``BRUTEX_RANK_RUST_SELECT=0`` is the per-process operator kill
-#: switch. Selection output is bit-identical either arm (burn-in-enforced at
-#: runtime, parity-suite-enforced in CI).
-RANK_RUST_SELECT_DEFAULT: Final[bool] = False
+#: The ONE default-arm constant (the flip lever) — **ON** since the LANE-W1
+#: final commit per the 2026-07-18 greenfield flip-ON ruling
+#: (coordinator-relayed over the operator's born-Rust/greenfield decrees —
+#: "no backtests ever run"; the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
+#: one-constant-flip precedent; disclosed in MIGRATION.md #1970/#1971 + the
+#: PR body). Revert = this one constant; ``BRUTEX_RANK_RUST_SELECT=0`` is
+#: the per-process operator kill switch. Selection output is bit-identical
+#: either arm (the 16-call burn-in bit-compare + ship-the-ORACLE autorevert
+#: at runtime; the parity suites in CI) — the flip changes WHICH arm serves,
+#: never what is selected.
+RANK_RUST_SELECT_DEFAULT: Final[bool] = True
 
 #: Kernel-served calls bit-compared against the oracle per function per
 #: process (the burn-in self-check).

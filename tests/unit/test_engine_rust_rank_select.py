@@ -88,9 +88,10 @@ def _quota(m: int = 2) -> tuple[list[int], ...]:
 
 class TestFlagResolution:
     def test_default_constant_documented_state(self) -> None:
-        # Ships OFF pre-flip; the final commit of this PR flips it ON (the
-        # greenfield ruling) — this pin moves WITH that commit.
-        assert RANK_RUST_SELECT_DEFAULT is False
+        # ON since the LANE-W1 flip commit (the 2026-07-18 greenfield
+        # ruling, coordinator-relayed) — the ONE-constant revert lever;
+        # BRUTEX_RANK_RUST_SELECT=0 stays the per-process kill switch.
+        assert RANK_RUST_SELECT_DEFAULT is True
 
     def test_truthy_forces_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(RANK_RUST_SELECT_ENV, "yes")
