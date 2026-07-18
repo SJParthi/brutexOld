@@ -144,8 +144,11 @@ jobs:
         # VERBATIM (zero test-line edits) with the seam armed + the REAL
         # wheel installed. Honesty: this proves NON-PERTURBATION (a fully
         # degrading crate ≡ flag-OFF is itself a pass for that property);
-        # crate-genuinely-engaged teeth live in the wheel-gated
-        # differential/A-B classes of tests/unit/test_notify_rust.py.
+        # crate-genuinely-engaged teeth live in tests/unit/test_notify_rust.py
+        # — the wheel-free TestDefinitionSiteEngagement per-site
+        # burn-in-budget/engaged-INFO spies (round 1: an un-wired definition
+        # site fails there) + the wheel-gated differential classes + the A/B
+        # class, whose ON arm asserts engagement, never byte-identity alone.
         env:
           BRUTEX_NOTIFY_RUST: "1"
         run: |

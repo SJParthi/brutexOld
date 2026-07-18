@@ -3325,12 +3325,21 @@ hostile-review pass._
   follow-up DEC-NOTIFY-RUST-BUILDERS-002 (pre-format-at-the-seam is its
   precondition); Python-oracle deletion is a LATER lane. TESTS:
   `tests/unit/test_notify_rust.py` — facade 100.00% line+branch
-  STANDALONE (120/36) in the wheel-free (50 passed/11 skipped) AND
-  wheel-installed (61 passed) arms; wheel-gated hypothesis differentials
+  STANDALONE (119/36 — the round-1 NIT corrected the "120" stmt-count
+  drift) in the wheel-free (54 passed/11 skipped) AND wheel-installed
+  (65 passed) arms; wheel-gated hypothesis differentials
   per law (hostile Unicode; the full-u64-bit-plane dedupe; lone
   surrogates degrade to oracle — never crash, never different bytes) +
   the flag-ON-vs-OFF byte-identity A/B through the REAL SweepAlerter
-  builders (8-builder battery, tuples byte-equal, zero autoreverts); the
+  builders (8-builder battery, tuples byte-equal, zero autoreverts; since
+  the HOSTILE-REVIEW ROUND 1 fold the ON arm ALSO asserts genuine crate
+  ENGAGEMENT — `notify_rust.engaged` + escape/truncate burn-in-budget
+  consumption — and the NEW wheel-free `TestDefinitionSiteEngagement`
+  per-site spies pin that each of the FOUR definition sites decrements
+  ITS law's budget with the other three untouched, so the executed
+  round-1 mutation class — all four sites silently un-wired back onto
+  their byte-identical Python oracles — now fails 4/4 wheel-free + 5
+  with the wheel, fails-before proven then reverted); the
   exact ci.yml isolated gates re-run green WHEEL-FREE (telegram 239/46 ·
   sweep_alerts 393/42 · wiring 83/24 — ALL 100.00%) and the 14-file
   notifications family battery re-runs VERBATIM green under

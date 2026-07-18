@@ -8,10 +8,13 @@ the flag matrix, the ``_TRUTHY``/``_FALSY`` mirror pin against
 crate-stale latches, every degrade arm, the ``MemoryError``/``SystemExit``
 re-raise pins, the burn-in mismatch autorevert + steady state, the
 refuse-poison gates, the panic belt, the reset seam, the routed
-``sweep_alerts``/``telegram`` definition-site integration, and — gated on
-the REAL built wheel — the hypothesis differential per law, the
+``sweep_alerts``/``telegram`` definition-site integration, the wheel-free
+per-site ENGAGEMENT spies (burn-in-budget + engaged-INFO — a silently
+un-wired definition site fails loudly; hostile-review round 1), and —
+gated on the REAL built wheel — the hypothesis differential per law, the
 lone-surrogate degrade, the FFI shape pins and the flag-ON-vs-OFF
-byte-identity A/B through the real ``SweepAlerter`` builders.
+byte-identity A/B through the real ``SweepAlerter`` builders (whose ON arm
+asserts genuine crate engagement, never byte-identity alone).
 """
 
 from __future__ import annotations
@@ -597,6 +600,89 @@ class TestDefinitionSites:
         assert bucket.check_dedupe_locked(kind, "key", 160.0) is False
 
 
+class TestDefinitionSiteEngagement:
+    """ENGAGEMENT TEETH — the FOUR definition sites genuinely ROUTE.
+
+    Hostile-review round 1 (MIGRATION.md #1955): the routing is
+    byte-identical-by-design, so byte-equality alone cannot catch a
+    definition site silently un-wired back onto its Python oracle (the
+    executed round-1 mutation reverted all four sites and the whole battery
+    stayed green). These pins observe the facade's SIDE CHANNEL instead
+    (the ``feed_rust`` engagement-spy precedent): with the flag ON + a
+    correct fake crate, a routed call decrements ITS law's burn-in budget
+    and fires the once-per-process ``notify_rust.engaged`` INFO — an
+    un-wired site leaves both untouched and fails here. Wheel-free (the
+    fake crate), so the teeth bite in the isolated ci.yml arm too.
+    """
+
+    @staticmethod
+    def _budgets() -> dict[str, int]:
+        return dict(nr._BURN_IN_REMAINING)  # pyright: ignore[reportPrivateUsage]
+
+    def test_escape_markdown_v2_site_engages_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            assert escape_markdown_v2("a._x!") == "a\\.\\_x\\!"
+        assert [rec["event"] for rec in logs] == ["notify_rust.engaged"]
+        # Per-LAW attribution: ONLY the escape budget was consumed.
+        assert self._budgets() == {
+            "escape": nr.BURN_IN_SAMPLES - 1,
+            "count": nr.BURN_IN_SAMPLES,
+            "dedupe": nr.BURN_IN_SAMPLES,
+            "truncate": nr.BURN_IN_SAMPLES,
+        }
+
+    def test_count_or_question_site_engages_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            assert _count_or_question(None) == "?"
+            assert _count_or_question(7) == "7"
+        assert [rec["event"] for rec in logs] == ["notify_rust.engaged"]
+        assert self._budgets() == {
+            "escape": nr.BURN_IN_SAMPLES,
+            "count": nr.BURN_IN_SAMPLES - 2,
+            "dedupe": nr.BURN_IN_SAMPLES,
+            "truncate": nr.BURN_IN_SAMPLES,
+        }
+
+    def test_short_id_site_engages_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            assert _short_id("0123456789abcdef") == "0123456789ab"
+        assert [rec["event"] for rec in logs] == ["notify_rust.engaged"]
+        assert self._budgets() == {
+            "escape": nr.BURN_IN_SAMPLES,
+            "count": nr.BURN_IN_SAMPLES,
+            "dedupe": nr.BURN_IN_SAMPLES,
+            "truncate": nr.BURN_IN_SAMPLES - 1,
+        }
+
+    def test_check_dedupe_locked_site_engages_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        bucket = TelegramBucket()
+        kind = str(TelegramEventKind.RATE_LIMIT_DOWNSHIFT)  # 60.0 s window
+        with capture_logs() as logs:
+            # The no-stamp (last_seen=None) arm ROUTES — the predicate owns it.
+            assert bucket.check_dedupe_locked(kind, "key", 100.0) is False
+            bucket.record_dedupe_locked(kind, "key", 100.0)
+            assert bucket.check_dedupe_locked(kind, "key", 159.9) is True
+        assert [rec["event"] for rec in logs] == ["notify_rust.engaged"]
+        assert self._budgets()["dedupe"] == nr.BURN_IN_SAMPLES - 2
+        # The zero-window short-circuit stays BEFORE the facade: no route,
+        # no budget consumption.
+        assert bucket.check_dedupe_locked(str(TelegramEventKind.TEST), "key", 0.0) is False
+        assert self._budgets() == {
+            "escape": nr.BURN_IN_SAMPLES,
+            "count": nr.BURN_IN_SAMPLES,
+            "dedupe": nr.BURN_IN_SAMPLES - 2,
+            "truncate": nr.BURN_IN_SAMPLES,
+        }
+
+
 # ── Real-wheel gates (skipped loudly when the wheel is absent) ──────────
 
 
@@ -810,9 +896,20 @@ class TestRealWheelByteIdentityAB:
         # AND fail the latch assertion below).
         monkeypatch.setenv(nr.NOTIFY_RUST_ENV, "1")
         nr.reset_notify_rust_for_tests()
-        on_tuples = _drive_builders(SweepAlerter(notifier=_CapturingNotifier()))
+        with capture_logs() as logs:
+            on_tuples = _drive_builders(SweepAlerter(notifier=_CapturingNotifier()))
         assert on_tuples == off_tuples
         assert nr.rust_notify_disabled() is False  # no burn-in mismatch fired
+        # ENGAGEMENT TEETH (hostile-review round 1): byte-identity alone is
+        # vacuously satisfiable by an un-wired definition site, so the ON-arm
+        # drive must also prove the REAL crate was genuinely engaged — the
+        # engaged INFO fired and the battery's two driven laws (every builder
+        # escapes; milestone/suspect/halted call `_short_id`) consumed
+        # burn-in budget.
+        assert "notify_rust.engaged" in [rec["event"] for rec in logs]
+        budgets = dict(nr._BURN_IN_REMAINING)  # pyright: ignore[reportPrivateUsage]
+        assert budgets["escape"] < nr.BURN_IN_SAMPLES
+        assert budgets["truncate"] < nr.BURN_IN_SAMPLES
         # ON arm again in the post-burn-in steady state (Rust bytes ship
         # uncompared) — still byte-identical.
         nr.reset_notify_rust_for_tests(remaining=0)
