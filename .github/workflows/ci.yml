@@ -4110,6 +4110,19 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # GATE-CORRECTNESS fix (DEC-RUST-RUNID-STORES-001 fold; a repo-wide
+          # CI-config correction — flagged for the steward): in `format: sarif`
+          # mode trivy-action DROPS the `severity` input unless this flag is
+          # set ("Building SARIF report with all severities" in the job log),
+          # so the exit-code gate fired on ANY-severity finding — proven by
+          # paired runs on the single sub-threshold advisory in the tree
+          # (thrift@0.17.0 CVE-2026-43868, MEDIUM, no fixed upstream release,
+          # transitive via parquet-rs in rust/brutex-identity/Cargo.lock):
+          # severity-filtered → exit 0; the unfixed invocation → exit 1. With
+          # this flag the job honors its own declared CRITICAL,HIGH gate.
+          # Re-carried after the #1651 CI-sharding merge (71fb2ee5) took main's
+          # ci.yml wholesale and dropped this input.
+          limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
