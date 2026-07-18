@@ -74,6 +74,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.verdict_banner import banner_for
 
@@ -263,6 +264,111 @@ def _from_error_detail(detail: str) -> LastPullOutcome:
     )
 
 
+# --- the Rust decision-kernel seam (DEC-RUST-PULL-STATE-001, Wave 1A) -------
+# Behind the default-OFF ``BRUTEX_PULL_STATE_RUST`` flag the ARM decision is
+# served by the ``brutex_pull_state`` kernel as MACHINE CODES; the tables
+# below compose the pinned human wordings Python-side (the frontend wire
+# contract stays single-sourced here — headlines are byte-copies of the
+# oracle arms, equality-pinned by the frozen golden + the seam parity tests),
+# and the ``@verdict`` markers hand the banner fold back to the RETAINED
+# ``_from_verdict`` so ``verdict_banner.banner_for`` stays the ONE colour
+# authority (CLAUDE.md §11).  Flag OFF is byte-identical (the oracle arms
+# below are untouched); any kernel degrade — wheel missing/stale, a raise, a
+# poisoned code — falls through to the oracle, never a raise.
+
+#: headline code → the pinned wording (codes NOT here: ``completed_failures``
+#: composes the failed count; ``halt:<Name>`` keys ``_HALT_NAME_OUTCOMES``).
+_RUST_HEADLINES: Final[dict[str, str]] = {
+    "wedged": "pull WEDGED — restart required",
+    "stalled": "pull running — STALLED-SUSPECT (no progress beats)",
+    "running": "pull running",
+    "deferred_market_hours": "pull deferred — NSE market hours (08:45-15:35 IST)",
+    "halted_disk_full": "pull HALTED — disk full",
+    "halted_oom": "pull HALTED — out of memory",
+    "halted_lake_write": "pull HALTED — lake write halted",
+    "failed": "pull FAILED",
+    "completed": "pull finished",
+    "never_run": "no pull has run in this dashboard process",
+}
+
+#: The CLOSED outcome vocabulary the kernel may emit directly (the banner
+#: outcomes — ``clean`` / ``verdict_*`` / ``unknown`` — only ever come out of
+#: the Python-side ``_from_verdict`` fold, never the kernel).
+_RUST_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {
+        OUTCOME_NEVER_RUN,
+        OUTCOME_RUNNING,
+        OUTCOME_RUNNING_STALLED,
+        OUTCOME_WEDGED,
+        OUTCOME_COMPLETED,
+        OUTCOME_COMPLETED_WITH_FAILURES,
+        OUTCOME_DEFERRED_MARKET_HOURS,
+        OUTCOME_ERROR,
+        "halted_disk_full",
+        "halted_oom",
+        "halted_lake_write",
+    }
+    | {outcome for outcome, _tone, _headline in _HALT_NAME_OUTCOMES.values()}
+)
+
+#: The heartbeat tone vocabulary (refuse-poison gate for kernel codes).
+_RUST_TONES: Final[frozenset[str]] = frozenset({TONE_OK, TONE_WARN, TONE_BAD, TONE_IDLE})
+
+
+def _compose_from_codes(
+    codes: tuple[str, str, str, str],
+    *,
+    detail: str,
+    failed: int,
+    verdict: Mapping[str, Any] | None,
+) -> LastPullOutcome | None:
+    """Compose the wire outcome from the kernel's decision codes.
+
+    ``None`` = the codes are unrecognisable (a stale/corrupt wheel) — the
+    caller degrades to the byte-identical Python oracle, warn-once, never a
+    raise and never an unvalidated token on the wire.
+    """
+    outcome, tone, headline_code, detail_code = codes
+    if outcome in ("@verdict", "@verdict_prepull"):
+        if verdict is None:
+            # A poisoned kernel claiming the verdict arm with no verdict to
+            # fold — structurally impossible from the real kernel.
+            _pull_state_rust.warn_degrade_once(
+                "kernel_invalid", detail="verdict marker without a verdict"
+            )
+            return None
+        if outcome == "@verdict":
+            return _from_verdict(verdict)
+        return _from_verdict(verdict, provenance="stamped before any pull started")
+    headline: str | None
+    if headline_code == "completed_failures":
+        headline = f"pull finished — {failed} unit(s) failed/quarantined (will re-pull)"
+    elif headline_code.startswith("halt:"):
+        mapped = _HALT_NAME_OUTCOMES.get(headline_code.removeprefix("halt:"))
+        headline = None if mapped is None else mapped[2]
+    else:
+        headline = _RUST_HEADLINES.get(headline_code)
+    if headline is None or outcome not in _RUST_OUTCOMES or tone not in _RUST_TONES:
+        _pull_state_rust.warn_degrade_once(
+            "kernel_invalid", detail=f"unrecognised outcome codes {codes!r}"
+        )
+        return None
+    if detail_code == "input":
+        composed_detail = detail
+    elif detail_code == "empty":
+        composed_detail = ""
+    elif detail_code == "completed":
+        composed_detail = (
+            detail if detail else "completed — no classified verdict recorded for this run"
+        )
+    else:
+        _pull_state_rust.warn_degrade_once(
+            "kernel_invalid", detail=f"unrecognised detail code {detail_code!r}"
+        )
+        return None
+    return LastPullOutcome(outcome=outcome, tone=tone, headline=headline, detail=composed_detail)
+
+
 def classify_last_pull_outcome(
     *,
     state: str,
@@ -299,6 +405,16 @@ def classify_last_pull_outcome(
         fabricated — an unclassifiable input degrades to an honest
         ``unknown``/``error``, never a green.
     """
+    if _pull_state_rust.pull_state_rust_enabled():
+        codes = _pull_state_rust.rust_classify_pull_outcome(
+            state, detail, failed, stalled, wedged, verdict is not None
+        )
+        if codes is not None:
+            composed = _compose_from_codes(codes, detail=detail, failed=failed, verdict=verdict)
+            if composed is not None:
+                return composed
+    # The Python oracle — the byte-identical retained arm: flag OFF takes it
+    # untouched; a flag-ON kernel degrade falls through to it (never a raise).
     if state == "running":
         if wedged:
             return LastPullOutcome(
@@ -395,6 +511,14 @@ def classify_retained_pull_outcome(
         )
     snap = retained.snapshot
     correlated = verdict if (retained.pull_id and verdict_pull_id == retained.pull_id) else None
+    if _pull_state_rust.pull_state_rust_enabled():
+        # DEC-RUST-PULL-STATE-001 Wave 1A: the correlation law's Rust twin —
+        # a kernel degrade keeps the oracle's answer above, never a raise.
+        kernel_correlates = _pull_state_rust.rust_verdict_correlates(
+            retained.pull_id, verdict_pull_id
+        )
+        if kernel_correlates is not None:
+            correlated = verdict if kernel_correlates else None
     return classify_last_pull_outcome(
         state=snap.state,
         detail=snap.detail,
