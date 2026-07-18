@@ -4,8 +4,11 @@ Structure (the ``test_lake_rust_render.py`` / ``test_feed_rust.py`` idioms):
 
 * The guard/latch/burn-in machinery is driven WHEEL-FREE via fake ``fno_math``
   modules installed in ``sys.modules`` (or a poisoned ``None`` entry for the
-  import-guard arm) — the facade must measure 100.00% line+branch from these
-  fakes alone, so the gate is green on a wheel-less box.
+  import-guard arm). Design intent: the facade measures 100.00% line+branch
+  from these fakes alone (re-measured true after the round-1 review closed a
+  5-line kernel-OK/oracle-arm gap the differentials had been masking) — but
+  the CI gate's guarantee deliberately rests on the ``test`` job's HARD
+  fno_math wheel install, never on that unenforced wheel-free property.
 * The ON-vs-oracle DIFFERENTIAL classes are wheel-gated
   (``pytest.importorskip``) and drive the REAL kernels over hostile domains
   (the full date plane incl. every refusal-window boundary read from the
@@ -25,7 +28,7 @@ import sys
 import types
 from collections.abc import Callable, Iterator, Sequence
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Final
 
@@ -600,6 +603,17 @@ class TestRegimeRateSeam:
         assert rust == python
         assert rust[0] == "raise"
 
+    def test_ok_code_ships_the_table_rate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fake-kernel OK path, WHEEL-FREE: a valid in-table rate ships with
+        zero fallback warns (the round-1 coverage-finding closure — the
+        regime ``_kernel`` OK return must be reachable from the fakes alone,
+        never only from the wheel-gated differentials)."""
+        _install(monkeypatch, _fake_kernel(optcost_regime_rate=lambda s, r, o: (0, 3_503)))
+        _flag_on(monkeypatch, steady=True)
+        with capture_logs() as logs:
+            assert self._rate(_REFUSAL_TABLE, date(2024, 10, 2)) == 3_503
+        assert not [e for e in logs if e["event"] == "optcost_rust.fallback"]
+
     @pytest.mark.parametrize(
         "result",
         [
@@ -738,6 +752,27 @@ class TestHistoryAndExpirySeams:
         )
         assert ocr.next_monthly(table, date(2024, 1, 1), python=lambda: target) == target
 
+    def test_next_monthly_burn_in_compares_raise_outcomes_equal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Burn-in ARMED, WHEEL-FREE: the ``next_monthly`` oracle's
+        ValueError-capture arm runs from the fakes (the round-1
+        coverage-finding closure of the facade's 769-770 gap)."""
+        table = ((date(2020, 1, 1), 3),)
+        _install(
+            monkeypatch, _fake_kernel(optcost_next_monthly_expiry=lambda s, d, y, m, o: (3, 0))
+        )
+        _flag_on(monkeypatch)  # burn-in armed
+
+        def _python() -> date:
+            raise ValueError(
+                f"on_date {date(2019, 1, 1)} is before recorded history start ({table[0][0]})"
+            )
+
+        with pytest.raises(ValueError, match="before recorded history start"):
+            ocr.next_monthly(table, date(2019, 1, 1), python=_python)
+        assert not ocr.optcost_rust_disabled()
+
 
 class TestMoneynessSeams:
     def test_classify_codes_map_to_buckets(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -837,6 +872,29 @@ class TestMoneynessSeams:
         )
 
 
+class TestAmbientDecimalContextPin:
+    """The round-1 refuter finding pinned CONSCIOUS (wheel-free OFF arm).
+
+    The kernel/oracle equivalence proof is scoped to the DEFAULT 28-digit
+    decimal context (``rust/fno-math/src/optcost/moneyness.rs`` module docs);
+    under a caller-MODIFIED ambient context the ORACLE's own Decimal
+    arithmetic context-rounds while the kernel's exact-integer law does not —
+    a reproduced divergence class with zero production reachability (no
+    production caller mutates the decimal context — grep-verified 2026-07-18;
+    ``brutex/data/pcr.py`` pins a default-equivalent context around its own
+    division). This pins the OFF arm's ambient-context sensitivity; the
+    wheel-gated ON-arm twin lives in ``TestMoneynessDifferential``.
+    """
+
+    def test_off_arm_follows_the_ambient_context(self) -> None:
+        strike, spot, step = Decimal("9999999.05"), Decimal("1000000.00"), Decimal("0.03")
+        with localcontext() as ctx:
+            ctx.prec = 6  # (9999999.05 − 1000000.00) / 0.03 context-rounds to 3.00000E+8
+            assert atm_offset(strike, spot, step) == 300_000_000
+        # the default 28-digit context yields the exact answer
+        assert atm_offset(strike, spot, step) == 299_999_968
+
+
 class TestStrikeSeams:
     def test_offset_and_grid_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(
@@ -849,6 +907,24 @@ class TestStrikeSeams:
         _flag_on(monkeypatch, steady=True)
         assert ocr.offset_strike(24_000, 2, 50, is_bull=True, python=lambda: -1) == 24_100
         assert ocr.strike_offset(24_000, -2, 50, python=lambda: -1) == 23_900
+
+    def test_offset_and_grid_offset_burn_in_runs_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Burn-in ARMED, WHEEL-FREE: both strike-seam oracle closures run
+        from the fakes (the round-1 coverage-finding closure of the facade's
+        915/939 gap); a clean compare leaves the seam un-latched."""
+        _install(
+            monkeypatch,
+            _fake_kernel(
+                optcost_offset_strike=lambda a, c, s, b: 24_100,
+                optcost_strike_offset_from_atm=lambda a, o, s: 23_900,
+            ),
+        )
+        _flag_on(monkeypatch)  # burn-in armed
+        assert ocr.offset_strike(24_000, 2, 50, is_bull=True, python=lambda: 24_100) == 24_100
+        assert ocr.strike_offset(24_000, -2, 50, python=lambda: 23_900) == 23_900
+        assert not ocr.optcost_rust_disabled()
 
     def test_grid_around_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         good = [23_900, 23_950, 24_000, 24_050, 24_100]
@@ -952,6 +1028,35 @@ class TestOffDefaultNeverTouchesTheKernel:
         )
         assert _lookup_in_history(((date(2020, 1, 1), 3),), date(2024, 1, 1)) == 3
         assert touches == []
+
+    def test_off_default_never_imports_fno_math(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The STRICT form of the bomb-spy law (round-1 review): with NO
+        ``fno_math`` entry in ``sys.modules`` at all, exercising every gated
+        public entry flag-OFF leaves it genuinely UN-IMPORTED. The PEP-562
+        bomb above proves non-ACCESS (a module ``__getattr__`` fires only on
+        a missing attribute, not on ``import``); this pins the stronger
+        never-imported property the ledger wording claims."""
+        monkeypatch.delitem(sys.modules, "fno_math", raising=False)
+        monkeypatch.delenv(ocr.OPTCOST_TAILS_RUST_ENV, raising=False)
+
+        assert rate_for_date(_STT_OPTIONS_REGIMES, date(2024, 10, 1)) == 10_000
+        assert classify("CE", Decimal("24000"), Decimal("24100"), atm_band=None) is Moneyness.ITM
+        assert atm_offset(Decimal("24100"), Decimal("24000"), Decimal("50")) == 2
+        assert derive_strike_step([Decimal("24000"), Decimal("24050")]) == Decimal("50")
+        assert get_lot_size(OptionsUnderlying.NIFTY, date(2024, 11, 20)) == 75
+        assert next_weekly_expiry(OptionsUnderlying.BANKNIFTY, date(2024, 11, 14)) is None
+        assert next_monthly_expiry(OptionsUnderlying.NIFTY, date(2024, 1, 1)) == date(2024, 1, 25)
+        assert round_to_atm(24_025.0, OptionsUnderlying.NIFTY) == 24_050
+        assert strike_offset_from_atm(24_000, -2, OptionsUnderlying.NIFTY) == 23_900
+        assert grid_around_atm(24_000, OptionsUnderlying.NIFTY, 1) == [23_950, 24_000, 24_050]
+        assert (
+            resolve_offset_strike(
+                RULES_BY_NAME["atm_plus_2_in_dir"], TradeDirection.BEAR, 24_000, 50
+            )
+            == 23_900
+        )
+        assert _lookup_in_history(((date(2020, 1, 1), 3),), date(2024, 1, 1)) == 3
+        assert "fno_math" not in sys.modules
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1115,6 +1220,22 @@ class TestMoneynessDifferential:
         finally:
             os.environ.pop(ocr.OPTCOST_TAILS_RUST_ENV, None)
             ocr.reset_optcost_rust_for_tests()
+
+    def test_modified_context_kernel_stays_exact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Flag ON post-burn-in, real wheel, under ``localcontext(prec=6)``:
+        the kernel ships the context-INSENSITIVE exact answer (299_999_968)
+        where the OFF arm's oracle context-rounds to 300_000_000 (pinned in
+        ``TestAmbientDecimalContextPin``) — the round-1 refuter divergence
+        pinned as CONSCIOUS: equivalence is proven for the DEFAULT context
+        only, the ON value is the exact one, and no production caller
+        mutates the decimal context (grep-verified)."""
+        _require_wheel()
+        _flag_on(monkeypatch, steady=True)
+        strike, spot, step = Decimal("9999999.05"), Decimal("1000000.00"), Decimal("0.03")
+        with localcontext() as ctx:
+            ctx.prec = 6
+            assert atm_offset(strike, spot, step) == 299_999_968
+        assert not ocr.optcost_rust_disabled()
 
     def test_half_step_midpoint_agreement_law_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """spot exactly step/2 from strike: classify==ATM ⟺ atm_offset==0 — flag ON."""

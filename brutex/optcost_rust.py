@@ -94,6 +94,17 @@ representable as i64 paisa — or a strike ladder without ONE uniform decimal
 exponent (the exponent is part of the byte identity of the derived step) —
 routes SILENTLY to the Python oracle. Nothing is ever approximated.
 
+Kernel/oracle EQUIVALENCE for the moneyness seams is proven under the
+DEFAULT decimal context (28 significant digits — the proof envelope in
+``rust/fno-math/src/optcost/moneyness.rs``). A caller-MODIFIED ambient
+context (a reduced ``prec`` / enabled traps) skews the ORACLE arm's own
+Decimal arithmetic, not the kernel's exact-integer law — so post-burn-in
+the two arms can diverge there, the ON value being the exact answer. Zero
+production callers mutate the decimal context (grep-verified; the one
+production ``localcontext`` in the repo, ``brutex/data/pcr.py``, pins a
+default-equivalent context around its own division) and the behavior is
+pinned as conscious in the unit suite (round-1 review).
+
 ## Honest envelope (Golden Rule #10)
 
 Expected payoff ≈ 0 — these are cold/warm per-trade + read-side paths, not
@@ -605,6 +616,15 @@ def regime_rate(
     exact f-string shapes (VERIFIED-RATES-ONLY — module docstring). *python*
     is the verbatim oracle body; its raises (``ValueError`` ∪ the
     ``UnverifiedCostRegimeError`` subclass) are captured for burn-in parity.
+
+    The OK-arm refuse-poison (``value ∈ table``) is STRUCTURAL, not
+    semantic — it cannot tell a correct rate from a table rate wrongly
+    returned on a refusal DATE (round-1 review). The semantic refusal
+    guarantee for the production surface rests on (a) callers only ever
+    passing the four shipped ``Final`` tables and (b) the exhaustive
+    full-date-plane ON-vs-oracle differential over exactly those tables
+    (± the boundary corpus, both ETC refusal rows) — defense-in-depth
+    posture, per the module docstring's fail-closed layers.
     """
 
     def _kernel(kernel: ModuleType) -> Outcome:
@@ -710,7 +730,19 @@ def next_weekly(
 ) -> date | None:
     """Routed :func:`brutex.options.expiry_calendar.next_weekly_expiry`
     (seam ``next_weekly``): ``NO_WEEKLY`` materialises as ``None``;
-    pre-history composes ``_lookup_in_history``'s exact ``ValueError``."""
+    pre-history composes ``_lookup_in_history``'s exact ``ValueError``.
+
+    NESTED-ORACLE DISCLOSURE (round-1 review): flag-ON, *python* (the
+    verbatim ``_next_weekly_expiry_python``) resolves its weekly DOW via
+    ``get_weekly_dow`` → the gated ``expiry_dow`` seam, so once THAT seam's
+    burn-in exhausts, this seam's burn-in compares kernel vs a
+    partially-kernel-routed oracle. SAFE-biased, never masking: this
+    kernel's internal lookup is a DISTINCT Rust path, so a shared-kernel
+    defect surfaces as a burn-in MISMATCH (autorevert), never a masked
+    pass — and the shared lookup kernel is independently differential-
+    tested against a pure-Python oracle (the ``lot_size`` full-date-plane
+    suite). Flag-OFF is pure Python end to end.
+    """
 
     def _kernel(kernel: ModuleType) -> Outcome:
         starts, dows = _history_columns(history)
@@ -746,7 +778,9 @@ def next_monthly(
     """Routed :func:`brutex.options.expiry_calendar.next_monthly_expiry`
     (seam ``next_monthly``). The kernel Errs on the December-9999 rollover
     Python's ``date`` refuses — that degrades to the oracle, which raises
-    exactly as today."""
+    exactly as today. The :func:`next_weekly` NESTED-ORACLE DISCLOSURE
+    applies verbatim (the oracle's ``get_monthly_dow`` rides the gated
+    ``expiry_dow`` seam — safe-biased, independently pure-oracle-tested)."""
 
     def _kernel(kernel: ModuleType) -> Outcome:
         starts, dows = _history_columns(history)
@@ -787,7 +821,9 @@ def classify_graded(
     representable as i64 paisa routes SILENTLY to the oracle — never a
     rounded paisa, never a changed bucket. The module's never-raises
     contract is preserved on every path (kernel faults degrade to the
-    oracle inside :func:`_route`).
+    oracle inside :func:`_route`). Kernel/oracle equivalence is proven for
+    the DEFAULT decimal context ONLY (module docstring — the oracle's own
+    ``spot − strike`` subtraction is ambient-context arithmetic).
     """
     from brutex.data.moneyness import Moneyness
 
@@ -829,7 +865,10 @@ def atm_offset_paisa(
 ) -> int:
     """Routed graded arm of :func:`brutex.data.moneyness.atm_offset`
     (seam ``atm_offset``) — the exact-integer ROUND_HALF_DOWN law, gated on
-    i64-paisa exactness (inexact → the oracle, hard rule 4)."""
+    i64-paisa exactness (inexact → the oracle, hard rule 4). Equivalence to
+    the Decimal oracle is proven for the DEFAULT 28-digit decimal context
+    ONLY (module docstring — a caller-modified ambient context skews the
+    oracle's division, never the kernel; pinned as conscious)."""
     strike_paisa = _exact_scaled_int(strike, 2)
     spot_paisa = _exact_scaled_int(spot, 2)
     step_paisa = _exact_scaled_int(step, 2)
@@ -860,7 +899,13 @@ def strike_step(
     Engages ONLY on a uniform-exponent ladder (see
     :func:`_uniform_exponent_units` — the derived step's byte identity
     includes its exponent); otherwise the oracle serves. Burn-in compares
-    on ``as_tuple()`` so an exponent drift can never ship.
+    on ``as_tuple()`` so an exponent drift can never ship. Kernel/oracle
+    equivalence is proven for the DEFAULT decimal context ONLY (module
+    docstring): the oracle's gap subtractions AND this seam's own
+    ``Decimal(gap).scaleb(exponent)`` materialisation are ambient-context
+    arithmetic — exact under the default context (i64 coefficients ≤ 19
+    digits < 28), both context-rounded under a caller-reduced ``prec``
+    (verified: prec=6 rounds a 10000001 gap to ``1.00000E+7`` on BOTH arms).
     """
     units = _uniform_exponent_units(qualifying)
     if units is None:
