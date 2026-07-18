@@ -131,6 +131,15 @@ os.environ.setdefault("BRUTEX_BOX_UPDATE", "0")
 os.environ.pop("BRUTEX_SKIP_WHEEL_FRESHNESS", None)
 os.environ.pop("BRUTEX_FILL_MODE", None)
 
+# DEC-ABSTAIN-GATE-STREAM-001 + DEC-META-LABEL-ANNOTATE-001 hermeticity: a
+# host env carrying the DORMANT `BRUTEX_ABSTAIN_GATE_INSIM` knob would trip
+# the sweep-launch refusal across every sweep-all suite, and an ambient
+# `BRUTEX_META_GATE` would flip the default-OFF Rust meta facade ON for
+# unrelated tests. POP both (the fill-mode discipline above — the meta
+# suites inject env explicitly on both arms).
+os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
+os.environ.pop("BRUTEX_META_GATE", None)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_today_gate_log_state() -> None:
