@@ -249,6 +249,12 @@ def test_completed_sweep_refreshes_leaderboard_cache(
         # Keep the account-wide single-flight lock inside the tmp lake (not the real
         # ~/.brutex/lake) — DEC-ACCOUNT-PULL-SINGLEFLIGHT-001.
         lake_root_resolver=lambda: lake_root,
+        # Hermeticity (DEC-TEST-AWS-HERMETICITY-001): a real lake root would
+        # otherwise invoke the DEFAULT account-key resolver, whose production
+        # binding reads the Groww api_key from LIVE AWS SSM. This sweep makes
+        # zero vendor calls, so the account lock is skipped explicitly (the
+        # established `lambda: None` idiom — test_pull_jobs_singleflight.py).
+        account_key_resolver=lambda: None,
     )
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
 
@@ -286,6 +292,9 @@ def test_failed_sweep_written_store_still_visible(
         spawn=lambda fn: fn(),
         summary_cache=summary_cache,
         lake_root_resolver=lambda: lake_root,  # DEC-ACCOUNT-PULL-SINGLEFLIGHT-001
+        # Hermeticity (DEC-TEST-AWS-HERMETICITY-001): skip the account lock —
+        # the default resolver would read the api_key from live AWS SSM.
+        account_key_resolver=lambda: None,
     )
     generation_before = summary_cache.generation
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True

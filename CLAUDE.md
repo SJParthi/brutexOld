@@ -72,6 +72,27 @@ burn-in-coverage flip preconditions. The honesty banner holds verbatim —
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the full record lives in
 the §1 Active-branch blurb + MIGRATION.md #1955.)
+Earlier: 2026-07-17 (DEC-TEST-AWS-HERMETICITY-001 (proposed — pending
+queue-master confirmation), MIGRATION.md #1954 (provisional; renumber-at-landing
+per DEC-LEDGER-RENUMBER-001), branch `claude/test-aws-hermeticity` — TEST-side
+AWS hermeticity: two `test_dashboard_results_route.py` sweep tests started a
+`BackgroundPullJob` whose DEFAULT account-key resolver reads the Groww
+credentials from LIVE AWS SSM (a real decrypting `ssm:GetParameter` on a
+boto3-equipped box — a hermeticity failure + a secret-exposure class; green on
+boto3-less CI only via the graceful `CredentialsError` degrade); both tests now
+inject the established `account_key_resolver=lambda: None` seam, and a
+suite-wide autouse BELT in `tests/conftest.py` patches the real-SSM-client
+factory (+ its from-import bindings, + `boto3.client`/`Session` when boto3 is
+importable) to raise a loud remediation-naming refusal — every box now behaves
+like boto3-less CI deterministically, and a live AWS call from any IN-PROCESS
+test path is structurally impossible (the belt is an in-process monkeypatch —
+subprocess children + hypothetical direct botocore use sit outside it,
+verified unreached by every current test; self-test
+`tests/unit/test_aws_hermeticity_belt.py`).
+ZERO brutex/ source change — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1954.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3447,6 +3468,50 @@ hostile-review pass._
   fib-express collision surface (trading-core/fno-math/brutex-lake/
   conditions.toml/spec.py/fib_definitions.py/generated bits) ZERO-diff
   by construction.)
+  Earlier: `claude/test-aws-hermeticity`
+  (**DEC-TEST-AWS-HERMETICITY-001 (proposed — pending queue-master
+  confirmation), MIGRATION.md #1954** — entry number PROVISIONAL
+  (queue-master-allocated; the #1933-#1953 band belongs to other lanes);
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001 — the TEST-side
+  AWS hermeticity fix, ZERO `brutex/` source change. FINDING (class only —
+  no secret value anywhere): the two `test_dashboard_results_route.py` sweep
+  tests (`test_completed_sweep_refreshes_leaderboard_cache` +
+  `test_failed_sweep_written_store_still_visible`) started a
+  `BackgroundPullJob` with an injected real tmp lake root but WITHOUT
+  `account_key_resolver`, so `start()`'s DEFAULT resolver walked
+  `resolve_groww_aws_credentials` → `load_groww_aws_credentials` →
+  `build_real_aws_client` → a live decrypting `ssm:GetParameter` against the
+  production SecureStrings on any box with boto3 + ambient IAM credentials
+  (boto3-less CI stayed green only via the graceful `CredentialsError` →
+  None degrade — executed fail-loud spy proof, no network). FIX: both tests
+  inject the established `account_key_resolver=lambda: None` idiom
+  (assertions unweakened), and `tests/conftest.py` gains the suite-wide
+  autouse `_aws_hermeticity_belt` (beside the market-hours/today-gate/TTL/
+  settle belts): the ONE real-SSM-client factory + its from-import bindings
+  in `credentials_aws`/`token_store_aws` raise the loud remediation-naming
+  `AWS_HERMETICITY_BELT_MESSAGE`, and `boto3.client`/`boto3.resource` + the
+  `Session` twins are patched whenever boto3 is importable (covers the
+  crossverify S3 publisher's lazy import; skipped gracefully when absent —
+  the CI posture). Callers keep their documented fail-fast mappings, so every
+  box behaves like boto3-less CI deterministically while a live AWS call from
+  any IN-PROCESS test path is structurally impossible; deliberate fakes
+  (constructor-injected `AwsClient`/S3, `aws_loader=`, test-level monkeypatch)
+  keep working.
+  Self-test `tests/unit/test_aws_hermeticity_belt.py` (12 tests — belt
+  active/loud/source-pinned-autouse + fakes-still-work); AST sweep of every
+  `BackgroundPullJob(` in tests/ recorded in #1954 (the reaching set:
+  the two fixed tests + the `test_pull_jobs.py` on_finally/heartbeat classes
+  + `test_pull_jobs_singleflight.py`'s no-resolver block + route-driven
+  starts — ALL belt-covered). HONEST: prevents FUTURE exposure from the test
+  suite; the belt is an in-process monkeypatch — subprocess-spawned children
+  and hypothetical direct `botocore`/aiobotocore use sit OUTSIDE it (verified:
+  no current subprocess-spawning test reaches the credential/S3 chain — the
+  residual is theoretical, actual exposure nil); credential rotation + IAM
+  review are operator decisions, out of scope. GATES: full `tests/unit` green under the belt (boto3-installed AND
+  boto3-absent arms); ruff/ruff-format clean on touched files; `mypy
+  --strict brutex` untouched; pyright clean on the touched test files.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -10097,6 +10162,23 @@ hostile-review pass._
   (bomb-spy-pinned), payoff ≈ 0 by the mandated banner; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1955 for the full blurb)
+  Earlier: `claude/test-aws-hermeticity`
+  (DEC-TEST-AWS-HERMETICITY-001 (proposed — pending queue-master
+  confirmation), MIGRATION.md #1954 (provisional; renumber-at-landing per
+  DEC-LEDGER-RENUMBER-001) — the TEST-side AWS hermeticity fix, ZERO
+  `brutex/` source change: the two `test_dashboard_results_route.py` sweep
+  tests inject the established `account_key_resolver=lambda: None` seam
+  (their default resolver reached a live decrypting `ssm:GetParameter` on
+  any boto3-equipped box), and the suite-wide autouse
+  `_aws_hermeticity_belt` in `tests/conftest.py` patches the real-SSM-client
+  factory + its from-import bindings + the boto3 boundary (when importable)
+  to raise a loud remediation-naming refusal — a live AWS call from any
+  IN-PROCESS test path is structurally impossible (subprocess children +
+  direct botocore use sit outside the in-process monkeypatch, verified
+  unreached by every current test); deliberate fakes keep working; self-test
+  `tests/unit/test_aws_hermeticity_belt.py`; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1954 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
