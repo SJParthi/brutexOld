@@ -3467,10 +3467,10 @@ hostile-review pass._
   core-rust-parity.yml models legs (flag-OFF coverage leg + the family
   re-run VERBATIM under the flag) + the mutation.yml models_rust
   zero-survivor mutmut pair + the facade census pin. GATES (executed;
-  coverage RE-MEASURED 2026-07-18 on head 57c456f35): cargo
+  coverage RE-MEASURED 2026-07-18 on head de11b9c46): cargo
   fmt/clippy `-D warnings --locked`/test `--release --locked` 62 green; the
-  365-test models battery green flag-OFF AND flag-ON; `models_rust.py`
-  100.00% line+branch (166/64) + `models.py` 100.00% (102/24); FIVE
+  377-test models battery green flag-OFF AND flag-ON; `models_rust.py`
+  100.00% line+branch (168/66) + `models.py` 100.00% (102/24); FIVE
   hand-applied mutants executed killed; ruff/ruff-format clean; `mypy
   --strict` 0 new; pyright 0 errors on touched files. HONEST:
   `normalise_tick_size` has ZERO production consumers outside models.py —
