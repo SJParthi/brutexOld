@@ -424,11 +424,13 @@ def annotate_run(
             combos_total += len(combo_ids)
             continue
         instrument = trades_path.parent.parent.name
-        lens = _lens_for(instrument, lens_cache, daily_bars_for)
         combos: dict[str, Any] = {}
         stem_trades = 0
         stem_malformed = 0
         try:
+            # Inside the isolation fence: a raising daily-bars loader is a
+            # counted stem skip, never a pass abort (correct-or-absent).
+            lens = _lens_for(instrument, lens_cache, daily_bars_for)
             for combo_id in combo_ids:
                 payload, n_trades, malformed = _combo_annotation(paths, combo_id, lens, scorer)
                 combos[combo_id] = payload
