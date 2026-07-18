@@ -600,3 +600,253 @@ __all__ += [
     "rust_scope_token",
     "rust_spot_only_note_surgery",
 ]
+
+
+# --- pull_intent (Wave 2E) --------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 2E: the ``brutex/dashboard/pull_intent.py``
+# parse-shape + resume-decision kernel accessors — the SAME guarded-consult
+# discipline as the sections above (lazy resolve via the ONE shared
+# ``_resolve_kernel_symbol`` → ``_call_kernel`` defensive belt →
+# refuse-poison gate → ``None`` = use the byte-identical Python oracle).
+# Append-only section (the wave-worker convention).
+#
+# BOUNDARY (design risk #3 — the corruption-taxonomy law): the JSON DECODE
+# of the intent sidecar STAYS PYTHON.  The seam classifies the
+# already-decoded payload's concrete types into the small integer codes
+# below (a MECHANICAL ``isinstance``/representability projection in
+# ``pull_intent._classify_payload_for_kernel``), and every decode failure —
+# ``UnicodeDecodeError`` ⊂ ``ValueError``, ``json.JSONDecodeError``,
+# nesting-bomb ``RecursionError``, ``OverflowError`` — folds into the ONE
+# not-a-Mapping root code BEFORE the kernel is consulted, so CPython's
+# failure taxonomy remains the single decoder and serde/hand-rolled parser
+# drift is structurally impossible.  Codes cross in; ONE verdict/arm code
+# crosses out; every warn string, structlog event and the frozen
+# ``PullIntent`` dataclass stay Python.  The one string edge is
+# ``intent_resume_enabled``'s raw env token (the strip+lower+falsy-set law
+# IS a string law; a lone-surrogate env value fails the pyo3 ``&str`` edge
+# and the belt degrades it to the oracle — verdict-identical, since the
+# oracle handles surrogates natively).
+
+#: Field-kind codes for the five request-string fields + ``created_at``
+#: (mirrors ``rust/brutex-pull-state/src/intent.rs``).
+INTENT_KIND_ABSENT: Final[int] = 0
+INTENT_KIND_NULL: Final[int] = 1
+INTENT_KIND_STR: Final[int] = 2
+INTENT_KIND_OTHER: Final[int] = 3
+
+#: ``restarts``-kind codes.  ``BOOL`` is the concrete CPython type tag
+#: (``bool`` subclasses ``int`` — accurate reporting probes it first; the
+#: "a JSON ``true`` is not a count" LAW lives in the kernel); the two HUGE
+#: codes are pure i64-representability facts for CPython's
+#: arbitrary-precision ints (the sign law still lives in the kernel).
+INTENT_RESTARTS_ABSENT: Final[int] = 0
+INTENT_RESTARTS_NULL: Final[int] = 1
+INTENT_RESTARTS_BOOL: Final[int] = 2
+INTENT_RESTARTS_INT: Final[int] = 3
+INTENT_RESTARTS_INT_HUGE_POS: Final[int] = 4
+INTENT_RESTARTS_INT_HUGE_NEG: Final[int] = 5
+INTENT_RESTARTS_OTHER: Final[int] = 6
+
+#: ``intent_shape_verdict``'s VALID verdict — every other in-vocabulary code
+#: (1..=8, the first violation in the oracle's own probe order) means the
+#: corrupt/absent answer; 255 (out-of-vocabulary inputs) is NOT in the
+#: served vocabulary, so it degrades as ``kernel_invalid`` below.
+INTENT_SHAPE_VALID: Final[int] = 0
+
+#: The whole served shape-verdict vocabulary (0=valid · 1=not-mapping ·
+#: 2..=6 the five request fields in probe order · 7=restarts ·
+#: 8=created_at) — anything else is a stale/corrupt wheel.
+_INTENT_SHAPE_CODES: Final[frozenset[int]] = frozenset(range(9))
+
+#: ``intent_resume_decision`` arm tokens (index == token value).
+RESUME_ARM_NO_INTENT: Final[int] = 0
+RESUME_ARM_PEER_ACTIVE: Final[int] = 1
+RESUME_ARM_OVER_CAP: Final[int] = 2
+RESUME_ARM_PROCEED: Final[int] = 3
+
+_RESUME_ARMS: Final[frozenset[int]] = frozenset(range(RESUME_ARM_PROCEED + 1))
+
+#: ``intent_refused_restore_decision`` arm tokens.
+RESTORE_ARM_NO_ACTION: Final[int] = 0
+RESTORE_ARM_LEAVE_ABSENT: Final[int] = 1
+RESTORE_ARM_CLEAR_ORPHAN: Final[int] = 2
+RESTORE_ARM_RESTORE_PRIOR: Final[int] = 3
+
+_RESTORE_ARMS: Final[frozenset[int]] = frozenset(range(RESTORE_ARM_RESTORE_PRIOR + 1))
+
+#: The u64 FFI ceiling for ``intent_resume_decision``'s counters — a count
+#: outside ``[0, 2**64)`` (a forged intent file's arbitrary-precision int)
+#: stays on the DOCUMENTED Python arm (a representability fact, not a
+#: kernel fault — no warn; the oracle decides byte-identically).
+_U64_MAX: Final[int] = 2**64 - 1
+
+
+def rust_intent_shape_verdict(
+    root_mapping: int,
+    symbols: int,
+    symbol: int,
+    from_date: int,
+    to_date: int,
+    scope: int,
+    restarts_kind: int,
+    restarts_value: int,
+    created_at_kind: int,
+) -> int | None:
+    """Consult the kernel's intent shape verdict; ``None`` = use the oracle.
+
+    Takes the 9-slot classified-payload tuple UNPACKED (the
+    ``pull_intent._classify_payload_for_kernel`` output — ``root_mapping``
+    rides as the classifier's 0/1 int and is boolified here).  Refuse-poison
+    gate: EXACTLY ``int`` and EXACTLY one of the nine served verdict codes —
+    the kernel's own 255 out-of-vocabulary-input answer (a classifier/wheel
+    mismatch) degrades as ``kernel_invalid``, never a verdict.
+    """
+    verdict = _call_kernel(
+        "intent_shape_verdict",
+        bool(root_mapping),
+        symbols,
+        symbol,
+        from_date,
+        to_date,
+        scope,
+        restarts_kind,
+        restarts_value,
+        created_at_kind,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _INTENT_SHAPE_CODES:
+        warn_degrade_once(
+            "kernel_invalid", symbol="intent_shape_verdict", detail=repr(verdict)[:80]
+        )
+        return None
+    return verdict
+
+
+def rust_intent_resume_decision(
+    *,
+    has_intent: bool,
+    probe_acquirable: bool,
+    restarts: int,
+    max_restarts: int,
+) -> int | None:
+    """Consult the kernel's resume arm token; ``None`` = use the oracle.
+
+    Counters outside u64 keep the call on the documented Python arm
+    (silently — a representability fact, never a kernel fault).  Beyond the
+    type + vocabulary refuse-poison gate, the ONE site-impossible arm is
+    gated too: ``NO_INTENT`` is total in ``has_intent`` (the kernel lattice
+    returns it iff the intent is absent), so a mismatch there can only mean
+    a stale/corrupt wheel — degrade, never serve.
+    """
+    if not (0 <= restarts <= _U64_MAX and 0 <= max_restarts <= _U64_MAX):
+        return None
+    verdict = _call_kernel(
+        "intent_resume_decision",
+        bool(has_intent),
+        bool(probe_acquirable),
+        restarts,
+        max_restarts,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _RESUME_ARMS:
+        warn_degrade_once(
+            "kernel_invalid", symbol="intent_resume_decision", detail=repr(verdict)[:80]
+        )
+        return None
+    if (verdict == RESUME_ARM_NO_INTENT) != (not has_intent):
+        warn_degrade_once(
+            "kernel_invalid",
+            symbol="intent_resume_decision",
+            detail=f"no_intent arm inconsistent with has_intent={has_intent}",
+        )
+        return None
+    return verdict
+
+
+def rust_intent_refused_restore_decision(
+    *,
+    dry_run: bool,
+    started: bool,
+    current_present: bool,
+    prior_present: bool,
+) -> int | None:
+    """Consult the kernel's refused-start restore arm; ``None`` = the oracle.
+
+    The ``NO_ACTION`` arm is total in ``dry_run or started`` — the
+    consistency gate degrades a wheel that breaks that totality (the
+    resume-decision posture), so the seam can never be steered into
+    skipping a restore (or performing one) on a short-circuit input.
+    """
+    verdict = _call_kernel(
+        "intent_refused_restore_decision",
+        bool(dry_run),
+        bool(started),
+        bool(current_present),
+        bool(prior_present),
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _RESTORE_ARMS:
+        warn_degrade_once(
+            "kernel_invalid",
+            symbol="intent_refused_restore_decision",
+            detail=repr(verdict)[:80],
+        )
+        return None
+    if (verdict == RESTORE_ARM_NO_ACTION) != (dry_run or started):
+        warn_degrade_once(
+            "kernel_invalid",
+            symbol="intent_refused_restore_decision",
+            detail=f"no_action arm inconsistent with dry_run={dry_run} started={started}",
+        )
+        return None
+    return verdict
+
+
+def rust_intent_resume_enabled(raw: str | None) -> bool | None:
+    """Consult the kernel's resume-env token law; ``None`` = use the oracle.
+
+    Refuse-poison gate: EXACTLY ``bool`` (an int pun from a stale wheel must
+    degrade loudly, never serve as truthy).  A lone-surrogate *raw* fails
+    the pyo3 ``&str`` edge inside the belt (``kernel_error``) — the oracle
+    handles surrogates natively, so the verdict is unaffected.
+    """
+    verdict = _call_kernel("intent_resume_enabled", raw)
+    if verdict is _KERNEL_FAULT:
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once(
+            "kernel_invalid", symbol="intent_resume_enabled", detail=type(verdict).__name__
+        )
+        return None
+    return verdict
+
+
+__all__ += [
+    "INTENT_KIND_ABSENT",
+    "INTENT_KIND_NULL",
+    "INTENT_KIND_OTHER",
+    "INTENT_KIND_STR",
+    "INTENT_RESTARTS_ABSENT",
+    "INTENT_RESTARTS_BOOL",
+    "INTENT_RESTARTS_INT",
+    "INTENT_RESTARTS_INT_HUGE_NEG",
+    "INTENT_RESTARTS_INT_HUGE_POS",
+    "INTENT_RESTARTS_NULL",
+    "INTENT_RESTARTS_OTHER",
+    "INTENT_SHAPE_VALID",
+    "RESTORE_ARM_CLEAR_ORPHAN",
+    "RESTORE_ARM_LEAVE_ABSENT",
+    "RESTORE_ARM_NO_ACTION",
+    "RESTORE_ARM_RESTORE_PRIOR",
+    "RESUME_ARM_NO_INTENT",
+    "RESUME_ARM_OVER_CAP",
+    "RESUME_ARM_PEER_ACTIVE",
+    "RESUME_ARM_PROCEED",
+    "rust_intent_refused_restore_decision",
+    "rust_intent_resume_decision",
+    "rust_intent_resume_enabled",
+    "rust_intent_shape_verdict",
+]
