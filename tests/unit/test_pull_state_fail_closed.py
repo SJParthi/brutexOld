@@ -23,6 +23,8 @@ from datetime import datetime
 import pytest
 from brutex.calendars import market_hours
 from brutex.calendars.nse import IST
+from brutex.dashboard import pull_jobs
+from brutex.dashboard.pull_progress import PullProgress
 from brutex.pull_state_rust import PullStateFlagRemovedError, PullStateKernelError
 
 #: A verified NSE trading WEEKDAY (Thu 2026-05-07) — in-window instants on it
@@ -106,8 +108,6 @@ class TestBackgroundPullJobStartFailsClosed:
         kernel RAISES out of ``start()`` — the worker fn is never invoked,
         nothing is spawned: the vendor pull is refused, never fail-open
         launched (the shared-TOTP account law)."""
-        from brutex.dashboard import pull_jobs
-        from brutex.dashboard.pull_progress import PullProgress
 
         # The unit-test posture of tests/unit/test_pull_jobs.py: no real
         # cross-process flock under the production lake root (the guard gate
@@ -135,8 +135,6 @@ class TestBackgroundPullJobStartFailsClosed:
         """HONEST scope pin: a ``market_hours_exempt=True`` start (zero vendor
         calls by contract) bypasses the gate — the fail-closed law binds the
         VENDOR-pull arm, exactly as designed."""
-        from brutex.dashboard import pull_jobs
-        from brutex.dashboard.pull_progress import PullProgress
 
         monkeypatch.setattr(pull_jobs, "_default_lake_root_resolver", lambda: None)
         monkeypatch.setenv(market_hours.MARKET_HOURS_GUARD_ENV, "1")

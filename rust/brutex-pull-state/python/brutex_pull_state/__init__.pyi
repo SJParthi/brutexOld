@@ -9,6 +9,7 @@
 SOURCE_DIGEST: str
 __version__: str
 __build_crate_version__: str
+_EXPECTED_COMPILED_SYMBOLS: tuple[str, ...]
 __source_digest__: str
 
 def pull_allowed_us(us_of_day: int, is_trading_day: bool) -> bool: ...

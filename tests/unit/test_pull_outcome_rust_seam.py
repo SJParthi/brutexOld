@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +47,18 @@ from brutex.pull_state_rust import PullStateFlagRemovedError, PullStateKernelErr
 FLAG_ENV = "BRUTEX_PULL_STATE_RUST"
 FIXTURES = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
 MODULE_FIXTURE = FIXTURES / "pull_outcome_classification.json"
+
+
+def _run_given(fn: Callable[..., object]) -> None:
+    """Invoke a hypothesis ``@given``-wrapped inner check as a zero-arg runner.
+
+    The decorator rebinds the signature (hypothesis supplies every argument),
+    which static arity checkers (pyright reportCallIssue, CodeQL
+    py/call/wrong-arguments) cannot see through on a DIRECT call — routing
+    the call through this ``Callable[..., object]`` seam states the dynamic
+    contract once instead of per-site ignore pragmas.
+    """
+    fn()
 
 
 class _BombKernelModule:
@@ -582,4 +595,4 @@ def test_real_wheel_hypothesis_vs_inline_law() -> None:
         )
         assert got == _inline_classify(state, detail, failed, stalled, wedged, verdict)
 
-    check()  # pyright: ignore[reportCallIssue] — hypothesis @given rebinds the signature
+    _run_given(check)

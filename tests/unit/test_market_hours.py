@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, time
+from types import SimpleNamespace
 
 import pytest
 from brutex.calendars.market_hours import (
@@ -18,6 +20,7 @@ from brutex.calendars.market_hours import (
     resolve_market_hours_guard_enabled,
 )
 from brutex.calendars.nse import IST
+from brutex.pull_state_rust import PullStateKernelError
 
 # A verified NSE trading WEEKDAY (Thu 2026-05-07 — inside holiday coverage, not a
 # holiday) and a plain Saturday within coverage.
@@ -254,8 +257,6 @@ class TestPullStateKernelPath:
     ) -> None:
         """A deliberately-WRONG stub verdict is served — proving the kernel,
         not a retained oracle, decides (the inverse of the old bomb-spy pin)."""
-        import sys
-        from types import SimpleNamespace
 
         monkeypatch.setitem(
             sys.modules,
@@ -269,9 +270,6 @@ class TestPullStateKernelPath:
     def test_missing_wheel_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No wheel ⇒ ``PullStateKernelError`` out of ``pull_allowed_now`` —
         never a ``True`` (the shared-TOTP guard must never fail OPEN)."""
-        import sys
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
         with pytest.raises(PullStateKernelError):
@@ -279,10 +277,6 @@ class TestPullStateKernelPath:
 
     def test_raising_stub_propagates_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A raising kernel propagates as the typed error — the fail-closed pin."""
-        import sys
-        from types import SimpleNamespace
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         def boom(us: int, flag: bool) -> bool:
             raise RuntimeError("poisoned wheel")

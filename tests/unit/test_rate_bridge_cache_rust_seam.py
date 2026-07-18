@@ -35,6 +35,7 @@ from brutex.dashboard.rate_bridge_cache import (
     MEMO_SOURCE_CACHED,
     MEMO_SOURCE_UNVERIFIED,
 )
+from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 from structlog.testing import capture_logs
 
 from tests.golden import _rate_bridge_cache_harness as harness
@@ -190,7 +191,6 @@ class TestSweepTwin:
         """``SweepProgressCache`` (the fix-6b twin) rides the SAME
         kernel-backed serve core with the REAL wheel — the flip covers both
         twins through the ONE base."""
-        from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
         progress = tmp_path / "progress.json"
         progress.write_text("{}", encoding="utf-8")
@@ -212,7 +212,6 @@ class TestSweepTwin:
         """Flip phase: a missing wheel raises out of the twin's read too —
         fail-closed, the base seam has no oracle to fall back to."""
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
-        from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
         progress = tmp_path / "progress.json"
         progress.write_text("{}", encoding="utf-8")

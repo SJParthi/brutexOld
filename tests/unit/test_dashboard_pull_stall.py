@@ -26,10 +26,14 @@ wedge tests stay here.
 
 from __future__ import annotations
 
+import sys
 import threading
 from collections.abc import Callable
 
 import pytest
+from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
+from brutex.adapters.rate_common import RateController
+from brutex.dashboard.pull_controller import make_window_observer
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook, WatchdogFactory
 from brutex.dashboard.pull_progress import STATE_DONE, STATE_RUNNING, PullProgress
 from brutex.dashboard.pull_stall import (
@@ -42,7 +46,11 @@ from brutex.dashboard.pull_stall import (
     resolve_stall_timeout_seconds,
     resolve_wedge_multiplier,
 )
+from brutex.observability.metrics import MetricRegistry
+from brutex.observability.pull_health import PullHealthMonitor
 from brutex.observability.watchdog import WorkerEvent, WorkerState
+from brutex.pull_state_rust import PullStateKernelError
+from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
 
@@ -681,7 +689,6 @@ class TestMakeWindowObserver:
     """The per-window observe wrapper that lets the pull.stalled dwell accumulate."""
 
     def test_no_observer_no_monitor_returns_inner_unwrapped(self) -> None:
-        from brutex.dashboard.pull_controller import make_window_observer
 
         def inner() -> None:
             pass
@@ -690,11 +697,6 @@ class TestMakeWindowObserver:
         assert wrapped is inner  # zero overhead when there is nothing to observe
 
     def test_inner_runs_then_observes_each_window(self) -> None:
-        from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
-        from brutex.adapters.rate_common import RateController
-        from brutex.dashboard.pull_controller import make_window_observer
-        from brutex.observability.metrics import MetricRegistry
-        from brutex.observability.pull_health import PullHealthMonitor
 
         order: list[str] = []
         registry = MetricRegistry()
@@ -713,11 +715,6 @@ class TestMakeWindowObserver:
 
     def test_per_window_observe_accumulates_stalled_dwell(self) -> None:
         """GAP 2: the dwell-gated pull.stalled rule fires once enough WINDOWS observe a stall."""
-        from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_CEILING
-        from brutex.adapters.rate_common import RateController
-        from brutex.dashboard.pull_controller import make_window_observer
-        from brutex.observability.metrics import MetricRegistry
-        from brutex.observability.pull_health import PullHealthMonitor
         from brutex.observability.sla import SLAState
 
         degraded: list[str] = []
@@ -1063,7 +1060,6 @@ class TestWatchdogAliveBeat:
         return [e for e in logs if e["event"] == "pull_stall.watchdog_alive"]
 
     def test_first_check_logs_then_throttles_within_interval(self) -> None:
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1083,7 +1079,6 @@ class TestWatchdogAliveBeat:
         """At the default 600 s timeout the check cadence is 200 s = EXACTLY 18
         checks/hour; simulating one hour of timer ticks yields exactly 18 lines —
         the documented bound falls out of the existing cadence, no new thread."""
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1100,7 +1095,6 @@ class TestWatchdogAliveBeat:
         """A small timeout (env-shrunk) checks every 10 s, but the alive log floors at
         ALIVE_LOG_MIN_INTERVAL_S — an hour of 10 s checks still logs ≤ 18 lines."""
         from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1117,7 +1111,6 @@ class TestWatchdogAliveBeat:
 
     def test_explicit_poll_seconds_above_floor_sets_the_interval(self) -> None:
         """start(poll_seconds=300) → the alive interval tracks the ACTUAL cadence."""
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1137,7 +1130,6 @@ class TestWatchdogAliveBeat:
         """The alive line carries the worker's CURRENT state — a hung worker reads
         ``hung`` (the happy-path line never masks a stall; the edge events are
         byte-identical, logging is the only delta)."""
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1155,7 +1147,6 @@ class TestWatchdogAliveBeat:
 
     def test_bare_check_once_without_start_reads_unregistered(self) -> None:
         """A never-started wrapper logs ``state="unregistered"`` instead of raising."""
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1171,7 +1162,6 @@ class TestWatchdogAliveBeat:
         POST-construction (the on_recovery pattern — the factory signature stays
         ``(on_hung)``), and rides the alive event as an ADDITIVE ``pull_id`` field.
         Event name + throttle behaviour byte-unchanged."""
-        from structlog.testing import capture_logs
 
         clock = _FakeClock()
         _captured, spawn = _capturing_spawn()
@@ -1237,7 +1227,6 @@ def _install_stall_kernel(
     alive: object = None,
 ) -> None:
     """Plant a fake ``brutex_pull_state`` module carrying the given kernels."""
-    import sys
     from types import SimpleNamespace
 
     ns = SimpleNamespace()
@@ -1407,9 +1396,6 @@ class TestPullStateRustKernelStall:
     # ── kernel faults are FAIL-CLOSED typed raises (no oracle exists) ─────
 
     def test_missing_wheel_raises_fail_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import sys
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
         wd, _clock, wedges = _seam_wedge_watchdog()
@@ -1420,9 +1406,6 @@ class TestPullStateRustKernelStall:
     def test_stale_wheel_bomb_is_touched_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The recording bomb proves the kernel module IS consulted — and its
         missing-symbol shape is the typed ``wheel_stale`` refusal."""
-        import sys
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         bomb = _RecordingBombModule()
         monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
@@ -1433,7 +1416,6 @@ class TestPullStateRustKernelStall:
         assert "wedge_decision" in bomb.accesses  # PROOF of the consult
 
     def test_raising_kernel_raises_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from brutex.pull_state_rust import PullStateKernelError
 
         def boom(*_a: object) -> int:
             raise RuntimeError("wheel poisoned")
@@ -1450,7 +1432,6 @@ class TestPullStateRustKernelStall:
     ) -> None:
         """The facade's refuse-poison gate (bool pun / out-of-vocabulary /
         wrong type) is the typed raise — and NO action body ran."""
-        from brutex.pull_state_rust import PullStateKernelError
 
         _install_stall_kernel(monkeypatch, wedge=lambda *a, _p=poison: _p)
         wd, _clock, wedges = _seam_wedge_watchdog()
@@ -1464,9 +1445,6 @@ class TestPullStateRustKernelStall:
         """The fault escapes :meth:`PullWatchdog.check_once` LOUDLY — the
         timer loop dies visibly rather than serving a silent wrong verdict
         (the fail-closed disposition at the module's public surface)."""
-        import sys
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
         wd, _clock, _wedges = _seam_wedge_watchdog()
@@ -1513,9 +1491,6 @@ class TestPullStateRustKernelStall:
         assert wd._alive_payload_locked() is None  # then throttles
 
     def test_alive_missing_wheel_raises_fail_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import sys
-
-        from brutex.pull_state_rust import PullStateKernelError
 
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
         clock = _FakeClock()
@@ -1535,7 +1510,6 @@ class TestPullStateRustKernelStall:
         resolvers are Python-only (their ``float()`` quirks are frozen in
         the pull-stall golden) and never touch the kernel: the bomb plant
         records ZERO accesses across both resolves."""
-        import sys
 
         bomb = _RecordingBombModule()
         monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)

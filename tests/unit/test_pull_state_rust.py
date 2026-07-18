@@ -15,6 +15,7 @@ wheel with hand-derived expected values. The ci.yml way:
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from datetime import UTC, datetime
@@ -59,7 +60,7 @@ def test_none_in_sys_modules_makes_import_raise(monkeypatch: pytest.MonkeyPatch)
     """The import-bomb MECHANISM itself: None in sys.modules ⇒ ImportError."""
     _poison_import(monkeypatch)
     with pytest.raises(ImportError):
-        import brutex_pull_state  # noqa: F401 — the mechanism under test
+        importlib.import_module("brutex_pull_state")
 
 
 # ── require_pull_state_env_unset — the SET-knob refusal guard ────────────────
@@ -1139,24 +1140,30 @@ class TestRealWheelHappyPaths:
             ),
         )
 
+    @staticmethod
+    def _reload(
+        *,
+        index_count: int = 3,
+        stock_count: int = 200,
+        legs_present: bool = False,
+        stale_economics: bool = False,
+        stale_eligibility: bool = False,
+    ) -> bool:
+        """Call the reload kernel with healthy defaults, overriding one axis."""
+        return pull_state_rust.rust_should_reload_master(
+            index_count=index_count,
+            stock_count=stock_count,
+            legs_present=legs_present,
+            stale_economics=stale_economics,
+            stale_eligibility=stale_eligibility,
+        )
+
     def test_should_reload_master_predicate(self) -> None:
         """Reload iff empty/missing-index/non-lean/stale economics/eligibility."""
-        healthy: dict[str, Any] = {
-            "index_count": 3,
-            "stock_count": 200,
-            "legs_present": False,
-            "stale_economics": False,
-            "stale_eligibility": False,
-        }
-        assert pull_state_rust.rust_should_reload_master(**healthy) is False
-        assert pull_state_rust.rust_should_reload_master(**{**healthy, "index_count": 0}) is True
-        assert (
-            pull_state_rust.rust_should_reload_master(**{**healthy, "legs_present": True}) is True
-        )
-        assert (
-            pull_state_rust.rust_should_reload_master(**{**healthy, "stale_economics": True})
-            is True
-        )
+        assert self._reload() is False
+        assert self._reload(index_count=0) is True
+        assert self._reload(legs_present=True) is True
+        assert self._reload(stale_economics=True) is True
 
     def test_bridge_payload_verdicts(self) -> None:
         """Valid → (0, pa_arm echo); not-mapping → 1; a bad 10th field → code 12."""
