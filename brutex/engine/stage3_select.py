@@ -49,8 +49,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from brutex.engine.pool_union import (
+    POOL_UNION_SOURCE_ORDER,
+    axis_better_key,
+    round_robin_union,
+)
 from brutex.engine.results_report import load_results_tree
 from brutex.engine.results_store import ResultRow, ResultsStoreError
+from brutex.ranking.presets import DEFAULT_PRESET, resolve_preset
 
 #: The spec-default Stage-3 selection depth (`TRACK1_BACKTEST_SPEC.md:407` —
 #: "default K = 10,000"; MIGRATION.md row #37 as amended by ADR-0007). Named
@@ -129,10 +135,38 @@ class _HeapEntry:
         return self.seq > other.seq  # later insertion is worse (stable-sort tie)
 
 
+@functools.total_ordering
+@dataclass(frozen=True, slots=True)
+class _AxisEntry:
+    """One bounded-heap slot of the LANE-W1 multi-axis union arm.
+
+    The :class:`_HeapEntry` discipline generalized over a PRE-COMPUTED
+    ascending better-first axis key (``better``) instead of the hard-coded
+    Sharpe field: ``<`` means "ranks strictly WORSE than" — larger axis key,
+    then larger ``run_id`` (asc wins), then later insertion. ``seq`` is
+    unique per input row, so the order is a strict total order and eviction
+    is deterministic (the same completeness argument as :class:`_HeapEntry`).
+    """
+
+    better: tuple[float | int, ...]
+    run_id: str
+    seq: int
+    row: ResultRow
+
+    def __lt__(self, other: _AxisEntry) -> bool:
+        """Return ``True`` iff ``self`` ranks strictly worse than *other*."""
+        if self.better != other.better:
+            return self.better > other.better  # larger better-first key is worse
+        if self.run_id != other.run_id:
+            return self.run_id > other.run_id  # larger run_id is worse (asc wins)
+        return self.seq > other.seq  # later insertion is worse (stable-sort tie)
+
+
 def group_survivors(
     rows: Iterable[ResultRow],
     *,
     top_k: int = DEFAULT_STAGE3_TOP_K,
+    multi_axis: bool = True,
 ) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
     """Group *rows* per leaderboard and keep each board's top-*top_k* — pure.
 
@@ -160,6 +194,19 @@ def group_survivors(
         Per-leaderboard selection depth (``>= 1``); defaults to
         :data:`DEFAULT_STAGE3_TOP_K`. A leaderboard with fewer rows yields
         them all (never an error).
+    multi_axis
+        LANE W1 (DEC-RANK-POOL-UNION-ADMIT-001): ``True`` (the default)
+        admits each board's rows by the interleaved round-robin union of the
+        FIVE :data:`~brutex.engine.pool_union.POOL_UNION_SOURCE_ORDER`
+        sources (Sharpe · the DEFAULT preset law · DD asc · win-rate desc ·
+        the persisted ε-Pareto frontier — the explicit frontier inclusion),
+        capped at the SAME *top_k* budget with the emitted board still in
+        TODAY's Sharpe-law order (membership changes; ordering discipline
+        does not; a board with ≤ *top_k* rows is byte-identical either way).
+        ``False`` is the legacy single-key (Sharpe) admission — the
+        byte-identity arm the golden-equality suite pins. RAM stays bounded:
+        the union arm holds at most ``len(POOL_UNION_SOURCE_ORDER) × top_k``
+        entries per board (5× the legacy bound — disclosed).
 
     Returns
     -------
@@ -173,6 +220,8 @@ def group_survivors(
     """
     if top_k < 1:
         raise ResultsStoreError(f"stage3 top_k must be >= 1, got {top_k}")
+    if multi_axis:
+        return _group_survivors_union(rows, top_k=top_k)
     heaps: dict[LeaderboardKey, list[_HeapEntry]] = {}
     for seq, row in enumerate(rows):
         key = LeaderboardKey(instrument=row.instrument, tf=row.tf, mode=row.mode)
@@ -197,11 +246,58 @@ def group_survivors(
     return selected
 
 
+def _group_survivors_union(
+    rows: Iterable[ResultRow], *, top_k: int
+) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
+    """The LANE-W1 multi-axis union arm of :func:`group_survivors`.
+
+    Streams *rows* ONCE into per-board, per-source bounded heaps (each the
+    :class:`_AxisEntry` discipline at capacity *top_k* — O(sources · top_k)
+    space per board), then per board round-robins the source orderings to
+    the SAME *top_k* cap (:func:`~brutex.engine.pool_union.round_robin_union`
+    — the ONE shared law the cascade seam also consumes) and emits the union
+    membership in TODAY's Sharpe-law discipline.
+    """
+    preset = resolve_preset(DEFAULT_PRESET)
+    n_sources = len(POOL_UNION_SOURCE_ORDER)
+    heaps: dict[LeaderboardKey, list[list[_AxisEntry]]] = {}
+    for seq, row in enumerate(rows):
+        key = LeaderboardKey(instrument=row.instrument, tf=row.tf, mode=row.mode)
+        boards = heaps.setdefault(key, [[] for _ in range(n_sources)])
+        for index, source in enumerate(POOL_UNION_SOURCE_ORDER):
+            axis = axis_better_key(source, row, preset=preset)
+            if axis is None:
+                continue  # the row does not qualify for this source (frontier)
+            entry = _AxisEntry(better=axis, run_id=row.run_id, seq=seq, row=row)
+            board = boards[index]
+            if len(board) < top_k:
+                heapq.heappush(board, entry)
+            elif board[0] < entry:
+                heapq.heapreplace(board, entry)
+    selected: dict[LeaderboardKey, tuple[ResultRow, ...]] = {}
+    for key in sorted(heaps, key=lambda k: (k.instrument, k.tf, k.mode)):
+        # The seq→row map is rebuilt from the KEPT heap entries only — the
+        # retained space stays O(sources · top_k) per board, never O(rows).
+        row_by_seq: dict[int, ResultRow] = {}
+        ordered_sources: list[list[int]] = []
+        for board in heaps[key]:
+            entries = sorted(board, key=lambda e: (e.better, e.run_id, e.seq))
+            for entry in entries:
+                row_by_seq[entry.seq] = entry.row
+            ordered_sources.append([entry.seq for entry in entries])
+        admitted = round_robin_union(ordered_sources, cap=top_k)
+        emitted = sorted(admitted, key=lambda seq: (row_by_seq[seq].run_id, seq))
+        emitted.sort(key=lambda seq: row_by_seq[seq].sharpe_ratio, reverse=True)
+        selected[key] = tuple(row_by_seq[seq] for seq in emitted)
+    return selected
+
+
 def select_stage3_survivors(
     root: Path,
     *,
     top_k: int = DEFAULT_STAGE3_TOP_K,
     current_snapshot_hash: str | None = None,
+    multi_axis: bool = True,
 ) -> dict[LeaderboardKey, tuple[ResultRow, ...]]:
     """Load the persisted Stage-2 results tree and select each leaderboard's top-K.
 
@@ -223,6 +319,10 @@ def select_stage3_survivors(
         snapshot-mismatch quarantine (DEC-LAKE-READ-UNIQUE-001) so a
         poisoned-era tree cannot seed the Stage-3 refinement. ``None`` (the
         default) is byte-identical to legacy behaviour.
+    multi_axis
+        Threaded to :func:`group_survivors` (LANE W1,
+        DEC-RANK-POOL-UNION-ADMIT-001) — ``True`` (the default) is the
+        multi-key union admission; ``False`` the legacy Sharpe-only law.
 
     Returns
     -------
@@ -241,7 +341,7 @@ def select_stage3_survivors(
     if top_k < 1:
         raise ResultsStoreError(f"stage3 top_k must be >= 1, got {top_k}")
     store = load_results_tree(root, current_snapshot_hash=current_snapshot_hash)
-    return group_survivors(store.rows(), top_k=top_k)
+    return group_survivors(store.rows(), top_k=top_k, multi_axis=multi_axis)
 
 
 __all__ = [

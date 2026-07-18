@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.engine.pool_union import union_select_rows
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -1751,12 +1752,22 @@ def spec_from_store_rows(
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     vwap_source: PriceSource = PriceSource.HLC3,
     ema_source: PriceSource = PriceSource.CLOSE,
+    multi_axis: bool = True,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
-    Selects the top-``top_k`` *rows* by Sharpe (ties broken by ``run_id`` ascending
-    — deterministic, matching :meth:`ResultsStore.top_k`) as the tuple's cascade
-    winners. Returns ``None`` when *rows* is empty (nothing to cascade).
+    Selects the tuple's cascade winners from *rows*. LANE W1
+    (DEC-RANK-POOL-UNION-ADMIT-001): under ``multi_axis=True`` (the default)
+    the ``top_k`` pool is the interleaved round-robin UNION of the five
+    :data:`~brutex.engine.pool_union.POOL_UNION_SOURCE_ORDER` admission
+    sources (Sharpe · the DEFAULT preset law · DD asc · win-rate desc · the
+    persisted ε-Pareto frontier) at the SAME total ``top_k`` budget —
+    killing the rank-1-forever-``not_validated`` shape — with the winners
+    still emitted in TODAY's order (Sharpe descending, ties ``run_id``
+    ascending, matching :meth:`ResultsStore.top_k`; a pool with
+    ≤ ``top_k`` rows is byte-identical either way). ``multi_axis=False``
+    (or ``top_k=None`` — the whole pool) is the legacy single-key law.
+    Returns ``None`` when *rows* is empty (nothing to cascade).
 
     Parameters
     ----------
@@ -1784,9 +1795,13 @@ def spec_from_store_rows(
     """
     if not rows:
         return None
-    ordered = sorted(rows, key=lambda row: row.run_id)
-    ordered.sort(key=lambda row: row.sharpe_ratio, reverse=True)
-    selected = ordered if top_k is None else ordered[:top_k]
+    if multi_axis and top_k is not None:
+        # LANE W1 union admission (the ONE shared law — pool_union).
+        selected: Sequence[ResultRow] = union_select_rows(rows, cap=top_k)
+    else:
+        ordered = sorted(rows, key=lambda row: row.run_id)
+        ordered.sort(key=lambda row: row.sharpe_ratio, reverse=True)
+        selected = ordered if top_k is None else ordered[:top_k]
     winners = tuple((row.run_id, row.mask_bits) for row in selected)
     return CascadeTupleSpec(
         instrument=instrument,
