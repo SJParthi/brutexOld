@@ -32,6 +32,7 @@ pub mod market_hours;
 // (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
 // + the banner colour authority stay Python.
 pub mod pull_outcome;
+pub mod pull_scope;
 
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};

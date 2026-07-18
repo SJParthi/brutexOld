@@ -69,6 +69,45 @@ fn verdict_correlates(retained_id: &str, verdict_id: &str) -> bool {
     pull_outcome::verdict_correlates(retained_id, verdict_id)
 }
 
+// ── pull_scope (Wave 1B) — note-surgery + scope-token laws ───────────────────
+//
+// Strings cross this edge (the ONE sanctioned exception to the integers-only
+// discipline — the outputs of these laws ARE strings, so byte-exactness IS
+// the contract; every literal is drift-pinned by the committed golden + the
+// Python-side cross-language source pin). The booleans are the seam's
+// `note_surgery_miss` WARN inputs; the WARN itself stays Python.
+
+/// `normalize_pull_scope` verdict code (0=full · 1=spot-only · 2=fno-only ·
+/// 255=unknown — Python composes the `{token!r}` refusal itself).
+#[pyfunction]
+#[pyo3(signature = (token))]
+fn scope_token(token: Option<&str>) -> u8 {
+    crate::pull_scope::scope_token(token)
+}
+
+/// The market-hours deferral-note rewrite (both-arms wording; first
+/// occurrence each; drifted notes pass through unchanged).
+#[pyfunction]
+#[pyo3(signature = (note, phases_replacement))]
+fn market_hours_note_rewrite(note: &str, phases_replacement: &str) -> String {
+    crate::pull_scope::market_hours_note_rewrite(note, phases_replacement)
+}
+
+/// `(rewritten_note, prefix_present, clause_present)` — the spot-only
+/// completion-note surgery MINUS the Python-side WARN + step-3 appends.
+#[pyfunction]
+#[pyo3(signature = (base_note))]
+fn spot_only_note_surgery(base_note: &str) -> (String, bool, bool) {
+    crate::pull_scope::spot_only_note_surgery(base_note)
+}
+
+/// `(rewritten_note, prefix_present, clause_present)` — the fno-only mirror.
+#[pyfunction]
+#[pyo3(signature = (base_note))]
+fn fno_only_note_surgery(base_note: &str) -> (String, bool, bool) {
+    crate::pull_scope::fno_only_note_surgery(base_note)
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -83,5 +122,10 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- pull_outcome (Wave 1A) ---
     m.add_function(wrap_pyfunction!(classify_pull_outcome, m)?)?;
     m.add_function(wrap_pyfunction!(verdict_correlates, m)?)?;
+    // pull_scope (Wave 1B) — append-only registrations.
+    m.add_function(wrap_pyfunction!(scope_token, m)?)?;
+    m.add_function(wrap_pyfunction!(market_hours_note_rewrite, m)?)?;
+    m.add_function(wrap_pyfunction!(spot_only_note_surgery, m)?)?;
+    m.add_function(wrap_pyfunction!(fno_only_note_surgery, m)?)?;
     Ok(())
 }
