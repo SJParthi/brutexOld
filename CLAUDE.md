@@ -58,6 +58,20 @@ remote + the canonical wheel-build fetches". ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
 §1 Active-branch blurb + MIGRATION.md #1939.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001,
+MIGRATION.md #1948 — SLICE T24 PR-1: the THREE cold data-integrity detector
+pure laws (raw-integrity blake2b digest · interior bar-less run walker ·
+partial-window truncation verdict) routed through `rust/brutex-lake` behind
+THREE default-OFF flags (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` /
+`BRUTEX_LAKE_RUST_INTERIOR_GAP` / `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`) with the
+verbatim Python law as the LIVE parity oracle; flag OFF is byte-identical +
+crate-never-imported (spy-pinned); calendar + json canonicalisation stay
+Python; blake2b in-crate from RFC 7693 — Cargo.toml/Cargo.lock byte-untouched;
+`window_status` EXCLUDED from the slice (write-retired) + the bad_tick
+COMMON-reuse ruling recorded. Ships INERT — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1948 — this header carries the pointer, never the
+story.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3472,6 +3486,81 @@ hostile-review pass._
   runbook `docs/runbooks/box-autodeploy.md`. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes.)
+  Earlier: `claude/rust-slice-t24-integrity`
+  (**DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948** — SLICE T24
+  PR-1: the THREE cold data-integrity detector pure laws routed through
+  `rust/brutex-lake` behind THREE default-OFF flags, the verbatim Python law
+  retained as the LIVE parity oracle on every path. NEW
+  `rust/brutex-lake/src/detectors.rs` — the raw-integrity BLAKE2b digest
+  implemented in-crate from RFC 7693 (ZERO new dependencies —
+  Cargo.toml/Cargo.lock byte-UNTOUCHED; RFC appendix-A + 11 hashlib-frozen
+  vectors), the interior bar-less run walker (token-for-token: a run breaks
+  ONLY at a covered session; `< 2` covered → `[]`), and the partial-window
+  truncation verdict (arm-for-arm over a Python-built `SessionGrid`; reason
+  tokens byte-equal; off-grid session walks ABSTAIN → oracle — the
+  DEC-FEED-RUST-CORE-001 abstain law); three `#[pyfunction]`s under the panic
+  belt; 23 new cargo tests. NEW facade `brutex/data/detectors_rust.py` —
+  `BRUTEX_LAKE_RUST_RAW_INTEGRITY` · `BRUTEX_LAKE_RUST_INTERIOR_GAP` ·
+  `BRUTEX_LAKE_RUST_PARTIAL_WINDOW` (Pattern-A tristate via the imported
+  `env_flag_tristate` — §11 COMMON, identity-pinned), all-or-nothing 3-symbol
+  `_CRATE_API` handshake (`crate_unavailable`/`crate_stale`; NO polars
+  version guard — the laws are polars-free, the G8 disclosed deviation),
+  per-law 16-call burn-in bit-compare with ship-the-ORACLE autorevert over
+  ONE SHARED process latch across the three laws (the PR-2 precedent,
+  disclosed), narrow degrade set → oracle with capped WARNs,
+  MemoryError/KeyboardInterrupt/SystemExit re-raise RAW above the imported
+  panic belt, refuse-poison result-shape gates, `reset_detectors_rust_for_tests`
+  seam. ROUTING is the G6 flag-gate-in-target shape (solves the
+  verdict-dataclass import cycle): each target gates its own flag and hands
+  the facade zero-arg `payload_factory`/`python_law` callables (+ a
+  target-side `materialize` for the partial-window verdict);
+  `raw_integrity.hash_payload` canonicalizes ONCE in Python (the CPython
+  `float.__repr__` byte law — only the digest of the already-canonical bytes
+  moves) then routes vs the verbatim `_hash_canonical_python` oracle;
+  `interior_gap_detect._interior_barless_runs` routes vs the verbatim
+  `_interior_barless_runs_python` walker (the whole verdict inherits parity);
+  `partial_window_detect.classify_partial_window` keeps its env-tunable
+  resolution at the composition root (the Slice-0 extraction — a disclosed
+  deviation) then routes vs `_classify_partial_window_python`, with the NSE
+  calendar staying PYTHON (`_partial_window_payload` computes session
+  ordinals/flags; 45-day back-walk margin, `_SPAN_CAP_DAYS=9000` — over-cap
+  ships an EMPTY grid so the crate abstains, never a giant flags list). Flag
+  OFF (the default) = byte-identical AND crate-never-imported (bomb-crate spy
+  pins on all three targets). SLICE RULINGS recorded in #1948: T24 is a
+  mandate-added slice beyond ADR-0020's original 17-module table;
+  `window_status` EXCLUDED from the whole slice (write-retired — its classify
+  law already moved under #1915, the residual is Stage-6 deletion); the
+  bad-tick predicate is COMMON-reuse territory (a future hot-path PR reuses
+  the `rust/brutex-feed` scan.rs predicate, never a second copy). EVIDENCE
+  (executed): cargo fmt/clippy(-D warnings)/`test --release --locked` 90
+  passed; the NEW 97-test Python battery green against the REAL wheel
+  (53-facade matrix + 3 stem-matched seam suites incl. 4 hypothesis
+  differentials + the frozen raw-integrity golden re-driven flag-ON + the
+  7-reason partial-window parity matrix on the REAL 2024 NSE calendar); the
+  three EXISTING detector suites re-run flag-ON UNMODIFIED 96 passed (+ the
+  raw-integrity store/wiring consumers 45 flag-ON in the same lane leg —
+  the recorded 140 was a mis-count of that 141 union, the round-1
+  re-measure) (the
+  flag-ON BELT — no regression in the catching suites under the flags; the
+  genuine parity gates are the seam remaining=0 differentials + the cargo
+  frozen vectors, the round-1 reframe); consumer suites
+  flag-OFF 391 passed; COVERAGE 100.00% line+branch on all four modules
+  (`detectors_rust.py` 204/64 · `raw_integrity.py` 63/6 ·
+  `interior_gap_detect.py` 105/34 · `partial_window_detect.py` 114/38);
+  ruff/ruff-format clean; `mypy --strict` clean (473 files); pyright FULL
+  0 errors; mutation.yml pair + lake-rust-parity.yml T24 paths/flag-ON leg
+  wired. HOSTILE-REVIEW ROUND 1 folded (both lenses SHIP, 0 MINOR+ — the
+  four NITs: the ledger count re-measured, the panic-belt docstring
+  reworded to the executed truth (a catch_unwind-caught panic lands in the
+  RuntimeError DEGRADE arm, no latch), the parity-lane belt reframe, + the
+  `_KNOWN_PARTIAL_REASONS` reason-token refuse-poison hardening; the
+  shared-latch NIT stays already-disclosed — per-item record in
+  MIGRATION.md #1948). HONEST (the ADR-0020 banner verbatim): expected payoff ≈ 0 —
+  conversion is for uniformity, not speed; cold paths, the FFI hop is a
+  small slowdown; ships INERT — a default flip needs its own DEC; none of
+  the three laws is in run identity. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -10135,6 +10224,32 @@ hostile-review pass._
   line+branch on NEW ci.yml stanzas + mutation pairs; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1939 for the full blurb)
+  Earlier: `claude/rust-slice-t24-integrity`
+  (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948 — SLICE T24 PR-1:
+  the THREE cold data-integrity detector pure laws — the raw-integrity blake2b
+  digest (in-crate from RFC 7693, ZERO new deps — Cargo.toml/Cargo.lock
+  byte-untouched), the interior bar-less run walker, and the partial-window
+  truncation verdict — routed through `rust/brutex-lake`
+  (NEW `src/detectors.rs`) behind THREE default-OFF flags via the NEW facade
+  `brutex/data/detectors_rust.py` (`BRUTEX_LAKE_RUST_RAW_INTEGRITY` ·
+  `BRUTEX_LAKE_RUST_INTERIOR_GAP` · `BRUTEX_LAKE_RUST_PARTIAL_WINDOW`;
+  per-law 16-call burn-in + ship-the-ORACLE autorevert over ONE shared latch;
+  narrow degrade set + imported panic belt; refuse-poison shape gates; NO
+  polars version guard — polars-free laws, the G8 deviation); the G6
+  flag-gate-in-target routing (zero-arg payload/oracle callables + a
+  target-side materialize — the facade never imports PartialWindowVerdict);
+  json canonicalisation + the NSE calendar stay PYTHON (payload factories
+  compute session ordinals/flags; off-grid walks ABSTAIN → oracle; span cap
+  9000 days); flag OFF byte-identical + crate-never-imported (bomb-spy
+  pinned); `window_status` EXCLUDED from the slice (write-retired) + the
+  bad_tick COMMON-reuse ruling recorded in #1948; cargo 90 passed
+  --release --locked, the new 97-test battery + the existing detector suites
+  flag-ON 96 passed (+45 store/wiring) + consumer suites flag-OFF 391
+  passed, all four modules 100.00%
+  line+branch; round-1 review folded (both lenses SHIP, 0 MINOR+ — see §1 +
+  MIGRATION.md #1948); ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1948 for the full
+  blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
