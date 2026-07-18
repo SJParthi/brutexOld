@@ -281,6 +281,33 @@ jobs:
             sleep 10
           done
 
+      - name: Install brutex_identity Rust extension (window-ledger kernel dep)
+        # DEC-RUST-RUNID-STORES-001 (MIGRATION.md #1954): the window-ledger
+        # store routes its status/streak laws + the Parquet ledger codec
+        # through the brutex_identity kernel via a HARD
+        # `import brutex_identity` (brutex/data/window_ledger_store.py) —
+        # there is no Python fallback by design. The T24 flag-ON detector
+        # leg runs tests/integration/test_raw_integrity_wiring.py, which
+        # imports brutex.adapters.groww.option_ingest →
+        # brutex.data.window_ledger_store → the kernel, so WITHOUT this
+        # wheel that leg dies at COLLECTION with ModuleNotFoundError.
+        # Install once for the whole job (any future leg widening its
+        # imports is covered). Same maturin/abi3 build + crates.io
+        # flake-retry idiom as the trading_core step above; the lane's
+        # newer toolchain is fine — the wheel is compiler-version
+        # independent.
+        run: |
+          n=0
+          until pip install ./rust/brutex-identity; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-identity failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-identity failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Align the installed polars wheel to the crate pin
         # Review-round fold (supersedes the warn-only-drift-with-no-alignment
         # shape): `pip install -e ".[data,dev]"` resolves the HIGHEST polars
