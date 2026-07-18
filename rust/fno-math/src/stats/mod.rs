@@ -31,6 +31,10 @@
 //! compiled); claiming otherwise is FORBIDDEN. Per-call FFI copies are
 //! disclosed on each `#[pyfunction]`.
 //!
-//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1).
+//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1);
+//! [`alpha`] — the ALPHA-vs-BUY&HOLD benchmark scalar
+//! (DEC-ALPHA-BUYHOLD-METRIC-001; STRUCTURAL — fixed convert-first op
+//! order transcribed from the Python oracle, no numpy involvement).
 
+pub mod alpha;
 pub mod cpcv;

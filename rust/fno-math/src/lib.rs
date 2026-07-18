@@ -167,6 +167,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark scalar
+    // (fenced additive registration; NO crate version bump — the #1942
+    // precedent, run identity / `_indicator_version` untouched).
+    m.add_function(wrap_pyfunction!(stats::alpha::alpha_vs_buyhold_pct, m)?)?;
     // ---- end stats module ----
     Ok(())
 }

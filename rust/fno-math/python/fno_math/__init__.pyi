@@ -26,6 +26,7 @@ __all__ = [
     "ResidentSweepSimU128",
     "__version__",
     "add_u64",
+    "alpha_vs_buyhold_pct",
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
@@ -61,6 +62,24 @@ def add_u64(a: int, b: int) -> int:
     """Add two `u64` values.
 
     Raises `OverflowError` if `a + b >= 2**64`.
+    """
+    ...
+
+def alpha_vs_buyhold_pct(
+    net_pnl_paisa: int,
+    start_equity_paisa: int,
+    anchor_open_paisa: int,
+    last_close_paisa: int,
+) -> float:
+    """ALPHA vs buy-&-hold, percent (DEC-ALPHA-BUYHOLD-METRIC-001).
+
+    `((net_pnl_paisa as f64) / (start_equity_paisa as f64) * 100.0) -
+    (((last_close_paisa - anchor_open_paisa) as f64) /
+    (anchor_open_paisa as f64) * 100.0)` under the fixed convert-first
+    IEEE-754 op order — bit-identical to the Python oracle
+    (`brutex.engine.alpha_metric.alpha_vs_buyhold_pct_python`). Raises
+    `ValueError` on a domain violation (`start_equity_paisa < 1`,
+    `anchor_open_paisa < 1`, `last_close_paisa < 0`).
     """
     ...
 
