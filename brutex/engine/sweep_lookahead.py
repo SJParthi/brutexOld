@@ -89,7 +89,7 @@ import structlog
 # `sweep_apriori` / `results_depth_pass`) is untouched. The literal SETS
 # themselves are consumed only through the classifier — import them from
 # `brutex.config.env_flags` directly if a new consumer ever needs them.
-from brutex.config.env_flags import env_flag_tristate
+from brutex.config.env_flags import FALSY_LITERALS, TRUTHY_LITERALS, env_flag_tristate
 from brutex.feed.lookahead import LookAheadBarrier
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -103,6 +103,18 @@ _LOG = structlog.get_logger("brutex.engine.sweep_lookahead")
 #: The opt-in env flag. Unset / falsy ⇒ the guard is OFF (the default) and
 #: the sweep hot path is byte-identical and cost-unchanged.
 SWEEP_LOOKAHEAD_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_LOOKAHEAD_GUARD"
+
+#: Identity re-exports of the ONE env-flag vocabulary (the SAME frozenset
+#: objects as :mod:`brutex.config.env_flags` — aliases, never copies, so
+#: CLAUDE.md §11 COMMON holds): four leaf modules whose import posture
+#: forbids the engine package (``feed_rust`` / ``money_rust`` /
+#: ``strategies.combo_rust`` / ``nightly.box_update``) carry inline
+#: vocabulary twins mirror-PINNED against THIS module's historical
+#: vocabulary home (their suites assert
+#: ``<leaf>._TRUTHY == sweep_lookahead._TRUTHY``), so the private names
+#: are deliberately KEPT here after the DEC-PREBUILD-FRAME-WRITE-001 hoist.
+_TRUTHY: Final[frozenset[str]] = TRUTHY_LITERALS
+_FALSY: Final[frozenset[str]] = FALSY_LITERALS
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
