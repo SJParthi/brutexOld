@@ -222,7 +222,9 @@ class TestFuturesAnnotationExtraction:
             **row,
             ANNOTATION_KEY: futures_annotation(None, kind=ExecutionKind.STOCK_SPOT_DEFERRED),
         }
-        assert projected[ANNOTATION_KEY]["note"] == STOCK_SPOT_DEFERRAL_NOTE
+        annotation = projected[ANNOTATION_KEY]
+        assert isinstance(annotation, dict)
+        assert annotation["note"] == STOCK_SPOT_DEFERRAL_NOTE
 
     def test_annotation_status_token_is_the_executed_constant(self) -> None:
         annotation = futures_annotation(_result(), kind=ExecutionKind.INDEX_FUTURES)

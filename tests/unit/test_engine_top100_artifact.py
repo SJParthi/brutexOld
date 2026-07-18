@@ -1202,7 +1202,8 @@ class TestExecProvidersWired:
         )
         assert len(artifact.entries) == TOP100_LIMIT
         assert sorted(options_calls) == sorted(c.row.run_id for c in many)  # every rep
-        assert sorted(fill_calls) == sorted(e["run_id"] for e in artifact.entries)  # ranked only
+        ranked_ids = [str(e["run_id"]) for e in artifact.entries]
+        assert sorted(fill_calls) == sorted(ranked_ids)  # ranked only
         assert len(fill_calls) == TOP100_LIMIT
 
     def test_wired_artifact_round_trips_through_write_and_load(self, tmp_path: Path) -> None:

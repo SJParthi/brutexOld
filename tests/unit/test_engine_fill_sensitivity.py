@@ -279,7 +279,8 @@ class TestFillSensitivityVerdict:
         assert verdict["reference_net_pnl_paisa"] == sum(
             50 if reason == "take_profit" else -80 for reason, _ in legs
         )
-        assert (
-            verdict["haircut_paisa"]
-            == verdict["reference_net_pnl_paisa"] - verdict["worst_case_net_pnl_paisa"]
-        )
+        reference_net = verdict["reference_net_pnl_paisa"]
+        worst_net = verdict["worst_case_net_pnl_paisa"]
+        assert isinstance(reference_net, int)
+        assert isinstance(worst_net, int)
+        assert verdict["haircut_paisa"] == reference_net - worst_net
