@@ -36,10 +36,12 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Final
 
-# DEC-RUST-PULL-STATE-001 (lane Phase 1): the default-OFF Rust seam leaf.
-# stdlib+structlog-only, so the guard's dependency-light law is preserved;
-# consulted ONLY when BRUTEX_PULL_STATE_RUST is explicitly truthy (flag OFF
-# never imports the wheel — bomb-kernel spy-pinned).
+# DEC-RUST-PULL-STATE-001 (flip phase): the fail-closed Rust kernel facade
+# leaf. stdlib-only, so the guard's dependency-light law is preserved; the
+# kernel is THE decision path — every ``pull_allowed_now`` call consults it,
+# and a missing/stale/raising wheel raises the typed
+# ``PullStateKernelError`` (the guard fails CLOSED: a pull is refused,
+# never silently allowed).
 from brutex import pull_state_rust as _pull_state_rust
 from brutex.calendars.nse import is_trading_day, now_ist
 
@@ -70,16 +72,18 @@ def pull_allowed_now(ist_dt: datetime, is_trading_day_flag: bool) -> bool:
     A pull is allowed unless *is_trading_day_flag* is ``True`` AND *ist_dt*'s IST
     wall-clock time is within ``[BLOCK_START, BLOCK_END)``. On a non-trading day
     (weekend / holiday) a pull is ALWAYS allowed regardless of the time. Pure,
-    O(1), no I/O — the sole place the window boundary law lives.
+    O(1), no I/O — :data:`BLOCK_START`/:data:`BLOCK_END` remain the one
+    documented home of the window boundary constants.
 
-    DEC-RUST-PULL-STATE-001 (lane Phase 1): behind the default-OFF
-    ``BRUTEX_PULL_STATE_RUST`` flag the verdict is served by the
-    ``brutex_pull_state`` Rust kernel (integers-only FFI — the SAME law,
-    golden- + differential-pinned bit-identical); the Python arm below is
-    RETAINED VERBATIM as the live parity oracle and serves every flag-OFF
-    call byte-identically, and every flag-ON degrade (wheel missing/stale,
-    kernel raise, poisoned result — each a named warn-once in
-    :mod:`brutex.pull_state_rust`).
+    DEC-RUST-PULL-STATE-001 (flip phase): the ``brutex_pull_state`` Rust
+    kernel is the ONLY implementation of the boundary law — the verdict is
+    served by :func:`brutex.pull_state_rust.rust_pull_allowed`
+    (microsecond-of-day packing, bit-exact ``[08:45, 15:35)`` boundary,
+    golden- + property-pinned); the former byte-identical Python oracle body
+    is DELETED. A missing/stale/raising wheel — or the removed
+    ``BRUTEX_PULL_STATE_RUST`` knob still set — raises the typed error out
+    of this predicate, and the guard chain fails CLOSED: a vendor pull is
+    REFUSED, never silently allowed (the shared-TOTP account protection).
 
     Parameters
     ----------
@@ -96,16 +100,15 @@ def pull_allowed_now(ist_dt: datetime, is_trading_day_flag: bool) -> bool:
     bool
         ``True`` when a pull may proceed; ``False`` when it is inside the
         market-hours window on a trading day.
+
+    Raises
+    ------
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, or a poisoned result — fail-closed.
+    brutex.pull_state_rust.PullStateFlagRemovedError
+        The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
     """
-    if _pull_state_rust.pull_state_rust_enabled():
-        verdict = _pull_state_rust.rust_pull_allowed(ist_dt, is_trading_day_flag)
-        if verdict is not None:
-            return verdict
-    # The Python oracle — the byte-identical retained arm: flag OFF takes it
-    # untouched; a flag-ON kernel degrade falls through to it (never a raise).
-    if not is_trading_day_flag:
-        return True
-    return not (BLOCK_START <= ist_dt.time() < BLOCK_END)
+    return _pull_state_rust.rust_pull_allowed(ist_dt, is_trading_day_flag)
 
 
 def market_hours_blocked_now(ist_dt: datetime, is_trading_day_flag: bool) -> bool:

@@ -238,111 +238,69 @@ def test_resolve_market_closed_reads_os_environ_by_default(
     assert predicate() is True
 
 
-# ── DEC-RUST-PULL-STATE-001 — the default-OFF Rust pull-state seam ───────────
+# ── DEC-RUST-PULL-STATE-001 (flip phase) — the fail-closed kernel path ───────
 #
-# ``pull_allowed_now`` consults the ``brutex_pull_state`` kernel ONLY when
-# ``BRUTEX_PULL_STATE_RUST`` is explicitly truthy; the Python arm below the
-# seam is the RETAINED byte-identical oracle. These pins cover all four seam
-# arcs (flag off · flag on + served · flag on + degrade · real wheel parity).
+# ``pull_allowed_now`` IS the ``brutex_pull_state`` kernel consult now: the
+# Python oracle body was DELETED, so the kernel is ALWAYS consulted and a
+# wheel fault propagates as the typed ``PullStateKernelError`` — the guard
+# fails CLOSED (a pull is refused, never silently allowed). These pins are
+# the inverse of the retired flag-OFF bomb-spy pins: the kernel IS consulted
+# (a stub's sentinel verdict is honoured), and every fault raises.
 
 
-class _BombKernelModule:
-    """A sys.modules plant that RECORDS any attribute access (the flag-OFF spy).
-
-    The never-imports pin: if ``pull_allowed_now`` under an unset/falsy flag
-    ever imports or touches the kernel module, the import machinery
-    (``__spec__``) or the resolver (``pull_allowed_us``) trips ``__getattr__``
-    and the access lands in ``touched``. ``__getattr__`` raises the STANDARD
-    ``AttributeError`` (CodeQL py/unexpected-raise-in-special-method — an
-    ``AssertionError`` in a special method is non-standard), so the LOUDNESS
-    deliberately does NOT ride the exception: the facade's
-    ``getattr(..., default)`` and ``except (ImportError, AttributeError)``
-    would swallow it silently. The tooth is the after-the-fact
-    ``assert bomb.touched == []`` in each flag-OFF test — ANY illicit
-    import/consult still fails the test loudly (tooth proven by simulating
-    the illicit access: flag ON against this bomb records
-    ``['__spec__', 'pull_allowed_us']`` and the empty-ledger assert fails).
-    """
-
-    def __init__(self) -> None:
-        self.touched: list[str] = []
-
-    def __getattr__(self, name: str) -> object:
-        self.touched.append(name)
-        raise AttributeError(f"flag-OFF path touched the Rust kernel module: {name}")
-
-
-class TestPullStateRustSeam:
-    @pytest.fixture(autouse=True)
-    def _clean_warn_registry(self) -> object:
-        from brutex import pull_state_rust
-
-        pull_state_rust.reset_for_tests()
-        yield
-        pull_state_rust.reset_for_tests()
-
-    def test_flag_off_is_byte_identical_and_never_imports(
+class TestPullStateKernelPath:
+    def test_kernel_is_consulted_stub_sentinel_honoured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The bomb-kernel pin: flag OFF never touches the wheel + the oracle serves."""
-        import sys
-
-        monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
-        bomb = _BombKernelModule()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        # The full boundary truth table — the oracle's own law, untouched.
-        assert pull_allowed_now(_at(8, 44, 59), True) is True
-        assert pull_allowed_now(_at(8, 45, 0), True) is False
-        assert pull_allowed_now(_at(15, 34, 59), True) is False
-        assert pull_allowed_now(_at(15, 35, 0), True) is True
-        assert pull_allowed_now(_at(12, 0, 0, day=_SATURDAY), False) is True
-        # The tooth: the flag-OFF path never touched the kernel module.
-        assert bomb.touched == []
-
-    def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import sys
-
-        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
-        bomb = _BombKernelModule()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        assert pull_allowed_now(_at(9, 0), True) is False
-        # The tooth: an explicit falsy flag never touches the kernel module.
-        assert bomb.touched == []
-
-    def test_flag_on_serves_the_kernel_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A deliberately-WRONG fake kernel verdict is served — proving the
-        flag-ON arm consults the kernel, not the oracle (the seam tooth)."""
+        """A deliberately-WRONG stub verdict is served — proving the kernel,
+        not a retained oracle, decides (the inverse of the old bomb-spy pin)."""
         import sys
         from types import SimpleNamespace
 
-        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
             SimpleNamespace(pull_allowed_us=lambda us, flag: False),
         )
-        # A Saturday evening is oracle-ALLOWED; the fake kernel says False —
-        # and the seam serves the kernel's answer.
+        # A Saturday evening is law-ALLOWED; the stub says False — and the
+        # guard serves the stub's answer (kernel consulted, oracle gone).
         assert pull_allowed_now(_at(20, 0, day=_SATURDAY), False) is False
 
-    def test_flag_on_kernel_degrade_falls_through_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A missing wheel under flag ON degrades (warn-once) to the oracle."""
+    def test_missing_wheel_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No wheel ⇒ ``PullStateKernelError`` out of ``pull_allowed_now`` —
+        never a ``True`` (the shared-TOTP guard must never fail OPEN)."""
         import sys
 
-        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
-        assert pull_allowed_now(_at(8, 44, 59), True) is True
-        assert pull_allowed_now(_at(8, 45, 0), True) is False
-        assert pull_allowed_now(_at(15, 35, 0), True) is True
+        from brutex.pull_state_rust import PullStateKernelError
 
-    def test_flag_on_real_wheel_matches_the_oracle_boundary_table(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Real-wheel parity over the boundary matrix (skips when not built)."""
-        pytest.importorskip("brutex_pull_state", reason="brutex_pull_state wheel not installed")
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
+        with pytest.raises(PullStateKernelError):
+            pull_allowed_now(_at(1, 30), True)  # even an out-of-window instant raises
+
+    def test_raising_stub_propagates_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A raising kernel propagates as the typed error — the fail-closed pin."""
+        import sys
+        from types import SimpleNamespace
+
+        from brutex.pull_state_rust import PullStateKernelError
+
+        def boom(us: int, flag: bool) -> bool:
+            raise RuntimeError("poisoned wheel")
+
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", SimpleNamespace(pull_allowed_us=boom))
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            pull_allowed_now(_at(10, 0), True)
+
+    def test_removed_knob_set_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A SET ``BRUTEX_PULL_STATE_RUST`` refuses the guard consult loudly."""
+        from brutex.pull_state_rust import PullStateFlagRemovedError
+
         monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        with pytest.raises(PullStateFlagRemovedError):
+            pull_allowed_now(_at(10, 0), True)
+
+    def test_real_wheel_serves_the_boundary_table(self) -> None:
+        """The REAL kernel serves the whole hand-derived boundary matrix."""
         for hh, mm, ss, expected in [
             (0, 0, 0, True),
             (8, 44, 59, True),
