@@ -27,9 +27,16 @@ Monte-Carlo). Three are **pool-level** — they consume the matrix of the
 *still-surviving* candidates' returns:
 
 * **SPA / Reality Check (#4)** asks "is the best candidate in the pool real,
-  given best-of-N selection?". The cascade's documented choice: if the pool's
-  Reality-Check p-value ``>= spa_alpha`` the whole surviving pool is
-  data-snooped noise → **all remaining are rejected at SPA**.
+  given best-of-N selection?". The cascade's documented choice
+  (DEC-CASCADE-STAT-TIER-WIRE-001 — a monotone-tightening JOIN, RC first):
+  if the pool's White Reality-Check p-value ``>= spa_alpha`` the whole
+  surviving pool is data-snooped noise → **all remaining are rejected at
+  SPA** (the byte-identical historical floor); when the RC passes, Hansen's
+  (2005) SPA-consistent p-value — the studentized, null-recentred PRIMARY
+  test (White's RC is conservative and distortable by poor/irrelevant
+  alternatives) — must ALSO clear ``spa_alpha`` or the pool is rejected
+  with a Hansen-SPA detail. Intersection composition keeps the false-pass
+  probability ``<= spa_alpha``; the SPA arm can only ADD rejections.
 * **PBO (#5)** is a pool overfitting probability; if ``pbo > pbo_max`` the
   pool is overfit → **all remaining are rejected at PBO**.
 * **Romano-Wolf (#6)** returns the FWER rejection set (the individually-real
@@ -97,7 +104,7 @@ from brutex.metrics.lockbox import (
 )
 from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 from brutex.metrics.pbo import pbo_probability
-from brutex.metrics.spa import BootstrapConfig, reality_check, romano_wolf
+from brutex.metrics.spa import BootstrapConfig, hansen_spa, reality_check, romano_wolf
 from brutex.metrics.wfo import WFOScheme, wfo_pass_rate
 
 if TYPE_CHECKING:
@@ -213,6 +220,17 @@ class CandidateInput:
     #: per-trade caller needs no evidence — its rows already ARE trades).
     #: May be EMPTY (a zero-trade candidate ⇒ honest ``INSUFFICIENT_N``).
     lockbox_trade_days: tuple[int, ...] | None = None
+    #: The candidate's OWN search-family return COLUMNS for the per-candidate
+    #: CSCV/PBO check at filter #5 (DEC-CASCADE-STAT-TIER-WIRE-001): one
+    #: per-bar return series per member of the candidate's Stage-3 eval family
+    #: — the (sl, tp) configurations the SAME mask was actually TRIED at —
+    #: with the finalist's own series included as one column (the wire layer
+    #: guarantees membership; see ``cascade_wire.build_candidate_input``).
+    #: ``None`` (the default) = family unavailable → the per-candidate PBO is
+    #: honestly SKIPPED (a pre-family manifest / a pure grid winner / a
+    #: hand-built candidate). Every column must be all-finite and share
+    #: ``len(returns)`` (the same bar axis).
+    family_returns: tuple[tuple[float, ...], ...] | None = None
 
     def __post_init__(self) -> None:
         """Reject a non-finite metric / series value or an empty id up front."""
@@ -231,6 +249,19 @@ class CandidateInput:
                     f"CandidateInput.{name} must be all-finite (no NaN/inf) "
                     f"(candidate {self.candidate_id!r})"
                 )
+        if self.family_returns is not None:
+            for index, column in enumerate(self.family_returns):
+                if len(column) != len(self.returns):
+                    raise ValueError(
+                        f"CandidateInput.family_returns[{index}] must share len(returns) "
+                        f"({len(self.returns)}), got {len(column)} "
+                        f"(candidate {self.candidate_id!r})"
+                    )
+                if not bool(np.all(np.isfinite(np.asarray(column, dtype=np.float64)))):
+                    raise ValueError(
+                        f"CandidateInput.family_returns[{index}] must be all-finite "
+                        f"(no NaN/inf) (candidate {self.candidate_id!r})"
+                    )
         if self.lockbox_trade_days is not None and any(
             later < earlier for earlier, later in itertools.pairwise(self.lockbox_trade_days)
         ):
@@ -283,6 +314,28 @@ class CascadeConfig:
     # #9 Monte-Carlo (spec line 472: p < 0.01)
     mc_alpha: float = 0.01
     mc_n_permutations: int = 1000
+    #: The Stage-4 walk-forward embargo OVERRIDE in decision-TF bars
+    #: (DEC-CASCADE-STAT-TIER-WIRE-001). ``None`` (the default) = AUTO — the
+    #: wire resolves one trading day in bars per (instrument, tf) group via
+    #: :func:`brutex.engine.cascade_wire.resolve_cascade_embargo_bars` (the
+    #: DEC-STAT-001 floor, MIGRATION.md #123: the cascade series are per-BAR
+    #: equity returns, so the label horizon is 1 bar and the formula floors at
+    #: ``ceil(375 / tf_minutes)``). An explicit ``int >= 0`` overrides
+    #: uniformly across every group; negative values are refused at the use
+    #: sites (:func:`run_stage4_cascade` / the wire resolver — this frozen
+    #: config class carries no ``__post_init__``, matching every other field).
+    #: Appended + defaulted (the additive-config precedent), so an OLD
+    #: manifest config dict without the key rebuilds with the default.
+    wfo_embargo: int | None = None
+    #: Cap on the per-candidate PBO family width (DEC-CASCADE-STAT-TIER-WIRE-001):
+    #: the wire re-simulates one return column per family (sl, tp) pair, so an
+    #: unbounded family would make the cascade build O(family x bars) without
+    #: limit. A family wider than the cap is truncated to the FIRST ``cap``
+    #: pairs in the deterministic (sorted) persisted order with ONE loud
+    #: structlog WARNING — never silently; if the truncation drops the
+    #: finalist's OWN pair the per-candidate PBO is honestly SKIPPED instead
+    #: (CSCV over a family that excludes the candidate says nothing about it).
+    candidate_pbo_family_cap: int = 256
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""
@@ -326,6 +379,20 @@ class CandidateVerdict:
     #: every existing construction is unaffected. NEVER rounded (CLAUDE.md
     #: §4 — display projections mint their own ``rate * 100.0`` alias).
     cpcv_pass_rate: float | None = None
+    #: The candidate's MEASURED per-candidate CSCV PBO over its OWN Stage-3
+    #: search family (DEC-CASCADE-STAT-TIER-WIRE-001) — the raw full-precision
+    #: probability from filter #5's per-candidate check, captured the moment
+    #: :func:`~brutex.metrics.pbo.pbo_probability` returns and BEFORE the
+    #: threshold compare, so a pass AND a threshold rejection both carry the
+    #: real number. ``None`` = the check never produced a value: the candidate
+    #: never REACHED the per-candidate check (an earlier rejection, or the
+    #: whole pool died at the pool-PBO half of #5) OR it reached it and was
+    #: SKIPPED (``family_returns`` absent / fewer than 2 columns / a series
+    #: shorter than one split block). RECORDING follows the
+    #: :attr:`cpcv_pass_rate` precedent exactly — stamped by the ONE final
+    #: :func:`dataclasses.replace` pass over the already-decided verdicts;
+    #: appended + defaulted; NEVER rounded (CLAUDE.md §4).
+    candidate_pbo: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +453,25 @@ class CascadeReport:
     #: (CSCV needs >= 2 candidates); (c) the return series is shorter than one
     #: split block (``usable < pbo_n_splits``).
     pool_pbo: float | None = None
+    #: The MEASURED pool Reality-Check p-value from filter #4
+    #: (DEC-CASCADE-STAT-TIER-WIRE-001, the pool_pbo/DEC-PBO-SIDECAR-001
+    #: precedent) — the raw p-value, full precision, NEVER rounded. Recorded
+    #: whenever White's RC ran on a non-empty pool — pass AND reject alike.
+    #: ``None`` iff the RC never ran (the pool was already empty when #4 was
+    #: reached, or every candidate was degenerate-rejected before the pool
+    #: matrix was built).
+    pool_rc_pvalue: float | None = None
+    #: The MEASURED pool Hansen-SPA CONSISTENT p-value from filter #4's SPA
+    #: arm (DEC-CASCADE-STAT-TIER-WIRE-001). Recorded only when the SPA arm
+    #: actually ran — i.e. the RC floor PASSED first (the join is
+    #: monotone-tightening: RC-first with the byte-identical historical
+    #: detail, then Hansen's studentized null-recentred consistent test as
+    #: the primary). ``None`` when the RC already killed the pool or #4 was
+    #: never reached with survivors — DISTINGUISHABLE from a measured value
+    #: by construction: ``pool_spa_pvalue is None and pool_rc_pvalue is not
+    #: None`` reads "RC rejected the pool", both ``None`` reads "the pool
+    #: never reached the data-snooping test".
+    pool_spa_pvalue: float | None = None
     #: Which trial population filter #2 deflated against
     #: (DEC-TRIAL-STATS-CONSUME-001): ``"leaderboard"`` — the frozen
     #: per-(instrument, tf) trial stats supplied by the wire (the honest,
@@ -539,6 +625,7 @@ def run_stage4_cascade(
     config: CascadeConfig,
     *,
     trial_stats: DsrTrialStats | None = None,
+    embargo_bars: int | None = None,
 ) -> CascadeReport:
     """Run the full Stage-4 cascade over a candidate pool.
 
@@ -560,6 +647,23 @@ def run_stage4_cascade(
         against ``trial_stats.n_trials`` / ``trial_stats.sharpe_variance``
         instead of the entering pool's own count + dispersion; the report's
         ``dsr_n_source`` records which source was used either way.
+    embargo_bars
+        The resolved Stage-4 embargo in decision-TF bars
+        (DEC-CASCADE-STAT-TIER-WIRE-001, the DEC-STAT-001 law —
+        ``docs/MIGRATION.md`` #123): the production wire resolves it per
+        (instrument, tf) group via
+        :func:`brutex.engine.cascade_wire.resolve_cascade_embargo_bars`.
+        ``None`` (the default) → ``0`` — full back-compat for direct
+        callers. Threaded into BOTH embargo-aware engines: filter #3's
+        :func:`~brutex.metrics.cpcv.cpcv_pass_rate` (where it is validated
+        but PROVABLY rate-inert — the model-free metric evaluates test
+        folds only; see that docstring) and filter #7's
+        :func:`~brutex.metrics.wfo.wfo_pass_rate` (where it genuinely
+        shifts every walk's test window ``embargo`` bars past the training
+        stop — the REAL serial-correlation de-leakage). A series too short
+        to fit one embargoed walk takes the EXISTING WFO short-series
+        degrade arm (the engine's "yields no walks" ``ValueError`` becomes
+        a rejection at the walk-forward stage, never a raise).
 
     Returns
     -------
@@ -570,11 +674,15 @@ def run_stage4_cascade(
     Raises
     ------
     ValueError
-        If two candidates share a ``candidate_id``, or two *pool-surviving*
+        If two candidates share a ``candidate_id``, two *pool-surviving*
         candidates have unequal-length return series (the pool filters need a
-        common time axis). Per-candidate engine domain errors do **not** raise —
-        they become rejections at the relevant stage.
+        common time axis), or ``embargo_bars`` is negative. Per-candidate
+        engine domain errors do **not** raise — they become rejections at the
+        relevant stage.
     """
+    resolved_embargo = 0 if embargo_bars is None else embargo_bars
+    if resolved_embargo < 0:
+        raise ValueError(f"embargo_bars must be >= 0 or None, got {embargo_bars}")
     pool = list(candidates)
     ids = [c.candidate_id for c in pool]
     if len(set(ids)) != len(ids):
@@ -656,10 +764,18 @@ def run_stage4_cascade(
     kept = []
     for c in survivors:
         try:
+            # DEC-CASCADE-STAT-TIER-WIRE-001: the resolved embargo is threaded
+            # (label_span stays 0 — per-BAR equity returns have a 1-bar label
+            # horizon, no forward window). HONEST: cpcv_pass_rate is model-free
+            # (test folds only), so the rate is UNCHANGED by construction for
+            # any valid embargo — the threading is declaration + validation,
+            # never a tightening illusion (pinned in tests/unit/test_cpcv.py).
             rate = cpcv_pass_rate(
                 c.returns,
                 n_groups=config.cpcv_n_groups,
                 n_test_groups=config.cpcv_n_test_groups,
+                label_span=0,
+                embargo=resolved_embargo,
             )
         except ValueError as exc:
             reject(c, FilterStage.CPCV, f"CPCV could not be evaluated: {exc}")
@@ -688,8 +804,24 @@ def run_stage4_cascade(
                 "cannot run the pool data-snooping test",
             )
     survivors = usable_pool
+    # DEC-CASCADE-STAT-TIER-WIRE-001: filter #4 is a monotone-tightening JOIN,
+    # RC-first. Hansen's (2005) SPA-consistent is the PRIMARY test — the
+    # studentized, null-recentred refinement (White's RC is conservative and
+    # distortable by poor/irrelevant alternatives in the pool) — while White's
+    # RC is RETAINED as the historical floor: a pool that failed the shipped
+    # cascade still fails HERE with the byte-identical detail, and the SPA arm
+    # can only ADD rejections (intersection composition keeps the false-pass
+    # probability <= spa_alpha). The `_pool_usable` degenerate pre-rejection
+    # above guarantees every column has >= 2 observations AND positive
+    # variance — exactly hansen_spa's `_require_positive_variance` demand —
+    # so the SPA arm can never raise on the pool matrix. Both tests consume
+    # the SAME deterministic BootstrapConfig (one seed).
+    pool_rc_pvalue: float | None = None
+    pool_spa_pvalue: float | None = None
     if survivors:
-        rc = reality_check(_pool_matrix(survivors), boot)
+        matrix = _pool_matrix(survivors)
+        rc = reality_check(matrix, boot)
+        pool_rc_pvalue = rc.pvalue
         if rc.pvalue >= config.spa_alpha:
             for c in survivors:
                 reject(
@@ -698,6 +830,18 @@ def run_stage4_cascade(
                     f"pool Reality-Check p {rc.pvalue:.4f} >= {config.spa_alpha}",
                 )
             survivors = []
+        else:
+            spa = hansen_spa(matrix, boot)
+            pool_spa_pvalue = spa.pvalue_consistent
+            if spa.pvalue_consistent >= config.spa_alpha:
+                for c in survivors:
+                    reject(
+                        c,
+                        FilterStage.REALITY_CHECK_SPA,
+                        f"pool Hansen-SPA consistent p {spa.pvalue_consistent:.4f} "
+                        f">= {config.spa_alpha}",
+                    )
+                survivors = []
     stage_survivors[FilterStage.REALITY_CHECK_SPA.value] = len(survivors)
 
     # ── #5 PBO (POOL: overfit pool is rejected wholesale) ──
@@ -726,6 +870,42 @@ def run_stage4_cascade(
             for c in survivors:
                 reject(c, FilterStage.PBO, f"pool PBO {result.pbo:.4f} > {config.pbo_max}")
             survivors = []
+    # DEC-CASCADE-STAT-TIER-WIRE-001: AFTER the (unchanged) pool law, the
+    # PER-CANDIDATE CSCV — Bailey's PBO applied to each survivor's OWN Stage-3
+    # search family (the (sl, tp) configurations its mask was actually TRIED
+    # at; the statistically intended CSCV use). A candidate with no family
+    # (``family_returns`` None), fewer than 2 columns, or a series shorter
+    # than one split block is SKIPPED (no reject, value ``None`` — honest
+    # abstention, never a fabricated verdict). The SAME ``pbo_max`` knob
+    # governs both halves (one overfitting ceiling — a deliberate,
+    # documented choice). The measured value is recorded pass AND reject
+    # (the cpcv_pass_rate capture precedent) and stamped by the ONE final
+    # ``replace`` pass below.
+    candidate_pbo_by_id: dict[str, float] = {}
+    kept = []
+    for c in survivors:
+        family = c.family_returns
+        if family is None or len(family) < _MIN_POOL_FOR_PBO:
+            kept.append(c)
+            continue
+        n_obs_family = len(c.returns)
+        usable_family = (n_obs_family // config.pbo_n_splits) * config.pbo_n_splits
+        if usable_family < config.pbo_n_splits:
+            kept.append(c)
+            continue
+        family_result = pbo_probability(
+            [
+                [float(column[t]) for column in family]
+                for t in range(n_obs_family - usable_family, n_obs_family)
+            ],
+            n_splits=config.pbo_n_splits,
+        )
+        candidate_pbo_by_id[c.candidate_id] = family_result.pbo
+        if family_result.pbo > config.pbo_max:
+            reject(c, FilterStage.PBO, f"candidate PBO {family_result.pbo:.4f} > {config.pbo_max}")
+        else:
+            kept.append(c)
+    survivors = kept
     stage_survivors[FilterStage.PBO.value] = len(survivors)
 
     # ── #6 Romano-Wolf (POOL: keep only the FWER rejection set) ──
@@ -754,12 +934,19 @@ def run_stage4_cascade(
         failed_scheme: str | None = None
         try:
             for scheme in WFOScheme:
+                # DEC-CASCADE-STAT-TIER-WIRE-001: the resolved embargo GAP
+                # between each walk's training stop and its test start — the
+                # genuine serial-correlation de-leakage (unlike CPCV's inert
+                # threading above). A series the embargo leaves walk-less
+                # raises the engine's "yields no walks" ValueError → the
+                # EXISTING short-series arm below rejects at this stage.
                 rate = wfo_pass_rate(
                     c.returns,
                     scheme,
                     train_size=config.wfo_train_size,
                     test_size=config.wfo_test_size,
                     step=config.wfo_step,
+                    embargo=resolved_embargo,
                 )
                 if rate < config.wfo_min_pass_rate:
                     failed_scheme = (
@@ -854,13 +1041,19 @@ def run_stage4_cascade(
             provisional=dsr_n_source == "pool",
         )
 
-    # ONE final recording-only stamp (DEC-RESULTS-CASCADE-VERDICT-JOIN-001):
-    # every verdict — pass, later-stage reject, CPCV reject — gains its
-    # measured stage-3 rate; a candidate that never reached #3 (or hit the
-    # ValueError arm) stamps the honest ``None``. ``replace`` preserves every
-    # other field bit-for-bit; ordering/decisions were finalised above.
+    # ONE final recording-only stamp (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 +
+    # DEC-CASCADE-STAT-TIER-WIRE-001): every verdict — pass, later-stage
+    # reject, CPCV/PBO reject — gains its measured stage-3 rate + its measured
+    # per-candidate PBO; a candidate that never produced either stamps the
+    # honest ``None``. ``replace`` preserves every other field bit-for-bit;
+    # ordering/decisions were finalised above.
     ordered_verdicts = tuple(
-        replace(verdicts[cid], cpcv_pass_rate=cpcv_rate_by_id.get(cid)) for cid in ids
+        replace(
+            verdicts[cid],
+            cpcv_pass_rate=cpcv_rate_by_id.get(cid),
+            candidate_pbo=candidate_pbo_by_id.get(cid),
+        )
+        for cid in ids
     )
     return CascadeReport(
         verdicts=ordered_verdicts,
@@ -869,6 +1062,8 @@ def run_stage4_cascade(
         n_survived=len(ranked),
         stage_survivors=stage_survivors,
         pool_pbo=pool_pbo,
+        pool_rc_pvalue=pool_rc_pvalue,
+        pool_spa_pvalue=pool_spa_pvalue,
         dsr_n_source=dsr_n_source,
         dsr_n_trials=n_trials,
         dsr_trial_variance=trial_var,
