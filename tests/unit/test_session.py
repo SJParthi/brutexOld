@@ -28,6 +28,7 @@ from brutex.data.session import (
     in_session,
     is_all_filtered,
     is_session_exempt,
+    ist_offset_duration,
     observe_all_filtered,
 )
 from hypothesis import given
@@ -326,3 +327,56 @@ class TestFormatIstClock:
     def test_unparseable_string_returned_unchanged(self) -> None:
         # A free-text note (e.g. last_error) is not a timestamp — left as-is.
         assert format_ist_clock("DhanRateLimitError") == "DhanRateLimitError"
+
+
+class TestIstOffsetDuration:
+    """`ist_offset_duration` — the ONE polars-family IST offset representation.
+
+    DEC-TIMESTAMP-IST-SINGLESOURCE-001: the helper is the polars-duration
+    family's single source, DERIVED from the canonical
+    `brutex.calendars.nse.IST_UTC_OFFSET` root — its built expression tree is
+    byte-identical to the historical `pl.duration(hours=5, minutes=30)`
+    literal every consumer used to re-mint.
+    """
+
+    def test_expr_tree_identical_to_historical_literal(self) -> None:
+        import polars as pl
+
+        assert str(ist_offset_duration()) == str(pl.duration(hours=5, minutes=30))
+
+    def test_shift_values_equal_both_literal_forms(self) -> None:
+        # Applying the helper to real UTC instants yields the SAME shifted
+        # instants as BOTH historical literal spellings (hours+minutes and
+        # whole-minutes) — the value-level byte-identity law.
+        import polars as pl
+
+        ts = [
+            datetime(2024, 1, 2, 3, 45, tzinfo=UTC),  # 09:15 IST
+            datetime(2024, 6, 28, 10, 0, tzinfo=UTC),  # 15:30 IST
+            datetime(2020, 1, 1, 18, 30, tzinfo=UTC),  # midnight IST next day
+        ]
+        frame = pl.DataFrame({"ts_utc": ts})
+        via_helper = frame.select((pl.col("ts_utc") + ist_offset_duration()).alias("v"))
+        via_hm = frame.select((pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).alias("v"))
+        via_min = frame.select((pl.col("ts_utc") + pl.duration(minutes=330)).alias("v"))
+        assert via_helper.equals(via_hm)
+        assert via_helper.equals(via_min)
+
+    def test_ist_date_of_shift_matches_zoneinfo_conversion(self) -> None:
+        # The frame-level (+05:30).date() idiom agrees with the ZoneInfo-family
+        # astimezone(IST).date() conversion on the same instants.
+        import polars as pl
+        from brutex.data.session import IST as SESSION_IST
+
+        ts = [
+            datetime(2024, 1, 2, 3, 45, tzinfo=UTC),
+            datetime(2024, 12, 31, 18, 29, tzinfo=UTC),  # 23:59 IST same day
+            datetime(2024, 12, 31, 18, 30, tzinfo=UTC),  # 00:00 IST NEXT day
+        ]
+        frame = pl.DataFrame({"ts_utc": ts})
+        got = (
+            frame.select((pl.col("ts_utc") + ist_offset_duration()).dt.date().alias("d"))
+            .get_column("d")
+            .to_list()
+        )
+        assert got == [t.astimezone(SESSION_IST).date() for t in ts]

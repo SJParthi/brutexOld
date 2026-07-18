@@ -259,6 +259,23 @@ jobs:
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel (canonical-JSON render +
+        # \x1f first-offender scan): mypy/pyright must see the
+        # wheel-PRESENT import arm of brutex/strategies/combo_rust.py
+        # (the brutex-feed precedent above). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -466,6 +483,25 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel: this job is the wheel-ON
+        # hypothesis differential's EXECUTION HOME — the coverage pass
+        # below runs tests/property, so
+        # tests/property/test_combo_rust_differential.py executes wheel-ON
+        # here, never skip-only (absent wheel = the ON arm goes unproven).
+        # The fail-loud retry means wheel-present-or-RED. Belt-and-
+        # suspenders crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest with coverage gate
@@ -742,6 +778,21 @@ jobs:
           else
             echo "(brutex.strategies.errors test file not present yet — gate inactive)"
           fi
+          # DEC-BOX-AUTODEPLOY-LANE-001 (§10 CI gating): the nightly box
+          # auto-deploy leg (guards/merge/wheel-rebuild/gate/rollback/
+          # repair/alarm-dedupe state machine) + the §12 removed-env-flag
+          # pre-flight — each 100% line+branch STANDALONE over its own
+          # unit matrix (the fill_mode-precedent shape above).
+          if compgen -G "tests/unit/test_nightly_box_update.py" > /dev/null; then
+            pytest --cov=brutex.nightly.box_update --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nightly_box_update.py
+          else
+            echo "(brutex.nightly.box_update test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_nightly_env_preflight.py" > /dev/null; then
+            pytest --cov=brutex.nightly.env_preflight --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nightly_env_preflight.py
+          else
+            echo "(brutex.nightly.env_preflight test file not present yet — gate inactive)"
+          fi
           # DEC-VENDOR-PIVOT-001 (2026-05-26): groww.constants strict-100%
           # gate deleted with the Groww wipe. The legacy step 8 deferral
           # for groww.types is no longer relevant — the Groww adapter is
@@ -917,14 +968,14 @@ jobs:
           #       package — seeded deterministic generator + O(1)-per-bar candle
           #       maths + instrument index + MarketAdapter composition.
           if compgen -G "tests/unit/test_synthetic_adapter.py" > /dev/null; then
-            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py
+            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py tests/unit/test_synthetic_constants_registry_pin.py
           else
             echo "(brutex.adapters.synthetic test file not present yet — gate inactive)"
           fi
           # 13b · brutex.data.partition (79 stmts, 24 branches, 70 tests — DEC-MUTATION-RUNTIME-001 mutation pins)
           #       Lake partition path computation (year/month/symbol/tf)
           if compgen -G "tests/unit/test_data_partition.py" > /dev/null; then
-            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py
+            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py tests/unit/test_data_partition_registry_pin.py
           else
             echo "(brutex.data.partition test file not present yet — gate inactive)"
           fi
@@ -985,11 +1036,23 @@ jobs:
           else
             echo "(brutex.strategies.registry test file not present yet — gate inactive)"
           fi
-          # 16d · brutex.strategies.combo (55 stmts, 38 branches, 34 tests)
+          # 16d · brutex.strategies.combo (79 stmts, 52 branches, 92 tests)
           if compgen -G "tests/unit/test_strategies_combo.py" > /dev/null; then
             pytest --cov=brutex.strategies.combo --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_combo.py
           else
             echo "(brutex.strategies.combo test file not present yet — gate inactive)"
+          fi
+          # 16d2 · brutex.strategies.combo_rust (DEC-STRATEGIES-RUST-COMBO-001):
+          #        the default-OFF combo Rust-facade leaf (flag + crate
+          #        handshake + per-law burn-in/autorevert + refuse-poison
+          #        gates); 100% line+branch STANDALONE on its dedicated
+          #        WHEEL-FREE unit suite (crate interaction via sys.modules
+          #        fakes — the wheel-ON teeth live in tests/property +
+          #        tests/golden).
+          if compgen -G "tests/unit/test_strategies_combo_rust.py" > /dev/null; then
+            pytest --cov=brutex.strategies.combo_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_combo_rust.py
+          else
+            echo "(brutex.strategies.combo_rust test file not present yet — gate inactive)"
           fi
           # 16e · brutex.vocabulary.conflicts (12 stmts, 4 branches, 65 tests)
           if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
@@ -1361,11 +1424,13 @@ jobs:
           else
             echo "(brutex.data.models test file not present yet — gate inactive)"
           fi
-          # 19i · brutex.engine.combo_mask (133 stmts, 52 branches — grown for
-          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012). The
-          # base scalar suite is test_engine_combo_mask.py; the u128 two-limb
-          # numpy oracle/fallback paths (the >=64-bit headroom + the
-          # kernel-unavailable ResidentBars fallback) live in the dedicated
+          # 19i · brutex.engine.combo_mask (183 stmts, 72 branches — grown for
+          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012, then the
+          # u128 Rust kernel dispatch, DEC-ENUM-KERNEL-U128-001). The base
+          # scalar suite is test_engine_combo_mask.py; the >=64-bit kernel
+          # dispatch paths (the wide Rust routing + lazy promotion + the
+          # LOUD-FAIL WideKernelUnavailableError law + the retained numpy
+          # oracle / <=64-bit ResidentBars fallback) live in the dedicated
           # test_engine_combo_mask_u128.py — BOTH are required to reach 100%
           # line+branch (COMMON, composed not duplicated — mirrors the
           # quota_tracker two-file gate above).
@@ -1500,7 +1565,7 @@ jobs:
           #       honest mark — code remains defensive in case the guard at
           #       143-144 is removed in the future.
           if compgen -G "tests/unit/test_feed_resampler.py" > /dev/null; then
-            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py
+            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py tests/unit/test_feed_resampler_registry_pin.py
           else
             echo "(brutex.feed.resampler test file not present yet — gate inactive)"
           fi
@@ -1549,7 +1614,7 @@ jobs:
           #       at import time, which is impossible to reach in normal
           #       test paths without monkey-patching pre-import.
           if compgen -G "tests/unit/test_timeframes.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py
+            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py tests/unit/test_timeframes_registry.py
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
@@ -1572,7 +1637,7 @@ jobs:
           #       test_tf_resampler_batch_seam.py. All the files are required
           #       for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_rust_seam.py tests/unit/test_tf_resampler_batch_seam.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_registry_parity.py tests/unit/test_tf_resampler_rust_seam.py tests/unit/test_tf_resampler_batch_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
@@ -2400,9 +2465,10 @@ jobs:
             echo "(brutex.metrics.spa test file not present yet — gate inactive)"
           fi
           # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives —
-          # brutex.metrics.cpcv (104 stmts / 34 branches) CPCV splits +
-          # purge/embargo + pass-rate; brutex.metrics.wfo (76 / 22) walk-forward
-          # rolling/anchored/expanding pass-rates.
+          # brutex.metrics.cpcv (132 stmts / 44 branches as of
+          # DEC-METRICS-RUST-STATS-001) CPCV splits + purge/embargo +
+          # pass-rate + the rust_stats dispatch; brutex.metrics.wfo (76 / 22)
+          # walk-forward rolling/anchored/expanding pass-rates.
           # NOTE: driven via the numpy-safe `--cov=brutex` + `coverage report
           # --include` form (NOT the dotted `--cov=brutex.metrics.cpcv`): once
           # the spa re-export (DEC-STAT-SPA-001, #431) landed, brutex.metrics
@@ -2425,6 +2491,21 @@ jobs:
             coverage report --include="*/brutex/metrics/wfo.py" --show-missing --fail-under=100
           else
             echo "(brutex.metrics.wfo test file not present yet — gate inactive)"
+          fi
+          # DEC-METRICS-RUST-STATS-001 (slice 6): brutex.metrics.rust_stats —
+          # the flag-gated Rust Stage-3/4 statistics seam (env tristate,
+          # per-function autorevert latch, burn-in self-check, kernel
+          # bindings). 100% line+branch from its dedicated unit suite ALONE;
+          # the property/golden/bench suites add kernel-vs-oracle parity.
+          # Same numpy-safe `--cov=brutex` + `coverage report --include`
+          # form as the sibling metrics gates.
+          if compgen -G "tests/unit/test_rust_stats.py" > /dev/null; then
+            pytest tests/unit/test_rust_stats.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/rust_stats.py" | grep -q "brutex/metrics/rust_stats.py" \
+              || { echo "ERROR: brutex/metrics/rust_stats.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/rust_stats.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.rust_stats test file not present yet — gate inactive)"
           fi
           # DEC-STAT-LOCKBOX-MC-001: Stage-4 filters #8 (Lockbox held-out
           # validation) + #9 (Monte-Carlo entry-permutation). brutex.metrics.lockbox
@@ -2896,6 +2977,25 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # A LIVE install site — deliberately unlike brutex-feed's pruned
+        # one (the comment below): the feed's dead-weight rationale is
+        # pyarrow-SPECIFIC and does not transfer. The combo differential
+        # (tests/property/test_combo_rust_differential.py) is
+        # wheel-only-gated with no pyarrow dependency, so this job is a
+        # second wheel-ON execution home for it. Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3141,6 +3241,25 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel: this job hosts the
+        # flag-ON golden WRAPPER (test_combo_rust_flag_on_golden.py —
+        # re-drives the frozen _GOLDEN_RUN_ID / content-hash / combo-hash
+        # corpus goldens flag-ON under an engagement spy, never by editing
+        # the frozen files) + the pytest half of the frozen cross-language
+        # canonical-params payload golden. Belt-and-suspenders crates.io
+        # flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest golden tests
@@ -3402,6 +3521,53 @@ jobs:
       # itself is built by the Python jobs above).
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
+
+  rust-brutex-strategies:
+    name: Rust (brutex-strategies build + clippy + test)
+    # DEC-STRATEGIES-RUST-COMBO-001: the combo byte-law decision kernel's
+    # own crate gate (the rust-brutex-feed shape, plus `--locked` — the
+    # crate commits its Cargo.lock, so the lockstep is enforced here like
+    # the lake-rust-parity lane does for brutex-lake). The Python-side
+    # byte-identity proof (frozen combo/run-identity goldens flag-ON + the
+    # wheel-ON hypothesis differential) lives in the test/golden/property
+    # jobs, which install the wheel via `pip install ./rust/brutex-strategies`
+    # (type installs it too for the wheel-present import arm).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-strategies
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-strategies -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # DEC-STRATEGIES-RUST-COMBO-001: the pure cores' cargo suites — the
+      # shared-literal escaper corpus (the stats_shard matrix, the
+      # cross-crate anti-drift gate of the DEC's recorded escaper
+      # duplication), sort adversaries incl. the non-BMP boundary, the
+      # [null,true,false,1,0] extraction-ORDER value-render pin, the
+      # i128 boundary pins, the frozen cross-language payload golden's
+      # cargo half, the \x1f scan edge matrix + proptest invariants and
+      # the source-digest twin parity.
+      - name: cargo test
+        run: cargo test --release --locked
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
 
   rust-brutexd:
     name: Rust (brutexd build + clippy + test)
@@ -3797,12 +3963,82 @@ jobs:
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Run gitleaks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
+          set -euo pipefail
           # --redact so any hit doesn't echo the value in CI logs.
           # --config=.gitleaks.toml applies our env-var-name allowlist.
+          #
+          # DEC-CI-SECRETS-SCAN-DIFFBOUND-001 (MIGRATION.md #1951): bound
+          # the scan to the PR/push diff. Given NO --log-opts, gitleaks
+          # 8.21.2 HARDCODES `git log -p -U0 --full-history --all`
+          # (sources/git.go), so under fetch-depth:0 (every origin/* ref
+          # fetched) it walks UNRELATED sibling branches and false-flags
+          # secrets that live only there. Bounding --log-opts to the diff
+          # mirrors the sibling gitleaks.yml on PR/push and preserves full
+          # PR-diff coverage; the default `-1 HEAD` guarantees no gating
+          # path (PR / push / merge_group) ever re-introduces the all-refs
+          # full-history walk.
+          LOG_OPTS="-1 HEAD"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Diff-bounded: only the PR's own commits vs its base.
+            # PR_BASE_REF defaults to main (the pull_request trigger is
+            # branches:[main]) so `set -u` cannot abort on an unset var —
+            # behavior-preserving: on-main PRs expand to origin/main..HEAD.
+            # Explicit fail-closed: if the base ref is missing/unfetched,
+            # REFUSE rather than let a git error be the only backstop — a
+            # required security gate must never silently pass.
+            if git cat-file -e "origin/${PR_BASE_REF:-main}^{commit}" 2>/dev/null; then
+              LOG_OPTS="--no-merges origin/${PR_BASE_REF:-main}..HEAD"
+            else
+              echo "::error::pull_request: base ref origin/${PR_BASE_REF:-main} not found — refusing to scan (fail-closed)" >&2
+              exit 1
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            # Diff-bounded: only the pushed commits. A new branch / forced
+            # push reports an all-zero or unknown 'before' — fall back to
+            # scanning just the tip commit (`-1 HEAD`).
+            if [ -n "${BEFORE_SHA:-}" ] \
+              && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              LOG_OPTS="--no-merges ${BEFORE_SHA}..${AFTER_SHA}"
+            fi
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            # Diff-bounded: only the merge candidate's commits.
+            #
+            # merge_group is a REQUIRED merge gate, so gitleaks must NEVER
+            # run against an empty / zero-patch range and exit green. On a
+            # merge_group event HEAD is the SPECULATIVE MERGE commit, so the
+            # old `-1 HEAD` fallback emitted ZERO patch lines (a merge commit
+            # has no diff under `git log -p`) → fail-open on a required gate.
+            if [ -n "${MG_BASE_SHA:-}" ] \
+              && git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null; then
+              # Primary: the queue base..head range (the PR's incoming commits).
+              LOG_OPTS="--no-merges ${MG_BASE_SHA}..${MG_HEAD_SHA}"
+            elif git rev-parse -q --verify "HEAD^1^{commit}" >/dev/null 2>&1 \
+              && git rev-parse -q --verify "HEAD^2^{commit}" >/dev/null 2>&1; then
+              # Fallback: the queue base env var is missing/unfetched, but
+              # HEAD is a merge commit — derive a NON-EMPTY range from its own
+              # parents (HEAD^1 = queue tip, HEAD^2 = the PR's incoming commits).
+              LOG_OPTS="--no-merges HEAD^1..HEAD^2"
+            else
+              # Fail closed: cannot resolve a diff range. Refuse rather than
+              # scan a speculative merge commit that would scan nothing.
+              echo "::error::merge_group: cannot resolve a diff range; refusing to scan a speculative merge commit that would scan nothing" >&2
+              exit 1
+            fi
+          fi
+          echo "gitleaks detect --log-opts=\"${LOG_OPTS}\""
           gitleaks detect \
             --source . \
             --config .gitleaks.toml \
+            --log-opts="$LOG_OPTS" \
             --redact \
             --verbose \
             --exit-code 1
@@ -4215,15 +4451,22 @@ jobs:
           # clean 100% kill (the only un-killable mutant, the quantum string →
           # invalid Decimal, is excluded via `# pragma: no mutate`). Same bounded
           # timeout + the SHARED parser above at a strict floor.
+          # DEC-CONFIG-RUST-LEAVES-001 (slice T35): the runner ALSO drives
+          # tests/unit/test_money_rust.py — the BRUTEX_CORE_RUST_MONEY seam's
+          # flag-routing mutants (`if not money_rust_enabled()` flips) are
+          # value-invisible to test_money.py alone when the crate is absent
+          # (the facade degrades to the identical oracle), and are killed by
+          # the seam suite's bomb-crate latch teeth + routing spies. Timeout
+          # raised 240 → 420 s for the grown module (~3x statements).
           set +e
-          timeout 240 mutmut run \
+          timeout 420 mutmut run \
             --paths-to-mutate brutex/money.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_money.py"
+            --runner "pytest -x tests/unit/test_money.py tests/unit/test_money_rust.py"
           run_rc=$?
           set -e
           if [ $run_rc -eq 124 ]; then
-            echo "ERROR: mutmut timed out after 4 minutes on money.py"
+            echo "ERROR: mutmut timed out after 7 minutes on money.py"
             exit 124
           fi
           echo "::group::mutmut results — money.py"
@@ -4573,7 +4816,14 @@ jobs:
     name: Proof bundle (aggregate CI artifacts)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    if: always()
+    # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001 (MIGRATION.md #1953): SKIP on a
+    # concurrency-cancelled/superseded run. This job is `if: !cancelled()`
+    # (runs on success OR failure to aggregate a partial proof), but must
+    # NOT run when the run was cancelled — a cancelled producer leaves no
+    # artifacts, `proof/` is never created, and the manifest step's
+    # `cat > proof/MANIFEST.txt` hard-fails → a spurious red "Proof bundle"
+    # check + false-red webhooks across the wave. Was `if: always()`.
+    if: ${{ !cancelled() }}
     needs:
       - test
       - bench
@@ -4611,6 +4861,11 @@ jobs:
       - name: Generate proof manifest
         if: always()
         run: |
+          # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001: belt-and-braces — even if the
+          # download-artifact steps found nothing (no producer artifacts on a
+          # failed/partial run), `proof/` may not exist yet, so `cat >
+          # proof/MANIFEST.txt` would hard-fail. Create it first.
+          mkdir -p proof
           cat > proof/MANIFEST.txt <<EOF
           BruteX CI Proof Bundle
           ======================
@@ -4711,6 +4966,9 @@ jobs:
       - rust-trading-core
       # DEC-FEED-RUST-CORE-001: the feed decision-kernel crate gate.
       - rust-brutex-feed
+      # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-strategies
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd

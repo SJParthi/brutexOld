@@ -34,6 +34,7 @@ from brutex.data.lake_rust_resample import (
     lake_rust_resample_enabled,
     resample_session_frame_via_rust,
 )
+from brutex.data.session import ist_offset_duration
 from brutex.data.spot_resample import _BASE_TF_MINUTES  # pyright: ignore[reportPrivateUsage]
 
 # The verbatim Python resample body is the session composite's oracle arm
@@ -169,7 +170,7 @@ def _forming_bucket_cutoff(
     # ``s + M``; keep it only when fully closed at/under the cutoff (``s + M <= cutoff``).
     # IST minute-of-day of the bucket label = (ts_utc + 05:30) hour*60 + minute, Int32-cast
     # before the arithmetic (Int8 hour/minute overflow guard — CLAUDE.md §11 COMMON).
-    ist = pl.col(_RESAMPLER_TS_COLUMN) + pl.duration(hours=5, minutes=30)
+    ist = pl.col(_RESAMPLER_TS_COLUMN) + ist_offset_duration()
     bucket_start_min = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
     guarded: pl.DataFrame = resampled.filter(bucket_start_min + target_tf_minutes <= cutoff_min)
     return guarded
