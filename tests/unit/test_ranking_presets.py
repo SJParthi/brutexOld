@@ -135,6 +135,8 @@ class TestDescendingPresets:
             ("win_rate", "win_rate"),
             ("calmar", "calmar_ratio"),
             ("growth", "log_growth_at_half_kelly"),
+            ("recent", "trailing_sharpe_ratio"),
+            ("recent_decay", "decay_weighted_net_paisa"),
         ],
     )
     def test_higher_raw_value_first(self, token: str, field: str) -> None:
@@ -143,7 +145,8 @@ class TestDescendingPresets:
         assert PRESETS[token].sort_records([low, high]) == (high, low)
 
     @pytest.mark.parametrize(
-        "token", ["composite", "profit_factor", "win_rate", "calmar", "growth"]
+        "token",
+        ["composite", "profit_factor", "win_rate", "calmar", "growth", "recent", "recent_decay"],
     )
     def test_value_tie_falls_to_run_id_asc(self, token: str) -> None:
         first = _rec("1" * 64)
@@ -168,6 +171,28 @@ class TestDescendingPresets:
     def test_rank_record_growth_field_defaults_none(self) -> None:
         # Defaulted-last so pre-extension record builders stay valid.
         assert _rec("a" * 64).log_growth_at_half_kelly is None
+
+    @pytest.mark.parametrize(
+        ("token", "field"),
+        [
+            ("recent", "trailing_sharpe_ratio"),
+            ("recent_decay", "decay_weighted_net_paisa"),
+        ],
+    )
+    def test_recency_none_ranks_last(self, token: str, field: str) -> None:
+        # DEC-METRICS-TRAILING-WINDOW-001: an unscored record (a
+        # pre-extension store row / anchor-less run / empty trailing window)
+        # ranks AFTER every scored one — the None-after-scored idiom.
+        unscored = _rec("a" * 64, **{field: None})
+        low = _rec("c" * 64, **{field: -5.0})
+        high = _rec("b" * 64, **{field: 2.0})
+        assert PRESETS[token].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_rank_record_recency_fields_default_none(self) -> None:
+        # Defaulted-LAST so pre-extension record builders stay valid.
+        record = _rec("a" * 64)
+        assert record.trailing_sharpe_ratio is None
+        assert record.decay_weighted_net_paisa is None
 
 
 class TestWinRateSafeLaw:

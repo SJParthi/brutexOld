@@ -3480,6 +3480,32 @@ class TestSlHitRateConcretePersist:
             assert 0.0 <= row.sl_hit_rate <= 1.0
 
 
+class TestRecencyConcretePersist:
+    """The sweep spine ALWAYS threads the GLOBAL ``trailing_anchor`` (the
+    loaded bar range's end — DEC-METRICS-TRAILING-WINDOW-001), so every
+    sweep-persisted row's ``decay_weighted_net_paisa`` is CONCRETE, and —
+    because the fixture's bars all sit inside the 24-month window — so is
+    its trailing trio, equal to the full-history figures (the projector's
+    no-coercion law depends on this row-level honesty pin)."""
+
+    def test_persisted_rows_carry_concrete_recency_metrics(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.persisted >= 1  # anti-vacuity
+        for row in store.rows():
+            assert row.decay_weighted_net_paisa is not None
+            # The fixture spans days (<< 730), so the whole history is inside
+            # the trailing window AND inside decay bucket 0: the trio equals
+            # the full-history figures and decay == net exactly (weight 1.0).
+            assert row.trailing_net_pnl_paisa == float(row.net_pnl_paisa)
+            assert row.decay_weighted_net_paisa == float(row.net_pnl_paisa)
+            assert row.trailing_sharpe_ratio is not None
+
+
 class TestMaxSlHitRateEnforcement:
     """Door-6 enforcement end-to-end (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
     Stage B): an active ``SweepRunConfig.max_sl_hit_rate`` ceiling gates the

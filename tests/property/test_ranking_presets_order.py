@@ -42,6 +42,12 @@ def _records(draw: st.DrawFn) -> list[RankRecord]:
             # win_rate_safe presets' presence-flag laws ride every property.
             log_growth_at_half_kelly=draw(_composite),
             sl_hit_rate=draw(st.one_of(st.none(), st.floats(0.0, 1.0, allow_nan=False))),
+            # The nullable Stage-C recency axes (DEC-METRICS-TRAILING-WINDOW-001)
+            # — the recent / recent_decay presence-flag laws ride every property.
+            trailing_sharpe_ratio=draw(_composite),
+            decay_weighted_net_paisa=draw(
+                st.one_of(st.none(), st.floats(-1e9, 1e9, allow_nan=False))
+            ),
         )
         for run_id in ids
     ]
@@ -95,3 +101,24 @@ def test_win_rate_safe_orders_win_rate_monotonically(records: list[RankRecord]) 
             assert later.sl_hit_rate is None
         elif later.sl_hit_rate is not None:
             assert earlier.sl_hit_rate <= later.sl_hit_rate
+
+
+@given(records=_records())
+@settings(max_examples=60, deadline=None)
+def test_recency_presets_order_scored_descending_nulls_last(
+    records: list[RankRecord],
+) -> None:
+    # DEC-METRICS-TRAILING-WINDOW-001: each recency preset orders its own
+    # metric descending over the SCORED records, with every None strictly
+    # after every scored one (the presence-flag law).
+    for token, field in (
+        ("recent", "trailing_sharpe_ratio"),
+        ("recent_decay", "decay_weighted_net_paisa"),
+    ):
+        ordered = PRESETS[token].sort_records(records)
+        values = [getattr(record, field) for record in ordered]
+        scored = [value for value in values if value is not None]
+        assert scored == sorted(scored, reverse=True), token
+        # Nulls form a contiguous TAIL — no scored record after a None.
+        if None in values:
+            assert all(value is None for value in values[values.index(None) :]), token
