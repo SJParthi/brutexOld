@@ -41,6 +41,11 @@ pub mod auto_pull_scheduler;
 // the PullIntent dataclass itself stay Python (see src/intent.rs).
 pub mod intent;
 pub mod market_hours;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the written-vs-settled census fold —
+// scoped rows/pairs in, counts + capped sample triples out; the payload
+// extraction (`str()`/`int()`), the `repr()` renders and the guarded
+// observe-only emit stay Python.
+pub mod pull_census;
 // Wave 1A (DEC-RUST-PULL-STATE-001): the last-pull OUTCOME decision core
 // (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
 // + the banner colour authority stay Python.
@@ -63,6 +68,7 @@ pub use auto_pull_scheduler::{auto_state_verdict, auto_tick_decision};
 pub use intent::{refused_restore_decision, resume_decision, resume_enabled, shape_verdict};
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use progress::{COUNT_DOMAIN_MAX, CountDomainError, progress_derived};
+pub use pull_census::{CENSUS_SAMPLE_CAP, census_fold};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 pub use stall::{
     WEDGE_ABSTAIN_PROBE_NONE, WEDGE_ADOPT_BASELINE, WEDGE_DEFER, WEDGE_ESCALATE, WEDGE_NO_PROBE,

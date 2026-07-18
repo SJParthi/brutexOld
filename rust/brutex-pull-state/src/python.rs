@@ -353,6 +353,24 @@ fn auto_state_verdict(
     )
 }
 
+// --- pull_census (Wave 3G) ---------------------------------------------------
+// The written-vs-settled census fold of `brutex/dashboard/pull_census.py`
+// (observe-only). The seam pre-extracts + scope-filters the rows/pairs
+// (`str()`/`int()` stay Python) and renders the `repr()` sample strings from
+// the returned triples; a lone-surrogate symbol fails the pyo3 String edge
+// and the facade belt degrades that call to the oracle.
+
+/// `(settled_unwritten, written_unsettled, samples)` — see
+/// `crate::pull_census::census_fold`.
+#[pyfunction]
+#[pyo3(signature = (rows, written_pairs))]
+fn census_fold(
+    rows: Vec<(String, String, bool)>,
+    written_pairs: Vec<(String, String)>,
+) -> (u64, u64, Vec<(u8, String, String)>) {
+    crate::pull_census::census_fold(&rows, &written_pairs)
+}
+
 // --- pull_progress (Wave 2F) ------------------------------------------------
 // The derived-metrics plane of `brutex/dashboard/pull_progress.py`
 // (DEC-PULL-PROGRESS-HONESTY-001). Counts cross as u64 (facade-gated to the
@@ -426,6 +444,8 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- auto_pull_scheduler (Wave 3G) ---
     m.add_function(wrap_pyfunction!(auto_tick_decision, m)?)?;
     m.add_function(wrap_pyfunction!(auto_state_verdict, m)?)?;
+    // --- pull_census (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(census_fold, m)?)?;
     // --- pull_progress (Wave 2F) ---
     m.add_function(wrap_pyfunction!(progress_derived, m)?)?;
     Ok(())
