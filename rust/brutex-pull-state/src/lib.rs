@@ -28,6 +28,7 @@
 //! pull start / per mid-run window check, never on a hot path.
 
 pub mod market_hours;
+pub mod pull_scope;
 
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 
