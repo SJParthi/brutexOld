@@ -17,6 +17,11 @@
 * the ``_session_close_instant`` arms (regular 15:30 · Muhurat session close ·
   in-coverage non-session fallback · out-of-coverage weekday LOUD raise · the
   per-day memo);
+* the §6b ``close_step_minutes`` conversion (375 trading minutes → the
+  1440-minute wall-clock day; identity for every intraday tf) + the
+  1day-shaped build law (a midnight-IST decision label closes at the NEXT
+  midnight ⇒ every 1day arm point cross-session drops — structurally EMPTY);
+* ``exec_window_slice`` (the §7.2/Q3 dual-stream window cut);
 * every ``ExecGridMap.__post_init__`` validation arm;
 * the tf=1 identity shape and the empty-stream degenerates.
 """
@@ -35,7 +40,12 @@ from brutex.calendars.nse import (
 )
 from brutex.data.models import CandleBar
 from brutex.engine import exec_grid as eg_mod
-from brutex.engine.exec_grid import ExecGridMap, build_exec_grid_map
+from brutex.engine.exec_grid import (
+    ExecGridMap,
+    build_exec_grid_map,
+    close_step_minutes,
+    exec_window_slice,
+)
 from structlog.testing import capture_logs
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday (session close 15:30 IST)
@@ -460,6 +470,105 @@ class TestSessionCloseArms:
             eg_mod.get_session_checked = original  # type: ignore[assignment]
         assert grid.arm_source == (-1, 0, 1)
         assert calls == [_DAY]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# §6b — close_step_minutes + the structurally-EMPTY 1day law
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCloseStepMinutes:
+    def test_1day_trading_minutes_map_to_wall_clock_day(self) -> None:
+        """375 (the 1day TRADING-minute vocabulary token) → 1440 wall-clock
+        minutes, so a midnight-IST 1day label closes at the NEXT midnight
+        (design §6b, DEC-FILL-EXEC-GRID-1M-001)."""
+        assert close_step_minutes(375) == 1440
+
+    @pytest.mark.parametrize("tf_minutes", [1, 3, 5, 240])
+    def test_intraday_timeframes_pass_through_identity(self, tf_minutes: int) -> None:
+        """Every intraday tf: trading minutes == wall-clock bucket duration."""
+        assert close_step_minutes(tf_minutes) == tf_minutes
+
+
+class TestOneDayStructurallyEmpty:
+    def test_1day_arm_points_all_cross_session_drop(self) -> None:
+        """A 1day-shaped build arms NOTHING — every arm point cross-session drops.
+
+        Decision bars labelled midnight IST 2024-01-02 and 2024-01-03
+        (derived-1day labels); exec = the 1m bars of both sessions.
+            close(0) = midnight 01-02 + 1440min = midnight 01-03 → the first
+                stored 1m bar >= it is day-2's 09:15 (index 3) — a DIFFERENT
+                IST date → cross_session_dropped (never an arm). A mutant
+                using the 375 trading minutes verbatim would close at 06:15
+                and ARM the SAME day's 09:15 bar.
+            close(1) = midnight 01-04 → past the stored tail → break (never
+                recorded anywhere).
+        decision_of: exec j 0..2 (day 1) own label 0; j 3..5 (day 2) own
+        label 1.
+        """
+        day2 = date(2024, 1, 3)
+        decision = [_bar(0, 0), _bar(0, 0, day=day2)]  # midnight-IST 1day labels
+        execs = _bars((9, 15), (9, 16), (9, 17)) + _bars((9, 15), (9, 16), (9, 17), day=day2)
+        grid = build_exec_grid_map(decision, execs, tf_minutes=375)
+        assert grid.arm_source == (-1,) * 6  # ZERO armed bars — structurally empty
+        assert grid.arm_slid == (False,) * 6
+        assert grid.cross_session_dropped == (0,)
+        assert grid.collision_losers == ()
+        assert grid.distance_refused == ()
+        assert grid.decision_of == (0, 0, 0, 1, 1, 1)
+
+    def test_1day_same_day_exec_only_arms_nothing(self) -> None:
+        """1day over ONE session's own 1m bars: zero armed (the tail break).
+
+        Decision = the midnight-IST 2024-01-02 label; exec = day-D 1m bars
+        09:15..09:20 only. close(0) = the NEXT midnight — every stored bar
+        precedes it, so the pointer exhausts and the build breaks with NO
+        candidate (and no drop accounting). A verbatim-375 mutant (close
+        06:15 IST) would ARM exec index 0 instead.
+        """
+        decision = [_bar(0, 0)]
+        execs = _bars(*[(9, 15 + i) for i in range(6)])
+        grid = build_exec_grid_map(decision, execs, tf_minutes=375)
+        assert grid.arm_source == (-1,) * 6  # ZERO armed bars
+        assert grid.cross_session_dropped == ()
+        assert grid.collision_losers == ()
+        assert grid.distance_refused == ()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# exec_window_slice — the §7.2/Q3 dual-stream window cut
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestExecWindowSlice:
+    def test_empty_decision_window(self) -> None:
+        assert exec_window_slice([], _bars((9, 15), (9, 16))) == (0, 0)
+
+    def test_bounds_first_label_through_last_session_end(self) -> None:
+        """lo = first exec bar >= the window's first label; hi = the first
+        exec bar at/after the NEXT midnight IST after the last decision day.
+
+        exec = [d1 09:14, d1 09:15, d1 09:16, d2 09:15]; window = [d1 09:15]:
+            lo = 1 (the 09:14 bar precedes the label — nothing earlier can
+            fill); hi = 3 (the d2 09:15 bar is the first at/after the d2
+            midnight boundary — the slide law never crosses out of d1).
+        """
+        day2 = date(2024, 1, 3)
+        execs = _bars((9, 14), (9, 15), (9, 16)) + _bars((9, 15), day=day2)
+        window = _bars((9, 15))
+        assert exec_window_slice(window, execs) == (1, 3)
+
+    def test_multi_day_window_ends_at_last_decision_day_boundary(self) -> None:
+        """A two-day decision window keeps BOTH days' exec bars and cuts at
+        the day-3 boundary: exec = d1 [09:15, 09:16] + d2 [09:15, 09:16] +
+        d3 [09:15]; window = [d1 09:15, d2 09:15] → (0, 4)."""
+        day2 = date(2024, 1, 3)
+        day3 = date(2024, 1, 4)
+        execs = (
+            _bars((9, 15), (9, 16)) + _bars((9, 15), (9, 16), day=day2) + _bars((9, 15), day=day3)
+        )
+        window = [_bar(9, 15), _bar(9, 15, day=day2)]
+        assert exec_window_slice(window, execs) == (0, 4)
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,19 @@
 """Golden cross-check: the Rust trade-sim kernel is byte-identical to the oracle.
 
 DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563), re-locked for the ONE
-worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001). Two guarantees:
+worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) and re-locked again for
+the 1-MINUTE execution grid (DEC-FILL-EXEC-GRID-1M-001): both sides are now
+DUAL-FEED — the kernel ctor takes the exec stream + ``arm_source`` and the
+oracle takes ``exec_bars_1m``. Every fixture here is ``tf_minutes == 1`` with
+the SAME contiguous list passed as decision AND execution stream (the §6
+degenerate fixed point), so a decision-bar-N signal fills on 1m bar N+1 at
+its adverse extreme — exactly the historical next-bar timing — EXCEPT the
+§2.4 same-bar deferral (the entry 1m bar folds its range but never exits) and
+the B3 terminal-CLOSE carve-out (end_of_data/session_gap priced at the entry
+bar's CLOSE when the last stored bar IS the entry bar). Each absolute pin's
+derivation below states why its value is (or is not) moved by those two laws.
+
+Two guarantees:
 
 1. **Parity** — over a frozen curated scenario corpus (every exit kind: end-of-
    data, SL/TP at the adverse-max fill, forced 15:20, the same-bar SL-first
@@ -96,7 +108,8 @@ class TestKernelMatchesOracle:
     ) -> None:
         _label, bars, mask, direction, sl, tp = case
         bar_bits = build_bar_bits(bars)
-        kernel = ResidentTradeSim(bars, bar_bits, tf_minutes=1).simulate_masks(
+        # tf==1 fixed point: the same list is decision AND execution stream.
+        kernel = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars).simulate_masks(
             [mask], direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
         )
         oracle = [
@@ -105,6 +118,7 @@ class TestKernelMatchesOracle:
                 mask_to_entry_signals(bar_bits, mask),
                 direction=direction,
                 tf_minutes=1,
+                exec_bars_1m=bars,
                 stop_loss_paisa=sl,
                 take_profit_paisa=tp,
             )
@@ -117,20 +131,26 @@ class TestAbsoluteFrozenValues:
 
     def test_long_end_of_data_exact_trade(self) -> None:
         # Prices in rupees; the canonical seam converts to paisa (×100, 2-dp grid).
-        # HAND-DERIVED under the one law (DEC-FILL-WORST-CASE-ONLY-001):
-        # mask=0 fires every bar → entry arms bar0, and the BUY entry fills at
-        # bar1's HIGH 110.00 = 11_000p (the adverse extreme — never the open).
+        # HAND-DERIVED under the 1m dual-feed law (DEC-FILL-EXEC-GRID-1M-001,
+        # tf==1 fixed point — decision == exec stream, fill on bar N+1):
+        # mask=0 fires every bar → the bar0 signal maps to the 09:16 1m bar,
+        # and the BUY entry fills at bar1's HIGH 110.00 = 11_000p (the adverse
+        # extreme — never the open; DEC-FILL-WORST-CASE-ONLY-001). No SL/TP
+        # legs exist, so the §2.4 same-bar deferral changes nothing here.
         # Excursions vs 11_000: bar1 (H110/L92) → fav 0 / adv 1_800; bar2
         # (H108/L95) → fav 0 (10_800 < entry) / adv 1_500 (no new max).
-        # End of data → the last bar's ADVERSE extreme prices the exit:
-        # bar2 LOW 95.00 = 9_500p → pnl 9_500 − 11_000 = −1_500.
+        # End of data → the LAST stored 1m bar (bar2) is NOT the entry bar, so
+        # the B3 CLOSE carve-out does not apply: the fill is bar2's ADVERSE
+        # extreme LOW 95.00 = 9_500p → pnl 9_500 − 11_000 = −1_500;
+        # holding = exit_idx 2 − entry_idx 1 + 1 = 2 (1-minute indices).
+        # Identical to the PR-A lock — the two new laws are both inert here.
         bars = [
             _bar(9, 15, "100", "101", "99", "100"),
             _bar(9, 16, "100", "110", "92", "100"),  # entry @HIGH 110 → adv 1800
             _bar(9, 17, "100", "108", "95", "104"),  # end of data → exit @LOW 95
         ]
         bar_bits = build_bar_bits(bars)
-        trades = ResidentTradeSim(bars, bar_bits, tf_minutes=1).simulate_masks(
+        trades = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars).simulate_masks(
             [0], direction=Side.BUY
         )[0]
         assert len(trades) == 1
@@ -160,9 +180,19 @@ class TestAbsoluteFrozenValues:
         signals = [False, True, False, False]
         raw = build_bar_bits(bars)
         bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
-        kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks([1], direction=Side.BUY)
+        # Under DEC-FILL-EXEC-GRID-1M-001 the drop is now baked at MAP build
+        # (the same-IST-date fill gate → ``cross_session_dropped``): the 15:29
+        # signal's close instant 15:30 has no same-date stored 1m bar, so no
+        # fill bar ever arms — the walker never even sees the signal.
+        kernel = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars).simulate_masks(
+            [1], direction=Side.BUY
+        )
         oracle = simulate_trades(
-            bars, mask_to_entry_signals(bits, 1), direction=Side.BUY, tf_minutes=1
+            bars,
+            mask_to_entry_signals(bits, 1),
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
         )
         assert kernel == [[]]  # Rust kernel: NO overnight trade
         assert oracle == []  # Python oracle: NO overnight trade
@@ -185,15 +215,26 @@ class TestAbsoluteFrozenValues:
         signals = [True, False, False, False, False]
         raw = build_bar_bits(bars)
         bits = [(b | 1) if sig else (b & ~1) for b, sig in zip(raw, signals, strict=True)]
-        kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks([1], direction=Side.BUY)
-        oracle = simulate_trades(
-            bars, mask_to_entry_signals(bits, 1), direction=Side.BUY, tf_minutes=1
+        kernel = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars).simulate_masks(
+            [1], direction=Side.BUY
         )
-        # HAND-DERIVED: entry fill = bar1 HIGH 102.00 = 10_200p. bar1
-        # (H102/L100): fav 0 / adv 200. bar2 (H103/L100.25): fav 100 /
-        # adv 175 → mfe 100, mae 200. bar3 is day 2 → session_gap prices at
-        # bar2's ADVERSE extreme LOW 100.25 = 10_025p → pnl −175,
-        # exit_ts = bars[2].ts, holding 2 — the boundary bar folds NO excursion.
+        oracle = simulate_trades(
+            bars,
+            mask_to_entry_signals(bits, 1),
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+        )
+        # HAND-DERIVED (1m law; tf==1 fixed point — the bar0 signal maps to
+        # the 11:01 fill bar): entry fill = bar1 HIGH 102.00 = 10_200p. bar1
+        # (H102/L100): fav 0 / adv 200 (the entry bar folds its range — §2.4;
+        # no SL/TP legs so the deferral is inert). bar2 (H103/L100.25):
+        # fav 100 / adv 175 → mfe 100, mae 200. bar3 is day 2 → session_gap
+        # prices at bar2 (the last day-1 stored 1m bar; last_idx 2 ≠
+        # entry_idx 1, so NOT the B3 CLOSE carve-out) at its ADVERSE extreme
+        # LOW 100.25 = 10_025p → pnl −175, exit_ts = bars[2].ts, holding =
+        # 2 − 1 + 1 = 2 (1m indices) — the boundary bar folds NO excursion.
+        # Identical to the PR-A lock — both PR-B laws are inert here.
         expected = ClosedTrade(
             pnl_paisa=-175,
             mfe_paisa=100,
@@ -237,14 +278,17 @@ class TestWideMaskGolden:
         return bars, bits
 
     def test_wide_mask_long_end_of_data_exact_trade(self) -> None:
-        # HAND-COMPUTED (paisa, the one law): entry at bar1's HIGH 110.00 =
-        # 11_000p; bar1 (110, 92) folds fav 0 / adv 1_800; bar2 (108, 95)
-        # folds 0/1_500 (no new max); end of data → bar2's adverse LOW
-        # 95.00 = 9_500p → pnl −1_500, holding 2. Identical numbers to the
-        # u64 `long_end_of_data` absolute pin above — proving the WIDE path
+        # HAND-COMPUTED (paisa; the 1m dual-feed law at the tf==1 fixed point
+        # — the bar0 signal maps to the 09:16 fill bar): entry at bar1's HIGH
+        # 110.00 = 11_000p; bar1 (110, 92) folds fav 0 / adv 1_800 (§2.4
+        # entry-bar fold; no legs → deferral inert); bar2 (108, 95) folds
+        # 0/1_500 (no new max); end of data → bar2 is NOT the entry bar (no
+        # B3 carve-out) → its adverse LOW 95.00 = 9_500p → pnl −1_500,
+        # holding = 2 − 1 + 1 = 2 (1m indices). Identical numbers to the u64
+        # `long_end_of_data` absolute pin above — proving the WIDE path
         # reproduces the exact walk.
         bars, bits = self._wide_feed_and_bits()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars)
         assert sim.rust_active is True
         trades = sim.simulate_masks([self._WIDE_MASK], direction=Side.BUY)[0]
         assert trades == [
@@ -274,7 +318,7 @@ class TestWideMaskGolden:
     ) -> None:
         bars, bits = self._wide_feed_and_bits()
         for direction in (Side.BUY, Side.SELL):
-            kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks(
+            kernel = ResidentTradeSim(bars, bits, tf_minutes=1, exec_bars_1m=bars).simulate_masks(
                 [self._WIDE_MASK, 0],
                 direction=direction,
                 stop_loss_paisa=sl,
@@ -286,6 +330,7 @@ class TestWideMaskGolden:
                     mask_to_entry_signals(bits, m),
                     direction=direction,
                     tf_minutes=1,
+                    exec_bars_1m=bars,
                     stop_loss_paisa=sl,
                     take_profit_paisa=tp,
                 )

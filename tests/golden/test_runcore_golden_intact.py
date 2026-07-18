@@ -173,4 +173,9 @@ def test_golden_store_bytes_identical_run_core_on_vs_off(tmp_path: Path) -> None
                 )
         return tuple_store_path(root, tuple_, grid).read_bytes()
 
-    assert _run(tmp_path / "on", core_on=True) == _run(tmp_path / "off", core_on=False)
+    # Hoisted out of the assert (the fills-track side-effecting-assert NIT:
+    # under `python -O` a bare `assert _run(...) == _run(...)` strips BOTH
+    # sweep executions, silently voiding the byte-identity gate).
+    on_bytes = _run(tmp_path / "on", core_on=True)
+    off_bytes = _run(tmp_path / "off", core_on=False)
+    assert on_bytes == off_bytes

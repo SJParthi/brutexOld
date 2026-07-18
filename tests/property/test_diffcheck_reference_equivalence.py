@@ -11,6 +11,14 @@ overnight-gap scenarios and asserts they agree field-for-field
 bit-for-bit under both the production ``drawdown_compare_key`` and the
 re-derived ``drawdown_bit_key``. The production modules are imported by
 THIS TEST only — the reference module itself is AST-banned from them.
+
+DEC-FILL-EXEC-GRID-1M-001 dual-feed shape: BOTH legs receive the drawn
+decision list as the EXECUTION stream too — the §6 tf=1 fixed point, and
+for coarse tf a LEGAL decision-grid exec input (each decision bar N arms
+at the first stream bar with ts >= label + tf) — so the parity claim
+covers the mapping + walk laws over one shared stream per scenario.
+Exit/entry indices and ``holding_bars`` are 1-MINUTE (exec-stream)
+quantities on both sides.
 """
 
 from __future__ import annotations
@@ -198,6 +206,7 @@ def test_r45_reference_equals_production_field_for_field(
         entry,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
     )
@@ -208,6 +217,7 @@ def test_r45_reference_equals_production_field_for_field(
         tf_minutes=tf_minutes,
         sl_paisa=sl,
         tp_paisa=tp,
+        exec_bars=bars,
     )
     _assert_field_for_field(prod, exit_indices, ref)
 
@@ -227,6 +237,7 @@ def test_r45_reference_drawdown_equals_production_bit_for_bit(
         entry,
         direction=direction,
         tf_minutes=tf_minutes,
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
     )
@@ -237,13 +248,14 @@ def test_r45_reference_drawdown_equals_production_bit_for_bit(
         tf_minutes=tf_minutes,
         sl_paisa=sl,
         tp_paisa=tp,
+        exec_bars=bars,
     )
     prod_stats = _drawdown_stats(
         build_equity_curve(
             bars, prod, start_equity_paisa=_START_EQUITY_PAISA, tf_minutes=tf_minutes
         )
     )
-    ref_stats = reference_drawdown(ref, n_bars=len(bars), start_equity_paisa=_START_EQUITY_PAISA)
+    ref_stats = reference_drawdown(ref, bars=bars, start_equity_paisa=_START_EQUITY_PAISA)
     # Bit-exact under BOTH keys: the production burn-in key and the
     # reference-side re-derived key (their parity is itself unit-pinned).
     assert drawdown_compare_key(prod_stats) == drawdown_compare_key(ref_stats)

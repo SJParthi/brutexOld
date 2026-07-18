@@ -101,7 +101,11 @@ def test_end_to_end_store_and_audit(tmp_path: Path) -> None:
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
     with AuditWriter.open(audit_path) as audit:
-        summary = run_persisted_sweep(bars, _config(), store=store, dedup=dedup, audit=audit)
+        # tf=1minute — the decision stream IS the execution stream
+        # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+        summary = run_persisted_sweep(
+            bars, _config(), store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
 
     # 1. Store Parquet exists + re-loads with the persisted finalists.
     assert store_path.exists()
@@ -132,5 +136,7 @@ def test_audit_line_count_independent_of_combo_count(tmp_path: Path) -> None:
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
         audit_path = tmp_path / f"{tag}.jsonl"
         with AuditWriter.open(audit_path) as audit:
-            run_persisted_sweep(bars, _config(k=k), store=store, dedup=dedup, audit=audit)
+            run_persisted_sweep(
+                bars, _config(k=k), store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         assert verify_chain(audit_path) == 3

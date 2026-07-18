@@ -81,7 +81,16 @@ _EXPECTED_SNAPSHOT_HASH = "1a8f36dd8d04452a77a49ba878dd2c473bc6d5418cdabf7323486
 # now carries the UNCONDITIONAL ``fill_mode: worst_case`` token AND the
 # snapshot moved with the re-crafted fixture — the run identity moved by
 # design (the precise-era digest f6a08f4c…b1b4c9 is permanently unreachable).
-_EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce020ca"
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 (2026-07-18): the ONE preimage
+# change is that ``canonical_trade_params`` now UNCONDITIONALLY emits the
+# additive ``execution_grid: "1m_next_bar"`` key into the canonical params
+# dict (the anti-aliasing token vs PR-A run_ids), so the blake3 run-identity
+# digest moved by design. Every OTHER identity input is byte-unchanged —
+# the snapshot-hash literal above still passes UNMODIFIED, and
+# mask/direction/instrument/tf/mode/indicator_version/code_commit_sha are
+# the same literals (the PR-A digest 2aa8c684…020ca is permanently
+# unreachable).
+_EXPECTED_RUN_ID = "31b6fd548d03df1fd591b4550d7844e01e26e124e7586768935eb26829457aa6"
 
 #: The frozen end-to-end store content hash (polars/zstd-build sensitive —
 #: see the module docstring).
@@ -96,7 +105,18 @@ _EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce0
 # RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
 # over the re-crafted fixture — regenerated on THIS tree, two-run
 # byte-determinism pinned in the literal test below.
-_EXPECTED_STORE_HASH = "8670c7f65404068c1090d30db9381494374f7c182fc57a8a7bacc5126ca074a0"
+# RE-LOCKED for DEC-FILL-EXEC-GRID-1M-001 (2026-07-18): the ONE by-design
+# delta at the tf==1 fixed point (exec stream == the stitched slice) is that
+# every persisted row's ``run_id`` re-keys on the additive
+# ``execution_grid: "1m_next_bar"`` params token — the same preimage change
+# as _EXPECTED_RUN_ID above. The TRADES themselves are unchanged: a per-mask
+# walker probe over this exact stitched slice (masks 1/2/4/8/16, SL 80 /
+# TP 50) measured ``exits_deferred == 0`` on every mask — no entry 1m bar
+# here ever touches a level, so the §2.4 same-bar deferral is inert and the
+# B3 carve-out never applies. Regenerated on THIS tree; two-run
+# byte-determinism + persisted>0 stay pinned in the literal test below
+# (polars/zstd-build sensitive, per the module docstring).
+_EXPECTED_STORE_HASH = "7671178b7099646319e479259c88d3eb000ea89aedd2074deebb399b51e902ec"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
@@ -215,7 +235,12 @@ def _run(tmp_path: Path, tag: str, bars: list[CandleBar], cfg: SweepRunConfig) -
     store = ResultsStore(path=tmp_path / f"{tag}.parquet")
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
-        return run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+        # The stitched slice IS the real 1-minute stream (interval "1minute",
+        # tf_minutes == 1) — the §6 fixed point: it is passed as BOTH the
+        # decision and the execution feed (DEC-FILL-EXEC-GRID-1M-001).
+        return run_persisted_sweep(
+            bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+        )
 
 
 # ────── the frozen chain ──────
