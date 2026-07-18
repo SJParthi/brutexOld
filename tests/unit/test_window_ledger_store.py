@@ -149,9 +149,10 @@ class TestSaveDiskFullHalts:
     pull-wide :class:`LakeWriteHalt`, not a raw error (the ledger is a LAKE write, so a
     full disk fails every remaining window identically and must halt the pull, never be
     mis-quarantined per-symbol). A non-ENOSPC OSError still propagates UNCHANGED (the
-    guard never over-escalates). ``pyarrow.parquet.write_table`` is the boundary that
-    raises in the real failure (the temp's first byte write on a full volume), so we
-    patch it to drive the deterministic regression.
+    guard never over-escalates). The temp's byte write (``Path.write_bytes`` inside
+    the ``atomic_write_via`` callback — DEC-RUST-RUNID-STORES-001: the kernel renders
+    the bytes, the callback writes them) is the boundary that raises in the real
+    failure (a full volume), so we patch it to drive the deterministic regression.
     """
 
     @staticmethod
@@ -163,12 +164,10 @@ class TestSaveDiskFullHalts:
     def test_disk_full_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import pyarrow.parquet as pq
-
         def _boom(*_a: object, **_k: object) -> None:
             raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(LakeWriteHalt) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert exc_info.value.reason == "disk_full"
@@ -178,12 +177,10 @@ class TestSaveDiskFullHalts:
     def test_out_of_memory_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import pyarrow.parquet as pq
-
         def _boom(*_a: object, **_k: object) -> None:
             raise MemoryError("heap exhausted")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(LakeWriteHalt) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert exc_info.value.reason == "out_of_memory"
@@ -192,12 +189,11 @@ class TestSaveDiskFullHalts:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A non-ENOSPC OSError (e.g. EACCES) is NOT escalated to a halt — propagates raw."""
-        import pyarrow.parquet as pq
 
         def _boom(*_a: object, **_k: object) -> None:
             raise OSError(errno.EACCES, "Permission denied")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(OSError) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert not isinstance(exc_info.value, LakeWriteHalt)
@@ -2988,17 +2984,28 @@ class TestInternedDecode:
         # never carry strings — nothing to intern there).
         assert frozenset(_CORE_COLUMNS) >= _INTERNED_COLUMNS
 
-    def test_intern_cells_passthrough_for_non_strings(self) -> None:
-        from brutex.data.window_ledger_store import _intern_cells
+    def test_pool_collapses_equal_cells_and_passes_none_through(self, tmp_path: Path) -> None:
+        # The kernel pool law (DEC-RUST-RUNID-STORES-001, replacing the retired
+        # per-call dict memo): equal low-cardinality cells collapse onto ONE
+        # object across reads sharing a pool; a nullable None cell passes
+        # through untouched; the pool's distinct-string count is observable.
+        import brutex_identity
+        from brutex.data.window_ledger_store import _read_ledger_file_rows
 
-        memo: dict[str, str] = {}
-        first = "1minute"
-        second = "".join(["1minu", "te"])  # equal value, runtime-built distinct object
-        assert second == first and second is not first
-        out = _intern_cells([first, None, second], memo)
-        assert out[0] is first
-        assert out[1] is None  # None (a nullable cell) passes through untouched
-        assert out[2] is first  # the memo collapsed the equal value
+        self._saved_ledger(tmp_path)
+        pool = brutex_identity.LedgerStringPool()
+        assert len(pool) == 0
+        first = _read_ledger_file_rows(ledger_path(tmp_path), pool=pool)
+        size_after_first = len(pool)
+        assert size_after_first > 0
+        again = _read_ledger_file_rows(ledger_path(tmp_path), pool=pool)
+        # A re-read of the same file adds NO new distinct strings and shares
+        # the FIRST read's objects (cross-call identity via the pool).
+        assert len(pool) == size_after_first
+        assert first[0][2] is again[0][2]  # interval
+        assert first[0][0] is again[0][0]  # market
+        # None (a nullable cell — the SUCCESS row's last_error) passes through.
+        assert first[0][8] is None
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -126,21 +126,19 @@ def _row(
 
 def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
     """Write a REAL 16-column base ledger Parquet directly (full status control)."""
-    import pyarrow.parquet as pq
 
     path = wls.ledger_path(lake)
     path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(wls._rows_to_table(list(rows)), path)  # type: ignore[no-untyped-call, unused-ignore]
+    path.write_bytes(wls.render_ledger_parquet(list(rows)))
 
 
 def _write_delta(lake: Path, rows: Sequence[tuple[Any, ...]]) -> Path:
     """Append one REAL 16-column delta Parquet via the store's own name minting."""
-    import pyarrow.parquet as pq
 
     directory = wls.deltas_dir(lake)
     directory.mkdir(parents=True, exist_ok=True)
     path = wls._next_delta_path(directory)
-    pq.write_table(wls._rows_to_table(list(rows)), path)  # type: ignore[no-untyped-call, unused-ignore]
+    path.write_bytes(wls.render_ledger_parquet(list(rows)))
     return path
 
 

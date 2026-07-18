@@ -41,11 +41,11 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _ODD = timezone(timedelta(hours=1, minutes=2, seconds=3))  # sub-minute offset
 
 
-def _canonical_corpus() -> list[dict[str, Any]]:
-    """The hostile params corpus for ``canonicalise_params`` (JSON-string oracle)."""
-    from brutex.strategies.combo import canonicalise_params
-
-    cases: list[tuple[str, dict[str, Any]]] = [
+def canonical_inputs() -> list[tuple[str, dict[str, Any]]]:
+    """The hostile params corpus INPUTS — ONE source shared with the golden test
+    (``tests/golden/test_runid_stores_oracle_golden.py``), so the asserted cases
+    can never drift from the captured ones (CLAUDE.md §11 COMMON)."""
+    return [
         ("empty", {}),
         (
             "flat_scalars",
@@ -138,13 +138,21 @@ def _canonical_corpus() -> list[dict[str, Any]]:
             },
         ),
     ]
-    return [{"name": name, "expected_json": canonicalise_params(params)} for name, params in cases]
 
 
-def _combo_corpus() -> list[dict[str, Any]]:
-    """9-field ``combo_hash`` digests over a hostile corpus."""
-    from brutex.strategies.combo import combo_hash
+def _canonical_corpus() -> list[dict[str, Any]]:
+    """The hostile params corpus for ``canonicalise_params`` (JSON-string oracle)."""
+    from brutex.strategies.combo import canonicalise_params
 
+    return [
+        {"name": name, "expected_json": canonicalise_params(params)}
+        for name, params in canonical_inputs()
+    ]
+
+
+def combo_inputs() -> list[tuple[str, dict[str, Any]]]:
+    """The 9-field ``combo_hash`` corpus INPUTS (each a full kwargs dict) —
+    ONE source shared with the golden test (CLAUDE.md §11 COMMON)."""
     base: dict[str, Any] = {
         "strategy_id": "mask:%032x" % ((1 << 7) | (1 << 42)),
         "direction": "bull",
@@ -175,17 +183,21 @@ def _combo_corpus() -> list[dict[str, Any]]:
         ("empty_params", {"params": {}}),
         ("mode", {"mode": "B"}),
     ]
-    out = []
-    for name, override in variants:
-        kwargs = {**base, **override}
-        out.append({"name": name, "expected_hex": combo_hash(**kwargs)})
-    return out
+    return [(name, {**base, **override}) for name, override in variants]
 
 
-def _snapshot_corpus() -> list[dict[str, Any]]:
-    """``data_snapshot_hash`` (bxsnap2) digests over synthetic bar corpora."""
+def _combo_corpus() -> list[dict[str, Any]]:
+    """9-field ``combo_hash`` digests over the hostile corpus."""
+    from brutex.strategies.combo import combo_hash
+
+    return [{"name": name, "expected_hex": combo_hash(**kwargs)} for name, kwargs in combo_inputs()]
+
+
+def snapshot_inputs() -> list[tuple[str, dict[str, Any]]]:
+    """The ``data_snapshot_hash`` corpus INPUTS (each a full kwargs dict of real
+    :class:`~brutex.data.models.CandleBar` slices) — ONE source shared with the
+    golden test (CLAUDE.md §11 COMMON)."""
     from brutex.data.models import CandleBar
-    from brutex.engine.snapshot_hash import data_snapshot_hash
 
     def bar(
         ts: datetime,
@@ -320,7 +332,17 @@ def _snapshot_corpus() -> list[dict[str, Any]]:
             },
         ),
     ]
-    return [{"name": name, "expected_hex": data_snapshot_hash(**kwargs)} for name, kwargs in cases]
+    return cases
+
+
+def _snapshot_corpus() -> list[dict[str, Any]]:
+    """``data_snapshot_hash`` (bxsnap2) digests over the synthetic bar corpora."""
+    from brutex.engine.snapshot_hash import data_snapshot_hash
+
+    return [
+        {"name": name, "expected_hex": data_snapshot_hash(**kwargs)}
+        for name, kwargs in snapshot_inputs()
+    ]
 
 
 def _result_row_kwargs(run_id: str, **override: Any) -> dict[str, Any]:
@@ -360,18 +382,11 @@ def _row_to_jsonable(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: (str(v) if isinstance(v, Decimal) else v) for k, v in kwargs.items()}
 
 
-def _append_law_corpus() -> list[dict[str, Any]]:
-    """The results-store append/merge decision law over row pairs."""
-    from brutex.engine.results_store import (
-        ResultRow,
-        ResultsStore,
-        ResultsStoreError,
-        ResultsStoreGateConflictError,
-        VixTrioConflictError,
-    )
-
+def append_inputs() -> list[tuple[str, dict[str, Any] | None, dict[str, Any]]]:
+    """The append/merge decision corpus INPUTS (existing kwargs | None, incoming
+    kwargs) — ONE source shared with the golden test (CLAUDE.md §11 COMMON)."""
     rid = "a1" * 32
-    cases: list[tuple[str, dict[str, Any] | None, dict[str, Any]]] = [
+    return [
         ("fresh_insert", None, _result_row_kwargs(rid)),
         ("identical_noop", _result_row_kwargs(rid), _result_row_kwargs(rid)),
         (
@@ -420,8 +435,20 @@ def _append_law_corpus() -> list[dict[str, Any]]:
             _result_row_kwargs(rid, avg_entry_price=Decimal("21500.15")),
         ),
     ]
+
+
+def _append_law_corpus() -> list[dict[str, Any]]:
+    """The results-store append/merge decision law over row pairs."""
+    from brutex.engine.results_store import (
+        ResultRow,
+        ResultsStore,
+        ResultsStoreError,
+        ResultsStoreGateConflictError,
+        VixTrioConflictError,
+    )
+
     out = []
-    for name, existing_kw, incoming_kw in cases:
+    for name, existing_kw, incoming_kw in append_inputs():
         store = ResultsStore(path=Path("/dev/null"))
         if existing_kw is not None:
             store.append(ResultRow(**existing_kw))
@@ -453,11 +480,9 @@ def _append_law_corpus() -> list[dict[str, Any]]:
     return out
 
 
-def _topk_corpus() -> list[dict[str, Any]]:
-    """``top_k`` ordering law incl. exact big-int ranking + run_id tie-breaks."""
-    from brutex.engine.results_store import ResultRow, ResultsStore
-
-    store = ResultsStore(path=Path("/dev/null"))
+def topk_inputs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The ``top_k`` corpus INPUTS — (row kwargs, queries); ONE source shared
+    with the golden test (CLAUDE.md §11 COMMON)."""
     rows = [
         _result_row_kwargs("aa" * 32, net_pnl_paisa=2**60, sharpe_ratio=1.0),
         _result_row_kwargs("bb" * 32, net_pnl_paisa=2**60 + 1, sharpe_ratio=1.0),
@@ -465,14 +490,23 @@ def _topk_corpus() -> list[dict[str, Any]]:
         _result_row_kwargs("dd" * 32, net_pnl_paisa=0, sharpe_ratio=2.5),
         _result_row_kwargs("ee" * 32, net_pnl_paisa=2**60, sharpe_ratio=-0.5),
     ]
-    for kw in rows:
-        store.append(ResultRow(**kw))
     queries = [
         {"k": 5, "by": "sharpe_ratio", "descending": True},
         {"k": 3, "by": "sharpe_ratio", "descending": False},
         {"k": 5, "by": "net_pnl_paisa", "descending": True},
         {"k": 2, "by": "total_trades", "descending": True},
     ]
+    return rows, queries
+
+
+def _topk_corpus() -> list[dict[str, Any]]:
+    """``top_k`` ordering law incl. exact big-int ranking + run_id tie-breaks."""
+    from brutex.engine.results_store import ResultRow, ResultsStore
+
+    store = ResultsStore(path=Path("/dev/null"))
+    rows, queries = topk_inputs()
+    for kw in rows:
+        store.append(ResultRow(**kw))
     out = []
     for q in queries:
         ranked = store.top_k(int(q["k"]), by=str(q["by"]), descending=bool(q["descending"]))
@@ -518,10 +552,9 @@ def _ledger_row(
     )
 
 
-def _ledger_merge_corpus() -> list[dict[str, Any]]:
-    """``merge_ledger_rows`` outputs over conflict/tombstone corpora."""
-    from brutex.data.window_ledger_store import merge_ledger_rows
-
+def ledger_merge_inputs() -> list[tuple[str, dict[str, Any]]]:
+    """The merge-law corpus INPUTS — ONE source shared with the golden test
+    (CLAUDE.md §11 COMMON)."""
     k1 = {"security_id": "NSE-A"}
     k2 = {"security_id": "NSE-B"}
     k3 = {"security_id": "NSE-C"}
@@ -620,8 +653,15 @@ def _ledger_merge_corpus() -> list[dict[str, Any]]:
             },
         ),
     ]
+    return cases
+
+
+def _ledger_merge_corpus() -> list[dict[str, Any]]:
+    """``merge_ledger_rows`` outputs over conflict/tombstone corpora."""
+    from brutex.data.window_ledger_store import merge_ledger_rows
+
     out = []
-    for name, kwargs in cases:
+    for name, kwargs in ledger_merge_inputs():
         merged = merge_ledger_rows(
             [tuple(r) for r in kwargs["memory_rows"]],
             [tuple(r) for r in kwargs["disk_rows"]],
@@ -665,17 +705,35 @@ def _legacy_derivation_corpus() -> list[dict[str, Any]]:
 
 
 def _ledger_roundtrip_corpus() -> list[dict[str, Any]]:
-    """Row fixed points through the CURRENT (pyarrow) codec — the #1917 law input.
+    """Row fixed points through the CURRENT ledger codec — the #1917 law input.
 
     The captured `rows` are the fixed-point contract: whatever encoder writes the
     ledger, reading it back must yield EXACTLY these row tuples (the option-(iii)
-    correctness law of the G10 re-baseline).
+    correctness law of the G10 re-baseline). The frozen fixture was captured
+    through the PRE-conversion pyarrow codec; a sanctioned REGEN runs the
+    canonical kernel codec — the captured `rows` are encoder-independent by the
+    fixed-point law, so the two captures are identical.
     """
     import tempfile
 
-    from brutex.data.window_ledger_store import _read_ledger_file_rows, _rows_to_table
+    from brutex.data.window_ledger_store import _read_ledger_file_rows, render_ledger_parquet
 
-    corpora: list[tuple[str, list[tuple[Any, ...]]]] = [
+    corpora = ledger_roundtrip_inputs()
+    out = []
+    for name, rows in corpora:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ledger.parquet"
+            path.write_bytes(render_ledger_parquet(rows))
+            read_back = _read_ledger_file_rows(path)
+        assert read_back == rows, f"ledger codec round-trip not a fixed point for {name}"
+        out.append({"name": name, "rows": [list(r) for r in rows]})
+    return out
+
+
+def ledger_roundtrip_inputs() -> list[tuple[str, list[tuple[Any, ...]]]]:
+    """The row-fixed-point corpora INPUTS — ONE source shared with the golden
+    test (CLAUDE.md §11 COMMON)."""
+    return [
         ("empty", []),
         (
             "mixed",
@@ -705,17 +763,6 @@ def _ledger_roundtrip_corpus() -> list[dict[str, Any]]:
             ],
         ),
     ]
-    out = []
-    for name, rows in corpora:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "ledger.parquet"
-            import pyarrow.parquet as pq
-
-            pq.write_table(_rows_to_table(rows), path)
-            read_back = _read_ledger_file_rows(path)
-        assert read_back == rows, f"pyarrow round-trip not a fixed point for {name}"
-        out.append({"name": name, "rows": [list(r) for r in rows]})
-    return out
 
 
 def main() -> int:

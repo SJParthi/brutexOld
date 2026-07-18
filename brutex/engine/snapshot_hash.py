@@ -6,8 +6,8 @@ and the Stage-4 cascade snapshot stamp
 (:func:`brutex.engine.cascade_wire.manifest_snapshot_hash`) all derive a run's
 ``data_snapshot_hash`` through this ONE helper.
 
-It lives in its own leaf module — depending only on :mod:`blake3` and
-:class:`~brutex.data.models.CandleBar` — so that both
+It lives in its own leaf module — depending only on the ``brutex_identity``
+kernel and :class:`~brutex.data.models.CandleBar` — so that both
 :mod:`brutex.engine.stage3_wire` (which imports :mod:`brutex.engine.cascade_wire`
 at module load) and :mod:`brutex.engine.cascade_wire` can import the derivation
 WITHOUT forming an ``stage3_wire`` ⇄ ``cascade_wire`` import cycle
@@ -15,13 +15,23 @@ WITHOUT forming an ``stage3_wire`` ⇄ ``cascade_wire`` import cycle
 precedent). ``stage3_wire`` re-exports :func:`data_snapshot_hash` so the
 public ``stage3_wire.data_snapshot_hash`` name (CLAUDE.md §2 Rule 4) is
 unchanged.
+
+DEC-RUST-RUNID-STORES-001 (the L14 conversion lane): the streamed digest —
+the ``bxsnap2`` framing, the ISO-8601 timestamp render and the BLAKE3 fold —
+now runs in the ``brutex_identity`` kernel
+(:class:`brutex_identity.SnapshotHasher`); this wrapper owns the slice-sort
+iteration order and the ``str(Decimal)`` price render (the exact
+scale-preserving CPython text law, a deliberately-retained CPython primitive).
+Byte-parity with the retired all-Python body is proven by the frozen
+pre-conversion oracle fixture + the live differential suite, so every
+recorded ``data_snapshot_hash`` is unchanged (Golden Rule #4).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import blake3
+import brutex_identity
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Mapping, Sequence
@@ -68,7 +78,8 @@ def data_snapshot_hash(
     per-launch ``catalog_reconcile`` full-byte rescan. Zero cost in any
     per-combo hot path (Rule 5 untouched). ``Decimal.__str__`` renders prices
     exactly (2dp-snapped at the lake-write boundary, DEC-SPOT-PRICE-2DP-001);
-    a ``None`` open_interest renders ``"None"`` deterministically.
+    a ``None`` open_interest renders ``"None"`` deterministically (the kernel
+    folds the identical literal).
 
     Parameters
     ----------
@@ -83,16 +94,17 @@ def data_snapshot_hash(
     str
         The 64-char lowercase BLAKE3 hex digest.
     """
-    hasher = blake3.blake3()
-    hasher.update(f"bxsnap2|{exchange}|{segment}|{start}|{end}".encode())
+    hasher = brutex_identity.SnapshotHasher(exchange, segment, start, end)
     for (symbol, interval), bars in sorted(slices.items()):
-        hasher.update(f"\n{symbol}|{interval}|{len(bars)}".encode())
+        hasher.add_slice(symbol, interval, len(bars))
         for bar in bars:
-            hasher.update(
-                f"\n{bar.timestamp.isoformat()}|{bar.open}|{bar.high}|{bar.low}|"
-                f"{bar.close}|{bar.volume}|{bar.open_interest}".encode()
+            hasher.add_bar(
+                bar.timestamp,
+                str(bar.open),
+                str(bar.high),
+                str(bar.low),
+                str(bar.close),
+                bar.volume,
+                bar.open_interest,
             )
-    # str(...) keeps this typed `str` even where the blake3 wheel (and its
-    # stubs) is absent and the import degrades to Any — e.g. the isolated
-    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
     return str(hasher.hexdigest())

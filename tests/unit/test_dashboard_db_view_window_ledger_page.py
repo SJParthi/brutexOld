@@ -300,7 +300,6 @@ class TestDegradeLaw:
         """A NULL ``empty_streak`` cell (all 16 columns PRESENT) trips the row
         projection's ValueError → the whole request defers to the legacy parse,
         which derives the cell from ``(status, attempts)`` — output identical."""
-        import pyarrow.parquet as pq
 
         _fresh_caches(monkeypatch)
         # Widened (Any) — this deliberately-junk row carries a NULL in an
@@ -325,7 +324,28 @@ class TestDegradeLaw:
         )
         path = wls.ledger_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(wls._rows_to_table([row]), path)  # type: ignore[no-untyped-call, unused-ignore]
+        # Planted RAW via pyarrow: the canonical kernel encoder REFUSES a NULL
+        # in an int-typed core slot (DEC-RUST-RUNID-STORES-001 — a production
+        # writer can no longer mint this shape), so the legacy-era junk file
+        # under test is fabricated out-of-band, exactly like a legacy lake.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table(
+            {name: [row[i]] for i, name in enumerate(wls._COLUMNS)},
+            schema=pa.schema(
+                [
+                    (
+                        name,
+                        pa.string()
+                        if isinstance(row[i], str) or (row[i] is None and i in (8, 10))
+                        else pa.int64(),
+                    )
+                    for i, name in enumerate(wls._COLUMNS)
+                ]
+            ),
+        )
+        pq.write_table(table, path)
         legacy = window_ledger_rows_cached(tmp_path)
         assert legacy[0][11] == 2  # derived: EMPTY → attempts
         with duckdb.connect() as conn, capture_logs() as logs:

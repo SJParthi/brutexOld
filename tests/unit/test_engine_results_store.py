@@ -831,3 +831,44 @@ class TestTopThousandStorage:
         after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
         assert after == before
         assert len(after) == 1000
+
+
+class TestKernelVerdictTotality:
+    """The defensive fail-closed arms over a DRIFTED kernel verdict.
+
+    DEC-RUST-RUNID-STORES-001: the append decision runs in the
+    ``brutex_identity`` kernel; a future kernel emitting an unknown verdict —
+    or a VIX-arm verdict with no stored row — must fail LOUDLY and mutate
+    NOTHING (Golden Rule #1), never a silent store write. Direct unit
+    coverage of the structurally-unreachable arms (the house
+    retained-structural convention — never a pragma).
+    """
+
+    def test_vix_arm_verdict_with_no_stored_row_fails_loud(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex_identity
+
+        monkeypatch.setattr(
+            brutex_identity,
+            "classify_result_append",
+            lambda existing, incoming: ("vix_conflict", [], None, ["vix_mean"]),
+        )
+        store = ResultsStore(path=Path("/dev/null"))
+        with pytest.raises(ResultsStoreError, match="unexpected kernel verdict 'vix_conflict'"):
+            store.append(_row())
+        assert len(store) == 0  # nothing mutated on the undefined verdict
+
+    def test_unknown_future_verdict_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex_identity
+
+        store = ResultsStore(path=Path("/dev/null"))
+        store.append(_row())
+        monkeypatch.setattr(
+            brutex_identity,
+            "classify_result_append",
+            lambda existing, incoming: ("teleport", [], None, []),
+        )
+        with pytest.raises(ResultsStoreError, match="unexpected kernel verdict 'teleport'"):
+            store.append(_row())
+        assert len(store) == 1  # the stored row is untouched
