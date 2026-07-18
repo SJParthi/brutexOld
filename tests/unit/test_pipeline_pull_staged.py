@@ -503,3 +503,140 @@ class TestAllNoneDefaultsParity:
             "400 contracts, historical 5000 bars over 10 contract(s)"
         )
         assert "vendor" not in report.to_dict()
+
+
+# --------------------------------------------------------------------------- #
+# Cooperative cancel on the STAGED shape (DEC-JOB-COOPERATIVE-CANCEL-001 —
+# the club-P weave law: a staged caller's cancel is NEVER silently ignored)
+# --------------------------------------------------------------------------- #
+
+
+class _Latch:
+    """A mutable cooperative-cancel probe (counts its consultations)."""
+
+    def __init__(self, value: bool = False) -> None:
+        self.value = value
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return self.value
+
+
+class TestStagedCooperativeCancel:
+    """``should_stop`` threaded through ``_run_staged_pipeline``: the
+    between-stages probe, the sequencer-minted ``"<stage> (cancelled)"``
+    stop, honest ``skipped`` for later PRESENT stages, the undisturbed
+    ABSENT contract, the withheld movers warm — and the ``None``-arm
+    byte-identity pin."""
+
+    @staticmethod
+    def _graph() -> dict[str, _Stage]:
+        # The second-vendor PARTIAL-absent shape: metadata / futures /
+        # futures_prebuild ABSENT — cancel must leave their tokens vacuous.
+        return {
+            "spot_daily": _Stage(),
+            "spot": _Stage(),
+            "spot_prebuild": _Stage(),
+            "options": _Stage(),
+            "greeks": _Stage(),
+        }
+
+    def _run(
+        self,
+        stages: dict[str, _Stage],
+        should_stop: _Latch | None,
+        *,
+        trip_on: str | None = None,
+        warm: list[str] | None = None,
+    ) -> PipelinePullReport:
+        def _maybe_trip(token: str) -> _Stage | _Latch:
+            stage = stages[token]
+            if trip_on != token or should_stop is None:
+                return stage
+
+            def _tripping() -> _Outcome:
+                out = stage()
+                should_stop.value = True  # the cancel lands DURING this stage
+                return out
+
+            return _tripping  # type: ignore[return-value]
+
+        def _warm_spy(segment: str) -> object:
+            def _w() -> MoversWarmResult:
+                (warm if warm is not None else []).append(segment)
+                return _warm(1, 0)
+
+            return _w
+
+        return run_full_pipeline(
+            run_spot=_maybe_trip("spot"),  # type: ignore[arg-type]
+            run_spot_daily=_maybe_trip("spot_daily"),  # type: ignore[arg-type]
+            run_prebuild_spot=_maybe_trip("spot_prebuild"),  # type: ignore[arg-type]
+            run_options=_maybe_trip("options"),  # type: ignore[arg-type]
+            run_greeks=_maybe_trip("greeks"),  # type: ignore[arg-type]
+            warm_spot_movers=_warm_spy("spot"),  # type: ignore[arg-type]
+            should_stop=should_stop,
+        )
+
+    def test_cancel_after_a_settled_stage_stops_the_chain_honestly(self) -> None:
+        stages = self._graph()
+        latch = _Latch()
+        warmed: list[str] = []
+        with capture_logs() as logs:
+            report = self._run(stages, latch, trip_on="spot", warm=warmed)
+        # The sequencer-minted token names the LAST completed stage.
+        assert report.stopped_after == "spot (cancelled)"
+        assert report.ok is False
+        # The just-run stage's status stays HONEST — settled, never faked.
+        assert report.stage_status["spot_daily"] == STAGE_STATUS_SETTLED
+        assert report.stage_status["spot"] == STAGE_STATUS_SETTLED
+        # Every later PRESENT stage is honestly skipped — NEVER invoked.
+        for token in ("spot_prebuild", "options", "greeks"):
+            assert report.stage_status[token] == STAGE_STATUS_SKIPPED
+            assert stages[token].calls == 0
+        # The ABSENT-vs-FAILED contract is UNDISTURBED by the cancel.
+        for token in ("metadata", "futures", "futures_prebuild"):
+            assert report.stage_status[token] == STAGE_STATUS_ABSENT
+        # The movers warm is withheld (stopped chain).
+        assert warmed == []
+        assert report.movers_warmed is None
+        # ONE cancel event, stage-attributed; the note carries the honest
+        # cancel guidance (one cancel vocabulary across both shapes).
+        cancel_events = _events(logs, "pipeline.stage.cancelled")
+        assert len(cancel_events) == 1
+        assert cancel_events[0]["stage"] == "spot"
+        assert "stopped after spot (cancelled)" in report.note
+        assert "pull cancelled by operator" in report.note
+
+    def test_cancel_wins_over_a_failing_gate_verdict(self) -> None:
+        # The legacy ordering law: cancel checked before the gate verdict —
+        # the minted token reads "(cancelled)" while the stage's own status
+        # stays the honest FAILED.
+        stages = self._graph()
+        stages["options"] = _Stage(_Outcome(ok=False))
+        latch = _Latch()
+        report = self._run(stages, latch, trip_on="options")
+        assert report.stopped_after == "options (cancelled)"
+        assert report.stage_status["options"] == STAGE_STATUS_FAILED
+        assert report.stage_status["greeks"] == STAGE_STATUS_SKIPPED
+        assert stages["greeks"].calls == 0
+        assert report.ok is False
+
+    def test_probe_consulted_after_every_invoked_stage(self) -> None:
+        stages = self._graph()
+        latch = _Latch(value=False)
+        report = self._run(stages, latch)
+        # Five PRESENT stages ran — the probe fired once after each.
+        assert latch.calls == 5
+        assert report.stopped_after is None
+        assert report.ok is True
+
+    def test_none_arm_is_byte_identical_to_a_never_true_probe(self) -> None:
+        # The byte-identity pin: should_stop=None and a never-True probe
+        # produce the SAME report (the cancel seam is inert when unwired).
+        report_none = self._run(self._graph(), None)
+        report_false = self._run(self._graph(), _Latch(value=False))
+        assert report_none.to_dict() == report_false.to_dict()
+        assert report_none.stopped_after is None
+        assert report_none.ok is True
