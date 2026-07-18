@@ -1,5 +1,5 @@
 # cargo-deny configuration for brutex-observability
-# (DEC-OBS-RUST-DETECTOR-CORE-001).
+# (DEC-RUST-OBSERVABILITY-001).
 #
 # The crate's dependency tree is a strict SUBSET of the sibling kernels':
 # ONLY the optional pyo3 (the binding), the build-script blake3 (the source

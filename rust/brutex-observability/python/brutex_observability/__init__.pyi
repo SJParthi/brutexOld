@@ -1,5 +1,5 @@
 # Type stub for the brutex_observability PyO3 wheel
-# (DEC-OBS-RUST-DETECTOR-CORE-001).
+# (DEC-RUST-OBSERVABILITY-001).
 #
 # SCALARS ONLY across the FFI: floats / ints / bools / strs / None and
 # tuples thereof — decide-in-Rust, materialize-in-Python. Argument-conversion

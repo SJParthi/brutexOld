@@ -1,4 +1,4 @@
-# DEC-OBS-RUST-DETECTOR-CORE-001 — the ONE cargo-mutants scope for
+# DEC-RUST-OBSERVABILITY-001 — the ONE cargo-mutants scope for
 # brutex-observability, resolved by BOTH the CI job (the future
 # rust-mutation-brutex-observability wiring in .github/workflows/mutation.yml)
 # and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11

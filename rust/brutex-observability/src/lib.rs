@@ -1,6 +1,6 @@
 //! `brutex-observability` — the observability DECISION-law kernel.
 //!
-//! `DEC-OBS-RUST-DETECTOR-CORE-001`: the four PURE decision laws of
+//! `DEC-RUST-OBSERVABILITY-001`: the four PURE decision laws of
 //! `brutex/observability/` — the loop-watchdog tiered stall state machine
 //! (law A), the per-worker HEALTHY↔HUNG decision (law B), the SLA
 //! predicate + hysteresis edge (law C) and the stage-stamp shape-order /

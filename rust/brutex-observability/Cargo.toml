@@ -1,6 +1,6 @@
 # brutex-observability — the observability DECISION-law kernel (Rust).
 #
-# DEC-OBS-RUST-DETECTOR-CORE-001: re-hosts the four PURE observability
+# DEC-RUST-OBSERVABILITY-001: re-hosts the four PURE observability
 # decision laws — the loop-watchdog tiered stall state machine (law A,
 # `brutex/observability/loop_watchdog.py::check_once`), the per-worker
 # HEALTHY↔HUNG decision (law B, `watchdog.Watchdog.check_once`'s loop core),

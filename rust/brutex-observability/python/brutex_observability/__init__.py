@@ -1,6 +1,6 @@
 """brutex_observability — observability decision-law kernel (PyO3 bridge).
 
-``DEC-OBS-RUST-DETECTOR-CORE-001``: mixed Python + Rust layout (the
+``DEC-RUST-OBSERVABILITY-001``: mixed Python + Rust layout (the
 ``brutex_feed`` shape). The compiled cdylib ships as the private submodule
 ``brutex_observability._brutex_observability``; this ``__init__.py``
 re-exports its symbols so the consumer facade

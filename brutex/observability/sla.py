@@ -187,7 +187,7 @@ def _sla_decide_python(
     """The SLA decision — the LIVE parity oracle over :func:`_predicate_holds`.
 
     A disclosed COMPOSITION of the loop-inlined lines of
-    :meth:`SLADetector.check_once` (DEC-OBS-RUST-DETECTOR-CORE-001 — the
+    :meth:`SLADetector.check_once` (DEC-RUST-OBSERVABILITY-001 — the
     Slice-0 exemption): ``breached`` per the untouched
     :func:`_predicate_holds` component, ``edge = breached != prev_breach``
     (≡ ``new_state != prev_state`` over the 2-member :class:`SLAState`).
@@ -271,7 +271,7 @@ class SLADetector:
                 continue  # provider says "not available yet"
             # The decision routes through the default-OFF observability_rust
             # facade with `_sla_decide_python` as the live oracle
-            # (DEC-OBS-RUST-DETECTOR-CORE-001; branch-free here — all
+            # (DEC-RUST-OBSERVABILITY-001; branch-free here — all
             # flag/guard/burn-in branching lives facade-side). prev_state is
             # read BEFORE the decision (a side-effect-free dict read; the
             # ONE disclosed re-ordering vs the pre-seam loop).

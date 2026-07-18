@@ -1,6 +1,6 @@
 //! Property suite for laws D1 / D2 — never-panics over arbitrary strings +
 //! option arms, plus law equivalence against independent reference
-//! computations (DEC-OBS-RUST-DETECTOR-CORE-001 §8.2).
+//! computations (DEC-RUST-OBSERVABILITY-001 §8.2).
 
 use brutex_observability::{VERDICT_HASH_MISMATCH, VERDICT_OK, stamp_shape_index, stamp_verdict};
 use proptest::prelude::*;

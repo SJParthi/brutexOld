@@ -1,4 +1,4 @@
-"""Unit matrix for :mod:`brutex.observability.observability_rust` (DEC-OBS-RUST-DETECTOR-CORE-001).
+"""Unit matrix for :mod:`brutex.observability.observability_rust` (DEC-RUST-OBSERVABILITY-001).
 
 The wheel-FREE facade battery: flag tristate matrix / import guard + SYMBOL
 handshake (``crate_unavailable`` / ``crate_stale``) / per-law burn-in

@@ -234,7 +234,7 @@ def _stamp_shape_index_python(
     """The strict-parse acceptance-ORDER law (D1) — the LIVE parity oracle.
 
     First-false wins, in the FROZEN order of the pre-seam ``_parse_stamp``
-    raise chain (DEC-OBS-RUST-DETECTOR-CORE-001). Index vocabulary: ``-1``
+    raise chain (DEC-RUST-OBSERVABILITY-001). Index vocabulary: ``-1``
     accept · ``0`` root-not-dict · ``1`` stage · ``2`` run_id ·
     ``3`` content_hash · ``4`` produced_at_utc · ``5`` extra.
     """
@@ -249,7 +249,7 @@ def _parse_stamp(text: str, *, source: Path) -> StageStamp:
     """Parse stamp JSON *text* strictly — :class:`StageStampError` on any defect.
 
     ``json.loads`` stays Python (the CPython-parse twin is the named
-    follow-up ``DEC-OBS-RUST-STAMP-PARSE-003``); the post-parse shape checks
+    follow-up ``DEC-RUST-OBSERVABILITY-STAMP-PARSE-003``); the post-parse shape checks
     are probed into bools (side-effect-free ``isinstance`` + ``dict.get``,
     hoisted unconditionally above the raises — behavior-identical) and the
     acceptance ORDER routes through the default-OFF ``observability_rust``
@@ -344,7 +344,7 @@ def _stamp_verdict_python(
     """The ``validate_stage_stamp`` mismatch matrix (D2) — the LIVE parity oracle.
 
     The identical boolean expression, scalarized (``stamp.<field>``
-    attribute reads became parameters — DEC-OBS-RUST-DETECTOR-CORE-001, a
+    attribute reads became parameters — DEC-RUST-OBSERVABILITY-001, a
     disclosed verbatim move). Returns the :class:`StampVerdict` VALUE token;
     the caller mints the enum member from it.
     """
@@ -428,7 +428,7 @@ def validate_stage_stamp(
     stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY)
     # The mismatch matrix routes through the default-OFF observability_rust
     # facade (law D2) with `_stamp_verdict_python` as the live oracle
-    # (DEC-OBS-RUST-DETECTOR-CORE-001; branch-free here). `StampVerdict(token)`
+    # (DEC-RUST-OBSERVABILITY-001; branch-free here). `StampVerdict(token)`
     # is an Enum VALUE-call — it returns the member SINGLETON, so consumers'
     # `verdict is StampVerdict.OK` identity checks hold bit-for-bit.
     token = observability_rust.routed_stamp_verdict(

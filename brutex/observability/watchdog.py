@@ -60,7 +60,7 @@ def _worker_decide_python(
     """The per-worker HEALTHY↔HUNG decision — the LIVE parity oracle.
 
     A disclosed COMPOSITION of the loop-inlined lines of
-    :meth:`Watchdog.check_once` (DEC-OBS-RUST-DETECTOR-CORE-001 — the
+    :meth:`Watchdog.check_once` (DEC-RUST-OBSERVABILITY-001 — the
     Slice-0 exemption): ``elapsed = now - last_beat`` (NO clamp — negative
     elapsed is legal and preserved), strict ``>`` (elapsed exactly AT the
     timeout is NOT hung), and the two-state edge law
@@ -197,7 +197,7 @@ class Watchdog:
         for name in tuple(self._state.keys()):
             # The decision routes through the default-OFF observability_rust
             # facade with `_worker_decide_python` as the live oracle
-            # (DEC-OBS-RUST-DETECTOR-CORE-001; branch-free here — all
+            # (DEC-RUST-OBSERVABILITY-001; branch-free here — all
             # flag/guard/burn-in branching lives facade-side). prev_state is
             # read BEFORE the decision (a side-effect-free dict read; the
             # ONE disclosed re-ordering vs the pre-seam loop).

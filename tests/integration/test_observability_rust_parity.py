@@ -1,4 +1,4 @@
-"""ON-arm integration parity for the observability Rust lane (DEC-OBS-RUST-DETECTOR-CORE-001).
+"""ON-arm integration parity for the observability Rust lane (DEC-RUST-OBSERVABILITY-001).
 
 Drives the FOUR REAL public entry points — ``loop_watchdog.check_once``,
 ``Watchdog.check_once``, ``SLADetector.check_once`` and

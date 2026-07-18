@@ -1,6 +1,6 @@
 //! Property suite for laws A / B / C — never-panics over raw-bit f64s +
 //! arbitrary strings, plus the state-law invariants
-//! (DEC-OBS-RUST-DETECTOR-CORE-001 §8.2).
+//! (DEC-RUST-OBSERVABILITY-001 §8.2).
 
 use brutex_observability::{
     EpisodesOverflow, TIER_CRITICAL, TIER_OK, TIER_WARNED, loop_watchdog_check_once,

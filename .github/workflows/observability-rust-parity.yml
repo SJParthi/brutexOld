@@ -1,7 +1,7 @@
 # observability-rust-parity.yml — the brutex-observability crate build +
 # flag-ON parity lane.
 #
-# DEC-OBS-RUST-DETECTOR-CORE-001 (ADR-0020 lane; the lake-rust-parity.yml
+# DEC-RUST-OBSERVABILITY-001 (ADR-0020 lane; the lake-rust-parity.yml
 # posture). The observability decision-law seams are DEFAULT-OFF behind
 # BRUTEX_OBSERVABILITY_RUST and the main CI test job deliberately never
 # installs the crate (the facade degrades loudly to the Python oracle when it

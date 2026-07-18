@@ -226,7 +226,7 @@ def _check_once_python(
     """The verbatim :func:`check_once` law body — the LIVE parity oracle.
 
     Moved token-for-token (the Slice-0 discipline) for the
-    DEC-OBS-RUST-DETECTOR-CORE-001 seam: :func:`check_once` routes through
+    DEC-RUST-OBSERVABILITY-001 seam: :func:`check_once` routes through
     ``observability_rust`` (default-OFF Rust with this function as the
     ``python_law`` oracle); flag-OFF returns this function's result
     DIRECTLY, so the default path is byte-identical — including the OK→OK
@@ -310,7 +310,7 @@ def check_once(
 
     The law body lives verbatim in :func:`_check_once_python` (the LIVE
     parity oracle); this entry point is the branch-free router through the
-    default-OFF ``observability_rust`` facade (DEC-OBS-RUST-DETECTOR-CORE-001
+    default-OFF ``observability_rust`` facade (DEC-RUST-OBSERVABILITY-001
     — ALL flag/guard/burn-in branching lives facade-side).
     """
     return observability_rust.routed_loop_check_once(

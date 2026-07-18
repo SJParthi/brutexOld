@@ -1,6 +1,6 @@
 # brutex-observability
 
-The observability DECISION-law kernel (`DEC-OBS-RUST-DETECTOR-CORE-001`) —
+The observability DECISION-law kernel (`DEC-RUST-OBSERVABILITY-001`) —
 the four PURE decision laws of `brutex/observability/` re-hosted in Rust
 behind the default-OFF `BRUTEX_OBSERVABILITY_RUST` facade
 (`brutex/observability/observability_rust.py`), with Python retained as the
@@ -16,8 +16,8 @@ LIVE parity oracle:
 SCALARS ONLY cross the FFI (decide-in-Rust, materialize-in-Python — the
 `DEC-FEED-RUST-CORE-001` shape). `json.loads` + `content_hash_of` stay
 Python (the parse twin is the named follow-up
-`DEC-OBS-RUST-STAMP-PARSE-003`; `run_tripwires` is
-`DEC-OBS-RUST-TRIPWIRES-002`).
+`DEC-RUST-OBSERVABILITY-STAMP-PARSE-003`; `run_tripwires` is
+`DEC-RUST-OBSERVABILITY-TRIPWIRES-002`).
 
 **Honest envelope (ADR-0020 banner, verbatim):** expected payoff ≈ 0 — the
 conversion is for uniformity, not speed. Every routed law is

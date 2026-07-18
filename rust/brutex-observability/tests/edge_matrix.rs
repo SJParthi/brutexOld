@@ -1,5 +1,5 @@
 //! Hand-derived edge matrix — one Rust row per Python pin class
-//! (DEC-OBS-RUST-DETECTOR-CORE-001 §8.2).
+//! (DEC-RUST-OBSERVABILITY-001 §8.2).
 //!
 //! Law A mirrors `tests/unit/test_observability_loop_watchdog.py::TestCheckOnce`
 //! (the full transition matrix, exact values), plus the junk-tier /

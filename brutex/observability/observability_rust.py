@@ -1,6 +1,6 @@
 """observability_rust — the default-OFF Rust routing facade for the observability DECISION laws.
 
-DEC-OBS-RUST-DETECTOR-CORE-001 (MIGRATION.md row coordinator-assigned;
+DEC-RUST-OBSERVABILITY-001 (MIGRATION.md row coordinator-assigned;
 ADR-0020 lane). Routes the four PURE observability decision laws through the
 ``rust/brutex-observability`` crate behind the ONE default-OFF
 ``BRUTEX_OBSERVABILITY_RUST`` flag, with the verbatim Python law retained as
@@ -16,7 +16,7 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
 * **Laws D1/D2** — ``stage_stamp``'s strict-parse acceptance ORDER + the
   ``validate_stage_stamp`` verdict matrix. ``json.loads`` and
   ``content_hash_of`` deliberately STAY Python — the CPython-parse twin is
-  the named follow-up ``DEC-OBS-RUST-STAMP-PARSE-003``, and hashlib.sha256
+  the named follow-up ``DEC-RUST-OBSERVABILITY-STAMP-PARSE-003``, and hashlib.sha256
   is already native (streaming a Path into Rust would violate the
   scalars-only FFI discipline).
 

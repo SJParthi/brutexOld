@@ -7,7 +7,7 @@
 // baked value. The crate re-exposes it as
 // `brutex_observability::SOURCE_DIGEST` and the PyO3 module exports
 // `SOURCE_DIGEST` / `__source_digest__` (the brutex-feed shape,
-// DEC-OBS-RUST-DETECTOR-CORE-001).
+// DEC-RUST-OBSERVABILITY-001).
 
 include!("../source_digest_core.rs");
 

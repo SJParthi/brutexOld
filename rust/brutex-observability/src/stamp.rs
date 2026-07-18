@@ -16,8 +16,8 @@
 //!   degrades to the oracle facade-side).
 //!
 //! `json.loads` and `content_hash_of` deliberately STAY Python
-//! (DEC-OBS-RUST-DETECTOR-CORE-001 §6.4/§6.5 — the CPython-parse twin is the
-//! named follow-up `DEC-OBS-RUST-STAMP-PARSE-003`; hashlib.sha256 is already
+//! (DEC-RUST-OBSERVABILITY-001 §6.4/§6.5 — the CPython-parse twin is the
+//! named follow-up `DEC-RUST-OBSERVABILITY-STAMP-PARSE-003`; hashlib.sha256 is already
 //! native and streaming a Path into Rust would violate the scalars-only FFI).
 
 /// The D2 OK token (mirrors `StampVerdict.OK.value`).
