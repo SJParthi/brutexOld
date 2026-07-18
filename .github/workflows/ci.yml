@@ -3820,12 +3820,82 @@ jobs:
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Run gitleaks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
+          set -euo pipefail
           # --redact so any hit doesn't echo the value in CI logs.
           # --config=.gitleaks.toml applies our env-var-name allowlist.
+          #
+          # DEC-CI-SECRETS-SCAN-DIFFBOUND-001 (MIGRATION.md #1951): bound
+          # the scan to the PR/push diff. Given NO --log-opts, gitleaks
+          # 8.21.2 HARDCODES `git log -p -U0 --full-history --all`
+          # (sources/git.go), so under fetch-depth:0 (every origin/* ref
+          # fetched) it walks UNRELATED sibling branches and false-flags
+          # secrets that live only there. Bounding --log-opts to the diff
+          # mirrors the sibling gitleaks.yml on PR/push and preserves full
+          # PR-diff coverage; the default `-1 HEAD` guarantees no gating
+          # path (PR / push / merge_group) ever re-introduces the all-refs
+          # full-history walk.
+          LOG_OPTS="-1 HEAD"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Diff-bounded: only the PR's own commits vs its base.
+            # PR_BASE_REF defaults to main (the pull_request trigger is
+            # branches:[main]) so `set -u` cannot abort on an unset var —
+            # behavior-preserving: on-main PRs expand to origin/main..HEAD.
+            # Explicit fail-closed: if the base ref is missing/unfetched,
+            # REFUSE rather than let a git error be the only backstop — a
+            # required security gate must never silently pass.
+            if git cat-file -e "origin/${PR_BASE_REF:-main}^{commit}" 2>/dev/null; then
+              LOG_OPTS="--no-merges origin/${PR_BASE_REF:-main}..HEAD"
+            else
+              echo "::error::pull_request: base ref origin/${PR_BASE_REF:-main} not found — refusing to scan (fail-closed)" >&2
+              exit 1
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            # Diff-bounded: only the pushed commits. A new branch / forced
+            # push reports an all-zero or unknown 'before' — fall back to
+            # scanning just the tip commit (`-1 HEAD`).
+            if [ -n "${BEFORE_SHA:-}" ] \
+              && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              LOG_OPTS="--no-merges ${BEFORE_SHA}..${AFTER_SHA}"
+            fi
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            # Diff-bounded: only the merge candidate's commits.
+            #
+            # merge_group is a REQUIRED merge gate, so gitleaks must NEVER
+            # run against an empty / zero-patch range and exit green. On a
+            # merge_group event HEAD is the SPECULATIVE MERGE commit, so the
+            # old `-1 HEAD` fallback emitted ZERO patch lines (a merge commit
+            # has no diff under `git log -p`) → fail-open on a required gate.
+            if [ -n "${MG_BASE_SHA:-}" ] \
+              && git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null; then
+              # Primary: the queue base..head range (the PR's incoming commits).
+              LOG_OPTS="--no-merges ${MG_BASE_SHA}..${MG_HEAD_SHA}"
+            elif git rev-parse -q --verify "HEAD^1^{commit}" >/dev/null 2>&1 \
+              && git rev-parse -q --verify "HEAD^2^{commit}" >/dev/null 2>&1; then
+              # Fallback: the queue base env var is missing/unfetched, but
+              # HEAD is a merge commit — derive a NON-EMPTY range from its own
+              # parents (HEAD^1 = queue tip, HEAD^2 = the PR's incoming commits).
+              LOG_OPTS="--no-merges HEAD^1..HEAD^2"
+            else
+              # Fail closed: cannot resolve a diff range. Refuse rather than
+              # scan a speculative merge commit that would scan nothing.
+              echo "::error::merge_group: cannot resolve a diff range; refusing to scan a speculative merge commit that would scan nothing" >&2
+              exit 1
+            fi
+          fi
+          echo "gitleaks detect --log-opts=\"${LOG_OPTS}\""
           gitleaks detect \
             --source . \
             --config .gitleaks.toml \
+            --log-opts="$LOG_OPTS" \
             --redact \
             --verbose \
             --exit-code 1
@@ -4596,7 +4666,14 @@ jobs:
     name: Proof bundle (aggregate CI artifacts)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    if: always()
+    # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001 (MIGRATION.md #1953): SKIP on a
+    # concurrency-cancelled/superseded run. This job is `if: !cancelled()`
+    # (runs on success OR failure to aggregate a partial proof), but must
+    # NOT run when the run was cancelled — a cancelled producer leaves no
+    # artifacts, `proof/` is never created, and the manifest step's
+    # `cat > proof/MANIFEST.txt` hard-fails → a spurious red "Proof bundle"
+    # check + false-red webhooks across the wave. Was `if: always()`.
+    if: ${{ !cancelled() }}
     needs:
       - test
       - bench
@@ -4634,6 +4711,11 @@ jobs:
       - name: Generate proof manifest
         if: always()
         run: |
+          # DEC-CI-PROOFBUNDLE-MKDIR-GATE-001: belt-and-braces — even if the
+          # download-artifact steps found nothing (no producer artifacts on a
+          # failed/partial run), `proof/` may not exist yet, so `cat >
+          # proof/MANIFEST.txt` would hard-fail. Create it first.
+          mkdir -p proof
           cat > proof/MANIFEST.txt <<EOF
           BruteX CI Proof Bundle
           ======================
