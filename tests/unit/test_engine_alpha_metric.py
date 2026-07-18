@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 from types import ModuleType
 from typing import TYPE_CHECKING
 
@@ -115,8 +116,11 @@ class TestOracleValues:
         expected = float(pnl) / float(equity) * 100.0
         got = alpha_vs_buyhold_pct_python(pnl, equity, 1, 1)
         assert got == expected
-        # The exact-rational division differs here — proving the law has teeth.
-        assert float(pnl / equity * 100.0) != expected or True  # documented, not load-bearing
+        # The exact-rational path genuinely DIFFERS here (verified: the
+        # correctly-rounded Fraction result is 1 ULP above the convert-first
+        # result, since float(2**60 + 1) rounds down to 2**60) — proving the
+        # convert-first law has teeth at |values| > 2**53 (review r1 NIT 3).
+        assert float(Fraction(pnl, equity) * 100) != expected
 
 
 class TestKernelRouting:
