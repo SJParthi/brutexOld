@@ -16,20 +16,6 @@ from typing import TYPE_CHECKING
 import brutex.engine.rust_rank_select as seam
 import pytest
 import structlog
-from brutex.engine.rust_rank_select import (
-    RANK_RUST_SELECT_DEFAULT,
-    RANK_RUST_SELECT_ENV,
-    SELF_CHECK_SAMPLES,
-    axis_quota_select,
-    disable_kernel,
-    frontier_select,
-    kernel_disabled,
-    rank_rust_select_enabled,
-    reset_observability_memo_for_tests,
-    reset_self_check_for_tests,
-    union_selection,
-    warn_fallback_once,
-)
 from brutex.ranking.multi_select import (
     SelectionInputs,
     axis_topm_indices,
@@ -48,12 +34,12 @@ fno_math = pytest.importorskip("fno_math")
 @pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Fresh burn-in budget + memo + kernel-ON flag per test."""
-    monkeypatch.setenv(RANK_RUST_SELECT_ENV, "1")
-    reset_self_check_for_tests()
-    reset_observability_memo_for_tests()
+    monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "1")
+    seam.reset_self_check_for_tests()
+    seam.reset_observability_memo_for_tests()
     yield
-    reset_self_check_for_tests()
-    reset_observability_memo_for_tests()
+    seam.reset_self_check_for_tests()
+    seam.reset_observability_memo_for_tests()
 
 
 # Typed per-column fixture constants (pyright-exact: a mixed-value dict
@@ -71,11 +57,11 @@ _QUOTA_EXPECTANCY: list[int] = [100, 300, 200]
 
 
 def _frontier() -> list[int]:
-    return frontier_select(_POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING)
+    return seam.frontier_select(_POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING)
 
 
 def _quota(m: int = 2) -> tuple[list[int], ...]:
-    return axis_quota_select(
+    return seam.axis_quota_select(
         m,
         _QUOTA_COMPOSITE,
         _QUOTA_MASKS,
@@ -91,31 +77,31 @@ class TestFlagResolution:
         # ON since the LANE-W1 flip commit (the 2026-07-18 greenfield
         # ruling, coordinator-relayed) — the ONE-constant revert lever;
         # BRUTEX_RANK_RUST_SELECT=0 stays the per-process kill switch.
-        assert RANK_RUST_SELECT_DEFAULT is True
+        assert seam.RANK_RUST_SELECT_DEFAULT is True
 
     def test_truthy_forces_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "yes")
-        assert rank_rust_select_enabled() is True
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "yes")
+        assert seam.rank_rust_select_enabled() is True
 
     def test_falsy_forces_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "off")
-        assert rank_rust_select_enabled() is False
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "off")
+        assert seam.rank_rust_select_enabled() is False
 
     def test_unset_falls_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(RANK_RUST_SELECT_ENV, raising=False)
-        assert rank_rust_select_enabled() is RANK_RUST_SELECT_DEFAULT
+        monkeypatch.delenv(seam.RANK_RUST_SELECT_ENV, raising=False)
+        assert seam.rank_rust_select_enabled() is seam.RANK_RUST_SELECT_DEFAULT
 
     def test_whitespace_falls_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "   ")
-        assert rank_rust_select_enabled() is RANK_RUST_SELECT_DEFAULT
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "   ")
+        assert seam.rank_rust_select_enabled() is seam.RANK_RUST_SELECT_DEFAULT
 
     def test_unrecognised_fails_safe_off_with_warn_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "flase")
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "flase")
         with structlog.testing.capture_logs() as logs:
-            assert rank_rust_select_enabled() is False
-            assert rank_rust_select_enabled() is False
+            assert seam.rank_rust_select_enabled() is False
+            assert seam.rank_rust_select_enabled() is False
         warns = [log for log in logs if log["event"] == "rust_rank_select.fallback"]
         assert len(warns) == 1
         assert warns[0]["reason"] == "flag_unrecognised"
@@ -123,29 +109,29 @@ class TestFlagResolution:
 
 class TestLatchAndMemos:
     def test_disable_kernel_latches_once(self) -> None:
-        assert not kernel_disabled()
+        assert not seam.kernel_disabled()
         with structlog.testing.capture_logs() as logs:
-            disable_kernel("test_reason", detail=1)
-            disable_kernel("second_reason")
-        assert kernel_disabled()
+            seam.disable_kernel("test_reason", detail=1)
+            seam.disable_kernel("second_reason")
+        assert seam.kernel_disabled()
         errors = [log for log in logs if log["event"] == "rust_rank_select.kernel_autoreverted"]
         assert len(errors) == 1
         assert errors[0]["reason"] == "test_reason"
 
     def test_warn_fallback_once_memo(self) -> None:
         with structlog.testing.capture_logs() as logs:
-            warn_fallback_once("some_reason")
-            warn_fallback_once("some_reason")
+            seam.warn_fallback_once("some_reason")
+            seam.warn_fallback_once("some_reason")
         assert len([log for log in logs if log["event"] == "rust_rank_select.fallback"]) == 1
 
     def test_reset_seams(self) -> None:
-        disable_kernel("x")
-        reset_self_check_for_tests(remaining=0)
-        assert not kernel_disabled()
-        reset_self_check_for_tests()
+        seam.disable_kernel("x")
+        seam.reset_self_check_for_tests(remaining=0)
+        assert not seam.kernel_disabled()
+        seam.reset_self_check_for_tests()
         assert seam._SELF_CHECK_REMAINING == {
-            "frontier": SELF_CHECK_SAMPLES,
-            "quota": SELF_CHECK_SAMPLES,
+            "frontier": seam.SELF_CHECK_SAMPLES,
+            "quota": seam.SELF_CHECK_SAMPLES,
         }
 
 
@@ -179,7 +165,7 @@ class TestFrontierSelectArms:
     def test_off_serves_oracle_and_never_imports_kernel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "0")
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "0")
 
         def bomb(*_args: object, **_kwargs: object) -> object:
             raise AssertionError("kernel must not be resolved on the OFF arm")
@@ -198,7 +184,7 @@ class TestFrontierSelectArms:
         assert any(log["event"] == "rust_rank_select.engaged" for log in logs)
 
     def test_latched_process_short_circuits(self) -> None:
-        disable_kernel("prior_mismatch")
+        seam.disable_kernel("prior_mismatch")
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == pareto_frontier_indices(
@@ -275,11 +261,11 @@ class TestFrontierSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
         assert result == expected  # the oracle value SHIPS
-        assert kernel_disabled()
+        assert seam.kernel_disabled()
         assert any(log["event"] == "rust_rank_select.kernel_autoreverted" for log in logs)
 
     def test_post_burn_in_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        reset_self_check_for_tests(remaining=0)
+        seam.reset_self_check_for_tests(remaining=0)
         calls: list[int] = []
         real_oracle = seam.pareto_frontier_indices
 
@@ -313,7 +299,7 @@ class TestQuotaSelectArms:
         )
 
     def test_off_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(RANK_RUST_SELECT_ENV, "false")
+        monkeypatch.setenv(seam.RANK_RUST_SELECT_ENV, "false")
         assert _quota() == axis_topm_indices(
             2,
             _QUOTA_COMPOSITE,
@@ -325,7 +311,7 @@ class TestQuotaSelectArms:
         )
 
     def test_latched_serves_oracle(self) -> None:
-        disable_kernel("x")
+        seam.disable_kernel("x")
         assert _quota() == axis_topm_indices(
             2,
             _QUOTA_COMPOSITE,
@@ -416,7 +402,7 @@ class TestQuotaSelectArms:
         )
         result = _quota()
         assert result == expected
-        assert kernel_disabled()
+        assert seam.kernel_disabled()
 
     def test_quota_autorevert_names_the_first_differing_axis(
         self, monkeypatch: pytest.MonkeyPatch
@@ -446,7 +432,7 @@ class TestQuotaSelectArms:
         with structlog.testing.capture_logs() as logs:
             result = _quota()
         assert result == expected  # the oracle value SHIPS
-        assert kernel_disabled()
+        assert seam.kernel_disabled()
         (autorevert,) = [
             log for log in logs if log["event"] == "rust_rank_select.kernel_autoreverted"
         ]
@@ -486,7 +472,7 @@ class TestQuotaSelectArms:
     def test_post_burn_in_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The quota twin of the frontier steady-state pin: with the burn-in
         # budget exhausted the kernel serves WITHOUT the oracle double-run.
-        reset_self_check_for_tests(remaining=0)
+        seam.reset_self_check_for_tests(remaining=0)
         calls: list[int] = []
         real_oracle = seam.axis_topm_indices
 
@@ -514,7 +500,7 @@ class TestBurnInBookkeeping:
         # decrement is skipped (the budget can never go negative). Direct
         # call — production gates it behind `_consume_burn_in`, so this
         # branch is the defensive floor, pinned here.
-        reset_self_check_for_tests(remaining=0)
+        seam.reset_self_check_for_tests(remaining=0)
         seam._burn_in_passed("frontier")
         assert seam._SELF_CHECK_REMAINING["frontier"] == 0
 
@@ -530,7 +516,7 @@ class TestUnionSelection:
             losing_trades=(1, 2, 3, 4),
             expectancy_paisa=(40, 30, 20, 10),
         )
-        via_seam = union_selection(inputs, top_k=2)
+        via_seam = seam.union_selection(inputs, top_k=2)
         via_oracle = compute_union_selection(inputs, top_k=2)
         assert via_seam == via_oracle
 

@@ -47,8 +47,9 @@ from __future__ import annotations
 
 import heapq
 from array import array
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 from brutex.ranking import (
     N_COMPOSITE_TERMS,
@@ -63,14 +64,18 @@ from brutex.ranking import (
 from brutex.ranking.multi_select import SelectionInputs, UnionSelection
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from brutex.metrics.compute import ResultMetrics
 
 #: The injectable union-selection binding (the burn-in-checked
 #: :func:`brutex.engine.rust_rank_select.union_selection` in production;
-#: ``None`` keeps the legacy composite-only top-K byte-identical).
-type UnionSelectionFn = Callable[..., UnionSelection]
+#: ``None`` keeps the legacy composite-only top-K byte-identical). Classic
+#: ``TypeAlias`` (not a PEP 695 ``type`` statement) because this alias is
+#: exported via ``__all__`` and CodeQL's Python extractor does not recognize
+#: a ``type`` statement as a definition (explicit-export alert on the export
+#: list — the ``ingest_common.SpotStepGroup`` precedent).
+UnionSelectionFn: TypeAlias = Callable[..., UnionSelection]  # noqa: UP040
 
 _U64_MASK: Final[int] = (1 << 64) - 1
 
