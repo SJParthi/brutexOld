@@ -97,6 +97,7 @@ import time
 from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -104,8 +105,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data import frame_write_gate as _frame_gate
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
-from brutex.data.errors import WriterError, parquet_read_skip_errors
+from brutex.data.errors import LakeWriteHalt, WriterError, parquet_read_skip_errors
 from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.lake_stats_manifest import (
     KIND_BARS,
@@ -183,20 +185,39 @@ _PRICE_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 
 
 #: The intermediate Decimal scale used to parse the float's ``str()`` repr LOSSLESSLY
-#: (DEC-LAKE-WRITE-VECTORIZE-001). A Python ``str(float)`` carries at most 17 SIGNIFICANT
-#: digits, so 17 FRACTIONAL digits can never truncate the repr — whatever the integer
-#: part. With ``precision=38`` that leaves room for up to 21 integer digits (≫ any real
-#: price), and the cast is byte-exact equal to ``Decimal(str(x))`` across the realistic
-#: price range. A *smaller* scale (the original ``scale=10``) silently ROUNDS an 11-17
-#: digit repr to 10 places BEFORE the half-up step — a double-rounding the legacy
-#: ``Decimal(str(x))`` never performs — which flips the 2dp answer for long-tail floats
-#: near a ``.xx5`` boundary (e.g. ``0.00499999999`` → wrong ``0.01`` vs legacy ``0.00``).
-#: That is exactly the class of value a legacy raw-float partition carries, so the full
-#: scale is load-bearing, not cosmetic. A value so large that ``x * 100`` exhausts the
-#: precision-38 headroom (``|x| ≳ 1e19`` — empirically the cast overflows between 1e18 and
-#: 1e19, still ~10^15x above any tradable price) raises a polars error, caught by the
-#: per-row fallback in :meth:`ParquetWriter._read_existing_bars` (correctness over speed).
-_SNAP_PARSE_SCALE: Final[int] = 17
+#: (DEC-LAKE-WRITE-VECTORIZE-001). A shortest-round-trip float repr carries at most 17
+#: SIGNIFICANT digits, but a sub-1 value in FIXED notation additionally spends leading
+#: FRACTIONAL zeros that are not significant: for ``|x| >= 1e-4`` (at most 3 leading
+#: zeros after the point) the repr carries up to ``3 + 17 = 20`` FRACTIONAL digits, so
+#: scale 20 — not 17 — is the lossless ceiling. The two are NOT interchangeable: the
+#: round-3 review MAJOR (DEC-PREBUILD-FRAME-WRITE-001) proved ``scale=17`` silently
+#: ROUNDED an 18-20-fractional-digit repr at digit 17 BEFORE the half-up step — a
+#: double-rounding the legacy ``Decimal(str(x))`` never performs — flipping the 2dp
+#: answer across a half-paisa boundary (``0.004999999999999996`` → wrong ``0.01`` vs
+#: legacy ``0.00``); the original ``scale=10`` had the same bug one class earlier
+#: (11-17-digit reprs, e.g. ``0.00499999999``). At scale 20 the parse equals
+#: ``Decimal(str(x))`` EXACTLY for every ``|x| >= 1e-4``; below 1e-4 (polars prints
+#: fixed notation — ``"0.0000999"`` — where Python ``str`` goes scientific) the parse
+#: may still round at digit 20, but the perturbation (``<= 5e-21``) is ~17 orders of
+#: magnitude smaller than the distance to the nearest half-paisa boundary
+#: (``>= 0.005 - 1e-4``), so the snapped 2dp answer is PROVABLY unchanged — value-lossy,
+#: snap-exact. With ``precision=38`` scale 20 leaves 18 integer digits (≫ any real
+#: price); a value so large that ``x * 100`` exhausts the headroom (``|x| ≳ 1e16`` —
+#: empirically the cast overflows between 1e15 and 1e16, still ~10^10x above any
+#: tradable price and ~10^3x above the fast lane's G4 bound) raises a polars error,
+#: caught by the per-row fallback in :meth:`ParquetWriter._read_existing_bars`
+#: (correctness over speed).
+_SNAP_PARSE_SCALE: Final[int] = 20
+
+
+#: G4 magnitude admission bound of the FRAME-DIRECT lane
+#: (DEC-PREBUILD-FRAME-WRITE-001): a price at/above this degrades to legacy.
+#: Far below the ``_snap_price_expr`` precision-38 overflow (``≳ 1e16``) AND
+#: the ``Decimal(38,2) → Float64`` injectivity bound; the cast golden
+#: (``tests/golden/test_writer_decimal_cast_golden.py``) pins the cast law up
+#: to exactly this bound, so every ADMITTED price is inside the proven
+#: envelope. ~10⁵× above any real Indian price — degrades are signal.
+FRAME_PRICE_MAGNITUDE_BOUND: Final[float] = 1e12
 
 
 def _snap_price_expr(column: str) -> pl.Expr:
@@ -215,14 +236,20 @@ def _snap_price_expr(column: str) -> pl.Expr:
        where Python emits ``"1e-05"`` — but ``Decimal("0.00001") == Decimal("1e-05")``,
        so the parsed value is identical; no realistic price is in scientific notation
        anyway.) It is then cast to ``Decimal(scale=_SNAP_PARSE_SCALE)`` — a scale
-       (17) wide enough to hold EVERY fractional digit of a ``str(float)`` (≤ 17
-       significant digits) WITHOUT truncation, so the parsed value equals
-       ``Decimal(str(op))`` EXACTLY with no binary-float drift AND no intermediate
-       rounding (a direct ``Float64 -> Decimal`` cast would carry the binary
-       representation, e.g. ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer;
-       and a too-SMALL scale would round an 11-17-digit repr like ``0.00499999999``
-       up to ``0.005`` BEFORE the half-up step → the WRONG ``0.01`` — the ``str``
-       round-trip at FULL scale is what keeps the half boundary on the legacy side).
+       (20) wide enough to hold EVERY FRACTIONAL digit of a fixed-notation repr
+       down to ``|x| >= 1e-4`` (≤ 17 SIGNIFICANT digits + up to 3 leading
+       fractional zeros — the distinction the round-3 review MAJOR caught: 17
+       alone rounds an 18-20-fractional-digit sub-0.1 repr) WITHOUT truncation,
+       so the parsed value equals ``Decimal(str(op))`` EXACTLY with no
+       binary-float drift AND no intermediate rounding (a direct
+       ``Float64 -> Decimal`` cast would carry the binary representation, e.g.
+       ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer; a too-SMALL
+       scale rounds a longer repr BEFORE the half-up step — scale 10 flipped
+       ``0.00499999999`` and scale 17 flipped ``0.004999999999999996``, both to
+       the WRONG ``0.01`` — the ``str`` round-trip at FULL scale is what keeps
+       the half boundary on the legacy side; below ``1e-4`` the parse may still
+       round at digit 20, a ``<= 5e-21`` perturbation that provably cannot reach
+       any half-paisa boundary — see ``_SNAP_PARSE_SCALE``).
     2. Half-away-from-zero to 2dp via integer arithmetic on the Decimal column:
        ``floor(d*100 + 0.5)/100`` for ``d >= 0`` and ``ceil(d*100 - 0.5)/100`` for
        ``d < 0``. ``floor``/``ceil`` (not a ``cast(Int64)``, which ROUNDS) give exact
@@ -235,8 +262,10 @@ def _snap_price_expr(column: str) -> pl.Expr:
     ``float(...)`` (the value :meth:`ParquetWriter._render_bytes` writes) is the SAME
     float (so the stored Parquet bytes are byte-identical for every NON-NEGATIVE price —
     the only kind a bar carries). Proven across the realistic price range incl. exact
-    ``.005`` half-boundaries, long-tail floats near a boundary (``0.00499999999`` …),
-    negatives, zeros, large strikes, and 4dp vendor noise in
+    ``.005`` half-boundaries, long-tail floats near a boundary — the 11-17-fractional-
+    digit class (``0.00499999999`` …) AND the 18-20-fractional-digit sub-0.1 class
+    (``0.004999999999999996`` …, the round-3 review MAJOR) — negatives, zeros, large
+    strikes, and 4dp vendor noise in
     ``tests/golden/test_writer_vectorized_snap_parity.py``.
 
     Known, unreachable edges (honest envelope, Golden Rule #10):
@@ -248,7 +277,7 @@ def _snap_price_expr(column: str) -> pl.Expr:
       positive OHLC; nothing writes a negative price). The numeric ``Decimal``/``float``
       values still compare EQUAL.
     * **Cast overflow.** A value whose ``x * 100`` exhausts the ``precision=38`` headroom
-      (``|x| ≳ 1e19`` — empirically between 1e18 and 1e19) raises a polars error;
+      (``|x| ≳ 1e16`` — empirically between 1e15 and 1e16) raises a polars error;
       :meth:`ParquetWriter._read_existing_bars` catches it and falls back to the exact
       per-row ``Decimal(str(x))`` reconstruction. UNREACHABLE for any tradable price.
     """
@@ -833,6 +862,613 @@ class ParquetWriter:
             # (byte-identical fast path, no extra allocation).
             result = replace(result, vendor_dup_rows_dropped=duplicates_in_batch)
         return result
+
+    def write_frame(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        frame: pl.DataFrame,
+        merge_mode: str,
+        absent_open_interest: int | None = 0,
+        stats: _frame_gate.FrameWriteStats | None = None,
+    ) -> WriteResult:
+        """FRAME-DIRECT sibling of :meth:`write` (DEC-PREBUILD-FRAME-WRITE-001).
+
+        Writes one single-UTC-month resampled *frame* (columns ``ts_utc, open,
+        high, low, close, volume[, open_interest]``) to its canonical
+        partition WITHOUT materialising per-bar :class:`CandleBar` objects —
+        the measured GIL-held wall of the prebuild (CONVERT + ``_tick_round``
+        + the DF-rebuild, ~60% of the cold per-symbol wall; re-paid in full on
+        every warm no-op merge). The vendor :meth:`write` entry is
+        byte/type-UNTOUCHED — this is a NEW sibling, fed only by the
+        prebuild's derived-TF writer via
+        :meth:`~brutex.data.sink.ParquetBarSink.append_frame`.
+
+        **Verify-or-degrade law:** admission guards G0–G9 prove — per
+        partition, with cheap vectorized checks — that the fast lane is
+        byte-equal to legacy; ANY unprovable shape degrades to the VERBATIM
+        legacy path (``self.write(bars=frame_to_candle_bars(frame), …)``),
+        which owns the bytes AND the failure semantics (zero new exception
+        types). The 2dp snap runs UNCONDITIONALLY via the golden-pinned
+        :func:`_snap_price_expr` (the V3 refuted-idempotence ruling — a
+        legacy off-grid source float MUST re-snap exactly as today). Tier-1
+        merge decides ONLY the provable no-op (every incoming row already
+        stored value-identically); every real delta degrades
+        (``merge_delta`` — the expected ~20 current-month rewrites per
+        symbol per day, classified NORMAL).
+
+        **Burn-in (L2):** the first
+        :data:`~brutex.data.frame_write_gate.FRESH_SELF_CHECK_SAMPLES` fresh
+        and :data:`~brutex.data.frame_write_gate.MERGE_SELF_CHECK_SAMPLES`
+        merge admissions per process ALSO run the legacy computation and
+        bit-compare; the LEGACY bytes always ship during burn-in, and a
+        mismatch latches the process OFF
+        (``prebuild.frame_write.autoreverted`` ERROR) — every later call
+        short-circuits to legacy. **Shadow (L3):**
+        ``BRUTEX_PREBUILD_FRAME_WRITE=shadow`` runs both lanes on EVERY
+        eligible write, ships legacy, and counts mismatches — the default-ON
+        evidence generator.
+
+        Raises
+        ------
+        WriterError
+            Empty frame, a non-``latest-wins`` *merge_mode* (fail-closed —
+            the keep-first conflict machinery is never re-implemented
+            columnar), or a multi-month frame (G6 — a caller bug, exactly as
+            :meth:`write` raises it; never a degrade).
+        LakeWriteHalt
+            Disk-full / OOM — NEVER swallowed by the degrade belt (V3 C7).
+
+        Notes
+        -----
+        Concurrency: the degrade / burn-in / shadow legacy re-entry runs
+        OUTSIDE this call's partition locks (``self.write`` takes its own —
+        the in-process lock is non-reentrant and the flock is per open file
+        description). The window between release and re-acquire is benign on
+        this path: the per-symbol ``derive_write_lock`` is exclusive across
+        processes, so no concurrent writer targets a derived partition
+        mid-derive; a hypothetical out-of-band toucher (heal sweep) could at
+        worst flip a burn-in compare to MISMATCH — the fail-safe direction
+        (autorevert to legacy; legacy bytes had shipped regardless).
+        """
+        if merge_mode != "latest-wins":
+            raise WriterError(
+                f"write_frame supports merge_mode 'latest-wins' only, got {merge_mode!r} — "
+                f"the keep-first vendor spine never routes through the frame lane"
+            )
+        if frame.height == 0:
+            raise WriterError("ParquetWriter.write_frame called with an empty frame")
+
+        mode = _frame_gate.resolve_frame_write_mode()
+        if mode is _frame_gate.FrameWriteMode.OFF:
+            # G0 gate verdict (env flipped after the Seam-A builder resolved, or
+            # a junk value's fail-safe OFF): silent legacy delegate — a merely-
+            # disabled call is never counted as a degrade.
+            return self._write_frame_via_legacy(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+            )
+        _frame_gate.note_engaged(mode)
+        if _frame_gate.autoreverted():
+            # G0 latch verdict: the burn-in bit-compare failed earlier this
+            # process — every later call short-circuits to legacy (warn-once).
+            _frame_gate.note_degrade(
+                _frame_gate.DegradeReason.AUTOREVERTED, stats, symbol=symbol, interval=interval
+            )
+            return self._write_frame_via_legacy(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+            )
+
+        # G1–G4 (shape / order / domain / magnitude) — cheap vectorized
+        # pre-lock checks — then G5, the UNCONDITIONAL vectorized 2dp snap
+        # (V3 C1; a snap overflow — PolarsError at |x| ≳ 1e16, unreachable
+        # for a price and already excluded by G4 — degrades, mirroring the
+        # `_read_existing_bars` per-row-fallback precedent). Any failure
+        # routes the WHOLE partition to legacy.
+        reason = self._frame_admission_reason(frame)
+        snapped = self._snap_frame_prices(frame) if reason is None else None
+        if snapped is None:
+            degrade_reason = (
+                reason if reason is not None else _frame_gate.DegradeReason.SNAP_OVERFLOW
+            )
+            _frame_gate.note_degrade(degrade_reason, stats, symbol=symbol, interval=interval)
+            return self._write_frame_via_legacy(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+            )
+
+        # G6 — single UTC (year, month): G2 proved sorted, so the frame ends
+        # bound every row. A violation is a CALLER bug — raise exactly as the
+        # legacy partition-set check does (never a degrade).
+        ts_col = frame.get_column("ts_utc")
+        first_ts: datetime = ts_col[0]
+        last_ts: datetime = ts_col[frame.height - 1]
+        first_part = partition_for_timestamp(first_ts)
+        last_part = partition_for_timestamp(last_ts)
+        if first_part != last_part:
+            raise WriterError(
+                f"bars span multiple partitions {sorted({first_part, last_part})}; "
+                f"caller must group by (year, month) before writing"
+            )
+        (year, month) = first_part
+
+        dest = build_partition_path(
+            lake_root=self._lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            year=year,
+            month=month,
+        )
+        # Same guarded mkdir as write() (DEC-LAKE-WRITE-HALT-001).
+        with lake_write_guard():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # ── Fast-lane attempt, under the SAME lock pair as write() ────────
+        lock_acquire_start = time.perf_counter()
+        dataset_created = False
+        fast_result: WriteResult | None = None
+        lane = "fresh"
+        double = False
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_PARTITION_LOCKS.acquire(dest))
+            stack.enter_context(partition_write_lock(self._lake_root, dest))
+            lock_wait_ms = (time.perf_counter() - lock_acquire_start) * 1000.0
+
+            write_start = time.perf_counter()
+            try:
+                if dest.exists():
+                    lane = "merge"
+                    double = (
+                        mode is _frame_gate.FrameWriteMode.SHADOW
+                        or _frame_gate.merge_self_check_pending()
+                    )
+                    outcome = self._merge_noop_probe(
+                        dest, snapped, absent_open_interest=absent_open_interest
+                    )
+                    if isinstance(outcome, _frame_gate.DegradeReason):
+                        reason = outcome
+                    else:
+                        fast_result = outcome
+                else:
+                    lane = "fresh"
+                    double = (
+                        mode is _frame_gate.FrameWriteMode.SHADOW
+                        or _frame_gate.fresh_self_check_pending()
+                    )
+                    render_df = self._fresh_render_frame(
+                        snapped, absent_open_interest=absent_open_interest
+                    )
+                    content_bytes = self._render_frame_bytes(render_df)
+                    fast_result = WriteResult(
+                        path=dest,
+                        row_count=frame.height,
+                        raw_hash=hashlib.sha256(content_bytes).hexdigest(),
+                        first_ts=first_ts,
+                        last_ts=last_ts,
+                        bytes_written=len(content_bytes),
+                        bars_added=frame.height,
+                        conflicts=(),
+                        file_rewritten=True,
+                    )
+                    if not double:
+                        # Steady fast path: commit under the held locks —
+                        # the SAME probe/write/stats-hook sequence as the
+                        # legacy fresh branch. During burn-in/shadow the
+                        # fast bytes NEVER touch disk (legacy ships below).
+                        dataset_created = not any(dest.parent.parent.rglob("*.parquet"))
+                        self._atomic_write(dest, content_bytes)
+                        self._record_stats_hook(dest, fast_result)
+            except (LakeWriteHalt, MemoryError):
+                # NEVER swallowed (V3 C7): a full disk / OOM is a pull-wide
+                # stop, not a per-partition degrade. (KeyboardInterrupt /
+                # SystemExit derive from BaseException and never reach the
+                # belt below.)
+                raise
+            except Exception as exc:  # the G9 belt, by design (see comment below)
+                # G9 belt (DEC-PREBUILD-FRAME-WRITE-001 §1.3): ANY unexpected
+                # fast-lane failure BEFORE bytes are committed degrades the
+                # partition to the verbatim legacy path — which reproduces
+                # today's bytes AND today's failure semantics (a corrupt
+                # stored file re-raises legacy's own quarantinable
+                # WriterError from legacy's own read). Observable, never
+                # silent: warn-once WARNING + per-symbol count via
+                # note_degrade below.
+                reason = _frame_gate.DegradeReason.FAST_LANE_ERROR
+                fast_result = None
+                _LOG.debug(
+                    "prebuild.frame_write.fast_lane_error_detail",
+                    partition=str(dest),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            append_ms = (time.perf_counter() - write_start) * 1000.0
+
+        # ── Degrade: hand the partition to the VERBATIM legacy path ───────
+        if fast_result is None:
+            degrade_reason = (
+                reason if reason is not None else _frame_gate.DegradeReason.FAST_LANE_ERROR
+            )
+            _frame_gate.note_degrade(
+                degrade_reason, stats, partition=str(dest), symbol=symbol, interval=interval
+            )
+            return self._write_frame_via_legacy(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+            )
+
+        # ── Burn-in / shadow: run the legacy lane too; LEGACY ships ───────
+        if double:
+            legacy_result = self._write_frame_via_legacy(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+            )
+            diverged = [
+                f.name
+                for f in dataclass_fields(WriteResult)
+                if getattr(fast_result, f.name) != getattr(legacy_result, f.name)
+            ]
+            if mode is _frame_gate.FrameWriteMode.SHADOW:
+                if stats is not None:
+                    stats.shadow_checked += 1
+                if diverged:
+                    if stats is not None:
+                        stats.shadow_mismatches += 1
+                    _frame_gate.note_shadow_mismatch(
+                        partition=str(dest),
+                        lane=lane,
+                        diverged_fields=diverged,
+                        fast_raw_hash=fast_result.raw_hash,
+                        legacy_raw_hash=legacy_result.raw_hash,
+                    )
+            else:
+                if stats is not None:
+                    stats.fast += 1
+                if diverged:
+                    _frame_gate.autorevert(
+                        "burn_in_mismatch",
+                        partition=str(dest),
+                        lane=lane,
+                        diverged_fields=diverged,
+                        fast_raw_hash=fast_result.raw_hash,
+                        legacy_raw_hash=legacy_result.raw_hash,
+                    )
+                elif lane == "fresh":
+                    _frame_gate.consume_fresh_self_check_sample()
+                else:
+                    _frame_gate.consume_merge_self_check_sample()
+            return legacy_result
+
+        # ── Steady fast path served: same telemetry + manifest hooks ──────
+        self._partition_log(
+            "lake.partition.write",
+            append_ms=round(append_ms, 3),
+            lock_wait_ms=round(lock_wait_ms, 3),
+            rows=frame.height,
+            partition_rows=fast_result.row_count,
+            partition=str(dest),
+        )
+        if dataset_created:
+            record_dataset(
+                self._lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+            )
+        if stats is not None:
+            stats.fast += 1
+        return fast_result
+
+    def _write_frame_via_legacy(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        frame: pl.DataFrame,
+        merge_mode: str,
+        absent_open_interest: int | None,
+    ) -> WriteResult:
+        """The ONE degrade/burn-in/shadow delegate: the LITERAL legacy entry.
+
+        ``frame_to_candle_bars`` (the exact conversion the flag-OFF Seam-A
+        branch runs) + :meth:`write` — the same objects and lines that run
+        today, not a re-implementation — so a degraded partition reproduces
+        today's bytes AND today's failure semantics for free (a poison row
+        raises ``CandleBar.__post_init__``'s exact loud error → the
+        prebuild's per-symbol quarantine; V3 C8, zero new exception types).
+        Lazy import from the LEAF converter home ``brutex.data.frame_bars`` —
+        never ``spot_daily_resample``, whose own lazy sink/writer imports
+        would re-form the CodeQL ``py/cyclic-import`` cycle the leaf broke
+        (drift-pinned by ``TestImportCycleDriftPin``).
+        """
+        from brutex.data.frame_bars import frame_to_candle_bars
+
+        return self.write(
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            bars=frame_to_candle_bars(frame, absent_open_interest=absent_open_interest),
+            merge_mode=merge_mode,
+        )
+
+    @staticmethod
+    def _frame_admission_reason(frame: pl.DataFrame) -> _frame_gate.DegradeReason | None:
+        """Admission guards G1–G4 — ``None`` iff the frame is provably in-envelope.
+
+        All vectorized / O(columns); the CHEAPEST failure wins (guards run in
+        order). A failure never decides correctness — the caller degrades the
+        partition to the verbatim legacy path, which reproduces today's
+        behavior for exactly that shape (G2's duplicate collapse + the
+        ``lake.vendor_duplicate_rows`` WARN; G3's loud
+        ``CandleBar.__post_init__`` error → per-symbol quarantine; …).
+        """
+        import polars as pl
+
+        # G1 — shape: required columns present, nothing beyond the allowed
+        # set, exact/integer dtypes, non-null tz-aware timestamps.
+        columns = set(frame.columns)
+        required = {"ts_utc", "open", "high", "low", "close", "volume"}
+        if not required.issubset(columns) or not columns.issubset(required | {"open_interest"}):
+            return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+        if frame.schema["ts_utc"] != pl.Datetime(time_unit="us", time_zone="UTC"):
+            return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+        for price_column in _PRICE_COLUMNS:
+            if frame.schema[price_column] != pl.Float64:
+                return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+        if not frame.schema["volume"].is_integer():
+            return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+        has_oi = "open_interest" in columns
+        if has_oi and not frame.schema["open_interest"].is_integer():
+            return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+        ts = frame.get_column("ts_utc")
+        if ts.null_count() > 0:
+            return _frame_gate.DegradeReason.SCHEMA_MISMATCH
+
+        # G2 — order: strictly increasing ⇒ unique + sorted (the vectorized
+        # P9 pre-check). Physical epoch-µs diff avoids Duration comparison.
+        if frame.height > 1:
+            diffs = ts.to_physical().diff().slice(1)
+            if not bool((diffs > 0).all()):
+                return _frame_gate.DegradeReason.DUP_OR_UNSORTED_TS
+
+        # G3 — domain: volume non-null ∧ ≥ 0; OI ≥ 0 where non-null; prices
+        # non-null ∧ finite ∧ OHLC-ordered (high≥low, low≤open,close≤high).
+        volume = frame.get_column("volume")
+        if volume.null_count() > 0 or bool((volume < 0).any()):
+            return _frame_gate.DegradeReason.DOMAIN_VIOLATION
+        if has_oi:
+            oi = frame.get_column("open_interest")
+            if bool((oi.drop_nulls() < 0).any()):
+                return _frame_gate.DegradeReason.DOMAIN_VIOLATION
+        for price_column in _PRICE_COLUMNS:
+            series = frame.get_column(price_column)
+            if series.null_count() > 0 or not bool(series.is_finite().all()):
+                return _frame_gate.DegradeReason.DOMAIN_VIOLATION
+        ordered = frame.select(
+            (
+                (pl.col("high") >= pl.col("low"))
+                & (pl.col("low") <= pl.col("open"))
+                & (pl.col("open") <= pl.col("high"))
+                & (pl.col("low") <= pl.col("close"))
+                & (pl.col("close") <= pl.col("high"))
+            ).all()
+        ).item()
+        if not bool(ordered):
+            return _frame_gate.DegradeReason.DOMAIN_VIOLATION
+
+        # G4 — magnitude: far below the `_snap_price_expr` precision-38
+        # overflow (≳1e16) AND the Decimal→Float64 injectivity bound; the
+        # cast golden pins the law up to this bound.
+        for price_column in _PRICE_COLUMNS:
+            magnitude = frame.get_column(price_column).abs().max()
+            if float(magnitude) >= FRAME_PRICE_MAGNITUDE_BOUND:  # type: ignore[arg-type]
+                return _frame_gate.DegradeReason.MAGNITUDE_OVERFLOW
+        return None
+
+    @staticmethod
+    def _snap_frame_prices(frame: pl.DataFrame) -> pl.DataFrame | None:
+        """G5 — the UNCONDITIONAL vectorized 2dp snap of the incoming frame.
+
+        Returns the frame with OHLC replaced by golden-pinned
+        ``Decimal(38,2)`` snapped columns (:func:`_snap_price_expr` — the
+        EXACT ``round_money(Decimal(str(x)))`` byte contract, V3 C1), or
+        ``None`` on a snap overflow (``PolarsError`` — mirrors the
+        ``_read_existing_bars`` per-row-fallback precedent; the caller
+        degrades). Runs inside ``lake_write_guard`` so an OOM halts the pull.
+        """
+        import polars as pl
+
+        with lake_write_guard():
+            try:
+                return frame.with_columns(*(_snap_price_expr(c) for c in _PRICE_COLUMNS))
+            except pl.exceptions.PolarsError:
+                # Narrow, documented degrade trigger (G5): the overflow class
+                # the per-row fallback exists for — observable via the
+                # caller's `snap_overflow` note_degrade.
+                return None
+
+    @staticmethod
+    def _frame_oi_expr(frame: pl.DataFrame, absent_open_interest: int | None) -> pl.Expr:
+        """The OI expression mirroring ``frame_to_candle_bars(absent_open_interest=…)``.
+
+        Column absent → a literal *absent_open_interest* for every row
+        (spot-intraday stores 0, NOT null); present → ``fill_null(absent)``
+        cast ``Int64`` (F&O-intraday null→0). ``absent_open_interest=None``
+        keeps nulls null (the spot-daily convention — not a Tier-1 caller,
+        but the sibling signature supports it; V3 C6).
+        """
+        import polars as pl
+
+        if "open_interest" not in frame.columns:
+            return pl.lit(absent_open_interest, dtype=pl.Int64).alias("open_interest")
+        expr = pl.col("open_interest")
+        if absent_open_interest is not None:
+            expr = expr.fill_null(absent_open_interest)
+        return expr.cast(pl.Int64).alias("open_interest")
+
+    @staticmethod
+    def _fresh_render_frame(
+        snapped: pl.DataFrame, *, absent_open_interest: int | None
+    ) -> pl.DataFrame:
+        """Project a G5-snapped frame into the pinned 7-column render shape.
+
+        ``ts_utc`` → ``timestamp``; the snapped ``Decimal(38,2)`` OHLC cast
+        ``Float64`` (the cast golden pins it ≡ Python ``float(Decimal)``);
+        ``volume`` cast ``Int64``; the OI expression per
+        :meth:`_frame_oi_expr`. Column ORDER is the render contract —
+        :meth:`_render_frame_bytes` re-asserts it.
+        """
+        import polars as pl
+
+        return snapped.select(
+            pl.col("ts_utc").alias("timestamp"),
+            *(pl.col(c).cast(pl.Float64) for c in _PRICE_COLUMNS),
+            pl.col("volume").cast(pl.Int64),
+            ParquetWriter._frame_oi_expr(snapped, absent_open_interest),
+        )
+
+    def _merge_noop_probe(
+        self,
+        dest: Path,
+        snapped: pl.DataFrame,
+        *,
+        absent_open_interest: int | None,
+    ) -> WriteResult | _frame_gate.DegradeReason:
+        """Tier-1 merge lane: decide ONLY the provable NO-OP (G7 + G8).
+
+        Runs under the caller's held partition locks. Returns the EXACT
+        legacy no-op :class:`WriteResult` when every incoming row is already
+        stored value-identically (file untouched — NO render, NO fsync,
+        ``file_rewritten=False``; the stats hook correctly does not fire), or
+        the degrade reason routing the partition to legacy ``_merge_write``:
+
+        * ``merge_stored_snap`` — the stored file's snap overflowed (the
+          per-row fallback class);
+        * ``merge_overlay`` — a hand-enriched partition (legacy's
+          latest-wins overlay-strip semantics must run);
+        * ``merge_stored_schema`` — anything but the plain 7-column non-null
+          shape (legacy owns the exotic shapes, including their errors);
+        * ``merge_stored_dups`` — pending dedup self-heal (footer physical
+          rows ≠ unique timestamps), or an unprovable footer probe;
+        * ``merge_delta`` — a genuine add/restate (the NORMAL daily shape).
+
+        Equality is decided on the ``Decimal(38,2)`` snap columns (exact
+        integer compare — never floats; ≡ ``_bar_values_equal``'s Decimal
+        numeric equality) with OI compared null-aware via ``eq_missing``
+        (polars ``null == null`` is null — the classic trap).
+
+        Disclosed cost: a ``merge_delta`` degrade re-enters ``self.write``,
+        whose ``_merge_write`` re-reads the stored bytes — one extra small
+        disk read per degraded merge partition (kept so ``_merge_write``'s
+        signature stays byte-untouched).
+        """
+        import polars as pl
+
+        existing_bytes = self._read_existing_bytes(dest)
+        stored = self._decode_and_snap_frame(dest, existing_bytes)
+        if stored is None:
+            return _frame_gate.DegradeReason.MERGE_STORED_SNAP
+
+        # G7 — stored-side guards, cheapest first.
+        if any(name in stored.columns for name in GREEKS_OVERLAY_FIELDS):
+            return _frame_gate.DegradeReason.MERGE_OVERLAY
+        if tuple(stored.columns) != self._RENDER_BASE_COLUMNS:
+            return _frame_gate.DegradeReason.MERGE_STORED_SCHEMA
+        if stored.schema["timestamp"] != pl.Datetime(time_unit="us", time_zone="UTC"):
+            return _frame_gate.DegradeReason.MERGE_STORED_SCHEMA
+        for name in ("open", "high", "low", "close", "volume"):
+            if stored.get_column(name).null_count() > 0:
+                # A null stored price/volume can never round-trip a CandleBar
+                # — legacy owns that failure (its own loud error).
+                return _frame_gate.DegradeReason.MERGE_STORED_SCHEMA
+        if not stored.schema["volume"].is_integer():
+            return _frame_gate.DegradeReason.MERGE_STORED_SCHEMA
+        if "open_interest" in stored.columns and not stored.schema["open_interest"].is_integer():
+            return _frame_gate.DegradeReason.MERGE_STORED_SCHEMA
+
+        physical = self._stored_physical_rows(dest, existing_bytes)
+        if physical is None:
+            # Unprovable footer ⇒ can't exclude a pending dedup self-heal —
+            # degrade (legacy skips the heal check exactly as today; the
+            # probe failure was already logged by _stored_physical_rows).
+            return _frame_gate.DegradeReason.MERGE_STORED_DUPS
+        unique = int(stored.get_column("timestamp").n_unique())
+        if physical != unique or stored.height != physical:
+            return _frame_gate.DegradeReason.MERGE_STORED_DUPS
+
+        # G8 — the no-op equality: every incoming ts present in stored with
+        # ALL of OHLCV+OI value-equal. Stored-only rows are FINE (the legacy
+        # union keeps them without a rewrite — union-never-delete).
+        incoming = snapped.select(
+            pl.col("ts_utc").alias("timestamp"),
+            *(pl.col(c) for c in _PRICE_COLUMNS),
+            pl.col("volume").cast(pl.Int64),
+            ParquetWriter._frame_oi_expr(snapped, absent_open_interest),
+        )
+        joined = incoming.join(stored, on="timestamp", how="left", suffix="_st")
+        if joined.get_column("volume_st").null_count() > 0:
+            # An incoming timestamp absent from stored ⇒ a genuine add.
+            return _frame_gate.DegradeReason.MERGE_DELTA
+        equal = joined.select(
+            (
+                pl.all_horizontal(
+                    *((pl.col(c) == pl.col(f"{c}_st")) for c in _PRICE_COLUMNS),
+                    pl.col("volume") == pl.col("volume_st"),
+                    pl.col("open_interest").eq_missing(pl.col("open_interest_st")),
+                )
+            ).all()
+        ).item()
+        if not bool(equal):
+            return _frame_gate.DegradeReason.MERGE_DELTA
+
+        stored_ts = stored.get_column("timestamp")
+        first_ts: datetime = stored_ts.min()  # type: ignore[assignment]
+        last_ts: datetime = stored_ts.max()  # type: ignore[assignment]
+        return WriteResult(
+            path=dest,
+            row_count=unique,
+            raw_hash=hashlib.sha256(existing_bytes).hexdigest(),
+            first_ts=first_ts,
+            last_ts=last_ts,
+            bytes_written=len(existing_bytes),
+            bars_added=0,
+            conflicts=(),
+            file_rewritten=False,
+        )
 
     def _merge_write(
         self, dest: Path, new_bars: list[CandleBar], *, merge_mode: str = "keep-first"
@@ -1519,6 +2155,73 @@ class ParquetWriter:
             return None
 
     @staticmethod
+    def _decode_partition_frame(dest: Path, existing_bytes: bytes) -> pl.DataFrame:
+        """Decode a stored partition's raw bytes into a DataFrame, guarded.
+
+        Seam E of DEC-PREBUILD-FRAME-WRITE-001 (lines MOVED out of
+        ``_read_existing_bars``, behavior-identical): the DECODE is the
+        steady-state re-pull's largest allocation, so it runs inside
+        ``lake_write_guard`` — a ``MemoryError`` becomes a ``LakeWriteHalt``
+        pull-wide stop (DEC-LAKE-WRITE-HALT-001, unchanged). A corrupt-file
+        ``PolarsError`` / non-ENOSPC ``OSError`` (GAP #1) is re-raised as a
+        quarantinable :class:`~brutex.data.errors.WriterError` naming the
+        path — ``MemoryError`` is NOT in the skip set, so an OOM still
+        reaches the guard and halts (never demoted to a quarantine).
+        """
+        try:
+            import polars as pl
+        except ImportError as exc:  # pragma: no cover — same guard as _frame_from_bars
+            raise WriterError(
+                "ParquetWriter requires 'polars' — install with "
+                "'pip install -e .[data]' to enable the P2 data lake"
+            ) from exc
+
+        import io
+
+        with lake_write_guard():
+            try:
+                return pl.read_parquet(io.BytesIO(existing_bytes))
+            except parquet_read_skip_errors() as exc:
+                raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+
+    @staticmethod
+    def _decode_and_snap_frame(dest: Path, existing_bytes: bytes) -> pl.DataFrame | None:
+        """Decode + 2dp-snap a stored partition into a frame — or ``None`` on snap overflow.
+
+        Seam E of DEC-PREBUILD-FRAME-WRITE-001 — the ONE stored-read
+        decode+snap law shared by ``_read_existing_bars`` (the legacy
+        ``{ts: CandleBar}`` consumers: merge, heal, healer reads) and the
+        frame-direct merge no-op probe (which consumes the FRAME directly,
+        never building per-bar Python objects). One decode, one snap law
+        (V3 C1/C9).
+
+        Snaps OHLC to the 2dp tick grid columnarly (byte-exact, GIL-released
+        — :func:`_snap_price_expr`); timestamp / volume / open_interest pass
+        through untouched. A value whose repr overflows precision-38
+        (unreachable for a price) raises a ``PolarsError`` from the snap →
+        returns ``None``, the trigger for the exact per-row
+        ``Decimal(str(x))`` fallback the legacy caller keeps. An ENRICHED
+        partition's ``spot_at_bar`` (the ONE overlay column that is a price —
+        plan §15.3) rides the SAME snap; the Greeks columns pass through at
+        FULL precision (DEC-MONEY-2DP-001). A corrupt file raises the
+        quarantinable :class:`WriterError` from the decode private.
+        """
+        import polars as pl
+
+        df = ParquetWriter._decode_partition_frame(dest, existing_bytes)
+        snap_columns: list[str] = list(_PRICE_COLUMNS)
+        if "spot_at_bar" in df.columns:
+            snap_columns.append("spot_at_bar")
+        # The snap allocation stays guarded (an OOM maps to LakeWriteHalt);
+        # the overflow PolarsError is the documented `None` fallback trigger
+        # — narrow catch, observable via the caller's per-row-path choice.
+        with lake_write_guard():
+            try:
+                return df.with_columns(*(_snap_price_expr(c) for c in snap_columns))
+            except pl.exceptions.PolarsError:
+                return None
+
+    @staticmethod
     def _read_existing_bars(dest: Path, existing_bytes: bytes) -> dict[datetime, CandleBar]:
         """Parse a stored partition's *existing_bytes* into ``{timestamp: CandleBar}``.
 
@@ -1564,7 +2267,7 @@ class ParquetWriter:
 
         Correctness fallback: the vectorized snap is BYTE-EXACT for every realistic price
         (see :func:`_snap_price_expr`), but a value whose ``x * 100`` overflows the
-        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e19``, unreachable for a bar
+        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e16``, unreachable for a bar
         price) raises a ``PolarsError`` from the snap. That is NOT corruption, so it is
         NOT quarantined — it falls back to the exact per-row ``Decimal(str(x))`` +
         ``_tick_round`` reconstruction (:meth:`_reconstruct_bars_per_row`), the proven
@@ -1573,45 +2276,16 @@ class ParquetWriter:
         valid 2dp price). So correctness wins over the micro-optimization, and the
         change never silently corrupts a long-tail value.
         """
-        try:
-            import polars as pl
-        except ImportError as exc:  # pragma: no cover — same guard as _render_bytes
-            raise WriterError(
-                "ParquetWriter requires 'polars' — install with "
-                "'pip install -e .[data]' to enable the P2 data lake"
-            ) from exc
-
-        import io
-
-        # The DECODE is the steady-state re-pull's largest allocation, so it stays inside
-        # `lake_write_guard`: a `MemoryError` here becomes a `LakeWriteHalt` pull-wide
-        # stop (DEC-LAKE-WRITE-HALT-001, unchanged). A corrupt-file `PolarsError` /
-        # non-ENOSPC `OSError` (GAP #1) is caught and re-raised as a quarantinable
-        # `WriterError` naming the path — `MemoryError` is NOT in the skip set, so an OOM
-        # still reaches the guard and halts (never demoted to a quarantine).
-        with lake_write_guard():
-            try:
-                df = pl.read_parquet(io.BytesIO(existing_bytes))
-                # Snap OHLC to the 2dp tick grid columnarly (byte-exact, GIL-released);
-                # timestamp / volume / open_interest pass through untouched. A value
-                # whose repr overflows precision-38 (unreachable for a price) raises a
-                # PolarsError here → fall back to the exact per-row reconstruction.
-                # An ENRICHED partition's `spot_at_bar` (the ONE overlay column that
-                # is a price — plan §15.3) rides the SAME snap; the Greeks columns
-                # pass through at FULL precision (DEC-MONEY-2DP-001).
-                snap_columns: list[str] = list(_PRICE_COLUMNS)
-                if "spot_at_bar" in df.columns:
-                    snap_columns.append("spot_at_bar")
-                snapped: pl.DataFrame | None
-                try:
-                    snapped = df.with_columns(*(_snap_price_expr(c) for c in snap_columns))
-                except pl.exceptions.PolarsError:
-                    snapped = None
-            except parquet_read_skip_errors() as exc:
-                raise WriterError(f"corrupt existing partition {dest}: {exc}") from exc
+        snapped = ParquetWriter._decode_and_snap_frame(dest, existing_bytes)
 
         if snapped is None:
             # Overflow / non-finite fallback: exact per-row Decimal(str(x)) path.
+            # The raw frame is decoded a SECOND time here (Seam E split,
+            # DEC-PREBUILD-FRAME-WRITE-001) — this path is unreachable for any
+            # real price (|x| ≳ 1e16 overflow — the `_snap_price_expr` honest
+            # envelope), so the extra decode never runs in production; the
+            # reconstruction output is byte-identical either way.
+            df = ParquetWriter._decode_partition_frame(dest, existing_bytes)
             return ParquetWriter._reconstruct_bars_per_row(dest, df)
 
         # COLUMN-wise extraction (one Series.to_list per column). The OHLC columns are
@@ -1713,7 +2387,7 @@ class ParquetWriter:
         CORRECTNESS fallback for the vectorized :func:`_snap_price_expr`
         (DEC-LAKE-WRITE-VECTORIZE-001): it is invoked ONLY when the columnar snap raises
         (a value whose ``x * 100`` overflows the intermediate ``Decimal(precision=38)``,
-        ``|x| ≳ 1e19`` — unreachable for a real price). Column-wise ``Series.to_list``
+        ``|x| ≳ 1e16`` — unreachable for a real price). Column-wise ``Series.to_list``
         extraction (one list per column, no per-row dict) keeps it allocation-lean.
 
         A genuinely-corrupt NON-FINITE (inf/NaN) price reaches this path too: building a
@@ -1834,8 +2508,25 @@ class ParquetWriter:
     def _render_bytes(sorted_bars: list[CandleBar]) -> bytes:
         """Serialise *sorted_bars* to a Parquet byte blob.
 
-        ``polars`` is imported lazily so callers that never write don't
-        need the dep. Raises :class:`WriterError` with a clear message
+        Since DEC-PREBUILD-FRAME-WRITE-001 (Seam D — the one-encoder split)
+        this is a thin composition of :meth:`_frame_from_bars` (the verbatim
+        DataFrame-from-Python-lists build) and :meth:`_render_frame_bytes`
+        (the ONE parquet encoder every lane terminates in), so the legacy,
+        heal, vendor AND frame-direct fast lanes can never drift apart at the
+        byte level — encoder drift is structurally impossible (V3 C9), and
+        the frozen ``tests/golden/test_writer_frame_render_golden.py`` oracle
+        proves the split byte-preserving.
+        """
+        return ParquetWriter._render_frame_bytes(ParquetWriter._frame_from_bars(sorted_bars))
+
+    @staticmethod
+    def _frame_from_bars(sorted_bars: list[CandleBar]) -> pl.DataFrame:
+        """Build the render DataFrame from *sorted_bars* — the MOVED legacy build.
+
+        The DataFrame-from-Python-lists half of the pre-Seam-D
+        ``_render_bytes`` (DEC-PREBUILD-FRAME-WRITE-001 — lines MOVED, not
+        copied). ``polars`` is imported lazily so callers that never write
+        don't need the dep. Raises :class:`WriterError` with a clear message
         if the import fails.
         """
         try:
@@ -1846,14 +2537,12 @@ class ParquetWriter:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
-        # Build columns from the bars + render to a Parquet byte blob. The polars
-        # allocations (the DataFrame build + write_parquet) are the FRESH-write OOM
-        # site (the merge READ in `_read_existing_bars` is guarded separately), so
-        # they run inside lake_write_guard: a MemoryError here becomes a LakeWriteHalt
-        # pull-wide stop instead of a raw mid-render crash (DEC-LAKE-WRITE-HALT-001).
-        # Decimal → float conversion is explicit so the cast is visible in audit logs.
-        import io
-
+        # Build columns from the bars. The polars allocations are a FRESH-write
+        # OOM site (the merge READ in `_read_existing_bars` is guarded
+        # separately), so they run inside lake_write_guard: a MemoryError here
+        # becomes a LakeWriteHalt pull-wide stop instead of a raw mid-render
+        # crash (DEC-LAKE-WRITE-HALT-001). Decimal → float conversion is
+        # explicit so the cast is visible in audit logs.
         with lake_write_guard():
             rows: dict[str, list[object]] = {
                 "timestamp": [b.timestamp for b in sorted_bars],
@@ -1896,7 +2585,84 @@ class ParquetWriter:
                     else:
                         rows[name] = [getattr(b, name, None) for b in sorted_bars]
                         schema[name] = pl.Float64
-            df = pl.DataFrame(rows, schema=schema)
+            return pl.DataFrame(rows, schema=schema)
+
+    #: The pinned 7-column render schema — names in EXACT order + dtypes
+    #: (V3 C2). :meth:`_render_frame_bytes` asserts every frame against it
+    #: (base columns, or base + the overlay tail for a Greeks-enriched batch)
+    #: so no lane can ever hand the encoder a drifted shape.
+    _RENDER_BASE_COLUMNS: Final[tuple[str, ...]] = (
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "open_interest",
+    )
+
+    @staticmethod
+    def _render_frame_bytes(df: pl.DataFrame) -> bytes:
+        """The ONE parquet encoder (Seam D — DEC-PREBUILD-FRAME-WRITE-001).
+
+        Every render lane (legacy bar-list via :meth:`_frame_from_bars`, the
+        heal rewrite, the vendor spine, AND the frame-direct fast lane)
+        terminates HERE, so the five encoder knobs (zstd · level
+        :data:`ZSTD_LEVEL` · :data:`ROW_GROUP_SIZE` · ``use_pyarrow=False`` ·
+        ``statistics=False``) and the column order/dtypes are enforced in ONE
+        place — encoder drift between paths is structurally impossible
+        (V3 C9 by construction, not by test).
+
+        * **Schema assert** (fail-loud :class:`WriterError`): columns must be
+          the pinned 7-column base shape, or base + the
+          :data:`~brutex.data.models.GREEKS_OVERLAY_FIELDS` overlay tail in
+          canonical order; ``timestamp`` must be ``Datetime(us, UTC)``, OHLC
+          ``Float64``, volume/OI ``Int64``.
+        * **Unconditional** ``df.rechunk()`` (graft G-C): identity on the
+          already-contiguous legacy DataFrame; normalises a multi-chunk
+          fast-lane frame (an expression/join product) whose chunk layout
+          could otherwise page-split the parquet bytes differently from the
+          single-chunk legacy render even with identical values.
+        * The render runs inside ``lake_write_guard`` (an OOM here is a
+          ``LakeWriteHalt`` pull-wide stop — DEC-LAKE-WRITE-HALT-001).
+        """
+        try:
+            import polars as pl
+        except ImportError as exc:  # pragma: no cover — same guard as _frame_from_bars
+            raise WriterError(
+                "ParquetWriter requires 'polars' — install with "
+                "'pip install -e .[data]' to enable the P2 data lake"
+            ) from exc
+
+        import io
+
+        base = ParquetWriter._RENDER_BASE_COLUMNS
+        columns = tuple(df.columns)
+        if columns not in (base, base + GREEKS_OVERLAY_FIELDS):
+            raise WriterError(
+                f"render schema violation: columns {columns!r} are neither the pinned "
+                f"7-column base shape nor base + the Greeks overlay tail"
+            )
+        expected_dtypes: dict[str, pl.DataType | type[pl.DataType]] = {
+            "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+            "open_interest": pl.Int64,
+        }
+        for name, expected in expected_dtypes.items():
+            if df.schema[name] != expected:
+                raise WriterError(
+                    f"render schema violation: column {name!r} has dtype "
+                    f"{df.schema[name]!r}, expected {expected!r}"
+                )
+
+        with lake_write_guard():
+            # Unconditional chunk normalisation (G-C) — identity on the legacy
+            # single-chunk DF; makes the byte law chunk-layout-independent.
+            df = df.rechunk()
 
             def _python_render() -> bytes:
                 # polars write_parquet → file-like. Use an in-memory BytesIO

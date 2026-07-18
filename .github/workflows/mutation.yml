@@ -510,6 +510,7 @@ jobs:
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \
             "brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:" \
+            "brutex/data/frame_write_gate.py:tests/unit/test_frame_write_gate.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \

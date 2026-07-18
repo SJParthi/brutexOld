@@ -2123,9 +2123,39 @@ jobs:
           # dedicated test file is now strict-gated above
           # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py
+            # DEC-PREBUILD-FRAME-WRITE-001: the append_frame sibling is covered
+            # by tests/unit/test_data_sink_frame.py, which MUST run alongside
+            # the base suite for the 100% gate to hold.
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py tests/unit/test_data_sink_frame.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the frame-direct derived-TF write's
+          # control leaf (tristate+shadow kill switch, burn-in budgets,
+          # autorevert latch, the CLOSED degrade taxonomy, FrameWriteStats).
+          # NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_frame_write_gate.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_write_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_write_gate.py
+          else
+            echo "(brutex.data.frame_write_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the ONE env-flag vocabulary leaf
+          # (promoted from engine/sweep_lookahead so the wheel-free data layer
+          # can consume it). NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_config_env_flags.py" > /dev/null; then
+            pytest --cov=brutex.config.env_flags --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_config_env_flags.py
+          else
+            echo "(brutex.config.env_flags test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001 (review fold): the batched frame→bar
+          # converter leaf `brutex.data.frame_bars` (moved out of
+          # spot_daily_resample to break the sink↔spot_daily_resample CodeQL
+          # py/cyclic-import cycle). NEW leaf -> its own strict 100%
+          # line+branch gate.
+          if compgen -G "tests/unit/test_frame_bars.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_bars --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_bars.py
+          else
+            echo "(brutex.data.frame_bars test file not present yet — gate inactive)"
           fi
           # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
           # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk

@@ -516,7 +516,7 @@ Active-branch blurb + its MIGRATION.md entry.)
 Earlier: 2026-07-15 (CLUB R2 merge vehicle, branch
 `integration/club-r2-crates` — the crate-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1469 DEC-GREEKS-RUST-BATCH-001
-(MIGRATION.md #1892, chain #1724 → #1795 → #1892 — the last hop at the
+(MIGRATION.md #1892, chain #1724 → #1956 → #1892 — the last hop at the
 2026-07-16 club CDR2 fold, bare vs club-D's #1795a–#1795d block) · #1435
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1891, chain #1726 → #1796 → #1832 →
 #1891 — the last hop at the club CDR2 fold, club-D took #1832) · #1454 DEC-FEED-RUST-CORE-001 (#1797, chain #1725 → #1741 → #1797).
@@ -524,7 +524,7 @@ Three INDEPENDENT crate trees (`rust/trading-core/src/greeks/batch.rs` ·
 `rust/brutex-lake/` · `rust/brutex-feed/`), every Python seam default-OFF /
 INERT (`BRUTEX_GREEKS_RUST_BATCH` · `BRUTEX_LAKE_RUST_RENDER` ·
 `BRUTEX_FEED_RUST`); the three colliding ledger rows were renumbered to the
-free consecutive block #1795–#1797 vs the live-main tail #1794 (chains
+free consecutive block #1956–#1797 vs the live-main tail #1794 (chains
 in-entry; DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001).
 #1433 (brutexd) deliberately NOT folded — joins post-refresh. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
@@ -568,6 +568,35 @@ DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item record lives
 in the §1 Active-branch blurb + MIGRATION.md #1780 — this header carries the
 one-line summary, never the story.)
+Earlier: 2026-07-14 (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1956
+(renumbered #1793 → #1956 at the 2026-07-14 merge-reconcile — main took
+#1793 for DEC-SETTLE-EVIDENCE-ADOPTION-001 + #1794 for
+DEC-BULK-SPOT-COMPLETENESS-FLAG-001; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001), branch `claude/prebuild-frame-write` — the
+verify-or-degrade FRAME-DIRECT
+derived-TF write, shipped DARK (default OFF via the tristate+`shadow`
+`BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒ FAIL-SAFE OFF + warn-once,
+a recorded kill-must-kill deviation from the fail-loud-env law): the
+prebuild's resampled polars frame reaches the partition writer WITHOUT the
+frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+21.9–23.9% + per-bar `_tick_round` 18.3–20.1% cold, both re-paid on
+1,581/1,581 warm no-op merges; sandbox ratios) behind admission guards
+G0–G9, the CLOSED 15-reason per-partition degrade-to-VERBATIM-legacy enum
+(degrade never decides correctness), a 16-write both-lanes burn-in shipping
+LEGACY bytes + durable autorevert latch, and a shadow mode whose clean
+operator transcript (`frame_shadow_mismatches == 0`) gates the PR-2
+default-ON flip; the 2dp snap stays UNCONDITIONAL (vectorized, ROUND_HALF_UP
+— the naive-skip idempotence claim was REFUTED); ONE encoder serves both
+lanes (`_frame_from_bars` + `_render_frame_bytes`, legacy render bytes
+FROZEN as a golden BEFORE any production change); vendor `write()`/`append()`
+signatures byte-untouched — NEW siblings `write_frame`/`append_frame` + ONE
+call-site branch in `make_lake_write_tf._write`; byte-identical lake output
+proven by the 14-case whole-tree A/B corpus + op-count bench gates; NO
+speedup claimed (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³
+bars). Run identity / `data_snapshot_hash` / the 1-minute lake untouched;
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change. This header carries the pointer, never the story — the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #1956.)
 Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
@@ -1075,7 +1104,7 @@ line+branch on the ci.yml whole-engine gate; the per-fix record lives in the
 one-line summary, never the story).
 Earlier: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892
 (renumbered from the provisional #1724 at the club-R2 fold, then
-#1795 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
+#1956 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
 suffixed block per DEC-LEDGER-RENUMBER-001) — additive
 `trading_core.greeks_batch` columnar FFI face of the frozen Black-76 kernel
 (calls the SAME scalar `greeks` per element — zero math duplication; crate
@@ -5102,7 +5131,7 @@ hostile-review pass._
   MIGRATION.md ledger weave and this file's header — plus ONE keep-both
   union in `rust/trading-core/src/python.rs` (main's stage1a batch block +
   #1469's greeks_batch block, both registrations kept). The three ledger
-  rows were renumbered to the free consecutive block #1795–#1797 vs the
+  rows were renumbered to the free consecutive block #1956–#1797 vs the
   live-main tail #1794 (renumber chains recorded in-entry; DEC-IDs are the
   stable handles per DEC-LEDGER-RENUMBER-001). #1433 (brutexd) is
   deliberately NOT folded — its update-branch was 422-refused; it joins
@@ -5226,6 +5255,116 @@ hostile-review pass._
   DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
   OUT of BruteX per DEC-LIVE-REMOVE-001.)
+  Earlier: `claude/prebuild-frame-write`
+  (**DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1956** — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF). THE MEASURED ROOT
+  (Phase-1 profiling, sandbox ratios — the operator M4-Pro measurement decides):
+  the derived-TF prebuild is GIL-held Python, not I/O — the polars-frame →
+  per-bar CandleBar CONVERT costs 21.9–23.9% of the cold prebuild wall, the
+  per-bar Decimal `_tick_round` another 18.3–20.1%, BOTH re-paid on every warm
+  NO-OP merge (1,581/1,581 warm merges re-converted + re-snapped bars producing
+  zero byte changes); fsync 10–12%; the resample math ~2.5%; thread scaling
+  ZERO. THE MECHANISM: the resampled frame reaches the partition writer without
+  the frame→CandleBar→frame round trip — NEW `brutex/data/frame_write_gate.py`
+  (mode resolution over the tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE`
+  kill switch [junk ⇒ FAIL-SAFE OFF + warn-once — a RECORDED kill-must-kill
+  deviation from the fail-loud-env law, the #1531 rust_metrics precedent]; the
+  8-fresh + 8-merge per-process BURN-IN running BOTH lanes, shipping LEGACY
+  bytes, bit-comparing — mismatch ⇒ durable first-writer-wins autorevert latch
+  + ONE never-throttled ERROR; the SHADOW mode — both lanes every write, ship
+  legacy, count `frame_shadow_checked`/`frame_shadow_mismatches`, non-latching;
+  the CLOSED 15-member `DegradeReason` enum, exhaustiveness-pinned —
+  `MERGE_DELTA` is the ONE NORMAL-class production reason, gate verdicts never
+  counted as degrades) + NEW sibling entries `ParquetWriter.write_frame` /
+  `ParquetBarSink.append_frame` (vendor `write()`/`append()` signatures
+  byte-UNTOUCHED; `append_frame` owns the sink contracts — empty-input early
+  return, `bars_appended` = INPUT count, vectorized UTC-month `partition_by`
+  written ascending) + ONE call-site branch in
+  `timeframe_materialize.make_lake_write_tf._write`. Admission G0–G9 (schema/
+  dtype exactness · ts_utc non-null tz-aware strictly-sorted unique · price
+  domain · the 1e12 magnitude cast-parity bound · the UNCONDITIONAL vectorized
+  2dp ROUND_HALF_UP snap [the naive-skip idempotence claim was REFUTED — a
+  pre-DEC off-grid legacy month exists in real lakes] · single-month dest
+  bound · the Tier-1 provable-NO-OP merge probe over `eq_missing` overlap
+  equality · the stored-file decode verify · the G9 belt degrading ANY
+  unexpected fast-lane exception to legacy while RE-RAISING
+  `LakeWriteHalt`/`MemoryError`); every unprovable shape degrades
+  PER-PARTITION to the VERBATIM legacy path — a degrade NEVER decides
+  correctness, legacy owns the bytes AND the failure semantics. ONE encoder
+  serves both lanes: `_render_bytes` split into `_frame_from_bars` +
+  `_render_frame_bytes` (unconditional `.rechunk()` + schema assert), with the
+  verbatim PRE-change render law FROZEN as an inline-oracle byte golden
+  COMMITTED FIRST (48ab57f) + the Decimal(38,2)→Float64 cast law its own
+  golden; the wheel-free `brutex/config/env_flags.py` leaf promotes
+  `env_flag_tristate` out of `engine/sweep_lookahead.py` (identity-pinned
+  re-export — `brutex.data` must not import `brutex.engine`). PROOF: the
+  14-case whole-tree A/B integration corpus proves ON≡OFF trees byte-identical
+  per case; hypothesis differentials (frame↔bars parity ·
+  dict-merge≡frame-merge · month grouping · OI mapping · eq_missing); op-count
+  bench gates (fsync/replace/flock/render counts EQUAL both lanes; ZERO
+  CandleBar constructions on an admitted fresh write; warm no-op 0/0/0;
+  burn-in bounded; degrade-storm within `ratio_ceiling(3.0)`); real-writer A/B
+  smoke (cold identical · warm stable · steady no-op clean · shadow 19/0).
+  HONEST: NO production speedup claimed — tiny symbols measure SLOWER flag-ON
+  (n=375 → 2.78; crossover ≈ few×10³ bars: n=7,500 → 0.63, n=30,000 → 0.30);
+  fsync/parquet-encode/resample floor UNADDRESSED; Tier-1 accelerates only the
+  provable no-op (Tier-2 columnar merge = DEC-PREBUILD-FRAME-MERGE-TIER2-001);
+  the M3 rechunk hand-mutant is EQUIVALENT-TODAY (polars 1.42.1 probe-verified;
+  kept as a belt, disclosed). PR-2 FLIP: DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON
+  opens within 3 days of a clean operator shadow transcript
+  (`frame_shadow_mismatches == 0`). Run identity / `data_snapshot_hash` / the
+  1-minute lake untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake-schema/scope/vocab/rate change; `frame_write_gate.py`
+  (117/30) + `env_flags.py` (12/4) + `parquet_writer.py` (626/222) + `sink.py`
+  (80/18) + `timeframe_materialize.py` (181/58) ALL 100.00% line+branch on
+  their gates; the new battery 202 passed + 1 env-gated skip (239 + 2 after
+  the reconcile fold); ruff/ruff-format clean; `mypy --strict` clean; pyright
+  0 new vs the origin/main baseline. CI/CODEQL RECONCILE FOLD (2026-07-15 —
+  the per-item record lives in MIGRATION.md #1956): the 16 head pyright
+  errors fixed (TypedDict `_COORDS` kwargs; the bench probe import repointed
+  to `pipeline_prebuild` + made load-bearing) and the 4 CodeQL alerts closed
+  at root cause — `frame_to_candle_bars` rehomed to the NEW leaf
+  `brutex/data/frame_bars.py` (kills the `sink ↔ spot_daily_resample`
+  py/cyclic-import; byte-compatible re-exports kept; drift-pinned by
+  `TestImportCycleDriftPin` + a NEW dedicated 100% gate 22/6 + ci.yml
+  stanza), the two dead `sweep_lookahead` literal-set aliases DELETED (the
+  classifier re-export + identity pin stand), the integration A/B suite on
+  ONE writer-module import style; entry renumbered #1793 → #1956 at the
+  merge-reconcile. REVIEW ROUND 1 folded (2026-07-15 — the per-finding
+  record lives in MIGRATION.md #1956): the refuter-named byte-SAFE
+  degrade-DIRECTION mutant class (invisible to the A/B sha256 differential
+  by construction — a narrowed admission degrades to legacy's identical
+  bytes) closed by a 10-mutant hand-kill census (4 already killed; 6
+  survivors each now die to ONE new direction pin, fails-before verified —
+  incl. the zero-VOLUME admits pin: the production spot-INDEX shape a
+  `<0`→`<=0` mutant would have silently degraded on the whole engine trio —
+  the census is the ACCEPTED mutant-kill substitute per the #1749
+  precedent, mutation.yml wiring stays the named follow-up); the engine
+  re-export identity pin gains a wheel-free importlib file-load twin (runs
+  in EVERY environment); the ledger's burn-in event token corrected to the
+  emitted `prebuild.frame_write.autoreverted`; the G3 'positivity'
+  over-attribution corrected (upstream read-boundary guard, legacy parity);
+  the stale `_TRUTHY`/`_FALSY` docstring attributions in
+  rust_metrics/rust_stage1a reconciled to the promoted
+  `brutex.config.env_flags` home — docstring/comment-only, ENGINE
+  UNCHANGED. REVIEW ROUND 3 folded (2026-07-15 — the per-finding record
+  lives in MIGRATION.md #1956): the refuter-confirmed MAJOR — the fresh
+  fast-lane snap's `_SNAP_PARSE_SCALE=17` conflated SIGNIFICANT with
+  FRACTIONAL digits, so an 18-20-fractional-digit sub-0.1 repr just below a
+  half-paisa boundary (`0.004999999999999996`) rounded ACROSS the boundary
+  before the half-up step and `write_frame` stored `0.01` flag-ON vs the
+  legacy `0.00` (reproduced end-to-end, distinct parquet sha256) — FIXED at
+  root cause: scale 17 → 20, the proven lossless ceiling for every
+  `|x| >= 1e-4` fixed-notation repr (sub-1e-4 stays value-lossy ≤ 5e-21,
+  provably snap-exact — disclosed), the precision-38 overflow moving
+  ≳1e19 → ≳1e16 (same per-row fallback; every stale figure reconciled +
+  the inherited #1023 claim corrected in place); TEETH all fails-before
+  verified at scale 17 — the snap-parity + Decimal-cast goldens gain the
+  killing class, the hypothesis `_price` differential samples the killers
+  permanently, and the A/B corpus grows CASE 14 (the killers raw-planted
+  as a legacy off-grid 1m source, steady-mode whole-tree sha256 A/B); plus
+  the NIT: the four branch-introduced `)Earlier:` joined-line sites in
+  this file split back to the Earlier:-begins-a-new-line convention.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -6869,8 +7008,8 @@ hostile-review pass._
   the pre-change baseline; `node --check` clean on both touched JS files.)
   Earlier: `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892** —
   entry number #1892 — renumbered from the provisional #1724 (= observed live-main max #1723 + 1
-  at append) at the club-R2 integration fold, the free consecutive block #1795–#1797 vs the
-  live-main tail #1794 (the #1711 precedent, gaps are legal), then #1795 → #1892 at the
+  at append) at the club-R2 integration fold, the free consecutive block #1956–#1797 vs the
+  live-main tail #1794 (the #1711 precedent, gaps are legal), then #1956 → #1892 at the
   2026-07-16 club CDR2 fold (bare vs club-D's #1795a–#1795d suffixed block —
   DEC-LEDGER-RENUMBER-001) —
   the additive `trading_core.greeks_batch` columnar FFI face + the default-OFF
@@ -11044,6 +11183,31 @@ hostile-review pass._
   DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1780 for the full blurb)
+  Earlier: `claude/prebuild-frame-write`
+  (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1956 — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF via the
+  tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒
+  FAIL-SAFE OFF + warn-once, a recorded kill-must-kill deviation): the
+  resampled polars frame reaches the partition writer without the
+  frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+  21.9–23.9% + `_tick_round` 18.3–20.1% cold, re-paid on 1,581/1,581 warm
+  no-op merges; sandbox ratios) behind admission guards G0–G9 + the CLOSED
+  15-reason per-partition degrade-to-VERBATIM-legacy enum (a degrade never
+  decides correctness) + the 16-write both-lanes burn-in shipping LEGACY
+  bytes with a durable autorevert latch + the shadow mode whose clean
+  operator transcript gates the PR-2 default-ON flip
+  (DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON opens within 3 days of
+  `frame_shadow_mismatches == 0`); the 2dp snap stays UNCONDITIONAL (the
+  naive-skip idempotence claim REFUTED); ONE encoder serves both lanes with
+  the legacy render bytes FROZEN as a golden BEFORE any production change;
+  vendor `write()`/`append()` byte-untouched — NEW siblings
+  `write_frame`/`append_frame` + ONE call-site branch in
+  `make_lake_write_tf._write`; byte-identical lake output proven by the
+  14-case whole-tree A/B corpus + op-count bench gates; NO speedup claimed
+  (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³ bars); run
+  identity / `data_snapshot_hash` / the 1-minute lake untouched; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1956 for the full blurb)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
@@ -11473,7 +11637,7 @@ hostile-review pass._
   Active branch line — see §1 + MIGRATION.md #1743 for the full blurb)
   Earlier: `claude/greeks-rust-batch`
   (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892 — renumbered from the
-  provisional #1724 at the club-R2 fold, then #1795 → #1892 at the club
+  provisional #1724 at the club-R2 fold, then #1956 → #1892 at the club
   CDR2 fold — the additive
   `trading_core.greeks_batch` columnar face of the frozen Greeks kernel + the
   default-OFF `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in

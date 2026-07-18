@@ -56,13 +56,17 @@ import structlog
 
 from brutex.data.derive_lock import derive_write_lock
 
-# Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
-# import-graph LEAF of the pair (this module already imports its daily-derive
-# seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
-# one-directional and the former `spot_daily_resample ↔ timeframe_materialize`
-# cycle (CodeQL py/cyclic-import) cannot re-form. Kept in `__all__` for the
-# original call sites/tests.
-from brutex.data.spot_daily_resample import frame_to_candle_bars
+# Re-export: `frame_to_candle_bars` LIVES in `brutex.data.frame_bars` — the
+# TRUE import-graph LEAF (DEC-PREBUILD-FRAME-WRITE-001 review fold; it moved
+# on from `spot_daily_resample` when the frame-write lane's sink/parquet_writer
+# degrade paths re-formed a CodeQL py/cyclic-import cycle with that module's
+# own lazy sink/writer imports) — so the shared batched converter
+# (DEC-PREBUILD-GIL-VECTORIZE-001) stays one-directional and neither the
+# former `spot_daily_resample ↔ timeframe_materialize` cycle nor the
+# `sink ↔ spot_daily_resample` one can re-form (drift-pinned by
+# `TestImportCycleDriftPin`). Kept in `__all__` for the original call
+# sites/tests.
+from brutex.data.frame_bars import frame_to_candle_bars
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,
@@ -78,6 +82,7 @@ if TYPE_CHECKING:
 
     import polars as pl
 
+    from brutex.data.frame_write_gate import FrameWriteStats
     from brutex.data.models import CandleBar
     from brutex.models import Instrument
 
@@ -683,8 +688,25 @@ def materialize_lake_timeframes(
             with_open_interest=kind is not PrebuildKind.SPOT,
             months=months,
         )
+        # Frame-write gate stats (DEC-PREBUILD-FRAME-WRITE-001): one collector
+        # per symbol derive when the gate is engaged, folded into the
+        # write_summary INFO below as ADDITIVE fields; ``None`` (the PR-1
+        # default-OFF path) keeps the summary payload byte-identical.
+        from brutex.data.frame_write_gate import (
+            FrameWriteMode,
+            FrameWriteStats,
+            resolve_frame_write_mode,
+        )
+
+        frame_stats: FrameWriteStats | None = (
+            FrameWriteStats() if resolve_frame_write_mode() is not FrameWriteMode.OFF else None
+        )
         write_tf = make_lake_write_tf(
-            lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            frame_stats=frame_stats,
         )
         resampler = intraday_resampler_for(kind)
 
@@ -718,6 +740,19 @@ def materialize_lake_timeframes(
             per symbol carrying the timeframe count + total derived bars — the
             aggregate form of the per-partition fields the forensics rely on.
             """
+            # Frame-write counters (DEC-PREBUILD-FRAME-WRITE-001): ADDITIVE
+            # fields, emitted ONLY while the gate is engaged — the flag-OFF
+            # summary payload stays byte-identical to the pre-change one
+            # (existing fields untouched, V3 C14).
+            frame_fields: dict[str, object] = {}
+            if frame_stats is not None:
+                frame_fields = {
+                    "frame_fast": frame_stats.fast,
+                    "frame_degraded": frame_stats.degraded,
+                    "frame_degrade_reasons": dict(frame_stats.degrade_reasons),
+                    "frame_shadow_checked": frame_stats.shadow_checked,
+                    "frame_shadow_mismatches": frame_stats.shadow_mismatches,
+                }
             _LOG.info(
                 "lake.derived.write_summary",
                 exchange=exchange,
@@ -727,6 +762,7 @@ def materialize_lake_timeframes(
                 total_bars=result.total_bars,
                 skipped=len(result.skipped),
                 include_daily=include_daily,
+                **frame_fields,
             )
 
         if not include_daily:
@@ -1129,6 +1165,7 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     exchange: str,
     segment: str,
     symbol: str,
+    frame_stats: FrameWriteStats | None = None,
 ) -> Callable[[str, pl.DataFrame], int]:
     """Build the injected per-timeframe writer for :func:`materialize_timeframes`.
 
@@ -1164,7 +1201,23 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     lake I/O — ``# pragma: no cover``; exercised by the round-trip integration
     test. Moved here from the dashboard route glue (DEC-TF-MATERIALIZE-002) —
     one builder for every caller.
+
+    **Frame-direct gate (DEC-PREBUILD-FRAME-WRITE-001, Seam A — the ONLY
+    call-site change):** the ``BRUTEX_PREBUILD_FRAME_WRITE`` kill switch is
+    resolved ONCE at builder time (the ``resolve_market_closed`` resolve-once
+    precedent). Engaged (``on``/``shadow``) → the returned writer calls the
+    NEW verify-or-degrade
+    :meth:`~brutex.data.sink.ParquetBarSink.append_frame` sibling
+    (``absent_open_interest=0`` — the intraday convention above, reproduced
+    columnar; V3 C6); disabled (the PR-1 DEFAULT — dark) → the VERBATIM
+    legacy ``append(bars=frame_to_candle_bars(frame), …)`` call below, kept
+    in place so the OFF path is byte-identical BY CONSTRUCTION (no fast-lane
+    code touches the frame — negative-pinned). *frame_stats* (optional)
+    collects the per-symbol fast/degrade/shadow counters
+    ``materialize_lake_timeframes`` folds into the
+    ``lake.derived.write_summary`` INFO as additive fields.
     """
+    from brutex.data.frame_write_gate import FrameWriteMode, resolve_frame_write_mode
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
@@ -1177,8 +1230,26 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     # (materialize_lake_timeframes); the live-pull vendor writers keep INFO.
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root, partition_log_level="debug"))
 
+    # Resolve the frame-write gate ONCE per builder (DEC-PREBUILD-FRAME-WRITE-001).
+    use_frame_lane = resolve_frame_write_mode() is not FrameWriteMode.OFF
+
     def _write(tf_label: str, frame: pl.DataFrame) -> int:
         interval = INTRADAY_TF_INTERVALS[tf_label]
+        if use_frame_lane:
+            # FRAME-DIRECT lane (DEC-PREBUILD-FRAME-WRITE-001): the sink/writer
+            # siblings own the admission guards, the burn-in/shadow cross-check
+            # and the per-partition degrade back to the verbatim legacy path.
+            frame_result = sink.append_frame(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=frame,
+                merge_mode="latest-wins",
+                absent_open_interest=0,
+                stats=frame_stats,
+            )
+            return frame_result.bars_appended
         result = sink.append(
             exchange=exchange,
             segment=segment,
