@@ -139,6 +139,21 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/data/lake_rust_render.py",
         ".github/workflows/lake-rust-parity.yml",
     ),
+    # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
+    # brutex_data is the default-OFF data pure-law crate (the fno_symbol
+    # structural grammar). It is consumed ONLY through the import-guarded
+    # facade brutex/data/fno_symbol_rust.py
+    # (`importlib.import_module("brutex_data")` inside the guard — an
+    # absent or broken install latches BRUTEX_DATA_RUST OFF with one loud
+    # WARN and the Python oracle serves, byte-identical). Deliberately NOT
+    # a turnkey build prerequisite: in NO cargo workspace, built ONLY by
+    # its own CI lane (.github/workflows/data-rust-parity.yml). A
+    # module-top `import brutex_data` anywhere in brutex/ would reclassify
+    # it REQUIRED — the inverse pin below forbids exactly that.
+    "brutex_data": (
+        "brutex/data/fno_symbol_rust.py",
+        ".github/workflows/data-rust-parity.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {
