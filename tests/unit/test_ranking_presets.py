@@ -41,7 +41,16 @@ def _rec(run_id: str, **overrides: Any) -> RankRecord:
 
 class TestPresetVocabulary:
     def test_display_order_and_default(self) -> None:
-        assert PRESET_NAMES == ("min_dd_first", "composite", "profit_factor", "win_rate", "calmar")
+        # "growth" appended last (DEC-METRICS-KELLY-GROWTH-001 — the half-Kelly
+        # log-growth preset; a sanctioned additive vocabulary extension).
+        assert PRESET_NAMES == (
+            "min_dd_first",
+            "composite",
+            "profit_factor",
+            "win_rate",
+            "calmar",
+            "growth",
+        )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
 
     def test_every_preset_names_itself(self) -> None:
@@ -53,7 +62,7 @@ class TestPresetVocabulary:
         # min_dd_first is the ONE ascending preset; the alternates all rank
         # descending on the raw value (the ResultsStore.top_k law).
         assert PRESETS["min_dd_first"].reverse is False
-        for token in ("composite", "profit_factor", "win_rate", "calmar"):
+        for token in ("composite", "profit_factor", "win_rate", "calmar", "growth"):
             assert PRESETS[token].reverse is True
 
     @pytest.mark.parametrize("token", PRESET_NAMES)
@@ -114,6 +123,7 @@ class TestDescendingPresets:
             ("profit_factor", "profit_factor"),
             ("win_rate", "win_rate"),
             ("calmar", "calmar_ratio"),
+            ("growth", "log_growth_at_half_kelly"),
         ],
     )
     def test_higher_raw_value_first(self, token: str, field: str) -> None:
@@ -121,7 +131,9 @@ class TestDescendingPresets:
         high = _rec("b" * 64, **{field: 3.1})
         assert PRESETS[token].sort_records([low, high]) == (high, low)
 
-    @pytest.mark.parametrize("token", ["composite", "profit_factor", "win_rate", "calmar"])
+    @pytest.mark.parametrize(
+        "token", ["composite", "profit_factor", "win_rate", "calmar", "growth"]
+    )
     def test_value_tie_falls_to_run_id_asc(self, token: str) -> None:
         first = _rec("1" * 64)
         second = _rec("2" * 64)
@@ -132,6 +144,19 @@ class TestDescendingPresets:
         low = _rec("c" * 64, composite_score=-9.0)
         high = _rec("b" * 64, composite_score=2.0)
         assert PRESETS["composite"].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_growth_none_ranks_last(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001: an unscored / pre-extension-store
+        # record (None log growth) ranks AFTER every scored one — the
+        # composite None-after-scored idiom, never a fabricated 0.
+        unscored = _rec("a" * 64, log_growth_at_half_kelly=None)
+        low = _rec("c" * 64, log_growth_at_half_kelly=-0.4)
+        high = _rec("b" * 64, log_growth_at_half_kelly=0.02)
+        assert PRESETS["growth"].sort_records([unscored, low, high]) == (high, low, unscored)
+
+    def test_rank_record_growth_field_defaults_none(self) -> None:
+        # Defaulted-last so pre-extension record builders stay valid.
+        assert _rec("a" * 64).log_growth_at_half_kelly is None
 
 
 class TestSortByPresetGeneric:

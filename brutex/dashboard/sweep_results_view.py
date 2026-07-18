@@ -635,6 +635,10 @@ def _preset_rank_record(
         profit_factor=row.profit_factor,
         win_rate=row.win_rate,
         calmar_ratio=row.calmar_ratio,
+        # The growth-preset input (DEC-METRICS-KELLY-GROWTH-001): persisted on
+        # the row; None on a pre-extension store — honestly unscored, ranks
+        # last under the preset's presence flag (never a fabricated 0).
+        log_growth_at_half_kelly=row.log_growth_at_half_kelly,
     )
 
 

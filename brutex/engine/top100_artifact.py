@@ -90,7 +90,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
-from brutex.ranking import MIN_TRADES
+from brutex.ranking import MIN_TRADES, STREAK_DOOR_WLR_EXEMPT, streak_door_threshold
 from brutex.ranking.presets import (
     DEFAULT_PRESET,
     PRESET_NAMES,
@@ -190,7 +190,11 @@ GATE_MAX_DRAWDOWN_PCT: Final[float] = 30.0
 GATE_MIN_WIN_RATE: Final[float] = 0.25
 GATE_MIN_WIN_LOSS_RATIO: Final[float] = 2.0
 
-#: Gate 5 — a longer losing streak is an account-blower.
+#: Gate 5's legacy fixed streak bound — since DEC-METRICS-KELLY-GROWTH-001
+#: the FLOOR inside the shared :func:`brutex.ranking.streak_door_threshold`
+#: (which :func:`passes_hard_gates` composes directly — the statistics is
+#: IMPORTED, never re-derived here); this re-pin survives for the
+#: drift-test against ``brutex.ranking``'s private twin + back-compat.
 GATE_MAX_CONSECUTIVE_LOSSES: Final[int] = 10
 
 #: Required keys of every artifact entry — the binding P3→P4 contract keys
@@ -387,6 +391,14 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     upstream non-finite fail-closed guard has no reachable input here. A
     ``None`` ``win_loss_ratio`` contributes ``0.0`` to the combined gate —
     the upstream ``passes_gates`` substitution, verbatim.
+
+    Door 5 is the derived binomial-null streak door
+    (DEC-METRICS-KELLY-GROWTH-001): the SHARED
+    :func:`brutex.ranking.streak_door_threshold` (imported — the statistics
+    has ONE home) at ``loss_rate = losing_trades / total_trades`` (safe:
+    Door 1 already refused ``total_trades < 30``, and the mirror
+    short-circuits), with the high-payoff exemption ``win_loss_ratio >=
+    STREAK_DOOR_WLR_EXEMPT`` (a ``None`` ratio never exempts).
     """
     if row.total_trades < GATE_MIN_TRADES:
         return False
@@ -397,7 +409,11 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     wlr = agg.win_loss_ratio if agg.win_loss_ratio is not None else 0.0
     if row.win_rate < GATE_MIN_WIN_RATE and wlr < GATE_MIN_WIN_LOSS_RATIO:
         return False
-    return agg.max_consecutive_losses <= GATE_MAX_CONSECUTIVE_LOSSES
+    if agg.win_loss_ratio is not None and agg.win_loss_ratio >= STREAK_DOOR_WLR_EXEMPT:
+        return True
+    return agg.max_consecutive_losses <= streak_door_threshold(
+        row.total_trades, row.losing_trades / row.total_trades
+    )
 
 
 def resolve_preset(name: str) -> str:
@@ -427,6 +443,10 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         profit_factor=candidate.row.profit_factor,
         win_rate=candidate.row.win_rate,
         calmar_ratio=candidate.row.calmar_ratio,
+        # The growth-preset input (DEC-METRICS-KELLY-GROWTH-001): the row's
+        # persisted half-Kelly log growth — None on a pre-extension store
+        # (honestly unscored, ranks last under the preset's presence flag).
+        log_growth_at_half_kelly=candidate.row.log_growth_at_half_kelly,
     )
 
 

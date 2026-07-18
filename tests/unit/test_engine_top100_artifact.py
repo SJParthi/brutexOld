@@ -148,6 +148,71 @@ class TestPassesHardGates:
         )
         assert passes_hard_gates(cand.row, cand.agg) is False
 
+    def test_streak_door_floor_pins_the_default_fixture(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001 (Door 5): the default fixture's pool
+        # (40 trades, loss rate 15/40) derives a binomial-null k99 BELOW the
+        # historical floor, so the door threshold is exactly the floor (10) —
+        # which is why test_long_losing_streak_rejected's 11 still rejects.
+        cand = make_candidate(1, fingerprint=fingerprint_seed(1))
+        derived = ranking.streak_door_threshold(
+            cand.row.total_trades, cand.row.losing_trades / cand.row.total_trades
+        )
+        assert derived == GATE_MAX_CONSECUTIVE_LOSSES == 10
+        boundary = make_candidate(
+            1, fingerprint=fingerprint_seed(1), agg_overrides={"max_consecutive_losses": 10}
+        )
+        assert passes_hard_gates(boundary.row, boundary.agg) is True
+
+    def test_streak_door_uses_the_shared_derived_threshold_above_the_floor(self) -> None:
+        # A big loss-heavy pool: the binomial-null 99th percentile EXCEEDS the
+        # floor, so a streak between the floor and the derived threshold now
+        # PASSES while threshold+1 still rejects — proving the mirror composes
+        # brutex.ranking.streak_door_threshold (imported), never a private
+        # fixed constant (DEC-METRICS-KELLY-GROWTH-001).
+        row_overrides = {
+            "total_trades": 400,
+            "winning_trades": 200,
+            "losing_trades": 200,
+            "win_rate": 0.5,
+        }
+        derived = ranking.streak_door_threshold(400, 0.5)
+        assert derived > GATE_MAX_CONSECUTIVE_LOSSES
+        at_threshold = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides=dict(row_overrides),
+            agg_overrides={"max_consecutive_losses": derived},
+        )
+        past_threshold = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides=dict(row_overrides),
+            agg_overrides={"max_consecutive_losses": derived + 1},
+        )
+        assert passes_hard_gates(at_threshold.row, at_threshold.agg) is True
+        assert passes_hard_gates(past_threshold.row, past_threshold.agg) is False
+
+    def test_high_win_loss_ratio_exempts_the_streak_door(self) -> None:
+        # The UNION law (door OR exemption): a payoff ratio at/above the
+        # map-pinned 3.0 tolerates any streak — Gate 4's separate 2.0 bound
+        # is unrelated (DEC-METRICS-KELLY-GROWTH-001).
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={"max_consecutive_losses": 50, "win_loss_ratio": 3.0},
+        )
+        assert passes_hard_gates(cand.row, cand.agg) is True
+
+    def test_none_win_loss_ratio_never_exempts_the_streak_door(self) -> None:
+        # An honest unknown ratio can never buy the exemption (the VIX
+        # None-never-fabricates posture).
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={"max_consecutive_losses": 11, "win_loss_ratio": None},
+        )
+        assert passes_hard_gates(cand.row, cand.agg) is False
+
 
 class TestResolvePreset:
     @pytest.mark.parametrize("name", TOP100_PRESETS)
@@ -209,7 +274,12 @@ class TestRankCandidates:
 
     @pytest.mark.parametrize(
         ("preset", "field"),
-        [("profit_factor", "profit_factor"), ("win_rate", "win_rate"), ("calmar", "calmar_ratio")],
+        [
+            ("profit_factor", "profit_factor"),
+            ("win_rate", "win_rate"),
+            ("calmar", "calmar_ratio"),
+            ("growth", "log_growth_at_half_kelly"),
+        ],
     )
     def test_alternate_presets_rank_descending_on_the_raw_row_value(
         self, preset: str, field: str
@@ -218,6 +288,30 @@ class TestRankCandidates:
         high = make_candidate(2, fingerprint=fingerprint_seed(2), row_overrides={field: 1.9})
         ranked = rank_candidates([low, high], preset=preset)
         assert [c.row.run_id for c in ranked] == [high.row.run_id, low.row.run_id]
+
+    def test_growth_preset_none_ranks_last(self) -> None:
+        # DEC-METRICS-KELLY-GROWTH-001: a pre-extension / degenerate row (None
+        # growth — the fixture default) ranks AFTER every scored one — the
+        # composite None-after-scored law, threaded row → RankRecord by the
+        # builder's _rank_record projection.
+        unscored = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unscored.row.log_growth_at_half_kelly is None
+        low = make_candidate(
+            2,
+            fingerprint=fingerprint_seed(2),
+            row_overrides={"log_growth_at_half_kelly": -0.4},
+        )
+        high = make_candidate(
+            3,
+            fingerprint=fingerprint_seed(3),
+            row_overrides={"log_growth_at_half_kelly": 0.02},
+        )
+        ranked = rank_candidates([unscored, low, high], preset="growth")
+        assert [c.row.run_id for c in ranked] == [
+            high.row.run_id,
+            low.row.run_id,
+            unscored.row.run_id,
+        ]
 
     def test_composite_preset_ranks_descending_none_last(self) -> None:
         none_score = make_candidate(

@@ -12,7 +12,9 @@ Default ``min_dd_first``: smallest ``max_drawdown_pct`` FIRST → composite
 score (full precision, never rounded) descending as the tiebreak — a ``None``
 composite ranks AFTER every real one, never coerced to a fake number →
 fewest ``max_consecutive_losses`` → ``run_id`` ASC (the store's tie law).
-Alternates ``composite`` / ``profit_factor`` / ``win_rate`` / ``calmar``:
+Alternates ``composite`` / ``profit_factor`` / ``win_rate`` / ``calmar`` /
+``growth`` (half-Kelly log growth, DEC-METRICS-KELLY-GROWTH-001 — a ``None``
+growth ranks after every scored one, the composite None-after-scored idiom):
 each DESCENDING on the RAW uncoerced value with the same ``run_id``-ASC
 stable pre-sort — the exact ``ResultsStore.top_k`` two-pass law
 (recon-ranking §3), so every preset is a strict, discovery-order-free total
@@ -79,6 +81,12 @@ class RankRecord:
     profit_factor: float
     win_rate: float
     calmar_ratio: float
+    #: The persisted half-Kelly log-growth figure feeding the ``growth``
+    #: preset (DEC-METRICS-KELLY-GROWTH-001). ``None`` = honestly unscored
+    #: (a pre-extension store row) — ranks AFTER every scored record under
+    #: the ``_growth_key`` presence flag, exactly like an unscored
+    #: composite. Defaulted so pre-extension record builders stay valid.
+    log_growth_at_half_kelly: float | None = None
 
 
 #: A preset sort key — either the 4-part min-DD ascending key or the
@@ -125,6 +133,20 @@ def _win_rate_key(record: RankRecord) -> tuple[int, float]:
 def _calmar_key(record: RankRecord) -> tuple[int, float]:
     """Raw persisted Calmar ratio (full precision)."""
     return (1, record.calmar_ratio)
+
+
+def _growth_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, log_growth_at_half_kelly)`` — the ``growth`` preset key.
+
+    The ``_composite_key`` None-after-scored idiom (DEC-METRICS-KELLY-GROWTH-001):
+    a ``None`` log-growth (a pre-extension store row — honestly unscored)
+    sorts LAST under ``reverse=True`` via the presence flag, never coerced to
+    a fake number; ties fall through to the stable ``run_id``-ASC pre-sort.
+    """
+    growth = record.log_growth_at_half_kelly
+    if growth is None:
+        return (0, 0.0)
+    return (1, growth)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +221,12 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         describe="Calmar ratio, descending",
         reverse=True,
         key=_calmar_key,
+    ),
+    "growth": RankingPreset(
+        name="growth",
+        describe=("half-Kelly log growth, descending (unscored/pre-extension rows rank last)"),
+        reverse=True,
+        key=_growth_key,
     ),
 }
 

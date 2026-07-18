@@ -5,7 +5,11 @@ Hard rejection gates (applied BEFORE composite scoring):
 - profit_factor < 1.2 → REJECT (no edge)
 - max_drawdown_pct > 30% → REJECT (uninvestable)
 - win_rate < 25% AND win_loss_ratio < 2.0 → REJECT
-- max_consecutive_losses > 10 → REJECT (account-blower)
+- max_consecutive_losses > max(10, k99) AND win_loss_ratio < 3.0 → REJECT
+  (account-blower — the BINOMIAL-NULL streak door, DEC-METRICS-KELLY-GROWTH-001:
+  k99 = the strategy's own-loss-rate max-run quantile from
+  :func:`brutex.ranking.streaks.max_loss_streak_quantile`; the legacy 10 is a
+  FLOOR so the door only ever LOOSENS — see :func:`streak_door_threshold`)
 - Deflated_Sharpe < dsr_min → REJECT (multiple-testing overfit)  [6th gate, opt-in]
 
 Composite ranking score (after gates pass):
@@ -69,6 +73,7 @@ from brutex.ranking.overfit import (
     passes_overfit_gate,
     pool_sharpe_dispersion,
 )
+from brutex.ranking.streaks import max_loss_streak_quantile
 
 # ── Hard rejection gate thresholds (the spec, above) ──
 #: Minimum closed trades for a result to be rankable (below this is statistical
@@ -83,7 +88,19 @@ _MIN_PROFIT_FACTOR = 1.2
 _MAX_DRAWDOWN_PCT = 30.0
 _MIN_WIN_RATE = 0.25
 _MIN_WIN_LOSS_RATIO = 2.0
+#: Door 5's legacy fixed streak bound — since DEC-METRICS-KELLY-GROWTH-001 the
+#: FLOOR of the derived threshold (see :func:`streak_door_threshold`), and the
+#: whole threshold for the degenerate all-loss (``loss_rate >= 1``) arm.
 _MAX_CONSECUTIVE_LOSSES = 10
+
+#: Door 5's high-payoff exemption bound (DEC-METRICS-KELLY-GROWTH-001, the
+#: map-PINNED 3.0): a combo whose average winner is at least this many times
+#: its average loser survives a long loss streak by construction — its streak
+#: length is not the account-blower signal the door hunts. PUBLIC because the
+#: ``top100_artifact`` gate mirror composes the SAME door from persisted
+#: records (CLAUDE.md §11 COMMON — one constant, never a re-pinned literal).
+#: Deliberately DISTINCT from Door 4's unrelated ``_MIN_WIN_LOSS_RATIO`` 2.0.
+STREAK_DOOR_WLR_EXEMPT: Final[float] = 3.0
 
 # ── Composite weights (the 7 available terms; the 0.05 lockbox term is Stage-3) ──
 _W_SHARPE = 0.25
@@ -177,6 +194,56 @@ class RankedCombo:
         return _risk_efficiency(self.metrics)
 
 
+def streak_door_threshold(total_trades: int, loss_rate: float) -> int:
+    """Door 5's derived max-loss-streak bound (DEC-METRICS-KELLY-GROWTH-001).
+
+    ``max(10, k99)`` where ``k99 =``
+    :func:`brutex.ranking.streaks.max_loss_streak_quantile` at the strategy's
+    OWN loss rate — the smallest run length whose binomial-null probability of
+    appearing at all in ``total_trades`` i.i.d. trades falls below
+    :data:`~brutex.ranking.streaks.STREAK_DOOR_ALPHA`. A streak at-or-below
+    the bound is CONSISTENT with luck under the strategy's own loss
+    probability; only an off-null streak fails the door.
+
+    **The floor is load-bearing (the map's Interactions cell):** relaxing the
+    streak gate widens survivor pools, and a wider pool auto-tightens the
+    Stage-4 DSR deflation (``N`` grows) — the SAFE direction. An UNFLOORED
+    derived bound would TIGHTEN the door for high-win-rate combos (``k99 <
+    10`` at small ``loss_rate``), flipping that direction, so the legacy 10
+    stays as the floor and the door only ever LOOSENS (property-pinned:
+    every metrics row that passed the fixed-10 door passes the derived one).
+
+    The degenerate all-loss arm (``loss_rate >= 1.0`` — the quantile's own
+    refusal domain) keeps the fixed legacy bound: a 100%-loss strategy must
+    never ride its "expected" run of ``n`` losses through the door.
+
+    PUBLIC because the ``top100_artifact`` gate mirror composes the SAME
+    door over persisted records (CLAUDE.md §11 COMMON — the statistics has
+    one home, never a mirrored re-derivation).
+    """
+    if loss_rate >= 1.0:
+        return _MAX_CONSECUTIVE_LOSSES
+    return max(_MAX_CONSECUTIVE_LOSSES, max_loss_streak_quantile(total_trades, loss_rate))
+
+
+def _fails_consecutive_losses_door(m: ResultMetrics) -> bool:
+    """Door 5 verdict — ONE body shared by :func:`passes_gates` + :func:`gate_reasons`.
+
+    FAIL iff the observed ``max_consecutive_losses`` exceeds the derived
+    :func:`streak_door_threshold` AND the high-payoff exemption does not
+    apply (``win_loss_ratio >= STREAK_DOOR_WLR_EXEMPT`` — a ``None`` ratio
+    never exempts, consistent with Door 4's ``None`` → ``0.0`` projection).
+    The door∧exemption UNION is a recorded lane choice
+    (DEC-METRICS-KELLY-GROWTH-001). Callers own the fail-closed non-finite
+    guard (``loss_rate`` / ``win_loss_ratio`` are judged there BEFORE any
+    door), so this body sees finite-or-``None`` inputs in gate context.
+    """
+    wlr = m.win_loss_ratio
+    if wlr is not None and wlr >= STREAK_DOOR_WLR_EXEMPT:
+        return False
+    return m.max_consecutive_losses > streak_door_threshold(m.total_trades, m.loss_rate)
+
+
 def _non_finite_gate_input(value: float | None) -> bool:
     """Whether a float-valued gate input is present but non-finite (``NaN``/±``inf``).
 
@@ -198,16 +265,31 @@ def passes_gates(m: ResultMetrics) -> bool:
 
     **Fail-closed on non-finite inputs (DEC-RANKING-TIEBREAK-001).** A ``NaN`` or
     ±``inf`` in any float-valued gate input (``profit_factor``, ``max_drawdown_pct``,
-    ``win_rate``, ``win_loss_ratio``) would silently slip through a ``<`` / ``>``
+    ``win_rate``, ``win_loss_ratio``, ``loss_rate`` — the last a Door-5 input
+    since DEC-METRICS-KELLY-GROWTH-001: a ``NaN`` loss rate would silently
+    corrupt the derived streak threshold) would slip through a ``<`` / ``>``
     comparison as a PASS (``NaN < x`` and ``NaN > x`` are both ``False``), a silent
     wrong-ACCEPT on malformed data. Such a result is REJECTED up front. The
     integer-valued gates (``total_trades``, ``max_consecutive_losses``) cannot be
     non-finite. Behaviour for every FINITE value and for ``None`` is byte-identical
     to before this guard.
+
+    **Door 5 is the derived binomial-null streak door**
+    (DEC-METRICS-KELLY-GROWTH-001, superseding the fixed
+    ``max_consecutive_losses <= 10``): the bound is
+    :func:`streak_door_threshold` (floored at the legacy 10 so the door only
+    LOOSENS), with the high-payoff exemption ``win_loss_ratio >=
+    STREAK_DOOR_WLR_EXEMPT`` — see :func:`_fails_consecutive_losses_door`.
     """
     if any(
         _non_finite_gate_input(value)
-        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
+        for value in (
+            m.profit_factor,
+            m.max_drawdown_pct,
+            m.win_rate,
+            m.win_loss_ratio,
+            m.loss_rate,
+        )
     ):
         return False
     if m.total_trades < MIN_TRADES:
@@ -226,7 +308,7 @@ def passes_gates(m: ResultMetrics) -> bool:
     wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0  # pragma: no mutate
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         return False
-    return m.max_consecutive_losses <= _MAX_CONSECUTIVE_LOSSES
+    return not _fails_consecutive_losses_door(m)
 
 
 # ── Gate-door reason vocabulary (DEC-SWEEP-RESULTS-DEPTH-001 · gap-register
@@ -247,7 +329,13 @@ GATE_MAX_DRAWDOWN: Final[str] = "max_drawdown"
 #: Door 4 — ``win_rate < 25%`` AND ``win_loss_ratio < 2.0`` (``None`` ratio
 #: counts as ``0.0``, exactly like :func:`passes_gates`).
 GATE_WIN_RATE_WLR: Final[str] = "win_rate_wlr"
-#: Door 5 — ``max_consecutive_losses > 10`` (account-blower).
+#: Door 5 — the DERIVED binomial-null streak door
+#: (DEC-METRICS-KELLY-GROWTH-001): ``max_consecutive_losses >
+#: streak_door_threshold(total_trades, loss_rate)`` (= ``max(10, k99)`` —
+#: the own-loss-rate null quantile, floored at the legacy 10 so the door
+#: only LOOSENS) AND no high-payoff exemption (``win_loss_ratio >=
+#: STREAK_DOOR_WLR_EXEMPT``). The wire TOKEN is UNCHANGED — the reason
+#: vocabulary is a stable contract; only the door's bound derivation moved.
 GATE_CONSECUTIVE_LOSSES: Final[str] = "consecutive_losses"
 
 #: The COMPLETE reason vocabulary in EVALUATION order — the exact order
@@ -281,7 +369,7 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
 
     * **Fail-closed short-circuit** — a present-but-non-finite float gate input
       (``NaN``/±``inf`` in ``profit_factor`` / ``max_drawdown_pct`` /
-      ``win_rate`` / ``win_loss_ratio``) returns
+      ``win_rate`` / ``win_loss_ratio`` / ``loss_rate``) returns
       ``(``:data:`GATE_NON_FINITE_INPUT```,)`` ALONE: the metrics are
       malformed, and judging the remaining doors on garbage would fabricate
       per-door verdicts (a ``NaN`` silently passes any ``<``/``>``), so no
@@ -302,7 +390,13 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     """
     if any(
         _non_finite_gate_input(value)
-        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
+        for value in (
+            m.profit_factor,
+            m.max_drawdown_pct,
+            m.win_rate,
+            m.win_loss_ratio,
+            m.loss_rate,
+        )
     ):
         return (GATE_NON_FINITE_INPUT,)
     reasons: list[str] = []
@@ -317,7 +411,9 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         reasons.append(GATE_WIN_RATE_WLR)
-    if m.max_consecutive_losses > _MAX_CONSECUTIVE_LOSSES:
+    # Door 5 rides the SAME shared body passes_gates consults (the derived
+    # binomial-null streak door + exemption — the two can never drift).
+    if _fails_consecutive_losses_door(m):
         reasons.append(GATE_CONSECUTIVE_LOSSES)
     return tuple(reasons)
 
@@ -682,6 +778,7 @@ __all__ = [
     "GATE_WIN_RATE_WLR",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
+    "STREAK_DOOR_WLR_EXEMPT",
     "OverfitGateConfig",
     "RankedCombo",
     "composite_scores",
@@ -689,7 +786,9 @@ __all__ = [
     "dsr_z_contributions",
     "ensure_unique_survivor_masks",
     "gate_reasons",
+    "max_loss_streak_quantile",
     "overfit_gate_positions",
     "passes_gates",
     "rank_combos",
+    "streak_door_threshold",
 ]
