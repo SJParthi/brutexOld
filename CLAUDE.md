@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-18 (DEC-META-LABEL-ANNOTATE-001 +
+DEC-ABSTAIN-GATE-STREAM-001, MIGRATION.md #1984–#1985 — the meta-labeling
+P(win) ANNOTATION layer + the abstention-first gate stream, ANNOTATION-ONLY:
+the NEW `brutex/meta/` package + the manual-invoke `brutex meta-annotate`
+CLI write the `<stem>.meta.json` FOURTH sidecar (strictly out-of-fold CPCV
+P(win) via the REUSED `cpcv_splits` + the τ sweep with
+`n_thresholds_swept` recorded + the five-reason abstain replay over each
+trade's ENTRY snapshot) beside the results-depth trio — `top100.json` +
+every existing artifact BYTE-UNTOUCHED; the born-Rust `rust/brutex-meta`
+kernels (O(1)/trade scorer + O(1)/element abstain bitmasks) sit behind the
+default-OFF `BRUTEX_META_GATE` facade with the Python oracle live; the
+DORMANT in-sim knob `BRUTEX_ABSTAIN_GATE_INSIM` REFUSES loudly at the
+sweep entry (the BRUTEX_FILL_MODE precedent). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1984–#1985 — this header carries the pointer, never
+the story.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
@@ -3297,7 +3313,88 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+- **Active branch:** `claude/meta-label-abstain-gates`
+  (**DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001,
+  MIGRATION.md #1984–#1985 — queue-master band per the winning-p0 ruling;
+  live-main ceiling #1953 at assignment, gaps legal per
+  DEC-LEDGER-RENUMBER-001** — P0 items 14+15 as ONE annotation-only change
+  set. ITEM 14 (meta-labeling, AFML Ch.3/10): NEW `brutex/meta/` —
+  `features.py` (the FIXED 16-name entry-observable feature vector, TOTAL
+  extraction from the trade_store wire), `logistic.py` (offline numpy
+  IRLS+ridge fit, NO sklearn; `score_logistic` = the pinned
+  ascending-accumulation Python inference ORACLE), `cpcv_fit.py`
+  (strictly OUT-OF-FOLD p_win via the EXISTING `metrics.cpcv.cpcv_splits`
+  — REUSED, never re-minted; label_span = embargo = the conservative
+  trade-index max-overlap approximation over entry/exit TIMESTAMPS;
+  < MIN_TRADES_FOR_FIT=30 / single-class → the honest degenerate),
+  `threshold.py` (τ 0.50→0.95 step 0.05; `N_THRESHOLDS_SWEPT`=10 recorded
+  in every sidecar — the DSR anti-double-dipping trials count), and
+  `annotate.py` — the pass writing ONE canonical-JSON `<stem>.meta.json`
+  FOURTH sidecar + the run-level `meta_annotation.json` (NO timestamps;
+  re-runs BYTE-IDENTICAL; per-stem isolation, counted named skips;
+  global-stops re-raise raw; six verbatim honest-limits notes +
+  `revalidation_required: true` on every artifact), surfaced as the
+  manual-invoke `brutex meta-annotate` CLI (lens via the SAME
+  `_depth_reference_loader` shim, best-effort empty-lens degrade;
+  `--dry-run` zero-write tree-pinned). R13 ZERO-RISK: `top100.json` +
+  every existing artifact BYTE-UNTOUCHED; `meta_label`/`abstain_gate`
+  display keys RESERVED, never written. THE W4 FOLD-KEY LAW (binding
+  coordination, recorded): trades are keyed ONLY by `trade_seq` +
+  entry/exit TIMESTAMPS — never bar indices or holding-bars quantities;
+  W4-owned names (`execution_grid` · `exits_deferred` ·
+  `signals_dropped_collision` · `fill_slid_minutes`) are NEVER emitted.
+  ITEM 15 (abstention-first, annotation-only): `abstain.py` — the STABLE
+  `ABSTAIN_REASON_ORDER = (regime_mismatch, vix_out_of_band, vix_missing,
+  event_day, low_confidence)` + the frozen `AbstainGateConfig` + the pure
+  TOTAL `abstain_reasons()` (NaN-normalized; EXACT `>= tau` boundary;
+  fail-closed on missing confidence under a configured τ; passes ⇔
+  reasons==(), property-pinned); the DEFAULT ILLUSTRATIVE config (no
+  regime restriction · stamped-aggs vix band else None ·
+  block_event_days=True · τ=0.7) replayed per trade into the `.meta.json`
+  abstain block (reasons keyed by trade_seq, `would_abstain_count`,
+  `kept_pct`); the DORMANT in-sim arm: `BRUTEX_ABSTAIN_GATE_INSIM` set to
+  ANY value raises the typed `AbstainGateInSimRefusedError` at the
+  `cmd_sweep_all` eager chokepoint BEFORE any artifact (the
+  BRUTEX_FILL_MODE precedent; refusal-leaves-zero-artifacts
+  integration-pinned) — the walker `abstain_gate=None` ctor-hook design,
+  the reserved `canonical_trade_params` key `abstain_gate` (NEVER emitted
+  today), the Rule-3 VIX precondition + MIN_TRADES/DSR interactions and
+  the W4 compose contract (`claude/fill-1m-exec-grid` @ 779fa9e2 — ctor
+  unchanged post-PR-B) live in `docs/design/meta/ABSTAIN_INSIM_DESIGN.md`;
+  building it needs its OWN DEC + ADR + operator ruling. BORN-RUST O(1)
+  (operator 2026-07-18): NEW crate `rust/brutex-meta` (pyo3 0.29
+  abi3-py312, the brutex-feed conventions — source-digest twin, symbol
+  handshake, panic belt, proptest) — batch logistic scorer + abstain
+  reason bitmasks — behind the default-OFF Pattern-A `BRUTEX_META_GATE`
+  facade `brutex/meta/meta_rust.py` (16-call burn-in bit-compare +
+  ship-the-ORACLE autorevert + process latch; refuse-poison validation;
+  MemoryError/KeyboardInterrupt/SystemExit re-raise raw; OFF = oracle
+  serves + crate NEVER imported, bomb-spy-pinned); `brutex_meta` joins
+  `OPTIONAL_KERNELS` (never a turnkey-build prerequisite; built by the
+  NON-required ci.yml `rust-brutex-meta` lane, which also EXECUTES the
+  wheel-backed Python↔Rust parity arms). GATES (executed): all 7 meta
+  modules 100.00% line+branch on the discovery gate (223 unit tests);
+  hypothesis properties (scorer parity bit-exact over hostile floats ·
+  purge invariant · τ monotonicity · passes⇔empty); the frozen
+  byte-golden (degenerate-small 12-trade run through the REAL
+  `write_tuple_sidecars` — float-free box-stable bytes; regen refused
+  without `BRUTEX_REGEN_META_GOLDEN=1`) + frozen scorer/abstain vectors
+  (IEEE-exact + libm-captured bits, the greeks_golden precedent) on BOTH
+  arms; per-element flatness benches (`cache_tier_ceiling`); the CLI e2e
+  integration incl. the REAL `cmd_sweep_all` → `meta-annotate` chain +
+  the refusal pair; cargo fmt/clippy `-D warnings`/test green; the four
+  pure modules join mutation.yml's proven-pair loop (wiring-pinned) + 6
+  hand-applied crate mutants verified KILLED. HONEST: the OOF label span
+  is a conservative approximation, not exact per-trade purging; the fit
+  is research evidence, never a validated gate or frozen deployable
+  model; the abstain replay judges the UNGATED sim's entry snapshots —
+  not a counterfactual re-simulation; p_win floats are per-box
+  BLAS-deterministic, so the byte-golden freezes only the float-free arm.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; run identity untouched; no new
+  routes; new env vars `BRUTEX_META_GATE` (default OFF) +
+  `BRUTEX_ABSTAIN_GATE_INSIM` (dormant, any set value refuses).)
+  Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
   first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
@@ -10159,7 +10256,25 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-u128-enum-kernel`
+- **Active feature branch:** `claude/meta-label-abstain-gates`
+  (DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001, MIGRATION.md
+  #1984–#1985 — P0 items 14+15 as ONE annotation-only change set: the NEW
+  `brutex/meta/` package + `brutex meta-annotate` write the `.meta.json`
+  fourth sidecar (strictly out-of-fold CPCV P(win) via the reused
+  `cpcv_splits` + the τ sweep with `n_thresholds_swept` recorded + the
+  five-reason abstain replay keyed by `trade_seq` + entry/exit timestamps —
+  the W4 fold-key law) beside the results-depth trio with `top100.json` +
+  every existing artifact byte-untouched; the born-Rust `rust/brutex-meta`
+  kernels behind the default-OFF `BRUTEX_META_GATE` facade (burn-in +
+  ship-the-oracle autorevert; OFF = crate never imported, bomb-spy-pinned;
+  `OPTIONAL_KERNELS` row + the non-required ci.yml `rust-brutex-meta`
+  parity lane); the DORMANT in-sim knob `BRUTEX_ABSTAIN_GATE_INSIM`
+  refuses loudly at the `cmd_sweep_all` chokepoint (the BRUTEX_FILL_MODE
+  precedent) with the composition design in
+  `docs/design/meta/ABSTAIN_INSIM_DESIGN.md`; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1984–#1985 for the full blurb)
+  Earlier: `claude/rust-u128-enum-kernel`
   (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
@@ -11584,7 +11699,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5158-5159` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5231-5232` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
