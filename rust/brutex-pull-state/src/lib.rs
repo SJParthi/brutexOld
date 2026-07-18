@@ -33,9 +33,16 @@ pub mod market_hours;
 // + the banner colour authority stay Python.
 pub mod pull_outcome;
 pub mod pull_scope;
+// Wave 2F (DEC-RUST-PULL-STATE-001): the pull-progress DERIVED-METRICS core
+// (DEC-PULL-PROGRESS-HONESTY-001 re-hosted) — percent's CPython banker's
+// round(x, 1) reproduced bit-exactly by exact integer arithmetic inside the
+// spike-proven <= 2**53 count domain; the counter state machine + every
+// string/clock stay Python (the pyclass flip is a LATER lane phase).
+pub mod progress;
 pub mod stall;
 
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
+pub use progress::{COUNT_DOMAIN_MAX, CountDomainError, progress_derived};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 pub use stall::{
     WEDGE_ABSTAIN_PROBE_NONE, WEDGE_ADOPT_BASELINE, WEDGE_DEFER, WEDGE_ESCALATE, WEDGE_NO_PROBE,
