@@ -16,7 +16,8 @@ plumbing (DEC-SWEEP-RUN-BUTTON-001).
 The defaults mirror the CLI's ``_add_sweep_grid_args`` declaration (the one source
 of truth for the sweep CLI contract, CLAUDE.md §2 Rule 11 COMMON): NSE index
 symbols on the ``INDEX`` segment, the ``1minute,5minute,15minute`` interval set,
-both directions, ``K∈{1,2}``, no SL/TP legs, top-20. SENSEX rides the BSE
+both directions, ``K∈{1,2}``, no SL/TP legs, the top-1000 persist default
+(DEC-RANK-QUOTA-PERSIST-1000-001). SENSEX rides the BSE
 exchange, so a SENSEX sweep is a separate run with ``exchange=BSE`` — never
 silently mixed into an NSE grid (Golden Rule #1, honest scope).
 
@@ -32,6 +33,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
@@ -48,8 +50,10 @@ DEFAULT_K: Final[str] = "1,2"
 #: Default stop-loss / take-profit — ``none`` disables that leg (signal-only).
 DEFAULT_SL: Final[str] = "none"
 DEFAULT_TP: Final[str] = "none"
-#: Default top-N composite-ranked combos persisted per tuple.
-DEFAULT_TOP: Final[int] = 20
+#: Default top-N composite-ranked combos persisted per tuple — the ONE common
+#: :data:`brutex.ranking.multi_select.DEFAULT_PERSIST_TOP_K` (1000; imported,
+#: never copied — CLAUDE.md §11 COMMON; DEC-RANK-QUOTA-PERSIST-1000-001).
+DEFAULT_TOP: Final[int] = DEFAULT_PERSIST_TOP_K
 #: Default run-mode identity label stamped on the run hash.
 DEFAULT_MODE: Final[str] = "A"
 #: Default lake exchange / segment partition for the index sweep.
