@@ -1028,6 +1028,7 @@ class TupleDiffCheck(Protocol):
         *,
         bars: Sequence[CandleBar],
         bar_bits: Sequence[int],
+        exec_bars: Sequence[CandleBar],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
     ) -> None:
@@ -1234,7 +1235,13 @@ def run_one_tuple(
             ) from retry_exc
     if diffcheck is not None and kernel is not None:
         # R45 — strictly post-persist, read-only; the closure is fail-soft.
-        diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
+        diffcheck(
+            bars=bars,
+            bar_bits=kernel.bar_bits,
+            exec_bars=exec_bars,
+            tuple_=tuple_,
+            grid=grid,
+        )
     return summary
 
 
