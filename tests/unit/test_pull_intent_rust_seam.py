@@ -137,9 +137,7 @@ class TestFlagOffNeverTouchesKernel:
         # site 4: the refused-start restore (restore-prior arm)
         store2 = _store_with_intent(tmp_path / "b", _PRIOR)
         assert (
-            restore_intent_after_refused_start(
-                store2, prior=_PRIOR, dry_run=False, started=False
-            )
+            restore_intent_after_refused_start(store2, prior=_PRIOR, dry_run=False, started=False)
             is True
         )
         assert bomb.touched == []
@@ -233,9 +231,7 @@ class TestFlagOnServesKernel:
         launched: list[PullIntent] = []
         # probe True + under cap would be FIRED on the oracle — the wrong
         # PEER_ACTIVE fake is served: no bump, no launch, intent untouched.
-        action = run_auto_resume(
-            store, launch=launched.append, probe_singleflight=lambda: True
-        )
+        action = run_auto_resume(store, launch=launched.append, probe_singleflight=lambda: True)
         assert action is ResumeAction.PEER_ACTIVE
         assert launched == []
         loaded = store.load()
@@ -283,9 +279,7 @@ class TestFlagOnServesKernel:
         )
         store = _store_with_intent(tmp_path, over_cap)
         launched: list[PullIntent] = []
-        action = run_auto_resume(
-            store, launch=launched.append, probe_singleflight=lambda: True
-        )
+        action = run_auto_resume(store, launch=launched.append, probe_singleflight=lambda: True)
         # The wrong PROCEED fake bumps + fires despite the cap — proving the
         # kernel arm owns the decision when served.
         assert action is ResumeAction.FIRED
@@ -304,9 +298,7 @@ class TestFlagOnServesKernel:
         # prior present would be RESTORE_PRIOR on the oracle — the wrong
         # CLEAR_ORPHAN fake is served (file gone, never re-written).
         assert (
-            restore_intent_after_refused_start(
-                store, prior=_PRIOR, dry_run=False, started=False
-            )
+            restore_intent_after_refused_start(store, prior=_PRIOR, dry_run=False, started=False)
             is True
         )
         assert store.load() is None
@@ -322,9 +314,7 @@ class TestFlagOnServesKernel:
         )
         store = _store_with_intent(tmp_path, _PRIOR)
         assert (
-            restore_intent_after_refused_start(
-                store, prior=_PRIOR, dry_run=False, started=False
-            )
+            restore_intent_after_refused_start(store, prior=_PRIOR, dry_run=False, started=False)
             is False
         )
         # served LEAVE_ABSENT touched nothing — the current file survives
@@ -344,9 +334,7 @@ class TestFlagOnServesKernel:
         )
         store = _store_with_intent(tmp_path, _PRIOR)
         assert (
-            restore_intent_after_refused_start(
-                store, prior=None, dry_run=False, started=False
-            )
+            restore_intent_after_refused_start(store, prior=None, dry_run=False, started=False)
             is True
         )
         assert store.load() is None
@@ -383,9 +371,7 @@ class TestFlagOnDegradesToOracle:
             assert action is ResumeAction.PEER_ACTIVE
             store2 = _store_with_intent(tmp_path / "b", _PRIOR)
             assert (
-                restore_intent_after_refused_start(
-                    store2, prior=None, dry_run=False, started=False
-                )
+                restore_intent_after_refused_start(store2, prior=None, dry_run=False, started=False)
                 is True
             )
         assert any(
@@ -427,10 +413,7 @@ class TestAccessorGates:
                 _fake_kernel(intent_shape_verdict=lambda *args, p=poison: p),
             )
             with capture_logs() as logs:
-                assert (
-                    pull_state_rust.rust_intent_shape_verdict(1, 2, 1, 2, 2, 2, 3, 1, 2)
-                    is None
-                )
+                assert pull_state_rust.rust_intent_shape_verdict(1, 2, 1, 2, 2, 2, 3, 1, 2) is None
             assert any(entry.get("reason") == "kernel_invalid" for entry in logs), poison
         # every served code passes the gate
         for code in range(9):
@@ -439,9 +422,7 @@ class TestAccessorGates:
                 "brutex_pull_state",
                 _fake_kernel(intent_shape_verdict=lambda *args, c=code: c),
             )
-            assert (
-                pull_state_rust.rust_intent_shape_verdict(1, 2, 1, 2, 2, 2, 3, 1, 2) == code
-            )
+            assert pull_state_rust.rust_intent_shape_verdict(1, 2, 1, 2, 2, 2, 3, 1, 2) == code
 
     def test_resume_decision_gates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
@@ -461,9 +442,7 @@ class TestAccessorGates:
                 )
             assert any(entry.get("reason") == "kernel_invalid" for entry in logs), poison
 
-    def test_resume_decision_site_consistency_gate(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_resume_decision_site_consistency_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
         # NO_INTENT with an intent present = a stale wheel — degrade.
         monkeypatch.setitem(
@@ -543,9 +522,7 @@ class TestAccessorGates:
                 )
             assert any(entry.get("reason") == "kernel_invalid" for entry in logs), poison
 
-    def test_restore_decision_site_consistency_gate(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_restore_decision_site_consistency_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
         monkeypatch.setitem(
             sys.modules,
@@ -696,9 +673,7 @@ class TestRealWheelParity:
                 max_restarts=int(row["max_restarts"]),
             )
             assert action.value == row["action"], row["id"]
-            assert (launched[0].restarts if launched else None) == row["launch_restarts"], row[
-                "id"
-            ]
+            assert (launched[0].restarts if launched else None) == row["launch_restarts"], row["id"]
         current = PullIntent(
             symbols="CURRENT",
             symbol=None,
@@ -732,8 +707,24 @@ class TestRealWheelParity:
             st.text(max_size=12),
             st.text(
                 alphabet=st.sampled_from(
-                    list("01falseno") + [ "\x1c", "\x1d", "\x1f", "\x85", "\xa0",
-                     " ", "　", "​", " ", "F", "O", "ｎ", "ｏ", "İ", "ﬀ"]
+                    [
+                        *"01falseno",
+                        "\x1c",
+                        "\x1d",
+                        "\x1f",
+                        "\x85",
+                        "\xa0",
+                        " ",
+                        "　",
+                        "\u200b",
+                        " ",
+                        "F",
+                        "O",
+                        "ｎ",
+                        "ｏ",
+                        "İ",
+                        "ﬀ",
+                    ]
                 ),
                 max_size=8,
             ),

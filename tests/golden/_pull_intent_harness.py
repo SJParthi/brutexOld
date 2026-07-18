@@ -525,8 +525,8 @@ ENV_CASES: tuple[str | None, ...] = (
     "İ",  # dotted capital I — lowercases to "i" + combining dot
     "ﬀ",  # latin small ligature ff — .lower() keeps the ligature
     "oﬀ",
-    "​0",  # ZERO WIDTH SPACE is NOT whitespace — must stay truthy
-    "no​",
+    "\u200b0",  # ZERO WIDTH SPACE is NOT whitespace — must stay truthy
+    "no\u200b",
     " 0 ",
     "\t\nfalse\r\v\f",
 )

@@ -29,14 +29,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.golden._pull_intent_harness import compute_all_tables, compute_kernel_tsv
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 _FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 _JSON_PATH = _FIXTURE_DIR / "pull_intent_verdicts.json"
@@ -44,11 +40,10 @@ _TSV_PATH = _FIXTURE_DIR / "pull_intent_kernel_cases.tsv"
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_resume_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _hermetic_resume_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ambient escape hatch must never skew the recomputed tables."""
     monkeypatch.delenv("BRUTEX_PULL_INTENT_RESUME", raising=False)
     monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
-    yield
 
 
 class TestPullIntentGolden:
