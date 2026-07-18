@@ -28,6 +28,7 @@ import ast
 import dataclasses
 import importlib
 import importlib.util
+import inspect
 import itertools
 import json
 import re
@@ -456,6 +457,42 @@ class TestCycleFreeTypeSurface:
             assert tv.__bound__ is bound
             assert tv.__covariant__ is covariant
             assert tv.__contravariant__ is contravariant
+
+    @pytest.mark.parametrize(
+        ("standin_name", "members"),
+        [
+            (
+                "WatchdogStateLike",
+                ("tier", "stall_started_beat", "last_logged_at", "last_alerted_at", "episodes"),
+            ),
+            (
+                "WatchdogVerdictLike",
+                (
+                    "state",
+                    "lag_s",
+                    "warn_edge",
+                    "critical_edge",
+                    "relog",
+                    "realert",
+                    "recovered",
+                    "stall_total_s",
+                ),
+            ),
+        ],
+    )
+    def test_standin_members_are_read_only_properties(
+        self, standin_name: str, members: tuple[str, ...]
+    ) -> None:
+        # mutmut's decorator mutation strips a stub's `@property`, turning
+        # the member into a plain method — invisible to the isinstance
+        # probes (runtime_checkable checks attribute PRESENCE only), so the
+        # descriptor KIND is pinned member-by-member. Read-only properties
+        # are also the load-bearing typing choice: a plain protocol
+        # variable would demand a SETTABLE attribute and the frozen
+        # consumer dataclasses would stop satisfying the stand-ins.
+        standin = getattr(obs, standin_name)
+        for name in members:
+            assert isinstance(inspect.getattr_static(standin, name), property), name
 
     def test_production_types_satisfy_the_structural_standins(self) -> None:
         # Drift pins BOTH directions: the consumer dataclasses' field sets
