@@ -2,17 +2,21 @@
 
 The sweep simulates trades at the tuple's OWN timeframe, so per-trade MFE/MAE
 excursions are folded from sweep-TF bar highs/lows and the portfolio drawdown is
-realized-equity-only (recon: no intraday bar-path drawdown exists anywhere).
-R22 demands the 1-MINUTE truth: MAE/MFE from the real minute path — a gap-open
-minute far beyond the stop shows its TRUE adverse depth — and intraday equity
-drawdown measured on the minute path (close-only DD understates real pain).
+realized-equity-only. R22 demands the 1-MINUTE truth: MAE/MFE from the real
+minute path — a gap-open minute far beyond the stop shows its TRUE adverse
+depth — and intraday equity drawdown measured on the minute path.
 
-This module is that math, as a **wheel-free stdlib leaf** (no ``polars`` /
-``numpy`` / Rust wheels — the design's F.10 envelope): it consumes
-already-loaded :class:`~brutex.data.models.CandleBar` sequences and returns
-plain frozen records. Loading the 1-minute bars is the caller's job (the
-run-end pass does ONE batched lake read per (instrument, window) — recon Q6's
-batch-load-then-slice pattern; this module never touches I/O).
+**RUST-HOSTED LAW (DEC-RUST-CASCADE-RESULTS-001):** the numeric laws — the
+span bisects, the excursion fold with the walker's exit-bar convention, the
+per-session equity walk, the INDEPENDENT paisa/pct max-drawdown fold, the
+IST session-date axis and the `rupees_to_paisa` price snap — live in
+``rust/brutex-cascade/src/minute_path.rs`` (+ ``decimal.rs``/``ist.rs``),
+verified against the FROZEN pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/minute_path.json``). This module
+is the type face: the frozen record dataclasses, :class:`PathStatus`, the
+:class:`EquityTradeLike` protocol and every repr-carrying validation raise;
+prices cross the FFI as ``str(Decimal)`` (the exact-value marshalling law),
+timestamps as exact epoch microseconds.
 
 ## Honesty envelope (Golden Rule #1 / #10)
 
@@ -33,35 +37,38 @@ batch-load-then-slice pattern; this module never touches I/O).
   (low for a long, high for a short). Equity PEAKS are sampled at session
   closes (we track adverse marks, not favourable ones), so the drawdown is a
   lower bound on true tick-path drawdown — stated, not hidden.
-* Rupees→paisa uses the COMMON :func:`brutex.money.rupees_to_paisa`
-  (``round_money`` half-up × 100 — the same law as the wheel-bound
-  ``stage1a._price_to_paisa`` seam; equality is test-pinned).
+* IST attribution is the fixed +05:30 arithmetic of the crate's ``ist.rs`` —
+  exactly ``ZoneInfo("Asia/Kolkata")`` for every post-1970 instant (the whole
+  lake domain); every marshalled timestamp must be tz-aware (a naive
+  timestamp raises ``TypeError`` at the epoch conversion — the models-layer
+  tz-aware law, previously a silent local-tz guess).
 
 ## O() envelope
 
-Building a :class:`MinuteIndex` is O(N_bars) once per (instrument, window);
-:meth:`MinuteIndex.span_slice` is O(log N) bisect; a trade's excursion fold is
-O(minutes-in-trade); a session equity series is one O(N_bars + N_trades) pass.
-Deterministic and pure: no globals, no wall-clock, no RNG, no I/O.
+Building a :class:`MinuteIndex` is O(N_bars) once per (instrument, window)
+(one price parse per bar); :meth:`MinuteIndex.span_slice` is O(log N); a
+trade's excursion fold is O(minutes-in-trade); a session equity series is one
+O(N_bars + N_trades) pass. Deterministic and pure: no globals, no wall-clock,
+no RNG, no I/O.
 """
 
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
-from brutex.calendars.nse import IST
+from brutex.engine.cascade_rust import EPOCH_DATE, epoch_day, epoch_us, require_cascade_rust
 from brutex.engine.exit_index import bars_strictly_increasing
 from brutex.models import BruteXError
-from brutex.money import rupees_to_paisa
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
     from decimal import Decimal
+
+    from brutex_cascade import MinuteIndexRs
 
     from brutex.data.models import CandleBar
 
@@ -102,6 +109,12 @@ class PathStatus(Enum):
     PARTIAL = "partial"
 
 
+def _check_span(start: datetime, end: datetime) -> None:
+    """The `span_slice` precondition — the ONE repr-carrying refusal."""
+    if start > end:
+        raise MinutePathError(f"span_slice: start {start!r} is after end {end!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class MinuteIndex:
     """A bisect-able view over one instrument's loaded 1-minute bars.
@@ -122,6 +135,7 @@ class MinuteIndex:
 
     bars: tuple[CandleBar, ...]
     timestamps: tuple[datetime, ...]
+    _rs: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_bars(cls, bars: Sequence[CandleBar]) -> MinuteIndex:
@@ -140,7 +154,16 @@ class MinuteIndex:
                 "(dedup + sort at the read boundary before indexing)"
             )
         frozen = tuple(bars)
-        return cls(bars=frozen, timestamps=tuple(bar.timestamp for bar in frozen))
+        timestamps = tuple(bar.timestamp for bar in frozen)
+        return cls(bars=frozen, timestamps=timestamps, _rs=_build_rs_index(frozen, timestamps))
+
+    def _rs_index(self) -> MinuteIndexRs:
+        """The crate-side index (lazily built for a directly-constructed view)."""
+        rs = self._rs
+        if rs is None:
+            rs = _build_rs_index(self.bars, self.timestamps)
+            object.__setattr__(self, "_rs", rs)
+        return cast("MinuteIndexRs", rs)
 
     def span_slice(self, start: datetime, end: datetime) -> tuple[int, int]:
         """Return ``(lo, hi)`` such that ``bars[lo:hi]`` are the bars in ``[start, end]``.
@@ -153,9 +176,21 @@ class MinuteIndex:
         MinutePathError
             If ``start > end``.
         """
-        if start > end:
-            raise MinutePathError(f"span_slice: start {start!r} is after end {end!r}")
-        return bisect_left(self.timestamps, start), bisect_right(self.timestamps, end)
+        _check_span(start, end)
+        lo, hi = self._rs_index().span_slice(epoch_us(start), epoch_us(end))
+        return lo, hi
+
+
+def _build_rs_index(bars: tuple[CandleBar, ...], timestamps: tuple[datetime, ...]) -> MinuteIndexRs:
+    """Marshal the bar columns into the crate index (prices as ``str(Decimal)``)."""
+    rs = require_cascade_rust()
+    built = rs.MinuteIndexRs(
+        [epoch_us(ts) for ts in timestamps],
+        [str(bar.open) for bar in bars],
+        [str(bar.high) for bar in bars],
+        [str(bar.low) for bar in bars],
+    )
+    return cast("MinuteIndexRs", built)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,19 +229,6 @@ def trade_excursions_1m(
     ``exit_bar_full_range = reason in {stop_loss, take_profit, end_of_data, session_gap}``
     (the reasons whose exit bar the walker itself folds in full).
 
-    Parameters
-    ----------
-    index
-        The (instrument, window)'s :class:`MinuteIndex`.
-    entry_ts, exit_ts
-        The trade's entry / exit bar timestamps (UTC, from the sweep-TF sim).
-    entry_fill_paisa
-        The exact entry fill (int64 paisa) — excursions are measured from it.
-    direction
-        ``Side.BUY`` or ``Side.SELL`` (``HOLD`` rejected).
-    exit_bar_full_range
-        Whether the exit minute contributes its full high/low (see above).
-
     Returns
     -------
     TradePath1m
@@ -221,34 +243,15 @@ def trade_excursions_1m(
     """
     if direction is Side.HOLD:
         raise MinutePathError("trade_excursions_1m: direction must be BUY or SELL, not HOLD")
-    lo, hi = index.span_slice(entry_ts, exit_ts)
-    if lo == hi:
-        return TradePath1m(mae_paisa=None, mfe_paisa=None, status=PathStatus.NO_1M_DATA)
-    status = (
-        PathStatus.OK
-        if index.timestamps[lo] == entry_ts and index.timestamps[hi - 1] == exit_ts
-        else PathStatus.PARTIAL
+    _check_span(entry_ts, exit_ts)
+    mae, mfe, status = index._rs_index().excursions(
+        epoch_us(entry_ts),
+        epoch_us(exit_ts),
+        entry_fill_paisa,
+        direction is Side.BUY,
+        exit_bar_full_range,
     )
-    mfe = 0
-    mae = 0
-    for i in range(lo, hi):
-        bar = index.bars[i]
-        if index.timestamps[i] == exit_ts and not exit_bar_full_range:
-            open_paisa = rupees_to_paisa(bar.open)
-            high_paisa = open_paisa
-            low_paisa = open_paisa
-        else:
-            high_paisa = rupees_to_paisa(bar.high)
-            low_paisa = rupees_to_paisa(bar.low)
-        if direction is Side.BUY:
-            favourable = high_paisa - entry_fill_paisa
-            adverse = entry_fill_paisa - low_paisa
-        else:  # Side.SELL — profit when price falls.
-            favourable = entry_fill_paisa - low_paisa
-            adverse = high_paisa - entry_fill_paisa
-        mfe = max(mfe, favourable)
-        mae = max(mae, adverse)
-    return TradePath1m(mae_paisa=mae, mfe_paisa=mfe, status=status)
+    return TradePath1m(mae_paisa=mae, mfe_paisa=mfe, status=PathStatus(status))
 
 
 class EquityTradeLike(Protocol):
@@ -304,7 +307,9 @@ class SessionEquityPoint:
 
 def _ist_date(ts: datetime) -> date:
     """Return the IST calendar date of a UTC instant (the ONE session key)."""
-    return ts.astimezone(IST).date()
+    rs = require_cascade_rust()
+    (day,) = rs.ist_session_dates([epoch_us(ts)])
+    return EPOCH_DATE + timedelta(days=day)
 
 
 def ist_session_dates(bars: Sequence[CandleBar]) -> tuple[date, ...]:
@@ -314,14 +319,9 @@ def ist_session_dates(bars: Sequence[CandleBar]) -> tuple[date, ...]:
     the SAME bars the sweep loaded (dates with data, never a fabricated
     calendar). One O(N_bars) pass.
     """
-    return tuple(sorted({_ist_date(bar.timestamp) for bar in bars}))
-
-
-def _day_slice(index: MinuteIndex, day: date) -> tuple[int, int]:
-    """Return the ``(lo, hi)`` bar slice of IST calendar date *day* (half-open hi)."""
-    start = datetime(day.year, day.month, day.day, tzinfo=IST)
-    end = start + timedelta(days=1)
-    return bisect_left(index.timestamps, start), bisect_left(index.timestamps, end)
+    rs = require_cascade_rust()
+    days = rs.ist_session_dates([epoch_us(bar.timestamp) for bar in bars])
+    return tuple(EPOCH_DATE + timedelta(days=day) for day in days)
 
 
 def session_equity_series(
@@ -394,67 +394,30 @@ def session_equity_series(
                 "is not one of the supplied sessions"
             )
 
-    live_index = index if index is not None and len(index.bars) > 0 else None
-    partial = False
-    points: list[SessionEquityPoint] = []
-    realized = start_equity_paisa
-    pointer = 0
-    n_trades = len(trades)
-    for day in sessions:
-        closed_today = 0
-        session_low: int | None = None
-        if live_index is not None:
-            lo, hi = _day_slice(live_index, day)
-            if lo == hi:
-                partial = True
-            else:
-                session_low = realized
-                for i in range(lo, hi):
-                    bar = live_index.bars[i]
-                    ts = live_index.timestamps[i]
-                    # Flush trades fully closed strictly BEFORE this minute.
-                    while pointer < n_trades and trades[pointer].exit_ts < ts:
-                        realized += trades[pointer].pnl_paisa
-                        closed_today += 1
-                        pointer += 1
-                        session_low = min(session_low, realized)
-                    candidate = realized
-                    if pointer < n_trades:
-                        trade = trades[pointer]
-                        if trade.entry_ts <= ts <= trade.exit_ts:
-                            entry_paisa = rupees_to_paisa(trade.entry_px)
-                            if trade.direction is Side.BUY:
-                                mark = rupees_to_paisa(bar.low) - entry_paisa
-                            else:
-                                mark = entry_paisa - rupees_to_paisa(bar.high)
-                            candidate = realized + mark
-                            if ts == trade.exit_ts:
-                                realized += trade.pnl_paisa
-                                closed_today += 1
-                                pointer += 1
-                    session_low = min(session_low, candidate, realized)
-        # End-of-session flush: exits dated today whose minute bar was absent
-        # (partial 1m data) or when no index exists at all — the CLOSE stays
-        # exact regardless of minute coverage (close-only truth).
-        while pointer < n_trades and _ist_date(trades[pointer].exit_ts) <= day:
-            realized += trades[pointer].pnl_paisa
-            closed_today += 1
-            pointer += 1
-        points.append(
-            SessionEquityPoint(
-                session_date=day,
-                equity_close_paisa=realized,
-                equity_intraday_low_paisa=session_low,
-                trades_closed=closed_today,
-            )
+    rs = require_cascade_rust()
+    rs_index = None
+    if index is not None and len(index.bars) > 0:
+        rs_index = index._rs_index()
+    raw_points, status = rs.session_equity_series(
+        rs_index,
+        [epoch_us(t.entry_ts) for t in trades],
+        [epoch_us(t.exit_ts) for t in trades],
+        [t.direction is Side.BUY for t in trades],
+        [t.pnl_paisa for t in trades],
+        [str(t.entry_px) for t in trades],
+        [epoch_day(day) for day in sessions],
+        start_equity_paisa,
+    )
+    points = tuple(
+        SessionEquityPoint(
+            session_date=day,
+            equity_close_paisa=close,
+            equity_intraday_low_paisa=low,
+            trades_closed=closed,
         )
-    if live_index is None:
-        status = PathStatus.NO_1M_DATA
-    elif partial:
-        status = PathStatus.PARTIAL
-    else:
-        status = PathStatus.OK
-    return tuple(points), status
+        for day, (close, low, closed) in zip(sessions, raw_points, strict=True)
+    )
+    return points, PathStatus(status)
 
 
 def minute_path_max_drawdown(
@@ -484,21 +447,14 @@ def minute_path_max_drawdown(
     adverse marks only), so a peak formed mid-session is sampled at that
     session's close — the figure is a lower bound on tick-path drawdown.
     """
-    peak: int | None = start_equity_paisa
-    if peak is not None and peak <= 0:
+    if start_equity_paisa is not None and start_equity_paisa <= 0:
         raise MinutePathError(
             f"minute_path_max_drawdown: start_equity_paisa must be > 0, got {start_equity_paisa}"
         )
-    max_dd = 0
-    max_dd_pct = 0.0
-    for point in points:
-        trough = point.equity_close_paisa
-        if point.equity_intraday_low_paisa is not None:
-            trough = min(trough, point.equity_intraday_low_paisa)
-        if peak is not None:
-            drop = peak - trough
-            max_dd = max(max_dd, drop)
-            if peak > 0 and drop > 0:
-                max_dd_pct = max(max_dd_pct, drop / peak)
-        peak = point.equity_close_paisa if peak is None else max(peak, point.equity_close_paisa)
-    return max_dd, max_dd_pct
+    rs = require_cascade_rust()
+    dd, pct = rs.minute_path_max_drawdown(
+        [point.equity_close_paisa for point in points],
+        [point.equity_intraday_low_paisa for point in points],
+        start_equity_paisa,
+    )
+    return dd, pct

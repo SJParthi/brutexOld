@@ -1,0 +1,49 @@
+# Maturin build configuration for the BruteX cascade / results-depth Rust
+# crate (DEC-RUST-CASCADE-RESULTS-001 — the T14 conversion lane).
+#
+# Pip installs this as a separate distribution alongside `brutex`, exactly
+# like the sibling kernels (`rust/fno-math`, `rust/trading-core`). Unlike the
+# default-OFF lake/feed seams this crate is REQUIRED at its call sites: the
+# converted Python laws are DELETED (greenfield compressed cycle), so the
+# engine shims hard-require the wheel (the `brutex.math` → fno_math
+# precedent) and CI installs it in every job that imports the engine.
+#
+# References:
+#   - docs/MIGRATION.md DEC-RUST-CASCADE-RESULTS-001
+#   - rust/fno-math/pyproject.toml (the layout template, DEC-P0-055)
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-cascade"
+version = "0.1.0"
+description = "BruteX cascade / results-depth compute laws in Rust — cascade_join + minute_path + combo_aggregates (DEC-RUST-CASCADE-RESULTS-001)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout (the fno-math DEC-P0-055 convention): Python
+# source under `python/`, the cdylib registered as the private
+# `brutex_cascade._brutex_cascade` submodule, re-exported by `__init__.py`
+# with a matched `__init__.pyi` + `py.typed` marker for pyright/mypy strict.
+python-source = "python"
+module-name = "brutex_cascade._brutex_cascade"
+features = ["pyo3/extension-module"]
+strip = true
+# Enforce the committed Cargo.lock on every wheel build (the brutex-lake
+# precedent): the lock pins the exact pyo3 graph the parity goldens were
+# proven against.
+locked = true

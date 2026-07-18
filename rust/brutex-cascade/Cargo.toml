@@ -1,0 +1,55 @@
+# brutex-cascade — the cascade / results-depth Rust conversion crate.
+#
+# DEC-RUST-CASCADE-RESULTS-001 (T14 lane of the pure-Rust O(1) conversion
+# program). Hosts the cascade / results-depth COMPUTE LAWS formerly
+# implemented in `brutex/engine/{cascade_join,minute_path,combo_aggregates}.py`
+# — ported token-for-token under the compressed greenfield cycle (convert →
+# verify against the FROZEN pre-conversion goldens → default-ON → delete the
+# converted Python law). The Python modules survive as thin type-face shims
+# (frozen dataclasses + boundary marshalling + structlog observability); every
+# numeric / ordering / JSON-rendering decision lives here.
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math + rust/trading-core + rust/brutex-lake + rust/brutex-feed are
+# standalone too; CI cargo jobs target crate dirs explicitly).
+#
+# Dependency posture: pyo3 ONLY. The phase-A laws are pure scalar/string
+# arithmetic — no polars, no serde (the JSON law is the in-crate CPython
+# `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)` twin,
+# the rust/brutex-lake stats_shard precedent), so there is no version-lockstep
+# hazard class in this crate.
+
+[package]
+name = "brutex-cascade"
+version = "0.1.0"
+edition = "2024"
+# Matches the repo-wide CI Rust floor (ci.yml RUST_VERSION 1.93.1; the
+# fno-math / trading-core precedent — edition 2024 needs >= 1.85).
+rust-version = "1.93.1"
+description = "BruteX cascade / results-depth compute laws in Rust — cascade_join + minute_path + combo_aggregates (DEC-RUST-CASCADE-RESULTS-001)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published to crates.io (the fno-math precedent).
+publish = false
+
+[lib]
+name = "brutex_cascade"
+path = "src/lib.rs"
+# cdylib so Python's `import brutex_cascade._brutex_cascade` finds the built
+# extension; rlib so `cargo test` links the pure-Rust law cores (the tests
+# reference ONLY the pyo3-free pure functions, so the unlinked libpython
+# symbols are never pulled into the test binary — the brutex-lake precedent).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# PyO3 + maturin bridge — the exact sibling-crate configuration
+# (rust/fno-math): abi3-py312 per CLAUDE.md §4's Python 3.12 baseline.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+
+# Release profile: cargo DEFAULT — deliberately NO `panic = "abort"` (a law
+# panic must surface across the FFI as a catchable Python error, never a
+# process abort mid-pass) and NO `overflow-checks` release override (the laws
+# use explicit i128 accumulators + checked arithmetic where overflow is a
+# real input class; debug builds + cargo test still carry debug overflow
+# checks).

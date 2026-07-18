@@ -475,3 +475,27 @@ def test_paisa_conversion_matches_stage1a_seam() -> None:
 
     for raw in ("100.005", "99.994", "0.01", "14020.7999", "123456.78"):
         assert rupees_to_paisa(Decimal(raw)) == _price_to_paisa(Decimal(raw))
+
+
+class TestDirectConstructionLazyIndex:
+    """A directly-constructed MinuteIndex (bypassing from_bars) builds its
+    crate-side index lazily on first use — and caches it
+    (DEC-RUST-CASCADE-RESULTS-001; from_bars remains the documented builder).
+    """
+
+    def test_direct_construction_builds_and_caches_the_rs_index(self) -> None:
+        bars = tuple(_bar(9, 16 + i, "100.00", "101.00", "99.00", "100.50") for i in range(3))
+        index = MinuteIndex(bars=bars, timestamps=tuple(b.timestamp for b in bars))
+        # First use builds the crate index lazily…
+        assert index.span_slice(_ts(9, 16), _ts(9, 18)) == (0, 3)
+        first = index._rs_index()
+        # …and later uses reuse the SAME cached instance.
+        assert index._rs_index() is first
+        result = trade_excursions_1m(
+            index,
+            entry_ts=_ts(9, 16),
+            exit_ts=_ts(9, 18),
+            entry_fill_paisa=10_000,
+            direction=Side.BUY,
+        )
+        assert result.status is PathStatus.OK
