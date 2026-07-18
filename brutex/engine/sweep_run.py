@@ -1014,6 +1014,22 @@ def ranked_combo_to_result_row(
         # counter-less legacy caller — the same honest-unknown a
         # pre-extension store reads back.
         sl_hit_rate=m.sl_hit_rate,
+        # The recency family (DEC-METRICS-TRAILING-WINDOW-001 Stage C) is a
+        # PLAIN pass-through — NO _metric_or_zero coercion: None means the
+        # GLOBAL trailing anchor was absent (a legacy caller), or — for the
+        # trailing trio — the 24-month window honestly held zero trades;
+        # coercing either to 0.0 would fabricate a measured recency figure
+        # (Golden Rule #1). The sweep spine always threads the anchor, so a
+        # sweep-persisted row's decay composite is concrete (test-pinned)
+        # while its trailing trio is concrete exactly when the window held
+        # trades. The exact int trailing net rides the row's nullable
+        # Float64 lane (exact below 2**53 paisa).
+        trailing_sharpe_ratio=m.trailing_sharpe_ratio,
+        trailing_profit_factor=m.trailing_profit_factor,
+        trailing_net_pnl_paisa=(
+            None if m.trailing_net_pnl_paisa is None else float(m.trailing_net_pnl_paisa)
+        ),
+        decay_weighted_net_paisa=m.decay_weighted_net_paisa,
     )
 
 
@@ -1328,6 +1344,11 @@ def _iter_mask_metrics(
                     tf_minutes=cfg.tf_minutes,
                     exit_indices=exit_indices,
                     exit_reason_counts=exit_counts,
+                    # The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001):
+                    # the loaded bar range's END instant — one value per launch
+                    # (every mask shares the tuple's full bars), NEVER a
+                    # per-combo max exit_ts.
+                    trailing_anchor=bars[-1].timestamp,
                 )
             except MemoryError:
                 raise

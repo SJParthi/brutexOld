@@ -644,6 +644,12 @@ def _preset_rank_record(
         # honestly unknown, ranks after every concrete rate within an equal
         # win rate under the preset's presence flag (never a fabricated 0).
         sl_hit_rate=row.sl_hit_rate,
+        # The recency-preset inputs (DEC-METRICS-TRAILING-WINDOW-001):
+        # persisted on the row; None on a pre-extension store / anchor-less
+        # run — honestly unscored, rank last under each preset's presence
+        # flag (never a fabricated 0).
+        trailing_sharpe_ratio=row.trailing_sharpe_ratio,
+        decay_weighted_net_paisa=row.decay_weighted_net_paisa,
     )
 
 

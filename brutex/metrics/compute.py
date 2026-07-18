@@ -42,6 +42,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -52,12 +53,19 @@ from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
 
 __all__ = [
+    "DECAY_BUCKET_DAYS",
+    "DECAY_HALF_LIFE_MONTHS",
+    "TRAILING_WINDOW",
     "Moments",
+    "RecencyFolds",
+    "RecencyMetrics",
     "ResultMetrics",
     "TradeFolds",
     "combine_metrics_from_folds",
+    "combine_recency_from_folds",
     "compute_metrics",
     "compute_metrics_from_scalars",
+    "fold_recency",
     "percentile",
     "with_stage4_statistics",
 ]
@@ -73,6 +81,30 @@ _MIN_SAMPLES_VARIANCE: Final[int] = 2
 #: (spec line 746) and ranking-stable — the Stage-4 z-score is clamped to
 #: [-3, +3] regardless. Recorded in DEC-METRICS-001 (MIGRATION #305).
 _CAGR_CAP_PCT: Final[float] = 1.0e9
+
+#: The trailing-recency window (DEC-METRICS-TRAILING-WINDOW-001): 24 months,
+#: implemented as a FIXED 730-day span (24 months (730 days) — a fixed
+#: day-count, not a calendar-month walk, so the cutoff instant is a pure
+#: ``anchor − timedelta`` subtraction that a Rust fold twin mirrors
+#: mechanically with zero calendar logic). Membership is judged by each
+#: trade's EXIT instant: ``exit_ts >= anchor − TRAILING_WINDOW`` (see
+#: :func:`fold_recency`).
+TRAILING_WINDOW: Final[timedelta] = timedelta(days=730)
+
+#: Default half-life (in age-month buckets) of the exponential recency decay
+#: (DEC-METRICS-TRAILING-WINDOW-001): a trade 12 bucket-months old at the
+#: global anchor contributes half its P&L to ``decay_weighted_net_paisa``.
+#: Configurable per call via the ``decay_half_life_months`` kw-only
+#: parameter (NO env var — an explicit parameter, never ambient state).
+DECAY_HALF_LIFE_MONTHS: Final[float] = 12.0
+
+#: Days per decay age bucket (DEC-METRICS-TRAILING-WINDOW-001): a bucket is
+#: one whole 30-day "month" of age at exit relative to the GLOBAL anchor —
+#: ``max(0, (anchor − exit_ts).days) // 30``, a pure-integer, deterministic
+#: key (deliberately NOT a calendar-month key: the integer form is exact,
+#: total, and trivially mirrored by the Rust fold twin). The 2020→2026 data
+#: span bounds the live bucket count at ~80.
+DECAY_BUCKET_DAYS: Final[int] = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +309,38 @@ class ResultMetrics:
     #: deliberately not enforced here (property-pinned for the default
     #: policy only).
     sl_hit_rate: float | None = None
+
+    # ── Recency metrics (DEC-METRICS-TRAILING-WINDOW-001) ────────────
+    #: Sharpe ratio over ONLY the trades whose ``exit_ts`` falls inside the
+    #: trailing :data:`TRAILING_WINDOW` (24 months (730 days)) ending at the
+    #: GLOBAL ``trailing_anchor`` — the run's data-end instant, threaded as
+    #: a per-run parameter, NEVER derived per-combo (a combo that died in
+    #: 2023 must not read recent-strong). The SAME per-trade-return Sharpe
+    #: law as ``sharpe_ratio`` (windowed ``moments.mean / moments.std_dev``,
+    #: zero risk-free rate, NO annualisation multiplier — DEC-METRICS-001;
+    #: same ``start_equity_paisa`` return denominator, so the two figures
+    #: differ only in trade membership). ``None`` when the anchor was not
+    #: threaded (the honest legacy arm), the result has zero trades, the
+    #: window holds zero trades, or the windowed std-dev is 0/undefined.
+    trailing_sharpe_ratio: float | None = None
+    #: Profit factor over the same trailing window — the main
+    #: ``profit_factor`` law token-for-token on the windowed folds
+    #: (``None`` when the windowed gross loss is zero). ``None`` also when
+    #: the anchor is absent or the window holds zero trades.
+    trailing_profit_factor: float | None = None
+    #: Net P&L (int paisa, exact) over the same trailing window. ``None``
+    #: when the anchor is absent or the window holds zero trades (honest
+    #: absence — a windowed 0 means measured cancellation, never "no data").
+    trailing_net_pnl_paisa: int | None = None
+    #: WHOLE-HISTORY exponentially decay-weighted net P&L (paisa, float):
+    #: ``Σ_buckets pnl · 0.5^(age_months / half_life)`` over the integer
+    #: age-month buckets of :func:`fold_recency` (age from the GLOBAL
+    #: anchor; half-life :data:`DECAY_HALF_LIFE_MONTHS` by default). Decay
+    #: over the WHOLE history is a deliberate ALTERNATIVE to the hard
+    #: trailing cutoff — decaying only within the window would double-count
+    #: recency (window membership AND weight). ``None`` when the anchor is
+    #: absent or the result has zero trades.
+    decay_weighted_net_paisa: float | None = None
 
     # ── Statistical validity (Stage 4 only — NULL before then; spec 581-583) ──
     # Filled by with_stage4_statistics(); left None (NULL) by compute_metrics,
@@ -565,6 +629,8 @@ def compute_metrics(
     *,
     drawdown: tuple[int, float, int, float] | None = None,
     sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Compute every per-result metric in the Track 1 Result Row Schema.
 
@@ -604,6 +670,17 @@ def compute_metrics(
         ``drawdown``; see :func:`combine_metrics_from_folds`). ``None``
         (the default) yields the honest ``sl_hit_rate=None`` on a
         non-empty trade set — never a fabricated ``0.0``.
+    trailing_anchor
+        The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001) — the
+        run's data-end instant, threaded as a per-run parameter (never
+        derived per-combo from the trades). ``None`` (the default) leaves
+        every recency field ``None`` — the honest legacy arm. Must be
+        tz-aware when supplied (see :func:`fold_recency`).
+    decay_half_life_months
+        The decay composite's half-life in age-month buckets
+        (:data:`DECAY_HALF_LIFE_MONTHS` by default; see
+        :func:`combine_recency_from_folds`). Read only when
+        ``trailing_anchor`` is supplied.
 
     Returns
     -------
@@ -638,6 +715,8 @@ def compute_metrics(
         span_years=equity.span_years,
         drawdown=drawdown,
         sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+        decay_half_life_months=decay_half_life_months,
     )
 
 
@@ -650,6 +729,8 @@ def compute_metrics_from_scalars(
     span_years: float,
     drawdown: tuple[int, float, int, float],
     sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Curve-less :func:`compute_metrics`: scalars in place of an :class:`EquityCurve`.
 
@@ -670,7 +751,11 @@ def compute_metrics_from_scalars(
 
     ``sl_exit_count`` threads exactly as on :func:`compute_metrics`
     (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the sweep's kernel-arm
-    tail passes the mask's stop-loss counter here).
+    tail passes the mask's stop-loss counter here), and so do
+    ``trailing_anchor`` / ``decay_half_life_months``
+    (DEC-METRICS-TRAILING-WINDOW-001 — the GLOBAL recency anchor +
+    half-life; ``None`` anchor = every recency field ``None``, the honest
+    legacy arm).
 
     Raises
     ------
@@ -696,6 +781,8 @@ def compute_metrics_from_scalars(
         span_years=span_years,
         drawdown=drawdown,
         sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+        decay_half_life_months=decay_half_life_months,
     )
 
 
@@ -1195,6 +1282,173 @@ def _folds_from_wire(wire: FoldWire) -> TradeFolds:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RecencyFolds:
+    """FOLD outputs of the recency pass (DEC-METRICS-TRAILING-WINDOW-001).
+
+    The Stage-C fold state, kept a SEPARATE additive structure — the frozen
+    :class:`TradeFolds` is untouched (the #1605 field-pairing obligation
+    binds its shape to the Rust fold wire; extending it would force a wire
+    re-key for state only the recency pass reads).
+
+    Attributes
+    ----------
+    trailing
+        A plain :class:`TradeFolds` over ONLY the trades whose ``exit_ts``
+        falls inside the trailing window (``exit_ts >= anchor −``
+        :data:`TRAILING_WINDOW`), or ``None`` when the window holds zero
+        trades. The SAME fold the main pass runs — a Rust twin reuses the
+        existing fold kernel over the filtered subsequence verbatim.
+    decay_buckets
+        The decay pass's ONLY new fold state: ``(age_month_bucket,
+        net_pnl_paisa)`` pairs, SORTED ascending by bucket key. Pure integer
+        accumulation (the fold/combine exactness law — no libm fold-side):
+        bucket key ``max(0, (anchor − exit_ts).days) //``
+        :data:`DECAY_BUCKET_DAYS`, value the exact int sum of the bucket's
+        ``pnl_paisa``. Sorted so the combine's float summation order is
+        DETERMINISTIC and independent of trade order / any future hash-map
+        Rust twin's iteration order.
+    """
+
+    trailing: TradeFolds | None
+    decay_buckets: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RecencyMetrics:
+    """COMBINE outputs of the recency pass — the four additive row values.
+
+    Field semantics are documented on the matching :class:`ResultMetrics`
+    fields (DEC-METRICS-TRAILING-WINDOW-001).
+    """
+
+    trailing_sharpe_ratio: float | None
+    trailing_profit_factor: float | None
+    trailing_net_pnl_paisa: int | None
+    decay_weighted_net_paisa: float
+
+
+def fold_recency(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    trailing_anchor: datetime,
+) -> RecencyFolds:
+    """Run the recency FOLD pass (DEC-METRICS-TRAILING-WINDOW-001).
+
+    Window membership is judged on each trade's EXIT instant — the exact
+    timestamp compare ``exit_ts >= trailing_anchor − TRAILING_WINDOW``
+    (the simplest defensible law: exit-date semantics like the
+    year fold ``combo_aggregates`` keys on ``ist_trade_date(exit_ts)``, but
+    as an instant compare — no IST date truncation, so the cutoff boundary
+    is exact and tz-arithmetic-free; a trade exiting exactly AT the cutoff
+    instant is IN the window). ``trailing_anchor`` is the GLOBAL per-run
+    anchor (the loaded bar range's end), never a per-combo maximum.
+
+    The decay buckets accumulate exact INTEGER P&L sums keyed by whole
+    30-day months of age at exit (:data:`DECAY_BUCKET_DAYS`;
+    ``timedelta.days`` floors, and a defensively negative age — an exit at
+    or after the anchor — clamps to bucket 0). The exponential weights are
+    applied COMBINE-side (:func:`combine_recency_from_folds`) so the fold
+    stays libm-free and IEEE-exact — the bit-identity law the Rust fold
+    twin must satisfy.
+
+    Callers guarantee ``trades`` is non-empty and ``start_equity_paisa > 0``
+    (the zero-trade row is :func:`_empty_metrics`, the caller's arm —
+    mirroring :func:`_fold_trades`' contract).
+
+    Raises
+    ------
+    ValueError
+        If ``trailing_anchor`` is naive — ``ClosedTrade.exit_ts`` is
+        validated tz-aware, and a naive/aware comparison would raise a bare
+        ``TypeError`` deep in the loop; refused loudly at the boundary
+        instead.
+    """
+    if trailing_anchor.tzinfo is None:
+        raise ValueError(
+            f"fold_recency: trailing_anchor must be tz-aware (ClosedTrade.exit_ts is), "
+            f"got naive {trailing_anchor!r}"
+        )
+    cutoff = trailing_anchor - TRAILING_WINDOW
+    windowed = [trade for trade in trades if trade.exit_ts >= cutoff]
+    trailing = _fold_trades(windowed, start_equity_paisa) if windowed else None
+    buckets: dict[int, int] = {}
+    for trade in trades:
+        age_days = (trailing_anchor - trade.exit_ts).days
+        key = max(0, age_days) // DECAY_BUCKET_DAYS
+        buckets[key] = buckets.get(key, 0) + trade.pnl_paisa
+    return RecencyFolds(trailing=trailing, decay_buckets=tuple(sorted(buckets.items())))
+
+
+def combine_recency_from_folds(
+    folds: RecencyFolds,
+    *,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
+) -> RecencyMetrics:
+    """COMBINE a :class:`RecencyFolds` into the four recency row values.
+
+    The trailing trio mirrors the main combine's expressions token-for-token
+    on the WINDOWED folds (DEC-METRICS-TRAILING-WINDOW-001):
+
+    * ``trailing_net_pnl_paisa`` — the windowed ``net_pnl_paisa`` (exact int).
+    * ``trailing_profit_factor`` — ``_safe_ratio(gross_profit,
+      gross_loss_abs)``, the main ``profit_factor`` law (``None`` when the
+      windowed gross loss is zero).
+    * ``trailing_sharpe_ratio`` — the main Sharpe law on the windowed
+      moments: ``None if std_dev is None or std_dev == 0.0 else mean /
+      std_dev`` (per-trade-return ratio, zero risk-free rate, NO
+      annualisation multiplier — DEC-METRICS-001 verbatim, so no span choice
+      arises; the windowed return series shares the full history's
+      ``start_equity_paisa`` denominator by construction of the fold).
+
+    All three are ``None`` when the window held zero trades
+    (``folds.trailing is None``) — expected and honest, never fabricated.
+
+    The decay composite applies the exponential weights libm-side (here —
+    the fold stays integer-exact): ``Σ pnl · 0.5^(bucket / half_life)``
+    over the SORTED buckets, whose fixed ascending-key order makes the IEEE
+    float summation deterministic. ``decay_half_life_months = math.inf`` is
+    legal and yields weight 1.0 everywhere (the plain-net limit).
+
+    Raises
+    ------
+    ValueError
+        If ``decay_half_life_months`` is not ``> 0`` (NaN/zero/negative
+        refused — a non-positive half-life has no decay semantics).
+    """
+    if not decay_half_life_months > 0.0:
+        raise ValueError(
+            f"combine_recency_from_folds: decay_half_life_months must be > 0, "
+            f"got {decay_half_life_months}"
+        )
+    trailing = folds.trailing
+    if trailing is None:
+        trailing_sharpe: float | None = None
+        trailing_pf: float | None = None
+        trailing_net: int | None = None
+    else:
+        trailing_net = trailing.net_pnl_paisa
+        # The main profit_factor law token-for-token on the windowed folds.
+        trailing_pf = _safe_ratio(
+            float(trailing.gross_profit_paisa), float(trailing.gross_loss_abs_paisa)
+        )
+        # The main Sharpe law token-for-token on the windowed moments.
+        std_dev = trailing.moments.std_dev
+        trailing_sharpe = (
+            None if std_dev is None or std_dev == 0.0 else trailing.moments.mean / std_dev
+        )
+    decay = 0.0
+    for bucket, pnl in folds.decay_buckets:
+        decay += pnl * 0.5 ** (bucket / decay_half_life_months)
+    return RecencyMetrics(
+        trailing_sharpe_ratio=trailing_sharpe,
+        trailing_profit_factor=trailing_pf,
+        trailing_net_pnl_paisa=trailing_net,
+        decay_weighted_net_paisa=decay,
+    )
+
+
 def _compute_metrics_impl(
     trades: Sequence[ClosedTrade],
     total_bars: int,
@@ -1204,6 +1458,8 @@ def _compute_metrics_impl(
     span_years: float,
     drawdown: tuple[int, float, int, float],
     sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
+    decay_half_life_months: float = DECAY_HALF_LIFE_MONTHS,
 ) -> ResultMetrics:
     """Shared metric body behind :func:`compute_metrics` / the scalar entry.
 
@@ -1223,6 +1479,11 @@ def _compute_metrics_impl(
     set. The zero-trade row stays this composition root's own arm
     (:func:`_empty_metrics`), mirroring the sweep core's ``zero_trade``
     arm — :func:`combine_metrics_from_folds` requires ``n_trades >= 1``.
+    With a supplied ``trailing_anchor`` the recency pass
+    (DEC-METRICS-TRAILING-WINDOW-001) runs as a SECOND fold/combine —
+    :func:`fold_recency` → :func:`combine_recency_from_folds` — and its four
+    values replace the base row's ``None`` defaults; an absent anchor is
+    the honest legacy arm (every recency field ``None``).
     """
     if not trades:
         if sl_exit_count not in (None, 0):
@@ -1235,7 +1496,7 @@ def _compute_metrics_impl(
                 f"threading bug"
             )
         return _empty_metrics(drawdown)
-    return combine_metrics_from_folds(
+    base = combine_metrics_from_folds(
         _resolve_folds(trades, start_equity_paisa),
         total_bars=total_bars,
         benchmark_return_pct=benchmark_return_pct,
@@ -1243,6 +1504,22 @@ def _compute_metrics_impl(
         span_years=span_years,
         drawdown=drawdown,
         sl_exit_count=sl_exit_count,
+    )
+    if trailing_anchor is None:
+        # The honest legacy arm (DEC-METRICS-TRAILING-WINDOW-001): a caller
+        # without a global anchor reads every recency field as None — never
+        # a per-combo max-exit fabrication.
+        return base
+    recency = combine_recency_from_folds(
+        fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
+        decay_half_life_months=decay_half_life_months,
+    )
+    return replace(
+        base,
+        trailing_sharpe_ratio=recency.trailing_sharpe_ratio,
+        trailing_profit_factor=recency.trailing_profit_factor,
+        trailing_net_pnl_paisa=recency.trailing_net_pnl_paisa,
+        decay_weighted_net_paisa=recency.decay_weighted_net_paisa,
     )
 
 

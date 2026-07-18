@@ -461,6 +461,12 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         # store (honestly unknown, ranks after every concrete rate within an
         # equal win rate under the preset's presence flag).
         sl_hit_rate=candidate.row.sl_hit_rate,
+        # The recency-preset inputs (DEC-METRICS-TRAILING-WINDOW-001): the
+        # row's persisted trailing Sharpe + decay composite — None on a
+        # pre-extension store / anchor-less run (honestly unscored, rank
+        # last under each preset's presence flag).
+        trailing_sharpe_ratio=candidate.row.trailing_sharpe_ratio,
+        decay_weighted_net_paisa=candidate.row.decay_weighted_net_paisa,
     )
 
 

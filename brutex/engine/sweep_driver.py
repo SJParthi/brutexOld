@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import fno_math
@@ -278,6 +279,7 @@ def metrics_for_mask(
     take_profit_paisa: int | None,
     start_equity_paisa: int,
     reference_stamper: TradeReferenceStamper | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics:
     """Project one mask onto pre-built ``bar_bits`` → its metrics (the shared core).
 
@@ -290,7 +292,10 @@ def metrics_for_mask(
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
     byte-identical with or without it — and so are the walker's exit-reason
     counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), which feed the
-    metrics' ``sl_hit_rate``.
+    metrics' ``sl_hit_rate``. ``trailing_anchor``
+    (DEC-METRICS-TRAILING-WINDOW-001) passes through to
+    :func:`metrics_from_trades` — the GLOBAL recency anchor; ``None`` (the
+    default) leaves every recency field the honest ``None``.
     """
     trades, exit_indices, exit_reason_counts = _simulate_window(
         bars,
@@ -309,6 +314,7 @@ def metrics_for_mask(
         tf_minutes=tf_minutes,
         exit_indices=exit_indices,
         exit_reason_counts=exit_reason_counts,
+        trailing_anchor=trailing_anchor,
     )
 
 
@@ -356,6 +362,7 @@ def metrics_from_trades(
     tf_minutes: int,
     exit_indices: Sequence[int] | None = None,
     exit_reason_counts: Sequence[int] | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics:
     """Build the equity curve from already-simulated trades and compute metrics.
 
@@ -399,6 +406,17 @@ def metrics_from_trades(
     the kernel arm and the Python tail. ``None`` (a legacy caller without
     reason attribution) yields the honest ``sl_hit_rate=None`` on a
     non-empty trade set — never a fabricated ``0.0``.
+
+    ``trailing_anchor`` (DEC-METRICS-TRAILING-WINDOW-001 Stage C) is the
+    GLOBAL recency anchor — the LOADED bar range's end instant, one value
+    per launch, threaded by the persistence spine
+    (``sweep_run._iter_mask_metrics`` passes ``bars[-1].timestamp`` of the
+    tuple's full loaded window). It reaches the metrics layer identically on
+    BOTH the kernel arm and the Python tail (the recency pass is Python-side
+    in either case), so results are byte-identical across arms. ``None``
+    (the default — and deliberately the walk-forward fold scorer, whose
+    ``bars`` are train/test SLICES: a slice-end anchor would violate the
+    GLOBAL-anchor law) leaves every recency field the honest ``None``.
     """
     sl_exit_count = (
         None if exit_reason_counts is None else exit_reason_counts[STOP_LOSS_REASON_INDEX]
@@ -411,13 +429,20 @@ def metrics_from_trades(
             tf_minutes=tf_minutes,
             exit_indices=exit_indices,
             sl_exit_count=sl_exit_count,
+            trailing_anchor=trailing_anchor,
         )
         if metrics is not None:
             return metrics
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
-    return compute_metrics(trades, equity, total_bars=len(bars), sl_exit_count=sl_exit_count)
+    return compute_metrics(
+        trades,
+        equity,
+        total_bars=len(bars),
+        sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
+    )
 
 
 def _exit_pairs(
@@ -526,6 +551,7 @@ def _metrics_from_trades_via_kernel(
     tf_minutes: int,
     exit_indices: Sequence[int] | None = None,
     sl_exit_count: int | None = None,
+    trailing_anchor: datetime | None = None,
 ) -> ResultMetrics | None:
     """ON-arm metrics tail: fused Rust drawdown + curve-less compute_metrics.
 
@@ -593,6 +619,7 @@ def _metrics_from_trades_via_kernel(
         span_years=span_years,
         drawdown=drawdown,
         sl_exit_count=sl_exit_count,
+        trailing_anchor=trailing_anchor,
     )
 
 
