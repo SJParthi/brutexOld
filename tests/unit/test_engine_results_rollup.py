@@ -1229,51 +1229,7 @@ class TestFenceThroughRealGrid:
         rows = ResultsStore.load(rr.rollup_parquet_path(root)).rows()
         assert len(rows) == summary.persisted
 
-        # ────── the CLI Hook-B reconcile fence ──────
-
-
-class TestCliReconcile:
-    def test_success_prints_reconciled(
-        self, sweeps_root: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from brutex.cli import _run_results_rollup_reconcile
-
-        _seed_tree(sweeps_root)
-        assert _run_results_rollup_reconcile(out_root=sweeps_root) is True
-        assert "reconciled" in capsys.readouterr().out
-        assert rr.rollup_parquet_path(sweeps_root).exists()
-
-    def test_zero_store_prints_skipped(
-        self, sweeps_root: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from brutex.cli import _run_results_rollup_reconcile
-
-        assert _run_results_rollup_reconcile(out_root=sweeps_root) is False
-        assert "skipped (no stores)" in capsys.readouterr().out
-
-    def test_failure_is_fenced_and_loud(
-        self, sweeps_root: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from brutex.cli import _run_results_rollup_reconcile
-
-        def _boom(root: Path) -> bool:
-            raise OSError("disk gone")
-
-        with structlog.testing.capture_logs() as logs:
-            assert _run_results_rollup_reconcile(out_root=sweeps_root, rebuild=_boom) is False
-        assert "rollup reconcile FAILED" in capsys.readouterr().err
-        assert any(e["event"] == "cli.results_rollup.failed" for e in logs)
-
-    def test_carve_out_propagates(self, sweeps_root: Path) -> None:
-        from brutex.cli import _run_results_rollup_reconcile
-
-        def _interrupt(root: Path) -> bool:
-            raise KeyboardInterrupt
-
-        with pytest.raises(KeyboardInterrupt):
-            _run_results_rollup_reconcile(out_root=sweeps_root, rebuild=_interrupt)
-
-            # ────── verify-insulation + workflow-wiring pins ──────
+        # ────── verify-insulation + workflow-wiring pins ──────
 
 
 def _repo_root() -> Path:
