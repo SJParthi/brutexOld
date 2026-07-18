@@ -31,6 +31,17 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "optcost_atm_offset",
+    "optcost_grid_around_atm",
+    "optcost_history_lookup",
+    "optcost_moneyness_classify",
+    "optcost_next_monthly_expiry",
+    "optcost_next_weekly_expiry",
+    "optcost_offset_strike",
+    "optcost_regime_rate",
+    "optcost_round_to_atm",
+    "optcost_strike_offset_from_atm",
+    "optcost_strike_step",
     "popcount_bytes",
     "stats_cpcv_pass_count",
 ]
@@ -111,6 +122,121 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def optcost_regime_rate(starts: list[int], rates: list[int], on_ordinal: int) -> tuple[int, int]:
+    """Date-regime rate lookup (DEC-OPTCOST-TAILS-RUST-001) — the
+    `brutex.costs.constants.rate_for_date` decision kernel.
+
+    `starts` are strictly-ascending `date.toordinal()` values; `rates` are
+    parallel `rate_bps_x100` with `-1` marking a refusal row. Returns
+    `(code, value)`: `(0, rate)` OK · `(1, row_index)` refusal (Python
+    raises `UnverifiedCostRegimeError` from its own RegimeRow) ·
+    `(2, 0)` empty table · `(3, 0)` pre-history (Python raises the exact
+    existing ValueErrors). Raises `ValueError` on structurally invalid
+    input — the seam degrades to the Python oracle.
+    """
+    ...
+
+def optcost_history_lookup(
+    starts: list[int], values: list[int], on_ordinal: int
+) -> tuple[int, int]:
+    """Dated history lookup — the shared `get_lot_size` /
+    `_lookup_in_history` bisect law (DEC-OPTCOST-TAILS-RUST-001).
+
+    Returns `(0, value)` OK (a `-1` value is legal data — the weekly
+    NO_WEEKLY sentinel) or `(3, 0)` pre-history. Raises `ValueError` on
+    poisoned input — the seam degrades to the Python oracle.
+    """
+    ...
+
+def optcost_next_weekly_expiry(
+    starts: list[int], dows: list[int], on_ordinal: int
+) -> tuple[int, int]:
+    """Next weekly expiry AT OR AFTER `on_ordinal` —
+    `brutex.options.expiry_calendar.next_weekly_expiry` over a
+    `(start_ordinal, dow | -1)` regime table.
+
+    Returns `(0, expiry_ordinal)` · `(4, 0)` NO_WEEKLY (Python returns
+    None) · `(3, 0)` pre-history. Raises `ValueError` on poisoned input.
+    """
+    ...
+
+def optcost_next_monthly_expiry(
+    starts: list[int], dows: list[int], year: int, month: int, on_ordinal: int
+) -> tuple[int, int]:
+    """Next monthly expiry AT OR AFTER `on_ordinal` — the "last <dow> of
+    the month" law with the cross-month regime re-evaluation
+    (`brutex.options.expiry_calendar.next_monthly_expiry`).
+
+    `year`/`month` must be the ordinal's own civil year/month
+    (consistency-checked). Returns `(0, expiry_ordinal)` or `(3, 0)`
+    pre-history. Raises `ValueError` on poisoned/out-of-domain input
+    (incl. the December-9999 rollover Python's `date` refuses).
+    """
+    ...
+
+def optcost_moneyness_classify(
+    is_put: bool, strike_paisa: int, spot_paisa: int, band_paisa: int
+) -> int:
+    """Moneyness bucket over i64 paisa —
+    `brutex.data.moneyness.classify`'s graded decision (ITM=2 / ATM=3 /
+    OTM=4; NA/UNKNOWN are decided Python-side pre-FFI). Raises
+    `ValueError` on a violated precondition — the seam degrades to the
+    Python oracle, preserving the module's never-raises contract.
+    """
+    ...
+
+def optcost_atm_offset(strike_paisa: int, spot_paisa: int, step_paisa: int) -> int:
+    """Signed ATM±N offset — `brutex.data.moneyness.atm_offset`'s
+    ROUND_HALF_DOWN (half toward zero) law in exact integer arithmetic.
+    Raises `ValueError` on non-positive inputs (Python returns None for
+    those pre-FFI).
+    """
+    ...
+
+def optcost_strike_step(strikes_paisa: list[int]) -> tuple[int, int]:
+    """Strike-grid step — `brutex.data.moneyness.derive_strike_step`'s
+    min-positive-consecutive-gap law over distinct positive i64 paisa
+    strikes. Returns `(0, step_paisa)` or `(5, 0)` when no step is
+    derivable (Python returns None). Raises `ValueError` on a
+    non-positive strike.
+    """
+    ...
+
+def optcost_offset_strike(atm_strike: int, step_count: int, strike_step: int, is_bull: bool) -> int:
+    """OFFSET-rule strike resolution —
+    `brutex.options.strike_rules.resolve_offset_strike`'s direction law
+    (BULL adds `step_count * step`, BEAR inverts). The non-OFFSET-rule
+    ValueError is decided Python-side pre-FFI. Raises `ValueError` on i64
+    overflow (→ the Python oracle).
+    """
+    ...
+
+def optcost_strike_offset_from_atm(atm_strike: int, offset_steps: int, step: int) -> int:
+    """`brutex.options.strike_grid.strike_offset_from_atm` —
+    `atm + offset_steps * step`, no bounds-check by contract. Raises
+    `ValueError` on i64 overflow (→ the Python oracle).
+    """
+    ...
+
+def optcost_grid_around_atm(atm_strike: int, step: int, half_width: int) -> list[int]:
+    """`brutex.options.strike_grid.grid_around_atm` — the ATM-centered
+    strike chain (negative `half_width` → empty, mirroring Python's
+    range). Raises `ValueError` on i64 overflow or an absurd width (→ the
+    Python oracle).
+    """
+    ...
+
+def optcost_round_to_atm(spot_price: float, step: int) -> int:
+    """`brutex.options.strike_grid.round_to_atm` — half-up grid rounding
+    with CPython float semantics replicated operation-for-operation (the
+    ONE sanctioned f64 FFI crossing: the Python function's own float-rupee
+    input domain; no money AMOUNT is computed in floats). Raises
+    `ValueError` outside the provable envelope (non-finite spot,
+    out-of-i64 quotient, step past 2**53) — the seam degrades to the
+    Python oracle.
+    """
     ...
 
 def stats_cpcv_pass_count(
