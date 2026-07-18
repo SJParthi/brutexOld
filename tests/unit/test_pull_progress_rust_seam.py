@@ -385,19 +385,21 @@ def test_real_wheel_replays_the_frozen_golden_flag_on(
             assert eta is None, f"eta fabricated on {case}"
 
 
-def test_real_wheel_hypothesis_differential() -> None:
+def test_real_wheel_hypothesis_differential(monkeypatch: pytest.MonkeyPatch) -> None:
     """The REAL kernel ≡ the Python oracle, bit-for-bit, over the full domain.
 
     Tie-biased count grids (1/16 + 1/2500 land exact banker's ties / the
     round-up-to-clamp boundary — the #1 numeric hazard) + arbitrary floats
-    (NaN/inf included). The suite runs flag-OFF by default, so the snapshot
-    properties ARE the oracle; the kernel is consulted DIRECTLY through the
-    facade accessor.
+    (NaN/inf included). The flag is pinned OFF for the SNAPSHOT side so its
+    properties ARE the oracle on EITHER ambient CI arm (a flag-ON ambient
+    would otherwise make this kernel-vs-kernel, vacuous); the kernel is
+    consulted DIRECTLY through the facade accessor.
     """
     _require_wave2f_wheel()
     from hypothesis import given, settings
     from hypothesis import strategies as st
 
+    monkeypatch.setenv(FLAG_ENV, "0")
     assert not pull_state_rust.pull_state_rust_enabled()
     counts = st.one_of(
         st.integers(min_value=0, max_value=64),

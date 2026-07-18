@@ -244,7 +244,16 @@ def test_gate_in_coverage_trading_day_no_coverage_warn() -> None:
 def test_gate_market_hours_belt_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     """The step-4 BELT is structurally unreachable while the settle floor holds
     (every in-window minute is already before_settle) — monkeypatch the guard
-    predicate to prove a future settle-law change cannot open a hole."""
+    predicate to prove a future settle-law change cannot open a hole.
+
+    ORACLE-ARM by construction (the DEC-LAKE-RUST-LOCKS-ATOMIC-001
+    Python-arm-only monkeypatch-seam class): the Rust kernel computes this
+    belt INTERNALLY from the crate's ONE market-hours core, so a patched
+    Python ``pull_allowed_default`` can never reach it — the flag is pinned
+    OFF here and the kernel-arm belt twins live at the right seams (cargo
+    ``market_hours_belt_stays_reachable`` + the seam suite's served-code and
+    builder-detail pins in ``test_auto_pull_gate_rust_seam.py``)."""
+    monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
     monkeypatch.setattr(auto_pull_gate, "pull_allowed_default", lambda *, now: False)
     v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=_NO_EVID)
     assert (v.allowed, v.reason) == (False, "market_hours_blocked")

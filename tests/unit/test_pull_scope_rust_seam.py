@@ -565,13 +565,10 @@ class TestRealWheelParity:
         monkeypatch.setenv(_FLAG, "0")
         try:
             oracle: str | None = normalize_pull_scope(token)
-            oracle_raised = False
         except ValueError:
-            oracle = None
-            oracle_raised = True
-        monkeypatch.setenv(_FLAG, "1")
-        if oracle_raised:
+            monkeypatch.setenv(_FLAG, "1")
             with pytest.raises(ValueError):
                 normalize_pull_scope(token)
         else:
+            monkeypatch.setenv(_FLAG, "1")
             assert normalize_pull_scope(token) == oracle
