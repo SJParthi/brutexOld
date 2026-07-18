@@ -36,6 +36,11 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Final
 
+# DEC-RUST-PULL-STATE-001 (lane Phase 1): the default-OFF Rust seam leaf.
+# stdlib+structlog-only, so the guard's dependency-light law is preserved;
+# consulted ONLY when BRUTEX_PULL_STATE_RUST is explicitly truthy (flag OFF
+# never imports the wheel — bomb-kernel spy-pinned).
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.calendars.nse import is_trading_day, now_ist
 
 #: The pull-blocked window START, INCLUSIVE (IST wall-clock). 30 minutes before the
@@ -67,6 +72,15 @@ def pull_allowed_now(ist_dt: datetime, is_trading_day_flag: bool) -> bool:
     (weekend / holiday) a pull is ALWAYS allowed regardless of the time. Pure,
     O(1), no I/O — the sole place the window boundary law lives.
 
+    DEC-RUST-PULL-STATE-001 (lane Phase 1): behind the default-OFF
+    ``BRUTEX_PULL_STATE_RUST`` flag the verdict is served by the
+    ``brutex_pull_state`` Rust kernel (integers-only FFI — the SAME law,
+    golden- + differential-pinned bit-identical); the Python arm below is
+    RETAINED VERBATIM as the live parity oracle and serves every flag-OFF
+    call byte-identically, and every flag-ON degrade (wheel missing/stale,
+    kernel raise, poisoned result — each a named warn-once in
+    :mod:`brutex.pull_state_rust`).
+
     Parameters
     ----------
     ist_dt
@@ -83,6 +97,12 @@ def pull_allowed_now(ist_dt: datetime, is_trading_day_flag: bool) -> bool:
         ``True`` when a pull may proceed; ``False`` when it is inside the
         market-hours window on a trading day.
     """
+    if _pull_state_rust.pull_state_rust_enabled():
+        verdict = _pull_state_rust.rust_pull_allowed(ist_dt, is_trading_day_flag)
+        if verdict is not None:
+            return verdict
+    # The Python oracle — the byte-identical retained arm: flag OFF takes it
+    # untouched; a flag-ON kernel degrade falls through to it (never a raise).
     if not is_trading_day_flag:
         return True
     return not (BLOCK_START <= ist_dt.time() < BLOCK_END)

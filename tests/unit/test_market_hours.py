@@ -236,3 +236,105 @@ def test_resolve_market_closed_reads_os_environ_by_default(
     predicate = resolve_market_closed()
     monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _at(10, 0))
     assert predicate() is True
+
+
+# ── DEC-RUST-PULL-STATE-001 — the default-OFF Rust pull-state seam ───────────
+#
+# ``pull_allowed_now`` consults the ``brutex_pull_state`` kernel ONLY when
+# ``BRUTEX_PULL_STATE_RUST`` is explicitly truthy; the Python arm below the
+# seam is the RETAINED byte-identical oracle. These pins cover all four seam
+# arcs (flag off · flag on + served · flag on + degrade · real wheel parity).
+
+
+class _BombKernelModule:
+    """A sys.modules plant that detonates on ANY attribute access.
+
+    The flag-OFF never-imports spy: if ``pull_allowed_now`` under an unset /
+    falsy flag ever imports or touches the kernel module, the import
+    machinery (``__spec__``) or the resolver (``pull_allowed_us``) trips this
+    and the test fails LOUDLY — ``getattr(..., default)`` only swallows
+    ``AttributeError``, never this.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"flag-OFF path touched the Rust kernel module: {name}")
+
+
+class TestPullStateRustSeam:
+    @pytest.fixture(autouse=True)
+    def _clean_warn_registry(self) -> object:
+        from brutex import pull_state_rust
+
+        pull_state_rust.reset_for_tests()
+        yield
+        pull_state_rust.reset_for_tests()
+
+    def test_flag_off_is_byte_identical_and_never_imports(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bomb-kernel pin: flag OFF never touches the wheel + the oracle serves."""
+        import sys
+
+        monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", _BombKernelModule())
+        # The full boundary truth table — the oracle's own law, untouched.
+        assert pull_allowed_now(_at(8, 44, 59), True) is True
+        assert pull_allowed_now(_at(8, 45, 0), True) is False
+        assert pull_allowed_now(_at(15, 34, 59), True) is False
+        assert pull_allowed_now(_at(15, 35, 0), True) is True
+        assert pull_allowed_now(_at(12, 0, 0, day=_SATURDAY), False) is True
+
+    def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", _BombKernelModule())
+        assert pull_allowed_now(_at(9, 0), True) is False
+
+    def test_flag_on_serves_the_kernel_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deliberately-WRONG fake kernel verdict is served — proving the
+        flag-ON arm consults the kernel, not the oracle (the seam tooth)."""
+        import sys
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        monkeypatch.setitem(
+            sys.modules,
+            "brutex_pull_state",
+            SimpleNamespace(pull_allowed_us=lambda us, flag: False),
+        )
+        # A Saturday evening is oracle-ALLOWED; the fake kernel says False —
+        # and the seam serves the kernel's answer.
+        assert pull_allowed_now(_at(20, 0, day=_SATURDAY), False) is False
+
+    def test_flag_on_kernel_degrade_falls_through_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing wheel under flag ON degrades (warn-once) to the oracle."""
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
+        assert pull_allowed_now(_at(8, 44, 59), True) is True
+        assert pull_allowed_now(_at(8, 45, 0), True) is False
+        assert pull_allowed_now(_at(15, 35, 0), True) is True
+
+    def test_flag_on_real_wheel_matches_the_oracle_boundary_table(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real-wheel parity over the boundary matrix (skips when not built)."""
+        pytest.importorskip("brutex_pull_state", reason="brutex_pull_state wheel not installed")
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        for hh, mm, ss, expected in [
+            (0, 0, 0, True),
+            (8, 44, 59, True),
+            (8, 45, 0, False),
+            (9, 15, 0, False),
+            (12, 0, 0, False),
+            (15, 34, 59, False),
+            (15, 35, 0, True),
+            (20, 0, 0, True),
+        ]:
+            assert pull_allowed_now(_at(hh, mm, ss), True) is expected, (hh, mm, ss)
+            # Non-trading: always allowed, any instant.
+            assert pull_allowed_now(_at(hh, mm, ss, day=_SATURDAY), False) is True
