@@ -41,6 +41,23 @@ reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
 on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
 this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939,
+branch `claude/box-autodeploy-lane` — the nightly BOX AUTO-DEPLOY leg + the
+standalone `brutex box-update` mouth: `cmd_nightly_run` gains a PRE-CHAIN
+leg that fast-forwards the box checkout to `origin/main` under FAIL-SAFE
+guards, rebuilds the maturin wheels on a rust/build-config delta (the
+Makefile-mirrored `WHEEL_SET`, drift-pinned; brutex-lake EXCLUDED pending
+DEC-BRUTEX-LAKE-BOX-WHEEL-001), asserts the doctor wheel-freshness law
+GREEN in a fresh scrubbed subprocess BEFORE the new tree is ever executed,
+rolls back + repairs on any failure (preserve-first quarantined lock
+restores; the §4.7 repeated-failure alarm dedupe), re-execs ONCE, and adds
+the removed-env-flag startup PRE-FLIGHT (`env_preflight.py`). FAIL-OPEN
+outside the chain break law — the leg never blocks the nightly; the
+network envelope is the coordinator-amended "no network beyond the git
+remote + the canonical wheel-build fetches". ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1939.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3371,6 +3388,90 @@ hostile-review pass._
   deliberately WEAKER than PR-1's byte gate for this ONE module (the ruled
   standard, disclosed). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; run identity untouched.)
+  Earlier: `claude/box-autodeploy-lane`
+  (**DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939** — entry
+  coordinator-reserved above the live-main ceiling #1932 at tip c220870;
+  gaps are legal per DEC-LEDGER-RENUMBER-001 — the nightly BOX AUTO-DEPLOY
+  leg + the standalone `brutex box-update` mouth. NEW
+  `brutex/nightly/box_update.py` (stdlib + structlog + exactly ONE audited
+  in-repo import — `atomic_write_simple`; imports with every wheel BROKEN,
+  poisoned-`sys.modules`-pinned; env vocabulary + seconds-parse as LOCAL
+  equality-pinned twins): the G0-G6 guard truth table (kill switch
+  `BRUTEX_BOX_UPDATE` — the ONE fail-loud knob, junk =
+  `BoxUpdateEnvError(ValueError)` ⇒ the EXISTING pre-chain catch's clean
+  `EXIT_USER_ERROR`; dirty-tree/diverged/detached/fetch-failed skips with
+  repr()'d evidence, untracked-only proceeds) → ff-only merge + post-merge
+  verify → §4.4 delta classification (failed diff ⇒ CONSERVATIVE
+  rust+pyproject) → the canonical extras-qualified pip refresh on a
+  pyproject delta → BARE per-crate `maturin develop --release` over the
+  Makefile-MIRRORED `WHEEL_SET` (fno_math + trading_core required,
+  brutex-feed optional; brutex-lake ABSENT pending
+  DEC-BRUTEX-LAKE-BOX-WHEEL-001 — the Makefile-parse drift pin forces the
+  one-line append when its target lands, automatic pickup; BARE not
+  `--locked` — no CI gate enforces lock↔manifest for the box crates, a
+  locked lane would wedge-loop on a repo-legal stale lock;
+  DEC-CRATE-LOCK-CI-GATE-001 = the rejected-for-now repo-wide option) →
+  the ASSERT-GREEN GATE (ONE fresh subprocess: FULL import smoke incl.
+  BOTH required wheels explicitly, then the four doctor wheel checks with
+  the child env SCRUBBED of `BRUTEX_SKIP_WHEEL_FRESHNESS` + the forged-SKIP
+  fold belt + the doctor-detail drift pins; `gate="skipped"` ⇔ the
+  subprocess never ran — never a fabricated ok) → on non-green the §4.6
+  ROLLBACK (checkout -B from_sha; the pip-dep RESTORE when the forward pip
+  ran — WARN-class on failure, proceed; the required-wheel smoke →
+  per-crate-probed REPAIR rebuild on unloadable, re-verified by the
+  IDENTICAL smoke never build-rc — still-unloadable ⇒ `repair=failed`,
+  `status=error` + the CRITICAL HARD-CLI-DOWN alarm; ONCE LOADABLE the
+  VERSION-COHERENCE check ALWAYS runs — the torn to_sha-installed SIBLING
+  is digest-caught + mismatch-repaired, both role orders test-pinned;
+  rebuild-fail/digest-still-warn ⇒ `repair=failed_stale`, WARN-class,
+  status stays rolled_back). Restores are crash-marker PROVENANCE-scoped
+  (`build_marker.json` written atomically pre-build; pathset = marker ∩
+  fresh porcelain; NO marker ⇒ an operator-dirty lock takes the visible
+  `dirty_tree` skip, NEVER a clobber — byte-identity-pinned; the marker
+  PROLOGUE runs pre-G4a so a quiet-upstream night still consumes it) and
+  PRESERVE-FIRST quarantined (pre-restore bytes copied + CONTENT-verified
+  to `<lake>/.box_update/quarantine/<UTC-ts>/` before any `checkout -f`;
+  copy-fail ⇒ NO restore; newest-10 retention, lane-files-only pruning).
+  Alarm dedupe: `last_alarm.json` machine-token signatures — night 1 full
+  severity, same-signature repeats demote to WARN with log `repeat=nights`
+  vs report `alarm_repeats=nights−1` (the two-integer law), healthy nights
+  clear, corrupt state fails OPEN louder. Re-exec ONCE (§6 shape (b)): the
+  flock is FULLY RELEASED strictly before `os.execv` (proven by a
+  genuinely-second-process LOCK_NB probe inside the pre-exec window); the
+  PROCESS-ENV-ONLY sentinel `BRUTEX_BOX_UPDATE_STATE` is the loop brake,
+  consumed + deleted by `adopt_state`; lock contention ⇒ leg skipped +
+  the chain's own standard COLLISION refusal. NOT a chain link — a
+  report-level block (`NightlyReport.box_update` + `env_preflight`,
+  additive, emitted always; the 📦 honesty-note line; report golden
+  consciously re-locked; the #1747 hub tolerance pinned); the six R42
+  links byte-untouched, six-link-composition-pinned. The §12 env
+  PRE-FLIGHT (`env_preflight.py`): registry-driven removed-flag detection
+  (`BRUTEX_FILL_MODE` removed-tier + `BRUTEX_SKIP_WHEEL_FRESHNESS`
+  active_escape-tier) over process env AND dotenv candidates, FIFO-safe,
+  detect+WARN only. HONEST: worst-case leg wall time ≈ 4.3 h (the mixed
+  gate-rollback ceiling; build-timeout arm ≈ 3.6 h; typical rust-delta
+  night = minutes, python-only ~seconds; three FAIL-SAFE timeout knobs);
+  the self-heal reach is ASYMMETRIC — an UNLOADABLE `trading_core` crashes
+  the CLI PRE-leg (a process death inside its install window = a hard
+  nightly wedge-loop with NO lane alarm; external signals = launchd +
+  the #1747 hub; manual `maturin develop --release` remediation; the
+  wheel-free rescue entrypoint = named follow-up
+  DEC-BOX-WEDGE-RESCUE-001, deliberately NOT built); every deploy night
+  FULL-re-sweeps (`code_commit_sha` re-key — the documented #1612
+  behavior at higher frequency, not a regression); lake-family Rust flips
+  get ZERO box soak telemetry until the lake wheel DEC lands; torn-version
+  `failed_stale` + torn-dep `pip_restore=failed` are the disclosed
+  residuals (visible, deduped, re-attempted nightly); Q5 CLOSED AS
+  SHIPPED — structlog + report block, NO new Telegram lane (11
+  implementation deviations recorded in the design §25 + MIGRATION.md
+  #1939). GATES: `box_update.py` 100.00% line+branch standalone (702/276,
+  137 tests) + `env_preflight.py` 100.00% (53/10, 14) on NEW ci.yml
+  stanzas; mutation.yml pairs + wiring pins; 19 CLI wiring + 12 real-git
+  integration tests + the run_nightly composition ride; touched `run.py`
+  315/60 + `chain.py` 201/52 at 100.00% on their discovery gates;
+  runbook `docs/runbooks/box-autodeploy.md`. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -10014,6 +10115,26 @@ hostile-review pass._
   INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1918 for the full blurb)
+  Earlier: `claude/box-autodeploy-lane`
+  (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939 — the nightly BOX
+  AUTO-DEPLOY leg + the standalone `brutex box-update` mouth: the pre-chain
+  ff-only self-update of the box checkout under fail-safe guards
+  (kill switch `BRUTEX_BOX_UPDATE`; dirty/diverged/fetch-failed skips),
+  delta-classified BARE maturin wheel rebuilds over the Makefile-mirrored
+  `WHEEL_SET` (brutex-lake excluded pending DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  drift-pinned), the fresh-subprocess assert-green gate (import smoke +
+  scrubbed-env doctor checks; `gate="skipped"` ⇔ never ran), rollback +
+  required-wheel repair + the always-once-loadable version-coherence
+  repair, crash-marker-provenance-scoped PRESERVE-FIRST quarantined lock
+  restores (operator locks never clobbered), the repeated-failure alarm
+  dedupe (two-integer law), re-exec ONCE (flock released strictly before
+  execv; process-env-only sentinel), the additive report blocks + 📦
+  honesty note, and the §12 removed-env-flag startup pre-flight; FAIL-OPEN
+  — never blocks the nightly; wedge-asymmetry disclosed with the named
+  follow-up DEC-BOX-WEDGE-RESCUE-001; both new modules 100.00%
+  line+branch on NEW ci.yml stanzas + mutation pairs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1939 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
