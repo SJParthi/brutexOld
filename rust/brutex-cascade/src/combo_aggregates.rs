@@ -119,10 +119,34 @@ pub fn int_stats(values: &[i64]) -> (i128, i128, i128) {
     )
 }
 
+/// CPython 3.12 `sum()` float fast path — NEUMAIER compensated summation
+/// (`builtin_sum_impl`'s `f_result` loop): per-term compensation is applied
+/// only while the running total stays finite, and the final result is
+/// `f + c`. A naive `iter().sum()` diverges from CPython in the last ULP
+/// (executed fail-before: the hypothesis differential produced mean
+/// 262144.634119352 vs …35203 on a 3-term input), which would break the
+/// bit-exact `_float_stats` parity law.
+pub fn py_float_sum(values: &[f64]) -> f64 {
+    let mut f = 0.0_f64;
+    let mut c = 0.0_f64;
+    for &x in values {
+        let t = f + x;
+        if t.is_finite() {
+            if f.abs() >= x.abs() {
+                c += (f - t) + x;
+            } else {
+                c += (x - t) + f;
+            }
+        }
+        f = t;
+    }
+    f + c
+}
+
 /// `(min, clamped_mean, max)` over non-empty full-precision floats —
-/// `_float_stats` (the ULP clamp law: left-fold `sum(values) / n`, clamped
-/// into `[min(values), max(values)]` — Python's `min`/`max` scan, not a
-/// sortedness assumption).
+/// `_float_stats` (the ULP clamp law: `sum(values) / n` via the CPython
+/// Neumaier float `sum()`, clamped into `[min(values), max(values)]` —
+/// Python's `min`/`max` scan, not a sortedness assumption).
 pub fn float_stats(values: &[f64]) -> (f64, f64, f64) {
     let mut lo = values[0];
     let mut hi = values[0];
@@ -134,8 +158,7 @@ pub fn float_stats(values: &[f64]) -> (f64, f64, f64) {
             hi = v;
         }
     }
-    let sum: f64 = values.iter().sum();
-    let mean = sum / values.len() as f64;
+    let mean = py_float_sum(values) / values.len() as f64;
     (lo, mean.max(lo).min(hi), hi)
 }
 
@@ -425,6 +448,27 @@ mod tests {
         // clamped back to 6.15.
         let (lo, mean, hi) = float_stats(&[6.15, 6.15, 6.15]);
         assert_eq!((lo, mean, hi), (6.15, 6.15, 6.15));
+    }
+
+    #[test]
+    fn py_float_sum_is_neumaier_not_naive() {
+        // Cancellation witness: CPython 3.12 sum() == 1.0 (compensated);
+        // a naive left fold loses the 1.0 and answers 0.0.
+        assert_eq!(py_float_sum(&[1e16, 1.0, -1e16]), 1.0);
+        let naive: f64 = [1e16, 1.0_f64, -1e16].iter().sum();
+        assert_eq!(naive, 0.0);
+        // Positive-domain last-ULP witness (bit patterns captured from the
+        // real CPython 3.12.3 venv — the hypothesis differential's defect
+        // class): the compensated sum differs from the naive fold by one ULP.
+        let values = [
+            f64::from_bits(0x4120_801b_c564_780f),
+            f64::from_bits(0x4121_6c43_6119_6074),
+            f64::from_bits(0x4121_1902_8dd4_9f96),
+        ];
+        let want = f64::from_bits(0x4139_82b0_da29_3c0c); // CPython sum()
+        let naive_bits = values.iter().sum::<f64>().to_bits();
+        assert_eq!(py_float_sum(&values).to_bits(), want.to_bits());
+        assert_eq!(naive_bits, 0x4139_82b0_da29_3c0d); // one ULP high
     }
 
     #[test]
