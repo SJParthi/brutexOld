@@ -18,8 +18,10 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956
-(provisional; renumber-at-landing per DEC-LEDGER-RENUMBER-001), branch
+_Last updated: 2026-07-18 (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1957
+(renumbered #1956 → #1957 at the 2026-07-18 merge-reconcile — main took
+#1956 for DEC-SWEEP-COVERAGE-SHARD-001; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001), branch
 `claude/alpha-buyhold-benchmark` — the ALPHA-vs-BUY&HOLD benchmark: every
 persisted top100 candidate gains the kernel-routed DISPLAY triple
 `alpha_pct`/`strategy_return_pct`/`bh_return_pct` (the strategy's % return
@@ -39,7 +41,7 @@ builds byte-identical (top100 golden UNMODIFIED); /screener + /strategy +
 operator rank-1 render the honest "—" on absence. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
 carries the pointer, never the story — the full record lives in the §1
-Active-branch blurb + MIGRATION.md #1956.)
+Active-branch blurb + MIGRATION.md #1957.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3413,8 +3415,10 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/alpha-buyhold-benchmark`
-  (**DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956 — provisional;
-  renumber-at-landing per DEC-LEDGER-RENUMBER-001** — the ALPHA-vs-BUY&HOLD
+  (**DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1957 — renumbered
+  #1956 → #1957 at the 2026-07-18 merge-reconcile (main took #1956 for
+  DEC-SWEEP-COVERAGE-SHARD-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001)** — the ALPHA-vs-BUY&HOLD
   benchmark, the operator-ordered institutional precision layer. THE FORMULA
   (grounded, not guessed): `alpha_pct = strategy_return_pct − bh_return_pct`
   where `strategy_return_pct = float(net_pnl_paisa)/float(start_equity_paisa)
@@ -3484,7 +3488,7 @@ hostile-review pass._
   env var, no new routes. Hostile review r1 folded (gate-honesty FIX-FIRST —
   1 refuter-confirmed MINOR: the gate-ON `gate_passers` hard-count restore —
   + 3 NITs + 1 latent baseline-write-ordering fix; per-item record in
-  MIGRATION.md #1956); r2 targeted CLEAN SHIP.)
+  MIGRATION.md #1957); r2 targeted CLEAN SHIP.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -10562,8 +10566,10 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/alpha-buyhold-benchmark`
-  (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956 — provisional;
-  renumber-at-landing per DEC-LEDGER-RENUMBER-001 — the ALPHA-vs-BUY&HOLD
+  (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1957 — renumbered
+  #1956 → #1957 at the 2026-07-18 merge-reconcile (main took #1956 for
+  DEC-SWEEP-COVERAGE-SHARD-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) — the ALPHA-vs-BUY&HOLD
   benchmark: the kernel-routed display triple
   `alpha_pct`/`strategy_return_pct`/`bh_return_pct` on every top100 entry
   (strategy return % on the sweep notional minus the instrument's R27
@@ -10580,7 +10586,7 @@ hostile-review pass._
   stores + the #1715 tuple digest byte-untouched; junk refuses at launch);
   default builds byte-identical, the frozen top100/sweep/vocab goldens
   UNMODIFIED; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
-  Active branch line — see §1 + MIGRATION.md #1956 for the full blurb)
+  Active branch line — see §1 + MIGRATION.md #1957 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·

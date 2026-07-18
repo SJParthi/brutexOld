@@ -65,7 +65,7 @@ runs inside :func:`brutex.engine.top100_artifact.build_top100` — persisted
 tuple stores, run identity and the ``sweep_identity`` tuple digest are
 byte-untouched (the gate is post-hoc display selection, deliberately NOT a
 store-address fold — the honest, simpler scope; flipping it ON is an
-operator action recorded in MIGRATION.md #1956).
+operator action recorded in MIGRATION.md #1957).
 """
 
 from __future__ import annotations
