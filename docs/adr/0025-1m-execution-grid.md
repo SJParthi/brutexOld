@@ -131,11 +131,19 @@ the session-bounded SLIDE, ratified and unified with PR-A's shipped walker.
 - The kernel-resident exec columns are ≈30 MB per index instrument by
   derivation; the Python CandleBar-list footprint remains UNMEASURED (the
   design's measure-at-build item, named honestly).
-- The design's dedicated bench-acceptance teeth (the A/B ≤2.0×
-  tuple-throughput refusal gate, the dedicated sparse-mask flat-vs-N_1m
-  pin) were not minted as new gates in this pass — the existing
-  throughput/O(1) benches were re-shaped dual-feed and pass; a named
-  residual for the lane.
+- The design's §7.5 bench-acceptance teeth are SHIPPED
+  (`tests/bench/test_exec_grid_dual_feed_bench.py`, same branch — the
+  2026-07-18 gap-closure pass): the sparse per-mask flat-vs-N_1m pin
+  (measured 1.02× at 20k→160k 1m bars; broken flat-skip ≈ 8×), the A/B
+  ≤ 2.0× tuple-throughput refusal gate at tf=5m (measured 1.23× —
+  dual-feed 1.940 ms vs single-feed-shape 1.574 ms per 24-mask tuple)
+  and the dense-mask worst-case linear pin (per-1m-bar flat 8.04→8.17 ns;
+  the ≈N_1m dense cost stated, never hidden). Honest residual: the A/B
+  baseline is the PR-A COST SHAPE emulated on the same binary (the tf==1
+  fixed point over the same decision stream) — the literal pre-PR-B tree
+  cannot be imported in-process; disclosed in the module docstring. The
+  pre-existing throughput/O(1) benches remain re-shaped dual-feed and
+  pass.
 - The fill-sensitivity annotation (the R13 half, MIGRATION.md #1979) is a
   run-end O(|top100|·bars) batch on the Python oracle — disclosed, never
   the sweep hot path; annotation never re-ranks or hides.
