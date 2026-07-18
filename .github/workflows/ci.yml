@@ -3643,6 +3643,48 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
+  rust-brutex-pull-state:
+    name: Rust (brutex-pull-state build + clippy + test)
+    # DEC-RUST-PULL-STATE-001: the pull-state DECISION kernel crate gates
+    # itself on-push — fmt/check/clippy/test + the PyO3 binding compiles,
+    # mirroring the rust-brutex-feed pattern (the PR that introduces a crate
+    # must gate that crate). Post-flip these kernels are the ONLY decision
+    # path for the pull-state modules, so the crate's cargo suites (the
+    # *_golden.rs cross-language pins, the proptest invariants and the
+    # source_digest_parity twin) must run on EVERY push — not only in the
+    # weekly mutation.yml matrix. The Python-side bit-identity proof (the
+    # frozen pull_outcome / stall goldens + the fail-closed seam suites)
+    # lives in the test (unit) + golden jobs, which install the wheel via
+    # `pip install ./rust/brutex-pull-state`.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-pull-state
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-pull-state -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
   # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
@@ -4177,7 +4219,7 @@ jobs:
       - name: codespell
         run: |
           pip install codespell
-          codespell --ignore-words-list "authorisation,organisation,analyse,analyses,analysed,behaviour,ist,bu,windo,hungs" \
+          codespell --ignore-words-list "authorisation,organisation,analyse,analyses,analysed,behaviour" \
             --skip="*.parquet,*.lmdb,.mypy_cache,.pytest_cache,target,rust/fno-math/target" \
             brutex tests docs rust || true
 
@@ -4960,6 +5002,11 @@ jobs:
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
+      # DEC-RUST-PULL-STATE-001: the pull-state decision-kernel crate gate —
+      # the PR that introduces a crate must gate that crate. Post-flip these
+      # kernels are the ONLY decision path for the pull-state modules, so
+      # their cargo suites run on every push here, not only in mutation.yml.
+      - rust-brutex-pull-state
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -5077,6 +5124,7 @@ jobs:
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
+          echo "  rust-pull-state:${{ needs.rust-brutex-pull-state.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -5119,6 +5167,7 @@ jobs:
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
             "${{ needs.rust-brutexd.result }}" \
+            "${{ needs.rust-brutex-pull-state.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \
