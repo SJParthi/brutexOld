@@ -8029,6 +8029,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         resolution: FuturesSeriesResolution | None = None
         roll_schedule_by_instrument: dict[str, tuple[int, ...]] | None = None
         futures_symbols = [s for s in symbol_list if is_futures_series_symbol(s)]
+        # RES-5 ⇄ DEC-CATALOG-READ-INTEGRITY-001 merge seam: a NON-lock
+        # ``Catalog.open`` failure (genuine catalog corruption) re-raises RAW —
+        # tracked by identity so the #1922 read-integrity refusal below (which
+        # owns the LOAD-phase CatalogError class) never converts it.
+        _open_failure: CatalogError | None = None
         try:
             if futures_symbols:
                 # Coordinate pin BEFORE the resolve (review round-8 finding 9) —
@@ -8084,10 +8089,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # Catalog.open wraps in a CatalogError. Convert THAT specific case to a
             # clean "another sweep is running" refusal (EXIT_USER_ERROR) instead of
             # a raw traceback — but re-raise any OTHER CatalogError (genuine catalog
-            # corruption / a real open failure) LOUDLY into the outer CatalogError
-            # refusal below (DEC-CATALOG-READ-INTEGRITY-001), never masking it as
-            # contention. A sweep that gets past this window is still refused by the
-            # sweep single-flight lock below.
+            # corruption / a real open failure) LOUDLY, never masking it as
+            # contention (the ``_open_failure`` identity tag keeps it OUT of the
+            # #1922 read-integrity refusal below, which owns the LOAD phase). A
+            # sweep that gets past this window is still refused by the sweep
+            # single-flight lock below.
             try:
                 _catalog_ctx = Catalog.open(catalog)
             except CatalogError as exc:
@@ -8096,6 +8102,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # DuckDB versions; a message change would fall through to the loud
                 # re-raise below (fail-safe), never silently mask real contention.
                 if "Conflicting lock" not in str(exc):
+                    _open_failure = exc
                     raise
                 print(
                     f"[brutex] another sweep is already running on this output dir "
@@ -8123,6 +8130,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             print(f"[brutex] sweep-all REFUSED: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
         except CatalogError as exc:
+            if exc is _open_failure:
+                # The RES-5 non-lock OPEN failure re-raising through — genuine
+                # catalog corruption surfaces RAW (the
+                # test_non_lock_catalog_error_still_surfaces_loudly law), never
+                # folded into the read-integrity refusal below.
+                raise
             # An UNREADABLE partition (corrupt/torn bytes surviving one retry, or
             # a foreign schema) is a LOUD refusal, never a silent drop — a skipped
             # partition would hole the data_snapshot_hash inputs and silently

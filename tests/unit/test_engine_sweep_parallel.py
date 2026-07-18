@@ -2991,6 +2991,8 @@ class TestParallelOnProgress:
             assert guards.checkpoint.next_index > 0
         assert summary.tuples_run > 0
         assert any(e["event"] == "sweep.progress.publish_failed" for e in logs)
+
+
 class TestParallelCorruptCheckpointResume:
     """G12: the parallel driver quarantines a corrupt checkpoint + starts fresh."""
 
