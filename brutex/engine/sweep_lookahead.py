@@ -118,6 +118,14 @@ _FALSY: Final[frozenset[str]] = FALSY_LITERALS
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
+    # _FALSY/_TRUTHY are exported so static analysis counts the aliases as
+    # USED (CodeQL py/unused-global-variable, alerts 1287/1115): they are
+    # consumed cross-module by the mirror-pin suites (test_feed_rust /
+    # test_money_rust / test_strategies_combo_rust /
+    # test_nightly_box_update / test_lake_rust_render) — see the alias
+    # comment above; never delete without re-homing those pins.
+    "_FALSY",
+    "_TRUTHY",
     "GuardedBarWindow",
     "env_flag_tristate",
     "maybe_guard_bars",
