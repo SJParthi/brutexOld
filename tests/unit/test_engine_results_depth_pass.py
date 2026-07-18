@@ -1041,3 +1041,7 @@ class TestAlphaThreading:
         # passers) == the shipped entries + the alpha-gate exclusions (the
         # fixture pool collapses no twin families).
         assert len(artifact.entries) + excluded == report.gate_passers
+        # Review r1 FIX 1: the artifact-side ``source["gate_passers"]`` AGREES
+        # with the report-side count under gate-ON — both mean the HARD-gate
+        # passer count, never the post-alpha-exclusion count.
+        assert artifact.source["gate_passers"] == report.gate_passers

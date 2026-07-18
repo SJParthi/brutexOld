@@ -800,6 +800,13 @@ def build_top100(
         join_for_entries = cascade_join
 
     passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
+    # Snapshot the HARD-gate passer count BEFORE the alpha gate can narrow
+    # ``passers``: ``source["gate_passers"]`` + the ``top100.built`` log field
+    # keep their historical meaning ("hard-gate passers") and stay equal to
+    # the report-side ``ResultsDepthReport.gate_passers`` accounting under
+    # gate-ON; ``alpha_gate_excluded`` is the SOLE accounting of alpha
+    # rejections (review r1, DEC-ALPHA-BUYHOLD-METRIC-001).
+    hard_passers = len(passers)
 
     # ── The DEFAULT-OFF alpha rejection gate (DEC-ALPHA-BUYHOLD-METRIC-001) ──
     # Runs BEFORE the family collapse so an excluded candidate can never be a
@@ -885,7 +892,7 @@ def build_top100(
         "data_snapshot_hashes": sorted(set(data_snapshot_hashes)),
         "stores": counts.stores,
         "pool": len(candidates),
-        "gate_passers": len(passers),
+        "gate_passers": hard_passers,
         "excluded_no_aggs": counts.excluded_no_aggs,
         "zero_trade_excluded": counts.zero_trade_excluded,
         "parity_excluded": counts.parity_excluded,
@@ -931,7 +938,7 @@ def build_top100(
         run_id=run_id,
         preset=resolved,
         pool=len(candidates),
-        gate_passers=len(passers),
+        gate_passers=hard_passers,
         families_collapsed=families_collapsed,
         entries=len(entries),
         cascade_join_state=join_state,

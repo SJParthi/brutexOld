@@ -1125,6 +1125,39 @@ class TestAlphaRejectionGate:
         assert len(events) == 1
         assert events[0]["excluded"] == 2
         assert set(events[0]["sample"]) == {loser.row.run_id, boundary.row.run_id}
+        # Review r1 FIX 1 (gate-honesty): ``gate_passers`` keeps its historical
+        # meaning — the HARD-gate passer count (all 4), NEVER the
+        # post-alpha-exclusion count (2) — on the persisted ``source`` AND the
+        # ``top100.built`` INFO log field alike; ``alpha_gate_excluded`` stays
+        # the sole accounting of alpha rejections.
+        assert artifact.source["gate_passers"] == 4
+        built = [log for log in logs if log["event"] == "top100.built"]
+        assert len(built) == 1
+        assert built[0]["gate_passers"] == 4
+
+    def test_gate_on_accounting_law_entries_plus_exclusions_recompose_gate_passers(
+        self,
+    ) -> None:
+        """The report-side accounting law holds under gate-ON (review r1):
+        ``len(entries) + families_collapsed + alpha_gate_excluded ==
+        gate_passers`` — the invariant the code establishes for a pool below
+        ``TOP100_LIMIT`` (here families_collapsed is 0, so entries + alpha
+        exclusions recompose the HARD-passer count exactly, matching
+        ``ResultsDepthReport.gate_passers``'s pre-alpha meaning)."""
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        loser = make_candidate(2, fingerprint=fingerprint_seed(2))  # alpha −1 → excluded
+        artifact = _build([winner, loser], **_alpha_kwargs(alpha_gate=True))
+        gate_passers = artifact.source["gate_passers"]
+        excluded = artifact.source["alpha_gate_excluded"]
+        collapsed = artifact.source["families_collapsed"]
+        assert isinstance(gate_passers, int)
+        assert isinstance(excluded, int)
+        assert isinstance(collapsed, int)
+        assert gate_passers == 2  # BOTH hard-gate passers — pre-alpha
+        assert excluded == 1
+        assert len(artifact.entries) + collapsed + excluded == gate_passers
 
     def test_gate_on_with_zero_exclusions_is_counted_zero_no_warn(self) -> None:
         winner = make_candidate(
