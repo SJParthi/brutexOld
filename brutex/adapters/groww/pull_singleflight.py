@@ -164,10 +164,12 @@ __all__ = [
     "PULL_LEASE_SCHEMA",
     "PULL_LEASE_STALE_AFTER_S",
     "PULL_SINGLEFLIGHT_LOCK_NAME",
+    "SWEEP_SINGLEFLIGHT_LOCK_NAME",
     "ForeignPullActiveError",
     "NightlyAlreadyRunningError",
     "PullAlreadyRunningError",
     "PullLease",
+    "SweepAlreadyRunningError",
     "account_pull_singleflight_lock",
     "account_singleflight_lock_path",
     "default_account_lock_dir",
@@ -180,6 +182,8 @@ __all__ = [
     "pull_singleflight_lock",
     "pull_singleflight_lock_path",
     "read_pull_lease",
+    "sweep_singleflight_lock",
+    "sweep_singleflight_lock_path",
 ]
 
 _LOG = structlog.get_logger(__name__)
@@ -197,6 +201,13 @@ PULL_SINGLEFLIGHT_LOCK_NAME: Final[str] = "pull_singleflight.lock"
 #: (DEC-SWEEP-NIGHTLY-AUTOMATION-001). Beside the pull lock so two nightly chains
 #: against one lake are mechanically impossible — the same non-blocking flock core.
 NIGHTLY_SINGLEFLIGHT_LOCK_NAME: Final[str] = "nightly_singleflight.lock"
+
+#: The single, stable filename for the SWEEP single-flight lock. Keyed by the
+#: sweep OUTPUT root (not the lake), so two ``sweep-all`` runs writing the SAME
+#: shared checkpoint / hash-chained supervisor audit / results store are refused
+#: — the second cannot corrupt the first's state (Golden Rule #8). Reuses the ONE
+#: :func:`_flock_singleflight` core, exactly like the nightly lock.
+SWEEP_SINGLEFLIGHT_LOCK_NAME: Final[str] = "sweep_singleflight.lock"
 
 #: Max bytes of the lock file read back as the best-effort HOLDER NOTE when a
 #: contended acquire builds its refusal message. Advisory only — a bound, not a
@@ -313,6 +324,31 @@ class NightlyAlreadyRunningError(BruteXError):
         self.lock_path = lock_path
 
 
+class SweepAlreadyRunningError(BruteXError):
+    """Another sweep already holds the sweep single-flight lock for this output dir.
+
+    Raised by :func:`sweep_singleflight_lock` on contention: a second
+    ``sweep-all`` over the SAME output root would share the first's crash-safe
+    resume checkpoint, its hash-chained supervisor audit JSONL (two concurrent
+    appenders would break the BLAKE3 chain — Golden Rule #8), and its results
+    store. The caller REFUSES to start a second sweep rather than corrupt that
+    shared state. Mirrors :class:`NightlyAlreadyRunningError` (the same
+    best-effort holder-note echo so the refusal can name the running sweep).
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        super().__init__(
+            _with_holder_suffix(
+                "another sweep is already running on this output dir "
+                f"(sweep single-flight lock held at {lock_path}); refusing to "
+                "start a second one, which would corrupt the shared resume "
+                "checkpoint / hash-chained audit / results store",
+                lock_path,
+            )
+        )
+        self.lock_path = lock_path
+
+
 def pull_singleflight_lock_path(lake_root: Path) -> Path:
     """Return the stable account-wide single-flight lock path under *lake_root*.
 
@@ -417,6 +453,60 @@ def nightly_singleflight_lock(
     with _flock_singleflight(
         nightly_singleflight_lock_path(lake_root),
         contention_error=NightlyAlreadyRunningError,
+        holder_note=holder_note,
+    ):
+        yield
+
+
+def sweep_singleflight_lock_path(out_root: Path) -> Path:
+    """Return the stable sweep single-flight lock path under the sweep *out_root*.
+
+    ``<out_root>/.locks/sweep_singleflight.lock`` — keyed by the sweep OUTPUT
+    root (where the checkpoint / supervisor audit / results store live), so two
+    sweeps writing the SAME shared state contend on one file, while sweeps to
+    DIFFERENT output roots never contend. Never created here. O(1).
+    """
+    return out_root / _LOCK_SUBDIR / SWEEP_SINGLEFLIGHT_LOCK_NAME
+
+
+@contextmanager
+def sweep_singleflight_lock(
+    out_root: Path, *, holder_note: str | None = None
+) -> Generator[None, None, None]:
+    """Hold the SWEEP single-flight lock for *out_root* for the whole ``with`` block.
+
+    The sweep's cross-process gate: only ONE ``sweep-all`` may run at a time per
+    output root, held for the ENTIRE (often multi-day) sweep, so a second
+    concurrent sweep cannot share — and corrupt — the first's crash-safe resume
+    checkpoint, its hash-chained supervisor audit JSONL (two appenders would
+    break the BLAKE3 chain, Golden Rule #8), or its results store. Same mechanics
+    as :func:`pull_singleflight_lock` / :func:`nightly_singleflight_lock` (the ONE
+    :func:`_flock_singleflight` core — a NON-BLOCKING exclusive ``flock``,
+    kernel-released on fd close / process death, so a ``kill -9`` of the holder
+    never wedges a stale lock; no pid files, no stale-lock recovery state).
+
+    Parameters
+    ----------
+    out_root
+        The sweep output root (locates the ``.locks`` sidecar dir). The lock file
+        is created on first use.
+    holder_note
+        Optional advisory note (e.g. ``sweep-all:<grid_id>``) best-effort-written
+        into the lock file so a contended peer's refusal names this sweep.
+
+    Raises
+    ------
+    SweepAlreadyRunningError
+        If another process holds the sweep lock — a sweep is in flight over this
+        output root; raised immediately (non-blocking), so the caller refuses.
+    LakeWriteHalt
+        If creating the ``.locks`` sidecar dir / lock file hits a full disk
+        (ENOSPC) / OOM (the same :func:`~brutex.data.atomic_io.lake_write_guard`
+        contract as the pull / nightly locks).
+    """
+    with _flock_singleflight(
+        sweep_singleflight_lock_path(out_root),
+        contention_error=SweepAlreadyRunningError,
         holder_note=holder_note,
     ):
         yield

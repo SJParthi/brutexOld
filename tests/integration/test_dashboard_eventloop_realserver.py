@@ -428,7 +428,10 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
     def _stalled_read(path: Path) -> dict[str, object]:
         entered.set()
         release.wait(timeout=_STALL_S)
-        return {"state": "running", "running": True, "enumerated": 999}
+        # A FRESH wall_time stamp, as publish_progress always writes it — a
+        # running claim without one is DEAD EVIDENCE under the
+        # DEC-JOB-COOPERATIVE-CANCEL-001 staleness law and would decay to idle.
+        return {"state": "running", "running": True, "enumerated": 999, "wall_time": time.time()}
 
     monkeypatch.setattr("brutex.engine.sweep_supervisor.read_progress", _stalled_read)
 

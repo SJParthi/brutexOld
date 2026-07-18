@@ -334,6 +334,239 @@ class TestPostTrigger:
         assert emitted == []  # no completion summary on a halted run
 
 
+class TestCancelRoute:
+    """POST /api/v1/universe/greeks-backfill-cancel (DEC-JOB-CANCEL-CONTROL-001).
+
+    The Greeks-backfill arm of the DEC-JOB-COOPERATIVE-CANCEL-001 mechanism:
+    the SAME ``request_cancel_verdict`` core + the SAME
+    ``{"cancelling": bool, "reason"?}`` wire as ``/api/v1/pull/cancel``, on
+    the DEDICATED backfill job (no kind gate — only this route family starts
+    it). Driven through the REAL routes via ``build_app`` + ``TestClient``.
+    """
+
+    def test_cancel_idle_is_reasoned_noop(self, client: TestClient) -> None:
+        """No run in flight → an honest reasoned refusal, never a fabricated ack."""
+        resp = client.post("/api/v1/universe/greeks-backfill-cancel")
+        assert resp.status_code == 200
+        assert resp.json() == {"cancelling": False, "reason": "idle"}
+
+    def test_idle_progress_payload_carries_cancelling_false(self, client: TestClient) -> None:
+        """The ADDITIVE `cancelling` key exists (False) beside every legacy key."""
+        snap = client.get("/api/v1/universe/greeks-backfill-progress").json()
+        assert snap["state"] == "idle"
+        assert snap["cancelling"] is False
+        for key in ("total", "completed", "failed", "bars", "current", "detail", "percent"):
+            assert key in snap  # the pre-existing shape is untouched
+
+    def test_cancel_running_wet_backfill_end_to_end(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stop a LIVE wet run through the real route chain: the ack, the
+        idempotent double-Stop, the additive ``cancelling: true`` progress
+        key, the runner probe GENUINELY observing the token (the threaded
+        ``should_stop`` — the #1369 idiom), the honest done-state whose
+        headline is the CANCELLED note (never an error), the still-fired ⏹
+        completion summary, and the after-finish Stop race settling as an
+        idle no-op (the fresh-Event-per-start identity law).
+        """
+        # The fixture note mirrors the REAL runner's 0/1-with-no-file shape
+        # (hostile-review #1748 fix round: the note's resume clause branches
+        # on the on-disk checkpoint truth — a cancel before the first clean
+        # record has no file, so the honest no-checkpoint arm renders here).
+        report = _report(
+            cancelled=True,
+            note=(
+                "Greeks backfill bbbbbbbbbbbb CANCELLED by operator at contract 0/1 — "
+                "resumable (no checkpoint recorded — the re-run re-scans; resume "
+                "correct via stored stamps): 0 contract(s) re-stamped "
+                "v2, 0 already current, 0 errored (re-runnable); 0 bars written"
+            ),
+        )
+        running = threading.Event()
+        observed = threading.Event()
+        release = threading.Event()
+        emitted: list[Any] = []
+
+        def _fake_run(lake_root: Path, **kwargs: Any) -> GreeksBackfillReport:
+            should_stop = kwargs["should_stop"]
+            running.set()
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not should_stop():
+                time.sleep(0.01)
+            assert should_stop(), "the cancel was never observed by the runner probe"
+            observed.set()
+            assert release.wait(timeout=10.0)
+            return report
+
+        monkeypatch.setattr(
+            app_module, "scan_stale_greeks_targets", lambda lake_root, **kwargs: _SCAN
+        )
+        monkeypatch.setattr(app_module, "plan_greeks_backfill", lambda scan, **kwargs: _PLAN)
+        monkeypatch.setattr(app_module, "run_greeks_backfill", _fake_run)
+        monkeypatch.setattr(app_module, "emit_greeks_backfill_complete_alert", emitted.append)
+        try:
+            resp = client.post("/api/v1/universe/greeks-backfill")
+            assert resp.json()["started"] is True
+            assert running.wait(timeout=10.0)
+            # Before the Stop: the additive key reads False on a live run.
+            before = client.get("/api/v1/universe/greeks-backfill-progress").json()
+            assert before["cancelling"] is False
+            first = client.post("/api/v1/universe/greeks-backfill-cancel")
+            assert first.status_code == 200
+            assert first.json() == {"cancelling": True}  # ack — no reason key on success
+            # Double-Stop on a live run: idempotent success (the per-run Event
+            # is already set — a second set changes nothing).
+            second = client.post("/api/v1/universe/greeks-backfill-cancel")
+            assert second.json() == {"cancelling": True}
+            assert observed.wait(timeout=10.0)  # the runner probe DID observe it
+            # Mid-stop (the run held open): the payload reflects the stopping state.
+            snap = client.get("/api/v1/universe/greeks-backfill-progress").json()
+            assert snap["state"] == "running" and snap["cancelling"] is True
+        finally:
+            release.set()
+        snap = _wait_for_backfill(client)
+        assert snap["state"] == "done"  # an honest cooperative stop — never "error"
+        assert snap["detail"] == report.note  # the CANCELLED note IS the headline
+        assert "CANCELLED by operator" in snap["detail"]
+        assert emitted == [report]  # the ⏹ completion summary still fires exactly once
+        # After settle: a late Stop is an idle no-op (the finish won the race) …
+        late = client.post("/api/v1/universe/greeks-backfill-cancel")
+        assert late.json() == {"cancelling": False, "reason": "idle"}
+        # … and the additive key drops back to False (no stale stopped flag).
+        assert client.get("/api/v1/universe/greeks-backfill-progress").json()["cancelling"] is False
+
+    def test_cancel_dry_run_refused_uncancellable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DRY-RUN work (scan + report only) never observes the cancel
+        token — the start passes ``cancellable=False`` so the route refuses
+        HONESTLY with the distinct reason (the #1369 standalone-metadata-pull
+        precedent), never a fabricated ``{"cancelling": true}``."""
+        scanning = threading.Event()
+        release = threading.Event()
+
+        def _gated_scan(lake_root: Path, **kwargs: Any) -> BackfillScan:
+            scanning.set()
+            assert release.wait(timeout=10.0)
+            return _SCAN
+
+        monkeypatch.setattr(app_module, "scan_stale_greeks_targets", _gated_scan)
+        monkeypatch.setattr(app_module, "plan_greeks_backfill", lambda scan, **kwargs: _PLAN)
+        try:
+            resp = client.post("/api/v1/universe/greeks-backfill", params={"dry_run": "true"})
+            assert resp.json()["started"] is True
+            assert scanning.wait(timeout=10.0)
+            cancel = client.post("/api/v1/universe/greeks-backfill-cancel")
+            assert cancel.json() == {"cancelling": False, "reason": "uncancellable"}
+            # No fabricated stopping state ever reaches the progress payload.
+            snap = client.get("/api/v1/universe/greeks-backfill-progress").json()
+            assert snap["cancelling"] is False
+        finally:
+            release.set()
+        snap = _wait_for_backfill(client)
+        assert snap["state"] == "done" and "DRY RUN" in snap["detail"]
+
+    def test_wet_run_threads_the_job_cancel_probe(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The runner receives the JOB's cancel probe as ``should_stop``
+        (captured through the real route ``_work``), and the probe reads
+        False once the run settles — an idle job never reports a pending
+        cancel (the fresh-Event-per-start law)."""
+        captured: dict[str, Any] = {}
+        _patch_pipeline(monkeypatch, captured, run_result=_report())
+        assert client.post("/api/v1/universe/greeks-backfill").json()["started"] is True
+        assert _wait_for_backfill(client)["state"] == "done"
+        probe = captured["run_kwargs"]["should_stop"]
+        assert callable(probe)
+        assert probe() is False  # settled + no cancel pending → False
+
+    def test_launch_window_running_and_cancel_accepted_before_first_beat(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The LAUNCH window — POST returned, the worker yet to land its FIRST
+        progress action — already reads ``running`` on the progress route and
+        ACCEPTS the Stop, with the ack on the wire within one poll.
+
+        The stamp-gated-refusal CLASS regression (the sweep lane's
+        ``progress_bridge_stale`` defect, found 2026-07-12: a fresh launch
+        baseline written WITHOUT the staleness stamp made the gate read a
+        LIVE just-launched run as dead — Stop hidden, cancel refused, progress
+        idle — until the first work unit completed). The greeks-backfill
+        lane's running-claim + cancel gates key ONLY on state stamped
+        synchronously INSIDE ``BackgroundPullJob.start`` (``_running`` + the
+        fresh per-run cancel Event + ``_cancellable``, one lock hold, before
+        the worker is spawned; the launch baseline ``_progress.start`` in the
+        same call) — this test pins that law THROUGH the real routes so a
+        future refusal keyed on a later-stamped field (a beat timestamp, a
+        ``total > 0`` condition, a wall-time analog) fails HERE, not in
+        production. Window construction: the worker is parked INSIDE
+        ``resolve_risk_free_source()`` — the ``_work`` statement strictly
+        BEFORE the scanning-label ``sync_from_ledger`` — so every wire sample
+        below is pre-first-beat BY CONSTRUCTION (the sibling end-to-end cancel
+        test samples only after that first sync has landed).
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        real_resolve = app_module.resolve_risk_free_source
+
+        def _blocking_resolve() -> Any:
+            entered.set()
+            assert release.wait(timeout=10.0)
+            return real_resolve()
+
+        report = _report(
+            cancelled=True,
+            note=(
+                "Greeks backfill bbbbbbbbbbbb CANCELLED by operator at contract 0/1 — "
+                "resumable (no checkpoint recorded — the re-run re-scans; resume "
+                "correct via stored stamps): 0 contract(s) re-stamped "
+                "v2, 0 already current, 0 errored (re-runnable); 0 bars written"
+            ),
+        )
+        emitted: list[Any] = []
+
+        def _fake_run(lake_root: Path, **kwargs: Any) -> GreeksBackfillReport:
+            # The Stop acked mid-window reaches the runner's FIRST top-of-batch
+            # probe (the disclosed cancel-blind-scan semantics: honored at the
+            # first batch boundary) — the token is ALREADY observable at entry.
+            should_stop = kwargs["should_stop"]
+            assert should_stop() is True, "the launch-window cancel never reached the runner probe"
+            return report
+
+        monkeypatch.setattr(app_module, "resolve_risk_free_source", _blocking_resolve)
+        monkeypatch.setattr(
+            app_module, "scan_stale_greeks_targets", lambda lake_root, **kwargs: _SCAN
+        )
+        monkeypatch.setattr(app_module, "plan_greeks_backfill", lambda scan, **kwargs: _PLAN)
+        monkeypatch.setattr(app_module, "run_greeks_backfill", _fake_run)
+        monkeypatch.setattr(app_module, "emit_greeks_backfill_complete_alert", emitted.append)
+        try:
+            assert client.post("/api/v1/universe/greeks-backfill").json()["started"] is True
+            # Worker LIVE but parked pre-beat: the only running-claim source on
+            # the wire is the launch baseline stamped inside start() itself.
+            assert entered.wait(timeout=10.0)
+            snap = client.get("/api/v1/universe/greeks-backfill-progress").json()
+            assert snap["state"] == "running"
+            assert snap["running"] is True
+            assert snap["total"] == 0  # the pre-scan shape the gb panel renders as "scanning …"
+            assert snap["cancelling"] is False
+            # The cancel route ACCEPTS in the window — never a stamp-gated refusal.
+            first = client.post("/api/v1/universe/greeks-backfill-cancel")
+            assert first.status_code == 200
+            assert first.json() == {"cancelling": True}
+            # The ack is on the wire within one poll, state still honestly running.
+            after = client.get("/api/v1/universe/greeks-backfill-progress").json()
+            assert after["state"] == "running"
+            assert after["cancelling"] is True
+        finally:
+            release.set()
+        snap = _wait_for_backfill(client)
+        assert snap["state"] == "done"  # the honest cooperative stop — never "error"
+        assert "CANCELLED by operator" in snap["detail"]
+        assert emitted == [report]  # the ⏹ completion summary still fires exactly once
+
+
 @pytest.fixture
 def divergent_env_client(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -589,11 +822,97 @@ class TestFrontend:
         # failure on the backoff path, never settle the panel.
         assert "return {ok: true, status: r.status, body: await r.json()};" in helper
         # NO gb call site fetches bare any more: the ONE raw fetch lives in
-        # the helper — poll, start POST, and attach probe all ride it.
+        # the helper — poll, start POST, attach probe and the cancel POST
+        # (DEC-JOB-CANCEL-CONTROL-001) all ride it.
         assert block.count("await fetch(") == 1
         assert "await fetch('/api/v1/universe/greeks-backfill-progress')" not in block
         assert "await fetch('/api/v1/universe/greeks-backfill'" not in block
-        assert block.count("await gbFetchJson(") == 3  # poll + start POST + attach probe
+        # poll + start POST + attach probe + cancel POST
+        assert block.count("await gbFetchJson(") == 4
+
+    def test_backfill_stop_button_and_cancel_wiring(self) -> None:
+        """DEC-JOB-CANCEL-CONTROL-001: the panel Stop button rides the
+        EXISTING gb machinery — the bounded ``gbFetchJson`` (no bare fetch),
+        the existing poll chain (ZERO new timers), textContent-only labels —
+        shown/reset by ``gbBeginWatch``, hidden/reset by ``gbFinish``,
+        reflecting a cancel acked from ANY tab off the additive
+        ``cancelling`` payload key, with the refusal reasons rendered
+        DISTINCTLY (idle vs the dry-run's honest "uncancellable"). Substring
+        pins per the panel's honest envelope (presence, not execution — no
+        headless JS runner in the unit gate).
+        """
+        template = _universe_template()
+        assert 'id="gbStopBtn"' in template
+        assert "/api/v1/universe/greeks-backfill-cancel" in template
+        block = self._gb_block()
+        assert "async function gbStopBackfill()" in block
+        assert "gbStopBtnEl.addEventListener('click', gbStopBackfill);" in block
+        # Shown + reset on watch begin (start click AND re-attach), hidden +
+        # reset on the observed terminal — a fresh run never inherits a stale
+        # "Stopping…" label.
+        assert block.count("sbtn.hidden = false;") == 1
+        assert block.count("sbtn.hidden = true;") == 1
+        # A cancel acked from ANY tab reflects off the additive payload key.
+        assert "s.cancelling === true" in block
+        assert "'stopping · '" in block
+        assert "Stopping — finishing current batch…" in block
+        # Distinct honest refusal labels + the failed-POST recovery.
+        assert "Dry-run scan has no stop seam" in block
+        assert "No running backfill to stop" in block
+        assert "Stop request failed — retry" in block
+
+    def test_backfill_stop_label_is_phase_accurate(self) -> None:
+        """HOSTILE-REVIEW REGRESSION (#1748 fix round): during the
+        cancel-blind O(files) SCAN phase (``total`` still 0) NO batch is in
+        flight — the stop lands at the FIRST batch boundary — so the poll's
+        stopping label must not claim a current batch is finishing (the
+        pre-fix branch wrote 'Stopping — finishing current batch…'
+        unconditionally). Once batches run (``total > 0``) the original
+        wording stands; the phase split keys off the SAME ``total`` the
+        status line keys off. The click-time label is phase-NEUTRAL
+        ('Stopping…') — the click cannot know the phase, and the very next
+        poll paints the accurate one off the payload.
+        """
+        block = self._gb_block()
+        poll = block[
+            block.index("async function pollGreeksBackfill()") : block.index(
+                "async function gbAttachIfRunning"
+            )
+        ]
+        assert "? 'Stopping — finishing current batch…'" in poll
+        assert ": 'Stopping — will stop at the first batch boundary…';" in poll
+        assert poll.count("(s.total || 0) > 0") == 2  # status line + label share the key
+        stop = block[block.index("async function gbStopBackfill()") :]
+        assert "sbtn.textContent = 'Stopping…';" in stop
+        assert "Stopping — finishing current batch…" not in stop
+
+    def test_backfill_stop_button_watch_epoch_guard(self) -> None:
+        """HOSTILE-REVIEW REGRESSION (#1748 fix round): gbStopBackfill's
+        late-response writes are watch-epoch guarded — without the guard a
+        cancel POST resolving AFTER run A settled and run B began repainted
+        run B's freshly-reset Stop button with run A's stale refusal label,
+        which then PERSISTED (the poll re-writes the button only under
+        ``cancelling === true``). The epoch (``gbStopGen``, the gbPollGen
+        pattern run-scoped to the Stop button) bumps on BOTH panel
+        transitions (gbBeginWatch AND gbFinish), and the guard also skips a
+        hidden/reset button. Substring pins (presence, not execution — the
+        panel's honest envelope).
+        """
+        block = self._gb_block()
+        assert "let gbStopGen = 0;" in block
+        assert block.count("gbStopGen += 1;") == 2  # begin + finish, nowhere else
+        begin = block[block.index("function gbBeginWatch()") : block.index("function gbFinish()")]
+        fin = block[
+            block.index("function gbFinish()") : block.index("async function startGreeksBackfill")
+        ]
+        assert "gbStopGen += 1;" in begin
+        assert "gbStopGen += 1;" in fin
+        stop = block[block.index("async function gbStopBackfill()") :]
+        assert "const gen = gbStopGen;" in stop
+        assert "const stale = () => gen !== gbStopGen || !sbtn || sbtn.hidden;" in stop
+        # BOTH late-write sites (the refusal branch AND the failed-POST
+        # catch) ride the guard — a stale response writes nothing.
+        assert stop.count("if (!stale())") == 2
 
     def test_backfill_poll_generation_guard_supersedes_stale_chains(self) -> None:
         """REGRESSION (fix round 10): the gb poll chain is generation-guarded.

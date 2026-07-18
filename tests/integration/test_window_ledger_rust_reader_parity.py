@@ -16,7 +16,7 @@ production read paths:
     ``_window_counts_total`` + the ``_window_counts_since``
     ``last_attempt_at >= ?`` ISO-STRING compare arm;
 (c) ``load_window_ledger`` / ``window_ledger_rows_cached`` round-trips;
-(d) the legacy-16-col schema-probe outcome equality;
+(d) the legacy-17-col schema-probe outcome equality;
 (e) footer-inertness (DuckDB description identical) + the ANTI-VACUOUS raw
     bytes-differ assert (the gates test the REAL divergence, not a no-op);
 (f) the EMPTY-ledger watch-item (polars 0 row groups vs pyarrow's 1 — every
@@ -269,7 +269,7 @@ class TestWindowLedgerPageParity:
             # THE FALLBACK-ABSENCE PIN: a rust base must never silently defer
             # to the legacy parse (the perf-silent trap — a fallback would
             # STILL return correct rows, so only the LOG proves the fast path
-            # genuinely served; the 16-col schema probe passed).
+            # genuinely served; the 17-col schema probe passed).
             fallbacks = [
                 e
                 for e in logs
@@ -355,7 +355,7 @@ class TestLoadRoundTrip:
 
 class TestSchemaProbeAndFooterInertness:
     def test_sixteen_col_probe_outcome_identical(self, twin_lakes: tuple[Path, Path]) -> None:
-        # The legacy-12-col defer law: BOTH writers emit the full 16-column
+        # The legacy-12-col defer law: BOTH writers emit the full 17-column
         # schema, so the LIMIT 0 description passes the probe on both — the
         # probe OUTCOME (not just the row payload) is pinned equal.
         py_lake, rust_lake = twin_lakes
@@ -403,7 +403,7 @@ class TestEmptyLedgerWatchItem:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The MEASURED empty-file arm: polars writes ZERO row groups where
-        pyarrow writes one empty group — but the 16 columns live in the
+        pyarrow writes one empty group — but the 17 columns live in the
         FOOTER schema, so every reader (pyarrow · polars · DuckDB describe +
         read · the store loader · the page query) is identical. Measured
         PASS ⇒ the ONE pre-authorized narrowing (special-casing EMPTY input
@@ -440,7 +440,7 @@ class TestEmptyLedgerWatchItem:
                 assert conn.execute(
                     "SELECT COUNT(*) FROM read_parquet(?)", [f.as_posix()]
                 ).fetchone() == (0,)
-            assert descs[0] == descs[1] and len(descs[0]) == 16
+            assert descs[0] == descs[1] and len(descs[0]) == 17
         for lake in lakes.values():
             assert wls.load_window_ledger(lake).to_rows() == []
             monkeypatch.setattr(db_view, "_LEDGER_READ_CACHE", db_view._make_ledger_read_cache())
