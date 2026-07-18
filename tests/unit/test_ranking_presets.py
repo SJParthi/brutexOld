@@ -41,7 +41,17 @@ def _rec(run_id: str, **overrides: Any) -> RankRecord:
 
 class TestPresetVocabulary:
     def test_display_order_and_default(self) -> None:
-        assert PRESET_NAMES == ("min_dd_first", "composite", "profit_factor", "win_rate", "calmar")
+        # Consciously extended (`DEC-OPTIONS-EXEC-FEEDBACK-001`): the
+        # net_after_cost preset joins the vocabulary tail — the options-exec
+        # headline net after the full cost stack, unpriced entries last.
+        assert PRESET_NAMES == (
+            "min_dd_first",
+            "composite",
+            "profit_factor",
+            "win_rate",
+            "calmar",
+            "net_after_cost",
+        )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
 
     def test_every_preset_names_itself(self) -> None:

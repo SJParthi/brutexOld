@@ -79,11 +79,20 @@ class RankRecord:
     profit_factor: float
     win_rate: float
     calmar_ratio: float
+    #: The joined ``options_exec`` headline net-after-cost figure (int64
+    #: paisa, `DEC-OPTIONS-EXEC-FEEDBACK-001`) — ``None`` = honestly unpriced
+    #: (no options-exec verdict for this run_id; ranks LAST under the
+    #: ``net_after_cost`` preset, never coerced). Defaulted trailing field —
+    #: every pre-change constructor is unchanged (the optional-column
+    #: back-compat template).
+    net_after_cost_paisa: int | None = None
 
 
-#: A preset sort key — either the 4-part min-DD ascending key or the
-#: ``(value_present, raw_value)`` descending key of the alternates.
-type PresetKey = tuple[float, int, float, int] | tuple[int, float]
+#: A preset sort key — the 4-part min-DD ascending key, the
+#: ``(value_present, raw_value)`` descending key of the float alternates, or
+#: the INT-EXACT ``(value_present, paisa)`` descending key of
+#: ``net_after_cost`` (paisa can exceed 2**53 — never through float).
+type PresetKey = tuple[float, int, float, int] | tuple[int, float] | tuple[int, int]
 
 
 def min_dd_first_key(record: RankRecord) -> tuple[float, int, float, int]:
@@ -125,6 +134,21 @@ def _win_rate_key(record: RankRecord) -> tuple[int, float]:
 def _calmar_key(record: RankRecord) -> tuple[int, float]:
     """Raw persisted Calmar ratio (full precision)."""
     return (1, record.calmar_ratio)
+
+
+def _net_after_cost_key(record: RankRecord) -> tuple[int, int]:
+    """``(value_present, paisa)`` — INT-EXACT (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    Never through float: paisa sums can exceed ``2**53`` (the /results
+    exact-int precedent), and Python tuple comparison on ints is exact at any
+    magnitude. Under ``reverse=True`` an unpriced entry (``None`` — no
+    options-exec verdict) ranks LAST via the presence flag, never coerced to
+    a fake number (the ``_composite_key`` None-after-scored law).
+    """
+    value = record.net_after_cost_paisa
+    if value is None:
+        return (0, 0)
+    return (1, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +223,17 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         describe="Calmar ratio, descending",
         reverse=True,
         key=_calmar_key,
+    ),
+    "net_after_cost": RankingPreset(
+        name="net_after_cost",
+        describe=(
+            "options-execution net P&L after the full Indian cost stack, descending "
+            "(ATM rule; unpriced entries rank last — only the replayed top-K winner "
+            "set is priced; priceable only within the verified ETC window "
+            "— see each entry's options_exec.window)"
+        ),
+        reverse=True,
+        key=_net_after_cost_key,
     ),
 }
 
