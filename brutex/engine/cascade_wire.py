@@ -1857,7 +1857,7 @@ def build_stage2_cascade_specs(
         try:
             rows = ResultsStore.load(store_path).rows()
         except ResultsStoreSchemaError as exc:
-            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796): a
+            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958): a
             # corrupt / old-schema finalist store surfaces as a typed cascade
             # abort naming the file, NEVER a raw error and NEVER a silent skip
             # (dropping a tuple's finalists would change Stage-2 selection

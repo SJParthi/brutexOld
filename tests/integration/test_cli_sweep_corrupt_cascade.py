@@ -4,7 +4,7 @@
 ``CascadeWireError`` can surface there from TWO real classes:
 
 * a CORRUPT / old-schema finalist store reaching ``build_stage2_cascade_specs``
-  (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796), and
+  (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958), and
 * a disk-full (ENOSPC) at the atomic manifest / report write
   (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1798).
 

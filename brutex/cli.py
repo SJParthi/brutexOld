@@ -7684,7 +7684,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # a foreign schema) is a LOUD refusal, never a silent drop — a skipped
             # partition would hole the data_snapshot_hash inputs and silently
             # change run identity (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001,
-            # MIGRATION.md #1797).
+            # MIGRATION.md #1959).
             print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
 
@@ -8091,7 +8091,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # Golden Rule #7); only a SECOND failure raises LmdbCorruptEnvError — or,
         # for a mid-Bloom-rebuild cursor fault on that second attempt, a raw
         # lmdb.Error (review round 1 belt) — both a clean user-facing refusal
-        # here (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1795) —
+        # here (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1957) —
         # never a raw traceback deep inside the sweep span. ``cache`` is entered
         # on the run-core OUTER with-tuple below (review round 1 MINOR-2): the
         # already-open LMDB env must be closed even when either audit-writer
@@ -8420,7 +8420,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             core.stage("cascade")
             # A CascadeWireError raised anywhere in this cascade tail — a corrupt /
             # old-schema finalist store reaching Stage-2 (DB-02,
-            # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796) OR a disk-full
+            # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958) OR a disk-full
             # (ENOSPC) at the atomic manifest/report write
             # (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1798) — is mapped to a
             # clean CLI refusal here, exactly like the LmdbCorruptEnvError/CatalogError

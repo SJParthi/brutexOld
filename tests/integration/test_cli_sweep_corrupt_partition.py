@@ -1,6 +1,6 @@
 """R2N-02 CLI integration: a corrupt registered partition REFUSES the sweep launch.
 
-DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1797. The engine's load-bearing
+DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1959. The engine's load-bearing
 input mouth (``Catalog.get_bars``) NEVER silently skips a corrupt partition — a
 dropped file would hole the ``data_snapshot_hash`` inputs and silently change run
 identity (Golden Rule #4). ``cmd_sweep_all`` maps the typed ``CatalogError`` to a

@@ -1035,7 +1035,7 @@ def run_supervised_grid(
                     reference_stamper=reference_stamper,
                 )
             except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
-                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796):
+                # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958):
                 # a CORRUPT / old-schema finalist store raised at its LOAD boundary
                 # on resume is CONTAINED to this tuple exactly like a SweepComboError,
                 # never a whole-grid abort. Only the G14 ResultsStoreSchemaError is

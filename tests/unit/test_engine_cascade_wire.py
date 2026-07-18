@@ -1801,7 +1801,7 @@ class TestBuildStage2CascadeSpecs:
         assert all(len(spec.winners) == 1 for spec in specs)
 
     def test_corrupt_store_raises_typed_cascade_error(self, tmp_path: Path) -> None:
-        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796).
+        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958).
 
         A corrupt / old-schema Stage-2 finalist store surfaces as a typed
         ``CascadeWireError`` naming the UNREADABLE file — never a raw error and

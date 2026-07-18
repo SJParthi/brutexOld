@@ -2393,7 +2393,7 @@ class TestBrokenProcessPoolQuarantine:
 
 
 class TestWorkerCorruptStoreContained:
-    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796).
+    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958).
 
     A CORRUPT / old-schema finalist store raised at its LOAD boundary inside a
     worker is CONTAINED as a failed marker (surfaced through the supervisor's
@@ -2436,7 +2436,7 @@ class TestWorkerCorruptStoreContained:
         corrupt store, or a schema fault raised from the store factory) by
         making ``run_one_tuple`` raise ``ResultsStoreSchemaError`` directly —
         the worker returns a failed marker (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001,
-        MIGRATION.md #1796), never a crash → whole-grid abort.
+        MIGRATION.md #1958), never a crash → whole-grid abort.
         """
         grid = _grid()
         out = tmp_path / "out"
@@ -2525,7 +2525,7 @@ class TestWorkerCorruptStoreContained:
         (``error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX)``) fires the SAME
         heal-instruction ``sweep_grid.tuple_store_corrupt`` WARN the sequential /
         supervisor sites emit (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md
-        #1796) — the parallel lane's own TRUE branch, previously unpinned.
+        #1958) — the parallel lane's own TRUE branch, previously unpinned.
         """
         grid = _grid()
         out = tmp_path / "out"

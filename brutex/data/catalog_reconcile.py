@@ -386,7 +386,7 @@ def reconcile_catalog_from_lake(
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         except _PARQUET_UNREADABLE_ERRORS as exc:
-            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1797): a CORRUPT /
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1799): a CORRUPT /
             # version-incompatible partition file — or one whose Datetime column
             # holds an out-of-range value (the round-18 OverflowError class, folded
             # into THIS unreadable arm at the club-S1 merge: present-but-unreadable

@@ -1511,7 +1511,7 @@ def test_summary_and_guards_are_frozen() -> None:
 
 
 class TestRunSupervisedGridCorruptStoreContained:
-    """DB-02 supervisor twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796).
+    """DB-02 supervisor twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958).
 
     A corrupt finalist store raised at LOAD on resume is CONTAINED to one tuple
     (``tuples_failed``), fires the ``sweep_grid.tuple_store_corrupt`` WARN, and does
