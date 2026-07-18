@@ -74,6 +74,7 @@ from typing import Any, Final
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.adapters.groww.pull_singleflight import (
     PullAlreadyRunningError,
     pull_singleflight_lock,
@@ -162,6 +163,15 @@ def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
     """
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(PULL_INTENT_RESUME_ENV)
+    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the
+    # strip+lower+falsy-set law consulted in Rust when the flag is ON; ANY
+    # degrade (wheel missing/stale, kernel raise, non-bool pun, a
+    # lone-surrogate env value failing the pyo3 &str edge) falls through to
+    # the byte-identical Python oracle below — never a raise from the seam.
+    if _pull_state_rust.pull_state_rust_enabled():
+        verdict = _pull_state_rust.rust_intent_resume_enabled(raw)
+        if verdict is not None:
+            return verdict
     if raw is None:
         return True
     return raw.strip().lower() not in _FALSY
@@ -229,6 +239,24 @@ class PullIntent:
         (forward-compat); a violation means a corrupt / foreign file, which the
         caller treats as absent (never a fabricated pull — Golden Rule #1).
         """
+        # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001):
+        # the shape LATTICE consulted in Rust over the mechanically-classified
+        # payload codes (the JSON decode — and CPython's whole failure
+        # taxonomy — happened BEFORE this method; a failed decode arrives as
+        # the ``None`` payload the not-a-Mapping code covers).  An INVALID
+        # kernel verdict is SERVED (the corrupt/absent answer); a VALID one
+        # deliberately falls THROUGH to the byte-identical oracle body below,
+        # so the dataclass is only ever constructed on the ONE Python path
+        # (zero construction duplication; a kernel-vs-oracle disagreement on
+        # the valid arm is decided by the oracle — fail-safe).  Any degrade
+        # (wheel missing/stale, kernel raise, out-of-vocabulary code) falls
+        # through too.
+        if _pull_state_rust.pull_state_rust_enabled():
+            verdict = _pull_state_rust.rust_intent_shape_verdict(
+                *_classify_payload_for_kernel(payload)
+            )
+            if verdict is not None and verdict != _pull_state_rust.INTENT_SHAPE_VALID:
+                return None
         if not isinstance(payload, Mapping):
             return None
         fields: dict[str, str | None] = {}
@@ -255,6 +283,84 @@ class PullIntent:
             created_at=created_at,
             scope=fields["scope"],
         )
+
+
+#: The i64 FFI band for the classified ``restarts`` value (the kernel
+#: carries the value only when it is representable; outside it only the
+#: representability + sign FACTS cross — the sign law stays in the kernel).
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def _classify_payload_for_kernel(
+    payload: object,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    """MECHANICAL kernel-input classification of a decoded payload — no law.
+
+    The Wave-2E seam projection (DEC-RUST-PULL-STATE-001): every slot is a
+    concrete-type / i64-representability FACT (``isinstance`` tags — bool
+    probed before int because ``bool`` subclasses ``int``; the
+    "a JSON ``true`` is not a count" LAW itself lives in the Rust kernel,
+    like absent ≡ null for the request fields, the sign law and
+    ``created_at``'s absent-defaults-empty split).  A non-Mapping root
+    (including the ``None`` a failed JSON decode folds to — the
+    taxonomy-parity chokepoint) zeroes the field slots; the kernel refuses
+    on the root code before reading them.  Mirrored 1:1 by the golden
+    harness (``tests/golden/_pull_intent_harness.py``) and drift-pinned by
+    the frozen fixture.
+    """
+    if not isinstance(payload, Mapping):
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    codes: list[int] = [1]
+    for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
+        if key not in payload:
+            codes.append(_pull_state_rust.INTENT_KIND_ABSENT)
+        else:
+            value = payload[key]
+            if value is None:
+                codes.append(_pull_state_rust.INTENT_KIND_NULL)
+            elif isinstance(value, str):
+                codes.append(_pull_state_rust.INTENT_KIND_STR)
+            else:
+                codes.append(_pull_state_rust.INTENT_KIND_OTHER)
+    if "restarts" not in payload:
+        codes.extend((_pull_state_rust.INTENT_RESTARTS_ABSENT, 0))
+    else:
+        restarts = payload["restarts"]
+        if restarts is None:
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_NULL, 0))
+        elif isinstance(restarts, bool):
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_BOOL, 0))
+        elif isinstance(restarts, int):
+            if _I64_MIN <= restarts <= _I64_MAX:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT, restarts))
+            elif restarts > 0:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT_HUGE_POS, 0))
+            else:
+                codes.extend((_pull_state_rust.INTENT_RESTARTS_INT_HUGE_NEG, 0))
+        else:
+            codes.extend((_pull_state_rust.INTENT_RESTARTS_OTHER, 0))
+    if "created_at" not in payload:
+        codes.append(_pull_state_rust.INTENT_KIND_ABSENT)
+    else:
+        created = payload["created_at"]
+        if created is None:
+            codes.append(_pull_state_rust.INTENT_KIND_NULL)
+        elif isinstance(created, str):
+            codes.append(_pull_state_rust.INTENT_KIND_STR)
+        else:
+            codes.append(_pull_state_rust.INTENT_KIND_OTHER)
+    return (
+        codes[0],
+        codes[1],
+        codes[2],
+        codes[3],
+        codes[4],
+        codes[5],
+        codes[6],
+        codes[7],
+        codes[8],
+    )
 
 
 class ResumeBanner:
@@ -631,9 +737,37 @@ def restore_intent_after_refused_start(
     """
     if dry_run or started:
         return False
-    if store.load() is None:
+    current_present = store.load() is not None
+    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the
+    # restore LATTICE consulted in Rust when the flag is ON.  The dry-run /
+    # started short-circuit above deliberately runs FIRST (its arm is a
+    # constant ``False`` and the ``store.load()`` side effects — corrupt
+    # delete + warns — must not fire on it), exactly as the kernel's
+    # ``NO_ACTION`` arm models; the facade's consistency gate degrades a
+    # wheel that breaks that totality.  Every effect (the load above, the
+    # clear/write below, the logs) stays on this Python body.
+    arm: int | None = None
+    if _pull_state_rust.pull_state_rust_enabled():
+        arm = _pull_state_rust.rust_intent_refused_restore_decision(
+            dry_run=False,
+            started=False,
+            current_present=current_present,
+            prior_present=prior is not None,
+        )
+    if arm is None:
+        if not current_present:
+            arm = _pull_state_rust.RESTORE_ARM_LEAVE_ABSENT
+        elif prior is None:
+            arm = _pull_state_rust.RESTORE_ARM_CLEAR_ORPHAN
+        else:
+            arm = _pull_state_rust.RESTORE_ARM_RESTORE_PRIOR
+    if arm == _pull_state_rust.RESTORE_ARM_LEAVE_ABSENT:
         return False
-    if prior is None:
+    if arm == _pull_state_rust.RESTORE_ARM_CLEAR_ORPHAN or prior is None:
+        # ``prior is None`` is the STRUCTURAL belt: a drifted wheel voting
+        # RESTORE_PRIOR with no snapshot to restore must clear the orphan
+        # (the oracle's own arm for that input), never raise out of this
+        # never-raises boundary.
         store.clear()
         _LOG.info(
             "pull_intent.refused_start_restored",
@@ -809,14 +943,38 @@ def run_auto_resume(
         if probe_singleflight is not None
         else (lambda: probe_pull_singleflight(store.lake_root))
     )
-    if not probe():
+    probe_ok = bool(probe())
+    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the arm
+    # LATTICE (peer-probe BEFORE cap BEFORE bump — the load-bearing order)
+    # consulted in Rust when the flag is ON; every EFFECT (the probe call
+    # itself, logs, banner, alert, bump, launch) stays on this Python body.
+    # ``has_intent=True`` structurally — the no-intent arm returned above,
+    # exactly as the kernel lattice models it.  Any degrade (wheel
+    # missing/stale, kernel raise, out-of-vocabulary or site-inconsistent
+    # arm, a beyond-u64 counter) falls to the byte-identical oracle arms.
+    arm: int | None = None
+    if _pull_state_rust.pull_state_rust_enabled():
+        arm = _pull_state_rust.rust_intent_resume_decision(
+            has_intent=True,
+            probe_acquirable=probe_ok,
+            restarts=intent.restarts,
+            max_restarts=max_restarts,
+        )
+    if arm is None:
+        if not probe_ok:
+            arm = _pull_state_rust.RESUME_ARM_PEER_ACTIVE
+        elif intent.restarts >= max_restarts:
+            arm = _pull_state_rust.RESUME_ARM_OVER_CAP
+        else:
+            arm = _pull_state_rust.RESUME_ARM_PROCEED
+    if arm == _pull_state_rust.RESUME_ARM_PEER_ACTIVE:
         _LOG.info(
             "pull_intent.peer_active",
             lake_root=str(store.lake_root),
             restarts=intent.restarts,
         )
         return ResumeAction.PEER_ACTIVE
-    if intent.restarts >= max_restarts:
+    if arm == _pull_state_rust.RESUME_ARM_OVER_CAP:
         store.banner.set(level="critical", message=restart_cap_message(intent, max_restarts))
         alert_fn = alert if alert is not None else emit_restart_cap_alert
         try:

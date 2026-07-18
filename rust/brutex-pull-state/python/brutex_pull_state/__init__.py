@@ -54,6 +54,10 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "auto_gate_decision",  # auto_pull_gate (Wave 2D)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
+    "intent_refused_restore_decision",  # pull_intent (Wave 2E)
+    "intent_resume_decision",  # pull_intent (Wave 2E)
+    "intent_resume_enabled",  # pull_intent (Wave 2E)
+    "intent_shape_verdict",  # pull_intent (Wave 2E)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
     "muhurat_window_active",  # auto_pull_gate (Wave 2D)
     "pull_allowed_us",
@@ -101,6 +105,10 @@ from ._brutex_pull_state import (  # noqa: E402
     auto_gate_decision,
     classify_pull_outcome,
     fno_only_note_surgery,
+    intent_refused_restore_decision,
+    intent_resume_decision,
+    intent_resume_enabled,
+    intent_shape_verdict,
     market_hours_note_rewrite,
     muhurat_window_active,
     pull_allowed_us,
@@ -129,6 +137,10 @@ __all__ = [
     "auto_gate_decision",
     "classify_pull_outcome",
     "fno_only_note_surgery",
+    "intent_refused_restore_decision",
+    "intent_resume_decision",
+    "intent_resume_enabled",
+    "intent_shape_verdict",
     "market_hours_note_rewrite",
     "muhurat_window_active",
     "pull_allowed_us",
