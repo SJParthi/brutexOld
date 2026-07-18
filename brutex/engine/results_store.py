@@ -131,7 +131,7 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.money import round_money
-from brutex.ranking.multi_select import join_basis_tokens
+from brutex.ranking.multi_select import BASIS_FRONTIER, join_basis_tokens
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from brutex.vocabulary.describe import matched_condition_names
@@ -569,6 +569,23 @@ class ResultRow:
                     f"ResultRow.selection_basis {self.selection_basis!r} is not in the "
                     f"canonical BASIS_ORDER join (expected {canonical!r})"
                 )
+
+        # LANE-W1 tag COHERENCE cross-check (review round 1): the persist
+        # composer stamps both provenance fields from the ONE frontier set,
+        # so `pareto_member is True` ⇔ the "frontier" basis token — a
+        # hand-built row breaking that biconditional is refused exactly like
+        # an empty/unknown/misordered tag (never persisted). Legacy
+        # None/None rows are vacuously coherent (not-True, no token).
+        frontier_tagged = (
+            self.selection_basis is not None and BASIS_FRONTIER in self.selection_basis.split(",")
+        )
+        if (self.pareto_member is True) != frontier_tagged:
+            raise ResultsStoreError(
+                f"ResultRow: pareto_member ({self.pareto_member!r}) and selection_basis "
+                f"({self.selection_basis!r}) are incoherent — pareto_member is True iff "
+                f"the {BASIS_FRONTIER!r} token is in selection_basis (the ONE persist "
+                f"composer stamps both from the same frontier set)"
+            )
 
 
 @dataclass(frozen=True, slots=True)

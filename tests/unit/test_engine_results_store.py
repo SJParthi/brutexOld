@@ -859,16 +859,43 @@ class TestSelectionFields:
         with pytest.raises(ResultsStoreError, match="canonical BASIS_ORDER"):
             _row(selection_basis="dd,composite")
 
+    def test_pareto_member_without_frontier_token_refused(self) -> None:
+        # The review-round-1 coherence cross-check, direction 1: a claimed
+        # frontier member MUST carry the "frontier" basis token (the persist
+        # composer stamps both from the ONE frontier set).
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=True, selection_basis=None)
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=True, selection_basis="composite")
+
+    def test_frontier_token_without_pareto_member_refused(self) -> None:
+        # Direction 2: a "frontier"-tagged row MUST claim membership — both
+        # the honest-unknown None and an explicit False are incoherent.
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=None, selection_basis="frontier")
+        with pytest.raises(ResultsStoreError, match="incoherent"):
+            _row(pareto_member=False, selection_basis="composite,frontier")
+
+    def test_coherent_tag_combinations_accepted(self) -> None:
+        # Every coherent shape constructs: member+token, tagged non-member
+        # without the token, and the legacy None/None row.
+        assert _row(pareto_member=True, selection_basis="frontier").pareto_member is True
+        assert _row(pareto_member=False, selection_basis="composite").selection_basis == "composite"
+        legacy = _row(pareto_member=None, selection_basis=None)
+        assert (legacy.pareto_member, legacy.selection_basis) == (None, None)
+
     def test_selection_fields_round_trip_flush_load(self, tmp_path: Path) -> None:
         pytest.importorskip("polars")
         path = tmp_path / "sel.parquet"
         store = ResultsStore(path=path)
-        store.append(_row(run_id="1" * 64, pareto_member=True, selection_basis="composite"))
+        store.append(
+            _row(run_id="1" * 64, pareto_member=True, selection_basis="composite,frontier")
+        )
         store.append(_row(run_id="2" * 64, mask_bits=0b11))
         store.flush()
         loaded = ResultsStore.load(path)
         rows = loaded.rows()
-        assert (rows[0].pareto_member, rows[0].selection_basis) == (True, "composite")
+        assert (rows[0].pareto_member, rows[0].selection_basis) == (True, "composite,frontier")
         assert (rows[1].pareto_member, rows[1].selection_basis) == (None, None)
 
     def test_differing_selection_tags_are_a_strict_conflict(self) -> None:
@@ -879,7 +906,7 @@ class TestSelectionFields:
         store = ResultsStore(path=Path("/tmp/unused.parquet"))
         store.append(_row(selection_basis="composite"))
         with pytest.raises(ResultsStoreError, match="run-identity conflict"):
-            store.append(_row(selection_basis="composite,frontier"))
+            store.append(_row(selection_basis="composite,dd"))
 
     def test_not_rankable(self) -> None:
         store = ResultsStore(path=Path("/tmp/unused.parquet"))

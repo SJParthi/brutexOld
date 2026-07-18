@@ -16,7 +16,9 @@ into three tiers; this slice ships the two bars-free tiers:
   :func:`recorded_context_from_audit`, never from memory — review condition
   2a). Re-derives every expected store path and every row's 9-field
   ``run_id``, checks mask membership/labels, and applies the killer cheap
-  check: ``rows > top_k`` under one digest is the #650 inflation signature —
+  check: ``rows > union_persist_bound(top_k)`` under one digest is the #650
+  inflation signature (LANE W1: a legitimate store holds the composite top-K
+  prefix PLUS the persist union's quota/frontier extras) —
   post-#654 the digest path always rewrites the FULL population, so an
   oversized store cannot occur legitimately. This detects the pre-#646
   inflation #654's envelope called "undetectable by the sweep" — without bars.
@@ -58,7 +60,12 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
+from brutex.engine.results_store import (
+    SELECTION_FIELDS,
+    VIX_FIELDS,
+    ResultsStore,
+    ResultsStoreError,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -80,6 +87,7 @@ from brutex.engine.tuple_complete import (
 )
 from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
+from brutex.ranking.multi_select import union_persist_bound
 from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -1247,13 +1255,22 @@ def _verify_store_rows(
     except ResultsStoreError as exc:
         add("store_unreadable", "corrupt", str(exc))
         return
-    if is_grid_tuple and grid.top_k is not None and len(rows) > grid.top_k:
-        add(
-            "rows_exceed_top_k",
-            "corrupt",
-            f"{len(rows)} rows > top_k={grid.top_k} — the #650 subset-re-rank "
-            f"inflation signature (impossible legitimately, pre- AND post-#654)",
-        )
+    if is_grid_tuple and grid.top_k is not None:
+        # LANE W1 (review round 1 gate re-run): a legitimate store holds the
+        # composite top-K prefix PLUS the persist union's quota/frontier
+        # extras, so the #650 inflation signature is rows beyond the ONE
+        # union_persist_bound law — a bare `rows > top_k` would false-flag
+        # every legitimate union store as corrupt.
+        bound = union_persist_bound(grid.top_k)
+        if len(rows) > bound:
+            add(
+                "rows_exceed_top_k",
+                "corrupt",
+                f"{len(rows)} rows > the union persist bound {bound} at "
+                f"top_k={grid.top_k} (top_k + quota/frontier extras, "
+                f"DEC-RANK-QUOTA-PERSIST-1000-001) — the #650 subset-re-rank "
+                f"inflation signature (impossible legitimately, pre- AND post-#654)",
+            )
     try:
         cfg = tuple_.to_run_config(grid, roll_schedule=roll_schedule)
     except ValueError as exc:
@@ -1638,7 +1655,7 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
 
 
 def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
-    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+    """``True`` iff *original* is exactly *scratch* minus the VIX trio (+ the selection pair).
 
     The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
     (round-5 panel): a store written BEFORE the trio columns landed loads an
@@ -1648,9 +1665,15 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     attributable iff the ONLY schema difference is the missing trio: the
     scratch must carry all three columns, the original none, and stripping
     the trio from the scratch schema must reproduce the original schema
-    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
-    partial trio presence, any other column/dtype drift, an unreadable
-    footer — returns ``False`` and the caller abstains to the normal ladder.
+    EXACTLY (names AND dtypes, order-sensitively). Post-LANE-W1 the current
+    writer ALSO appends the two ``SELECTION_FIELDS`` provenance columns —
+    their OWN optional generation: an original carrying the complete pair
+    keeps it in the compare; an original carrying neither (the genuine
+    pre-VIX shape — selection landed after VIX) strips it from the scratch
+    alongside the trio (review round 1 gate re-run). Anything less
+    provable — partial trio/selection presence, any other column/dtype
+    drift, an unreadable footer — returns ``False`` and the caller abstains
+    to the normal ladder.
     Honest attribution only, never a guess (Golden Rule #1). O(columns) —
     two Parquet footer reads, no row data.
     """
@@ -1667,7 +1690,22 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     scratch_names = {name for name, _ in scratch_schema}
     if any(name not in scratch_names for name in VIX_FIELDS):
         return False  # the recount side lacks the trio — not this migration
-    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
+    # LANE W1 (review round 1 gate re-run): the CURRENT writer also appends
+    # the two SELECTION_FIELDS provenance columns AFTER the trio. They are a
+    # SEPARATE optional generation: an original carrying the COMPLETE pair
+    # keeps it in the compare (the pair must match exactly), an original
+    # carrying NEITHER strips it from the scratch alongside the trio (the
+    # recount side must then carry the complete pair), and a PARTIAL pair on
+    # either side is not any known generation — abstain.
+    strip: set[str] = set(VIX_FIELDS)
+    original_selection = sum(name in original_names for name in SELECTION_FIELDS)
+    if original_selection == 0:
+        if any(name not in scratch_names for name in SELECTION_FIELDS):
+            return False  # the recount side lacks the selection pair
+        strip.update(SELECTION_FIELDS)
+    elif original_selection != len(SELECTION_FIELDS):
+        return False  # a partial selection pair — not a known generation
+    stripped = [entry for entry in scratch_schema if entry[0] not in strip]
     return stripped == original_schema
 
 

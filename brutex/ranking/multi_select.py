@@ -91,12 +91,14 @@ __all__ = [
     "PARETO_EPS_NET_PNL_PAISA",
     "PARETO_EPS_WIN_RATE",
     "PARETO_FRONTIER_CAP",
+    "QUOTA_AXES",
     "SelectionInputs",
     "UnionSelection",
     "axis_topm_indices",
     "compute_union_selection",
     "join_basis_tokens",
     "pareto_frontier_indices",
+    "union_persist_bound",
 ]
 
 #: The REAL persist top-K default (item 2 — "mint the real 1000 default"):
@@ -116,6 +118,11 @@ AXIS_QUOTA_M: Final[int] = 200
 #: W1 default, disclosed). Over-cap keeps the best by ``(-composite, mask)``
 #: with the drop counted + warned.
 PARETO_FRONTIER_CAP: Final[int] = 500
+
+#: The quota-select axis count (composite · dd · losing_trades · win_rate ·
+#: expectancy) — the ONE arity the quota kernels return and the persist
+#: bound below multiplies by.
+QUOTA_AXES: Final[int] = 5
 
 # ── The W1-default per-axis ε values (disclosed operator-constant stand-ins) ──
 #: net P&L tolerance: ₹10 (1,000 paisa) — two combos within ₹10 net P&L are
@@ -159,6 +166,28 @@ def join_basis_tokens(tokens: Sequence[str]) -> str:
         raise ValueError(f"multi_select: unknown selection_basis token(s) {unknown}")
     present = set(tokens)
     return ",".join(token for token in BASIS_ORDER if token in present)
+
+
+def union_persist_bound(
+    top_k: int,
+    *,
+    quota_m: int = AXIS_QUOTA_M,
+    frontier_cap: int = PARETO_FRONTIER_CAP,
+) -> int:
+    """The MAXIMUM row count the persist union can legitimately select.
+
+    The composite prefix (≤ *top_k*) plus the union-only extras, which are a
+    subset of the :data:`QUOTA_AXES` quota lists (each ≤ *quota_m*) united
+    with the capped frontier (≤ *frontier_cap*) — so
+    ``top_k + QUOTA_AXES·quota_m + frontier_cap`` is a sound upper bound on
+    any legitimate store's row count. The ONE law ``sweep-verify``'s
+    ``rows_exceed_top_k`` inflation check consumes (review round 1 gate
+    re-run: the pre-W1 ``rows > top_k`` check would false-flag every
+    legitimate union store as #650-corrupt). Deliberately LOOSE, never
+    exact — the exact union size depends on the pool's axis overlaps; the
+    inflation signature only needs "impossible legitimately".
+    """
+    return top_k + QUOTA_AXES * quota_m + frontier_cap
 
 
 def pareto_frontier_indices(

@@ -24,11 +24,13 @@ from brutex.ranking.multi_select import (
     PARETO_EPS_NET_PNL_PAISA,
     PARETO_EPS_WIN_RATE,
     PARETO_FRONTIER_CAP,
+    QUOTA_AXES,
     SelectionInputs,
     axis_topm_indices,
     compute_union_selection,
     join_basis_tokens,
     pareto_frontier_indices,
+    union_persist_bound,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -47,6 +49,14 @@ class TestConstants:
         assert PARETO_EPS_WIN_RATE == 0.005
         assert PARETO_EPS_MAX_DD_PCT == 0.25
         assert PARETO_EPS_LOSING_TRADES == 0
+
+    def test_union_persist_bound_law(self) -> None:
+        # Review round 1 gate re-run: the ONE inflation-check bound —
+        # top_k + QUOTA_AXES·quota_m + frontier_cap (loose, sound).
+        assert QUOTA_AXES == 5
+        assert union_persist_bound(1000) == 1000 + 5 * AXIS_QUOTA_M + PARETO_FRONTIER_CAP
+        assert union_persist_bound(1) == 1 + 5 * AXIS_QUOTA_M + PARETO_FRONTIER_CAP
+        assert union_persist_bound(10, quota_m=2, frontier_cap=3) == 10 + 5 * 2 + 3
 
     def test_basis_vocabulary_order(self) -> None:
         assert BASIS_ORDER == (

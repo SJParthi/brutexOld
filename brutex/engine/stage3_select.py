@@ -199,7 +199,11 @@ def group_survivors(
         admits each board's rows by the interleaved round-robin union of the
         FIVE :data:`~brutex.engine.pool_union.POOL_UNION_SOURCE_ORDER`
         sources (Sharpe · the DEFAULT preset law · DD asc · win-rate desc ·
-        the persisted ε-Pareto frontier — the explicit frontier inclusion),
+        the persisted ε-Pareto frontier — frontier inclusion GUARANTEED only
+        under the ``top_k >= non-empty sources`` precondition, which the
+        production ``DEFAULT_STAGE3_TOP_K=10_000`` always satisfies; below
+        it the tail sources are starved + WARNED once — the
+        :mod:`~brutex.engine.pool_union` module docstring, review round 1),
         capped at the SAME *top_k* budget with the emitted board still in
         TODAY's Sharpe-law order (membership changes; ordering discipline
         does not; a board with ≤ *top_k* rows is byte-identical either way).
@@ -285,7 +289,9 @@ def _group_survivors_union(
             for entry in entries:
                 row_by_seq[entry.seq] = entry.row
             ordered_sources.append([entry.seq for entry in entries])
-        admitted = round_robin_union(ordered_sources, cap=top_k)
+        admitted = round_robin_union(
+            ordered_sources, cap=top_k, source_names=POOL_UNION_SOURCE_ORDER
+        )
         emitted = sorted(admitted, key=lambda seq: (row_by_seq[seq].run_id, seq))
         emitted.sort(key=lambda seq: row_by_seq[seq].sharpe_ratio, reverse=True)
         selected[key] = tuple(row_by_seq[seq] for seq in emitted)

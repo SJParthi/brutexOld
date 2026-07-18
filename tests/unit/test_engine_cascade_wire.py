@@ -2183,6 +2183,9 @@ def _result_row(
         avg_entry_price=Decimal("14020.50"),
         avg_exit_price=Decimal("14100.25"),
         pareto_member=pareto_member,
+        # The store's tag-coherence law (review round 1): pareto_member=True
+        # rows must carry the "frontier" basis token.
+        selection_basis="frontier" if pareto_member is True else None,
     )
 
 

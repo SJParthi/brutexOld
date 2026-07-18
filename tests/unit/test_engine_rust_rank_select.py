@@ -256,9 +256,7 @@ class TestFrontierSelectArms:
         assert (
             result
             == result_again
-            == pareto_frontier_indices(
-                _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
-            )
+            == pareto_frontier_indices(_POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING)
         )
         refusals = [log for log in logs if log["event"] == "rust_rank_select.kernel_result_refused"]
         assert len(refusals) == 1  # warn-once per function
@@ -272,9 +270,7 @@ class TestFrontierSelectArms:
             return [1]
 
         monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace(rank_pareto_frontier=wrong))
-        expected = pareto_frontier_indices(
-            _POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING
-        )
+        expected = pareto_frontier_indices(_POOL_NET_PNL, _POOL_WIN_RATE, _POOL_DD, _POOL_LOSING)
         assert expected != [1]
         with structlog.testing.capture_logs() as logs:
             result = _frontier()
@@ -421,6 +417,43 @@ class TestQuotaSelectArms:
         result = _quota()
         assert result == expected
         assert kernel_disabled()
+
+    def test_quota_autorevert_names_the_first_differing_axis(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round 1 (NIT): the quota autorevert must carry the frontier
+        # arm's diagnostic discipline — the FIRST differing axis by name +
+        # both bounded index prefixes. The composite axis is fed the ORACLE
+        # value so the diff sits on a LATER axis ("dd") — also covering the
+        # equal-axis skip in the first-diff scan.
+        expected = axis_topm_indices(
+            2,
+            _QUOTA_COMPOSITE,
+            _QUOTA_MASKS,
+            _QUOTA_DD,
+            _QUOTA_LOSING,
+            _QUOTA_WIN_RATE,
+            _QUOTA_EXPECTANCY,
+        )
+        # m=2 over 3 rows ⇒ exactly one index is outside the oracle's dd axis.
+        wrong_dd = [index for index in range(len(_QUOTA_DD)) if index not in expected[1]][:1]
+        assert wrong_dd and wrong_dd != expected[1]
+
+        def wrong(*_args: object) -> object:
+            return (expected[0], wrong_dd, expected[2], expected[3], expected[4])
+
+        monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace(rank_axis_topm=wrong))
+        with structlog.testing.capture_logs() as logs:
+            result = _quota()
+        assert result == expected  # the oracle value SHIPS
+        assert kernel_disabled()
+        (autorevert,) = [
+            log for log in logs if log["event"] == "rust_rank_select.kernel_autoreverted"
+        ]
+        assert autorevert["reason"] == "quota_mismatch"
+        assert autorevert["axis"] == "dd"
+        assert autorevert["kernel"] == wrong_dd[:8]
+        assert autorevert["oracle"] == expected[1][:8]
 
     def test_burn_in_budget_decrements(self) -> None:
         before = seam._SELF_CHECK_REMAINING["quota"]

@@ -13,17 +13,23 @@ from __future__ import annotations
 
 import random
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 from brutex.engine.pool_union import (
     POOL_UNION_SOURCE_ORDER,
     axis_better_key,
     rank_record_of_row,
+    reset_starved_warn_for_tests,
     round_robin_union,
     union_select_rows,
 )
 from brutex.engine.results_store import ResultRow
 from brutex.ranking.presets import PRESETS, dd_band_index, resolve_preset
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _rid(seed: int) -> str:
@@ -62,6 +68,9 @@ def _row(
         avg_entry_price=Decimal("14020.50"),
         avg_exit_price=Decimal("14100.25"),
         pareto_member=pareto_member,
+        # The store's tag-coherence law (review round 1): pareto_member=True
+        # rows must carry the "frontier" basis token.
+        selection_basis="frontier" if pareto_member is True else None,
     )
 
 
@@ -155,6 +164,113 @@ class TestRoundRobinUnion:
     def test_cap_below_one_refused(self) -> None:
         with pytest.raises(ValueError, match="cap must be >= 1"):
             round_robin_union([[1]], cap=0)
+
+
+class TestStarvedCapHonesty:
+    """Review round 1 (MINOR, lens A): the ``cap < non-empty sources`` shape.
+
+    The per-source ≥ 1 admission guarantee holds ONLY at
+    ``cap >= non-empty sources``; below it the tail sources (win_rate #4,
+    frontier #5) admit ZERO rows — pinned here, plus the one capped
+    ``pool_union.sources_starved`` WARNING naming exactly the starved
+    sources (warn-once per starved set; never at ``cap >= sources``).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_memo(self) -> Iterator[None]:
+        reset_starved_warn_for_tests()
+        yield
+        reset_starved_warn_for_tests()
+
+    def test_cap_3_4_5_admission_sets(self) -> None:
+        # The reviewer's repro shape: five non-empty sources, one distinct
+        # best each — the tail sources admit NOTHING until the cap reaches
+        # the source count.
+        sources = [[0, 9], [1, 9], [2, 9], [3, 9], [4, 9]]
+        assert round_robin_union(sources, cap=3) == {0, 1, 2}  # #4 + #5 starved
+        assert round_robin_union(sources, cap=4) == {0, 1, 2, 3}  # #5 starved
+        assert round_robin_union(sources, cap=5) == {0, 1, 2, 3, 4}  # all admit
+
+    def test_warn_fires_naming_the_starved_sources(self) -> None:
+        with structlog.testing.capture_logs() as logs:
+            round_robin_union(
+                [[0], [1], [2], [3], [4]], cap=3, source_names=POOL_UNION_SOURCE_ORDER
+            )
+        starved = [log for log in logs if log["event"] == "pool_union.sources_starved"]
+        assert len(starved) == 1
+        assert starved[0]["starved_sources"] == ["win_rate", "frontier"]
+        assert starved[0]["cap"] == 3
+        assert starved[0]["non_empty_sources"] == 5
+
+    def test_warn_once_per_starved_set(self) -> None:
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                round_robin_union(
+                    [[0], [1], [2], [3], [4]], cap=3, source_names=POOL_UNION_SOURCE_ORDER
+                )
+        starved = [log for log in logs if log["event"] == "pool_union.sources_starved"]
+        assert len(starved) == 1  # the memo caps the volume
+
+    def test_no_warn_at_cap_at_or_above_source_count(self) -> None:
+        with structlog.testing.capture_logs() as logs:
+            round_robin_union(
+                [[0], [1], [2], [3], [4]], cap=5, source_names=POOL_UNION_SOURCE_ORDER
+            )
+            round_robin_union(
+                [[0], [1], [2], [3], [4]], cap=9, source_names=POOL_UNION_SOURCE_ORDER
+            )
+        assert not [log for log in logs if log["event"] == "pool_union.sources_starved"]
+
+    def test_no_warn_when_tail_sources_are_covered_not_starved(self) -> None:
+        # cap < non-empty sources, but the zero-admission source's EVERY
+        # candidate was admitted through other sources — its inclusion
+        # guarantee genuinely holds (covered, not starved): no WARN.
+        with structlog.testing.capture_logs() as logs:
+            admitted = round_robin_union(
+                [[0, 1, 2], [0], [1], [2]], cap=3, source_names=("a", "b", "c", "d")
+            )
+        assert admitted == {0, 1, 2}
+        assert not [log for log in logs if log["event"] == "pool_union.sources_starved"]
+
+    def test_default_positional_labels(self) -> None:
+        # No source_names supplied → positional "#<index>" labels.
+        with structlog.testing.capture_logs() as logs:
+            round_robin_union([[0], [1], [2], [3]], cap=2)
+        starved = [log for log in logs if log["event"] == "pool_union.sources_starved"]
+        assert len(starved) == 1
+        assert starved[0]["starved_sources"] == ["#2", "#3"]
+
+    def test_union_select_rows_repro_cap_3_4_5(self) -> None:
+        # The row-level reviewer repro: each source has a distinct best row —
+        # at cap=3 the win_rate-best AND the frontier member are absent
+        # (the docstring's precondition wording is the honest guarantee).
+        rows = [
+            _row(1, sharpe=10.0, max_drawdown_pct=20.0, win_rate=0.5),  # sharpe best
+            _row(2, sharpe=9.0, max_drawdown_pct=20.0, win_rate=0.5),
+            _row(3, sharpe=1.0, max_drawdown_pct=1.0, win_rate=0.2),  # preset + dd best
+            _row(4, sharpe=2.0, max_drawdown_pct=25.0, win_rate=0.99),  # win_rate best
+            _row(  # frontier-only member
+                5, sharpe=0.5, max_drawdown_pct=28.0, win_rate=0.1, pareto_member=True
+            ),
+        ]
+        with structlog.testing.capture_logs() as logs:
+            cap3 = {r.run_id for r in union_select_rows(rows, cap=3)}
+        assert cap3 == {_rid(1), _rid(2), _rid(3)}  # rows 4 + 5 starved out
+        starved = [log for log in logs if log["event"] == "pool_union.sources_starved"]
+        assert len(starved) == 1
+        assert starved[0]["starved_sources"] == ["win_rate", "frontier"]
+        reset_starved_warn_for_tests()
+        with structlog.testing.capture_logs() as logs4:
+            cap4 = {r.run_id for r in union_select_rows(rows, cap=4)}
+        assert cap4 == {_rid(1), _rid(2), _rid(3), _rid(4)}  # frontier still starved
+        starved4 = [log for log in logs4 if log["event"] == "pool_union.sources_starved"]
+        assert len(starved4) == 1
+        assert starved4[0]["starved_sources"] == ["frontier"]
+        reset_starved_warn_for_tests()
+        with structlog.testing.capture_logs() as logs5:
+            cap5 = {r.run_id for r in union_select_rows(rows, cap=5)}
+        assert cap5 == {_rid(i) for i in (1, 2, 3, 4, 5)}  # precondition met: all in
+        assert not [log for log in logs5 if log["event"] == "pool_union.sources_starved"]
 
 
 class TestUnionSelectRows:

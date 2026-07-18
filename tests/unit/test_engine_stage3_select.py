@@ -75,6 +75,11 @@ def _row(**overrides: object) -> ResultRow:
         "avg_exit_price": Decimal("14100.25"),
     }
     base.update(overrides)
+    # The store's tag-coherence law (review round 1): a pareto_member=True
+    # row must carry the "frontier" basis token (production stamps both
+    # from the ONE frontier set — the helper mirrors it).
+    if base.get("pareto_member") is True and "selection_basis" not in base:
+        base["selection_basis"] = "frontier"
     return ResultRow(**base)  # type: ignore[arg-type]
 
 

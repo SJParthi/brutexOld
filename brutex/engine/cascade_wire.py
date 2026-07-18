@@ -1761,7 +1761,12 @@ def spec_from_store_rows(
     the ``top_k`` pool is the interleaved round-robin UNION of the five
     :data:`~brutex.engine.pool_union.POOL_UNION_SOURCE_ORDER` admission
     sources (Sharpe · the DEFAULT preset law · DD asc · win-rate desc · the
-    persisted ε-Pareto frontier) at the SAME total ``top_k`` budget —
+    persisted ε-Pareto frontier — frontier inclusion GUARANTEED only under
+    the ``top_k >= non-empty sources`` precondition, which the production
+    ``DEFAULT_PERSIST_TOP_K=1_000`` always satisfies; below it the tail
+    sources are starved + WARNED once, the
+    :mod:`~brutex.engine.pool_union` module docstring, review round 1) at
+    the SAME total ``top_k`` budget —
     killing the rank-1-forever-``not_validated`` shape — with the winners
     still emitted in TODAY's order (Sharpe descending, ties ``run_id``
     ascending, matching :meth:`ResultsStore.top_k`; a pool with

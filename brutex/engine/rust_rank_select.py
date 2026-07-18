@@ -112,6 +112,21 @@ _U64_MASK: Final[int] = (1 << 64) - 1
 #: The quota kernel's result arity (one index list per quota axis).
 _QUOTA_AXES_ARITY: Final[int] = 5
 
+#: The quota result's axis order (the ``axis_topm_indices`` tuple order) —
+#: diagnostic labels for the quota autorevert payload (review round 1: the
+#: quota mismatch must name the first differing axis + both index prefixes,
+#: the frontier arm's kernel=/oracle= discipline).
+_QUOTA_AXIS_NAMES: Final[tuple[str, ...]] = (
+    "composite",
+    "dd",
+    "losing_trades",
+    "win_rate",
+    "expectancy",
+)
+
+#: Bounded diagnostic prefix length for autorevert payloads (both arms).
+_AUTOREVERT_PREFIX: Final[int] = 8
+
 
 def rank_rust_select_enabled() -> bool:
     """Resolve the flag over :data:`RANK_RUST_SELECT_DEFAULT`.
@@ -271,7 +286,11 @@ def frontier_select(
     if _consume_burn_in("frontier"):
         expected = oracle()
         if kernel_indices != expected:
-            disable_kernel("frontier_mismatch", kernel=kernel_indices[:8], oracle=expected[:8])
+            disable_kernel(
+                "frontier_mismatch",
+                kernel=kernel_indices[:_AUTOREVERT_PREFIX],
+                oracle=expected[:_AUTOREVERT_PREFIX],
+            )
             return expected
         _burn_in_passed("frontier")
     _mark_engaged()
@@ -337,7 +356,21 @@ def axis_quota_select(
     if _consume_burn_in("quota"):
         expected = oracle()
         if kernel_lists != expected:
-            disable_kernel("quota_mismatch")
+            # Review round 1: carry the frontier arm's diagnostic discipline —
+            # name the FIRST differing axis + both bounded index prefixes.
+            axis_pos = next(
+                index
+                for index, (kernel_axis, oracle_axis) in enumerate(
+                    zip(kernel_lists, expected, strict=True)
+                )
+                if kernel_axis != oracle_axis
+            )
+            disable_kernel(
+                "quota_mismatch",
+                axis=_QUOTA_AXIS_NAMES[axis_pos],
+                kernel=kernel_lists[axis_pos][:_AUTOREVERT_PREFIX],
+                oracle=expected[axis_pos][:_AUTOREVERT_PREFIX],
+            )
             return expected
         _burn_in_passed("quota")
     _mark_engaged()

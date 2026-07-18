@@ -35,6 +35,19 @@ rows). Every source's internal order rides the store tie law: the axis key,
 then ``run_id`` ascending, then input order (a strict total order — the
 ``ResultsStore.top_k`` two-pass discipline collapsed into one key tuple).
 
+PRECONDITION for the per-source guarantee (review round 1, honesty): every
+non-empty source is guaranteed ≥ 1 admission ONLY when
+``cap >= the number of non-empty sources``. Below that precondition sources
+admit in the fixed source order and the TAIL sources get none — e.g. at
+``cap=3`` over five non-empty sources, ``win_rate`` (#4) and ``frontier``
+(#5) admit ZERO rows, so the "explicit ε-Pareto frontier inclusion" does
+NOT hold there. A starved shape emits one capped
+``pool_union.sources_starved`` WARNING naming the starved sources
+(warn-once per starved-source set per process). Both production caps —
+Stage-3 ``DEFAULT_STAGE3_TOP_K=10_000`` and the cascade's
+``DEFAULT_PERSIST_TOP_K=1_000`` — dwarf the five sources, so the
+precondition holds everywhere in production and the WARN never fires there.
+
 The EMITTED pool keeps TODAY's ordering law (Sharpe desc, ``run_id`` asc,
 input order) over the union membership — the union changes MEMBERSHIP only,
 never the downstream ordering discipline.
@@ -65,6 +78,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
 from brutex.engine.results_store import ResultRow
 from brutex.ranking.presets import DEFAULT_PRESET, RankingPreset, RankRecord, resolve_preset
 
@@ -75,9 +90,24 @@ __all__ = [
     "POOL_UNION_SOURCE_ORDER",
     "axis_better_key",
     "rank_record_of_row",
+    "reset_starved_warn_for_tests",
     "round_robin_union",
     "union_select_rows",
 ]
+
+_LOG = structlog.get_logger("brutex.engine.pool_union")
+
+#: Warn-once memo for the starved-cap shape (one WARNING per distinct
+#: starved-source-name set per process — the rust_rank_select
+#: ``_OBSERVABILITY_MEMO`` log-volume discipline; capped at the ≤ 2⁵ possible
+#: source subsets by construction).
+_STARVED_WARNED: Final[set[tuple[str, ...]]] = set()
+
+
+def reset_starved_warn_for_tests() -> None:
+    """Clear the starved-cap warn-once memo (test isolation ONLY)."""
+    _STARVED_WARNED.clear()
+
 
 #: The FIXED admission-source order (module docstring) — ``sharpe`` is
 #: deliberately FIRST so the single-source reduction is the legacy law.
@@ -145,7 +175,12 @@ def axis_better_key(
     raise ValueError(f"pool_union: unknown admission source {source!r}")
 
 
-def round_robin_union(ordered_sources: Sequence[Sequence[int]], *, cap: int) -> set[int]:
+def round_robin_union(
+    ordered_sources: Sequence[Sequence[int]],
+    *,
+    cap: int,
+    source_names: Sequence[str] | None = None,
+) -> set[int]:
     """Interleaved round-robin dedup-union over best-first candidate id lists.
 
     Per round, each source in order admits its best NOT-YET-ADMITTED
@@ -154,6 +189,16 @@ def round_robin_union(ordered_sources: Sequence[Sequence[int]], *, cap: int) -> 
     every source is exhausted. Deterministic; with ONE source this is
     exactly ``set(source[:cap])`` (the legacy top-K prefix — parity-pinned).
 
+    PRECONDITION (review round 1, honesty): every non-empty source admits
+    ≥ 1 candidate ONLY when ``cap >= the number of non-empty sources``.
+    Below that, sources admit in the fixed input order and the TAIL sources
+    admit nothing. A source that admitted ZERO candidates while still
+    holding a candidate OUTSIDE the final admitted set is STARVED — the
+    starved shape logs one capped ``pool_union.sources_starved`` WARNING
+    (warn-once per starved-source set per process; the production caps
+    10_000 / 1_000 never trip it). *source_names* labels the sources for
+    that WARN (default: positional ``#<index>`` labels).
+
     Raises ``ValueError`` on ``cap < 1`` (an empty pool budget is a caller
     bug, never a silent empty admission).
     """
@@ -161,6 +206,7 @@ def round_robin_union(ordered_sources: Sequence[Sequence[int]], *, cap: int) -> 
         raise ValueError(f"pool_union: cap must be >= 1, got {cap}")
     admitted: set[int] = set()
     cursors = [0] * len(ordered_sources)
+    admissions = [0] * len(ordered_sources)
     exhausted = False
     while len(admitted) < cap and not exhausted:
         exhausted = True
@@ -173,10 +219,49 @@ def round_robin_union(ordered_sources: Sequence[Sequence[int]], *, cap: int) -> 
                 continue
             exhausted = False
             admitted.add(source[cursor])
+            admissions[index] += 1
             cursors[index] = cursor + 1
             if len(admitted) >= cap:
                 break
+    non_empty = sum(1 for source in ordered_sources if source)
+    if cap < non_empty:
+        _warn_starved_once(ordered_sources, admitted, admissions, source_names, cap, non_empty)
     return admitted
+
+
+def _warn_starved_once(
+    ordered_sources: Sequence[Sequence[int]],
+    admitted: set[int],
+    admissions: Sequence[int],
+    source_names: Sequence[str] | None,
+    cap: int,
+    non_empty: int,
+) -> None:
+    """Emit the capped ``pool_union.sources_starved`` WARNING (memoised).
+
+    Starved = a non-empty source with ZERO admissions that still holds a
+    candidate outside the final admitted set (its inclusion guarantee is
+    genuinely broken — a zero-admission source whose every candidate was
+    admitted through other sources is covered, not starved). Reached only
+    on the ``cap < non_empty`` shape (the caller gates), so the O(n)
+    membership sweep never runs on the production caps.
+    """
+    starved = tuple(
+        source_names[index] if source_names is not None else f"#{index}"
+        for index, source in enumerate(ordered_sources)
+        if source
+        and admissions[index] == 0
+        and any(candidate not in admitted for candidate in source)
+    )
+    if not starved or starved in _STARVED_WARNED:
+        return
+    _STARVED_WARNED.add(starved)
+    _LOG.warning(
+        "pool_union.sources_starved",
+        cap=cap,
+        non_empty_sources=non_empty,
+        starved_sources=list(starved),
+    )
 
 
 def union_select_rows(
@@ -202,7 +287,9 @@ def union_select_rows(
         discovery-order-free by the total-order keys).
     cap
         The pool budget (``>= 1``) — UNCHANGED vs the legacy single-key
-        admission.
+        admission. The per-source ≥ 1 admission guarantee needs
+        ``cap >= the number of non-empty sources`` (module docstring —
+        below that the tail sources are starved, WARNED once).
     preset
         The ACTIVE preset for source #2; ``None`` resolves the DEFAULT
         (``min_dd_first`` — both production seams carry no preset context).
@@ -222,7 +309,7 @@ def union_select_rows(
             keyed.append((axis, row.run_id, seq))
         keyed.sort()
         ordered_sources.append([seq for _axis, _run_id, seq in keyed])
-    admitted = round_robin_union(ordered_sources, cap=cap)
+    admitted = round_robin_union(ordered_sources, cap=cap, source_names=tuple(sources))
     emitted = sorted(admitted, key=lambda seq: (rows[seq].run_id, seq))
     emitted.sort(key=lambda seq: rows[seq].sharpe_ratio, reverse=True)
     return tuple(rows[seq] for seq in emitted)
