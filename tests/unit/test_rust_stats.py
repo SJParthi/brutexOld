@@ -1705,8 +1705,8 @@ from brutex.metrics.rust_stats import (  # noqa: E402
     wfo_pass_count_via_kernel,
 )
 
-# The fixed PSR fixture (finite, radicand > 0) and its oracle-true value.
-_PSR_ARGS = (0.15, 0.0, 250, -0.6, 5.5)
+# The fixed PSR fixture's radicand (finite, > 0) — the fixture args
+# (0.15, 0.0, 250, -0.6, 5.5) live inline as ``_call_psr``'s defaults.
 _PSR_RADICAND = 1.0 - (-0.6) * 0.15 + (5.5 - 1.0) / 4.0 * 0.15 * 0.15
 
 
