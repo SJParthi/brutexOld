@@ -64,6 +64,7 @@ EXPECTED_OUTCOMES = {
     "verdict_auth_expired",
     "verdict_mass_empty_halt",
     "verdict_quota_exhausted",
+    "verdict_cancelled",
     "verdict_transient_residual",
     "verdict_quarantined_symbols",
     "verdict_known_gap_only",
