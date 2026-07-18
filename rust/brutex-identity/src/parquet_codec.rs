@@ -14,7 +14,7 @@
 //! `ARROW:schema` flatbuffer, page-header thrift) and is NOT pursued;
 //! greenfield makes the re-baseline coherent — no stored ledger exists.
 //!
-//! Encoder discipline: the fixed 16-column `LEDGER_COLUMNS` schema (every
+//! Encoder discipline: the fixed 17-column `LEDGER_COLUMNS` schema (every
 //! column OPTIONAL — the pyarrow-written shape the DuckDB `/db` +
 //! `/coverage` fast paths already read), ONE row group, zstd level 3 (the
 //! repo's lake compression standard), row order preserved from the caller
@@ -35,9 +35,9 @@ use std::sync::Arc;
 /// (`ZSTD_LEVEL = 3`, deterministic across zstd >= 1.5).
 const ZSTD_LEVEL: i32 = 3;
 
-/// Build the fixed 16-column ledger schema (all columns OPTIONAL).
+/// Build the fixed 17-column ledger schema (all columns OPTIONAL).
 fn ledger_schema() -> Result<Arc<Type>, String> {
-    let mut fields: Vec<Arc<Type>> = Vec::with_capacity(16);
+    let mut fields: Vec<Arc<Type>> = Vec::with_capacity(17);
     let string_columns = [
         "market",
         "security_id",
@@ -48,6 +48,7 @@ fn ledger_schema() -> Result<Arc<Type>, String> {
         "last_error",
         "first_seen_at",
         "last_attempt_at",
+        "streak_provenance",
     ];
     let int_columns = [
         "bars",
@@ -188,6 +189,12 @@ pub fn write_ledger_parquet(rows: &[LedgerRow]) -> Result<Vec<u8>, String> {
         write_int_column(&mut rg, rows.iter().map(|r| r.bars_net_new).collect())?;
         write_int_column(&mut rg, rows.iter().map(|r| r.empty_retries).collect())?;
         write_int_column(&mut rg, rows.iter().map(|r| r.transient_retries).collect())?;
+        write_string_column(
+            &mut rg,
+            rows.iter()
+                .map(|r| r.streak_provenance.as_deref())
+                .collect(),
+        )?;
         rg.close()
             .map_err(|e| format!("ledger write: close row group: {e}"))?;
         writer
@@ -362,6 +369,8 @@ fn read_ledger_parquet_impl(bytes: bytes::Bytes) -> Result<Vec<RawLedgerRow>, St
             bars_net_new: optional_int(&cells, "bars_net_new")?,
             empty_retries: optional_int(&cells, "empty_retries")?,
             transient_retries: optional_int(&cells, "transient_retries")?,
+            // Appended last (17th); a legacy 16-col file has no such cell → None.
+            streak_provenance: optional_str(&cells, "streak_provenance")?,
         });
     }
     Ok(out)
@@ -391,6 +400,7 @@ mod tests {
                 bars_net_new: Some(375),
                 empty_retries: Some(0),
                 transient_retries: Some(0),
+                streak_provenance: Some("EMPTY@p1|EMPTY@p2".into()),
             },
             LedgerRow {
                 market: "groww".into(),
@@ -409,6 +419,7 @@ mod tests {
                 bars_net_new: None,
                 empty_retries: None,
                 transient_retries: None,
+                streak_provenance: None,
             },
         ]
     }

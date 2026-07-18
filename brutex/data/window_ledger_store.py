@@ -535,10 +535,6 @@ def render_ledger_parquet(rows: Sequence[LedgerRow]) -> bytes:
     ``tests/golden/test_window_ledger_bytes_probe.py``). Deterministic: same
     rows → same bytes (one row group, zstd-3, no clock/randomness).
     """
-    # L14-PHASE-B: post merge-forward onto main 4c11f7aa the record-side (window_ledger.py)
-    # emits 17-field row tuples incl. streak_provenance (DEC-STREAK-PROVENANCE-001, #1512),
-    # but the brutex_identity kernel is still 16-col. This delegation is intentionally
-    # left thin; Phase B extends LEDGER_COLUMNS/codec/coerce/python.rs to 17 (see spec §6).
     return bytes(brutex_identity.render_ledger_parquet(rows))
 
 

@@ -296,14 +296,14 @@ fn rank_top_k(
 
 // ── window-ledger store laws + codec ───────────────────────────────────────
 
-/// Extract one 16-field ledger row tuple (`WindowLedger.to_rows` order).
+/// Extract one 17-field ledger row tuple (`WindowLedger.to_rows` order).
 fn extract_ledger_row(obj: &Bound<'_, PyAny>) -> PyResult<LedgerRow> {
     let t = obj
         .cast::<PyTuple>()
-        .map_err(|_| PyValueError::new_err("ledger row marshalling: expected a 16-tuple"))?;
-    if t.len() != 16 {
+        .map_err(|_| PyValueError::new_err("ledger row marshalling: expected a 17-tuple"))?;
+    if t.len() != 17 {
         return Err(PyValueError::new_err(format!(
-            "ledger row marshalling: expected a 16-tuple, got {} fields",
+            "ledger row marshalling: expected a 17-tuple, got {} fields",
             t.len()
         )));
     }
@@ -324,6 +324,8 @@ fn extract_ledger_row(obj: &Bound<'_, PyAny>) -> PyResult<LedgerRow> {
         bars_net_new: t.get_item(13)?.extract()?,
         empty_retries: t.get_item(14)?.extract()?,
         transient_retries: t.get_item(15)?.extract()?,
+        // Opaque passthrough (str | None) — the 17th, appended last.
+        streak_provenance: t.get_item(16)?.extract()?,
     })
 }
 
@@ -382,7 +384,7 @@ fn string_cell(
     PyString::new(py, text).unbind().into_any()
 }
 
-/// Build the 16-tuple for one resolved ledger row. The interned positions
+/// Build the 17-tuple for one resolved ledger row. The interned positions
 /// mirror `_INTERNED_COLUMNS`: market, security_id, interval, window_start,
 /// window_end, status, last_error (timestamps deliberately NOT interned).
 fn ledger_row_to_tuple<'py>(
@@ -390,7 +392,7 @@ fn ledger_row_to_tuple<'py>(
     row: &LedgerRow,
     mut pool: Option<&mut LedgerStringPool>,
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let mut items: Vec<Py<PyAny>> = Vec::with_capacity(16);
+    let mut items: Vec<Py<PyAny>> = Vec::with_capacity(17);
     items.push(string_cell(py, &mut pool, true, &row.market));
     items.push(string_cell(py, &mut pool, true, &row.security_id));
     items.push(string_cell(py, &mut pool, true, &row.interval));
@@ -416,6 +418,11 @@ fn ledger_row_to_tuple<'py>(
             Some(v) => v.into_pyobject(py)?.unbind().into_any(),
         });
     }
+    // The 17th — opaque str | None history (high-cardinality → NOT interned).
+    items.push(match &row.streak_provenance {
+        None => py.None(),
+        Some(text) => string_cell(py, &mut pool, false, text),
+    });
     PyTuple::new(py, items)
 }
 
@@ -470,7 +477,7 @@ fn render_ledger_parquet<'py>(
     Ok(PyBytes::new(py, &rendered))
 }
 
-/// Decode one ledger-shaped Parquet byte buffer into the resolved 16-tuples
+/// Decode one ledger-shaped Parquet byte buffer into the resolved 17-tuples
 /// (legacy optional columns derived per `_rows_to_records`; `skipped_streak`
 /// = the EMPTY_TERMINAL_THRESHOLD constant). A malformed/wrong-shape buffer
 /// raises `ValueError` (a `_LEDGER_READ_ERRORS` member — the caller's

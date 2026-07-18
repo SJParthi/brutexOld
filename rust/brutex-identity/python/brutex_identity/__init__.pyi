@@ -16,15 +16,16 @@ SOURCE_DIGEST: Final[str]
 #: the wheel-handshake suite reads it, so the stub must declare it).
 _EXPECTED_COMPILED_SYMBOLS: Final[tuple[str, ...]]
 
-#: The fixed 16-column window-ledger schema order (the ONE schema authority).
+#: The fixed 17-column window-ledger schema order (the ONE schema authority).
 #: The pyo3 runtime exports a Python LIST (the store docstring says so) —
 #: the stub matches the runtime type exactly (refuter NIT, 2026-07-18).
 LEDGER_COLUMNS: Final[list[str]]
 #: The 11 required core columns (the read-side wrong-shape guard).
 LEDGER_CORE_COLUMNS: Final[list[str]]
 
-#: One serialised window-ledger row — the 16-field tuple of
+#: One serialised window-ledger row — the 17-field tuple of
 #: `WindowLedger.to_rows` (`LedgerRowTuple` on the brutex side).
+#: The 17th (`streak_provenance`, appended last) is an opaque str | None.
 type LedgerRowTupleFfi = tuple[
     str,
     str,
@@ -42,6 +43,7 @@ type LedgerRowTupleFfi = tuple[
     int | None,
     int | None,
     int | None,
+    str | None,
 ]
 
 #: One marshalled ResultRow — dataclass field order, condition_names LAST,

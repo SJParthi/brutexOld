@@ -33,11 +33,12 @@ pub struct LedgerRow {
     pub bars_net_new: Option<i64>,
     pub empty_retries: Option<i64>,
     pub transient_retries: Option<i64>,
+    pub streak_provenance: Option<String>,
 }
 
 /// The fixed on-disk column order (`window_ledger_store._COLUMNS` twin — the
 /// Python tuple now DERIVES from this constant, one source of truth).
-pub const LEDGER_COLUMNS: [&str; 16] = [
+pub const LEDGER_COLUMNS: [&str; 17] = [
     "market",
     "security_id",
     "interval",
@@ -54,6 +55,7 @@ pub const LEDGER_COLUMNS: [&str; 16] = [
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
 ];
 
 /// The CORE columns every ledger Parquet MUST carry (the read-side REQUIRED set).
@@ -88,7 +90,7 @@ impl LedgerRow {
 
     /// The `tuple("" if v is None else str(v) for v in row)` determinism
     /// tie-break projection of `_row_preference` — field order = row order.
-    fn full_row_strings(&self) -> [String; 16] {
+    fn full_row_strings(&self) -> [String; 17] {
         [
             self.market.clone(),
             self.security_id.clone(),
@@ -110,6 +112,7 @@ impl LedgerRow {
             self.transient_retries
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            self.streak_provenance.clone().unwrap_or_default(),
         ]
     }
 }
@@ -132,7 +135,7 @@ fn status_rank(status: &str) -> i32 {
 /// `attempts`, (4) the full-row string tuple (pure determinism tie-break).
 /// Python `str` tuple comparison is code-point order == Rust's UTF-8 byte
 /// order, so the two implementations agree on every input.
-fn row_preference(row: &LedgerRow) -> (i32, String, i64, [String; 16]) {
+fn row_preference(row: &LedgerRow) -> (i32, String, i64, [String; 17]) {
     (
         status_rank(&row.status),
         row.last_attempt_at.clone().unwrap_or_default(),
@@ -221,9 +224,10 @@ pub struct RawLedgerRow {
     pub bars_net_new: Option<i64>,
     pub empty_retries: Option<i64>,
     pub transient_retries: Option<i64>,
+    pub streak_provenance: Option<String>,
 }
 
-/// Resolve a raw decoded row into the 16-field record (`_rows_to_records`
+/// Resolve a raw decoded row into the 17-field record (`_rows_to_records`
 /// twin): a `None` `empty_streak` / `in_pull_fetches` derives from the row's
 /// terminal state; `bars_net_new` / `empty_retries` / `transient_retries`
 /// stay an honest `None` (any number would be a fabrication — Golden Rule #1).
@@ -251,6 +255,7 @@ pub fn coerce_raw_row(raw: RawLedgerRow, skipped_streak: i64) -> LedgerRow {
         bars_net_new: raw.bars_net_new,
         empty_retries: raw.empty_retries,
         transient_retries: raw.transient_retries,
+        streak_provenance: raw.streak_provenance,
     }
 }
 
@@ -277,6 +282,7 @@ mod tests {
             bars_net_new: Some(10),
             empty_retries: Some(0),
             transient_retries: Some(0),
+            streak_provenance: None,
         }
     }
 
@@ -395,6 +401,7 @@ mod tests {
             bars_net_new: None,
             empty_retries: None,
             transient_retries: None,
+            streak_provenance: Some("EMPTY@p1".into()),
         };
         let resolved = coerce_raw_row(raw, 3);
         assert_eq!(resolved.empty_streak, 2);
@@ -402,5 +409,7 @@ mod tests {
         assert_eq!(resolved.bars_net_new, None); // honest unknown, never 0
         assert_eq!(resolved.empty_retries, None);
         assert_eq!(resolved.transient_retries, None);
+        // opaque passthrough — never derived, never fabricated
+        assert_eq!(resolved.streak_provenance, Some("EMPTY@p1".into()));
     }
 }
