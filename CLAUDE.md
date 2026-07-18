@@ -3385,7 +3385,7 @@ hostile-review pass._
   `OPTIONAL_KERNELS` (never a turnkey-build prerequisite; built by the
   NON-required ci.yml `rust-brutex-meta` lane, which also EXECUTES the
   wheel-backed Python↔Rust parity arms). GATES (executed): all 7 meta
-  modules 100.00% line+branch on the discovery gate (223 unit tests);
+  modules 100.00% line+branch on the discovery gate (233 unit tests);
   hypothesis properties (scorer parity bit-exact over hostile floats ·
   purge invariant · τ monotonicity · passes⇔empty); the frozen
   byte-golden (degenerate-small 12-trade run through the REAL
