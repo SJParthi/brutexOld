@@ -90,7 +90,7 @@ def _per_bar_seconds(bars: list[CandleBar], signals: list[bool]) -> float:
             direction=Side.BUY, tf_minutes=1, stop_loss_paisa=20, take_profit_paisa=40
         )
         t0 = time.perf_counter()
-        walker.run(bars, signals)
+        walker.run(bars, bars, signals)
         best = min(best, (time.perf_counter() - t0) / n)
     return best
 
@@ -104,10 +104,10 @@ def test_trade_sim_per_bar_cost_is_flat() -> None:
 
     # Warm caches / allocator on each size before timing.
     TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=20, take_profit_paisa=40).run(
-        small_bars, small_sig
+        small_bars, small_bars, small_sig
     )
     TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=20, take_profit_paisa=40).run(
-        big_bars, big_sig
+        big_bars, big_bars, big_sig
     )
 
     per_bar_small = _per_bar_seconds(small_bars, small_sig)
