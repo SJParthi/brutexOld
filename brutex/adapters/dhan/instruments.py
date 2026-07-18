@@ -92,12 +92,15 @@ def exchange_segment_for(exch_id: str, segment: str) -> str:
 
 
 def is_allowed_scrip_host(url: str) -> bool:
-    """True iff *url*'s host is on the Dhan SSRF allowlist (the scrip-master hosts).
+    """True iff *url* is ``https`` AND its host is on the Dhan SSRF allowlist.
 
     A future real downloader MUST call this before fetching (Golden Rule #1 — never
-    follow an arbitrary host). Pure string check; no network.
+    follow an arbitrary host, never a plaintext/MITM-able scheme). Mirrors the Groww
+    sibling ``instrument_loader._check_url``, which refuses BOTH a non-https scheme
+    AND a non-allowlisted host. Pure string check; no network.
     """
-    return urlsplit(url).hostname in DHAN_ALLOWED_HOSTS
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and parsed.hostname in DHAN_ALLOWED_HOSTS
 
 
 def _optional_str(row: Mapping[str, str], header: str) -> str | None:
@@ -138,10 +141,13 @@ def parse_scrip_master(csv_text: str) -> list[DhanScripRow]:
     """Parse Dhan scrip-master CSV **text** into :class:`DhanScripRow` records (header-driven).
 
     Reads columns BY NAME from :data:`~brutex.adapters.dhan.constants.\
-    DHAN_SCRIP_HEADERS_UNVERIFIED`, tolerating column order. A missing REQUIRED
-    header (security_id / trading_symbol / instrument_type / exch_id / segment)
-    fails LOUD; the optional derivative/economics columns default to ``None`` when
-    absent. An unparseable required ``security_id`` raises (a genuine shape problem).
+    DHAN_SCRIP_HEADERS_UNVERIFIED`, tolerating column order AND whitespace-padded
+    header names (headers are stripped for BOTH the presence check and the row
+    reads — the header names are UNVERIFIED, so a padded real header must not
+    silently drop data; Golden Rule #1). A missing REQUIRED header (security_id /
+    trading_symbol / instrument_type / exch_id / segment) fails LOUD; the optional
+    derivative/economics columns default to ``None`` when absent. An unparseable
+    required ``security_id`` raises (a genuine shape problem).
 
     Raises
     ------
@@ -165,7 +171,12 @@ def parse_scrip_master(csv_text: str) -> list[DhanScripRow]:
     cols = DHAN_SCRIP_HEADERS_UNVERIFIED
     rows: list[DhanScripRow] = []
     for raw_row in reader:
-        row = {k: v for k, v in raw_row.items() if k is not None}
+        # Strip the row KEYS exactly like the header presence check above — a
+        # whitespace-padded header (e.g. " SEM_SMST_SECURITY_ID") passes the
+        # required-header check on the stripped set, so the row read must resolve
+        # the same canonical name (else EVERY row would silently skip on the raw
+        # padded key — the round-1 silent-data-mismatch finding).
+        row = {k.strip(): v for k, v in raw_row.items() if k is not None}
         sec_text = (row.get(cols["security_id"]) or "").strip()
         if not sec_text:
             continue  # skip a blank / continuation row (no addressing key)

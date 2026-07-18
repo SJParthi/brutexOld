@@ -104,7 +104,13 @@ def test_capability_matrix_golden_pin() -> None:
     """The honest capability record is FROZEN — a drift is a conscious re-pin."""
     pinned = {
         "historical_daily": ("daily max-range-per-call (no documented cap)",),
-        "intraday": ("candle price unit (rupees-vs-paisa)",),
+        # round-1 re-pin (CONSCIOUS): the intraday "last 5 years" depth claim was
+        # OUT of the verified canon (5-year depth is documented only for the
+        # rolling-option endpoint) — the depth is now an UNVERIFIED aspect.
+        "intraday": (
+            "candle price unit (rupees-vs-paisa)",
+            "intraday history depth (undocumented — the earliest-history probe gate)",
+        ),
         "option_chain": ("exact per-strike Greek field names",),
         "expiry_list": (),
         "rolling_option": ("expired-futures history existence (undocumented — no path provided)",),
@@ -114,7 +120,10 @@ def test_capability_matrix_golden_pin() -> None:
     }
     got = {cap.name: cap.unverified for cap in DHAN_CAPABILITY_MATRIX}
     assert got == pinned
-    assert len(DHAN_UNVERIFIED_PROBE_GATES) == 7
+    # the register mirrors ADR-0024 §4's EIGHT gates 1:1 (round-1 re-pin: gate #8,
+    # the earliest-history floor, was missing from the register while the ADR named it)
+    assert len(DHAN_UNVERIFIED_PROBE_GATES) == 8
+    assert any("earliest-history" in gate for gate in DHAN_UNVERIFIED_PROBE_GATES)
 
 
 def test_package_public_surface() -> None:

@@ -172,12 +172,16 @@ def _iv_or_none(raw: object) -> Decimal | None:
 
     IV is not a price (0 is a legitimate value), so :func:`has_no_price` is NOT used;
     an absent cell → ``None``, a present cell → exact Decimal (rejects non-finite via
-    :func:`~brutex.data.candle_fields.to_price`, which the OptionBar constructor's
-    ``iv >= 0`` guard then bounds).
+    :func:`~brutex.data.candle_fields.to_price`). A present NEGATIVE iv — vendor junk
+    no real volatility can be — is nulled to ``None``, the same invalid-value law as
+    the strike/spot siblings (honest unknown, never a fabricated value — and never an
+    ``OptionBar.__post_init__`` ``ValueError`` escaping the per-symbol quarantine,
+    which catches ``BruteXError`` only; the round-1 correctness finding).
     """
     if is_absent(raw):
         return None
-    return to_price(raw, "iv")
+    value = to_price(raw, "iv")
+    return None if value < 0 else value
 
 
 def parse_rolling_option(payload: Mapping[str, object]) -> list[OptionBar]:
@@ -297,7 +301,9 @@ class OptionChainSnapshot:
 def parse_option_chain(payload: Mapping[str, object]) -> OptionChainSnapshot:
     """Parse a Dhan option-chain payload defensively into an :class:`OptionChainSnapshot`.
 
-    VERIFIED shape: ``{data: {last_price, oc: {"<strike>": {"ce": {...}, "pe": {...}}}}}``
+    ASSUMED response shape (the REQUEST body is VERIFIED; the response ENVELOPE is
+    model-inferred — probe-gated, like the per-strike Greek names):
+    ``{data: {last_price, oc: {"<strike>": {"ce": {...}, "pe": {...}}}}}``
     (the ``data`` envelope may be absent — the map may sit at the top level). Extracts
     the underlying ``last_price`` and every ``(strike, ce, pe)`` row, surfacing the RAW
     per-side mappings verbatim (Greek NAMES UNVERIFIED). Strikes are returned sorted
@@ -367,8 +373,9 @@ def nameable_option_chain_fields(side: Mapping[str, object]) -> dict[str, object
 def parse_expiry_list(payload: Mapping[str, object]) -> list[date]:
     """Parse a Dhan expiry-list payload into ``date`` objects.
 
-    VERIFIED shape: ``{data: ["YYYY-MM-DD", ...], status: "success"}``. Returns the
-    dates in ascending order (deduplicated). A blank / non-string entry is skipped
+    ASSUMED response shape (the REQUEST body is VERIFIED; the response ENVELOPE is
+    model-inferred — probe-gated): ``{data: ["YYYY-MM-DD", ...], status: "success"}``.
+    Returns the dates in ascending order (deduplicated). A blank / non-string entry is skipped
     gracefully; an unparseable date string raises (a genuine shape problem).
 
     Raises

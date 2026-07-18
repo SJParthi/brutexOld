@@ -27,6 +27,7 @@ from brutex.adapters.dhan.errors import (
     DhanAuthError,
     DhanBadRequestError,
     DhanEmptyResponseError,
+    DhanError,
     DhanNetworkError,
     DhanRateLimitError,
     DhanTimeoutError,
@@ -111,7 +112,10 @@ def test_option_chain_sends_client_id_and_special_pace() -> None:
     client.option_chain(underlying_scrip=13, underlying_seg="IDX_I", expiry="2026-08-27")
     assert transport.seen_paths == [DHAN_ENDPOINT_OPTION_CHAIN]
     assert transport.seen_headers[0][DHAN_HEADER_CLIENT_ID] == "1100"
-    assert paces == ["chain"]  # the SPECIAL pacer, not the data pacer
+    # the shared Data-API token FIRST, then the SPECIAL 3s pacer (ADDITIONAL, not
+    # instead-of — round-1 concurrency finding: chain-only pacing would issue
+    # outside the shared 5/s aggregate bucket)
+    assert paces == ["data", "chain"]
 
 
 def test_expiry_list_happy() -> None:
@@ -243,6 +247,121 @@ def test_rate_limit_exhaustion_raises_rate_limit() -> None:
         client.expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
 
 
+# ── HTTP-200 body-level failure envelope (hostile-review round 1, MAJOR) ──
+# Dhan can deliver its DH-9xx / {status:"failure"} failure envelope on an
+# HTTP 200 — the errors module's documented + unit-pinned SECOND failure
+# mechanism. The client must classify the BODY on a 2xx too, so a
+# 200-delivered dead token drives the reauth/terminal-auth path instead of
+# masquerading as success and dying later as a misleading parse error.
+
+
+def test_http200_dh901_without_refresher_is_terminal_auth() -> None:
+    """A dead-token DH-901 delivered on HTTP 200 classifies — never a fake success."""
+    transport = FakeDhanTransport(
+        script=[Response(200, {"errorCode": "DH-901", "errorMessage": "invalid token"})]
+    )
+    fired: list[str] = []
+    client = _client(transport, on_success=lambda: fired.append("ok"))
+    with pytest.raises(DhanAuthError):
+        client.expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
+    assert transport.calls == 1
+    assert fired == []  # a 200-delivered failure NEVER fires on_success
+
+
+def test_http200_dh901_with_refresher_rereads_and_retries() -> None:
+    """A 200-delivered DH-901 drives the SAME reauth self-heal as a 401-delivered one."""
+    refresher = DhanTokenRefresher(initial_token="tok0", read_token=lambda: "tok1")
+    transport = FakeDhanTransport(script=[Response(200, {"errorCode": "DH-901"}), _ok()])
+    client = _client(transport, refresher=refresher)
+    got = client.expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
+    assert got == {"ok": True}
+    # the SECOND call carried the freshly-adopted token — the reauth path fired
+    assert transport.seen_headers[1][DHAN_HEADER_ACCESS_TOKEN] == "tok1"
+
+
+def test_http200_dh905_is_typed_bad_request() -> None:
+    """A 200-delivered DH-905 raises the TYPED bad-request, not a downstream parse error."""
+    transport = FakeDhanTransport(script=[Response(200, {"errorCode": "DH-905"})])
+    with pytest.raises(DhanBadRequestError):
+        _client(transport).expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
+
+
+def test_http200_sdk_failure_envelope_classified() -> None:
+    """The SDK {status:"failure", remarks:{...}} envelope on HTTP 200 classifies."""
+    body: dict[str, object] = {
+        "status": "failure",
+        "remarks": {"error_code": "dh-901", "error_message": "bad token"},
+    }
+    transport = FakeDhanTransport(script=[Response(200, body)])
+    with pytest.raises(DhanAuthError) as excinfo:
+        _client(transport).expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
+    assert "bad token" in str(excinfo.value)
+
+
+def test_http200_failure_status_without_code_is_terminal_base() -> None:
+    """status:"failure" with NO usable DH code still classifies (terminal base)."""
+    transport = FakeDhanTransport(script=[Response(200, {"status": "failure", "remarks": {}})])
+    client = _client(transport)
+    with pytest.raises(DhanError) as excinfo:
+        client.expiry_list(underlying_scrip=1, underlying_seg="IDX_I")
+    assert type(excinfo.value) is DhanError  # HTTP 200 is unmapped → the terminal base
+    assert transport.calls == 1
+
+
+def test_http200_clean_success_bodies_never_misclassified() -> None:
+    """Clean success shapes (candle columns / expiry success envelope) stay success.
+
+    The 2xx-body failure gate keys on POSITIVE failure markers only — never the
+    absence of success keys — so a marker-free payload can never be misclassified.
+    """
+    candle: dict[str, object] = {
+        "open": [1.0],
+        "high": [1.0],
+        "low": [1.0],
+        "close": [1.0],
+        "volume": [1],
+        "timestamp": [1_700_000_000],
+    }
+    expiry: dict[str, object] = {"data": ["2026-08-27"], "status": "success"}
+    fired: list[str] = []
+    transport = FakeDhanTransport(script=[Response(200, candle), Response(200, expiry)])
+    client = _client(transport, on_success=lambda: fired.append("ok"))
+    got_candle = client.intraday_candles(
+        security_id="13",
+        exchange_segment="IDX_I",
+        instrument="INDEX",
+        interval="1",
+        from_date="2024-01-01 09:15:00",
+        to_date="2024-03-01 15:30:00",
+    )
+    assert got_candle == candle
+    assert client.expiry_list(underlying_scrip=1, underlying_seg="IDX_I") == expiry
+    assert fired == ["ok", "ok"]  # both clean 200s fired on_success
+
+
+# ── option-chain shared + special pace composition (round 1, concurrency) ──
+
+
+def test_option_chain_acquires_shared_and_special_pace_each_attempt() -> None:
+    """option_chain consumes a SHARED Data-API token AND the special interval, per attempt.
+
+    The option chain is a Data-API request: paced ONLY by the 3s special pacer it
+    would issue OUTSIDE the shared 5/s bucket (5/s candles + 0.33/s chain = 5.33/s
+    aggregate — a by-design vendor-cap breach at a future live wiring). The shared
+    token is acquired FIRST; the special interval LAST (closest to the physical
+    issue, so a blocking shared acquire can never erode the 3 s inter-issue law).
+    """
+    paces: list[str] = []
+    transport = FakeDhanTransport(script=[Response(429, {}), _ok()])
+    client = _client(
+        transport,
+        pace=lambda: paces.append("data"),
+        option_chain_pace=lambda: paces.append("chain"),
+    )
+    client.option_chain(underlying_scrip=1, underlying_seg="IDX_I", expiry="2026-08-27")
+    assert paces == ["data", "chain", "data", "chain"]  # BOTH hooks, EVERY physical attempt
+
+
 # ── reauth self-heal ───────────────────────────────────────────────────────
 
 
@@ -329,3 +448,11 @@ def test_with_rate_hooks_overrides_option_chain_pace() -> None:
 def test_client_satisfies_protocol() -> None:
     client = _client(FakeDhanTransport())
     assert isinstance(client, DhanClientProtocol)
+
+
+def test_client_repr_never_exposes_the_token() -> None:
+    """``repr(DhanClient)`` must elide the access-token JWT (round-1 security NIT)."""
+    client = DhanClient(
+        transport=FakeDhanTransport(), access_token="jwt-secret-value", client_id="1100"
+    )
+    assert "jwt-secret-value" not in repr(client)

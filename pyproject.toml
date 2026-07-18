@@ -91,6 +91,15 @@ groww = [
     "growwapi>=1.0,<2.0",
     "pyotp>=2.9,<3.0",
 ]
+# DEC-DHAN-ADAPTER-001 (2026-07-18, review round 1): the live Dhan Data API v2 HTTP
+# transport needs `requests`; kept behind an OPTIONAL extra — exactly like `groww` —
+# so the INERT reference-only adapter, unit-test runners and `bootstrap.sh` never
+# install it (the real transport is `# pragma: no cover` behind the injected
+# DhanTransport Protocol; a deterministic fake drives every client branch with no
+# install and no network). The transport's fail-fast remediation names this extra.
+dhan = [
+    "requests>=2.32,<3.0",
+]
 # DEC-TOKEN-BROKER-AWS-001 (2026-07-01): the SHARED AWS token broker — BruteX READS
 # the Groww creds (api_key + TOTP secret) AND the daily minted access token from AWS
 # Systems Manager Parameter Store (region ap-south-1); a dedicated Lambda is the only

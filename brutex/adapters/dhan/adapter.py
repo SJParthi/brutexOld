@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time
 from typing import Final
 
 from brutex.adapters.dhan.chunks import plan_candle_windows
@@ -40,7 +40,9 @@ from brutex.adapters.protocol import (
     MarketCapabilities,
     single_instrument_page,
 )
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.data.models import CandleBar
+from brutex.data.session import SESSION_CLOSE, SESSION_OPEN
 from brutex.models import Exchange, Instrument, OutOfScopeError
 
 #: Capabilities of the Dhan reference adapter (CLAUDE.md §3 scope; INERT).
@@ -65,10 +67,11 @@ _SEGMENT_CANDIDATES: Final[dict[Exchange, tuple[str, ...]]] = {
     Exchange.BSE: ("IDX_I", "BSE_EQ", "BSE_FNO"),
 }
 
-#: NSE/BSE session open — used to build a from-date's intraday datetime bound.
-_SESSION_OPEN: Final[time] = time(9, 15)
-#: NSE/BSE session close — used to build a to-date's intraday datetime bound.
-_SESSION_CLOSE: Final[time] = time(15, 30)
+#: NSE/BSE session open/close — the CANONICAL session-time constants (imported per
+#: DEC-TIMESTAMP-IST-SINGLESOURCE-001 §11 COMMON, never a re-minted ``time(9, 15)``
+#: copy), used to build the window datetime bounds.
+_SESSION_OPEN: Final[time] = SESSION_OPEN
+_SESSION_CLOSE: Final[time] = SESSION_CLOSE
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,8 +147,12 @@ class DhanMarketAdapter:
         row, segment = self._resolve_row(exchange, symbol)
         drop_volume = row.instrument_type == "INDEX"
         security_id = str(row.security_id)
-        start_dt = datetime.combine(start, _SESSION_OPEN, tzinfo=UTC)
-        end_dt = datetime.combine(end, _SESSION_CLOSE, tzinfo=UTC)
+        # The bounds are IST wall-clock session times, so they carry the IST fixed
+        # offset (round-1 review: tagging them UTC produced no wrong bytes — the
+        # serializers slice the wall-clock prefix — but was a latent tz-semantics
+        # trap for any future tz-aware comparison/astimezone on these datetimes).
+        start_dt = datetime.combine(start, _SESSION_OPEN, tzinfo=IST_FIXED_OFFSET)
+        end_dt = datetime.combine(end, _SESSION_CLOSE, tzinfo=IST_FIXED_OFFSET)
         windows = plan_candle_windows(start_dt, end_dt, interval=interval)
 
         bars: list[CandleBar] = []

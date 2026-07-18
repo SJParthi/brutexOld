@@ -96,6 +96,21 @@ def test_from_transport_exception_timeout_name() -> None:
     assert isinstance(got, e.DhanTimeoutError)
 
 
+def test_from_transport_exception_builtin_timeout_names() -> None:
+    """A raw builtin ``TimeoutError`` / ``socket.timeout`` maps RETRYABLE (round-1 NIT).
+
+    On Python 3.10+ ``socket.timeout is TimeoutError`` (``__name__`` ==
+    ``"TimeoutError"``), so the name set must carry ``"TimeoutError"`` — a raw
+    socket timeout leaking past the requests wrappers must never read terminal.
+    """
+
+    got = e.from_transport_exception(TimeoutError("timed out"))
+    assert isinstance(got, e.DhanTimeoutError)
+    assert e.is_retryable(got)
+    got2 = e.from_transport_exception(TimeoutError("timed out"))
+    assert isinstance(got2, e.DhanTimeoutError)
+
+
 def test_from_transport_exception_network_name() -> None:
     got = e.from_transport_exception(ConnectionError("Failed to resolve api.dhan.co"))
     assert isinstance(got, e.DhanNetworkError)
@@ -155,7 +170,31 @@ def test_steps_timeout_ladder() -> None:
     assert not e.steps_timeout_ladder(e.DhanBadRequestError("x"))
 
 
-def test_sdk_numeric_scheme_kept_separate() -> None:
-    # the SDK 8xx scheme is documented but NOT a DH-9xx code — never conflated
-    assert e.SDK_NUMERIC_CODES[807] == "token-expired"
+def test_sdk_numeric_scheme_kept_separate_and_stamped_unverified() -> None:
+    # the SDK 8xx scheme is model-inferred (UNVERIFIED — the suffix carries the
+    # honesty) and NOT a DH-9xx code — never conflated in classification
+    assert e.SDK_NUMERIC_CODES_UNVERIFIED[807] == "token-expired"
     assert 807 not in e.HTTP_STATUS_TO_ERROR
+    assert not hasattr(e, "SDK_NUMERIC_CODES")  # the un-suffixed name is GONE
+
+
+def test_body_signals_failure_truth_table() -> None:
+    """The 2xx-body failure gate keys on POSITIVE documented markers only."""
+    # failure markers — either documented error-body shape
+    assert e.body_signals_failure({"errorCode": "DH-901"})
+    assert e.body_signals_failure({"errorCode": " dh-905 "})  # trimmed + case-folded
+    assert e.body_signals_failure({"remarks": {"error_code": "DH-905"}})
+    assert e.body_signals_failure({"status": "failure"})
+    assert e.body_signals_failure({"status": " FAILURE "})  # case-insensitive token
+    assert e.body_signals_failure({"status": "failure", "remarks": {"error_code": "dh-901"}})
+    # clean success shapes — NEVER misclassified (absence of success keys is not a marker)
+    assert not e.body_signals_failure({})
+    assert not e.body_signals_failure({"open": [1.0], "timestamp": [1]})
+    assert not e.body_signals_failure({"data": ["2026-08-27"], "status": "success"})
+    assert not e.body_signals_failure({"data": {"last_price": 1.0, "oc": {}}})
+    # non-DH-shaped / malformed markers do NOT flip a 2xx to failure
+    assert not e.body_signals_failure({"errorCode": "oops"})
+    assert not e.body_signals_failure({"errorCode": "DH-9XX"})
+    assert not e.body_signals_failure({"errorCode": 901})  # non-string code
+    assert not e.body_signals_failure({"status": 1})  # non-string status
+    assert not e.body_signals_failure({"remarks": "oops"})  # non-mapping envelope

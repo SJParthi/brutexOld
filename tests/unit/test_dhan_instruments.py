@@ -39,6 +39,19 @@ def test_is_allowed_scrip_host() -> None:
     assert not m.is_allowed_scrip_host("https://evil.example.com/x.csv")
 
 
+def test_is_allowed_scrip_host_refuses_non_https_scheme() -> None:
+    """The SSRF guard refuses a plaintext/odd scheme even on an allowlisted host.
+
+    Round-1 security finding: the Groww sibling ``_check_url`` refuses BOTH a
+    non-https scheme AND a non-allowlisted host — a MITM-able
+    ``http://images.dhan.co/...`` must not pass the Dhan guard either.
+    """
+    assert not m.is_allowed_scrip_host("http://images.dhan.co/api-data/api-scrip-master.csv")
+    assert not m.is_allowed_scrip_host("http://api.dhan.co/v2/charts/historical")
+    assert not m.is_allowed_scrip_host("ftp://images.dhan.co/x.csv")
+    assert not m.is_allowed_scrip_host("images.dhan.co/api-data/api-scrip-master.csv")
+
+
 # ── parse_scrip_master ─────────────────────────────────────────────────────
 
 
@@ -178,6 +191,30 @@ def test_parse_scrip_master_unparseable_int() -> None:
     csv = ",".join(headers) + "\n" + ",".join(["1", "X", "EQUITY", "NSE", "E", "lots"]) + "\n"
     with pytest.raises(InstrumentFormatError, match="unparseable lot_size"):
         m.parse_scrip_master(csv)
+
+
+def test_parse_scrip_master_padded_required_header_still_reads_rows() -> None:
+    """A whitespace-padded REQUIRED header parses every row (round-1 correctness MINOR).
+
+    The header presence check strips names, so the row read must strip its keys
+    too — a ``" SEM_SMST_SECURITY_ID"`` header must not silently drop EVERY row
+    (Golden Rule #1 — no silent data mismatch). Headers are UNVERIFIED, so the
+    real CSV's whitespace is unknown.
+    """
+    headers = [f" {H['security_id']}"] + [H[k] for k in _REQUIRED[1:]]
+    csv = ",".join(headers) + "\n" + ",".join(["13", "NIFTY", "INDEX", "NSE", "I"]) + "\n"
+    rows = m.parse_scrip_master(csv)
+    assert len(rows) == 1
+    assert rows[0].security_id == 13
+    assert rows[0].exchange_segment == "IDX_I"
+
+
+def test_parse_scrip_master_padded_optional_header_still_reads_cell() -> None:
+    """A padded OPTIONAL header (`` SEM_LOT_UNITS``) reads its value, not silent None."""
+    headers = [H[k] for k in _REQUIRED] + [f" {H['lot_size']} "]
+    csv = ",".join(headers) + "\n" + ",".join(["1", "X", "EQUITY", "NSE", "E", "75"]) + "\n"
+    rows = m.parse_scrip_master(csv)
+    assert rows[0].lot_size == 75
 
 
 def test_parse_scrip_master_float_shaped_lot() -> None:

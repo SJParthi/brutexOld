@@ -172,6 +172,30 @@ def test_parse_rolling_option_both_sides() -> None:
     assert bars[0].open_interest == 2000
 
 
+def test_parse_rolling_option_negative_iv_nulled_never_valueerror() -> None:
+    """A present NEGATIVE iv cell nulls to None (round-1 correctness MINOR).
+
+    Pre-fix a negative iv reached ``OptionBar.__post_init__`` and raised a bare
+    ``ValueError`` — NOT a BruteXError, so it escaped the per-symbol quarantine
+    and crashed a multi-symbol pull. The invalid-value law mirrors the
+    strike/spot siblings: honest None (unknown), never a fabricated value,
+    never an un-quarantinable crash.
+    """
+    side = _rolling_side()
+    side["iv"] = [-0.5]
+    bars = p.parse_rolling_option({"ce": side})
+    assert len(bars) == 1
+    assert bars[0].iv is None
+
+
+def test_parse_rolling_option_zero_iv_kept_exact() -> None:
+    """iv == 0 is a legitimate value — kept as exact Decimal, never nulled."""
+    side = _rolling_side()
+    side["iv"] = [0]
+    bars = p.parse_rolling_option({"ce": side})
+    assert bars[0].iv == Decimal("0")
+
+
 def test_parse_rolling_option_one_side_absent() -> None:
     bars = p.parse_rolling_option({"ce": _rolling_side()})  # pe absent
     assert [b.side for b in bars] == ["CE"]

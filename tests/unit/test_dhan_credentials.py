@@ -59,3 +59,15 @@ def test_load_hard_read_failure_fails_fast() -> None:
 def test_how_to_fix_names_subscription_gate() -> None:
     assert "Data API" in cred.DHAN_CREDS_HOW_TO_FIX
     assert "₹499" in cred.DHAN_CREDS_HOW_TO_FIX
+
+
+def test_credentials_repr_never_exposes_the_token() -> None:
+    """``repr(DhanCredentials)`` must elide the JWT (round-1 security NIT).
+
+    The access token is a genuine secret; the default dataclass repr would
+    render it verbatim into any log/traceback that interpolates the object.
+    The non-secret ``client_id`` stays visible for diagnostics.
+    """
+    creds = cred.DhanCredentials(access_token="jwt-secret-value", client_id="1100")
+    assert "jwt-secret-value" not in repr(creds)
+    assert "1100" in repr(creds)

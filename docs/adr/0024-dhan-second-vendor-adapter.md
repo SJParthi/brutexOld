@@ -125,9 +125,16 @@ The machine-readable register is
   sustained event volume through live-shaped subsystems; an INERT adapter with
   no production wiring has no sustained-load surface to soak (Golden Rule #10 —
   a fabricated stress test would be gate theater). Revisit at live wiring.
-* The future live wiring (rate-controller binding at 5/s + the 3s option-chain
-  pacer, ledger namespaces, pull spine integration) is its own DEC when the
-  subscription lands.
+* The future live wiring is its own DEC when the subscription lands. Its
+  checklist (round-1 review fold): the rate-controller binding at 5/s; the 3s
+  option-chain pacer wired ON TOP of the shared 5/s acquire (the client's
+  `_option_chain_acquire` already composes them — the special pacer is
+  ADDITIONAL, never instead-of, so the chain call always consumes a shared
+  Data-API token too); a **100,000/day Data-API daily-quota tracker** — a REAL
+  vendor ceiling a ~750-symbol multi-window pull can approach, and NO shared
+  per-day mechanism exists in-repo today (the shared `RateController` is
+  per-second + per-minute only), so the tracker must be DESIGNED at wiring
+  time, never assumed; the ledger namespaces; the pull spine integration.
 * **`DEC-DHAN-RUST-FACADE-001`** (deferred): optional Rust facades over the
   frozen pure-law leaves, only under a cross-repo uniformity mandate, with the
   Python law retained as the live oracle (the ADR-0020 pattern).

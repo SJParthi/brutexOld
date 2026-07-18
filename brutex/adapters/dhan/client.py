@@ -44,6 +44,7 @@ from brutex.adapters.dhan.constants import (
 )
 from brutex.adapters.dhan.errors import (
     DhanError,
+    body_signals_failure,
     from_dhan_response,
     from_transport_exception,
     is_auth_failure,
@@ -55,8 +56,11 @@ from brutex.adapters.dhan.transport import DhanTransport
 
 _LOG = structlog.get_logger("brutex.adapters.dhan.client")
 
-#: HTTP status codes treated as a successful body (2xx). Anything else is classified
-#: by :func:`~brutex.adapters.dhan.errors.from_dhan_response`.
+#: The HTTP success band (2xx). A non-2xx is ALWAYS classified by
+#: :func:`~brutex.adapters.dhan.errors.from_dhan_response`; a 2xx is a success
+#: ONLY when its body carries no documented failure marker
+#: (:func:`~brutex.adapters.dhan.errors.body_signals_failure` — Dhan can deliver
+#: its DH-9xx / ``{status:"failure"}`` envelope on an HTTP 200).
 _HTTP_OK_FLOOR = 200
 _HTTP_OK_CEILING = 300
 
@@ -85,10 +89,14 @@ class DhanClient:
         The Dhan JWT + client-id sent on requests (the client-id header is added only
         where the endpoint requires it, e.g. the option chain).
     pace
-        Rate-bucket acquire hook fired before every physical call.
+        Rate-bucket acquire hook fired before every physical call — INCLUDING the
+        option-chain call (every endpoint here is a Data-API request against the
+        shared 5/s aggregate cap).
     option_chain_pace
         The SPECIAL 1-request/3-seconds pacer fired before the option-chain call
-        (Dhan's option-chain rate limit) — a no-op by default.
+        (Dhan's option-chain rate limit) — a no-op by default. ADDITIONAL to —
+        never instead of — the shared :attr:`pace` (see
+        :meth:`_option_chain_acquire`).
     sleep
         Backoff sleeper (injected in tests).
     on_rate_limit, on_success
@@ -109,7 +117,7 @@ class DhanClient:
     """
 
     transport: DhanTransport
-    access_token: str
+    access_token: str = field(repr=False)  # a JWT secret — never rendered in repr/logs
     client_id: str
     pace: Callable[[], None] = _noop_pace
     option_chain_pace: Callable[[], None] = _noop_pace
@@ -146,10 +154,41 @@ class DhanClient:
         return headers
 
     def _error_for(self, status: int, body: Mapping[str, object]) -> DhanError | None:
-        """Return a classified :class:`DhanError` for a non-2xx status, or ``None`` on success."""
-        if _HTTP_OK_FLOOR <= status < _HTTP_OK_CEILING:
+        """Classify ``(status, body)`` — ``None`` iff the response is a GENUINE success.
+
+        A non-2xx status is always classified. A 2xx is a success ONLY when the
+        body carries no documented failure marker (:func:`~brutex.adapters.dhan.\
+        errors.body_signals_failure`): Dhan can deliver a DH-9xx /
+        ``{status:"failure", remarks:{...}}`` failure envelope ON an HTTP 200 —
+        the errors module's second failure mechanism — and it must ride the SAME
+        :func:`~brutex.adapters.dhan.errors.from_dhan_response` law (so a
+        200-delivered DH-901 drives the reauth/terminal-auth path and a
+        200-delivered throttle-classified error fires ``on_rate_limit``, never a
+        fake success dying downstream as a misleading parse error). The marker
+        gate is POSITIVE-presence only, so a clean success payload can never be
+        misclassified.
+        """
+        if _HTTP_OK_FLOOR <= status < _HTTP_OK_CEILING and not body_signals_failure(body):
             return None
         return from_dhan_response(status, body)
+
+    def _option_chain_acquire(self) -> None:
+        """Acquire the SHARED Data-API token, THEN the option-chain special interval.
+
+        The option chain is a Data-API request, so it must consume a shared 5/s
+        token like every sibling endpoint AND honour the SPECIAL 1-req/3s minimum
+        interval — :attr:`option_chain_pace` is ADDITIONAL to, never instead of,
+        the shared :attr:`pace`. (Paced by the 3s pacer alone, a live wiring
+        would issue option-chain requests OUTSIDE the shared bucket: 5/s candles
+        + 0.33/s chain = 5.33/s aggregate, breaching the VERIFIED Data-API 5/s
+        cap, with the shared AIMD fed 429s it never issued into.) Order law: the
+        shared token FIRST, the special interval LAST — closest to the physical
+        issue, so a blocking shared acquire can never erode the 3 s inter-issue
+        guarantee (a late issue after a token grab only ever LOWERS the realised
+        rate, never raises it).
+        """
+        self.pace()
+        self.option_chain_pace()
 
     def _backoff(self, *, rate_limited: bool, attempt: int) -> float:
         """Linear backoff (``base × attempt``); the longer base for a rate-limit."""
@@ -166,8 +205,9 @@ class DhanClient:
         """Run *call* through the adaptive limiter: pace → classify → retry / reauth / raise.
 
         Every physical call acquires a token (*pace*), then runs ``call()`` (which does
-        the transport request and returns ``(status, body)``). A 2xx returns the body
-        and fires :attr:`on_success`; a non-2xx / transport exception is classified. A
+        the transport request and returns ``(status, body)``). A 2xx whose body carries
+        no failure marker returns the body and fires :attr:`on_success`; a non-2xx, a
+        marker-carrying 2xx body, or a transport exception is classified. A
         RETRYABLE failure backs off + retries within :attr:`max_attempts` (a rate-limit
         additionally fires :attr:`on_rate_limit` on every occurrence). A terminal AUTH
         failure with a wired :attr:`refresher` and budget remaining RE-READS the shared
@@ -286,11 +326,13 @@ class DhanClient:
     def option_chain(
         self, *, underlying_scrip: int, underlying_seg: str, expiry: str
     ) -> Mapping[str, object]:
-        """Fetch the option chain (``POST /v2/optionchain``) — honours the 1-req/3s pacer.
+        """Fetch the option chain (``POST /v2/optionchain``) — shared pace + 1-req/3s pacer.
 
-        Requires the ``client-id`` header. The special option-chain rate limit is
-        applied via :attr:`option_chain_pace` (a no-op by default; a live site wires a
-        3-second min-interval pacer).
+        Requires the ``client-id`` header. Every physical attempt acquires BOTH the
+        shared Data-API token (:attr:`pace`) AND the special option-chain interval
+        (:attr:`option_chain_pace` — a no-op by default; a live site wires a
+        3-second min-interval pacer ON TOP of the shared 5/s controller). See
+        :meth:`_option_chain_acquire` for the composition + order law.
         """
         body: dict[str, object] = {
             "UnderlyingScrip": underlying_scrip,
@@ -303,7 +345,7 @@ class DhanClient:
                 body=body,
                 headers=self._headers(include_client_id=True),
             ),
-            pace=self.option_chain_pace,
+            pace=self._option_chain_acquire,
             label="option_chain",
         )
 
@@ -435,7 +477,7 @@ class DhanClientProtocol(Protocol):
         expiry_code: int | None = None,
     ) -> Mapping[str, object]:
         """Fetch one daily historical window."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def intraday_candles(
         self,
@@ -449,17 +491,17 @@ class DhanClientProtocol(Protocol):
         oi: bool = False,
     ) -> Mapping[str, object]:
         """Fetch one intraday window."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def option_chain(
         self, *, underlying_scrip: int, underlying_seg: str, expiry: str
     ) -> Mapping[str, object]:
         """Fetch the option chain."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def expiry_list(self, *, underlying_scrip: int, underlying_seg: str) -> Mapping[str, object]:
         """Fetch the expiry list."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def rolling_option(
         self,
@@ -477,16 +519,16 @@ class DhanClientProtocol(Protocol):
         required_data: Sequence[str],
     ) -> Mapping[str, object]:
         """Fetch one rolling-option window."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     @property
     def meter(self) -> CallMeter:
         """The shared achieved-throughput meter."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def with_pace(self, pace: Callable[[], None]) -> Self:
         """Return a copy bound to *pace*."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
     def with_rate_hooks(
         self,
@@ -497,7 +539,7 @@ class DhanClientProtocol(Protocol):
         option_chain_pace: Callable[[], None] | None = None,
     ) -> Self:
         """Return a copy bound to the rate-feedback hooks."""
-        ...
+        raise NotImplementedError  # structural Protocol stub — never executed
 
 
 __all__ = ["DhanClient", "DhanClientProtocol"]

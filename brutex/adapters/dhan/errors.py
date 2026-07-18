@@ -20,11 +20,13 @@ never copying Groww's SDK-specific class-name map).
 CONSERVATIVELY to the terminal base :class:`DhanError` (never blindly retried,
 Golden Rule #1), pinned in :data:`DH_CODE_UNVERIFIED`.
 
-The Dhan Python SDK ALSO uses a separate NUMERIC scheme (``807`` token-expired /
-``808`` auth-failed / ``809`` invalid-token / ``810`` invalid-client-id). That is
-an SDK-tier scheme, kept SEPARATE from the DH-9xx REST codes (:data:`SDK_NUMERIC_\
-CODES`) and NOT conflated in classification — a REST body carrying an integer
-``807`` is not a DH-9xx code and falls through to HTTP-status classification.
+The Dhan Python SDK ALSO appears to use a separate NUMERIC scheme — **UNVERIFIED**
+(model-inferred codes + meanings, NOT in the verified fact canon): ``807``
+token-expired / ``808`` auth-failed / ``809`` invalid-token / ``810``
+invalid-client-id. Recorded in :data:`SDK_NUMERIC_CODES_UNVERIFIED` — kept
+SEPARATE from the DH-9xx REST codes and NOT conflated in classification — a REST
+body carrying an integer ``807`` is not a DH-9xx code and falls through to
+HTTP-status classification.
 
 This module is a **pure, I/O-free LEAF** (imports only :mod:`json` + the neutral
 :class:`~brutex.models.BruteXError`) so a future ``dhan_errors_rust.py`` facade
@@ -35,6 +37,7 @@ could wrap :func:`from_dhan_response` / :func:`from_transport_exception` 1:1
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 
 from brutex.models import BruteXError
@@ -131,9 +134,11 @@ DH_CODE_TO_ERROR: Mapping[str, type[DhanError]] = {
 #: test asserts they stay terminal until a live probe documents their real meaning.
 DH_CODE_UNVERIFIED: frozenset[str] = frozenset({"DH-902", "DH-903", "DH-904", "DH-907"})
 
-#: The Dhan SDK's SEPARATE numeric error scheme — kept DISTINCT from the DH-9xx REST
-#: codes and never conflated in classification. Documented for completeness only.
-SDK_NUMERIC_CODES: Mapping[int, str] = {
+#: The Dhan SDK's SEPARATE numeric error scheme — **UNVERIFIED** (model-inferred
+#: codes + meanings; the verified canon covers only the DH-9xx REST codes). Kept
+#: DISTINCT from the DH-9xx codes and never conflated in classification; recorded
+#: for completeness only, consumed by NOTHING (a live probe may confirm or delete).
+SDK_NUMERIC_CODES_UNVERIFIED: Mapping[int, str] = {
     807: "token-expired",
     808: "auth-failed",
     809: "invalid-token",
@@ -180,7 +185,11 @@ _TIMEOUT_ERROR_NAMES: frozenset[str] = frozenset(
         "ReadTimeout",
         "ConnectTimeout",
         "Timeout",
-        "timeout",
+        # The builtin: on Python 3.10+ ``socket.timeout is TimeoutError`` (its
+        # ``__name__`` is "TimeoutError"), so a raw socket timeout leaking past
+        # the requests wrappers must map RETRYABLE too. The pre-3.10 lowercase
+        # "timeout" name is dead on this 3.12-pinned repo and deliberately absent.
+        "TimeoutError",
     }
 )
 
@@ -201,6 +210,44 @@ def _extract_dh_code(body: Mapping[str, object]) -> str | None:
         if isinstance(nested, str) and nested.strip():
             return nested.strip().upper()
     return None
+
+
+#: The documented ``DH-<digits>`` application-error-code shape. Used by the 2xx
+#: body-failure gate — only a code matching the documented shape marks an HTTP-2xx
+#: body as a failure (an arbitrary ``errorCode`` string on a success payload must
+#: never flip it to an error).
+_DH_CODE_SHAPE = re.compile(r"DH-\d+\Z")
+
+
+def body_signals_failure(body: Mapping[str, object]) -> bool:
+    """True iff *body* carries a documented Dhan FAILURE marker (the 2xx-body gate).
+
+    Dhan can deliver an application failure ON an HTTP 200 — the module
+    docstring's SECOND failure mechanism (``DH-9xx`` in the body / the SDK
+    ``{status:"failure", remarks:{...}}`` envelope). The client consults this on
+    a 2xx status so such a response is classified through
+    :func:`from_dhan_response` instead of returned as success (where it would
+    die downstream as a misleading parse error, bypassing the reauth /
+    terminal-auth / rate-limit paths entirely).
+
+    The gate keys on POSITIVE marker presence ONLY — never on the absence of
+    success keys — so a clean candle / expiry / option-chain payload can never
+    be misclassified:
+
+    * a ``DH-<digits>``-shaped code from either documented error-body shape
+      (:func:`_extract_dh_code` — top-level ``errorCode`` or the SDK
+      ``remarks.error_code``), or
+    * a ``status`` field reading ``"failure"`` (case-insensitive — the SDK
+      failure envelope's status token; the expiry-list success envelope carries
+      ``status: "success"``, which never matches).
+
+    Pure + O(1); never raises.
+    """
+    code = _extract_dh_code(body)
+    if code is not None and _DH_CODE_SHAPE.fullmatch(code):
+        return True
+    status = body.get("status")
+    return isinstance(status, str) and status.strip().lower() == "failure"
 
 
 def _detail_from_body(body: Mapping[str, object]) -> str:
@@ -314,7 +361,7 @@ __all__ = [
     "DH_CODE_TO_ERROR",
     "DH_CODE_UNVERIFIED",
     "HTTP_STATUS_TO_ERROR",
-    "SDK_NUMERIC_CODES",
+    "SDK_NUMERIC_CODES_UNVERIFIED",
     "DhanAuthError",
     "DhanBadRequestError",
     "DhanEmptyResponseError",
@@ -326,6 +373,7 @@ __all__ = [
     "DhanServerError",
     "DhanTimeoutError",
     "DhanTokenStillStaleError",
+    "body_signals_failure",
     "from_dhan_response",
     "from_transport_exception",
     "is_auth_failure",

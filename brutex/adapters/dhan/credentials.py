@@ -19,7 +19,7 @@ AWS-hermeticity belt additionally blocks any live boto3 call from these tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -58,12 +58,15 @@ class DhanCredentials:
     ----------
     access_token
         The Dhan access-token JWT (SSM ``/tickvault/prod/dhan/access-token``).
+        A SECRET — excluded from ``repr`` so a logged/interpolated credentials
+        object never renders the token (round-1 security review).
     client_id
         The Dhan client id (SSM ``/tickvault/prod/dhan/client-id``) — sent as the
-        ``client-id`` header where an endpoint requires it.
+        ``client-id`` header where an endpoint requires it (not a secret; kept in
+        ``repr`` for diagnostics).
     """
 
-    access_token: str
+    access_token: str = field(repr=False)
     client_id: str
 
 

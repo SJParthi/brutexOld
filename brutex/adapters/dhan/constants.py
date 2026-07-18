@@ -41,8 +41,9 @@ DHAN_ENDPOINT_INTRADAY: Final[str] = "/v2/charts/intraday"
 #: Expiry}``; requires the ``client-id`` header. VERIFIED — DhanHQ v2 docs.
 DHAN_ENDPOINT_OPTION_CHAIN: Final[str] = "/v2/optionchain"
 
-#: Expiry-list endpoint (``POST``). Body ``{UnderlyingScrip, UnderlyingSeg}`` →
-#: ``{data:[...], status:"success"}``. VERIFIED — DhanHQ v2 docs.
+#: Expiry-list endpoint (``POST``). Body ``{UnderlyingScrip, UnderlyingSeg}``.
+#: VERIFIED — DhanHQ v2 docs (path + request body; the response ENVELOPE shape is
+#: ASSUMED — see :func:`brutex.adapters.dhan.parser.parse_expiry_list`).
 DHAN_ENDPOINT_EXPIRY_LIST: Final[str] = "/v2/optionchain/expirylist"
 
 #: Expired-options rolling/ATM-relative history endpoint (``POST``). VERIFIED —
@@ -69,7 +70,9 @@ DHAN_HEADER_ACCESS_TOKEN: Final[str] = "access-token"  # noqa: S105  # header na
 #: via ``dhanClientId``). VERIFIED — DhanHQ v2 docs.
 DHAN_HEADER_CLIENT_ID: Final[str] = "client-id"
 
-#: ``dhanClientId`` header name for ``RenewToken``. VERIFIED — DhanHQ v2 docs.
+#: ``dhanClientId`` header name for ``RenewToken`` — ASSUMED field name (the docs
+#: verify RenewToken itself + a generic client-id requirement on some endpoints;
+#: the exact ``dhanClientId`` spelling is model-inferred, probe-gated).
 DHAN_HEADER_DHAN_CLIENT_ID: Final[str] = "dhanClientId"
 
 #: Access-token JWT lifetime (hours). VERIFIED — DhanHQ v2 docs (24-hour token).
@@ -99,10 +102,12 @@ DHAN_QUOTE_RATE_LIMIT_RPS: Final[int] = 1
 #: ("Non-Trading 20/s").
 DHAN_NON_TRADING_RATE_LIMIT_RPS: Final[int] = 20
 
-#: Order/Trading rate-limit table (VERIFIED — DhanHQ v2 docs). Recorded for
-#: completeness; a data-only adapter never places orders. Keys are the documented
-#: window labels, values the limits.
-DHAN_ORDER_RATE_LIMITS: Final[Mapping[str, int]] = {
+#: Order/Trading rate-limit table — **UNVERIFIED** (model-inferred values; the
+#: verified rate-limit canon covers ONLY Data 5/s + 100k/day, option-chain 1/3s,
+#: Quote 1/s, Non-Trading 20/s — no order/trading tier). Recorded for structural
+#: completeness only; a data-only adapter never places orders, so NOTHING consumes
+#: these values. A live probe (or the official rate-limit table) closes the gap.
+DHAN_ORDER_RATE_LIMITS_UNVERIFIED: Final[Mapping[str, int]] = {
     "per_second": 10,
     "per_minute": 250,
     "per_hour": 1000,
@@ -250,11 +255,13 @@ DHAN_SCRIP_HEADERS_UNVERIFIED: Final[Mapping[str, str]] = {
 NATIVE_TIMEZONE: Final[str] = "Asia/Kolkata"
 
 #: Earliest history date used to clamp Phase-D requests. **UNVERIFIED** — daily is
-#: served "from inception" (exact earliest UNVERIFIED) and intraday is a ROLLING
-#: last-5-years window, so no single fixed earliest date exists in the docs. A
-#: conservative ``2020-01-01`` placeholder is used pending the live probe; the
-#: ``_UNVERIFIED`` suffix carries the honesty (a too-early clamp never fabricates
-#: data — the vendor simply returns nothing before its real floor).
+#: served "from inception" (exact earliest UNVERIFIED) and the INTRADAY history
+#: depth is UNDOCUMENTED (assumed a rolling ~5-year window, itself unverified —
+#: the docs pin a 5-year depth ONLY for the rolling-option endpoint), so no fixed
+#: earliest date exists in the docs. A conservative ``2020-01-01`` placeholder is
+#: used pending the live probe; the ``_UNVERIFIED`` suffix carries the honesty (a
+#: too-early clamp never fabricates data — the vendor simply returns nothing
+#: before its real floor).
 EARLIEST_HISTORY_UNVERIFIED: Final[date] = date(2020, 1, 1)
 
 #: Rolling-option (expired-options) coverage depth — last 5 years, minute-level, up
@@ -369,7 +376,7 @@ __all__ = [
     "DHAN_NON_TRADING_RATE_LIMIT_RPS",
     "DHAN_OPTION_CHAIN_MIN_INTERVAL_S",
     "DHAN_OPTION_COVERAGE_MARKET",
-    "DHAN_ORDER_RATE_LIMITS",
+    "DHAN_ORDER_RATE_LIMITS_UNVERIFIED",
     "DHAN_QUOTE_RATE_LIMIT_RPS",
     "DHAN_RATE_LIMIT_RPS_CEILING",
     "DHAN_ROLLING_OPTION_COVERAGE_YEARS",

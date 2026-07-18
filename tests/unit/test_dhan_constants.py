@@ -18,7 +18,19 @@ def test_verified_rate_limits() -> None:
     assert c.DHAN_QUOTE_RATE_LIMIT_RPS == 1
     assert c.DHAN_NON_TRADING_RATE_LIMIT_RPS == 20
     assert c.DHAN_RATE_LIMIT_RPS_CEILING == 5.0
-    assert c.DHAN_ORDER_RATE_LIMITS["per_day"] == 7000
+
+
+def test_order_rate_limits_stamped_unverified() -> None:
+    """The order/trading tier is OUT of the verified canon — ``_UNVERIFIED``-stamped.
+
+    Round-1 vendor-honesty finding: the verified rate-limit canon covers only
+    Data 5/s + 100k/day, option-chain 1/3s, Quote 1/s, Non-Trading 20/s. The
+    order tier is recorded for structural completeness only (unused by a
+    data-only adapter) and must carry the honesty suffix in its identifier.
+    """
+    assert c.DHAN_ORDER_RATE_LIMITS_UNVERIFIED["per_day"] == 7000
+    assert "DHAN_ORDER_RATE_LIMITS_UNVERIFIED" in c.__all__
+    assert not hasattr(c, "DHAN_ORDER_RATE_LIMITS")  # the un-suffixed name is GONE
 
 
 def test_endpoints_and_base_url() -> None:

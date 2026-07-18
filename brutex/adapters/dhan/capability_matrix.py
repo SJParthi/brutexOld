@@ -59,9 +59,12 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
         endpoint="/v2/charts/intraday",
         verb="POST",
         verified=True,
-        coverage="1/5/15/25/60-minute, last 5 years",
+        coverage="1/5/15/25/60-minute intraday candles (history DEPTH undocumented)",
         limits="Data 5/s + 100,000/day; 90 days per call",
-        unverified=("candle price unit (rupees-vs-paisa)",),
+        unverified=(
+            "candle price unit (rupees-vs-paisa)",
+            "intraday history depth (undocumented — the earliest-history probe gate)",
+        ),
     ),
     EndpointCapability(
         name="option_chain",
@@ -121,7 +124,9 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
 )
 
 #: The full ``_UNVERIFIED`` probe-gate register — every aspect a live credentialed
-#: probe must close (Golden Rule #1). Ordered, deduplicated, machine-enumerable.
+#: probe must close (Golden Rule #1). Ordered, deduplicated, machine-enumerable;
+#: mirrors ADR-0024 §4's EIGHT gates 1:1 (the round-1 review caught gate #8 —
+#: the earliest-history floor — missing from this register while the ADR named it).
 DHAN_UNVERIFIED_PROBE_GATES: tuple[str, ...] = (
     "candle price unit (rupees-vs-paisa)",
     "daily max-range-per-call (no documented cap)",
@@ -130,6 +135,8 @@ DHAN_UNVERIFIED_PROBE_GATES: tuple[str, ...] = (
     "DH-902 / DH-903 / DH-904 / DH-907 error-code meanings",
     "expired-futures history existence (undocumented)",
     "subscription + credential provisioning (₹499/mo Data-API add-on + SSM SecureStrings)",
+    "earliest-history floor (daily inception + intraday depth — "
+    "EARLIEST_HISTORY_UNVERIFIED placeholder)",
 )
 
 
