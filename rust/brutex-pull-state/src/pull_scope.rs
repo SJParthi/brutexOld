@@ -97,18 +97,6 @@ pub const MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE: &str = "resume once the protecti
 
 // ── the pure laws ────────────────────────────────────────────────────────────
 
-/// CPython `str.strip()` whitespace parity predicate.
-///
-/// Rust `char::is_whitespace` is the Unicode `White_Space` property;
-/// CPython `str.isspace()` ADDITIONALLY treats the bidirectional-class
-/// B/S separators U+001C..U+001F as whitespace (verified exhaustively over
-/// the full codepoint range, 2026-07-18: the delta is EXACTLY those four).
-/// The trim must match CPython or a `"\x1c"`-padded token would normalize
-/// differently across the FFI.
-fn is_cpython_strip_whitespace(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
-}
-
 /// The `normalize_pull_scope` VERDICT (Python pull_scope.py:98-112).
 ///
 /// `None` / blank / whitespace-only → [`SCOPE_CODE_FULL`] (the byte-identical
@@ -119,9 +107,13 @@ fn is_cpython_strip_whitespace(c: char) -> bool {
 /// deliberately never reproduced here).
 #[must_use]
 pub fn scope_token(token: Option<&str>) -> u8 {
+    // CPython `str.strip()` parity via the ONE shared predicate
+    // ([`crate::intent::is_python_space`], the frozen 29-codepoint `isspace`
+    // enumeration — a `"\x1c"`-padded token must normalize identically across
+    // the FFI; Golden Rule #11 COMMON, no second copy).
     let stripped = token
         .unwrap_or("")
-        .trim_matches(is_cpython_strip_whitespace);
+        .trim_matches(crate::intent::is_python_space);
     match stripped {
         "" => SCOPE_CODE_FULL,
         SCOPE_FULL => SCOPE_CODE_FULL,

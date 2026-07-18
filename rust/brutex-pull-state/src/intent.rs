@@ -228,6 +228,9 @@ pub fn refused_restore_decision(
 /// the pinned CPython 3.12 (`[c for c in range(0x110000) if chr(c).isspace()]`
 /// — 29 codepoints), drift-pinned by the golden env corpus + the seam's
 /// real-wheel hypothesis differential.
+///
+/// The ONE crate-shared CPython-strip predicate (Golden Rule #11 COMMON):
+/// [`crate::pull_scope::scope_token`] trims with it too.
 #[must_use]
 pub const fn is_python_space(c: char) -> bool {
     matches!(

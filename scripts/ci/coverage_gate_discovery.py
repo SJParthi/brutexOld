@@ -116,9 +116,9 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # the stem-matched test_pull_state_rust*.py pair alone measures ~62%
         # standalone, so the discovery gate's stem mapping is a structural
         # mismatch that would block every facade-touching PR. The dedicated
-        # STATIC per-module gate in ci.yml runs exactly the curated 4-file
-        # suite at --cov-fail-under=100 (+ the whole-package floor) — the
-        # pull_controller.py precedent.
+        # STATIC per-module gate in ci.yml runs exactly the curated static
+        # per-module suite enumerated there at --cov-fail-under=100 (+ the
+        # whole-package floor) — the pull_controller.py precedent.
         "brutex/pull_state_rust.py",
         # The ~1050-statement ``/db`` lake-viewer module. Its 100% line+branch is
         # reached by the WHOLE db_view test FAMILY collectively — SEVENTEEN files

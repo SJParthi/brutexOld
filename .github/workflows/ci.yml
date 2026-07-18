@@ -216,32 +216,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -256,7 +235,7 @@ jobs:
   # BUILD WHEELS — the ONE maturin wheel build for the whole run
   # (DEC-SWEEP-COVERAGE-SHARD-001). Previously ~10 jobs each rebuilt the
   # same 2-4 crates from source per run (minutes each, crates.io-flake
-  # exposed); now this job builds all four ONCE — behind an actions/cache
+  # exposed); now this job builds all five ONCE — behind an actions/cache
   # keyed on the crate sources, so an unchanged-Rust push restores the
   # wheels in seconds — and every consumer job downloads + pip-installs
   # them. run-smoke deliberately KEEPS its own from-source build: it
@@ -279,13 +258,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: wheelhouse
-          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**') }}
+          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-pull-state/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-      - name: Build the four maturin wheels (cache miss only)
+      - name: Build the five maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -310,14 +289,15 @@ jobs:
           build_with_retry ./rust/trading-core
           build_with_retry ./rust/brutex-feed
           build_with_retry ./rust/brutex-strategies
+          build_with_retry ./rust/brutex-pull-state
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 4
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies; print('all four kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 5
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_pull_state; print('all five kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -393,32 +373,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -525,32 +484,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -2850,32 +2788,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3006,32 +2923,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3155,32 +3051,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3249,11 +3124,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3261,27 +3136,6 @@ jobs:
       # dual-arm parity gate's execution home is the `test:` job
       # ([dev,data,ui] + the wheel), which runs tests/property in its
       # coverage pass.
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -3380,32 +3234,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3466,32 +3299,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3966,32 +3778,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -4064,32 +3855,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4552,32 +4322,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -4980,32 +4729,11 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_pull_state)
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
-      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
-        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
-        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
-        # flip phase DELETED the Python oracles, and the facade
-        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
-        # raises PullStateKernelError (never a silent fallback), so EVERY
-        # job that imports brutex and can touch a pull-state path installs
-        # the wheel. Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-pull-state; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
