@@ -129,7 +129,10 @@ __all__ = [
     "TOP100_SCHEMA_VERSION",
     "TOP100_STAGE",
     "TOP100_STAMP_FILENAME",
+    "FillSensitivityProvider",
+    "FuturesExecProvider",
     "MarginRoiProvider",
+    "OptionsExecProvider",
     "PoolCounts",
     "ReasonProvider",
     "Top100Artifact",
@@ -271,6 +274,36 @@ ReasonProvider: TypeAlias = Callable[[int], Mapping[str, str] | None]  # noqa: U
 #: ``None``. WP3's ``brutex.engine.margin_history`` plugs in here.
 MarginRoiProvider: TypeAlias = Callable[  # noqa: UP040
     ["Top100Candidate"], Mapping[str, object] | None
+]
+
+#: `DEC-OPTIONS-EXEC-FEEDBACK-001` — the post-sweep options-sim verdict
+#: provider: candidate → the per-entry ``options_exec`` object (priced or the
+#: NAMED ``not_priced`` — TOTAL when wired, never ``None`` per entry). The
+#: whole provider being ``None`` (``--no-options-sim`` / no option lake) means
+#: the key is ABSENT from every entry — pre-change artifacts + the fixture
+#: corpus stay BYTE-IDENTICAL (unlike the cascade's always-emit: a sim that
+#: never ran has nothing to say per entry, and emitting a key would force the
+#: frozen byte golden to regenerate for zero information).
+OptionsExecProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
+]
+
+#: The futures-executor verdict provider — the ``options_exec`` law's futures
+#: twin (`DEC-OPTIONS-EXEC-FEEDBACK-001`; the object REUSES the shipped
+#: ``futures/leaderboard.py`` annotation shape under the reserved
+#: ``futures_exec`` key).
+FuturesExecProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
+]
+
+#: The fill-sensitivity annotation provider (DEC-FILL-EXEC-GRID-1M-001, R13 —
+#: annotation NEVER re-ranks or hides): candidate → the per-entry
+#: ``fill_sensitivity`` object (:mod:`brutex.engine.fill_sensitivity` — priced
+#: or the NAMED ``not_priced``; TOTAL when wired). Resolved ONLY for the
+#: RANKED entries (each call is one O(bars) reference re-sim — the disclosed
+#: O(|top100|·bars) run-end envelope), never for the whole pool.
+FillSensitivityProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object]
 ]
 
 
@@ -417,8 +450,18 @@ def resolve_preset(name: str) -> str:
     return DEFAULT_TOP100_PRESET
 
 
-def _rank_record(candidate: Top100Candidate) -> RankRecord:
-    """Project one pooled candidate onto the COMMON flat rank-record shape."""
+def _rank_record(
+    candidate: Top100Candidate, *, net_after_cost_of: Mapping[str, int] | None = None
+) -> RankRecord:
+    """Project one pooled candidate onto the COMMON flat rank-record shape.
+
+    ``net_after_cost_of`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) maps ``run_id`` →
+    the PRICED options-exec headline net (int paisa); an unmapped candidate —
+    or ``None``, every pre-change caller — keeps the honest ``None``
+    "unpriced" state (ranks last under the ``net_after_cost`` preset, inert
+    under every other; never a fabricated 0).
+    """
+    mapped = None if net_after_cost_of is None else net_after_cost_of.get(candidate.row.run_id)
     return RankRecord(
         run_id=candidate.row.run_id,
         max_drawdown_pct=candidate.row.max_drawdown_pct,
@@ -427,11 +470,15 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         profit_factor=candidate.row.profit_factor,
         win_rate=candidate.row.win_rate,
         calmar_ratio=candidate.row.calmar_ratio,
+        net_after_cost_paisa=mapped,
     )
 
 
 def rank_candidates(
-    candidates: Sequence[Top100Candidate], *, preset: str
+    candidates: Sequence[Top100Candidate],
+    *,
+    preset: str,
+    net_after_cost_of: Mapping[str, int] | None = None,
 ) -> tuple[Top100Candidate, ...]:
     """Order *candidates* under *preset* — a strict, discovery-order-free total order.
 
@@ -439,9 +486,15 @@ def rank_candidates(
     (:func:`brutex.ranking.presets.sort_by_preset` — the ``ResultsStore.top_k``
     law: stable ``run_id``-ASC pre-sort, then ONE stable sort on the preset
     key) — identical output for any input permutation (property-pinned).
+    ``net_after_cost_of`` threads the joined options-exec nets into the rank
+    record (see :func:`_rank_record`; ``None`` is byte-identical pre-change).
     """
     resolved = resolve_preset(preset)
-    return sort_by_preset(candidates, preset=PRESETS[resolved], record_of=_rank_record)
+    return sort_by_preset(
+        candidates,
+        preset=PRESETS[resolved],
+        record_of=lambda candidate: _rank_record(candidate, net_after_cost_of=net_after_cost_of),
+    )
 
 
 # ── Entry payload projection ─────────────────────────────────────────────────
@@ -612,11 +665,22 @@ def _entry_payload(
     margin_roi: Mapping[str, object] | None,
     join: CascadeJoin | None = None,
     join_state: str = CASCADE_STATE_NO_REPORT,
+    options_exec: Mapping[str, object] | None = None,
+    futures_exec: Mapping[str, object] | None = None,
+    fill_sensitivity: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Project one ranked candidate onto the binding entry shape (B5)."""
+    """Project one ranked candidate onto the binding entry shape (B5).
+
+    ``options_exec`` / ``futures_exec`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) and
+    ``fill_sensitivity`` (DEC-FILL-EXEC-GRID-1M-001) are ADDITIVE
+    emit-on-wired keys: ``None`` (an unwired provider) leaves the key ABSENT —
+    pre-change artifact bytes are IDENTICAL (:data:`ENTRY_REQUIRED_KEYS`
+    deliberately untouched, the cascade-comment law); a wired provider keys
+    EVERY entry (priced or the named ``not_priced``).
+    """
     row = candidate.row
     cascade, cpcv_rate = _cascade_payload(row.run_id, join=join, state=join_state)
-    return {
+    entry: dict[str, object] = {
         "rank": rank,
         "run_id": row.run_id,
         "mask_hex": f"{row.mask_bits:0{_MASK_HEX_WIDTH}x}",
@@ -635,6 +699,13 @@ def _entry_payload(
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
         "cascade": cascade,
     }
+    if options_exec is not None:
+        entry["options_exec"] = dict(options_exec)
+    if futures_exec is not None:
+        entry["futures_exec"] = dict(futures_exec)
+    if fill_sensitivity is not None:
+        entry["fill_sensitivity"] = dict(fill_sensitivity)
+    return entry
 
 
 # ── Builder ──────────────────────────────────────────────────────────────────
@@ -652,6 +723,9 @@ def build_top100(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    options_exec_provider: OptionsExecProvider | None = None,
+    futures_exec_provider: FuturesExecProvider | None = None,
+    fill_sensitivity_provider: FillSensitivityProvider | None = None,
 ) -> Top100Artifact:
     """Build the global artifact from the pooled winners — one O(pool) pass.
 
@@ -693,6 +767,20 @@ def build_top100(
         stay ``not_validated``. The join is ANNOTATION-ONLY: ranking /
         preset order / family collapse are byte-untouched (R13 — a
         cascade-FAILED rank-1 stays rank-1, flagged never hidden).
+    options_exec_provider, futures_exec_provider
+        The `DEC-OPTIONS-EXEC-FEEDBACK-001` post-sweep exec-sim verdict seams
+        (TOTAL providers — see the aliases). ``None`` leaves the key ABSENT
+        from every entry AND the ``*_wired`` source flag UNEMITTED —
+        pre-change artifact bytes IDENTICAL (the emit-on-wired law); wired,
+        each is resolved ONCE per gate-passing representative BEFORE ranking
+        and the PRICED options nets feed the ``net_after_cost`` preset's rank
+        record (``net_after_cost_of``) — the SAME resolved verdicts land on
+        the entries (never a double resolve).
+    fill_sensitivity_provider
+        The DEC-FILL-EXEC-GRID-1M-001 annotation seam — resolved ONLY for the
+        RANKED entries (each call is one O(bars) reference re-sim; the
+        disclosed O(|top100|·bars) run-end envelope). It never feeds ranking
+        (R13 — annotation only).
 
     Raises
     ------
@@ -755,7 +843,29 @@ def build_top100(
         members_of[chosen.row.run_id] = listed
     families_collapsed = len(passers) - len(representatives)
 
-    ranked = rank_candidates(representatives, preset=resolved)[:TOP100_LIMIT]
+    # ── Exec-sim verdict resolution (`DEC-OPTIONS-EXEC-FEEDBACK-001`) ──
+    # Resolve each wired provider ONCE per gate-passing representative BEFORE
+    # ranking (the providers are O(1) map lookups over the hook's in-memory
+    # verdict maps): the PRICED options nets feed the ``net_after_cost``
+    # preset's rank record, and the SAME resolved verdicts land on the ranked
+    # entries below — provider consulted exactly once per entry.
+    options_exec_by_id: dict[str, Mapping[str, object]] | None = None
+    if options_exec_provider is not None:
+        options_exec_by_id = {c.row.run_id: options_exec_provider(c) for c in representatives}
+    futures_exec_by_id: dict[str, Mapping[str, object]] | None = None
+    if futures_exec_provider is not None:
+        futures_exec_by_id = {c.row.run_id: futures_exec_provider(c) for c in representatives}
+    net_after_cost_of: dict[str, int] | None = None
+    if options_exec_by_id is not None:
+        net_after_cost_of = {}
+        for rid, verdict in options_exec_by_id.items():
+            net = verdict.get("net_after_cost_paisa")
+            if verdict.get("status") == "priced" and isinstance(net, int):
+                net_after_cost_of[rid] = net
+
+    ranked = rank_candidates(representatives, preset=resolved, net_after_cost_of=net_after_cost_of)[
+        :TOP100_LIMIT
+    ]
     entries: list[Mapping[str, object]] = []
     for position, candidate in enumerate(ranked, start=1):
         run = candidate.row.run_id
@@ -773,6 +883,16 @@ def build_top100(
                 ),
                 join=join_for_entries,
                 join_state=join_state,
+                options_exec=(None if options_exec_by_id is None else options_exec_by_id[run]),
+                futures_exec=(None if futures_exec_by_id is None else futures_exec_by_id[run]),
+                # Resolved ONLY for the ranked entries — one O(bars)
+                # reference re-sim per call (DEC-FILL-EXEC-GRID-1M-001; the
+                # disclosed O(|top100|·bars) run-end envelope).
+                fill_sensitivity=(
+                    None
+                    if fill_sensitivity_provider is None
+                    else fill_sensitivity_provider(candidate)
+                ),
             )
         )
 
@@ -788,6 +908,18 @@ def build_top100(
         "reasons_wired": reason_provider is not None,
         "margin_roi_wired": margin_roi_provider is not None,
     }
+    # EMIT-ON-WIRED `*_wired` flags (`DEC-OPTIONS-EXEC-FEEDBACK-001` /
+    # DEC-FILL-EXEC-GRID-1M-001): deliberately NOT unconditional like
+    # `reasons_wired` — an always-emitted False would change every
+    # provider-None artifact's bytes and force the frozen byte golden + the
+    # whole fixture corpus to regenerate for zero information (the
+    # emit-on-present idiom). Absence == not wired, disclosed here.
+    if options_exec_provider is not None:
+        source["options_exec_wired"] = True
+    if futures_exec_provider is not None:
+        source["futures_exec_wired"] = True
+    if fill_sensitivity_provider is not None:
+        source["fill_sensitivity_wired"] = True
     # Root cascade-join meta — writer-ALWAYS-emitted, reader-OPTIONAL. Under
     # a mismatch the report's sweep_id is NAMED (the diagnosable half) while
     # the counts stay honest null (a stale report's totals must never read
