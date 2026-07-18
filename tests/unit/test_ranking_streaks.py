@@ -8,7 +8,8 @@ DEC-METRICS-KELLY-GROWTH-001 (the Door-5 re-derivation core). Three layers:
    independent dynamic program over trailing-run states (the design pack's
    ruling: the closed form is PRODUCTION, the DP is TEST-ONLY). Measured
    quality (2026-07-18, the grid ``n ∈ {5..50 step 5} × q ∈ {0.05..0.95
-   step 0.05}``): the approximation's quantile is NEVER tighter than the
+   step 0.05}`` plus the large-``n`` spot row ``(n=400, q=0.5)``): the
+   approximation's quantile is NEVER tighter than the
    exact quantile (the SAFE, loosening-only error direction — the door's
    ``max(10, k99)`` floor plus this direction mean the derived door can only
    ever widen pools, which the Stage-4 DSR deflation auto-tightens), and for
@@ -159,6 +160,16 @@ class TestApproximationVsExactDP:
         for n in self._GRID_N:
             for q in self._GRID_Q:
                 assert max_loss_streak_quantile(n, q) >= exact_quantile(n, q), (n, q)
+
+    def test_never_tighter_large_n_spot(self) -> None:
+        """Large-``n`` spot row (n=400, q=0.5) — the DP is O(n·k), fine.
+
+        The grid above tops out at n=50; the derived door's whole point is
+        the big loss-heavy pool (the #1975 sanctioned-loosening example is
+        exactly 400 trades at loss rate 0.5), so the SAFE direction gets one
+        measured row there too.
+        """
+        assert max_loss_streak_quantile(400, 0.5) >= exact_quantile(400, 0.5)
 
     def test_within_two_of_exact_for_moderate_loss_rates(self) -> None:
         """Measured band (2026-07-18): |approx − exact| <= 2 for q <= 0.5.

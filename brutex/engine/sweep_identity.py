@@ -54,10 +54,12 @@ class _GateConfigInput(Protocol):
     def max_sl_hit_rate(self) -> float | None:
         """The opt-in SL-hit-rate gate ceiling, or ``None`` when the gate is off.
 
-        DEC-METRICS-KELLY-GROWTH-001 (Stage A): the knob exists + folds into
-        the identity fragment, but ``SweepGridConfig`` REFUSES a set value
-        until the gate's enforcement lands (Stage B) — a store address must
-        never claim an sl-hit-rate gate that never ran.
+        DEC-METRICS-KELLY-GROWTH-001: an ACTIVE (set) knob re-keys the
+        per-tuple store address via the identity fragment; enforcement is
+        ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B —
+        :func:`brutex.ranking.passes_gates` / :func:`brutex.ranking.gate_reasons`).
+        The default ``None`` contributes nothing, so ungated digests are
+        byte-identical.
         """
         raise NotImplementedError
 
@@ -116,9 +118,9 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
         # active-gate axis exactly like overfit: a SET ceiling changes what a
         # tuple's persisted rows MEAN, so it re-keys; the default None
         # contributes NOTHING and every existing digest is byte-identical
-        # (the frozen 5b020e892247deac default-digest pin). Stage A:
-        # production-unreachable — SweepGridConfig refuses a set value until
-        # Stage B wires the enforcement (covered via a Protocol fake).
+        # (the frozen 5b020e892247deac default-digest pin). Enforcement is
+        # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B); the
+        # fragment arm itself stays covered via a Protocol fake.
         fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a

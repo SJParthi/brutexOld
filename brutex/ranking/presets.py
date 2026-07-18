@@ -286,7 +286,7 @@ def sort_by_preset[T](
     return tuple(item for _record, item in keyed)
 
 
-#: The named preset table (R30): the default + the four one-click alternates,
+#: The named preset table (R30): the default + the one-click alternates,
 #: in display order. Keys are the wire tokens the CLI/dashboard pass around.
 PRESETS: Final[Mapping[str, RankingPreset]] = {
     PRESET_MIN_DD_FIRST: RankingPreset(

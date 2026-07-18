@@ -1355,7 +1355,11 @@ def fold_recency(
 
     Callers guarantee ``trades`` is non-empty and ``start_equity_paisa > 0``
     (the zero-trade row is :func:`_empty_metrics`, the caller's arm —
-    mirroring :func:`_fold_trades`' contract).
+    mirroring :func:`_fold_trades`' contract), with ONE sanctioned
+    exception: :func:`_compute_metrics_impl`'s zero-trade arm invokes this
+    fold VALIDATION-ONLY over the empty series (the empty fold is
+    well-defined — ``trailing=None``, no buckets — and the result is
+    discarded) so the tz-aware anchor law fires on both arms.
 
     Raises
     ------
@@ -1568,6 +1572,17 @@ def _compute_metrics_impl(
                 f"sl_exit_count={sl_exit_count} supplied for a zero-trade result — "
                 f"the exit-reason counters sum to the trade count, so this is a "
                 f"threading bug"
+            )
+        if trailing_anchor is not None:
+            # The recency validators run on the zero-trade arm too (a naive
+            # anchor / non-positive half-life must fail loudly on BOTH arms,
+            # never masked by the empty return): the REAL owners are invoked
+            # over the empty series (well-defined — ``trailing=None``, no
+            # buckets; O(1), result discarded) so the boundary laws + their
+            # messages keep exactly ONE home each.
+            combine_recency_from_folds(
+                fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
+                decay_half_life_months=decay_half_life_months,
             )
         return _empty_metrics(drawdown)
     base = combine_metrics_from_folds(

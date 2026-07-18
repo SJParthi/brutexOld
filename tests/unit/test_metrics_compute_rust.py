@@ -229,6 +229,29 @@ class TestResolveKernel:
         assert len(warns) == 1
         assert warns[0]["reason"] == "wheel_stale"
 
+    def test_wheel_stale_on_both_faces_names_each_symbol_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dedupe keys per (reason, symbol) — review-round fix.
+
+        Pre-fix the memo keyed on the reason alone, so a wheel stale on
+        BOTH kernel faces logged ``wheel_stale`` once and MUTED the second
+        symbol; each missing face now warns exactly once, repeats stay
+        silent.
+        """
+        monkeypatch.setitem(sys.modules, "fno_math", types.SimpleNamespace())
+        with capture_logs() as logs:
+            assert compute_rust._resolve_kernel("metrics_fold_trades") is None
+            assert compute_rust._resolve_kernel("metrics_fold_recency") is None
+            # Repeats on either face stay deduped.
+            assert compute_rust._resolve_kernel("metrics_fold_trades") is None
+            assert compute_rust._resolve_kernel("metrics_fold_recency") is None
+        warns = _events(logs, "metrics_rust_fold.fallback")
+        assert [(w["reason"], w["symbol"]) for w in warns] == [
+            ("wheel_stale", "metrics_fold_trades"),
+            ("wheel_stale", "metrics_fold_recency"),
+        ]
+
 
 class TestFoldViaKernelDegrades:
     """Every kernel-call fault serves the row from the Python oracle.

@@ -124,6 +124,21 @@ class TestAnchorArms:
                 trailing_anchor=datetime(2026, 1, 1),
             )
 
+    def test_zero_trades_naive_anchor_still_refused(self) -> None:
+        """The zero-trade arm validates the anchor too (review-round fix).
+
+        Pre-fix, ``_compute_metrics_impl`` returned ``_empty_metrics``
+        BEFORE the recency validators ran, so a naive anchor passed
+        silently with zero trades — asymmetric with the non-empty arm.
+        """
+        with pytest.raises(ValueError, match="tz-aware"):
+            _metrics([], trailing_anchor=datetime(2026, 1, 1))
+
+    def test_zero_trades_junk_half_life_still_refused(self) -> None:
+        """The zero-trade arm validates the half-life too (review-round fix)."""
+        with pytest.raises(ValueError, match="decay_half_life_months"):
+            _metrics([], trailing_anchor=_ANCHOR, decay_half_life_months=0.0)
+
     def test_curve_entry_threads_the_anchor_identically(self) -> None:
         trades = [_trade(_ANCHOR - timedelta(days=d), p) for d, p in ((5, 200), (800, -70))]
         equity = EquityCurve(

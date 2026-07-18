@@ -59,10 +59,16 @@ def max_loss_streak_quantile(n: int, loss_prob: float, *, alpha: float = STREAK_
     The answer is CAPPED at ``n + 1``: a run cannot exceed the sequence
     length, so the TRUE tail is identically zero for every ``k > n`` — the
     closed form does not know that and can otherwise wander far past ``n``
-    for high ``q``. The cap keeps the approximation's measured
-    NEVER-TIGHTER-than-exact direction (the exact quantile is itself always
-    ``<= n + 1``), while the raw formula's answer below the cap is returned
-    untouched.
+    for high ``q``. The cap keeps the approximation's NEVER-TIGHTER-than-exact
+    direction as MEASURED on the test-oracle grid (``n ∈ {5..50 step 5}``
+    plus a large-``n`` spot at 400, ``q ∈ {0.05..0.95 step 0.05}`` — see
+    ``tests/unit/test_ranking_streaks.py``; the exact quantile is itself
+    always ``<= n + 1``), while the raw formula's answer below the cap is
+    returned untouched. The claim is NOT extended past that grid: as
+    ``q → 1`` the closed form's ``(1−q)`` factor degenerates the tail toward
+    0 (a TOO-TIGHT direction) — in the door composition that tail is guarded
+    by the ``max(10, …)`` floor plus the caller's ``loss_prob >= 1.0``
+    refusal below, so no production consumer reads the degenerate region.
 
     Degenerate arms (the DOOR owns the ``q >= 1`` all-loss case — see
     ``brutex.ranking``):

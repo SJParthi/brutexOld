@@ -247,14 +247,20 @@ def metrics_rust_fold_enabled() -> bool:
 def warn_fallback_once(reason: str, **context: object) -> None:
     """Log ``metrics_rust_fold.fallback`` ONCE per process per *reason*.
 
-    The seam runs once per metric row (potentially millions per sweep), so
-    a sticky fallback reason would flood the logs; the first occurrence is
-    loud (WARNING), repeats fall back silently. The fallback itself is
-    bit-exact regardless (the Python oracle serves the row).
+    A SYMBOL-carrying reason dedupes per ``(reason, symbol)`` — a wheel
+    stale on BOTH kernel faces (``metrics_fold_trades`` +
+    ``metrics_fold_recency``) names EACH missing face once instead of
+    muting the second behind the first (review-round fix); the logged
+    ``reason`` token itself is unchanged. The seam runs once per metric
+    row (potentially millions per sweep), so a sticky fallback reason
+    would flood the logs; the first occurrence is loud (WARNING), repeats
+    fall back silently. The fallback itself is bit-exact regardless (the
+    Python oracle serves the row).
     """
-    if reason in _OBSERVABILITY_MEMO:
+    key = f"{reason}:{context['symbol']}" if "symbol" in context else reason
+    if key in _OBSERVABILITY_MEMO:
         return
-    _OBSERVABILITY_MEMO.add(reason)
+    _OBSERVABILITY_MEMO.add(key)
     _LOG.warning("metrics_rust_fold.fallback", reason=reason, **context)
 
 
