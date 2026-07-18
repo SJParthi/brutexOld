@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -165,3 +166,22 @@ class TestFit:
 
         monkeypatch.setattr(np.linalg, "solve", _nan_step)
         assert fit_logistic(x, y) is None
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The detectors_rust twin (#1797 pattern): the module:suite pair sits in
+    the workflow's per-module ``mutmut`` loop with the EMPTY third
+    (timeout) field — this deterministic pin fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only; the weekly run executes on
+    its own schedule.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/meta/logistic.py:tests/unit/test_meta_logistic.py:"' in text, (
+            "logistic.py is not wired into mutation.yml's per-module mutmut loop"
+        )

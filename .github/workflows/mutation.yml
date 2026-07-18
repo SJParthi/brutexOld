@@ -520,6 +520,10 @@ jobs:
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
+            "brutex/meta/abstain.py:tests/unit/test_meta_abstain.py:" \
+            "brutex/meta/features.py:tests/unit/test_meta_features.py:" \
+            "brutex/meta/logistic.py:tests/unit/test_meta_logistic.py:" \
+            "brutex/meta/threshold.py:tests/unit/test_meta_threshold.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \

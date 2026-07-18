@@ -7,6 +7,8 @@ monotone-shrink invariant.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from brutex.meta.threshold import N_THRESHOLDS_SWEPT, TAU_GRID, tau_curve
 
@@ -73,3 +75,22 @@ class TestCurve:
         points = tau_curve(p_win, wins)
         kept = [p.n_kept for p in points]
         assert kept == sorted(kept, reverse=True)
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The detectors_rust twin (#1797 pattern): the module:suite pair sits in
+    the workflow's per-module ``mutmut`` loop with the EMPTY third
+    (timeout) field — this deterministic pin fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only; the weekly run executes on
+    its own schedule.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/meta/threshold.py:tests/unit/test_meta_threshold.py:"' in text, (
+            "threshold.py is not wired into mutation.yml's per-module mutmut loop"
+        )

@@ -8,6 +8,7 @@ malformed-row matrix (every junk shape reads ``None``, never a raise).
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 from brutex.engine.session_lens import SessionLens, TrendRegime
@@ -212,4 +213,23 @@ class TestTotalityMatrix:
         assert (
             trade_features_from_wire(wire_row(entry_ts=2**62, exit_ts=2**62 + 1), lens=EMPTY_LENS)
             is None
+        )
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The detectors_rust twin (#1797 pattern): the module:suite pair sits in
+    the workflow's per-module ``mutmut`` loop with the EMPTY third
+    (timeout) field — this deterministic pin fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only; the weekly run executes on
+    its own schedule.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/meta/features.py:tests/unit/test_meta_features.py:"' in text, (
+            "features.py is not wired into mutation.yml's per-module mutmut loop"
         )

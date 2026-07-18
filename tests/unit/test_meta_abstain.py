@@ -10,6 +10,7 @@ tuple function, and the dormant in-sim knob's fail-loud refusal (the
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 from brutex.meta.abstain import (
@@ -384,3 +385,22 @@ class TestInSimRefusal:
 
     def test_error_is_a_runtime_error(self) -> None:
         assert issubclass(AbstainGateInSimRefusedError, RuntimeError)
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The detectors_rust twin (#1797 pattern): the module:suite pair sits in
+    the workflow's per-module ``mutmut`` loop with the EMPTY third
+    (timeout) field — this deterministic pin fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only; the weekly run executes on
+    its own schedule.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/meta/abstain.py:tests/unit/test_meta_abstain.py:"' in text, (
+            "abstain.py is not wired into mutation.yml's per-module mutmut loop"
+        )
