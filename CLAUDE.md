@@ -18,7 +18,26 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
+_Last updated: 2026-07-18 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 +
+DEC-METRICS-KELLY-GROWTH-001 + DEC-METRICS-TRAILING-WINDOW-001,
+MIGRATION.md #1974–#1976 — the W2 metrics-depth lane on
+`claude/metrics-loss-growth-recency` (STACKED on PR #1605's #1902 branch):
+`loss_rate` first-class + the per-mask exit-reason counters (u64 AND u128
+kernels) feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair +
+the binomial-null Door-5 re-derivation (`max(10, k99)` — the fixed 10
+becomes the FLOOR; alpha 0.01 [NEEDS OPERATOR RULING]) + the opt-in
+`max_sl_hit_rate` ranking Door 6 (ACTIVE-only in the tuple-digest
+identity); the 24-month trailing recency pass + the exponential-decay
+composite behind the GLOBAL `bars[-1].timestamp` anchor, with the
+`RecencyFolds` Rust fold twin under the default-OFF
+`BRUTEX_METRICS_RUST_FOLD` shared-latch burn-in seam; EIGHT nullable
+appended-last ResultRow columns + FOUR new ranking presets. ENGINE
+results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; run identity
+untouched (`_GOLDEN_RUN_ID` byte-stable); the ONE sanctioned
+ranking-gate delta is Door 5's derived threshold, LOOSENING-only. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1974–#1976.)
+Earlier: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
 (a coordinator-granted released S1 spare, verified free on live main) — the Rust mirror of compute.py's
 Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
 `brutex/metrics/compute_rust.py`) behind the NEW default-OFF
@@ -2998,7 +3017,79 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+- **Active branch:** `claude/metrics-loss-growth-recency`
+  (**DEC-METRICS-LOSSRATE-FIRSTCLASS-001 + DEC-METRICS-KELLY-GROWTH-001 +
+  DEC-METRICS-TRAILING-WINDOW-001, MIGRATION.md #1974–#1976 — the lane's
+  coordinator-assigned band; gaps are legal per DEC-LEDGER-RENUMBER-001** —
+  build lane W2, the metrics-depth pack (operator-approved P0 items 4/8/13),
+  STACKED on PR #1605's `claude/rust-metrics-compute-fold-r2` head (#1902) —
+  the PR opens after #1605 lands. WHAT SHIPPED, per entry: **(#1974)**
+  `loss_rate` FIRST-CLASS on `ResultMetrics` (`losers/n` — scratch trades in
+  the denominator only, so `loss_rate ≠ 1 − win_rate`, property-pinned) +
+  the per-mask EXIT-REASON COUNTERS on the trade-sim wire
+  (`simulate_masks_with_exit_counts` on BOTH the u64 AND u128 kernel
+  pyclasses + the Python walker oracle twin; the `TradeRecord` 6-tuple FFI
+  trade wire BYTE-UNTOUCHED) feeding `sl_hit_rate` at COMBINE (the
+  "SL exit = losing trade" claim property-pinned AT_LEVEL-only — the
+  documented honesty limit). **(#1975)** the Kelly pair
+  (`kelly_fraction` / `log_growth_at_half_kelly` — COMBINE-side libm,
+  Python by the #1902 split law; honest `None` on the degenerate arms,
+  never a fabricated 0) + the BINOMIAL-NULL Door-5 re-derivation (NEW leaf
+  `brutex/ranking/streaks.py`: threshold `max(10, k99)` — the historical
+  fixed 10 becomes the FLOOR — UNION the WLR ≥ 3.0 exemption; `alpha =
+  0.01` is [NEEDS OPERATOR RULING]; the exact O(n·k) DP is the TEST-ONLY
+  oracle, the closed form measured NEVER-tighter-than-exact on the oracle
+  grid) + the `max_sl_hit_rate` knob ENFORCED as the opt-in ranking
+  **Door 6** (ONE shared verdict body under `passes_gates` +
+  `gate_reasons`; FAIL-CLOSED on a None rate under an active knob; folds
+  ACTIVE-ONLY into the tuple-digest identity fragment — the frozen default
+  digest `5b020e892247deac` byte-stable, an active knob re-keys the store
+  address). **(#1976)** the 24-month TRAILING recency metrics (`trailing_
+  sharpe_ratio` / `trailing_profit_factor` / `trailing_net_pnl_paisa`) +
+  the whole-history exponential-DECAY composite (`decay_weighted_net_
+  paisa`; `DECAY_HALF_LIFE_MONTHS = 12.0`, kw-only configurable) as a
+  SECOND fold/combine pass behind the GLOBAL `trailing_anchor` law —
+  `bars[-1].timestamp`, the loaded bar-range end (snapshot-determined,
+  never a per-combo max; a naive anchor refuses loudly on BOTH arms) —
+  with the `RecencyFolds` Rust fold twin (`fno_math.metrics_fold_recency`)
+  behind the SAME default-OFF `BRUTEX_METRICS_RUST_FOLD` seam (per-face
+  16-call burn-in budgets over the SHARED autorevert latch; refuse-poison
+  wire gate — the conservation check pins the bucket TOTAL, per-bucket
+  correctness rides the burn-in bit-compare, the documented envelope).
+  PERSISTENCE + RANKING: EIGHT nullable appended-LAST `ResultRow` columns
+  under the Ruling-5 optional-column law (`loss_rate` · `kelly_fraction` ·
+  `log_growth_at_half_kelly` · `sl_hit_rate` · the recency four —
+  pre-extension stores load None; None→value backfill; value-vs-value
+  clash = a typed conflict; nulls-last top_k both directions) + FOUR new
+  presets at the ONE preset home (`growth` · `win_rate_safe` · `recent` ·
+  `recent_decay`, appended-last so `TOP100_PRESETS` inherits verbatim;
+  `RankRecord` threaded at BOTH consumers). HONEST LIMITS (named): the
+  display surfaces (/results · /screener · the top100 metrics dict) do
+  NOT yet render the new columns — Stage-D lane work; the map's optional
+  WFO-window exemption flag stays EXCLUDED (a cascade-gate alteration
+  needing its own ruling); the flag-flip parity residual is NAMED in
+  #1976 (the growth/recency columns sit INSIDE the run-identity envelope —
+  a hypothetical Rust/Python recency-fold divergence across a flag flip
+  surfaces as a same-run_id append conflict, the plain `ResultsStoreError`
+  HARD ABORT; mitigants: default-OFF + the burn-in bit-compare +
+  autorevert + the goldens green flag-ON); the log-growth model folds
+  scratch trades into the loss arm `q = 1 − p` (mildly pessimistic when
+  scratches exist — a monotone ranking key, never reported P&L). GATES
+  (executed): coverage 100.00% line+branch on all 13 discovered touched
+  modules (the ci discovery method); cargo fmt/clippy `-D warnings`/test
+  --release --locked 601 passed (wheel rebuilt); goldens 540 passed
+  flag-OFF AND flag-ON with fixtures byte-untouched — `_GOLDEN_RUN_ID`
+  f588194f…d5921a UNCHANGED (run identity untouched) + the TWO audited
+  schema-additive content re-locks (`_GOLDEN_CONTENT_HASH` 2f335da9… +
+  the futures `_EXPECTED_STORE_HASH` 3eaa8b08…); ruff/ruff-format clean;
+  `mypy --strict` clean; pyright 0 errors on touched files. ENGINE
+  results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; the ONE sanctioned ranking-gate
+  delta is Door 5's derived threshold, LOOSENING-ONLY (no
+  previously-passing strategy is newly rejected). The full record lives
+  in MIGRATION.md #1974–#1976 — this blurb carries the shape, never the
+  per-stage story.)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
   (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
   coordinator-granted released S1 spare, verified free on live main** — the
   Rust mirror of `compute.py`'s Slice-0
@@ -8746,7 +8837,28 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+- **Active feature branch:** `claude/metrics-loss-growth-recency`
+  (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 + DEC-METRICS-KELLY-GROWTH-001 +
+  DEC-METRICS-TRAILING-WINDOW-001, MIGRATION.md #1974–#1976 — the W2
+  metrics-depth pack, STACKED on PR #1605's
+  `claude/rust-metrics-compute-fold-r2` head (#1902): `loss_rate`
+  first-class + the per-mask exit-reason counters (u64 AND u128 kernels)
+  feeding `sl_hit_rate`; the Kelly / half-Kelly-log-growth pair + the
+  binomial-null Door-5 re-derivation (`max(10, k99)` floor law; alpha
+  [NEEDS OPERATOR RULING]) + the opt-in `max_sl_hit_rate` ranking Door 6
+  (ACTIVE-only in the tuple-digest identity — the default digest
+  byte-stable); the 24-month trailing recency pass + the decay composite
+  behind the GLOBAL `bars[-1].timestamp` anchor, with the `RecencyFolds`
+  Rust fold twin under the default-OFF `BRUTEX_METRICS_RUST_FOLD`
+  shared-latch burn-in seam; EIGHT nullable appended-last ResultRow
+  columns + FOUR new presets (`growth` · `win_rate_safe` · `recent` ·
+  `recent_decay`); display surfaces do NOT yet render the new columns
+  (Stage-D lane work) and the WFO-exemption flag stays a named follow-up;
+  ENGINE results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX (the one
+  sanctioned ranking-gate delta is Door 5's derived threshold,
+  loosening-only); matches §1's Active branch line — see §1 +
+  MIGRATION.md #1974–#1976 for the full blurb)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
   (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
   coordinator-granted released S1 spare, verified free on live main — the
   Rust mirror of `compute.py`'s Slice-0
