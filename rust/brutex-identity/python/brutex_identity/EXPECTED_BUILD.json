@@ -1,0 +1,25 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-RUST-RUNID-STORES-001; the fno_math/trading_core/brutex_feed pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_identity._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-identity surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught by the frozen pre-conversion oracle golden (tests/golden/test_runid_stores_oracle_golden.py) per CI push, not at import.",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "LEDGER_COLUMNS",
+    "LEDGER_CORE_COLUMNS",
+    "LedgerStringPool",
+    "SOURCE_DIGEST",
+    "SnapshotHasher",
+    "canonicalise_params_json",
+    "classify_result_append",
+    "combo_hash",
+    "derive_empty_streak",
+    "derive_in_pull_fetches",
+    "find_unit_separator_field",
+    "mask_from_limbs",
+    "mask_to_limbs",
+    "merge_ledger_rows",
+    "rank_top_k",
+    "read_ledger_rows",
+    "render_ledger_parquet",
+    "validate_run_id_error",
+    "version"
+  ]
+}

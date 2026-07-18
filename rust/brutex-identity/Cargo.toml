@@ -1,0 +1,100 @@
+# brutex-identity — run-identity + ledger-store kernels (Rust).
+#
+# DEC-RUST-RUNID-STORES-001 (L14 conversion lane): the COMPUTATION plane of
+# the four run-identity/store surfaces —
+#
+# * `brutex/strategies/combo.py`   — the 9-field BLAKE3 run-identity join +
+#   the full param canonicaliser (CPython-repr floats, CPython-`json.dumps`
+#   byte-law encoding, the `\x1f` unit-separator screen);
+# * `brutex/engine/snapshot_hash.py` — the streamed `bxsnap2` data-snapshot
+#   digest (framing + ISO-8601 timestamp render + BLAKE3);
+# * `brutex/engine/results_store.py` — the store LAWS (run-id validation, the
+#   u128 mask↔limb codec, the append/VIX-merge decision, top-k ordering);
+# * `brutex/data/window_ledger_store.py` — the merge-on-save law, the
+#   legacy-column derivations + row coercion, and the ledger Parquet CODEC
+#   (read + write; the DEC-LAKE-EXACT-PIN-001 / #1917 G10 resolution by
+#   golden re-baseline onto THIS encoder as the canonical bytes).
+#
+# Python keeps orchestration, I/O sequencing, error-class raising and the
+# consumer-facing dataclass shells; every law above computes HERE, once.
+#
+# Pure-Rust-first (rlib, dependency-light core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed / trading-core shape.
+
+[package]
+name = "brutex-identity"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Run-identity (BLAKE3) + results/window-ledger store kernels for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published (mirrors fno-math / trading-core / brutex-feed).
+publish = false
+
+[lib]
+name = "brutex_identity"
+path = "src/lib.rs"
+# cdylib so `import brutex_identity` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core (float repr, JSON byte-law, snapshot framing, store +
+# ledger laws, the Parquet codec) needs NO Python. The PyO3 module is opt-in:
+# `cargo test` (default features) builds + links zero Python symbols. maturin
+# turns `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# The run-identity hash primitive (Golden Rule #4) — same major as the
+# fno-math kernel's `blake3_hash`.
+blake3 = "1.5"
+# Zero-copy byte buffers for the Parquet codec FFI edge (a parquet dep already).
+bytes = "1"
+# The window-ledger Parquet codec (DEC-RUST-RUNID-STORES-001, option (iii) of
+# the #1917 G10 escalation): the low-level ColumnWriter/record API — NO arrow,
+# NO polars. zstd = the CANONICAL write compression (the repo's lake
+# discipline); snap = READ-side back-compat for LEGACY ledgers written by the
+# retired pyarrow `pq.write_table` default (SNAPPY) — refusing those would
+# orphan every pre-conversion ledger file.
+parquet = { version = "57", default-features = false, features = [
+    "zstd",
+    "snap",
+] }
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = [
+    "extension-module",
+    "abi3-py312",
+], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into the
+# artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — the CPython-repr/json differential corpora + law
+# invariants over the pure core. Test-only; same major as the sibling crates.
+proptest = "1.6.0"
+# tests/source_digest_parity.rs re-includes the shared framing core to pin the
+# golden parity vector (the brutex-feed pattern). Test-only.
+blake3 = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true
