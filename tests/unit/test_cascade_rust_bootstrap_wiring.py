@@ -68,6 +68,12 @@ class TestMakefileWiring:
 
     def test_makefile_cascade_block_has_no_optional_fallback(self) -> None:
         text = MAKEFILE.read_text(encoding="utf-8")
+        # Round-3 NIT-1 fold: assert presence FIRST so a full revert fails with
+        # a clean AssertionError, never a raw ValueError from .index().
+        assert "import brutex_cascade" in text, (
+            "Makefile run-raw no longer probes/builds brutex_cascade — the "
+            "required wiring was reverted (DEC-RUST-CASCADE-RESULTS-001)."
+        )
         start = text.index("import brutex_cascade")
         block = text[start : text.index("$(VPY) -m brutex run", start)]
         assert "|| echo" not in block, (
