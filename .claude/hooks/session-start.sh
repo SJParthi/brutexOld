@@ -73,6 +73,13 @@ cd "${REPO_ROOT}" 2>/dev/null || exit 0  # silent exit if not a repo
     CLAUDE_MTIME=$(date -r CLAUDE.md '+%Y-%m-%d %H:%M' 2>/dev/null || stat -c '%y' CLAUDE.md 2>/dev/null | cut -d. -f1)
     echo "  CLAUDE.md:        last modified ${CLAUDE_MTIME}"
   fi
+  if [[ -d "docs/claude" ]]; then
+    SPLIT_NEWEST=$(ls -t docs/claude/*.md 2>/dev/null | head -1)
+    if [[ -n "${SPLIT_NEWEST}" ]]; then
+      SPLIT_MTIME=$(date -r "${SPLIT_NEWEST}" '+%Y-%m-%d %H:%M' 2>/dev/null || stat -c '%y' "${SPLIT_NEWEST}" 2>/dev/null | cut -d. -f1)
+      echo "  docs/claude/:     newest ${SPLIT_NEWEST##*/} modified ${SPLIT_MTIME}"
+    fi
+  fi
   if [[ -f "docs/STANDARDS_100PCT_HONEST_AUDIT.md" ]]; then
     AUDIT_MTIME=$(date -r docs/STANDARDS_100PCT_HONEST_AUDIT.md '+%Y-%m-%d %H:%M' 2>/dev/null || stat -c '%y' docs/STANDARDS_100PCT_HONEST_AUDIT.md 2>/dev/null | cut -d. -f1)
     echo "  Honest audit:     last refreshed ${AUDIT_MTIME}"
@@ -165,7 +172,7 @@ cd "${REPO_ROOT}" 2>/dev/null || exit 0  # silent exit if not a repo
   echo ""
 
   # ────────── reminder ──────────
-  echo "  Pre-merge gates per CLAUDE.md §10:"
+  echo "  Pre-merge gates per docs/claude/12-session-etiquette.md (old §10):"
   echo "    .venv/bin/ruff check brutex tests && .venv/bin/mypy brutex && .venv/bin/pytest -q"
   echo ""
   echo "  Z+ 6-marker PR-body discipline per scripts/ci/zplus-pr-guard.sh:"

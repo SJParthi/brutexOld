@@ -32,10 +32,10 @@ Full verbatim text: `docs/claude/04-golden-rules.md` (old CLAUDE.md §2).
 
 1. **No hallucination** — every factual Groww/NSE/BSE/NIFTY claim is verified, never guessed.
 2. **Single source of truth** — all Track 1 specs live in their one designated home.
-3. **Scope lock** — Track 1 = Groww + spot indexes + India VIX; nothing else creeps in.
+3. **Scope lock** — Track 1 = Groww + spot indexes + India VIX; nothing else creeps in (India VIX reference-only).
 4. **Reproducibility first** — every run is identified by a blake3 hash of its inputs.
 5. **O(1) discipline** — bar lookup, indicator value lookup, combo dedup are O(1).
-6. **Rate-limit safety** — respect Groww's published type-level rate limits; never out-poll.
+6. **Rate-limit safety** — respect Groww's published type-level rate limits; never out-poll; historical-candles caps UNDOCUMENTED.
 7. **Idempotence** — every ingest chunk and every backtest combo is safely re-runnable.
 8. **Audit trail** — every material action (ingest chunk, combo run, …) leaves a record.
 9. **Hostile review before code** — major design changes get adversarial review first.
@@ -74,4 +74,6 @@ coordinate per `docs/claude/04-golden-rules.md`.
 Comments citing "CLAUDE.md §N" resolve via the table above — the §
 numbering is preserved verbatim inside the moved files. Legacy "§11"
 citations mean Golden Rule #11 (COMMON · DYNAMIC · SCALABLE · AUTOMATED)
-in `docs/claude/04-golden-rules.md`.
+in `docs/claude/04-golden-rules.md`. The archived preamble's "12 Golden
+Rules" count is stale — 13 is correct (rule 13 = MERGE-READINESS CHARTER,
+operator decree 2026-05-29).

@@ -102,6 +102,10 @@ CITATION_PATTERNS = [
     # Groww is the LIVE vendor (DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009): a
     # reference to the operator-supplied Groww API docs counts as a citation.
     re.compile(r"docs/groww/api-reference/", re.IGNORECASE),
+    # 2026-07-18 CLAUDE.md split: the old single-file sections now live
+    # verbatim under docs/claude/NN-topic.md — a reference to one of those
+    # canonical homes counts as a citation.
+    re.compile(r"docs/claude/\d{2}-[a-z0-9-]+\.md", re.IGNORECASE),
     re.compile(r"nseindia\.com", re.IGNORECASE),
     # Decision IDs (DEC-FOO-NNN) also count — those resolve to ledger entries.
     re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b"),
