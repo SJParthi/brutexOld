@@ -533,7 +533,20 @@ jobs:
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \
+            "brutex/adapters/dhan/constants.py:tests/unit/test_dhan_constants.py:" \
+            "brutex/adapters/dhan/errors.py:tests/unit/test_dhan_errors.py:" \
+            "brutex/adapters/dhan/parser.py:tests/unit/test_dhan_parser.py:" \
+            "brutex/adapters/dhan/chunks.py:tests/unit/test_dhan_chunks.py:" \
+            "brutex/adapters/dhan/instruments.py:tests/unit/test_dhan_instruments.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
+            # DEC-DHAN-ADAPTER-001: the five PURE-LAW Dhan leaves (constants /
+            # errors / parser / chunks / instruments — the deliberately
+            # I/O-free modules a future DEC-DHAN-RUST-FACADE-001 facade would
+            # wrap 1:1) ride the standard runner against their stem unit
+            # files (each ~1 s standalone, network-free via the injected
+            # fakes). The client/pool/orchestration modules stay OUT of this
+            # loop (behavioral seams over the injected transport, covered by
+            # the 100% gates + integration suite — the combo.py precedent).
             # combo_rust.py pair (DEC-STRATEGIES-RUST-COMBO-001): the combo
             # Rust-facade leaf rides the standard historical runner. Its
             # killing suite is deliberately WHEEL-FREE (every crate

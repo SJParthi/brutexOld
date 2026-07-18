@@ -220,6 +220,8 @@ def _aws_hermeticity_belt(monkeypatch: pytest.MonkeyPatch) -> None:
     ``tests/unit/test_aws_hermeticity_belt.py`` (active + loud + source-pinned
     ``autouse=True``).
     """
+    import brutex.adapters.dhan.credentials as _dhan_credentials_module
+    import brutex.adapters.dhan.token_store_aws as _dhan_token_store_aws_module
     import brutex.adapters.groww.aws_client as _aws_client_module
     import brutex.adapters.groww.token_store_aws as _token_store_aws_module
     import brutex.config.credentials_aws as _credentials_aws_module
@@ -228,6 +230,11 @@ def _aws_hermeticity_belt(monkeypatch: pytest.MonkeyPatch) -> None:
     # From-import bindings resolve from THEIR module's namespace — patch each.
     monkeypatch.setattr(_credentials_aws_module, "build_real_aws_client", _aws_belt_blocked)
     monkeypatch.setattr(_token_store_aws_module, "build_real_aws_client", _aws_belt_blocked)
+    # DEC-DHAN-ADAPTER-001: the Dhan credential + token-store modules bind the SAME
+    # shared ``build_real_aws_client`` at import — patch their bindings too so a live
+    # boto3 call is impossible from the Dhan credential tests (tests-only belt).
+    monkeypatch.setattr(_dhan_credentials_module, "build_real_aws_client", _aws_belt_blocked)
+    monkeypatch.setattr(_dhan_token_store_aws_module, "build_real_aws_client", _aws_belt_blocked)
     try:
         import boto3  # type: ignore[import-not-found, unused-ignore]
         import boto3.session  # type: ignore[import-not-found, unused-ignore]

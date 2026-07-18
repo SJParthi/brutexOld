@@ -11,6 +11,16 @@
 # (case-insensitive) anywhere on the scanned surface, it prints every
 # offending `file:line` and FAILS (exit 1). A clean surface exits 0.
 #
+# AMENDED by DEC-DHAN-ADAPTER-001 (2026-07-18, ADR-0024): the operator directed
+# a SECOND vendor adapter — Dhan Data API v2, LAKE/reference-only, INERT until
+# the ₹499/mo Data-API subscription + credentials are provisioned. The ONE
+# sanctioned home for the vendor word is the new `brutex/adapters/dhan/`
+# package (exemption 5 below). Everywhere ELSE the ban STANDS — which makes
+# this guard the STRUCTURAL enforcement of the adapter's inertness: any
+# attempt to wire Dhan into the engine / dashboard / CLI / pull spines would
+# necessarily name it outside the sanctioned package and FAIL this guard,
+# forcing the conscious live-wiring DEC the ADR requires.
+#
 # POSITIVE SCAN SCOPE (where `dhan` is forbidden)
 # -----------------------------------------------
 #   - brutex/            (the Python package — all live code)
@@ -39,6 +49,10 @@
 #      the exemptions and necessarily contains the word it bans.
 #   4. Build / VCS / vendor artifacts: `.git/`, `.venv/`, `target/`,
 #      `__pycache__/`, `*.egg-info/`, `node_modules/`.
+#   5. `brutex/adapters/dhan/` — the SANCTIONED second-vendor adapter package
+#      (DEC-DHAN-ADAPTER-001 / ADR-0024; lake/reference-only, subscription-
+#      gated, INERT). The vendor word is legitimate ONLY here; the ban on the
+#      rest of `brutex/` is what structurally keeps the adapter unwired.
 #
 # USAGE
 # -----
@@ -82,6 +96,7 @@ mapfile -d '' -t files < <(
       -name 'node_modules' -o \
       -name '*.egg-info' \
     \) -prune -o \
+    -path 'brutex/adapters/dhan' -prune -o \
     -type f -print0 2>/dev/null
 )
 
@@ -107,11 +122,13 @@ done
 if [[ "${hits}" -gt 0 ]]; then
   echo ""
   echo "❌ no-dhan-guard: found ${hits} forbidden 'dhan' occurrence(s) on the live surface."
-  echo "   The live vendor is Groww — reword to Groww or vendor-neutral language."
+  echo "   The live vendor is Groww. The ONLY sanctioned 'dhan' home is the inert"
+  echo "   second-vendor package brutex/adapters/dhan/ (DEC-DHAN-ADAPTER-001 / ADR-0024)"
+  echo "   — wiring Dhan anywhere else requires its own live-wiring DEC first."
   echo "   (Immutable DEC-DHAN-* decision IDs are exempt and are stripped before scanning;"
   echo "    historical docs under docs/ — MIGRATION.md, adr/, TRACK1_*.md — are not scanned.)"
   exit 1
 fi
 
-echo "✅ no-dhan-guard: zero forbidden 'dhan' on the live surface (brutex/, scripts/, CLAUDE.md, README.md, docs/runbooks/)."
+echo "✅ no-dhan-guard: zero forbidden 'dhan' outside the sanctioned adapter package (brutex/ minus adapters/dhan/, scripts/, CLAUDE.md, README.md, docs/runbooks/)."
 exit 0

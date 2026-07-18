@@ -793,6 +793,87 @@ jobs:
           else
             echo "(brutex.nightly.env_preflight test file not present yet — gate inactive)"
           fi
+          # DEC-DHAN-ADAPTER-001: the SECOND vendor adapter (Dhan Data API
+          # v2, LAKE/reference-only, subscription-gated, INERT) — every
+          # brutex.adapters.dhan module 100% line+branch STANDALONE over
+          # its own stem-matched unit file (the Groww per-module shape),
+          # driven by the injected FakeDhanTransport / FakeAwsClient (no
+          # requests, no boto3, no network).
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
+          else
+            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_errors.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_errors.py
+          else
+            echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
+          else
+            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
+          else
+            echo "(brutex.adapters.dhan.chunks test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_instruments.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.instruments --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instruments.py
+          else
+            echo "(brutex.adapters.dhan.instruments test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_transport.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.transport --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_transport.py
+          else
+            echo "(brutex.adapters.dhan.transport test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+          else
+            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_pool.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.pool --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_pool.py
+          else
+            echo "(brutex.adapters.dhan.pool test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_credentials.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_credentials.py
+          else
+            echo "(brutex.adapters.dhan.credentials test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_token_store_aws.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store_aws.py
+          else
+            echo "(brutex.adapters.dhan.token_store_aws test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_reauth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.reauth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_reauth.py
+          else
+            echo "(brutex.adapters.dhan.reauth test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_option_chain.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.option_chain --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_chain.py
+          else
+            echo "(brutex.adapters.dhan.option_chain test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_expired_options.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.expired_options --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_expired_options.py
+          else
+            echo "(brutex.adapters.dhan.expired_options test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
+          else
+            echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_capability_matrix.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.capability_matrix --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_capability_matrix.py
+          else
+            echo "(brutex.adapters.dhan.capability_matrix test file not present yet — gate inactive)"
+          fi
           # DEC-VENDOR-PIVOT-001 (2026-05-26): groww.constants strict-100%
           # gate deleted with the Groww wipe. The legacy step 8 deferral
           # for groww.types is no longer relevant — the Groww adapter is
