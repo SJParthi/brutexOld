@@ -55,6 +55,7 @@ on:
       - "rust/fno-math/**"
       - "rust/trading-core/**"
       - "rust/brutex-feed/**"
+      - "rust/brutex-strategies/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
@@ -513,6 +514,14 @@ jobs:
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
+            "brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:" \
+            "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
+            "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
+            "brutex/config/seam_core.py:tests/unit/test_config_seam_core.py:" \
+            "brutex/config/paths_rust.py:tests/unit/test_config_paths_rust.py:" \
+            "brutex/config/dotenv_rust.py:tests/unit/test_config_dotenv_rust.py:" \
+            "brutex/config/backup_env_rust.py:tests/unit/test_backup_env_rust.py:" \
+            "brutex/data/lake_keys_rust.py:tests/unit/test_lake_keys_rust.py:" \
             "brutex/data/lake_rust_ledger_render.py:tests/unit/test_lake_rust_ledger_render.py:" \
             "brutex/data/detectors_rust.py:tests/unit/test_detectors_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
@@ -523,8 +532,20 @@ jobs:
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/observability/observability_rust.py:tests/unit/test_observability_rust.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+            "brutex/strategies/combo_rust.py:tests/unit/test_strategies_combo_rust.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
+            # combo_rust.py pair (DEC-STRATEGIES-RUST-COMBO-001): the combo
+            # Rust-facade leaf rides the standard historical runner. Its
+            # killing suite is deliberately WHEEL-FREE (every crate
+            # interaction via sys.modules fakes), so this loop needs NO
+            # brutex_strategies wheel install — the feed pair's wheel-gated
+            # rationale above does not transfer; installing the wheel here
+            # would be dead weight (the feed property-job round-1 pruning
+            # logic). combo.py itself stays OUT of this loop — its seam-line
+            # mutants are HAND-KILLED with ledgered evidence (the
+            # DEC-GREEKS-RUST-BATCH-001 / DEC-LAKE-RUST-MERGE-DEDUP-001
+            # hand-kill precedent; see the DEC's ledger entry).
             # feed/replay.py pair (DEC-FEED-RUST-CORE-001, MIGRATION #1797
             # REFUTER ROUND 6): the seam module previously had ZERO mutation
             # coverage — R6a's `<= i -> < i` warn-drain mutant survived the
@@ -985,6 +1006,76 @@ jobs:
       # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
 
   # ─────────────────────────────────────────────────────────────────
+  # brutex-strategies deep mutation gate (DEC-STRATEGIES-RUST-COMBO-001) —
+  # the combo byte-law kernel's cargo-mutants pass. SINGLE job (no shard
+  # matrix): the scope is the two small pure cores (src/canon.rs +
+  # src/scan_sep.rs — 33 mutants measured at introduction; scope +
+  # exclusions documented in rust/brutex-strategies/.cargo/mutants.toml),
+  # so the whole pass fits far inside the 120-min cap. Zero-survivor is
+  # the standard.
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation-brutex-strategies:
+    name: "Rust mutation (cargo-mutants, brutex-strategies)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003)
+    # — see the rust-mutation job comment for the measured rationale.
+    if: github.event_name != 'push'
+    defaults:
+      run:
+        working-directory: rust/brutex-strategies
+    steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-strategies -> target
+          shared-key: "mutation-brutex-strategies"
+          # cache-on-failure — see the fno-math twin.
+          cache-on-failure: true
+      - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin.
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (canon.rs + scan_sep.rs pure cores, in-place)
+        run: |
+          # DEC-STRATEGIES-RUST-COMBO-001:
+          # - SCOPE lives in rust/brutex-strategies/.cargo/mutants.toml (ONE
+          #   source of truth): src/canon.rs + src/scan_sep.rs only —
+          #   python.rs (PyErr-constructing extraction wrappers cargo-mutants
+          #   cannot viably replace, gated end-to-end by the Python wheel
+          #   suites) + lib.rs (const/re-export only) documented OUT there.
+          # - --in-place: build.rs include!s ../source_digest_core.rs —
+          #   outside the crate dir, so copy-mode baselines break (the #1258
+          #   measured trading-core rationale, restated by the feed twin).
+          # - default features suffice: canon.rs/scan_sep.rs compile without
+          #   pyo3.
+          cargo mutants \
+            --in-place \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload cargo-mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cargo-mutants-report-brutex-strategies
+          path: rust/brutex-strategies/cargo-mutants.out
+          retention-days: 14
+      # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
+
+  # ─────────────────────────────────────────────────────────────────
   # Verdict (DEC-MUTATION-RUNTIME-003): ONE issue-filer per Rust gate
   # (per-shard create-only steps RACE the title dedup) + the zero-click
   # issue lifecycle: a fully-green SCHEDULED main run auto-closes every
@@ -1015,7 +1106,7 @@ jobs:
       contents: read
       issues: write # the fan-in filers + the scheduled-green auto-close below
     if: always()
-    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed]
+    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed, rust-mutation-brutex-strategies]
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
@@ -1080,6 +1171,27 @@ jobs:
               body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-FEED-RUST-CORE-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
+      - name: Open GitHub issue — brutex-strategies gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-strategies.result) && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const outcome = '${{ needs.rust-mutation-brutex-strategies.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in brutex-strategies on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'The job hit the 120-minute timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'The job failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The job log + report artifact distinguish them.';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-STRATEGIES-RUST-COMBO-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
       - name: Auto-close superseded mutation issues (green SCHEDULED main run only)
         if: >-
           github.event_name == 'schedule' && github.ref == 'refs/heads/main'
@@ -1087,6 +1199,7 @@ jobs:
           && needs.rust-mutation.result == 'success'
           && needs.rust-mutation-trading-core.result == 'success'
           && needs.rust-mutation-brutex-feed.result == 'success'
+          && needs.rust-mutation-brutex-strategies.result == 'success'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -1134,9 +1247,11 @@ jobs:
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-feed.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-strategies.result)
         run: |
-          echo "python:       ${{ needs.python-mutation.result }}"
-          echo "fno-math:     ${{ needs.rust-mutation.result }}"
-          echo "trading-core: ${{ needs.rust-mutation-trading-core.result }}"
-          echo "brutex-feed:  ${{ needs.rust-mutation-brutex-feed.result }}"
+          echo "python:            ${{ needs.python-mutation.result }}"
+          echo "fno-math:          ${{ needs.rust-mutation.result }}"
+          echo "trading-core:      ${{ needs.rust-mutation-trading-core.result }}"
+          echo "brutex-feed:       ${{ needs.rust-mutation-brutex-feed.result }}"
+          echo "brutex-strategies: ${{ needs.rust-mutation-brutex-strategies.result }}"
           exit 1

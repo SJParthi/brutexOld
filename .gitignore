@@ -143,6 +143,10 @@ Cargo.lock
 # (DEC-RUST-OBSERVABILITY-001 — a NEW crate needs its own negation to be
 # addable; the lock is the reproducible-build + security-audit trigger).
 !rust/brutex-observability/Cargo.lock
+# Same law for the brutex-strategies combo byte-law kernel
+# (DEC-STRATEGIES-RUST-COMBO-001 — a NEW crate needs its own negation to be
+# addable; the FRESH lock is committed, never a copy of a sibling's).
+!rust/brutex-strategies/Cargo.lock
 # brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
 # application BINARY crate: its lockfile is tracked for reproducible builds
 # (Golden Rule #4) + the security-audit Cargo.lock trigger.
