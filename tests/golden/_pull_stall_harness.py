@@ -38,11 +38,14 @@ two) so every ``now - stored`` subtraction is EXACT — the boundary rows
 (``age == multiplier × timeout``) are genuinely on the boundary.
 """
 
+# Whitebox drives of module-private state (sanctioned — the unit suite precedent).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -139,7 +142,7 @@ def _drive_wedge_case(case: WedgeCase) -> int:
     if case.hung:
         # Drive the REAL underlying watchdog into HUNG via genuine silence.
         clock.t = case.timeout + 1.0
-        wd._wd.check_once()  # noqa: SLF001 — whitebox drive (the suite's precedent)
+        wd._wd.check_once()
         assert wd.state() is WorkerState.HUNG, case.label
         assert len(hungs) == 1, case.label
     clock.t = T_EVAL
@@ -149,25 +152,23 @@ def _drive_wedge_case(case: WedgeCase) -> int:
     # the module's own ``clock() - stored`` recovers the age bit-exactly
     # (dyadic values) or propagates NaN/inf faithfully.
     wd.on_wedged = wedges.append if case.hook_bound else None
-    wd._wedged_fired = case.already_fired  # noqa: SLF001
-    wd._hung_baseline_captured = case.baseline_captured  # noqa: SLF001
-    wd._hung_baseline_token = case.baseline  # noqa: SLF001
-    wd._baseline_capture_pending = False  # noqa: SLF001
-    wd._last_beat_at = T_EVAL - case.last_beat_age  # noqa: SLF001
-    wd._wedge_window_restart_at = (  # noqa: SLF001
-        None if case.restart_age is None else T_EVAL - case.restart_age
-    )
-    wants = wd._escalation_wants_probe_locked()  # noqa: SLF001
-    baseline_before = wd._hung_baseline_token  # noqa: SLF001
-    wd._maybe_escalate_locked(case.current)  # noqa: SLF001
-    fired_now = wd._wedged_fired and not case.already_fired  # noqa: SLF001
-    baseline_after = wd._hung_baseline_token  # noqa: SLF001
+    wd._wedged_fired = case.already_fired
+    wd._hung_baseline_captured = case.baseline_captured
+    wd._hung_baseline_token = case.baseline
+    wd._baseline_capture_pending = False
+    wd._last_beat_at = T_EVAL - case.last_beat_age
+    wd._wedge_window_restart_at = None if case.restart_age is None else T_EVAL - case.restart_age
+    wants = wd._escalation_wants_probe_locked()
+    baseline_before = wd._hung_baseline_token
+    wd._maybe_escalate_locked(case.current)
+    fired_now = wd._wedged_fired and not case.already_fired
+    baseline_after = wd._hung_baseline_token
     if fired_now:
         assert len(wedges) == 1, case.label
         return WEDGE_ARM_NAMES.index("escalate")
     assert not wedges, case.label
     if baseline_after != baseline_before:
-        assert wd._wedge_window_restart_at == T_EVAL, case.label  # noqa: SLF001
+        assert wd._wedge_window_restart_at == T_EVAL, case.label
         if baseline_before is None:
             return WEDGE_ARM_NAMES.index("adopt_baseline")
         return WEDGE_ARM_NAMES.index("rebaseline")
@@ -192,10 +193,7 @@ def _wedge_cases() -> list[WedgeCase]:
                 for captured in (False, True):
                     cases.append(
                         WedgeCase(
-                            label=(
-                                "guards-"
-                                f"h{int(hung)}f{int(fired)}k{int(hook)}c{int(captured)}"
-                            ),
+                            label=(f"guards-h{int(hung)}f{int(fired)}k{int(hook)}c{int(captured)}"),
                             hung=hung,
                             already_fired=fired,
                             hook_bound=hook,
@@ -411,9 +409,9 @@ def _drive_alive_case(since_last: float, interval: float) -> bool:
     )
     wd.start()
     clock.t = T_EVAL
-    wd._alive_interval = interval  # noqa: SLF001 — whitebox install
-    wd._last_alive_log = T_EVAL - since_last  # noqa: SLF001
-    payload = wd._alive_payload_locked()  # noqa: SLF001
+    wd._alive_interval = interval
+    wd._last_alive_log = T_EVAL - since_last
+    payload = wd._alive_payload_locked()
     return payload is not None
 
 
@@ -450,7 +448,7 @@ def compute_alive_table() -> list[dict[str, Any]]:
 
 
 @contextmanager
-def _env(monkey_env: dict[str, str | None]) -> Iterator[None]:
+def _env(monkey_env: dict[str, str | None]) -> Generator[None]:
     """Apply/restore env vars (harness-local — the generator has no monkeypatch)."""
     import os
 
@@ -498,7 +496,12 @@ def compute_resolver_table() -> dict[str, list[dict[str, Any]]]:
     """The two fail-SAFE env resolvers over the frozen raw-value sweep."""
     tables: dict[str, list[dict[str, Any]]] = {}
     for kind, env_name, resolver, default in (
-        ("stall_timeout", PULL_STALL_ENV, resolve_stall_timeout_seconds, DEFAULT_STALL_TIMEOUT_SECONDS),
+        (
+            "stall_timeout",
+            PULL_STALL_ENV,
+            resolve_stall_timeout_seconds,
+            DEFAULT_STALL_TIMEOUT_SECONDS,
+        ),
         ("wedge_multiplier", PULL_WEDGE_ENV, resolve_wedge_multiplier, DEFAULT_WEDGE_MULTIPLIER),
     ):
         rows: list[dict[str, Any]] = []
@@ -510,9 +513,7 @@ def compute_resolver_table() -> dict[str, list[dict[str, Any]]]:
                     "raw": raw,
                     "resolved": _float_json(value),
                     "resolved_bits": f64_bits(value),
-                    "is_default": (
-                        value == default and not math.isnan(value)
-                    ),
+                    "is_default": (value == default and not math.isnan(value)),
                 }
             )
         tables[kind] = rows

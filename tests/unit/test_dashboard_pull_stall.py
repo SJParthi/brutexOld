@@ -1195,3 +1195,347 @@ class TestWatchdogAliveBeat:
         alive = self._alive(logs)
         assert len(alive) == 1
         assert alive[0]["pull_id"] == "abc123def456"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# DEC-RUST-PULL-STATE-001 (Wave 1C) — the default-OFF Rust decision seam
+# ════════════════════════════════════════════════════════════════════════
+#
+# The wedge/alive decision plane consults the ``brutex_pull_state`` kernel
+# ONLY when ``BRUTEX_PULL_STATE_RUST`` is explicitly truthy; the Python arms
+# are the RETAINED byte-identical oracle. These pins cover the seam arcs
+# (flag off + never-imports · flag on + kernel authority per token · flag on
+# + degrade) and the FAIL-SAFE resolver posture on BOTH arms. Real-wheel
+# parity lives in ``tests/property/test_pull_stall_rust_parity.py``.
+
+
+class _RecordingBombModule:
+    """A ``sys.modules`` plant that RECORDS every attribute access, then raises.
+
+    Raises ``AttributeError`` (never ``AssertionError`` — CodeQL's
+    ``__getattr__`` contract; an AttributeError is also what ``getattr(...,
+    default)`` swallows, so detection is the RECORD, not the raise). The
+    teeth are verified by the flag-ON test: the same bomb IS touched there.
+    """
+
+    def __init__(self) -> None:
+        self.accesses: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        self.accesses.append(name)
+        raise AttributeError(name)
+
+
+def _install_stall_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wedge: object = None,
+    alive: object = None,
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    ns = SimpleNamespace()
+    if wedge is not None:
+        ns.wedge_decision = wedge
+    if alive is not None:
+        ns.alive_log_due = alive
+    monkeypatch.setitem(sys.modules, "brutex_pull_state", ns)
+
+
+def _seam_wedge_watchdog() -> tuple[PullWatchdog, _FakeClock, list[WorkerEvent]]:
+    """A started, genuinely-HUNG watchdog with a captured 'revA' baseline,
+    silent past the full wedge window — the escalate-shaped oracle state."""
+    clock = _FakeClock()
+    wd = PullWatchdog(
+        on_hung=lambda _e: None,
+        timeout_seconds=30.0,
+        spawn=lambda _fn: None,
+        clock=clock,
+        wedge_multiplier=6.0,
+    )
+    wedges: list[WorkerEvent] = []
+    wd.on_wedged = wedges.append
+    wd.start()
+    clock.advance(31.0)
+    wd._wd.check_once()  # the real HUNG edge
+    assert wd.state() is WorkerState.HUNG
+    wd._baseline_capture_pending = False
+    wd._hung_baseline_captured = True
+    wd._hung_baseline_token = "revA"
+    clock.advance(180.0)  # total silence 211 s > 6 x 30 s
+    return wd, clock, wedges
+
+
+class TestPullStateRustSeamStall:
+    @pytest.fixture(autouse=True)
+    def _clean_warn_registry(self) -> object:
+        from brutex import pull_state_rust
+
+        pull_state_rust.reset_for_tests()
+        yield
+        pull_state_rust.reset_for_tests()
+
+    # ── flag OFF — byte-identical + never touches the kernel ──────────────
+
+    def test_flag_off_full_wedge_lifecycle_never_touches_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
+        bomb = _RecordingBombModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd.revision_probe = _TokenProbe("revA")
+        wd.check_once()  # wants-probe + escalate — the oracle fires
+        assert len(wedges) == 1
+        assert wd._wedged_fired is True
+        assert bomb.accesses == []  # the kernel module was NEVER touched
+
+    def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
+        bomb = _RecordingBombModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revA")
+        assert len(wedges) == 1
+        assert bomb.accesses == []
+
+    def test_bomb_spy_teeth_flag_on_touches_and_degrades(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The spy's TEETH: with the flag ON the SAME bomb IS touched — and the
+        AttributeError shape degrades to the oracle (behaviour unchanged)."""
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        bomb = _RecordingBombModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revA")
+        assert len(wedges) == 1  # the oracle still escalates (degrade arc)
+        assert bomb.accesses  # PROOF the flag-ON path consults the module
+
+    # ── flag ON — kernel AUTHORITY per arm token ──────────────────────────
+
+    def test_kernel_escalate_token_fires_even_where_the_oracle_would_refuse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deliberately-WRONG escalate token is SERVED — proving the seam
+        consults the kernel, not the oracle (the market_hours seam tooth)."""
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, wedge=lambda *a: 5)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
+        )
+        wedges: list[WorkerEvent] = []
+        wd.on_wedged = wedges.append
+        wd.start()  # HEALTHY — the oracle would refuse at the HUNG guard
+        wd._maybe_escalate_locked("revA")
+        assert len(wedges) == 1
+        assert wd._wedged_fired is True
+
+    @pytest.mark.parametrize("token", [0, 1, 4])
+    def test_kernel_noop_tokens_mutate_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, token: int
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, wedge=lambda *a, _t=token: _t)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revB")
+        assert not wedges
+        assert wd._wedged_fired is False
+        assert wd._hung_baseline_token == "revA"
+        assert wd._wedge_window_restart_at is None
+
+    @pytest.mark.parametrize("token", [2, 3])
+    def test_kernel_adopt_and_rebaseline_tokens_restart_the_window(
+        self, monkeypatch: pytest.MonkeyPatch, token: int
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, wedge=lambda *a, _t=token: _t)
+        wd, clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revB")
+        assert not wedges
+        assert wd._hung_baseline_token == "revB"  # the shared action body ran
+        assert wd._wedge_window_restart_at == clock.t
+
+    def test_kernel_and_oracle_escalate_loglines_are_byte_identical(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The SAME scenario through both arms emits the SAME CRITICAL line —
+        the actions are shared-verbatim Python, the kernel only decides."""
+        import logging
+
+        def run(flag: str | None) -> str:
+            if flag is None:
+                monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
+            else:
+                monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", flag)
+            wd, _clock, wedges = _seam_wedge_watchdog()
+            caplog.clear()
+            with caplog.at_level(logging.CRITICAL, logger="brutex.dashboard.pull_stall"):
+                wd._maybe_escalate_locked("revA")
+            assert len(wedges) == 1
+            (record,) = [r for r in caplog.records if "pull_stall.wedged" in r.getMessage()]
+            return record.getMessage()
+
+        _install_stall_kernel(monkeypatch, wedge=lambda *a: 5)
+        on_line = run("1")
+        off_line = run(None)
+        assert on_line == off_line
+        assert "pull_stall.wedged worker=dashboard-pull" in off_line
+
+    def test_wants_probe_serves_the_kernel_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """token != 0 ⇔ wants probe — served even where the oracle disagrees."""
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        seen: list[tuple[object, ...]] = []
+
+        def kernel(*args: object) -> int:
+            seen.append(args)
+            return 1  # abstain-shaped: the guards passed, current is None
+
+        _install_stall_kernel(monkeypatch, wedge=kernel)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
+        )
+        wd.on_wedged = lambda _e: None
+        wd.start()  # HEALTHY — the oracle would say False
+        assert wd._escalation_wants_probe_locked() is True
+        # The wants-probe consult passes current=None (the kernel decides).
+        assert seen[-1][-1] is None
+
+    def test_wants_probe_kernel_zero_token_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, wedge=lambda *a: 0)
+        wd, _clock, _wedges = _seam_wedge_watchdog()
+        assert wd._escalation_wants_probe_locked() is False
+
+    def test_hook_unbound_short_circuits_the_state_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wrapper mirrors the oracle's guard ORDER: with no on_wedged the
+        underlying state is never read (an unregistered worker cannot raise)."""
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        seen: list[tuple[object, ...]] = []
+
+        def kernel(*args: object) -> int:
+            seen.append(args)
+            return 0
+
+        _install_stall_kernel(monkeypatch, wedge=kernel)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
+        )
+        wd.start()
+        wd.on_wedged = None  # hook unbound — the oracle short-circuits here
+        assert wd._escalation_wants_probe_locked() is False
+        # hung=False was passed WITHOUT reading state (flags refuse first).
+        assert seen and seen[-1][0] is False and seen[-1][2] is False
+
+    # ── flag ON — degrade arcs fall through to the oracle ─────────────────
+
+    def test_missing_wheel_degrades_to_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revA")
+        assert len(wedges) == 1  # the oracle escalates
+
+    def test_raising_kernel_degrades_to_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+
+        def boom(*_a: object) -> int:
+            raise RuntimeError("wheel poisoned")
+
+        _install_stall_kernel(monkeypatch, wedge=boom, alive=boom)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revA")
+        assert len(wedges) == 1
+
+    @pytest.mark.parametrize("poison", [True, 6, -1, "5", None, 2.0])
+    def test_poisoned_token_degrades_to_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, poison: object
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, wedge=lambda *a, _p=poison: _p)
+        wd, _clock, wedges = _seam_wedge_watchdog()
+        wd._maybe_escalate_locked("revB")  # oracle: rebaseline (revA -> revB)
+        assert not wedges
+        assert wd._hung_baseline_token == "revB"
+
+    # ── flag ON — the alive-throttle seam ─────────────────────────────────
+
+    def test_alive_kernel_authority_and_stamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, alive=lambda *_a: True)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
+        )
+        wd.start()
+        wd._last_alive_log = clock.t  # oracle would THROTTLE (since == 0)
+        payload = wd._alive_payload_locked()
+        assert payload is not None  # the kernel verdict is served
+        assert payload["state"] == "healthy"
+        assert wd._last_alive_log == clock.t  # the shared stamp body ran
+
+    def test_alive_kernel_false_suppresses_even_the_first_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        _install_stall_kernel(monkeypatch, alive=lambda *_a: False)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
+        )
+        wd.start()  # first check: the -inf seed — the oracle would emit
+        assert wd._alive_payload_locked() is None
+
+    def test_alive_degrade_falls_through_to_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "1")
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
+        clock = _FakeClock()
+        wd = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
+        )
+        wd.start()
+        assert wd._alive_payload_locked() is not None  # the -inf seed emits
+        assert wd._alive_payload_locked() is None  # then throttles
+
+    # ── the FAIL-SAFE resolver posture — pinned on BOTH arms ──────────────
+
+    @pytest.mark.parametrize("flag", [None, "0", "1"])
+    def test_resolvers_stay_fail_safe_on_both_arms(
+        self, monkeypatch: pytest.MonkeyPatch, flag: str | None
+    ) -> None:
+        """Junk env values silently fall back to the audited defaults with the
+        seam flag unset, explicitly OFF and ON — the resolvers are Python-only
+        (never routed through the kernel) and their fail-SAFE posture (the
+        deliberate opposite of the lane's fail-loud env family) is preserved
+        exactly. The bomb proves the resolvers never consult the kernel."""
+        import sys
+
+        if flag is None:
+            monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
+        else:
+            monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", flag)
+        bomb = _RecordingBombModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        monkeypatch.setenv(PULL_STALL_ENV, "junk")
+        monkeypatch.setenv(PULL_WEDGE_ENV, "-3")
+        assert resolve_stall_timeout_seconds() == DEFAULT_STALL_TIMEOUT_SECONDS
+        assert resolve_wedge_multiplier() == DEFAULT_WEDGE_MULTIPLIER
+        assert bomb.accesses == []

@@ -643,7 +643,9 @@ class PullWatchdog:
         """
         now = self._alive_clock()
         if _pull_state_rust.pull_state_rust_enabled():
-            due = _pull_state_rust.rust_alive_log_due(now - self._last_alive_log, self._alive_interval)
+            due = _pull_state_rust.rust_alive_log_due(
+                now - self._last_alive_log, self._alive_interval
+            )
             if due is not None:
                 if not due:
                     return None

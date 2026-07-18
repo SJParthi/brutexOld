@@ -47,18 +47,16 @@ def frozen() -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def live() -> dict[str, Any]:
-    return json.loads(json.dumps(compute_payload(), allow_nan=False))
+    payload = json.loads(json.dumps(compute_payload(), allow_nan=False))
+    assert isinstance(payload, dict)
+    return payload
 
 
 class TestFrozenGolden:
-    def test_wedge_table_matches_frozen(
-        self, frozen: dict[str, Any], live: dict[str, Any]
-    ) -> None:
+    def test_wedge_table_matches_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
         assert live["wedge"] == frozen["wedge"]
 
-    def test_alive_table_matches_frozen(
-        self, frozen: dict[str, Any], live: dict[str, Any]
-    ) -> None:
+    def test_alive_table_matches_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
         assert live["alive"] == frozen["alive"]
 
     def test_resolver_tables_match_frozen(
@@ -85,9 +83,7 @@ class TestFailSafeResolverPosture:
     """The resolvers are FAIL-SAFE (junk → silent default) — pinned, never 'fixed'."""
 
     @pytest.mark.parametrize("kind", ["stall_timeout", "wedge_multiplier"])
-    def test_junk_rows_resolve_to_the_default(
-        self, frozen: dict[str, Any], kind: str
-    ) -> None:
+    def test_junk_rows_resolve_to_the_default(self, frozen: dict[str, Any], kind: str) -> None:
         rows = frozen["resolvers"][kind]
         junk = [r for r in rows if r["raw"] in (None, "", "   ", "junk", "12abc", "-1", "0")]
         assert junk, "the frozen sweep must carry the junk arms"
