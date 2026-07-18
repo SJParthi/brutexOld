@@ -504,18 +504,18 @@ def test_r38_stage3_cells_genuinely_written(rehearsal: _Rehearsal) -> None:
 
 
 def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
-    """The cascade report exists AND carries the pinned seed's FULL-cascade shape.
+    """The cascade report exists AND every statistical cascade leg genuinely ran.
 
     CASCADE-SHAPE DRIFT PIN (DEC-R38-REHEARSAL-DETERMINISM-001 #1798): the
-    "full chain in miniature" claim rests on the PINNED seed drawing ONE
-    candidate through the DSR gate so every statistical cascade leg —
+    "full chain in miniature" claim rests on the PINNED seed drawing at least
+    ONE candidate through the DSR gate so every statistical cascade leg —
     walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox and the
-    1000-permutation Monte-Carlo filter (which kills it) — genuinely EXECUTES.
-    That coverage is a property of the seed choice, not of the code, so a
-    future ``indicator_version`` / wheel / engine change that re-keys the
-    pinned seed could silently revert the rehearsal to a DSR-KILLED fast path
-    (legs never run) while the runtime gate stays green. This assertion makes
-    that rot fail LOUD and forces a conscious re-pin (re-measure candidate
+    1000-permutation Monte-Carlo filter — genuinely EXECUTES. That coverage is
+    a property of the seed choice, not of the code, so a future
+    ``indicator_version`` / wheel / engine change that re-keys the pinned seed
+    could silently revert the rehearsal to a DSR-KILLED fast path (legs never
+    run) while the runtime gate stays green. These assertions make that rot
+    fail LOUD and force a conscious re-derivation (re-measure candidate
     constants per the #1798 matrix; never a silent coverage drop).
     """
     report = json.loads((rehearsal.results_root / "cascade" / "cascade-report.json").read_text())
@@ -542,17 +542,48 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # the 1000-permutation Monte-Carlo leg runs on the survivor and PASSES it
     # — every statistical leg genuinely EXECUTES (the R38 law; the old
     # "MC kills it" tail was a property of the old fixture, not of the law).
-    assert report["groups"][0]["report"]["stage_survivors"] == {
-        "hard_gates": 9,
-        "deflated_sharpe": 2,
-        "cpcv": 2,
-        "reality_check_spa": 2,
-        "pbo": 2,
-        "romano_wolf": 2,
-        "walk_forward": 2,
-        "lockbox": 1,
-        "monte_carlo": 1,
-    }, "the pinned seed's full-cascade shape drifted — re-pin consciously (#1798)"
+    #
+    # SHAPE PIN → LAW PIN (2026-07-19, the shard-5 red on club-O head
+    # 4dd18c24): the EXACT stage_survivors dict proved RUNNER-SENSITIVE —
+    # on the SAME commit the dedicated `sweep-rehearsal` CI job measured the
+    # re-lock shape (DSR passes 2 of 9, lockbox 2→1, MC passes 1; pool
+    # trial variance 0.788) while unit shard 5 AND a local 4-vCPU sandbox
+    # both measured a SECOND stable shape (DSR passes 6 of 9, mid legs keep
+    # all 6, lockbox keeps 6, MC kills one → 5; trial variance 0.5307 —
+    # reproduced 3/3 locally, so deterministic PER MACHINE, bimodal ACROSS
+    # machines). Root: the stage-3 BIPOP-CMA-ES trajectory (pycma + numpy,
+    # deterministically seeded) is floating-point-sensitive to the host
+    # CPU's runtime BLAS/SIMD kernel dispatch, so the 6 refined CELLS —
+    # count-stable, identity-drifting — differ across heterogeneous CI
+    # runners and re-shape the DSR pool's Sharpes. An exact dict therefore
+    # cannot hold fleet-wide; the pin below asserts the R38 LAW itself —
+    # the pool is NOT DSR-killed and every leg receives + processes >= 1
+    # candidate — which BOTH measured shapes satisfy while a DSR-KILLED
+    # fast path (the #1798 rot) still fails loud.
+    surv = report["groups"][0]["report"]["stage_survivors"]
+    _msg = "the pinned seed's full-cascade coverage broke — re-derive consciously (#1798)"
+    assert set(surv) == {
+        "hard_gates",
+        "deflated_sharpe",
+        "cpcv",
+        "reality_check_spa",
+        "pbo",
+        "romano_wolf",
+        "walk_forward",
+        "lockbox",
+        "monte_carlo",
+    }, _msg
+    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 6
+    # unique refined cells — 9 in every measured env, both attractors).
+    assert surv["hard_gates"] == 9, _msg
+    dsr = surv["deflated_sharpe"]
+    assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
+    for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):
+        assert 1 <= surv[leg] <= dsr, _msg  # each mid leg ran on >= 1 candidate
+    assert 1 <= surv["lockbox"] <= dsr, _msg  # lockbox ran AND fed the MC leg
+    # MC genuinely executed (lockbox >= 1 candidates reached it); an
+    # executed-and-killed MC (monte_carlo == 0) is legal under the law.
+    assert 0 <= surv["monte_carlo"] <= surv["lockbox"], _msg
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
 
