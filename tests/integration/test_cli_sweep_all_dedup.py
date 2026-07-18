@@ -564,3 +564,72 @@ def test_sweep_all_sla_nan_env_is_clean_user_error(
     err = capsys.readouterr().err
     assert "BRUTEX_SWEEP_PER_TUPLE_SECONDS" in err
     assert "nan days" not in err  # never a silently-poisoned projection
+
+
+def test_sweep_all_sla_multiplicity_folds_price_source_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cardinality-2 belt for the MARKERLESS price-source SLA-multiplicity seam.
+
+    The club-S1 merge composed main's DEC-NIFTY-PRICE-SOURCE-AXIS-001 (#1681)
+    axis into ``cmd_sweep_all``'s SLA cell weighting with NO textual conflict
+    marker — ``per_group_multiplicity`` must fold
+    ``× len(grid.price_source_cells)`` (``count_sweep_tuples`` folds the axis,
+    so a dropped factor makes every multi-cell price-source sweep UNDERCOUNT
+    its wall-clock projection past the §8 envelope guard). Every sibling SLA
+    test runs at price-source cardinality 1 where the factor is INERT, so this
+    is the ONE test that fails if the factor is dropped: it captures the
+    ``TupleCostCell`` list ``check_sweep_sla`` receives for a 2-cell grid vs
+    the 1-cell twin and asserts the multiplicity — and the projected total
+    weight — EXACTLY doubles (never a ``>=``).
+    """
+    from brutex.engine import sweep_sla_guard
+
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    captured: list[list[Any]] = []
+
+    def _capture(tuple_count: int, **kwargs: Any) -> Any:
+        captured.append(list(kwargs["cells"] or []))
+        raise ValueError("belt-capture: abort before any sweep work")
+
+    # cmd_sweep_all imports check_sweep_sla from its source module at call
+    # time, so the source-module patch is honored on both runs.
+    monkeypatch.setattr(sweep_sla_guard, "check_sweep_sla", _capture)
+
+    rc_one = _sweep_all(lake_root, catalog_path, tmp_path / "s1")
+    rc_two = _sweep_all(
+        lake_root,
+        catalog_path,
+        tmp_path / "s2",
+        # EMA-perturb second cell — spot-applicable, so no incidental
+        # stage1a.vwap_source_on_spot warning muddies the run.
+        price_source_cells="hlc3:close,hlc3:open",
+    )
+    # Both runs abort on the capture sentinel (the ValueError → clean
+    # user-error path), so no sweep work ever ran.
+    assert rc_one == cli.EXIT_USER_ERROR
+    assert rc_two == cli.EXIT_USER_ERROR
+    assert "belt-capture" in capsys.readouterr().err
+
+    one_cell, two_cell = captured
+    assert one_cell and len(one_cell) == len(two_cell)  # same (inst, tf, k) groups
+    # Regression anchor: the 1-cell baseline multiplicity is the pre-axis
+    # product exactly (1 direction × 1 SL × 1 TP × 1 proximity × 1 fib anchor).
+    assert all(cell.multiplicity == 1 for cell in one_cell)
+    for base, doubled in zip(one_cell, two_cell, strict=True):
+        # Same group coordinates, EXACTLY doubled multiplicity.
+        assert (base.label, base.k, base.n_bits, base.n_bars) == (
+            doubled.label,
+            doubled.k,
+            doubled.n_bits,
+            doubled.n_bars,
+        )
+        assert doubled.multiplicity == 2 * base.multiplicity
+
+    # And the whole-grid work proxy doubles with it — exact, never `>=`.
+    def _total_weight(cells: list[Any]) -> int:
+        return sweep_sla_guard.project_weighted_grid_cost(cells, per_tuple_seconds=1.0).total_weight
+
+    assert _total_weight(two_cell) == 2 * _total_weight(one_cell)

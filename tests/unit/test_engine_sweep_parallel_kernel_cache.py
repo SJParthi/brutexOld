@@ -97,7 +97,7 @@ from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.observability.logging import reset_configuration
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.audit import read_entries as read_ingest_entries
-from brutex.strategies.types import Side
+from brutex.strategies.types import Side, parse_price_source_cells
 from brutex.vocabulary import ProximityParams
 from structlog.testing import capture_logs
 
@@ -341,6 +341,38 @@ class TestResolveWorkerKernelCapacity:
     def test_single_axis_grid_floors_at_one(self) -> None:
         grid = _grid()
         assert mod.worker_kernel_capacity_default(grid) == 1
+
+    def test_worker_kernel_capacity_folds_price_source_cells(self) -> None:
+        """Cardinality-2 belt for the MARKERLESS price-source capacity seam.
+
+        The club-S1 merge composed main's DEC-NIFTY-PRICE-SOURCE-AXIS-001
+        (#1681) axis into this branch's #1464 per-worker kernel-cache sizing
+        law with NO textual conflict marker — ``worker_kernel_capacity_default``
+        must be ``min(max(1, proximities × fib_anchors × price_source_cells),
+        64)``, the orchestrator's own ResidentKernelCache fan-out (price_source
+        joined the kernel key in #1681, so dropping the factor here silently
+        LRU-thrashes every multi-cell price-source sweep per worker). Every
+        sibling test runs at price-source cardinality 1 where the factor is
+        INERT, so this is the ONE test that fails if the
+        ``× len(grid.price_source_cells)`` term is dropped.
+        """
+        # EMA-perturb second cell — spot-applicable, so no incidental
+        # stage1a.vwap_source_on_spot warning muddies the unit run.
+        two_cells = parse_price_source_cells("hlc3:close,hlc3:open")
+        assert len(two_cells) == 2
+        grid = _grid(
+            proximities=[None, ProximityParams(pivot_proximity_bps=25)],
+            price_source_cells=two_cells,
+        )
+        # 2 proximities × 1 fib anchor × 2 price-source cells = 4 — small
+        # cardinalities on purpose, so the 64 clamp never binds.
+        assert len(grid.fib_anchors) == 1
+        assert mod.worker_kernel_capacity_default(grid) == 4
+        # Regression anchor: the cardinality-1 twin keeps the pre-axis value
+        # exactly (the default single baseline cell is byte-inert).
+        baseline = _grid(proximities=[None, ProximityParams(pivot_proximity_bps=25)])
+        assert len(baseline.price_source_cells) == 1
+        assert mod.worker_kernel_capacity_default(baseline) == 2
 
     def test_blank_env_is_the_default(self) -> None:
         grid = _grid()
