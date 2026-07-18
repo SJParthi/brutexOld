@@ -3436,7 +3436,16 @@ hostile-review pass._
   module's ONE pure function law: `normalise_tick_size` behind the
   default-OFF `BRUTEX_CORE_RUST_MODELS` seam (crate 0.3.0→0.4.0) — the
   money_rust facade template verbatim (eligibility gate incl. the
-  context-hazard arm, import/API handshake, refuse-poison gate mirror-pinned
+  context-hazard arm — since the REFUTER-r1 fold ALSO guarding the ambient
+  ROUNDING mode: `!= ROUND_HALF_EVEN` ⇒ oracle-routed (pre-fix an ambient
+  ROUND_UP context made `Decimal('0.104999')` a steady-state flag-ON/OFF
+  divergence — the crate's pinned HALF_EVEN accepted the member '0.10'
+  where the oracle's ambient-mode quantize raised; nil live risk — default
+  context everywhere, seam default-OFF/inert; regression-pinned:
+  the counterexample verbatim + the all-modes hazard parametrization + the
+  ON≡OFF-under-ROUND_UP matrix, `TestAmbientRoundingGuard`, 12 tests —
+  battery 365 → 377, `models_rust.py` 100.00% at 168/66),
+  import/API handshake, refuse-poison gate mirror-pinned
   to `VALID_TICK_SIZES_RUPEES`, 16-call outcome burn-in + ship-the-oracle
   autorevert, panic belt + escape set; the `tick_refuse:*` protocol keeps
   every `TickSizeFormatError` message byte 100% Python-owned;

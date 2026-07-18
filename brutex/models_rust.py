@@ -100,10 +100,16 @@ untouched, spy-pinned):
 * AND, for every kind, a non-hazardous ambient decimal context: no
   ``Inexact``/``Rounded`` trap armed (the oracle's quantize/division sets
   those flags — armed traps make it RAISE where the context-independent
-  crate returns a value) and ``prec >= 12`` / ``Emax >= 12`` /
-  ``Emin <= -12`` (the whole candidate envelope fits with headroom — a
-  narrower window can raise ``InvalidOperation``/``Overflow`` in the
-  oracle; the money-seam r2 context-narrowing lesson applied from birth).
+  crate returns a value), the ambient ROUNDING mode exactly
+  ``ROUND_HALF_EVEN`` (the crate's pinned mode; the oracle's un-pinned
+  ``quantize(Decimal("0.01"))`` follows the ambient mode, so any other
+  mode can round a near-boundary candidate to a DIFFERENT 2dp string than
+  the crate — a member ⟷ non-member flip; HALF_EVEN is Python decimal's
+  DEFAULT, so the default context stays eligible), and ``prec >= 12`` /
+  ``Emax >= 12`` / ``Emin <= -12`` (the whole candidate envelope fits
+  with headroom — a narrower window can raise
+  ``InvalidOperation``/``Overflow`` in the oracle; the money-seam r2
+  context-narrowing lesson applied from birth).
 """
 
 from __future__ import annotations
@@ -112,7 +118,7 @@ import importlib
 import math
 import os
 import re
-from decimal import Decimal, Inexact, Rounded, getcontext
+from decimal import ROUND_HALF_EVEN, Decimal, Inexact, Rounded, getcontext
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -316,13 +322,20 @@ def _log_engaged_once(crate: ModuleType) -> None:
 
 
 def _context_hazard() -> bool:
-    """``True`` iff the ambient decimal context could make the oracle RAISE
-    where the context-independent crate returns a value (gate law): an
-    armed ``Inexact``/``Rounded`` trap, or a precision/exponent window
-    narrower than the law's whole candidate envelope.
+    """``True`` iff the ambient decimal context could make the oracle
+    DIVERGE from the context-independent crate (gate law): an armed
+    ``Inexact``/``Rounded`` trap (the oracle RAISES where the crate
+    returns a value), an ambient rounding mode other than
+    ``ROUND_HALF_EVEN`` (the crate's pinned mode — the oracle's un-pinned
+    ``quantize`` follows the ambient mode, so any other mode can round a
+    near-boundary candidate to a DIFFERENT 2dp string, flipping
+    member ⟷ non-member), or a precision/exponent window narrower than
+    the law's whole candidate envelope.
     """
     ctx = getcontext()
     if ctx.traps[Inexact] or ctx.traps[Rounded]:
+        return True
+    if ctx.rounding != ROUND_HALF_EVEN:
         return True
     if ctx.prec < _MIN_PREC:
         return True
@@ -334,10 +347,12 @@ def _encode_tick_input(raw: float | int | Decimal | str) -> tuple[str, str] | No
     law). ``None`` = route to the oracle without touching the crate.
 
     Safety invariant: the gate need NOT exclude every oracle-raise input —
-    the load-bearing law is "crate-accepts-a-member ⟹ the value is small
-    ⟹ the oracle produces the same member without raising"; for everything
-    else the crate can only REFUSE, and the refuse→serve-oracle path
-    reproduces the oracle's behavior (including its raw raises).
+    the load-bearing law HOLDS GIVEN the gate's rounding guard: the gate
+    requires the ambient rounding mode to be ``ROUND_HALF_EVEN`` (the
+    crate's pinned mode), so crate-accepts-a-member ⟹ the oracle's
+    ambient-mode quantize produces the same member without raising; every
+    other input the crate can only REFUSE, and refuse→serve-oracle
+    reproduces the oracle's behavior including its raw raises.
     """
     if _context_hazard():
         return None

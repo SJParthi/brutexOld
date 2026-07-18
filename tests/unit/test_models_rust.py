@@ -12,8 +12,24 @@ from __future__ import annotations
 import math
 import sys
 import types
-from collections.abc import Iterator
-from decimal import Context, Decimal, DecimalException, Inexact, Rounded, localcontext
+from collections.abc import Callable, Iterator
+from decimal import (
+    ROUND_05UP,
+    ROUND_CEILING,
+    ROUND_DOWN,
+    ROUND_FLOOR,
+    ROUND_HALF_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_HALF_UP,
+    ROUND_UP,
+    Context,
+    Decimal,
+    DecimalException,
+    Inexact,
+    Rounded,
+    getcontext,
+    localcontext,
+)
 from pathlib import Path
 
 import pytest
@@ -300,6 +316,106 @@ class TestEligibilityGate:
                 ctx.traps[armed_trap] = True
             assert models_rust._encode_tick_input(Decimal("0.05")) is None  # pyright: ignore[reportPrivateUsage]
         assert models_rust._encode_tick_input(Decimal("0.05")) is not None  # pyright: ignore[reportPrivateUsage]
+
+
+# ── The ambient-rounding guard (refuter r1) ────────────────────────────────
+
+#: Every stdlib decimal rounding mode OTHER than the crate's pinned
+#: ``ROUND_HALF_EVEN`` — each one is a gate hazard (oracle-routed).
+_NON_HALF_EVEN_MODES: list[str] = [
+    ROUND_UP,
+    ROUND_DOWN,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    ROUND_HALF_DOWN,
+    ROUND_05UP,
+]
+
+
+class TestAmbientRoundingGuard:
+    """Refuter r1: an ambient rounding mode != ``ROUND_HALF_EVEN`` is a
+    gate hazard — the oracle's un-pinned ``quantize(Decimal("0.01"))``
+    follows the ambient mode while the crate pins HALF_EVEN, so a
+    near-boundary candidate (``Decimal("0.104999")``) can flip
+    member ⟷ non-member between the arms.
+    """
+
+    def test_refuter_counterexample_round_up_steady_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The executed counterexample verbatim: flag-ON in the post-burn-in
+        steady state, under an ambient ``ROUND_UP`` context,
+        ``normalise_tick_size(Decimal("0.104999"))`` raises
+        ``TickSizeFormatError`` with the byte-same message as flag-OFF —
+        and the bomb crate proves the crate was NEVER touched (gate-routed).
+        """
+        _arm(monkeypatch, _bomb_crate())
+        models_rust.reset_models_rust_for_tests(remaining=0)  # steady state
+        with localcontext() as ctx:
+            ctx.rounding = ROUND_UP
+            with pytest.raises(models.TickSizeFormatError) as flag_on:
+                models.normalise_tick_size(Decimal("0.104999"))
+        with localcontext() as ctx:
+            ctx.rounding = ROUND_UP
+            with pytest.raises(models.TickSizeFormatError) as flag_off:
+                models._normalise_tick_size_python(  # pyright: ignore[reportPrivateUsage]
+                    Decimal("0.104999")
+                )
+        assert str(flag_on.value) == str(flag_off.value)
+        assert not models_rust.models_rust_disabled()
+
+    @pytest.mark.parametrize("mode", _NON_HALF_EVEN_MODES)
+    def test_every_non_half_even_mode_is_a_hazard(self, mode: str) -> None:
+        with localcontext() as ctx:
+            ctx.rounding = mode
+            assert models_rust._context_hazard() is True  # pyright: ignore[reportPrivateUsage]
+            assert models_rust._encode_tick_input(Decimal("0.05")) is None  # pyright: ignore[reportPrivateUsage]
+        assert models_rust._context_hazard() is False  # pyright: ignore[reportPrivateUsage]
+
+    def test_default_half_even_context_engages_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The positive twin: the DEFAULT context (``ROUND_HALF_EVEN``) is
+        non-hazardous and the crate is GENUINELY engaged."""
+        calls: list[tuple[str, str]] = []
+
+        def _spy(kind: str, payload: str) -> str:
+            calls.append((kind, payload))
+            return _law_faithful(kind, payload)
+
+        _arm(monkeypatch, _fake_crate(models_normalise_tick_size_str=_spy))
+        assert getcontext().rounding == ROUND_HALF_EVEN
+        assert models_rust._context_hazard() is False  # pyright: ignore[reportPrivateUsage]
+        assert models.normalise_tick_size(Decimal("0.05")) == Decimal("0.05")
+        assert calls == [("decimal", "0.05")]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [Decimal("0.104999"), Decimal("0.05"), Decimal("0.07")],
+        ids=["counterexample", "member", "refuse"],
+    )
+    def test_flag_on_equals_flag_off_under_round_up(
+        self, monkeypatch: pytest.MonkeyPatch, raw: Decimal
+    ) -> None:
+        """Flag-ON ≡ flag-OFF under an ambient ``ROUND_UP`` context over the
+        small matrix (counterexample · member · refuse) — every input
+        oracle-routed (bomb spy), outcomes identical."""
+        _arm(monkeypatch, _bomb_crate())
+        models_rust.reset_models_rust_for_tests(remaining=0)
+
+        def _outcome(
+            law: Callable[[float | int | Decimal | str], Decimal],
+        ) -> tuple[str, str]:
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_UP
+                try:
+                    return ("value", str(law(raw)))
+                except models.TickSizeFormatError as exc:
+                    return ("refuse", str(exc))
+
+        assert _outcome(models.normalise_tick_size) == _outcome(
+            models._normalise_tick_size_python  # pyright: ignore[reportPrivateUsage]
+        )
+        assert not models_rust.models_rust_disabled()
 
 
 # ── Degrade paths ──────────────────────────────────────────────────────────
