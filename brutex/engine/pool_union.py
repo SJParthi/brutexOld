@@ -36,7 +36,8 @@ then ``run_id`` ascending, then input order (a strict total order — the
 ``ResultsStore.top_k`` two-pass discipline collapsed into one key tuple).
 
 PRECONDITION for the per-source guarantee (review round 1, honesty): every
-non-empty source is guaranteed ≥ 1 admission ONLY when
+non-empty source is guaranteed ≥ 1 admission — or full coverage by earlier
+sources (every candidate already admitted through them) — ONLY when
 ``cap >= the number of non-empty sources``. Below that precondition sources
 admit in the fixed source order and the TAIL sources get none — e.g. at
 ``cap=3`` over five non-empty sources, ``win_rate`` (#4) and ``frontier``
@@ -190,7 +191,8 @@ def round_robin_union(
     exactly ``set(source[:cap])`` (the legacy top-K prefix — parity-pinned).
 
     PRECONDITION (review round 1, honesty): every non-empty source admits
-    ≥ 1 candidate ONLY when ``cap >= the number of non-empty sources``.
+    ≥ 1 candidate — or is fully covered by earlier sources' admissions —
+    ONLY when ``cap >= the number of non-empty sources``.
     Below that, sources admit in the fixed input order and the TAIL sources
     admit nothing. A source that admitted ZERO candidates while still
     holding a candidate OUTSIDE the final admitted set is STARVED — the
@@ -244,7 +246,10 @@ def _warn_starved_once(
     genuinely broken — a zero-admission source whose every candidate was
     admitted through other sources is covered, not starved). Reached only
     on the ``cap < non_empty`` shape (the caller gates), so the O(n)
-    membership sweep never runs on the production caps.
+    membership sweep never runs on the production caps. The memo keys on
+    the starved-source NAME SET per process — a second call site hitting
+    the SAME starved set at a DIFFERENT cap does not re-warn (by design,
+    the warn-once discipline).
     """
     starved = tuple(
         source_names[index] if source_names is not None else f"#{index}"

@@ -29,9 +29,14 @@ per process, the seam ALSO runs the Python oracle and compares the results
 EXACTLY (index lists — integers, so ``==`` is the bit-compare). A mismatch
 SHIPS THE ORACLE RESULT and latches the kernels OFF for the process (one
 ``rust_rank_select.kernel_autoreverted`` ERROR; later calls short-circuit to
-the oracle with a warn-once fallback). Selection output is therefore
-bit-identical either arm by construction — a wrong kernel can never select a
-different row set than the oracle would.
+the oracle with a warn-once fallback). Bit-identity is ENFORCED by that
+16-call burn-in bit-compare plus the refuse-poison shape gates — a kernel
+that turns membership-wrong only AFTER the burn-in exhausts is the standard
+accepted burn-in envelope (the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
+precedent, same as rust_metrics / greeks_batch / feed_rust), guarded by the
+cargo tests + the CI parity suites. Order-wrong kernel output is additionally
+harmless — the composer consumes the index lists set-based (and re-sorts the
+frontier itself).
 
 ## Honest envelope (Golden Rule #10)
 
