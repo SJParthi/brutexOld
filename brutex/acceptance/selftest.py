@@ -451,6 +451,9 @@ _LEDGER_FIELDS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    # DEC-STREAK-PROVENANCE-001 (club-P, PR #1547) appended the provenance
+    # column LAST — the mirror follows the ledger's appended-LAST law.
+    "streak_provenance",
 )
 
 
