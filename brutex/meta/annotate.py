@@ -5,7 +5,8 @@
 For every finalist combo with a results-depth ``.trades`` sidecar under
 ``sweep_runs/<run_id>/results-depth/`` the pass extracts the fixed feature
 vector per trade, fits the strictly out-of-fold CPCV P(win) column, sweeps
-the τ grid, replays the DEFAULT ILLUSTRATIVE abstention config over every
+the τ grid, replays the DEFAULT ILLUSTRATIVE abstention config (or an
+EXPLICIT operator-supplied one — the ``abstain_config`` seam) over every
 trade's ENTRY snapshot, and writes ONE canonical-JSON ``<stem>.meta.json``
 beside the ``.trades``/``.aggs``/``.equity`` trio — plus one run-level
 ``meta_annotation.json`` summary at the run dir.
