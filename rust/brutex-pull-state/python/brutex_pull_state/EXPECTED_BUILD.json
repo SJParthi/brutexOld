@@ -6,6 +6,9 @@
     "__version__",
     "alive_log_due",
     "auto_gate_decision",
+    "auto_state_verdict",
+    "auto_tick_decision",
+    "census_fold",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "intent_refused_restore_decision",
@@ -18,6 +21,7 @@
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",
+    "should_reload_master",
     "spot_only_note_surgery",
     "verdict_correlates",
     "wedge_decision"

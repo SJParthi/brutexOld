@@ -31,12 +31,25 @@
 // Muhurat margined-window + settle-token verdict kernels — codes only;
 // every human string + the fail-loud env raise stay Python.
 pub mod auto_pull_gate;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the auto-pull-scheduler tick-decision
+// ladder + durable-state-parse verdict kernels — codes only; the ticker
+// thread, store I/O, log-dedup memo and every human string stay Python.
+pub mod auto_pull_scheduler;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the instrument-master reload predicate
+// — five caller-resolved facts in, one bool out; the store probes stay
+// Python.
+pub mod auto_pull;
 // Wave 2E (DEC-RUST-PULL-STATE-001): the pull-intent parse-shape +
 // resume-decision core (DEC-PULL-INTENT-RESUME-001 re-hosted) — codes only;
 // the JSON decode (CPython's whole failure taxonomy), every warn string and
 // the PullIntent dataclass itself stay Python (see src/intent.rs).
 pub mod intent;
 pub mod market_hours;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the written-vs-settled census fold —
+// scoped rows/pairs in, counts + capped sample triples out; the payload
+// extraction (`str()`/`int()`), the `repr()` renders and the guarded
+// observe-only emit stay Python.
+pub mod pull_census;
 // Wave 1A (DEC-RUST-PULL-STATE-001): the last-pull OUTCOME decision core
 // (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
 // + the banner colour authority stay Python.
@@ -50,14 +63,17 @@ pub mod pull_scope;
 pub mod progress;
 pub mod stall;
 
+pub use auto_pull::should_reload_master;
 pub use auto_pull_gate::{
     GATE_BEFORE_SETTLE, GATE_MARKET_HOURS_BLOCKED, GATE_MUHURAT_DEFERRAL, GATE_NON_TRADING_DAY,
     GATE_OK, SETTLE_BAD_SHAPE, SETTLE_BELOW_FLOOR, SETTLE_NO_VALUE, SETTLE_NOT_WALL_CLOCK,
     SETTLE_OK, auto_gate_decision, muhurat_window_active, settle_token_verdict,
 };
+pub use auto_pull_scheduler::{auto_state_verdict, auto_tick_decision};
 pub use intent::{refused_restore_decision, resume_decision, resume_enabled, shape_verdict};
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use progress::{COUNT_DOMAIN_MAX, CountDomainError, progress_derived};
+pub use pull_census::{CENSUS_SAMPLE_CAP, census_fold};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 pub use stall::{
     WEDGE_ABSTAIN_PROBE_NONE, WEDGE_ADOPT_BASELINE, WEDGE_DEFER, WEDGE_ESCALATE, WEDGE_NO_PROBE,

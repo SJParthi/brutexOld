@@ -52,6 +52,9 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "__version__",
     "alive_log_due",  # pull_stall (Wave 1C)
     "auto_gate_decision",  # auto_pull_gate (Wave 2D)
+    "auto_state_verdict",  # auto_pull_scheduler (Wave 3G)
+    "auto_tick_decision",  # auto_pull_scheduler (Wave 3G)
+    "census_fold",  # pull_census (Wave 3G)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
     "intent_refused_restore_decision",  # pull_intent (Wave 2E)
@@ -64,6 +67,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
     "settle_token_verdict",  # auto_pull_gate (Wave 2D)
+    "should_reload_master",  # auto_pull (Wave 3G)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
     "verdict_correlates",  # pull_outcome (Wave 1A)
     "wedge_decision",  # pull_stall (Wave 1C)
@@ -104,6 +108,9 @@ from ._brutex_pull_state import (  # noqa: E402
     __version__,
     alive_log_due,
     auto_gate_decision,
+    auto_state_verdict,
+    auto_tick_decision,
+    census_fold,
     classify_pull_outcome,
     fno_only_note_surgery,
     intent_refused_restore_decision,
@@ -116,6 +123,7 @@ from ._brutex_pull_state import (  # noqa: E402
     pull_allowed_us,
     scope_token,
     settle_token_verdict,
+    should_reload_master,
     spot_only_note_surgery,
     verdict_correlates,
     wedge_decision,
@@ -137,6 +145,9 @@ __all__ = [
     "__version__",
     "alive_log_due",
     "auto_gate_decision",
+    "auto_state_verdict",
+    "auto_tick_decision",
+    "census_fold",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "intent_refused_restore_decision",
@@ -149,6 +160,7 @@ __all__ = [
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",
+    "should_reload_master",
     "spot_only_note_surgery",
     "verdict_correlates",
     "wedge_decision",

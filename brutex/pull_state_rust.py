@@ -42,7 +42,7 @@ the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent), never this one.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Final, Protocol, cast
 
@@ -1136,4 +1136,305 @@ def rust_progress_derived(
 __all__ += [
     "PROGRESS_COUNT_MAX",
     "rust_progress_derived",
+]
+
+
+# --- auto_pull_scheduler (Wave 3G) -------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/auto_pull_scheduler``
+# tick-decision + durable-state-parse kernel accessors — the SAME
+# guarded-consult discipline as the sections above (lazy resolve via the ONE
+# shared ``_resolve_kernel_symbol`` → ``_call_kernel`` defensive belt →
+# refuse-poison gate → ``None`` = use the byte-identical Python oracle).
+# Append-only section (the wave-worker convention).
+#
+# BOUNDARY: the ticker thread, the corruption-hardened store I/O
+# (``read_sidecar_bytes`` + the corrupt ⇒ DISARMED + one WARN posture), the
+# per-(day, reason) log-dedup memo, every log/status string and the
+# fail-LOUD ``BRUTEX_AUTO_PULL_TICK_S`` resolver STAY PYTHON.  The JSON
+# decode of the state sidecar stays Python too (the Wave-2E taxonomy law) —
+# every decode failure folds BEFORE any kernel consult.  The seam's
+# two-stage tick consult (pre-gate placeholders, then the post-gate real
+# facts) preserves the oracle's LAZY gate/launcher evaluation order — the
+# ladder's own arm ORDER makes the placeholder stage exact (pinned by the
+# exhaustive lattice golden + the crate's placeholder-leak test).
+
+#: ``auto_tick_decision`` ladder tokens (mirrors
+#: ``rust/brutex-pull-state/src/auto_pull_scheduler.rs`` — index == value).
+TICK_CODE_DISARMED: Final[int] = 0
+TICK_CODE_ALREADY_SUCCEEDED: Final[int] = 1
+TICK_CODE_ALREADY_ATTEMPTED: Final[int] = 2
+TICK_CODE_DEFERRED: Final[int] = 3
+TICK_CODE_LAUNCHER_UNBOUND: Final[int] = 4
+TICK_CODE_FIRE: Final[int] = 5
+
+#: Every legal ``auto_tick_decision`` result — the refuse-poison vocabulary.
+_TICK_CODES: Final[frozenset[int]] = frozenset(range(TICK_CODE_FIRE + 1))
+
+#: ``schema``-kind classification codes for ``auto_state_verdict`` (the
+#: value law — CPython's NUMERIC ``schema == 1`` across bool/int/float —
+#: lives in the kernel; these are mechanical type tags).
+SCHEMA_KIND_MISSING: Final[int] = 0
+SCHEMA_KIND_BOOL: Final[int] = 1
+SCHEMA_KIND_INT: Final[int] = 2
+SCHEMA_KIND_INT_HUGE: Final[int] = 3
+SCHEMA_KIND_FLOAT: Final[int] = 4
+SCHEMA_KIND_OTHER: Final[int] = 5
+
+#: Optional-string field-kind codes — the ONE Wave-2E vocabulary, derived
+#: (never re-minted): absent ≡ null load ``None``; a string loads itself;
+#: anything else is the corruption the kernel refuses.
+STATE_FIELD_ABSENT: Final[int] = INTENT_KIND_ABSENT
+STATE_FIELD_NULL: Final[int] = INTENT_KIND_NULL
+STATE_FIELD_STR: Final[int] = INTENT_KIND_STR
+STATE_FIELD_OTHER: Final[int] = INTENT_KIND_OTHER
+
+#: ``auto_state_verdict`` codes (0=valid · 1=not-object · 2=schema ·
+#: 3=armed · 4..=6 the three optional strings in constructor-arg order).
+STATE_CODE_VALID: Final[int] = 0
+STATE_CODE_NOT_OBJECT: Final[int] = 1
+STATE_CODE_BAD_SCHEMA: Final[int] = 2
+STATE_CODE_ARMED_NOT_BOOL: Final[int] = 3
+STATE_CODE_BAD_ARMED_AT: Final[int] = 4
+STATE_CODE_BAD_LAST_ATTEMPT: Final[int] = 5
+STATE_CODE_BAD_LAST_SUCCESS: Final[int] = 6
+
+#: The whole served state-verdict vocabulary — 255 (out-of-vocabulary
+#: inputs) is NOT in it, so a classifier/wheel mismatch degrades as
+#: ``kernel_invalid`` and the oracle decides.
+_STATE_CODES: Final[frozenset[int]] = frozenset(range(STATE_CODE_BAD_LAST_SUCCESS + 1))
+
+
+def rust_auto_tick_decision(
+    *,
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> int | None:
+    """Consult the kernel's tick-decision ladder; ``None`` = use the oracle.
+
+    The caller (``AutoPullScheduler``'s seam) resolves every fact —
+    ``succeeded_today``/``attempted_today`` are the Python-side ISO-date
+    comparisons (dates never cross the FFI) — and exploits the ladder's arm
+    ORDER for its two-stage consult (pre-gate placeholders first; the
+    kernel can only answer a state arm or DEFERRED for them).  Refuse-poison
+    gate: EXACTLY ``int`` (a ``bool`` pun degrades) inside the six-token
+    vocabulary.
+    """
+    verdict = _call_kernel(
+        "auto_tick_decision",
+        armed,
+        succeeded_today,
+        attempted_today,
+        gate_allowed,
+        launcher_bound,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _TICK_CODES:
+        warn_degrade_once("kernel_invalid", symbol="auto_tick_decision", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+def rust_auto_state_verdict(
+    *,
+    root_mapping: bool,
+    schema_kind: int,
+    schema_i64: int,
+    schema_f64_bits: int,
+    armed_is_bool: bool,
+    armed_at_kind: int,
+    last_attempt_kind: int,
+    last_success_kind: int,
+) -> int | None:
+    """Consult the kernel's state-shape verdict; ``None`` = use the oracle.
+
+    Codes in (the seam's mechanical classification of the already-decoded
+    payload), ONE verdict code out; every refusal MESSAGE stays Python
+    (``_state_from_payload`` composes the byte-identical ``ValueError``
+    text per code).  Refuse-poison gate: EXACTLY ``int`` inside the
+    seven-code served vocabulary (the kernel's 255 input-mismatch answer
+    deliberately degrades here — the oracle decides).
+    """
+    verdict = _call_kernel(
+        "auto_state_verdict",
+        root_mapping,
+        schema_kind,
+        schema_i64,
+        schema_f64_bits,
+        armed_is_bool,
+        armed_at_kind,
+        last_attempt_kind,
+        last_success_kind,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _STATE_CODES:
+        warn_degrade_once("kernel_invalid", symbol="auto_state_verdict", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+__all__ += [
+    "SCHEMA_KIND_BOOL",
+    "SCHEMA_KIND_FLOAT",
+    "SCHEMA_KIND_INT",
+    "SCHEMA_KIND_INT_HUGE",
+    "SCHEMA_KIND_MISSING",
+    "SCHEMA_KIND_OTHER",
+    "STATE_CODE_ARMED_NOT_BOOL",
+    "STATE_CODE_BAD_ARMED_AT",
+    "STATE_CODE_BAD_LAST_ATTEMPT",
+    "STATE_CODE_BAD_LAST_SUCCESS",
+    "STATE_CODE_BAD_SCHEMA",
+    "STATE_CODE_NOT_OBJECT",
+    "STATE_CODE_VALID",
+    "STATE_FIELD_ABSENT",
+    "STATE_FIELD_NULL",
+    "STATE_FIELD_OTHER",
+    "STATE_FIELD_STR",
+    "TICK_CODE_ALREADY_ATTEMPTED",
+    "TICK_CODE_ALREADY_SUCCEEDED",
+    "TICK_CODE_DEFERRED",
+    "TICK_CODE_DISARMED",
+    "TICK_CODE_FIRE",
+    "TICK_CODE_LAUNCHER_UNBOUND",
+    "rust_auto_state_verdict",
+    "rust_auto_tick_decision",
+]
+
+
+# --- pull_census (Wave 3G) ---------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/pull_census``
+# fold accessor — the SAME guarded-consult discipline (``_call_kernel``
+# defensive belt → refuse-poison gate → ``None`` = the byte-identical
+# Python oracle).  Append-only section (the wave-worker convention).
+#
+# BOUNDARY: the seam pre-extracts + scope-filters the ledger rows / lake
+# spans (the ``str()``/``int()`` conversions over arbitrary payload objects
+# and the lazy-``int()``-after-the-scope-filter law stay Python) and renders
+# the ``repr()`` sample strings from the returned triples; the kernel folds
+# sets, sorts (UTF-8 byte order ≡ code-point order — valid UTF-8 only; a
+# lone-surrogate symbol fails the pyo3 edge and the belt degrades) and caps.
+
+#: Sample-kind codes (mirrors ``rust/brutex-pull-state/src/pull_census.rs``).
+SAMPLE_KIND_SETTLED_UNWRITTEN: Final[int] = 0
+SAMPLE_KIND_WRITTEN_UNSETTLED: Final[int] = 1
+
+_SAMPLE_KINDS: Final[frozenset[int]] = frozenset(
+    {SAMPLE_KIND_SETTLED_UNWRITTEN, SAMPLE_KIND_WRITTEN_UNSETTLED}
+)
+
+#: The kernel's sample cap — sync-pinned against the Python
+#: ``pull_census.CENSUS_SAMPLE_CAP`` by the seam suite; a longer sample list
+#: can only mean a stale/corrupt wheel (refused below).
+_CENSUS_SAMPLE_CAP: Final[int] = 20
+
+#: The census result arity — ``(settled_unwritten, written_unsettled, samples)``.
+_CENSUS_TRIPLE_ARITY: Final[int] = 3
+
+
+def _census_count_ok(value: object) -> bool:
+    """EXACTLY a non-negative ``int`` (a ``bool`` pun degrades)."""
+    return type(value) is int and value >= 0
+
+
+def rust_census_fold(
+    rows: Sequence[tuple[str, str, bool]],
+    written_pairs: Sequence[tuple[str, str]],
+) -> tuple[int, int, tuple[tuple[int, str, str], ...]] | None:
+    """Consult the kernel's census fold; ``None`` = use the oracle.
+
+    Refuse-poison gate: EXACTLY a 3-tuple of two non-negative ints + a
+    ≤-cap sequence of ``(kind, symbol, interval)`` triples with kind in the
+    two-token vocabulary — anything else is a stale/corrupt wheel.
+    """
+    result = _call_kernel("census_fold", list(rows), list(written_pairs))
+    if result is _KERNEL_FAULT:
+        return None
+    if not isinstance(result, tuple) or len(result) != _CENSUS_TRIPLE_ARITY:
+        warn_degrade_once("kernel_invalid", symbol="census_fold", detail=type(result).__name__)
+        return None
+    settled_unwritten, written_unsettled, samples = result
+    if (
+        not _census_count_ok(settled_unwritten)
+        or not _census_count_ok(written_unsettled)
+        or not isinstance(samples, (list, tuple))
+        or len(samples) > _CENSUS_SAMPLE_CAP
+    ):
+        warn_degrade_once("kernel_invalid", symbol="census_fold", detail=repr(result)[:80])
+        return None
+    validated: list[tuple[int, str, str]] = []
+    for item in samples:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != _CENSUS_TRIPLE_ARITY
+            or type(item[0]) is not int
+            or item[0] not in _SAMPLE_KINDS
+            or type(item[1]) is not str
+            or type(item[2]) is not str
+        ):
+            warn_degrade_once("kernel_invalid", symbol="census_fold", detail=repr(item)[:80])
+            return None
+        validated.append((item[0], item[1], item[2]))
+    return (settled_unwritten, written_unsettled, tuple(validated))
+
+
+__all__ += [
+    "SAMPLE_KIND_SETTLED_UNWRITTEN",
+    "SAMPLE_KIND_WRITTEN_UNSETTLED",
+    "rust_census_fold",
+]
+
+
+# --- auto_pull (Wave 3G) -----------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/auto_pull``
+# reload-predicate accessor — the SAME guarded-consult discipline
+# (``_call_kernel`` defensive belt → bool-exact refuse-poison gate →
+# ``None`` = the byte-identical Python oracle).  Append-only section.
+
+#: The i64 FFI band for the two counts — an out-of-band CPython int stays
+#: on the DOCUMENTED Python arm (a representability fact, not a kernel
+#: fault — no warn; the intent ``_U64_MAX`` precedent).
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def rust_should_reload_master(
+    *,
+    index_count: int,
+    stock_count: int,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool | None:
+    """Consult the kernel's reload predicate; ``None`` = use the oracle.
+
+    The representability gate keeps an out-of-i64 count on the Python arm
+    SILENTLY; the refuse-poison gate is bool-exact.
+    """
+    if not (_I64_MIN <= index_count <= _I64_MAX and _I64_MIN <= stock_count <= _I64_MAX):
+        return None
+    verdict = _call_kernel(
+        "should_reload_master",
+        index_count,
+        stock_count,
+        legs_present,
+        stale_economics,
+        stale_eligibility,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once(
+            "kernel_invalid", symbol="should_reload_master", detail=type(verdict).__name__
+        )
+        return None
+    return verdict
+
+
+__all__ += [
+    "rust_should_reload_master",
 ]

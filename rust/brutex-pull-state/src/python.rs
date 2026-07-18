@@ -298,6 +298,103 @@ fn intent_resume_enabled(raw: Option<&str>) -> bool {
     crate::intent::resume_enabled(raw)
 }
 
+// --- auto_pull_scheduler (Wave 3G) ------------------------------------------
+// The tick-decision ladder + durable-state-parse verdict of
+// `brutex/dashboard/auto_pull_scheduler.py`. Codes/bools only cross; the
+// ticker thread, store I/O, log dedup and every human string stay Python.
+
+/// `tick_once`'s decision ladder token (0=disarmed .. 5=fire) — see
+/// `crate::auto_pull_scheduler::auto_tick_decision`.
+#[allow(clippy::fn_params_excessive_bools)] // 1:1 FFI mirror of the ladder facts
+#[pyfunction]
+#[pyo3(signature = (armed, succeeded_today, attempted_today, gate_allowed, launcher_bound))]
+fn auto_tick_decision(
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> u8 {
+    crate::auto_pull_scheduler::auto_tick_decision(
+        armed,
+        succeeded_today,
+        attempted_today,
+        gate_allowed,
+        launcher_bound,
+    )
+}
+
+/// `_state_from_payload`'s validation verdict over classified codes — see
+/// `crate::auto_pull_scheduler::auto_state_verdict`. An out-of-i64 /
+/// out-of-u64 slot raises `OverflowError` at the pyo3 edge (the facade's
+/// defensive belt degrades such a call to the oracle).
+#[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the classified payload
+#[pyfunction]
+#[pyo3(signature = (root_mapping, schema_kind, schema_i64, schema_f64_bits, armed_is_bool, armed_at_kind, last_attempt_kind, last_success_kind))]
+fn auto_state_verdict(
+    root_mapping: bool,
+    schema_kind: u8,
+    schema_i64: i64,
+    schema_f64_bits: u64,
+    armed_is_bool: bool,
+    armed_at_kind: u8,
+    last_attempt_kind: u8,
+    last_success_kind: u8,
+) -> u8 {
+    crate::auto_pull_scheduler::auto_state_verdict(
+        root_mapping,
+        schema_kind,
+        schema_i64,
+        schema_f64_bits,
+        armed_is_bool,
+        armed_at_kind,
+        last_attempt_kind,
+        last_success_kind,
+    )
+}
+
+// --- auto_pull (Wave 3G) -----------------------------------------------------
+
+/// The instrument-master reload predicate — see
+/// `crate::auto_pull::should_reload_master`. An out-of-i64 count raises
+/// `OverflowError` at the pyo3 edge (the seam's representability gate never
+/// sends one; the belt is insurance).
+#[pyfunction]
+#[pyo3(signature = (index_count, stock_count, legs_present, stale_economics, stale_eligibility))]
+fn should_reload_master(
+    index_count: i64,
+    stock_count: i64,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool {
+    crate::auto_pull::should_reload_master(
+        index_count,
+        stock_count,
+        legs_present,
+        stale_economics,
+        stale_eligibility,
+    )
+}
+
+// --- pull_census (Wave 3G) ---------------------------------------------------
+// The written-vs-settled census fold of `brutex/dashboard/pull_census.py`
+// (observe-only). The seam pre-extracts + scope-filters the rows/pairs
+// (`str()`/`int()` stay Python) and renders the `repr()` sample strings from
+// the returned triples; a lone-surrogate symbol fails the pyo3 String edge
+// and the facade belt degrades that call to the oracle.
+
+/// `(settled_unwritten, written_unsettled, samples)` — see
+/// `crate::pull_census::census_fold`.
+#[pyfunction]
+#[pyo3(signature = (rows, written_pairs))]
+fn census_fold(
+    rows: Vec<(String, String, bool)>,
+    written_pairs: Vec<(String, String)>,
+) -> (u64, u64, Vec<(u8, String, String)>) {
+    crate::pull_census::census_fold(&rows, &written_pairs)
+}
+
 // --- pull_progress (Wave 2F) ------------------------------------------------
 // The derived-metrics plane of `brutex/dashboard/pull_progress.py`
 // (DEC-PULL-PROGRESS-HONESTY-001). Counts cross as u64 (facade-gated to the
@@ -368,6 +465,13 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intent_resume_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_refused_restore_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_resume_enabled, m)?)?;
+    // --- auto_pull_scheduler (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(auto_tick_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(auto_state_verdict, m)?)?;
+    // --- auto_pull (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(should_reload_master, m)?)?;
+    // --- pull_census (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(census_fold, m)?)?;
     // --- pull_progress (Wave 2F) ---
     m.add_function(wrap_pyfunction!(progress_derived, m)?)?;
     Ok(())

@@ -133,3 +133,51 @@ def progress_derived(
     started_at: float,
     phase_started_at: float,
 ) -> tuple[float, float, float, bool, float]: ...
+
+# --- auto_pull_scheduler (Wave 3G) ---
+# The tick-decision ladder + durable-state-parse verdict of
+# brutex/dashboard/auto_pull_scheduler.py: caller-resolved booleans /
+# classified type-tag codes in, ONE ladder token / verdict code out (Python
+# composes every log line, ValueError message and the AutoPullState itself;
+# the ticker thread + store I/O never cross).
+
+def auto_tick_decision(
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> int: ...
+def auto_state_verdict(
+    root_mapping: bool,
+    schema_kind: int,
+    schema_i64: int,
+    schema_f64_bits: int,
+    armed_is_bool: bool,
+    armed_at_kind: int,
+    last_attempt_kind: int,
+    last_success_kind: int,
+) -> int: ...
+
+# --- pull_census (Wave 3G) ---
+# The written-vs-settled census fold of brutex/dashboard/pull_census.py:
+# scoped (symbol, interval, is_success) rows + scoped bars>0 pairs in,
+# (settled_unwritten, written_unsettled, capped (kind, symbol, interval)
+# sample triples) out — the repr() renders + `scanned` stay Python.
+
+def census_fold(
+    rows: list[tuple[str, str, bool]],
+    written_pairs: list[tuple[str, str]],
+) -> tuple[int, int, list[tuple[int, str, str]]]: ...
+
+# --- auto_pull (Wave 3G) ---
+# The instrument-master reload predicate of brutex/dashboard/auto_pull.py:
+# five caller-resolved facts in, one bool out (the store probes stay Python).
+
+def should_reload_master(
+    index_count: int,
+    stock_count: int,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool: ...
