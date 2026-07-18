@@ -59,7 +59,7 @@ __all__ = [
 
 # ── The stable reason vocabulary (mirrors GATE_REASON_ORDER's law) ──────────
 
-#: Door 1 — the entry-date trend regime is not in ``allowed_regimes``.
+#: Door 1 — the trade's PRIOR-session trend regime is not in ``allowed_regimes``.
 ABSTAIN_REGIME_MISMATCH: Final[str] = "regime_mismatch"
 #: Door 2 — VIX stamped and outside the configured INCLUSIVE ``[lo, hi]``.
 ABSTAIN_VIX_OUT_OF_BAND: Final[str] = "vix_out_of_band"
