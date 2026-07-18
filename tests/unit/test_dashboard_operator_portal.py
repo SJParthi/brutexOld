@@ -670,6 +670,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "scTf",
             "scDir",
             "scInstrument",
+            "scExec",
             "scMinWin",
             "scMinPf",
             "scMaxDd",
@@ -688,6 +689,11 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             ">Timeframe<",
             ">Direction<",
             ">Instrument<",
+            # `DEC-OPTIONS-EXEC-FEEDBACK-001`: the executability select — the
+            # ">" in the net>0 option is the literal &gt; entity in markup.
+            ">Executability<",
+            ">Options-priced<",
+            ">Net &gt; 0 after costs<",
             ">Min win %<",
             ">Min PF<",
             ">Max |DD| (paisa)<",

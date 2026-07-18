@@ -493,3 +493,140 @@ class TestRenderCaps:
             " return [a.rows.length, a.null_vix_excluded]; })()"
         )
         assert out == [5000, 0]
+
+
+#: The executability fixture rows (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+_EXEC_ROWS: list[dict[str, Any]] = [
+    {
+        "rank": 1,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": 64_206},
+    },
+    {
+        "rank": 2,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": -4_000},
+    },
+    {
+        "rank": 3,
+        "metrics": {},
+        "options_exec": {"status": "not_priced", "reason": "not_in_replay_set"},
+    },
+    {"rank": 4, "metrics": {}},  # absent options_exec — the pre-change row
+    {
+        "rank": 5,
+        "metrics": {},
+        "options_exec": {"status": "priced", "net_after_cost_paisa": 0},
+    },  # zero net is NOT > 0
+]
+
+
+class TestExecutabilityFilter:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the options_exec executability filter.
+
+    "priced" matches only rows whose additive options_exec object carries a
+    priced status; "positive" additionally requires net_after_cost_paisa > 0;
+    a row WITHOUT the options_exec key NEVER matches an active filter (the
+    absent-key law — a pre-change artifact filters to empty, never to a
+    fabricated verdict); "" (All) matches everything.
+    """
+
+    def _kept_ranks(self, executability: str) -> list[int]:
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1]).rows.map((r) => r.rank)",
+            json.dumps(_EXEC_ROWS),
+            json.dumps({"executability": executability}),
+        )
+        assert isinstance(out, list)
+        return out
+
+    def test_blank_filter_matches_everything(self) -> None:
+        assert self._kept_ranks("") == [1, 2, 3, 4, 5]
+
+    def test_priced_matches_only_priced_status_rows(self) -> None:
+        # not_priced (3) and absent-key (4) both drop — key presence alone is
+        # NOT a priced verdict.
+        assert self._kept_ranks("priced") == [1, 2, 5]
+
+    def test_positive_requires_priced_and_strictly_positive_net(self) -> None:
+        # Negative (2), unpriced (3), absent (4) and ZERO net (5) all drop.
+        assert self._kept_ranks("positive") == [1]
+
+    def test_absent_key_never_matches_either_active_filter(self) -> None:
+        for mode in ("priced", "positive"):
+            assert 4 not in self._kept_ranks(mode), mode
+        assert 4 in self._kept_ranks("")
+
+    def test_non_numeric_net_never_matches_positive(self) -> None:
+        """A string net (out-of-contract) is a definitive non-match — the
+        filter demands typeof number, never a coerced comparison."""
+        rows = [
+            {
+                "rank": 1,
+                "metrics": {},
+                "options_exec": {"status": "priced", "net_after_cost_paisa": "500"},
+            }
+        ]
+        out = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1]).rows.map((r) => r.rank)",
+            json.dumps(rows),
+            json.dumps({"executability": "positive"}),
+        )
+        assert out == []
+
+    def test_filter_row_predicate_direct(self) -> None:
+        """The exported bxFilterRow itself pins the three-value contract."""
+        out = _node_call(
+            "ARGS[0].map((c) => S.filterRow(c.row, c.filters))",
+            json.dumps(
+                [
+                    {"row": _EXEC_ROWS[0], "filters": {"executability": "positive"}},
+                    {"row": _EXEC_ROWS[3], "filters": {"executability": "priced"}},
+                    {"row": _EXEC_ROWS[3], "filters": {}},
+                ]
+            ),
+        )
+        assert out == [True, False, True]
+
+
+class TestExecColumnsConfig:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001` — the two exec-verdict columns are
+    config-driven off BXScreener.COLUMNS (dotted paths into the additive
+    objects; a pre-change artifact renders "—" via the absent-key law)."""
+
+    def test_columns_config_carries_the_two_exec_columns(self) -> None:
+        cols = _node_call("S.COLUMNS")
+        keys = [c["key"] for c in cols]
+        opt = cols[keys.index("options_exec.net_after_cost_paisa")]
+        assert opt == {
+            "key": "options_exec.net_after_cost_paisa",
+            "label": "Opt net",
+            "type": "num",
+            "money": True,
+            "explain": "options_net_after_cost",
+        }
+        fut = cols[keys.index("futures_exec.net_pnl_paisa")]
+        assert fut == {
+            "key": "futures_exec.net_pnl_paisa",
+            "label": "Fut net",
+            "type": "num",
+            "money": True,
+            "explain": "futures_net",
+        }
+        # Placed together right after the cascade verdict column.
+        assert (
+            keys.index("options_exec.net_after_cost_paisa") == keys.index("cascade.status_text") + 1
+        )
+        assert keys.index("futures_exec.net_pnl_paisa") == (
+            keys.index("options_exec.net_after_cost_paisa") + 1
+        )
+
+    def test_absent_key_cell_reads_undefined_for_the_dash_render(self) -> None:
+        """The dotted path over a pre-change row yields undefined (JSON null
+        through the harness) — the str-cell fallback renders "—"."""
+        out = _node_call(
+            '["options_exec.net_after_cost_paisa", "futures_exec.net_pnl_paisa"]'
+            ".map((k) => S.fieldValue(ARGS[0], k) === undefined)",
+            json.dumps({"rank": 1, "metrics": {}}),
+        )
+        assert out == [True, True]

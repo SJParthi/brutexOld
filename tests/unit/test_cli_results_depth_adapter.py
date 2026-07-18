@@ -250,3 +250,99 @@ class TestCascadeReportThreading:
         assert captured["cascade_join"] is None
         (warn,) = [e for e in logs if e["event"] == "cli.results_depth.cascade_join_failed"]
         assert warn["error_type"] == "CascadeJoinError"
+
+
+class TestExecSimProviderThreading:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001`: the winners-hook in-memory per-run_id
+    verdict maps become TOTAL provider closures — a known run_id serves its
+    EXACT verdict object, an unknown one the NAMED not_priced/not_in_replay_set
+    degrade; a ``None`` map threads NO provider (the entry key stays ABSENT,
+    artifact bytes byte-identical)."""
+
+    def _captured(self, tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        assert _call(tmp_path, _runner, **overrides) is True
+        return captured
+
+    def test_options_map_builds_a_total_provider_closure(self, tmp_path: Path) -> None:
+        from brutex.options.exec_verdict import options_exec_not_priced
+
+        verdict: dict[str, object] = {"status": "priced", "net_after_cost_paisa": 64_206}
+        captured = self._captured(tmp_path, options_exec={"r-known": verdict})
+        provider = captured["options_exec_provider"]
+        assert provider is not None
+        # The known run_id serves the EXACT verdict object (never a copy —
+        # dict(options_exec) shallow-copies the map, values ride through).
+        known = provider(SimpleNamespace(row=SimpleNamespace(run_id="r-known")))
+        assert known is verdict
+        # An unknown run_id reads the NAMED degrade, never a wrong join.
+        unknown = provider(SimpleNamespace(row=SimpleNamespace(run_id="r-unknown")))
+        assert unknown == options_exec_not_priced("not_in_replay_set")
+        assert unknown == {"status": "not_priced", "reason": "not_in_replay_set"}
+        # Only the WIRED map grows a provider.
+        assert captured["futures_exec_provider"] is None
+
+    def test_futures_map_builds_a_total_provider_closure(self, tmp_path: Path) -> None:
+        from brutex.futures.leaderboard import futures_exec_not_priced
+
+        verdict: dict[str, object] = {"status": "executed", "net_pnl_paisa": 749_625}
+        captured = self._captured(tmp_path, futures_exec={"r-known": verdict})
+        provider = captured["futures_exec_provider"]
+        assert provider is not None
+        known = provider(SimpleNamespace(row=SimpleNamespace(run_id="r-known")))
+        assert known is verdict
+        unknown = provider(SimpleNamespace(row=SimpleNamespace(run_id="r-gone")))
+        assert unknown == futures_exec_not_priced("not_in_replay_set")
+        assert unknown == {"status": "not_priced", "reason": "not_in_replay_set"}
+        assert captured["options_exec_provider"] is None
+
+    def test_none_maps_thread_no_providers(self, tmp_path: Path) -> None:
+        """The byte-identical passthrough: a sim that never ran threads NO
+        provider — build_top100 leaves the entry key ABSENT."""
+        captured = self._captured(tmp_path)
+        assert captured["options_exec_provider"] is None
+        assert captured["futures_exec_provider"] is None
+
+    def test_top100_preset_threads_the_resolved_token(self, tmp_path: Path) -> None:
+        from brutex.engine.top100_artifact import DEFAULT_TOP100_PRESET
+
+        default = self._captured(tmp_path)
+        assert default["preset_name"] == DEFAULT_TOP100_PRESET
+        explicit = self._captured(tmp_path, top100_preset="net_after_cost")
+        assert explicit["preset_name"] == "net_after_cost"
+
+    def test_fill_sensitivity_defaults_true_and_threads_false(self, tmp_path: Path) -> None:
+        """DEC-FILL-EXEC-GRID-1M-001: the annotation half is production-ON by
+        default; an explicit False threads through."""
+        default = self._captured(tmp_path)
+        assert default["fill_sensitivity"] is True
+        off = self._captured(tmp_path, fill_sensitivity=False)
+        assert off["fill_sensitivity"] is False
+
+
+class TestResolveTop100Preset:
+    """`DEC-OPTIONS-EXEC-FEEDBACK-001`: the eager fail-loud --top100-preset law."""
+
+    @pytest.mark.parametrize("token", [None, "", "   "])
+    def test_none_and_blank_read_the_default(self, token: str | None) -> None:
+        from brutex.engine.top100_artifact import DEFAULT_TOP100_PRESET
+
+        assert cli._resolve_top100_preset(token) == DEFAULT_TOP100_PRESET
+
+    def test_known_token_passes_through_stripped(self) -> None:
+        assert cli._resolve_top100_preset(" composite ") == "composite"
+
+    def test_unknown_token_refuses_naming_every_valid_value(self) -> None:
+        from brutex.engine.top100_artifact import TOP100_PRESETS
+
+        with pytest.raises(cli.CliUserError) as excinfo:
+            cli._resolve_top100_preset("typo")
+        message = str(excinfo.value)
+        assert "unknown --top100-preset 'typo'" in message
+        for preset in TOP100_PRESETS:
+            assert preset in message
