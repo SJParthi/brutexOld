@@ -991,12 +991,11 @@ class TestAlphaThreading:
     ) -> None:
         """A failed baseline carries NO alpha keys (the honest '—'), while
         the pass + artifact still complete (the R27 fence law)."""
-        import brutex.engine.results_depth_pass as pass_module
 
         def _boom(*args: object, **kwargs: object) -> object:
             raise ValueError("baseline exploded")
 
-        monkeypatch.setattr(pass_module, "compute_baseline", _boom)
+        monkeypatch.setattr(results_depth_pass, "compute_baseline", _boom)
         grid = _grid()
         report = _run_pass(out_root, grid)
         assert report.baselines_written == 0
@@ -1014,12 +1013,11 @@ class TestAlphaThreading:
         fail-soft in its OWN narrow guard — a raise there can never skip the
         pre-existing R27 baseline WRITE (still written + referenced +
         tallied, pass completes, alpha honestly absent)."""
-        import brutex.engine.results_depth_pass as pass_module
 
         def _boom(*args: object, **kwargs: object) -> object:
             raise ValueError("alpha derivation exploded")
 
-        monkeypatch.setattr(pass_module, "alpha_baseline_from_series", _boom)
+        monkeypatch.setattr(results_depth_pass, "alpha_baseline_from_series", _boom)
         grid = _grid()
         report = _run_pass(out_root, grid)
         # The R27 baseline artifact is untouched by the alpha raise.
@@ -1041,12 +1039,11 @@ class TestAlphaThreading:
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The alpha guard's escape trio propagates raw (never fail-soft)."""
-        import brutex.engine.results_depth_pass as pass_module
 
         def _oom(*_args: object, **_kwargs: object) -> object:
             raise MemoryError
 
-        monkeypatch.setattr(pass_module, "alpha_baseline_from_series", _oom)
+        monkeypatch.setattr(results_depth_pass, "alpha_baseline_from_series", _oom)
         with pytest.raises(MemoryError):
             _run_pass(out_root)
 
