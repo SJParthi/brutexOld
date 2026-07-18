@@ -27,6 +27,11 @@
 //! small SLOWDOWN, acceptable because the seam runs a handful of times per
 //! pull start / per mid-run window check, never on a hot path.
 
+// Wave 2E (DEC-RUST-PULL-STATE-001): the pull-intent parse-shape +
+// resume-decision core (DEC-PULL-INTENT-RESUME-001 re-hosted) — codes only;
+// the JSON decode (CPython's whole failure taxonomy), every warn string and
+// the PullIntent dataclass itself stay Python (see src/intent.rs).
+pub mod intent;
 pub mod market_hours;
 // Wave 1A (DEC-RUST-PULL-STATE-001): the last-pull OUTCOME decision core
 // (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
@@ -35,6 +40,7 @@ pub mod pull_outcome;
 pub mod pull_scope;
 pub mod stall;
 
+pub use intent::{refused_restore_decision, resume_decision, resume_enabled, shape_verdict};
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 pub use stall::{

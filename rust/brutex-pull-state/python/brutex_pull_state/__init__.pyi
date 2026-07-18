@@ -56,3 +56,37 @@ def wedge_decision(
     current: str | None,
 ) -> int: ...
 def alive_log_due(since_last_s: float, interval_s: float) -> bool: ...
+
+# --- pull_intent (Wave 2E) ---
+# The pull-intent parse-shape + resume-decision laws of
+# brutex/dashboard/pull_intent.py (DEC-PULL-INTENT-RESUME-001).  Codes only:
+# the seam classifies the ALREADY-Python-decoded payload's concrete types
+# into small integers (the JSON decode — and CPython's whole failure
+# taxonomy — stays Python; taxonomy parity by construction), and every warn
+# string / the frozen PullIntent dataclass stay Python.  The one string edge
+# is intent_resume_enabled's raw env token (the strip+lower+falsy-set law).
+
+def intent_shape_verdict(
+    root_mapping: bool,
+    symbols: int,
+    symbol: int,
+    from_date: int,
+    to_date: int,
+    scope: int,
+    restarts_kind: int,
+    restarts_value: int,
+    created_at_kind: int,
+) -> int: ...
+def intent_resume_decision(
+    has_intent: bool,
+    probe_acquirable: bool,
+    restarts: int,
+    max_restarts: int,
+) -> int: ...
+def intent_refused_restore_decision(
+    dry_run: bool,
+    started: bool,
+    current_present: bool,
+    prior_present: bool,
+) -> int: ...
+def intent_resume_enabled(raw: str | None) -> bool: ...

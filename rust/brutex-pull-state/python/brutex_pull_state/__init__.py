@@ -53,6 +53,10 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "alive_log_due",  # pull_stall (Wave 1C)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
+    "intent_refused_restore_decision",  # pull_intent (Wave 2E)
+    "intent_resume_decision",  # pull_intent (Wave 2E)
+    "intent_resume_enabled",  # pull_intent (Wave 2E)
+    "intent_shape_verdict",  # pull_intent (Wave 2E)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)

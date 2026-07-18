@@ -154,6 +154,87 @@ fn alive_log_due(since_last_s: f64, interval_s: f64) -> bool {
     crate::stall::alive_log_due(since_last_s, interval_s)
 }
 
+// --- pull_intent (Wave 2E) --------------------------------------------------
+// The pull-intent parse-shape + resume-decision laws of
+// `brutex/dashboard/pull_intent.py` (DEC-PULL-INTENT-RESUME-001). Codes only:
+// the seam classifies the ALREADY-Python-decoded payload's concrete types
+// into small integers (the JSON decode — and CPython's whole failure
+// taxonomy — stays Python, so taxonomy parity holds by construction), and
+// every warn string / structlog event / the frozen PullIntent dataclass stay
+// Python.  The ONE string edge is `intent_resume_enabled`'s raw env token
+// (the strip+lower+falsy-set law IS a string law); a lone-surrogate value
+// fails the pyo3 `&str` edge and the facade's belt degrades to the oracle.
+
+/// `PullIntent.from_payload`'s strict shape lattice over classified codes —
+/// see `crate::intent::shape_verdict` (0 = valid; 1..=8 name the first
+/// violation in probe order; 255 = out-of-vocabulary input codes, which the
+/// facade maps to `kernel_invalid`).
+#[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the classified payload
+#[pyfunction]
+#[pyo3(signature = (root_mapping, symbols, symbol, from_date, to_date, scope, restarts_kind, restarts_value, created_at_kind))]
+fn intent_shape_verdict(
+    root_mapping: bool,
+    symbols: u8,
+    symbol: u8,
+    from_date: u8,
+    to_date: u8,
+    scope: u8,
+    restarts_kind: u8,
+    restarts_value: i64,
+    created_at_kind: u8,
+) -> u8 {
+    crate::intent::shape_verdict(
+        root_mapping,
+        symbols,
+        symbol,
+        from_date,
+        to_date,
+        scope,
+        restarts_kind,
+        restarts_value,
+        created_at_kind,
+    )
+}
+
+/// `run_auto_resume`'s arm token (0=no-intent · 1=peer-active · 2=over-cap ·
+/// 3=proceed-to-bump) — the load-bearing probe-BEFORE-cap order lives in
+/// `crate::intent::resume_decision`.  An out-of-u64 count raises
+/// `OverflowError` at the pyo3 edge (the facade pre-checks representability
+/// and keeps such calls on the documented Python arm).
+#[pyfunction]
+#[pyo3(signature = (has_intent, probe_acquirable, restarts, max_restarts))]
+fn intent_resume_decision(
+    has_intent: bool,
+    probe_acquirable: bool,
+    restarts: u64,
+    max_restarts: u64,
+) -> u8 {
+    crate::intent::resume_decision(has_intent, probe_acquirable, restarts, max_restarts)
+}
+
+/// The refused-start restore arm (0=no-action · 1=leave-absent ·
+/// 2=clear-orphan · 3=restore-prior) — see
+/// `crate::intent::refused_restore_decision`.
+#[pyfunction]
+#[pyo3(signature = (dry_run, started, current_present, prior_present))]
+fn intent_refused_restore_decision(
+    dry_run: bool,
+    started: bool,
+    current_present: bool,
+    prior_present: bool,
+) -> u8 {
+    crate::intent::refused_restore_decision(dry_run, started, current_present, prior_present)
+}
+
+/// `resolve_pull_intent_resume`'s env-token law (default ON; the stripped,
+/// lowercased falsy set disables) — the strip is the CPython `str.isspace`
+/// twin, see `crate::intent::resume_enabled`.
+#[pyfunction]
+#[pyo3(signature = (raw))]
+fn intent_resume_enabled(raw: Option<&str>) -> bool {
+    crate::intent::resume_enabled(raw)
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -176,5 +257,10 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- pull_stall (Wave 1C) ---
     m.add_function(wrap_pyfunction!(wedge_decision, m)?)?;
     m.add_function(wrap_pyfunction!(alive_log_due, m)?)?;
+    // --- pull_intent (Wave 2E) ---
+    m.add_function(wrap_pyfunction!(intent_shape_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(intent_resume_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(intent_refused_restore_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(intent_resume_enabled, m)?)?;
     Ok(())
 }
