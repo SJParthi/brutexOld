@@ -66,7 +66,9 @@ def collect_test_files(root: Path, dirs: tuple[str, ...]) -> list[Path]:
         files.update(p for p in base.rglob(TEST_FILE_GLOB) if p.is_file())
     ordered = sorted(files)
     if not ordered:
-        raise SystemExit("shard_tests: zero test files collected — refusing to emit an empty universe")
+        raise SystemExit(
+            "shard_tests: zero test files collected — refusing to emit an empty universe"
+        )
     return ordered
 
 
@@ -93,7 +95,9 @@ def self_check(files: list[Path], shards: list[list[Path]]) -> None:
     for idx, shard in enumerate(shards):
         overlap = seen.intersection(shard)
         if overlap:
-            raise SystemExit(f"shard_tests: SELF-CHECK FAILED — shard {idx} duplicates {sorted(overlap)[:3]}")
+            raise SystemExit(
+                f"shard_tests: SELF-CHECK FAILED — shard {idx} duplicates {sorted(overlap)[:3]}"
+            )
         seen.update(shard)
     missing = set(files) - seen
     extra = seen - set(files)
