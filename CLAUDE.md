@@ -3319,19 +3319,39 @@ hostile-review pass._
   re-baseline re-keys NO recorded run identity, and the run-identity HASHES
   themselves are proven UNCHANGED by the oracle fixture. WIRED REQUIRED:
   the brutex-identity maturin build+install joins every ci.yml job that
-  installs fno-math (10) + doctor-daily/mutation/soak-selfhosted/
-  stress-nightly + the Makefile + bootstrap Step 6b (REQUIRED, exit 1);
+  installs fno-math (11, run-smoke included) + doctor-daily/mutation/
+  soak-selfhosted/stress-nightly + (since the independent refuter rounds)
+  the two self-hosted M4-Pro workflows verify-m4pro/bench-m4pro + the
+  Makefile + bootstrap Step 6b (REQUIRED, exit 1);
   NOT facade-fronted through `brutex.math` (`version` symbol collision
   with trading_core — the brutex_feed direct-import posture followed).
+  TWO INDEPENDENT REFUTER ROUNDS folded (the inline rounds' CLEAN claim
+  stands corrected — the per-finding record lives in MIGRATION.md #1954):
+  the m4pro wheel-install MAJOR; the hostile-utcoffset overflow abort →
+  checked-arithmetic total; the BLOCKER — corrupt ledger parquet SIGABRTed
+  the process (parquet-rs panics + `panic = "abort"`) — fixed by dropping
+  `panic = "abort"` (the brutex-lake precedent) + the `catch_unwind`
+  decode boundary mapping the panic class into the typed
+  `_LEDGER_READ_ERRORS` degrade, pinned by the deterministic subprocess
+  corruption battery (fails-before executed, rc −6); the doctor
+  wheel-freshness + source-digest stages gain the brutex_identity specs;
+  ci.yml's Trivy step gains `limit-severities-for-sarif` (the gate-
+  correctness fix for its dropped CRITICAL,HIGH filter — a repo-wide
+  CI-config correction flagged to the steward).
   GATES: combo 100.00% (21/2) · snapshot_hash 100.00% (11/4) ·
-  results_store 100.00% (243/76) · window_ledger_store 100.00% (372/94)
-  line+branch; cargo fmt/clippy `-D warnings` clean both feature sets, 26
+  results_store 100.00% (245/76) · window_ledger_store 100.00% (371/94)
+  line+branch (re-measured at the refuter-fold head); cargo fmt/clippy
+  `-D warnings` clean both feature sets, 28
   tests green under `--locked`; ruff/ruff-format clean; `mypy --strict`
   clean (the one stage3_refine `cma` note is merge-base-identical,
-  env-only); pyright 0 errors on touched files; the lane battery 373
-  passed. HONEST gaps: the lane's Python modules are not in mutation.yml's
+  env-only); pyright 0 errors on touched files. HONEST gaps: the lane's
+  Python modules are not in mutation.yml's
   mutmut loop (the brutex-lake precedent — the differential/golden suites
-  carry the load). ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  carry the load) and the crate is absent from its cargo-mutants list
+  (the per-PR `cargo test` battery is its gate — the #1892 precedent);
+  ONE known sub-threshold dependency advisory (thrift@0.17.0
+  CVE-2026-43868, MEDIUM, unfixable upstream, transitive via parquet-rs)
+  is disclosed in #1954. ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes, no new env vars.)
   Earlier: `claude/preopen-day-freshness-guard`
