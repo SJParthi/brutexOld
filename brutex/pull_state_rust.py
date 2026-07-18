@@ -239,6 +239,9 @@ _SCOPE_TOKEN_CODES: Final[frozenset[int]] = frozenset({0, 1, 2, SCOPE_CODE_UNKNO
 #: read as a degrade).
 _KERNEL_FAULT: Final[object] = object()
 
+#: The surgery kernels' result arity — ``(note, prefix_present, clause_present)``.
+_SURGERY_TRIPLE_ARITY: Final[int] = 3
+
 
 def _resolve_kernel_symbol(name: str) -> object | None:
     """Resolve one ``brutex_pull_state`` symbol, or ``None`` (warn-once).
@@ -254,7 +257,7 @@ def _resolve_kernel_symbol(name: str) -> object | None:
     except (ImportError, AttributeError):
         warn_degrade_once("wheel_missing")
         return None
-    kernel = getattr(brutex_pull_state, name, None)
+    kernel = cast("object | None", getattr(brutex_pull_state, name, None))
     if kernel is None:
         warn_degrade_once("wheel_stale", symbol=name)
         return None
@@ -319,7 +322,7 @@ def _validated_surgery_triple(name: str, result: object) -> tuple[str, bool, boo
     """
     if (
         isinstance(result, tuple)
-        and len(result) == 3
+        and len(result) == _SURGERY_TRIPLE_ARITY
         and type(result[0]) is str
         and type(result[1]) is bool
         and type(result[2]) is bool

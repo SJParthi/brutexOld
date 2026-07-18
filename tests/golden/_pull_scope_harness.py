@@ -26,16 +26,15 @@ Two renderings of ONE table:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from structlog.testing import capture_logs
-
+from brutex.dashboard.composite_pull import CompositePullReport
+from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pipeline_pull import (
     _market_hours_stop_note,
     run_full_pipeline,
 )
-from brutex.dashboard.composite_pull import CompositePullReport
-from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
 from brutex.dashboard.pull_scope import (
     GREEKS_NOT_RUN_NOTE,
@@ -49,6 +48,7 @@ from brutex.dashboard.pull_scope import (
     spot_only_historical_report,
     spot_only_metadata_report,
 )
+from structlog.testing import capture_logs
 
 #: The fixed tail every spot-surgery case appends (status/human recorded in
 #: the fixture so the pre-append derivation is self-describing).
@@ -339,7 +339,7 @@ def _mh_row(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _surgery_flags(logs: list[dict[str, Any]]) -> tuple[bool, bool | None, bool | None]:
+def _surgery_flags(logs: Sequence[Mapping[str, Any]]) -> tuple[bool, bool | None, bool | None]:
     """(miss_warned, prefix_present, clause_present) off the captured WARN."""
     miss = [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
     if not miss:

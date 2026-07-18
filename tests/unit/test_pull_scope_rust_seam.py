@@ -32,6 +32,8 @@ from brutex.dashboard.pull_scope import (
     normalize_pull_scope,
     rewrite_market_hours_note,
 )
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
@@ -44,6 +46,28 @@ _JSON_FIXTURE = _REPO_ROOT / "tests" / "golden" / "fixtures" / "pull_scope_note_
 _TAIL = CrossverifyTailOutcome(status="started", human="producer started (poll x)")
 
 _FLAG = "BRUTEX_PULL_STATE_RUST"
+
+#: Anchor-fragment note strategy for the real-wheel differential (module
+#: level so the ``@given``-decorated methods can reference it).
+_NOTE_FRAGMENT_LISTS = st.lists(
+    st.sampled_from(
+        [
+            ps._MARKET_HOURS_WINDOW_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._MARKET_HOURS_PHASES_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._MARKET_HOURS_RESUME_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._FULL_PREFIX,  # pyright: ignore[reportPrivateUsage]
+            ps._NOOP_FNO_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._NOOP_SPOT_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._STOP_FNO_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            "spot clean (1 pair(s))",
+            " — ",
+            "x",
+            "",
+        ]
+    ),
+    min_size=0,
+    max_size=6,
+).map("".join)
 
 
 @pytest.fixture(autouse=True)
@@ -95,9 +119,7 @@ class TestFlagOffNeverTouchesKernel:
         assert fno.startswith("F&O-only pipeline complete — ")
         assert bomb.touched == []
 
-    def test_explicit_falsy_flag_also_short_circuits(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "0")
         bomb = _RecordingBomb()
         monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
@@ -173,9 +195,7 @@ class TestFlagOnServesKernel:
         out = rewrite_market_hours_note("n", phases_replacement="p")
         assert out == "KERNEL[n|p]"
 
-    def test_spot_surgery_served_with_python_appends(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_spot_surgery_served_with_python_appends(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
         monkeypatch.setitem(
             sys.modules,
@@ -204,6 +224,17 @@ class TestFlagOnServesKernel:
         assert miss[0]["prefix_present"] is True
         assert miss[0]["fno_clause_present"] is False
         assert miss[0]["base_note"] == "half-drifted base"
+
+    def test_fno_surgery_served_clean_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+        monkeypatch.setitem(
+            sys.modules,
+            "brutex_pull_state",
+            _fake_kernel(fno_only_note_surgery=lambda note: ("CLEAN", True, True)),
+        )
+        with capture_logs() as logs:
+            assert build_fno_only_note("whatever") == "CLEAN"
+        assert [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"] == []
 
     def test_fno_surgery_served_and_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
@@ -347,6 +378,33 @@ class TestFlagOnDegrades:
             if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
         ] == ["kernel_invalid"]
 
+    def test_spot_surgery_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+
+        def _boom(note: str) -> tuple[str, bool, bool]:
+            raise ValueError("surgery kernel exploded")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "brutex_pull_state",
+            _fake_kernel(
+                spot_only_note_surgery=_boom,
+                market_hours_note_rewrite=lambda note, repl: note,
+            ),
+        )
+        base = (
+            "pipeline complete — spot clean (1 pair(s))"
+            ", metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)"
+        )
+        with capture_logs() as logs:
+            note = build_spot_only_note(base, _TAIL)
+        assert note.startswith("spot-only pipeline complete — ")  # the oracle served
+        assert [
+            e["reason"]
+            for e in logs
+            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
+        ] == ["kernel_error"]
+
     def test_wheel_missing_degrades_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # import → ImportError
@@ -413,9 +471,7 @@ class TestCrossLanguageAnchorDriftPin:
 
 
 def _require_wave1b_wheel() -> object:
-    wheel = pytest.importorskip(
-        "brutex_pull_state", reason="brutex_pull_state wheel not installed"
-    )
+    wheel = pytest.importorskip("brutex_pull_state", reason="brutex_pull_state wheel not installed")
     if not hasattr(wheel, "scope_token"):
         pytest.skip("installed brutex_pull_state wheel predates Wave 1B (no scope_token)")
     return wheel
@@ -438,18 +494,18 @@ class TestRealWheelParity:
             else:
                 assert normalize_pull_scope(token) == row["ok"]
         for row in table["market_hours_rewrite"]:
-            phases = row["phases"]
-            replacement = {
-                "SPOT": ps._MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE,
-                "FNO": ps._MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE,
-            }.get(phases, phases[2:])
+            phases = str(row["phases"])
+            if phases == "SPOT":
+                replacement = ps._MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE
+            elif phases == "FNO":
+                replacement = ps._MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE
+            else:
+                replacement = phases[2:]
             assert (
                 rewrite_market_hours_note(row["note"], phases_replacement=replacement)
                 == row["expected"]
             )
-        tail = CrossverifyTailOutcome(
-            status=table["tail"]["status"], human=table["tail"]["human"]
-        )
+        tail = CrossverifyTailOutcome(status=table["tail"]["status"], human=table["tail"]["human"])
         for row in table["spot_only_surgery"]:
             with capture_logs() as logs:
                 assert build_spot_only_note(row["base_note"], tail) == row["full"]
@@ -461,75 +517,61 @@ class TestRealWheelParity:
             missed = any(e["event"] == "pull_scope.note_surgery_miss" for e in logs)
             assert missed == row["miss_warned"]
 
+    @settings(
+        max_examples=200,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(note=_NOTE_FRAGMENT_LISTS, text=st.text(max_size=40))
     def test_hypothesis_differential_flag_on_vs_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, note: str, text: str
     ) -> None:
+        """Arbitrary anchor-fragment notes: flag-ON == flag-OFF byte-equal.
+
+        Each example toggles the flag ITSELF (0 → oracle, 1 → kernel), so the
+        function-scoped monkeypatch surviving across examples is harmless —
+        the house suppression precedent (test_dashboard_empty_state)."""
         _require_wave1b_wheel()
-        from hypothesis import given, settings
-        from hypothesis import strategies as st
+        base = note + text
+        monkeypatch.setenv(_FLAG, "0")
+        with capture_logs():
+            oracle_spot = build_spot_only_note(base, _TAIL)
+            oracle_fno = build_fno_only_note(base)
+            oracle_mh = rewrite_market_hours_note(base)
+        monkeypatch.setenv(_FLAG, "1")
+        with capture_logs():
+            assert build_spot_only_note(base, _TAIL) == oracle_spot
+            assert build_fno_only_note(base) == oracle_fno
+            assert rewrite_market_hours_note(base) == oracle_mh
 
-        fragments = st.sampled_from(
-            [
-                ps._FULL_PREFIX,
-                ps._NOOP_FNO_CLAUSE,
-                ps._NOOP_SPOT_CLAUSE,
-                ps._STOP_FNO_CLAUSE,
-                ps._MARKET_HOURS_WINDOW_CLAUSE,
-                ps._MARKET_HOURS_PHASES_CLAUSE,
-                ps._MARKET_HOURS_RESUME_CLAUSE,
-                "spot clean (1 pair(s))",
-                " — ",
-                "x",
-                "",
-            ]
-        )
-        notes = st.lists(fragments, min_size=0, max_size=6).map("".join)
-
-        @settings(max_examples=200, deadline=None)
-        @given(note=notes, text=st.text(max_size=40))
-        def _check(note: str, text: str) -> None:
-            base = note + text
-            monkeypatch.setenv(_FLAG, "0")
-            with capture_logs():
-                oracle_spot = build_spot_only_note(base, _TAIL)
-                oracle_fno = build_fno_only_note(base)
-                oracle_mh = rewrite_market_hours_note(base)
-            monkeypatch.setenv(_FLAG, "1")
-            with capture_logs():
-                assert build_spot_only_note(base, _TAIL) == oracle_spot
-                assert build_fno_only_note(base) == oracle_fno
-                assert rewrite_market_hours_note(base) == oracle_mh
-
-        _check()
-
-    def test_scope_token_differential_flag_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _require_wave1b_wheel()
-        from hypothesis import given, settings
-        from hypothesis import strategies as st
-
-        tokens = st.one_of(
+    @settings(
+        max_examples=300,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        token=st.one_of(
             st.none(),
             st.text(max_size=20),
             st.sampled_from(
                 ["full", "spot-only", "fno-only", "  spot-only  ", "\x1cfull\x1f", "junk"]
             ),
         )
-
-        @settings(max_examples=300, deadline=None)
-        @given(token=tokens)
-        def _check(token: str | None) -> None:
-            monkeypatch.setenv(_FLAG, "0")
-            try:
-                oracle: str | None = normalize_pull_scope(token)
-                oracle_raised = False
-            except ValueError:
-                oracle = None
-                oracle_raised = True
-            monkeypatch.setenv(_FLAG, "1")
-            if oracle_raised:
-                with pytest.raises(ValueError):
-                    normalize_pull_scope(token)
-            else:
-                assert normalize_pull_scope(token) == oracle
-
-        _check()
+    )
+    def test_scope_token_differential_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch, token: str | None
+    ) -> None:
+        _require_wave1b_wheel()
+        monkeypatch.setenv(_FLAG, "0")
+        try:
+            oracle: str | None = normalize_pull_scope(token)
+            oracle_raised = False
+        except ValueError:
+            oracle = None
+            oracle_raised = True
+        monkeypatch.setenv(_FLAG, "1")
+        if oracle_raised:
+            with pytest.raises(ValueError):
+                normalize_pull_scope(token)
+        else:
+            assert normalize_pull_scope(token) == oracle
