@@ -6,6 +6,8 @@
     "__version__",
     "alive_log_due",
     "auto_gate_decision",
+    "auto_state_verdict",
+    "auto_tick_decision",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "intent_refused_restore_decision",

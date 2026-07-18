@@ -1137,3 +1137,170 @@ __all__ += [
     "PROGRESS_COUNT_MAX",
     "rust_progress_derived",
 ]
+
+
+# --- auto_pull_scheduler (Wave 3G) -------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/auto_pull_scheduler``
+# tick-decision + durable-state-parse kernel accessors — the SAME
+# guarded-consult discipline as the sections above (lazy resolve via the ONE
+# shared ``_resolve_kernel_symbol`` → ``_call_kernel`` defensive belt →
+# refuse-poison gate → ``None`` = use the byte-identical Python oracle).
+# Append-only section (the wave-worker convention).
+#
+# BOUNDARY: the ticker thread, the corruption-hardened store I/O
+# (``read_sidecar_bytes`` + the corrupt ⇒ DISARMED + one WARN posture), the
+# per-(day, reason) log-dedup memo, every log/status string and the
+# fail-LOUD ``BRUTEX_AUTO_PULL_TICK_S`` resolver STAY PYTHON.  The JSON
+# decode of the state sidecar stays Python too (the Wave-2E taxonomy law) —
+# every decode failure folds BEFORE any kernel consult.  The seam's
+# two-stage tick consult (pre-gate placeholders, then the post-gate real
+# facts) preserves the oracle's LAZY gate/launcher evaluation order — the
+# ladder's own arm ORDER makes the placeholder stage exact (pinned by the
+# exhaustive lattice golden + the crate's placeholder-leak test).
+
+#: ``auto_tick_decision`` ladder tokens (mirrors
+#: ``rust/brutex-pull-state/src/auto_pull_scheduler.rs`` — index == value).
+TICK_CODE_DISARMED: Final[int] = 0
+TICK_CODE_ALREADY_SUCCEEDED: Final[int] = 1
+TICK_CODE_ALREADY_ATTEMPTED: Final[int] = 2
+TICK_CODE_DEFERRED: Final[int] = 3
+TICK_CODE_LAUNCHER_UNBOUND: Final[int] = 4
+TICK_CODE_FIRE: Final[int] = 5
+
+#: Every legal ``auto_tick_decision`` result — the refuse-poison vocabulary.
+_TICK_CODES: Final[frozenset[int]] = frozenset(range(TICK_CODE_FIRE + 1))
+
+#: ``schema``-kind classification codes for ``auto_state_verdict`` (the
+#: value law — CPython's NUMERIC ``schema == 1`` across bool/int/float —
+#: lives in the kernel; these are mechanical type tags).
+SCHEMA_KIND_MISSING: Final[int] = 0
+SCHEMA_KIND_BOOL: Final[int] = 1
+SCHEMA_KIND_INT: Final[int] = 2
+SCHEMA_KIND_INT_HUGE: Final[int] = 3
+SCHEMA_KIND_FLOAT: Final[int] = 4
+SCHEMA_KIND_OTHER: Final[int] = 5
+
+#: Optional-string field-kind codes — the ONE Wave-2E vocabulary, derived
+#: (never re-minted): absent ≡ null load ``None``; a string loads itself;
+#: anything else is the corruption the kernel refuses.
+STATE_FIELD_ABSENT: Final[int] = INTENT_KIND_ABSENT
+STATE_FIELD_NULL: Final[int] = INTENT_KIND_NULL
+STATE_FIELD_STR: Final[int] = INTENT_KIND_STR
+STATE_FIELD_OTHER: Final[int] = INTENT_KIND_OTHER
+
+#: ``auto_state_verdict`` codes (0=valid · 1=not-object · 2=schema ·
+#: 3=armed · 4..=6 the three optional strings in constructor-arg order).
+STATE_CODE_VALID: Final[int] = 0
+STATE_CODE_NOT_OBJECT: Final[int] = 1
+STATE_CODE_BAD_SCHEMA: Final[int] = 2
+STATE_CODE_ARMED_NOT_BOOL: Final[int] = 3
+STATE_CODE_BAD_ARMED_AT: Final[int] = 4
+STATE_CODE_BAD_LAST_ATTEMPT: Final[int] = 5
+STATE_CODE_BAD_LAST_SUCCESS: Final[int] = 6
+
+#: The whole served state-verdict vocabulary — 255 (out-of-vocabulary
+#: inputs) is NOT in it, so a classifier/wheel mismatch degrades as
+#: ``kernel_invalid`` and the oracle decides.
+_STATE_CODES: Final[frozenset[int]] = frozenset(range(STATE_CODE_BAD_LAST_SUCCESS + 1))
+
+
+def rust_auto_tick_decision(
+    *,
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> int | None:
+    """Consult the kernel's tick-decision ladder; ``None`` = use the oracle.
+
+    The caller (``AutoPullScheduler``'s seam) resolves every fact —
+    ``succeeded_today``/``attempted_today`` are the Python-side ISO-date
+    comparisons (dates never cross the FFI) — and exploits the ladder's arm
+    ORDER for its two-stage consult (pre-gate placeholders first; the
+    kernel can only answer a state arm or DEFERRED for them).  Refuse-poison
+    gate: EXACTLY ``int`` (a ``bool`` pun degrades) inside the six-token
+    vocabulary.
+    """
+    verdict = _call_kernel(
+        "auto_tick_decision",
+        armed,
+        succeeded_today,
+        attempted_today,
+        gate_allowed,
+        launcher_bound,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _TICK_CODES:
+        warn_degrade_once("kernel_invalid", symbol="auto_tick_decision", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+def rust_auto_state_verdict(
+    *,
+    root_mapping: bool,
+    schema_kind: int,
+    schema_i64: int,
+    schema_f64_bits: int,
+    armed_is_bool: bool,
+    armed_at_kind: int,
+    last_attempt_kind: int,
+    last_success_kind: int,
+) -> int | None:
+    """Consult the kernel's state-shape verdict; ``None`` = use the oracle.
+
+    Codes in (the seam's mechanical classification of the already-decoded
+    payload), ONE verdict code out; every refusal MESSAGE stays Python
+    (``_state_from_payload`` composes the byte-identical ``ValueError``
+    text per code).  Refuse-poison gate: EXACTLY ``int`` inside the
+    seven-code served vocabulary (the kernel's 255 input-mismatch answer
+    deliberately degrades here — the oracle decides).
+    """
+    verdict = _call_kernel(
+        "auto_state_verdict",
+        root_mapping,
+        schema_kind,
+        schema_i64,
+        schema_f64_bits,
+        armed_is_bool,
+        armed_at_kind,
+        last_attempt_kind,
+        last_success_kind,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _STATE_CODES:
+        warn_degrade_once("kernel_invalid", symbol="auto_state_verdict", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+__all__ += [
+    "SCHEMA_KIND_BOOL",
+    "SCHEMA_KIND_FLOAT",
+    "SCHEMA_KIND_INT",
+    "SCHEMA_KIND_INT_HUGE",
+    "SCHEMA_KIND_MISSING",
+    "SCHEMA_KIND_OTHER",
+    "STATE_CODE_ARMED_NOT_BOOL",
+    "STATE_CODE_BAD_ARMED_AT",
+    "STATE_CODE_BAD_LAST_ATTEMPT",
+    "STATE_CODE_BAD_LAST_SUCCESS",
+    "STATE_CODE_BAD_SCHEMA",
+    "STATE_CODE_NOT_OBJECT",
+    "STATE_CODE_VALID",
+    "STATE_FIELD_ABSENT",
+    "STATE_FIELD_NULL",
+    "STATE_FIELD_OTHER",
+    "STATE_FIELD_STR",
+    "TICK_CODE_ALREADY_ATTEMPTED",
+    "TICK_CODE_ALREADY_SUCCEEDED",
+    "TICK_CODE_DEFERRED",
+    "TICK_CODE_DISARMED",
+    "TICK_CODE_FIRE",
+    "TICK_CODE_LAUNCHER_UNBOUND",
+    "rust_auto_state_verdict",
+    "rust_auto_tick_decision",
+]

@@ -133,3 +133,28 @@ def progress_derived(
     started_at: float,
     phase_started_at: float,
 ) -> tuple[float, float, float, bool, float]: ...
+
+# --- auto_pull_scheduler (Wave 3G) ---
+# The tick-decision ladder + durable-state-parse verdict of
+# brutex/dashboard/auto_pull_scheduler.py: caller-resolved booleans /
+# classified type-tag codes in, ONE ladder token / verdict code out (Python
+# composes every log line, ValueError message and the AutoPullState itself;
+# the ticker thread + store I/O never cross).
+
+def auto_tick_decision(
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> int: ...
+def auto_state_verdict(
+    root_mapping: bool,
+    schema_kind: int,
+    schema_i64: int,
+    schema_f64_bits: int,
+    armed_is_bool: bool,
+    armed_at_kind: int,
+    last_attempt_kind: int,
+    last_success_kind: int,
+) -> int: ...

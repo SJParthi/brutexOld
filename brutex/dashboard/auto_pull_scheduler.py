@@ -72,6 +72,7 @@ from typing import Any, Final
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.calendars.auto_pull_gate import (
     AutoGateVerdict,
     auto_pull_allowed,
@@ -162,8 +163,136 @@ def _optional_str(payload: Mapping[str, Any], key: str) -> str | None:
     raise ValueError(f"{key} is not a string")
 
 
+#: The i64 FFI band for the classified ``schema`` value (outside it only
+#: the representability FACT crosses — it can never equal 1 anyway).
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def _classify_state_for_kernel(payload: dict[str, Any]) -> dict[str, int | bool]:
+    """MECHANICAL kernel-input classification of a decoded state payload.
+
+    The Wave-3G seam projection (DEC-RUST-PULL-STATE-001): type tags +
+    representability facts only — the value law (CPython's NUMERIC
+    ``schema == 1`` across bool/int/float) and the refusal lattice live in
+    the kernel; the JSON decode (and its whole failure taxonomy) happened
+    BEFORE this call.
+    """
+    import struct
+
+    schema = payload.get("schema")
+    schema_kind = _pull_state_rust.SCHEMA_KIND_OTHER
+    schema_i64 = 0
+    schema_f64_bits = 0
+    if schema is None:
+        schema_kind = _pull_state_rust.SCHEMA_KIND_MISSING
+    elif isinstance(schema, bool):
+        schema_kind = _pull_state_rust.SCHEMA_KIND_BOOL
+        schema_i64 = int(schema)
+    elif isinstance(schema, int):
+        if _I64_MIN <= schema <= _I64_MAX:
+            schema_kind = _pull_state_rust.SCHEMA_KIND_INT
+            schema_i64 = schema
+        else:
+            schema_kind = _pull_state_rust.SCHEMA_KIND_INT_HUGE
+    elif isinstance(schema, float):
+        schema_kind = _pull_state_rust.SCHEMA_KIND_FLOAT
+        schema_f64_bits = struct.unpack("<Q", struct.pack("<d", schema))[0]
+
+    def field_kind(key: str) -> int:
+        value = payload.get(key)
+        if key not in payload:
+            return _pull_state_rust.STATE_FIELD_ABSENT
+        if value is None:
+            return _pull_state_rust.STATE_FIELD_NULL
+        if isinstance(value, str):
+            return _pull_state_rust.STATE_FIELD_STR
+        return _pull_state_rust.STATE_FIELD_OTHER
+
+    return {
+        "root_mapping": True,
+        "schema_kind": schema_kind,
+        "schema_i64": schema_i64,
+        "schema_f64_bits": schema_f64_bits,
+        "armed_is_bool": isinstance(payload.get("armed"), bool),
+        "armed_at_kind": field_kind("armed_at"),
+        "last_attempt_kind": field_kind("last_attempt_date"),
+        "last_success_kind": field_kind("last_success_date"),
+    }
+
+
+#: Kernel refusal code → the field the oracle's message names (composed
+#: HERE, Python-side — byte-identical ``ValueError`` text per code).
+_STATE_FIELD_BY_CODE: Final[dict[int, str]] = {
+    _pull_state_rust.STATE_CODE_BAD_ARMED_AT: "armed_at",
+    _pull_state_rust.STATE_CODE_BAD_LAST_ATTEMPT: "last_attempt_date",
+    _pull_state_rust.STATE_CODE_BAD_LAST_SUCCESS: "last_success_date",
+}
+
+
+def _rust_state_refusal(payload: object) -> str | None:
+    """Kernel-served refusal MESSAGE for ``_state_from_payload``; ``None`` = oracle.
+
+    The Wave-2E serve-the-refusal law: only a NON-valid verdict is served (as
+    the byte-identical ``ValueError`` text the caller raises); a VALID
+    verdict deliberately falls THROUGH to the oracle body, so the state is
+    only ever constructed on the ONE Python path (a kernel-vs-oracle
+    disagreement on the valid arm is decided by the oracle — fail-safe).
+    A verdict inconsistent with the locally-known payload shape (a poisoned
+    in-vocabulary code that would need a mapping's field to compose its
+    message) degrades to the oracle too — this helper is TOTAL.
+    """
+    if isinstance(payload, dict):
+        codes = _classify_state_for_kernel(payload)
+    else:
+        codes = {
+            "root_mapping": False,
+            "schema_kind": _pull_state_rust.SCHEMA_KIND_MISSING,
+            "schema_i64": 0,
+            "schema_f64_bits": 0,
+            "armed_is_bool": False,
+            "armed_at_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+            "last_attempt_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+            "last_success_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+        }
+    verdict = _pull_state_rust.rust_auto_state_verdict(
+        root_mapping=bool(codes["root_mapping"]),
+        schema_kind=int(codes["schema_kind"]),
+        schema_i64=int(codes["schema_i64"]),
+        schema_f64_bits=int(codes["schema_f64_bits"]),
+        armed_is_bool=bool(codes["armed_is_bool"]),
+        armed_at_kind=int(codes["armed_at_kind"]),
+        last_attempt_kind=int(codes["last_attempt_kind"]),
+        last_success_kind=int(codes["last_success_kind"]),
+    )
+    if verdict is None or verdict == _pull_state_rust.STATE_CODE_VALID:
+        return None
+    if verdict == _pull_state_rust.STATE_CODE_NOT_OBJECT:
+        return None if isinstance(payload, dict) else "not a JSON object"
+    if not isinstance(payload, dict):
+        return None  # a mapping-shaped refusal for a non-mapping — poison
+    if verdict == _pull_state_rust.STATE_CODE_BAD_SCHEMA:
+        schema = payload.get("schema")
+        return f"unknown schema {schema!r} (expected {AUTO_PULL_STATE_SCHEMA})"
+    if verdict == _pull_state_rust.STATE_CODE_ARMED_NOT_BOOL:
+        return "armed is not a bool"
+    field = _STATE_FIELD_BY_CODE.get(verdict)
+    if field is None:  # pragma: no cover - unreachable past the facade gate
+        return None
+    return f"{field} is not a string"
+
+
 def _state_from_payload(payload: object) -> AutoPullState:
     """Decode the on-disk JSON into a state; :class:`ValueError` on any junk."""
+    # --- auto_pull_scheduler (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001):
+    # the validation LATTICE consulted in Rust over the mechanically-
+    # classified payload codes; a kernel refusal raises the byte-identical
+    # message composed above, a VALID verdict (and any degrade) falls
+    # through to the byte-identical oracle body below.
+    if _pull_state_rust.pull_state_rust_enabled():
+        refusal = _rust_state_refusal(payload)
+        if refusal is not None:
+            raise ValueError(refusal)
     if not isinstance(payload, dict):
         raise ValueError("not a JSON object")
     schema = payload.get("schema")
@@ -514,22 +643,78 @@ class AutoPullScheduler:
         instant = self._clock() if now is None else now
         today = instant.date()
         state = self._state_now()
-        if not state.armed:
-            return "disarmed"
         iso = today.isoformat()
-        if state.last_success_date == iso:
-            return "already_succeeded"
-        if state.last_attempt_date == iso:
-            # ONE started attempt per day, whatever its outcome — the
-            # incremental ledger makes the next day's run the catch-up.
-            return "already_attempted"
+        # --- auto_pull_scheduler (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001):
+        # the tick LADDER consulted in Rust, two-staged to preserve the
+        # oracle's LAZY side-effect order.  Stage 1 (pre-gate) passes
+        # ``gate_allowed=False, launcher_bound=False`` placeholders — the
+        # ladder's arm ORDER means they cannot affect the state arms (pinned
+        # by the crate's placeholder-leak test + the exhaustive lattice
+        # golden), so a disarmed/succeeded/attempted tick is served WITHOUT
+        # ever consulting the injected gate.  A DEFERRED answer means "past
+        # the state checks" — the gate consult and everything after run on
+        # the SHARED Python path below (stage 2 re-consults with the real
+        # facts; the launcher call, state writes, logs and ``_last_outcome``
+        # strings always stay Python).  Any degrade serves the oracle.
+        pre: int | None = None
+        if _pull_state_rust.pull_state_rust_enabled():
+            pre = _pull_state_rust.rust_auto_tick_decision(
+                armed=state.armed,
+                succeeded_today=state.last_success_date == iso,
+                attempted_today=state.last_attempt_date == iso,
+                gate_allowed=False,
+                launcher_bound=False,
+            )
+            if pre == _pull_state_rust.TICK_CODE_DISARMED:
+                return "disarmed"
+            if pre == _pull_state_rust.TICK_CODE_ALREADY_SUCCEEDED:
+                return "already_succeeded"
+            if pre == _pull_state_rust.TICK_CODE_ALREADY_ATTEMPTED:
+                return "already_attempted"
+            if pre != _pull_state_rust.TICK_CODE_DEFERRED:
+                pre = None  # degrade / out-of-stage poison → the oracle
+        if pre is None:
+            # The oracle pre-gate ladder (byte-identical to the pre-seam body).
+            if not state.armed:
+                return "disarmed"
+            if state.last_success_date == iso:
+                return "already_succeeded"
+            if state.last_attempt_date == iso:
+                # ONE started attempt per day, whatever its outcome — the
+                # incremental ledger makes the next day's run the catch-up.
+                return "already_attempted"
         verdict = self._gate(instant)
-        if not verdict.allowed:
+        launcher = self._launcher
+        post: int | None = None
+        if pre is not None:
+            # Stage 2: the SAME kernel over the real post-gate facts.  A
+            # state-arm answer here, or a FIRE with no launcher to call, is
+            # inconsistent with stage 1 / the local wiring — degrade.
+            post = _pull_state_rust.rust_auto_tick_decision(
+                armed=state.armed,
+                succeeded_today=state.last_success_date == iso,
+                attempted_today=state.last_attempt_date == iso,
+                gate_allowed=verdict.allowed,
+                launcher_bound=launcher is not None,
+            )
+            if post is not None and (
+                post < _pull_state_rust.TICK_CODE_DEFERRED
+                or (post == _pull_state_rust.TICK_CODE_FIRE and launcher is None)
+            ):
+                post = None
+        if post is None:
+            # The oracle post-gate decision (byte-identical conditions).
+            if not verdict.allowed:
+                post = _pull_state_rust.TICK_CODE_DEFERRED
+            elif launcher is None:
+                post = _pull_state_rust.TICK_CODE_LAUNCHER_UNBOUND
+            else:
+                post = _pull_state_rust.TICK_CODE_FIRE
+        if post == _pull_state_rust.TICK_CODE_DEFERRED:
             self._log_once(today, "auto_pull.deferred", verdict.reason, verdict.detail)
             self._last_outcome = f"deferred: {verdict.detail}"
             return f"deferred:{verdict.reason}"
-        launcher = self._launcher
-        if launcher is None:
+        if launcher is None or post == _pull_state_rust.TICK_CODE_LAUNCHER_UNBOUND:
             # Reachable only on an unbound test/partial wiring — production
             # binds the launcher at build_app time, before any tick.
             self._log_once(

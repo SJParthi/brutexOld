@@ -67,9 +67,7 @@ class TestFrozenGolden:
     def test_tick_rows_match_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
         assert live["tick"] == frozen["tick"]
 
-    def test_sequence_rows_match_frozen(
-        self, frozen: dict[str, Any], live: dict[str, Any]
-    ) -> None:
+    def test_sequence_rows_match_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
         assert live["sequence"] == frozen["sequence"]
 
     def test_state_rows_match_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
