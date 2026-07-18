@@ -1328,6 +1328,15 @@ jobs:
           else
             echo "(brutex.feed_rust test file not present yet — gate inactive)"
           fi
+          # 19c3 · brutex.optcost_rust (DEC-OPTCOST-TAILS-RUST-001) — the
+          #        flag-gated options-cost tail seam facade (default OFF;
+          #        wheel-free fakes carry the 100% gate, the wheel-gated
+          #        differential classes ride along when fno_math is present).
+          if compgen -G "tests/unit/test_optcost_rust.py" > /dev/null; then
+            pytest --cov=brutex.optcost_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_optcost_rust.py
+          else
+            echo "(brutex.optcost_rust test file not present yet — gate inactive)"
+          fi
           # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
           #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
           #       direct-construction tests, REQUIRED here because this gate

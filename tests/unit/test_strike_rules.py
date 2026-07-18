@@ -8,6 +8,9 @@ Verifies:
 - Rule name lookup
 """
 
+# Whitebox pins on the private Python oracles (DEC-OPTCOST-TAILS-RUST-001):
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import pytest
@@ -222,3 +225,45 @@ class TestSymmetry:
         )
         # Bull and bear strikes equidistant from ATM (24,000) but opposite sides
         assert bull_strike + bear_strike == 24_000 * 2
+
+
+# ── DEC-OPTCOST-TAILS-RUST-001: the flag-ON seam (ON == OFF, refusal bytes) ──
+
+
+class TestOptcostRustSeamOn:
+    """`resolve_offset_strike` under `BRUTEX_OPTCOST_TAILS_RUST=1` — the
+    kernel-routed arithmetic matches the Python oracle in both directions;
+    the non-OFFSET-rule ValueError stays pre-FFI with its exact bytes."""
+
+    @pytest.fixture(autouse=True)
+    def _seam_on(self, monkeypatch: pytest.MonkeyPatch):
+        import brutex.optcost_rust as ocr
+
+        pytest.importorskip("fno_math")
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "1")
+        ocr.reset_optcost_rust_for_tests()  # burn-in armed — oracle runs beside
+        yield
+        ocr.reset_optcost_rust_for_tests()
+
+    def test_both_directions_match_the_oracle(self) -> None:
+        import brutex.optcost_rust as ocr
+        from brutex.options.strike_rules import _resolve_offset_strike_python
+
+        for rule in OFFSET_RULES:
+            for direction in TradeDirection:
+                assert resolve_offset_strike(rule, direction, 24_000, 50) == (
+                    _resolve_offset_strike_python(int(rule.param), direction, 24_000, 50)
+                )
+        assert not ocr.optcost_rust_disabled()
+
+    def test_non_offset_rule_refusal_bytes_are_pre_ffi(self) -> None:
+        rule = RULES_BY_NAME["delta_target_030"]
+        with pytest.raises(
+            ValueError, match=r"resolve_offset_strike called on non-OFFSET rule 'delta_target_030'"
+        ):
+            resolve_offset_strike(rule, TradeDirection.BULL, 24_000, 50)
+
+    def test_out_of_i64_atm_takes_the_oracle_bigint_answer(self) -> None:
+        rule = RULES_BY_NAME["atm_plus_1_in_dir"]
+        atm = 2**64  # past i64 — the kernel abstains, Python's unbounded int serves
+        assert resolve_offset_strike(rule, TradeDirection.BULL, atm, 50) == atm + 50
