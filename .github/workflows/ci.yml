@@ -2813,12 +2813,20 @@ jobs:
   # is retired with the monolith; see git history at the pre-shard
   # revision for the full per-raise evidence.
   #
-  # FAIL-CLOSED LAW: `if: always()` + the explicit upstream-result
-  # check as the FIRST step. Without it a red shard would SKIP this job
-  # via `needs`, and both ci-ok's loop (skipped==pass) and branch
-  # protection (a skipped required check satisfies the context) would
-  # read green — the exact silent-pass hole the check closes. The four
-  # upstream jobs are ALSO in ci-ok's needs for the same reason.
+  # FAIL-CLOSED LAW: `if: ${{ !cancelled() }}` + the explicit
+  # upstream-result check as the FIRST step. Without it a red shard
+  # would SKIP this job via `needs`, and both ci-ok's loop
+  # (skipped==pass) and branch protection (a skipped required check
+  # satisfies the context) would read green — the exact silent-pass
+  # hole the check closes. The four upstream jobs are ALSO in ci-ok's
+  # needs for the same reason. `!cancelled()` — NOT `always()` — per
+  # the DEC-CI-PROOFBUNDLE-MKDIR-GATE-001 precedent: on a
+  # concurrency-cancelled/superseded run the upstream shards read
+  # `cancelled`, and an `always()` fan-in would still run and mint a
+  # spurious RED required context on the dead head (observed live on
+  # run 29644640240) while also resisting the cancellation itself; a
+  # cancelled run's fan-in must SKIP (the superseded head reports
+  # nothing — branch protection evaluates the new head's run).
   # ─────────────────────────────────────────────────────────────────
   test:
     name: Unit tests + coverage (100% gate)
@@ -2828,7 +2836,7 @@ jobs:
       - test-shard
       - per-module-static
       - per-module-touched
-    if: always()
+    if: ${{ !cancelled() }}
     timeout-minutes: 45
     steps:
       - name: Verify upstream shard + per-module gate jobs succeeded (fail-closed)
