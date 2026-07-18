@@ -174,9 +174,13 @@ def _interior_barless_runs(
     ``BRUTEX_LAKE_RUST_INTERIOR_GAP`` facade
     (:mod:`brutex.data.detectors_rust`). The NSE calendar + observed
     overlay stay PYTHON on both arms: the Rust arm's payload factory walks
-    the interior once with the SAME
-    :func:`~brutex.calendars.observed_sessions.is_trading_day_observed` and
-    passes plain TRADING-session ordinals — the calendar is never
+    the interior once, mirroring the oracle's two-gate law — a COVERED date
+    enters the session-ordinal list iff the STATIC
+    :func:`~brutex.calendars.nse.is_trading_day` says session (the
+    covered-breaks-static law, DEC-SEED-OBSERVED-OVERLAY-001 review fold),
+    a NON-covered date iff
+    :func:`~brutex.calendars.observed_sessions.is_trading_day_observed`
+    does — and passes plain TRADING-session ordinals; the calendar is never
     re-implemented in Rust. The fewer-than-two-covered arm and flag OFF
     (the default) return the oracle directly — the crate is never imported,
     byte-identical to the pre-facade law.
@@ -185,11 +189,26 @@ def _interior_barless_runs(
         return _interior_barless_runs_python(covered, observed)
 
     def _payload() -> InteriorRunsPayload:
+        have = set(covered)
         interior: list[int] = []
         cursor = covered[0] + timedelta(days=1)
         last = covered[-1]
         while cursor < last:
-            if is_trading_day_observed(cursor, observed=observed):
+            if cursor in have:
+                # A COVERED date enters the session list iff the STATIC
+                # calendar says session — the oracle's covered-breaks-static
+                # law (DEC-SEED-OBSERVED-OVERLAY-001 review fold): bars on an
+                # overlaid day are the drift-heal evidence the overlay entry
+                # is STALE, so the crate-side covered-membership break must
+                # fire exactly where the oracle breaks (consulting the
+                # overlay here would drop the ordinal and MERGE the two
+                # flanking runs — the differential's falsifying case). A
+                # covered date the static calendar calls a NON-session (a
+                # legacy weekend/holiday bar leak) stays OUT of the list —
+                # inert on both arms, exactly the oracle.
+                if is_trading_day(cursor):
+                    interior.append(cursor.toordinal())
+            elif is_trading_day_observed(cursor, observed=observed):
                 interior.append(cursor.toordinal())
             cursor += timedelta(days=1)
         return InteriorRunsPayload(
