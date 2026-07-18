@@ -477,43 +477,56 @@ class TestLoadObservedHolidays:
         monkeypatch.setattr(os, "open", _open_spy)
         monkeypatch.setattr(os, "close", _close_spy)
 
+        def _drain() -> tuple[list[int], list[int]]:
+            """Snapshot-then-reset the spy ledgers for ONE arm's assertions.
+
+            Each arm below asserts on its OWN freshly-bound snapshot lists so
+            every pin is self-contained — the previous shape re-asserted the
+            identical comparison on the same live, never-rebound ledgers
+            (mutated only in place via ``clear``/``append``), which a
+            flow-sensitive static analysis reads as implied by the earlier
+            arm's assert and therefore always-true (CodeQL alert 1089,
+            py/redundant-comparison).
+            """
+            snapshot = (list(opened), list(closed))
+            opened.clear()
+            closed.clear()
+            return snapshot
+
         # Absent: no fd exists, so no close may happen.
         assert load_observed_holidays(tmp_path) == frozenset()
-        assert opened == [] and closed == []
+        absent_opened, absent_closed = _drain()
+        assert absent_opened == [] and absent_closed == []
 
         # Served: ownership moved to the BufferedReader — the frame's own
         # finally must not (double-)close it, and the bytes are served
-        # (proven by the parsed overlay set). Reset both ledgers so only
-        # the LOADER's behaviour is measured.
+        # (proven by the parsed overlay set).
         path = self._write(
             tmp_path,
             {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("2026-05-12")]},
         )
-        opened.clear()
-        closed.clear()
         assert load_observed_holidays(tmp_path) == frozenset({_DRIFT_DAY})
-        assert len(opened) == 1 and closed == []
+        served_opened, served_closed = _drain()
+        assert len(served_opened) == 1 and served_closed == []
 
         # Not-regular (directory): opened (POSIX ``os.open`` on a directory
         # SUCCEEDS, unlike ``Path.open``), never handed off — closed exactly
         # once. This is the arm the surviving ``owned = True -> False``
-        # mutant leaks on: under it ``closed`` stays empty.
+        # mutant leaks on: under it the closed ledger stays empty.
         path.unlink()
         path.mkdir()
-        opened.clear()
-        closed.clear()
         with _hang_watchdog():
             assert load_observed_holidays(tmp_path) == frozenset()
-        assert len(opened) == 1 and closed == opened
+        dir_opened, dir_closed = _drain()
+        assert len(dir_opened) == 1 and dir_closed == dir_opened
 
         # Not-regular (FIFO): same law through the O_NONBLOCK open.
         path.rmdir()
         os.mkfifo(path)
-        opened.clear()
-        closed.clear()
         with _hang_watchdog():
             assert load_observed_holidays(tmp_path) == frozenset()
-        assert len(opened) == 1 and closed == opened
+        fifo_opened, fifo_closed = _drain()
+        assert len(fifo_opened) == 1 and fifo_closed == fifo_opened
 
 
 class TestWindowCovers:
