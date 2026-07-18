@@ -554,10 +554,11 @@ class TestStagedCooperativeCancel:
             stage = stages[token]
             if trip_on != token or should_stop is None:
                 return stage
+            latch: _Latch = should_stop  # bind the narrowed non-None latch for the closure
 
             def _tripping() -> _Outcome:
                 out = stage()
-                should_stop.value = True  # the cancel lands DURING this stage
+                latch.value = True  # the cancel lands DURING this stage
                 return out
 
             return _tripping  # type: ignore[return-value]
