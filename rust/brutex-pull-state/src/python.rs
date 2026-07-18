@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use crate::market_hours;
+use crate::pull_outcome;
 
 /// Crate version baked at compile time (`CARGO_PKG_VERSION`).
 #[pyfunction]
@@ -36,6 +37,38 @@ fn pull_allowed_us(us_of_day: i64, is_trading_day: bool) -> PyResult<bool> {
     market_hours::pull_allowed_us(us_of_day, is_trading_day).map_err(PyValueError::new_err)
 }
 
+// --- pull_outcome (Wave 1A, DEC-RUST-PULL-STATE-001) ---------------------
+
+/// The last-pull outcome DECISION codes `(outcome, tone, headline_code,
+/// detail_code)` — machine tokens only; Python composes every human string
+/// and keeps the `verdict_banner` colour authority (the `@verdict` /
+/// `@verdict_prepull` markers hand the banner fold back to Python).
+///
+/// Total over every input: strings cross as UTF-8, `failed` as `i64` (an
+/// out-of-`i64` int raises `OverflowError` at the pyo3 edge — the facade's
+/// defensive belt degrades such a call to the oracle).
+#[pyfunction]
+#[pyo3(signature = (state, detail, failed, stalled, wedged, has_verdict))]
+fn classify_pull_outcome(
+    state: &str,
+    detail: &str,
+    failed: i64,
+    stalled: bool,
+    wedged: bool,
+    has_verdict: bool,
+) -> (String, String, String, String) {
+    pull_outcome::classify_pull_outcome(state, detail, failed, stalled, wedged, has_verdict)
+}
+
+/// The run-id correlation law of `classify_retained_pull_outcome`: `True`
+/// iff the retained snapshot's NON-empty run id equals the verdict holder's
+/// stamped id (see `crate::pull_outcome::verdict_correlates`).
+#[pyfunction]
+#[pyo3(signature = (retained_id, verdict_id))]
+fn verdict_correlates(retained_id: &str, verdict_id: &str) -> bool {
+    pull_outcome::verdict_correlates(retained_id, verdict_id)
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -47,5 +80,8 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SOURCE_DIGEST", crate::SOURCE_DIGEST)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(pull_allowed_us, m)?)?;
+    // --- pull_outcome (Wave 1A) ---
+    m.add_function(wrap_pyfunction!(classify_pull_outcome, m)?)?;
+    m.add_function(wrap_pyfunction!(verdict_correlates, m)?)?;
     Ok(())
 }
