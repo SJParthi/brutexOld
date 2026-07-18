@@ -1085,6 +1085,7 @@ def _run_staged_pipeline(
     warm_futures_movers: Callable[[], MoversWarmResult] | None,
     warm_options_movers: Callable[[], MoversWarmResult] | None,
     strict_gate: bool,
+    should_stop: CancelCheck | None,
     market_closed: Callable[[], bool] | None,
     vendor: str,
 ) -> PipelinePullReport:
@@ -1115,6 +1116,19 @@ def _run_staged_pipeline(
       predicate — a guard-free vendor profile passes ``market_closed=None``
       and never defers (the ADR Decision 4 per-vendor guard binding; the
       binder is WS-C).
+    * **Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001, the staged
+      mirror of the legacy between-phases probe):** *should_stop* is
+      consulted after EVERY invoked stage — a cancel observed after stage k
+      stops the chain with the SEQUENCER-minted
+      ``stopped_after = "<stage k> (cancelled)"`` (cancel WINS over the gate
+      verdict, the legacy ordering law — the cancel check precedes the
+      phase gate), the just-run stage's status stays HONEST (``settled`` /
+      ``failed`` as measured — never fake-settled), every later PRESENT
+      stage is marked ``skipped`` by the fail-closed arm, ABSENT stages
+      keep their vacuous ``absent`` token (the Decision 3 contract is
+      undisturbed), and the movers warm is withheld (``stopped_after`` set).
+      Durable work stands; the next pull resumes the remainder. ``None``
+      (every cancel-free caller) is byte-identical.
     * **Halts (§11):** any other exception is a vendor-halt — ONE
       ``pipeline.stage.halted`` event (vendor + stage tokens) then RE-RAISE
       to the job layer's CRITICAL pull-halt handling; ``LakeWriteHalt`` is
@@ -1170,6 +1184,7 @@ def _run_staged_pipeline(
     )
     status: dict[str, str] = {}
     stopped_after: str | None = None
+    cancelled = False
     with shared_pull_ledger_scope():
         for token, fn, vendor_stage in plan:
             if fn is None:
@@ -1235,6 +1250,21 @@ def _run_staged_pipeline(
                 status[token] = STAGE_STATUS_FAILED
                 stopped_after = token
                 _LOG.warning("pipeline.stage.settled", vendor=vendor, stage=token, ok=False)
+            if _cancel_requested(should_stop):
+                # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001)
+                # — the staged mirror of the legacy between-phases probe,
+                # consulted after EVERY invoked stage. CANCEL WINS over the
+                # gate verdict (the legacy ordering law: the cancel check
+                # precedes the phase gate), so the minted token reads
+                # "<stage> (cancelled)" either way, while the stage's own
+                # status above stays honest (settled/failed as measured —
+                # never fake-settled). Every later PRESENT stage takes the
+                # fail-closed `skipped` arm; ABSENT stages keep their vacuous
+                # token (the Decision 3 contract is undisturbed). Durable
+                # work stands; the next pull resumes the remainder.
+                cancelled = True
+                stopped_after = f"{token} (cancelled)"
+                _LOG.warning("pipeline.stage.cancelled", vendor=vendor, stage=token, ok=ok)
     # Movers warm — the §4.1 supersession-4 staged-graph law (no terminal
     # prebuild exists to gate on): spot-prebuild ok ∧ futures-prebuild ok ∧
     # options settled, each vacuously ok when ABSENT (Decision 3), and only
@@ -1267,9 +1297,13 @@ def _run_staged_pipeline(
                 failed=dict(segment_movers_failed),
                 vendor=vendor,
             )
-    note = _staged_note(vendor, stopped_after, status) + _movers_note_clause(
-        segment_movers_warmed, segment_movers_failed
-    )
+    note = _staged_note(vendor, stopped_after, status)
+    if cancelled:
+        # The honest amber-partial guidance rides the staged note too
+        # (DEC-JOB-COOPERATIVE-CANCEL-001 — one cancel vocabulary across
+        # both shapes).
+        note += f" — {_CANCEL_NOTE}"
+    note += _movers_note_clause(segment_movers_warmed, segment_movers_failed)
     return PipelinePullReport(
         spot=None,
         metadata=None,
@@ -1313,7 +1347,13 @@ def run_full_pipeline(
     honest note — the completed phases' durable state stands, the skipped
     phases run on the next pull. ``None`` (every legacy caller) is
     byte-identical. Composes with the existing gate-failure stop (a cancelled
-    report is never ``ok``).
+    report is never ``ok``). The STAGED shape
+    (DEC-STAGED-SEQUENCER-SEAMS-001) threads the SAME probe through
+    :func:`_run_staged_pipeline` — consulted after every invoked stage, the
+    sequencer-minted ``stopped_after = "<stage> (cancelled)"`` stop, later
+    PRESENT stages honestly ``skipped``, ABSENT stages vacuously settled
+    (the Decision 3 contract undisturbed), movers warm withheld — a staged
+    caller's cancel is NEVER silently ignored.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -1530,6 +1570,7 @@ run_options, run_greeks
             warm_futures_movers=warm_futures_movers,
             warm_options_movers=warm_options_movers,
             strict_gate=strict_gate,
+            should_stop=should_stop,
             market_closed=market_closed,
             vendor=vendor,
         )
