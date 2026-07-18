@@ -125,9 +125,6 @@ pub mod resample;
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
 pub mod stats_shard;
 pub mod window_ledger;
-// ADR-0020 G10 CONVERT — the window-ledger parquet RENDER
-// (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918; row-equivalence
-// standard, never bytes — the #1917 spike record). ADDITIVE registration.
 // SLICE T24 PR-1 — the cold data-integrity detector pure laws
 // (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948): the
 // raw-integrity blake2b digest + the interior bar-less run walker + the
@@ -575,7 +572,6 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // which is irrelevant to a polars-free law).
     m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
     m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
-    // ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) — the
     // SLICE T24 PR-1 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001) — the detector
     // pure laws; the facade `brutex/data/detectors_rust.py` engages them
     // behind three default-OFF flags via the all-or-nothing SYMBOL

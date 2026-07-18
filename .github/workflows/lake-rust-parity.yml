@@ -78,8 +78,10 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
-      # G10 CONVERT — the window-ledger parquet-render seam
-      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      # Window-ledger store (its render plane is superseded by
+      # DEC-RUST-RUNID-STORES-001, ledger #1954 — the G10 CONVERT seam is
+      # RETIRED); the path entries are kept for the G8 pure-law suite +
+      # lane co-triggering.
       - "brutex/data/window_ledger_store.py"
       - "tests/unit/test_window_ledger_store.py"
       - "tests/unit/test_lake_rust_render.py"
@@ -132,8 +134,10 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
-      # G10 CONVERT — the window-ledger parquet-render seam
-      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      # Window-ledger store (its render plane is superseded by
+      # DEC-RUST-RUNID-STORES-001, ledger #1954 — the G10 CONVERT seam is
+      # RETIRED); the path entries are kept for the G8 pure-law suite +
+      # lane co-triggering.
       - "brutex/data/window_ledger_store.py"
       - "tests/unit/test_window_ledger_store.py"
       - "tests/unit/test_lake_rust_render.py"

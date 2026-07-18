@@ -3397,8 +3397,11 @@ hostile-review pass._
   correctness fix for its dropped CRITICAL,HIGH filter — a repo-wide
   CI-config correction flagged to the steward).
   GATES: combo 100.00% (21/2) · snapshot_hash 100.00% (11/4) ·
-  results_store 100.00% (245/76) · window_ledger_store 100.00% (371/94)
-  line+branch (re-measured at the refuter-fold head); cargo fmt/clippy
+  results_store 100.00% (245/76) · window_ledger_store 100.00% (381/96)
+  line+branch (re-measured at the refuter-fold head; window_ledger_store
+  re-measured 371/94 → 381/96 at the post-merge cleanup head — the #1639
+  merge-forward's env guard added 10 stmts/2 branches, coverage genuinely
+  100.00%); cargo fmt/clippy
   `-D warnings` clean both feature sets, 28
   tests green under `--locked`; ruff/ruff-format clean; `mypy --strict`
   clean (the one stage3_refine `cma` note is merge-base-identical,
