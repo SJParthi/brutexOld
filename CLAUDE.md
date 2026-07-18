@@ -29,6 +29,18 @@ silent numpy degrade; the u64 path byte-identical (goldens unmodified,
 bomb-spy-pinned). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1942 —
 this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md
+#1918 — ADR-0020 slice G10 CONVERT: the `window_ledger_store` parquet render
+routed through `rust/brutex-lake` behind the default-OFF
+`BRUTEX_LAKE_RUST_LEDGER_RENDER` seam under the ROW-EQUIVALENCE +
+reader-parity standard, never bytes (byte-identity measured-infeasible per the
+#1917 spike; the operator ruling of 2026-07-16 as relayed via the coordinator;
+golden re-baseline forbidden); the verbatim pyarrow render stays the LIVE
+oracle, flag OFF is byte-identical + never-imports-crate; twin-lake
+reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
+on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
+this header carries the pointer, never the story.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3309,6 +3321,56 @@ hostile-review pass._
   ruff/ruff-format clean; `mypy --strict` clean (472 files); pyright 0 errors (baseline 0; +3 house
   `reportPrivateUsage` test warnings). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run identity untouched; no new routes/env vars.)
+  Earlier: `claude/rust-lake-ledgerstore-convert`
+  (**DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+  MIGRATION.md #1918** — ADR-0020 slice G10 CONVERT: the `window_ledger_store`
+  parquet render routed through `rust/brutex-lake` behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_LEDGER_RENDER` flag under the **ROW-EQUIVALENCE +
+  reader-parity standard, never bytes** (byte-identity MEASURED-INFEASIBLE per
+  the #1917 spike — the operator ruling of 2026-07-16 as relayed via the
+  coordinator; golden re-baseline FORBIDDEN; the two entries COEXIST — #1917
+  is the measurement record + the priced `DEC-LAKE-EXACT-PIN-001` escalation,
+  #1918 the ruled conversion). NEW `rust/brutex-lake/src/window_ledger_render.rs`
+  (`render_ledger_parquet_from_ipc` over the crate's ONE shared streaming-sink
+  core; 16-col schema exactness cargo-pinned with EXACT dtypes —
+  `last_attempt_at` MUST stay a String, the DuckDB `>= ?` VARCHAR-compare
+  watch-item; crate stays 0.1.0, Cargo.lock byte-untouched) + the NEW facade
+  `brutex/data/lake_rust_ledger_render.py` (the PR-1 guard set: tristate flag ·
+  import guard + the G8 `crate_stale` SYMBOL handshake · the polars-lockstep
+  VERSION guard · refuse-poison · the sibling's imported degrade set + panic
+  belt · MemoryError re-raises RAW) whose 16-render burn-in compares ROW
+  EQUIVALENCE via pyarrow readback — normalized-STRING-FAMILY schema compare
+  (`large_string`/`string_view` → `string`, the measured polars `ARROW:schema`
+  artifact — the ONE documented fold; a timestamp-typed column still
+  autoreverts) + ordered `to_pylist()` equality — shipping the ORACLE bytes +
+  latching on ANY mismatch. The store's two `pq.write_table` closures
+  consolidate onto ONE shared render body (`_ledger_parquet_bytes`; the
+  verbatim pyarrow oracle `_render_ledger_parquet_python` retained LIVE); the
+  render runs INSIDE `atomic_write_via`'s guarded callable so
+  flock/atomic/`PartitionLockTimeout`/ENOSPC-OOM→`LakeWriteHalt` semantics are
+  byte-identical; flag OFF is byte-identical + never-imports-crate
+  (bomb-spy-pinned). PROOF (executed on the real merged wheel — pyarrow 25.0.0
+  · polars 1.42.1 · duckdb 1.5.4): the twin-lake READER-PARITY battery (11
+  tests — tri-reader ordered rows; the `dedup_latest_source_sql` fold across
+  ALL FOUR base/delta writer-arm mixes; `query_window_ledger_page`
+  payload-identical + the FALLBACK-ABSENCE pin; `_window_counts_total` + the
+  `_window_counts_since` ISO-string arm; load round-trips; the 16-col probe
+  outcome; footer inertness + the anti-vacuous bytes-differ assert; the
+  EMPTY-ledger 0-vs-1-row-group watch-item MEASURED PASS — the pre-authorized
+  empty-input narrowing NOT needed; stat-token EXPECTED-move; torn-read retry
+  self-heal) + the NAMED MERGE GATE
+  (`tests/integration/test_window_ledger_rust_state_convergence.py` — 3 crash
+  scenarios + re-pull idempotence, control-OFF vs subject-ON converging
+  identically through the REAL WindowLedger + store machinery); facade 100.00%
+  line+branch standalone; the store stanza re-measured 100.00% with the 164
+  pre-existing tests UNMODIFIED + the flag-ON twin green; cargo
+  fmt/clippy(-D warnings)/test --release --locked 73 passed; the #1917
+  bytes-probe pins RECONCILED not broken (oracle-arm-hermetic, no golden
+  regenerated). HONEST: expected payoff ≈ 0 — conversion is for uniformity,
+  not speed; ships INERT — a default flip needs its own DEC; the gate class is
+  deliberately WEAKER than PR-1's byte gate for this ONE module (the ruled
+  standard, disclosed). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; run identity untouched.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -9928,6 +9990,30 @@ hostile-review pass._
   179.5 ms numpy vs 27.7/20.0 ms Rust free/resident at 94k×1k — observed,
   never asserted; ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line — see §1 + MIGRATION.md #1942 for the full blurb)
+  Earlier: `claude/rust-lake-ledgerstore-convert`
+  (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918 — ADR-0020 slice
+  G10 CONVERT: the `window_ledger_store` parquet render routed through
+  `rust/brutex-lake` behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_LEDGER_RENDER` flag under the ROW-EQUIVALENCE +
+  reader-parity standard, never bytes (byte-identity measured-infeasible per
+  the #1917 spike — the operator ruling of 2026-07-16 as relayed via the
+  coordinator; golden re-baseline forbidden); NEW
+  `rust/brutex-lake/src/window_ledger_render.rs`
+  (`render_ledger_parquet_from_ipc`; `last_attempt_at` stays a String —
+  cargo-pinned) + the NEW facade `brutex/data/lake_rust_ledger_render.py`
+  (PR-1 guard set; the 16-render burn-in compares ROW EQUIVALENCE via pyarrow
+  readback — the normalized-string-family fold is the ONE documented
+  deviation — shipping the oracle bytes + latching on any mismatch); the
+  store's two write sites consolidate onto the ONE shared render body with
+  the verbatim pyarrow oracle retained LIVE, the render inside
+  `atomic_write_via`'s guarded callable (flock/atomic/LakeWriteHalt semantics
+  byte-identical); flag OFF byte-identical + never-imports-crate
+  (bomb-spy-pinned); the twin-lake reader-parity battery + the
+  crash/resume/re-pull state-convergence NAMED MERGE GATE EXECUTED on the
+  real merged wheel; the #1917 bytes-probe pins reconciled not broken; ships
+  INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1918 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored

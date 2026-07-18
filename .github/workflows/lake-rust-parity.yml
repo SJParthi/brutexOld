@@ -78,6 +78,14 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
+      # G10 CONVERT — the window-ledger parquet-render seam
+      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      - "brutex/data/lake_rust_ledger_render.py"
+      - "brutex/data/window_ledger_store.py"
+      - "tests/unit/test_lake_rust_ledger_render.py"
+      - "tests/unit/test_window_ledger_store.py"
+      - "tests/integration/test_window_ledger_rust_reader_parity.py"
+      - "tests/integration/test_window_ledger_rust_state_convergence.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -116,6 +124,14 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
+      # G10 CONVERT — the window-ledger parquet-render seam
+      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      - "brutex/data/lake_rust_ledger_render.py"
+      - "brutex/data/window_ledger_store.py"
+      - "tests/unit/test_lake_rust_ledger_render.py"
+      - "tests/unit/test_window_ledger_store.py"
+      - "tests/integration/test_window_ledger_rust_reader_parity.py"
+      - "tests/integration/test_window_ledger_rust_state_convergence.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -306,6 +322,25 @@ jobs:
             tests/unit/test_window_ledger_rust.py \
             tests/unit/test_window_status.py \
             tests/unit/test_window_ledger.py
+
+      - name: G10 ledger render — reader-parity + state-convergence gates (flag-ON)
+        # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (ledger #1918): the
+        # ROW-EQUIVALENCE standard's teeth on the REAL merged wheel — the
+        # twin-lake reader-parity battery over the REAL read paths
+        # (pyarrow · polars · DuckDB · the db_view fast paths) + the
+        # crash/resume/re-pull state-convergence NAMED MERGE GATE, then the
+        # store suite's flag-ON twin (byte-level VERBATIM — zero test
+        # edits — with the seam armed; a test failing ONLY under the flag
+        # is a perturbation finding: fix-or-refuse, never a test edit).
+        # The bytes-probe golden is DELIBERATELY absent here: it probes the
+        # PYARROW oracle arm and pins its own env hermetically.
+        run: |
+          pytest -rs -q \
+            tests/unit/test_lake_rust_ledger_render.py \
+            tests/integration/test_window_ledger_rust_reader_parity.py \
+            tests/integration/test_window_ledger_rust_state_convergence.py
+          BRUTEX_LAKE_RUST_LEDGER_RENDER=1 pytest -q \
+            tests/unit/test_window_ledger_store.py
 
       - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
         # The PR-2 non-perturbation leg: the 18-round
