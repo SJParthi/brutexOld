@@ -195,12 +195,8 @@ class TestPresetParam:
             store.path.parent,
             [
                 make_leaderboard_row(1, trailing_sharpe_ratio=0.2, decay_weighted_net_paisa=50.0),
-                make_leaderboard_row(
-                    2, trailing_sharpe_ratio=1.7, decay_weighted_net_paisa=-10.0
-                ),
-                make_leaderboard_row(
-                    3, trailing_sharpe_ratio=None, decay_weighted_net_paisa=None
-                ),
+                make_leaderboard_row(2, trailing_sharpe_ratio=1.7, decay_weighted_net_paisa=-10.0),
+                make_leaderboard_row(3, trailing_sharpe_ratio=None, decay_weighted_net_paisa=None),
             ],
         )
         recent = client.get("/api/v1/sweep/leaderboard?preset=recent").json()

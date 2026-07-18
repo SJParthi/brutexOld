@@ -121,7 +121,7 @@ class TestAnchorArms:
             fold_recency(
                 [_trade(_ANCHOR, 1)],
                 _START_EQUITY,
-                trailing_anchor=datetime(2026, 1, 1),  # noqa: DTZ001 — the refusal under test
+                trailing_anchor=datetime(2026, 1, 1),
             )
 
     def test_curve_entry_threads_the_anchor_identically(self) -> None:
@@ -244,8 +244,8 @@ class TestDecayCombine:
     def test_weight_math_matches_hand_derivation(self) -> None:
         folds = RecencyFolds(trailing=None, decay_buckets=((0, 1000), (12, 1000), (24, -500)))
         rm = combine_recency_from_folds(folds)
-        expected = 1000 * 0.5 ** (0 / 12.0) + 1000 * 0.5 ** (12 / 12.0) + (-500) * 0.5 ** (
-            24 / 12.0
+        expected = (
+            1000 * 0.5 ** (0 / 12.0) + 1000 * 0.5 ** (12 / 12.0) + (-500) * 0.5 ** (24 / 12.0)
         )
         assert rm.decay_weighted_net_paisa == expected
         assert rm.decay_weighted_net_paisa == pytest.approx(1000.0 + 500.0 - 125.0)
@@ -274,16 +274,19 @@ class TestDecayCombine:
             _trade(_ANCHOR - timedelta(days=180), 1000),
             _trade(_ANCHOR - timedelta(days=181), 1000),
         ]
-        default = _metrics(trades, trailing_anchor=_ANCHOR)
-        custom = _metrics(trades, trailing_anchor=_ANCHOR, decay_half_life_months=6.0)
-        assert default.decay_weighted_net_paisa == 2000 * 0.5 ** (6 / DECAY_HALF_LIFE_MONTHS)
-        assert custom.decay_weighted_net_paisa == 2000 * 0.5 ** (6 / 6.0)
-        assert custom.decay_weighted_net_paisa < default.decay_weighted_net_paisa
+        default = _metrics(trades, trailing_anchor=_ANCHOR).decay_weighted_net_paisa
+        custom = _metrics(
+            trades, trailing_anchor=_ANCHOR, decay_half_life_months=6.0
+        ).decay_weighted_net_paisa
+        assert default is not None and custom is not None
+        assert default == 2000 * 0.5 ** (6 / DECAY_HALF_LIFE_MONTHS)
+        assert custom == 2000 * 0.5 ** (6 / 6.0)
+        assert custom < default
 
 
 class TestConstants:
     def test_frozen_law_constants(self) -> None:
         # 24 months (730 days); 30-day buckets; 12-month half-life default.
-        assert TRAILING_WINDOW == timedelta(days=730)
+        assert timedelta(days=730) == TRAILING_WINDOW
         assert DECAY_BUCKET_DAYS == 30
         assert DECAY_HALF_LIFE_MONTHS == 12.0

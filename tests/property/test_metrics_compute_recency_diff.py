@@ -12,9 +12,9 @@ from datetime import UTC, datetime, timedelta
 
 from brutex.metrics.compute import (
     TRAILING_WINDOW,
+    combine_recency_from_folds,
     compute_metrics_from_scalars,
     fold_recency,
-    combine_recency_from_folds,
 )
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
@@ -28,9 +28,7 @@ _FLAT_DD = (0, 0.0, 0, 0.0)
 #: Bounded pnl so any bucket / total sum stays far inside 2**53 — the float
 #: additions of int-valued weights-1.0 terms are then EXACT (the inf-limit
 #: property's exact-equality basis).
-_pnls = st.lists(
-    st.integers(min_value=-10_000, max_value=10_000), min_size=1, max_size=30
-)
+_pnls = st.lists(st.integers(min_value=-10_000, max_value=10_000), min_size=1, max_size=30)
 
 
 def _trades(pnls: list[int], ages_days: list[int]) -> list[ClosedTrade]:
@@ -61,12 +59,12 @@ def _metrics(trades: list[ClosedTrade], **kwargs: object):
 
 @given(pnls=_pnls, data=st.data())
 @settings(max_examples=80, deadline=None)
-def test_all_inside_window_trailing_equals_full_history(pnls: list[int], data: st.DataObject) -> None:
+def test_all_inside_window_trailing_equals_full_history(
+    pnls: list[int], data: st.DataObject
+) -> None:
     # Every exit strictly inside the 730-day window ⇒ the windowed fold IS
     # the full fold ⇒ the trailing trio equals the full-history figures.
-    ages = data.draw(
-        st.lists(st.integers(0, 729), min_size=len(pnls), max_size=len(pnls))
-    )
+    ages = data.draw(st.lists(st.integers(0, 729), min_size=len(pnls), max_size=len(pnls)))
     m = _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR)
     assert m.trailing_net_pnl_paisa == m.net_pnl_paisa
     assert m.trailing_profit_factor == m.profit_factor
@@ -76,9 +74,7 @@ def test_all_inside_window_trailing_equals_full_history(pnls: list[int], data: s
 @given(pnls=_pnls, data=st.data())
 @settings(max_examples=80, deadline=None)
 def test_all_outside_window_trailing_is_none(pnls: list[int], data: st.DataObject) -> None:
-    ages = data.draw(
-        st.lists(st.integers(731, 2000), min_size=len(pnls), max_size=len(pnls))
-    )
+    ages = data.draw(st.lists(st.integers(731, 2000), min_size=len(pnls), max_size=len(pnls)))
     m = _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR)
     assert m.trailing_net_pnl_paisa is None
     assert m.trailing_profit_factor is None
@@ -95,9 +91,7 @@ def test_infinite_half_life_is_exactly_the_plain_net(pnls: list[int], data: st.D
     # the limit is EXACT equality — no tolerance needed at ∞ itself (the
     # documented tolerance story applies to large FINITE half-lives, covered
     # below).
-    ages = data.draw(
-        st.lists(st.integers(0, 2000), min_size=len(pnls), max_size=len(pnls))
-    )
+    ages = data.draw(st.lists(st.integers(0, 2000), min_size=len(pnls), max_size=len(pnls)))
     m = _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR, decay_half_life_months=math.inf)
     assert m.decay_weighted_net_paisa == float(sum(pnls))
 
@@ -112,9 +106,7 @@ def test_huge_finite_half_life_approaches_the_plain_net(
     # (bucket <= 66) and half_life = 1e9, each weight is 0.5**(<= 6.6e-8)
     # in [1 - 5e-8, 1], so the weighted sum sits within 5e-8 of the plain
     # net relative to the ABSOLUTE-value sum (the signed net can cancel).
-    ages = data.draw(
-        st.lists(st.integers(0, 2000), min_size=len(pnls), max_size=len(pnls))
-    )
+    ages = data.draw(st.lists(st.integers(0, 2000), min_size=len(pnls), max_size=len(pnls)))
     m = _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR, decay_half_life_months=1e9)
     assert m.decay_weighted_net_paisa is not None
     bound = 5e-8 * sum(abs(p) for p in pnls) + 1e-9
