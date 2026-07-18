@@ -1,7 +1,9 @@
 # ADR-0024 — Dhan Data API v2 as a SECOND Vendor Adapter (Lake/Reference-Only, Subscription-Gated)
 
-**Decision ID:** `DEC-DHAN-ADAPTER-001` (MIGRATION.md — provisional entry;
-renumber-at-landing per DEC-LEDGER-RENUMBER-001)
+**Decision ID:** `DEC-DHAN-ADAPTER-001` (MIGRATION.md #1957 — renumbered
+#1956 → #1957 at the 2026-07-18 merge-reconcile; main took #1956 for
+DEC-SWEEP-COVERAGE-SHARD-001; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001)
 **Date:** 2026-07-18
 **Status:** ACCEPTED — operator-directed, relayed via the coordinator.
 **Author:** Claude Code (coordinator-directed)
