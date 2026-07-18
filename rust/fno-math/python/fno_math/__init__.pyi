@@ -204,32 +204,39 @@ class ResidentBarsU128:
     def count_supermask(self, mask: int) -> int: ...
 
 class ResidentSweepSim:
-    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
+    """Resident Stage-2 dual-feed trade-sim buffer — 1m EXECUTION columns + arm_source + bar_bits.
 
-    DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The per-bar SL/TP/forced-exit
+    DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563), rebuilt on the 1-minute
+    execution grid by DEC-FILL-EXEC-GRID-1M-001. The per-1m-bar SL/TP/forced
     state machine (the Python `TradeSimWalker`) ported to Rust + fused with the
-    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the columns +
-    flags + session ordinals + bar_bits is paid ONCE in `__init__`; subsequent
-    `simulate_masks` / `count_trades` calls marshal only `masks`. Frozen +
-    immutable (only `n_bars` is exposed). All money is int64 paisa; the
-    price→paisa conversion, the forced-exit detection AND the per-bar session
-    identity (`session_idx[i]` = bar `i`'s IST calendar-date ordinal) are done in
-    Python (the single source of truth) so the trades are bit-identical to
-    `brutex.engine.trade_sim.simulate_trades`. A pending entry only fills on a
-    bar with the SAME `session_idx` it armed on — a cross-session fill (the
-    overnight-gap leak, R2-OC-2) is dropped.
+    per-mask entry projection: the four `exec_*` OHLC paisa columns, the
+    `exec_is_forced` flags and the `exec_session_idx` ordinals cover the
+    1-MINUTE EXECUTION stream (the walk domain); `bar_bits` stays
+    DECISION-length (the signal domain) and `arm_source[j]` names the decision
+    bar whose next-1m fill lands on 1m bar `j` (`-1` = unarmed; from
+    `brutex.engine.exec_grid.ExecGridMap` — the mapping gates are applied at
+    build time in Python). The `O(N_1m + N_tf)` Python→Rust copy is paid ONCE
+    in `__init__`; subsequent `simulate_masks` / `count_trades` calls marshal
+    only `masks`. Frozen + immutable (only `n_bars` — the 1m walk length — is
+    exposed). All money is int64 paisa; the price→paisa conversion, the
+    forced-exit detection, the session identity AND the arm_source mapping are
+    done in Python (the single source of truth) so the trades are bit-identical
+    to `brutex.engine.trade_sim.simulate_trades`. Trade-record indices/holding
+    are 1-MINUTE quantities (design §2.6).
 
-    Unequal column lengths raise `ValueError`.
+    Unequal execution-column lengths, an out-of-range or non-increasing
+    `arm_source`, or an out-of-envelope price raise `ValueError`.
     """
 
     def __init__(
         self,
-        open: list[int],
-        high: list[int],
-        low: list[int],
-        close: list[int],
-        is_forced: list[bool],
-        session_idx: list[int],
+        exec_open: list[int],
+        exec_high: list[int],
+        exec_low: list[int],
+        exec_close: list[int],
+        exec_is_forced: list[bool],
+        exec_session_idx: list[int],
+        arm_source: list[int],
         bar_bits: list[int],
     ) -> None: ...
     @property
@@ -274,17 +281,19 @@ class ResidentSweepSimU128:
     `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge; unequal
     column lengths raise `ValueError`. Today's production vocabulary is 60
     bits, so this kernel is future headroom — only tests (and a future >64-bit
-    vocabulary) drive it.
+    vocabulary) drive it. The constructor takes the SAME dual-feed
+    execution-grid faces as `ResidentSweepSim` (DEC-FILL-EXEC-GRID-1M-001).
     """
 
     def __init__(
         self,
-        open: list[int],
-        high: list[int],
-        low: list[int],
-        close: list[int],
-        is_forced: list[bool],
-        session_idx: list[int],
+        exec_open: list[int],
+        exec_high: list[int],
+        exec_low: list[int],
+        exec_close: list[int],
+        exec_is_forced: list[bool],
+        exec_session_idx: list[int],
+        arm_source: list[int],
         bar_bits: list[int],
     ) -> None: ...
     @property
