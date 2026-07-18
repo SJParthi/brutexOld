@@ -33,9 +33,14 @@ pub mod market_hours;
 // + the banner colour authority stay Python.
 pub mod pull_outcome;
 pub mod pull_scope;
+pub mod stall;
 
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
+pub use stall::{
+    WEDGE_ABSTAIN_PROBE_NONE, WEDGE_ADOPT_BASELINE, WEDGE_DEFER, WEDGE_ESCALATE, WEDGE_NO_PROBE,
+    WEDGE_REBASELINE, alive_log_due, wedge_decision,
+};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
 /// baked at build time by `build.rs` under the shared FRAMING v1 of

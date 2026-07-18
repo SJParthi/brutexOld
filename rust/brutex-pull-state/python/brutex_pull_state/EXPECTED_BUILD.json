@@ -4,10 +4,14 @@
   "symbols": [
     "SOURCE_DIGEST",
     "__version__",
+    "alive_log_due",
+    "classify_pull_outcome",
     "fno_only_note_surgery",
     "market_hours_note_rewrite",
     "pull_allowed_us",
     "scope_token",
-    "spot_only_note_surgery"
+    "spot_only_note_surgery",
+    "verdict_correlates",
+    "wedge_decision"
   ]
 }

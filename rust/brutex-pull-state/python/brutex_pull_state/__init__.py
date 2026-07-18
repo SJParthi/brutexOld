@@ -50,12 +50,15 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "SOURCE_DIGEST",
     "__version__",
+    "alive_log_due",  # pull_stall (Wave 1C)
+    "classify_pull_outcome",  # pull_outcome (Wave 1A)
+    "fno_only_note_surgery",  # pull_scope (Wave 1B)
+    "market_hours_note_rewrite",  # pull_scope (Wave 1B)
     "pull_allowed_us",
-    # --- pull_scope (Wave 1B) — note-surgery + scope-token laws ---
-    "fno_only_note_surgery",
-    "market_hours_note_rewrite",
-    "scope_token",
-    "spot_only_note_surgery",
+    "scope_token",  # pull_scope (Wave 1B)
+    "spot_only_note_surgery",  # pull_scope (Wave 1B)
+    "verdict_correlates",  # pull_outcome (Wave 1A)
+    "wedge_decision",  # pull_stall (Wave 1C)
 )
 
 
@@ -91,11 +94,15 @@ _assert_compiled_surface(_compiled)
 from ._brutex_pull_state import (  # noqa: E402
     SOURCE_DIGEST,
     __version__,
+    alive_log_due,
+    classify_pull_outcome,
     fno_only_note_surgery,
     market_hours_note_rewrite,
     pull_allowed_us,
     scope_token,
     spot_only_note_surgery,
+    verdict_correlates,
+    wedge_decision,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -112,9 +119,13 @@ __source_digest__: str = SOURCE_DIGEST
 __all__ = [
     "SOURCE_DIGEST",
     "__version__",
+    "alive_log_due",
+    "classify_pull_outcome",
     "fno_only_note_surgery",
     "market_hours_note_rewrite",
     "pull_allowed_us",
     "scope_token",
     "spot_only_note_surgery",
+    "verdict_correlates",
+    "wedge_decision",
 ]
