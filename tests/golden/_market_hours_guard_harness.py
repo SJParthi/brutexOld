@@ -34,6 +34,7 @@ forces a deliberate, ledger-worthy regeneration — never a silent drift.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -354,13 +355,19 @@ def _belt_coherence_cases() -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     second = timedelta(seconds=1)
+
+    def _frozen_clock(instant: datetime) -> Callable[[], datetime]:
+        return lambda: instant
+
     for d, (open_t, _close_t) in sorted(MUHURAT_SESSIONS.items()):
         inside = datetime.combine(d, open_t, tzinfo=IST) + timedelta(minutes=1)
         outside = datetime.combine(d, open_t, tzinfo=IST) - MUHURAT_PRE_MARGIN - second
         for guard in ("unset", "1", "0"):
             env: dict[str, str] = {} if guard == "unset" else {MARKET_HOURS_GUARD_ENV: guard}
             for instant in (inside, outside):
-                composed = compose_market_closed(lambda: False, clock=lambda i=instant: i, env=env)
+                composed = compose_market_closed(
+                    lambda: False, clock=_frozen_clock(instant), env=env
+                )
                 rows.append(
                     {
                         "date": d.isoformat(),
