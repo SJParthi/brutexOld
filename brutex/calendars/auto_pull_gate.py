@@ -262,6 +262,7 @@ def _warn_coverage_exhausted(d: date) -> None:
 
 
 def _verdict_non_trading(d: date) -> AutoGateVerdict:
+    """Build the disallowed ``non_trading_day`` verdict for day ``d``."""
     return AutoGateVerdict(
         allowed=False,
         reason="non_trading_day",
@@ -270,6 +271,7 @@ def _verdict_non_trading(d: date) -> AutoGateVerdict:
 
 
 def _verdict_muhurat(d: date) -> AutoGateVerdict:
+    """Build the disallowed ``muhurat_deferral`` verdict for day ``d``."""
     return AutoGateVerdict(
         allowed=False,
         reason="muhurat_deferral",
@@ -281,6 +283,7 @@ def _verdict_muhurat(d: date) -> AutoGateVerdict:
 
 
 def _verdict_before_settle(res: SettleResolution) -> AutoGateVerdict:
+    """Build the disallowed ``before_settle`` verdict for the resolved settle."""
     # The provenance clause is per-tier (Golden Rule #10): the DEFAULT
     # arm's rendered detail is BYTE-IDENTICAL to the pre-#1793 wording.
     return AutoGateVerdict(
@@ -291,6 +294,7 @@ def _verdict_before_settle(res: SettleResolution) -> AutoGateVerdict:
 
 
 def _verdict_market_hours_blocked() -> AutoGateVerdict:
+    """Build the disallowed ``market_hours_blocked`` verdict."""
     return AutoGateVerdict(
         allowed=False,
         reason="market_hours_blocked",
@@ -299,6 +303,7 @@ def _verdict_market_hours_blocked() -> AutoGateVerdict:
 
 
 def _verdict_ok() -> AutoGateVerdict:
+    """Build the allowed ``ok`` verdict."""
     return AutoGateVerdict(allowed=True, reason="ok", detail="ok")
 
 
