@@ -14,9 +14,17 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from brutex.data.models import CandleBar
 from brutex.engine.minute_path import MinuteIndex, ist_session_dates, session_equity_series
 from brutex.strategies.types import Side
+
+# Tier discipline (SOAK-R7-1 / test_stress_marker_discipline): without this
+# marker the sustained battery is INVISIBLE to both the nightly `-m stress`
+# and soak `-m "stress or soak"` tiers — caught by the independent
+# workspace-health gate run (DEC-RUST-CASCADE-RESULTS-001, unit gate was RED
+# as pushed at 906edf9).
+pytestmark = pytest.mark.stress
 
 _T0 = datetime(2024, 1, 2, 3, 46, tzinfo=UTC)  # 09:16 IST
 

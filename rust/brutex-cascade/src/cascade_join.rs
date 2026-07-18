@@ -13,7 +13,13 @@
 //! while the type semantics stay CPython's own. Divergence envelope
 //! (documented, ultra-hostile inputs only): an int beyond ±i128 and a str
 //! carrying a lone surrogate classify [`Leaf::Other`] (Python's unbounded
-//! int / surrogate-tolerant str would have accepted them); both are
+//! int / surrogate-tolerant str would have accepted them); and a within-±i128
+//! SUM can wrap in the release build — the group-stats fallback totals
+//! (`build_join`'s `n_input`/`n_survived` fold) sum per-group i128 counts
+//! without checked arithmetic, so a hand-crafted report carrying n_input ≈
+//! i128::MAX in two or more groups would display a wrapped integer (never a
+//! panic; Python's unbounded int would have summed exactly — the round-4
+//! review NIT of DEC-RUST-CASCADE-RESULTS-001). All three shapes are
 //! unreachable from any real cascade report.
 
 use std::collections::BTreeMap;
