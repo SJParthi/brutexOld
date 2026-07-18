@@ -169,6 +169,8 @@ def _forced_fallback_sim(
     bar_bits: Sequence[int],
     *,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: object = None,
     reference_stamper: object = None,
     precomputed_columns: object = None,
 ) -> ResidentTradeSim:
@@ -179,13 +181,17 @@ def _forced_fallback_sim(
     instance-level ``_rust = None`` mechanism the rust_trade_sim fallback tests
     use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
     attribute the superclass ctor just built). ``precomputed_columns`` tracks
-    the additive W2-rider kwarg (DEC-STAGE1A-RUST-BATCH-001) so the factory's
-    signature stays call-compatible with the production seam.
+    the additive W2-rider kwarg (DEC-STAGE1A-RUST-BATCH-001), and
+    ``exec_bars_1m``/``exec_map`` the dual-feed kwargs
+    (DEC-FILL-EXEC-GRID-1M-001), so the factory's signature stays
+    call-compatible with the production seam.
     """
     sim = ResidentTradeSim(
         bars,
         bar_bits,
         tf_minutes=tf_minutes,
+        exec_bars_1m=exec_bars_1m,
+        exec_map=exec_map,  # type: ignore[arg-type]
         reference_stamper=reference_stamper,  # type: ignore[arg-type]
         precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
     )
@@ -256,21 +262,37 @@ def _run_sweep(
             audit=audit,
             kernel=kernel,
             trial_stats_digest=digest,
+            exec_bars_1m=bars,
         )
 
 
 def _crafted_kernel(bars: Sequence[CandleBar]) -> ResidentSweepKernel:
     """A real kernel whose ``bar_bits`` are HAND-CRAFTED so bits 0–4 fire on
-    pairwise-DIFFERENT bar subsets (periods 2..6) — every mask's trade stream,
-    and therefore its metrics, differ, so a chunk-boundary mask↔metrics swap
-    CANNOT hide behind identical rows (the chunk-alignment tests' teeth).
+    pairwise-DIFFERENT bar subsets (periods 2..6, residue ``p - 1``) — every
+    mask's trade stream, and therefore its metrics, differ, so a
+    chunk-boundary mask↔metrics swap CANNOT hide behind identical rows (the
+    chunk-alignment tests' teeth).
+
+    RESIDUE DERIVATION (DEC-FILL-EXEC-GRID-1M-001 re-teeth): the old
+    residue-0 craft (``i % p == 0``) lost its teeth under the dual-feed law —
+    ``per_day == 120`` is divisible by every period p ∈ {2..6}, so EVERY mask
+    fired on day-local minute 0 of EVERY day, and on the 1m execution stream
+    that signal's fill maps to day-local 1 (same IST date — legal), which the
+    session-gap boundary no longer consumes (the boundary bar itself emitted
+    the ``session_gap`` close; its SUCCESSOR is the earliest fill — design
+    §2 law 8). With ``sl/tp = None`` each day's single trade therefore became
+    IDENTICAL across all five masks (measured: every mask read the same
+    (net_pnl, trades) fingerprint). Residue ``p - 1`` makes bit b first fire
+    at day-local minute ``b + 1`` (since ``(d*120 + m) % p == m % p``), so
+    the mask's daily entry FILLS land on pairwise-distinct day-local bars
+    ``b + 2`` ∈ {2..6} at pairwise-distinct prices — distinct metrics again.
 
     The resident Stage-1B count buffer still holds the ORIGINAL bits, so tests
     using this kernel MUST disable the pre-filter (``min_hits=0``).
     """
     kernel = ResidentSweepKernel(bars)
     kernel.bar_bits[:] = [
-        sum(1 << b for b in range(5) if i % (b + 2) == 0) for i in range(len(bars))
+        sum(1 << b for b in range(5) if i % (b + 2) == b + 1) for i in range(len(bars))
     ]
     return kernel
 
@@ -503,6 +525,7 @@ def _ranked_combo(bars: list[CandleBar]) -> tuple[RankedCombo, list[int]]:
                 stop_loss_paisa=None,
                 take_profit_paisa=None,
                 start_equity_paisa=10_000_000,
+                exec_bars_1m=bars,
             ),
         )
         for m in masks
@@ -529,6 +552,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.run_id == rid
         assert row.total_trades == rc.metrics.total_trades
@@ -553,6 +577,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.direction == "bear"
 
@@ -578,6 +603,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.mask_bits == rc.mask
         assert row.condition_names == " AND ".join(matched_condition_names(rc.mask))
@@ -600,6 +626,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.deflated_sharpe is None
 
@@ -629,6 +656,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.sortino_ratio == 0.0
         assert row.calmar_ratio == 0.0
@@ -651,6 +679,7 @@ class TestRankedComboToResultRow:
             stop_loss_paisa=80,
             take_profit_paisa=50,
             start_equity_paisa=10_000_000,
+            exec_bars_1m=bars,
         )
         assert metrics.total_trades == 0
         rc = RankedCombo(mask=mask, metrics=metrics, composite_score=0.0)
@@ -666,6 +695,7 @@ class TestRankedComboToResultRow:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            exec_bars_1m=bars,
         )
         assert row.total_trades == 0
         assert row.avg_entry_price == Decimal("0.00")
@@ -694,6 +724,11 @@ class TestCanonicalTradeParams:
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
             "fill_mode": "worst_case",
+            # DEC-FILL-EXEC-GRID-1M-001: the 1-minute execution grid is the
+            # ONLY fill grid — its token is emitted UNCONDITIONALLY beside
+            # fill_mode (the same anti-aliasing law: a PR-B run must never
+            # alias a decision-TF-era identity).
+            "execution_grid": "1m_next_bar",
         }
 
     def test_fill_mode_emitted_unconditionally_as_worst_case(self) -> None:
@@ -807,6 +842,9 @@ class TestCanonicalTradeParams:
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
             "fill_mode": "worst_case",
+            # DEC-FILL-EXEC-GRID-1M-001: unconditional grid token (see the
+            # layout pin above) — present on spot params too.
+            "execution_grid": "1m_next_bar",
         }
         assert "roll_schedule" not in params
 
@@ -881,6 +919,7 @@ class TestTrialStatsSidecar:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         assert summary.trial_sidecar_written is True
         assert summary.backtested == summary.evaluated - summary.minhits_dropped
@@ -901,10 +940,16 @@ class TestTrialStatsSidecar:
     def test_no_digest_writes_no_sidecar(self, tmp_path: Path) -> None:
         from brutex.engine.trial_stats import trial_stats_sidecar_path
 
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
             )
         assert summary.trial_sidecar_written is False
         assert not trial_stats_sidecar_path(store.path).exists()
@@ -928,6 +973,7 @@ class TestTrialStatsSidecar:
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         sidecar = trial_stats_sidecar_path(store.path)
         original = sidecar.read_bytes()
@@ -940,6 +986,7 @@ class TestTrialStatsSidecar:
                 dedup=dedup,  # every mask marked — yet the marks are ADVISORY
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         assert resumed.resumed_complete is False
         assert resumed.skipped_dedup == 0  # probes bypassed — full population
@@ -964,6 +1011,7 @@ class TestTrialStatsSidecar:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         baseline = trial_stats_sidecar_path(clean_store.path).read_bytes()
 
@@ -989,6 +1037,7 @@ class TestTrialStatsSidecar:
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         assert summary.skipped_dedup == 0  # the stale mark was never consulted
         assert summary.trial_sidecar_written is True
@@ -1012,6 +1061,7 @@ class TestTrialStatsSidecar:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         sidecar = trial_stats_sidecar_path(store.path)
         first = sidecar.read_bytes()
@@ -1026,6 +1076,7 @@ class TestTrialStatsSidecar:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         assert redone.resumed_complete is False
         assert redone.sentinel_written is True  # the redo healed the sentinel
@@ -1067,6 +1118,7 @@ class TestCompletionSentinel:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         return store.path, summary
 
@@ -1091,6 +1143,7 @@ class TestCompletionSentinel:
                 dedup=dedup if dedup is not None else _dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
 
     def _rid(self, cfg: SweepRunConfig, bit: int) -> str:
@@ -1126,10 +1179,16 @@ class TestCompletionSentinel:
     def test_no_digest_writes_no_sentinel(self, tmp_path: Path) -> None:
         from brutex.engine.tuple_complete import completion_sentinel_path
 
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
             )
         assert summary.sentinel_written is False
         assert not completion_sentinel_path(store.path).exists()
@@ -1235,6 +1294,7 @@ class TestCompletionSentinel:
                 dedup=_MarkCrashDedup(),  # its mark_many RAISES if ever called
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         # The crash-on-mark dedup was NEVER asked to mark, so the sweep finished.
         assert summary.sentinel_written is True
@@ -1372,18 +1432,29 @@ class TestRunPersistedSweep:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="bars must be non-empty"),
         ):
-            run_persisted_sweep([], _make_config(), store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                [], _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=[]
+            )
 
     def test_hold_direction_rejected(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         cfg = _make_config(direction=Side.HOLD)
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="must be Side.BUY or Side.SELL"),
         ):
-            run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+            )
 
     def test_over_cap_raises_before_compute(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         # C(5,2)=10 > max_combos=3 → refuse.
         cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, max_combos=3)
@@ -1391,7 +1462,14 @@ class TestRunPersistedSweep:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="exceeds max_combos=3"),
         ):
-            run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+            )
 
     def test_apriori_enabled_enumeration_source_is_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1426,7 +1504,7 @@ class TestRunPersistedSweep:
         audit_path = tmp_path / "a.jsonl"
         with AuditWriter.open(audit_path) as audit:
             summary = run_persisted_sweep(
-                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
             )
         assert isinstance(summary, SweepRunSummary)
         assert summary.enumerated == 5  # C(5,1)
@@ -1446,13 +1524,20 @@ class TestRunPersistedSweep:
         legacy_store = ResultsStore(path=tmp_path / "legacy.parquet")
         with AuditWriter.open(tmp_path / "la.jsonl") as audit:
             legacy = run_persisted_sweep(
-                bars, _make_config(), store=legacy_store, dedup=_dedup(), audit=audit
+                bars,
+                _make_config(),
+                store=legacy_store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
             )
 
         gated_store = ResultsStore(path=tmp_path / "gated.parquet")
         cfg = _make_config(overfit=OverfitGateConfig(dsr_min=0.0))
         with AuditWriter.open(tmp_path / "ga.jsonl") as audit:
-            gated = run_persisted_sweep(bars, cfg, store=gated_store, dedup=_dedup(), audit=audit)
+            gated = run_persisted_sweep(
+                bars, cfg, store=gated_store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         # dsr_min=0.0 rejects nobody → same leaderboard size as legacy.
         assert gated.ranked == legacy.ranked
 
@@ -1463,12 +1548,19 @@ class TestRunPersistedSweep:
         legacy_store = ResultsStore(path=tmp_path / "legacy.parquet")
         with AuditWriter.open(tmp_path / "la.jsonl") as audit:
             legacy = run_persisted_sweep(
-                bars, _make_config(), store=legacy_store, dedup=_dedup(), audit=audit
+                bars,
+                _make_config(),
+                store=legacy_store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
             )
         gated_store = ResultsStore(path=tmp_path / "gated.parquet")
         cfg = _make_config(overfit=OverfitGateConfig(dsr_min=0.99))
         with AuditWriter.open(tmp_path / "ga.jsonl") as audit:
-            gated = run_persisted_sweep(bars, cfg, store=gated_store, dedup=_dedup(), audit=audit)
+            gated = run_persisted_sweep(
+                bars, cfg, store=gated_store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert gated.ranked <= legacy.ranked
         assert gated.persisted == len(gated_store)
 
@@ -1477,7 +1569,9 @@ class TestRunPersistedSweep:
         store = ResultsStore(path=tmp_path / "r.parquet")
         cfg = _make_config(top_k=1)
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.ranked >= 1
         assert summary.persisted == 1
 
@@ -1486,10 +1580,12 @@ class TestRunPersistedSweep:
         cfg = _make_config()
         dedup = _dedup()
         # Pre-mark every enumerated identity → every mask is skipped. The params
-        # layout carries the default ``fib_anchor`` (prev_day) AND the permanent
-        # ``fill_mode`` key (DEC-FILL-WORST-CASE-ONLY-001 — hand-built WITHOUT it
-        # the run-ids would be the precise-era identities and nothing would
-        # skip) so these hand-built run-ids match the sweep's.
+        # layout carries the default ``fib_anchor`` (prev_day), the permanent
+        # ``fill_mode`` key (DEC-FILL-WORST-CASE-ONLY-001) AND the permanent
+        # ``execution_grid`` key (DEC-FILL-EXEC-GRID-1M-001) — hand-built
+        # WITHOUT either key the run-ids would be the retired-era identities
+        # and nothing would skip — so these hand-built run-ids match the
+        # sweep's.
         params = {
             "sl_paisa": None,
             "tp_paisa": None,
@@ -1498,6 +1594,7 @@ class TestRunPersistedSweep:
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
             "fill_mode": "worst_case",
+            "execution_grid": "1m_next_bar",
         }
         for mask in (1, 2, 4, 8, 16):
             dedup.mark(
@@ -1515,7 +1612,9 @@ class TestRunPersistedSweep:
             )
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         assert summary.skipped_dedup == 5
         assert summary.evaluated == 0
         assert summary.ranked == 0
@@ -1528,7 +1627,9 @@ class TestRunPersistedSweep:
         cfg = _make_config(condition_bits=[BIT_BAR_BULLISH, BIT_BAR_BEARISH, 0], k=2)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.enumerated == 3  # C(3,2)
         assert summary.conflict_pruned == 1
 
@@ -1539,7 +1640,9 @@ class TestRunPersistedSweep:
         cfg = _make_config(min_hits=10_000_000)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.evaluated == 5
         assert summary.ranked == 0
         assert summary.persisted == 0
@@ -1549,7 +1652,9 @@ class TestRunPersistedSweep:
         cfg = _make_config(min_hits=0)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.evaluated == 5  # no Stage-1B drop
 
     def test_sell_direction_runs(self, tmp_path: Path) -> None:
@@ -1558,7 +1663,9 @@ class TestRunPersistedSweep:
         cfg = _make_config(direction=Side.SELL)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.enumerated == 5
         # Every persisted row carries the bear label.
         assert all(row.direction == "bear" for row in store.rows())
@@ -1571,7 +1678,9 @@ class TestRunPersistedSweep:
         cfg = _make_config(proximity=ProximityParams(pivot_proximity_bps=25))
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.enumerated == 5
         # The default-proximity run_id for the same mask differs (proximity is in
         # the canonical params), proving the proximity branch fed the hash.
@@ -1614,7 +1723,14 @@ class TestRunPersistedSweep:
         store = _GateConflictStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:  # noqa: SIM117
             with pytest.raises(SweepComboError, match="gate-config conflict persisting") as exc:
-                run_persisted_sweep(bars, _make_config(), store=store, dedup=_dedup(), audit=audit)
+                run_persisted_sweep(
+                    bars,
+                    _make_config(),
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    exec_bars_1m=bars,
+                )
         assert "NIFTY" in str(exc.value)
         assert "DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001" in str(exc.value)
 
@@ -1679,6 +1795,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         msg = str(excinfo.value)
         # The message names the mask hex, the run-id, the tuple coordinate, and k.
@@ -1741,6 +1858,7 @@ class TestSweepComboError:
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # The store Parquet, the trial-stats sidecar, and the completion sentinel
         # were ALL left unwritten (the raise is BEFORE flush/mark/sentinel), so the
@@ -1792,6 +1910,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
         assert not isinstance(excinfo.value, SweepComboError)
@@ -1839,6 +1958,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # It is NOT downgraded to a SweepComboError (the per-tuple skip path).
         assert not isinstance(excinfo.value, SweepComboError)
@@ -1892,6 +2012,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # Not an Exception, so it cannot be wrapped by the SweepComboError catch.
         assert not isinstance(excinfo.value, Exception)
@@ -1935,6 +2056,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # It is NOT wrapped as a SweepComboError tuple-skip — it is the raw store
         # error, with no SweepComboError anywhere in the chain.
@@ -1994,6 +2116,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # The raw store error, NOT a SweepComboError tuple-skip, anywhere in the chain.
         assert not isinstance(exc.value, SweepComboError)
@@ -2049,6 +2172,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # The raw OSError is NOT downgraded into a SweepComboError tuple-skip.
         assert not isinstance(exc.value, SweepComboError)
@@ -2109,6 +2233,7 @@ class TestSweepComboError:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         # The raw OSError is NOT downgraded into a SweepComboError tuple-skip
         # (so the grid drivers ABORT instead of bumping tuples_failed + skipping).
@@ -2154,6 +2279,7 @@ class TestResidentKernelBarMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
     def test_kernel_matching_bars_is_accepted(self, tmp_path: Path) -> None:
@@ -2174,6 +2300,7 @@ class TestResidentKernelBarMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
         assert summary.enumerated >= 1
 
@@ -2246,6 +2373,7 @@ class TestResidentKernelBarMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
     def test_kernel_built_for_other_vwap_source_raises(self, tmp_path: Path) -> None:
@@ -2278,6 +2406,7 @@ class TestResidentKernelBarMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
     def test_kernel_built_for_other_ema_source_raises(self, tmp_path: Path) -> None:
@@ -2315,6 +2444,7 @@ class TestResidentKernelBarMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
 
@@ -2353,6 +2483,7 @@ class TestResidentKernelRollScheduleMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
     def test_scheduleless_kernel_for_a_futures_tuple_raises(self, tmp_path: Path) -> None:
@@ -2374,6 +2505,7 @@ class TestResidentKernelRollScheduleMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
     def test_matching_schedule_kernel_is_accepted(self, tmp_path: Path) -> None:
@@ -2421,6 +2553,7 @@ class TestResidentKernelRollScheduleMismatch:
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
                 kernel=kernel,
+                exec_bars_1m=bars,
             )
 
 
@@ -2539,6 +2672,7 @@ class TestTradeSimChunkInvariance:
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
+                exec_bars_1m=bars,
             )
             for b in range(5)
         }
@@ -2628,6 +2762,7 @@ class TestTradeSimConstructionFailure:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         msg = str(excinfo.value)
         assert "trade-sim construction" in msg
@@ -2662,6 +2797,7 @@ class TestTradeSimConstructionFailure:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         assert not isinstance(excinfo.value, SweepComboError)
         assert excinfo.value.__cause__ is None
@@ -2696,7 +2832,9 @@ class TestChunkFailureReattribution:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(SweepComboError) as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert f"0x{boom_mask:032x}" in str(excinfo.value)
         assert isinstance(excinfo.value.__cause__, ValueError)
 
@@ -2724,7 +2862,9 @@ class TestChunkFailureReattribution:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(SweepComboError) as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         # Deterministic: the FIRST culprit in kept order (mask 2), never mask 8.
         assert f"0x{1 << 1:032x}" in str(excinfo.value)
         assert f"0x{1 << 3:032x}" not in str(excinfo.value)
@@ -2762,6 +2902,7 @@ class TestChunkFailureReattribution:
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest="ab12cd34ef56ab12",
+                exec_bars_1m=bars,
             )
         msg = str(excinfo.value)
         assert "trade-sim chunk of 5 masks" in msg
@@ -2800,7 +2941,9 @@ class TestChunkFailureReattribution:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(MemoryError, match="oracle OOM") as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert not isinstance(excinfo.value, SweepComboError)
         assert excinfo.value.__cause__ is None  # bare re-raise, no wrap
         assert not store.path.exists()
@@ -2830,7 +2973,9 @@ class TestChunkLengthContract:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(SweepComboError) as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         msg = str(excinfo.value)
         # The SweepComboError names the CHUNK + carries the length ValueError.
         assert "trade-sim chunk of 5 masks" in msg
@@ -2870,7 +3015,9 @@ class TestMetricsTailFailure:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(SweepComboError) as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         msg = str(excinfo.value)
         assert f"0x{0b100:032x}" in msg
         assert "run_id=" in msg
@@ -2892,7 +3039,9 @@ class TestMetricsTailFailure:
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(MemoryError, match="tail OOM") as excinfo,
         ):
-            run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert not isinstance(excinfo.value, SweepComboError)
         assert excinfo.value.__cause__ is None
         assert not store.path.exists()
@@ -2947,6 +3096,7 @@ class TestU128EnvelopeThroughSweep:
             stop_loss_paisa=cfg.sl_paisa,
             take_profit_paisa=cfg.tp_paisa,
             start_equity_paisa=cfg.start_equity_paisa,
+            exec_bars_1m=bars,
         )
         assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
@@ -3023,7 +3173,13 @@ class TestMixedEraCheckpointResume:
             store = ResultsStore(path=store_path)
             with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
                 return run_persisted_sweep(
-                    bars, cfg, store=store, dedup=_dedup(), audit=audit, trial_stats_digest=digest
+                    bars,
+                    cfg,
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    trial_stats_digest=digest,
+                    exec_bars_1m=bars,
                 )
 
         # Era 1: the tuple completes on the PYTHON engine (pre-wiring build).
@@ -3065,7 +3221,7 @@ class TestSweepLookaheadGuardWiring:
         store = ResultsStore(path=store_path)
         with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
             summary = run_persisted_sweep(
-                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
             )
         return summary, store_path.read_bytes()
 
@@ -3102,7 +3258,13 @@ class TestSweepLookaheadGuardWiring:
             store = ResultsStore(path=store_path)
             with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
                 summary = run_persisted_sweep(
-                    bars, cfg, store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                    bars,
+                    cfg,
+                    store=store,
+                    dedup=_dedup(),
+                    audit=audit,
+                    kernel=kernel,
+                    exec_bars_1m=bars,
                 )
             return summary, store_path.read_bytes()
 
@@ -3135,10 +3297,16 @@ class TestSweepLookaheadGuardWiring:
         # String-target setattr: patches the name inside brutex.engine.sweep_run
         # without a second import style for the module (CodeQL py/import-and-import-from).
         monkeypatch.setattr("brutex.engine.sweep_run.maybe_guard_bars", _spy)
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             run_persisted_sweep(
-                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
             )
         assert len(seen) == 1
         assert isinstance(seen[0], GuardedBarWindow)
@@ -3163,7 +3331,9 @@ class TestSweepLookaheadGuardWiring:
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            run_persisted_sweep(bars, _make_config(), store=store, dedup=_dedup(), audit=audit)
+            run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert len(seen) == 1
         passed, returned = seen[0]
         assert passed is bars
@@ -3283,18 +3453,20 @@ class TestLazyRunIdDigestPath:
             return real_tail(*args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr("brutex.engine.sweep_run.metrics_from_trades", _tail)
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(SweepComboError) as excinfo,
         ):
             run_persisted_sweep(
-                _trending_bars(),
+                bars,
                 cfg,
                 store=store,
                 dedup=_dedup(),
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         rid = self._expected_run_ids(cfg)[0b100]
         assert str(excinfo.value) == (
@@ -3309,15 +3481,17 @@ class TestLazyRunIdDigestPath:
         cfg = _make_config()
         dedup = _dedup()
         dedup.mark_many(self._expected_run_ids(cfg).values())
+        bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                _trending_bars(),
+                bars,
                 cfg,
                 store=store,
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
+                exec_bars_1m=bars,
             )
         assert summary.skipped_dedup == 0
         assert summary.persisted > 0
@@ -3396,6 +3570,7 @@ class TestLazyRunIdHardening:
                     dedup=_dedup(),
                     audit=audit,
                     trial_stats_digest=digest,
+                    exec_bars_1m=bars,
                 )
             assert isinstance(excinfo.value.__cause__, ValueError)
             assert not store.path.exists()  # nothing flushed — the tuple redoes
@@ -3448,6 +3623,7 @@ class TestLazyRunIdHardening:
                     dedup=_dedup(),
                     audit=audit,
                     trial_stats_digest=digest,
+                    exec_bars_1m=bars,
                 )
             assert isinstance(excinfo.value.__cause__, ValueError)
             messages[arm] = str(excinfo.value)
@@ -3496,6 +3672,7 @@ class TestLazyRunIdHardening:
                         dedup=dedup,
                         audit=audit,
                         trial_stats_digest=digest,
+                        exec_bars_1m=bars,
                     )
                     peak = tracemalloc.get_traced_memory()[1]
                 finally:
@@ -3572,19 +3749,67 @@ class TestWorstCaseFinalistProjection:
         cfg = _make_config(sl_paisa=200, tp_paisa=100)
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
         assert summary.persisted >= 1  # the seam is EXERCISED, not vacuously skipped
         rows = {row.mask_bits: row for row in store.rows()}
         assert 16 in rows, sorted(rows)
         row = rows[16]
-        # Hand-derived worst-case anchors (the oracle re-derivation below
-        # reproduces them): 218 trades, avg entry-bar open 149.86, avg
-        # exit-bar close 151.42 — the retired PRECISE projection of the SAME
-        # mask was 389 trades / avg exit 153.79, so a projector priced any
-        # other way cannot reproduce these pins.
-        assert row.total_trades == 218
-        assert row.avg_entry_price == Decimal("149.86")
-        assert row.avg_exit_price == Decimal("151.42")
+        # HAND-DERIVED dual-feed anchors (DEC-FILL-EXEC-GRID-1M-001; the
+        # retired PR-A single-feed pins were 218 / 149.86 / 151.42 and the
+        # retired PRECISE-era projection 389 / 153.79 — a projector priced
+        # under either retired law cannot reproduce these). Fixture algebra
+        # (all prices in paisa; per day, p_k := 10_000 + 250k for cycle
+        # k = 0..29, day-local bar 4k is the DIP bar):
+        #   4k   : open p_k,     high p_k+5,   low p_k-55,  close p_k-50
+        #   4k+1 : open p_k-50,  high p_k+55,  low p_k-55,  close p_k+50
+        #   4k+2 : open p_k+50,  high p_k+155, low p_k+45,  close p_k+150
+        #   4k+3 : open p_k+150, high p_k+255, low p_k+145, close p_k+250
+        # Mask 16 = bit 4 (ema20_above_ema200) fires (run-length verified in
+        # the oracle's own bar_bits): day 0 never; day 1 locals 79-119;
+        # day 2 locals 0-4 + 62-119; day 3 locals 0-4 + 63-119; days 4-14
+        # locals 0-3 + 64-119. Under the law, a signal at bar N fills the
+        # entry at bar N+1's HIGH; detection starts on the fill bar's
+        # successor (same-bar deferral); a TP touch (high >= entry+100)
+        # fills worst-case at min(level, low); the exit bar's own ON signal
+        # re-arms on its successor. STEADY CYCLE: entry at 4k+3 (price
+        # p_k+255, TP p_k+355), bars 4(k+1) / 4(k+1)+1 touch nothing, bar
+        # 4(k+1)+2 has high p_k+405 >= TP -> exit, so entries repeat every
+        # 4 bars at locals 4k+3 with exit bars 4(k+1)+2; the last full
+        # cycle needs 4(k+1)+2 <= 118 -> k <= 28. A signal at exit bar 118
+        # then arms local 119 (the day's LAST bar): the fill lands there and
+        # the next session's boundary closes it retroactively AT the entry
+        # bar (B3: entry-bar CLOSE; end_of_data on day 14) — one 1-bar tail
+        # trade per active day. Per-day trade rosters (entry-bar OPEN /
+        # exit-bar CLOSE are the anchors):
+        #   day 1 (ON from 79): entry@80 (open 15_000, exit@82 close
+        #     15_150) + cycle k=20..28 (9 trades: entry opens p_k+150 =
+        #     15_150..17_150, sum 145_350; exit closes p_{k+1}+150 =
+        #     15_400..17_400, sum 147_600) + tail@119 (17_400 / 17_500)
+        #     = 11 trades, entries 177_750, exits 180_250.
+        #   day 2 (ON 0-4, 62-119): entry@1 (9_950 / exit@2 10_150) +
+        #     entry@3 (10_150 / exit@6 10_400) + cycle k=15..28 (14 trades:
+        #     entry opens 13_900..17_150 sum 217_350; exit closes
+        #     14_150..17_400 sum 220_850) + tail@119 (17_400 / 17_500)
+        #     = 17 trades, entries 254_850, exits 258_900.
+        #   day 3 (ON 0-4, 63-119): the two early trades + entry@64 (a DIP
+        #     fill: open 14_000 / exit@66 close 14_150) + cycle k=16..28
+        #     (13 trades: entry opens 14_150..17_150 sum 203_450; exit
+        #     closes 14_400..17_400 sum 206_700) + tail@119
+        #     = 17 trades, entries 254_950, exits 258_900.
+        #   days 4-14 (ON 0-3, 64-119; 11 days): the two early trades +
+        #     entry@65 (open 13_950 / exit@66 close 14_150) + cycle
+        #     k=16..28 + tail@119 = 17 trades each, entries 254_900,
+        #     exits 258_900.
+        # TOTALS: trades = 11 + 17 + 17 + 11*17 = 232; entry-open sum =
+        # 177_750 + 254_850 + 254_950 + 11*254_900 = 3_491_450 paisa ->
+        # avg 3_491_450/232 = 15_049.35 paisa -> ₹150.49 (ROUND_HALF_UP);
+        # exit-close sum = 180_250 + 13*258_900 = 3_545_950 paisa ->
+        # avg 15_284.27 paisa -> ₹152.84.
+        assert row.total_trades == 232
+        assert row.avg_entry_price == Decimal("150.49")
+        assert row.avg_exit_price == Decimal("152.84")
         # Independent oracle re-derivation of the anchors under the one law.
         from brutex.engine.sweep_driver import mask_to_entry_signals
         from brutex.engine.trade_sim import simulate_trades
@@ -3597,6 +3822,7 @@ class TestWorstCaseFinalistProjection:
             mask_to_entry_signals(bar_bits, 16),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=200,
             take_profit_paisa=100,
         )
@@ -3607,5 +3833,5 @@ class TestWorstCaseFinalistProjection:
             round_money(sum(entries, Decimal("0")) / len(entries)),
             round_money(sum(exits, Decimal("0")) / len(exits)),
         )
-        assert anchors == (218, Decimal("149.86"), Decimal("151.42"))
+        assert anchors == (232, Decimal("150.49"), Decimal("152.84"))
         assert (row.total_trades, row.avg_entry_price, row.avg_exit_price) == anchors
