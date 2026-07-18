@@ -73,6 +73,7 @@ from brutex.engine.cascade_wire import (
     spec_from_store_rows,
 )
 from brutex.engine.combo_mask import popcount
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, ExecGridMap, build_exec_grid_map
 from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
 from brutex.engine.snapshot_hash import data_snapshot_hash
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
@@ -212,7 +213,42 @@ def _ist_day_ordinal(bar: CandleBar) -> int:
     return bar.timestamp.astimezone(IST).date().toordinal()
 
 
-def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
+def lockbox_boundary(bars: Sequence[CandleBar]) -> int | None:
+    """Return *bars*' own default-lockbox START day ordinal (``None`` when empty).
+
+    The per-STREAM half of the dual-stream train-slice law (design §7.2/Q3,
+    DEC-FILL-EXEC-GRID-1M-001): with ``max_day`` the last bar's IST day
+    ordinal, the lockbox window starts at ``max_day -
+    LOCKBOX_DEFAULT_WINDOW_DAYS + 1``. :func:`run_stage3_pass` resolves ONE
+    boundary per instrument — the EARLIEST across the decision stream(s) and
+    the 1-minute execution stream (divergence = a tail-skew WARN) — and
+    applies it to BOTH streams via :func:`train_slice_bars`.
+
+    Raises
+    ------
+    Stage3WireError
+        If the bars' IST day ordinals are not non-decreasing.
+    """
+    if not bars:
+        return None
+    ordinals = _validated_day_ordinals(bars)
+    return ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+
+
+def _validated_day_ordinals(bars: Sequence[CandleBar]) -> list[int]:
+    """IST day ordinals of *bars*, refusing a non-chronological stream loudly."""
+    ordinals = [_ist_day_ordinal(bar) for bar in bars]
+    for prev, cur in itertools.pairwise(ordinals):
+        if cur < prev:
+            raise Stage3WireError(
+                "train_slice_bars: bars must be chronological (non-decreasing IST day ordinals)"
+            )
+    return ordinals
+
+
+def train_slice_bars(
+    bars: Sequence[CandleBar], *, boundary: int | None = None
+) -> tuple[CandleBar, ...]:
     """Return the lockbox-excluded training slice of *bars* (ADR-0007 condition 7).
 
     Mirrors :func:`brutex.metrics.lockbox.lockbox_evaluation`'s DEFAULT
@@ -232,6 +268,12 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
     ----------
     bars
         Chronologically ordered bars for one ``(instrument, interval)``.
+    boundary
+        Optional PRE-RESOLVED lockbox-start day ordinal (the dual-stream ONE
+        BOUNDARY of design §7.2/Q3 — :func:`run_stage3_pass` resolves it per
+        instrument as the EARLIEST :func:`lockbox_boundary` across the
+        decision + execution streams). ``None`` (the default) derives this
+        stream's OWN boundary — byte-identical to the pre-PR-B behaviour.
 
     Returns
     -------
@@ -247,13 +289,10 @@ def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
     """
     if not bars:
         return ()
-    ordinals = [_ist_day_ordinal(bar) for bar in bars]
-    for prev, cur in itertools.pairwise(ordinals):
-        if cur < prev:
-            raise Stage3WireError(
-                "train_slice_bars: bars must be chronological (non-decreasing IST day ordinals)"
-            )
-    lockbox_start = ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+    ordinals = _validated_day_ordinals(bars)
+    lockbox_start = (
+        boundary if boundary is not None else ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+    )
     return tuple(bar for bar, day in zip(bars, ordinals, strict=True) if day < lockbox_start)
 
 
@@ -394,6 +433,8 @@ def _make_evaluator(
     mask: int,
     side: Side,
     tf_minutes: int,
+    exec_bars_1m: Sequence[CandleBar],
+    exec_map: ExecGridMap,
     start_equity_paisa: int,
     reference_stamper: TradeReferenceStamper | None,
 ) -> Evaluator:
@@ -402,6 +443,9 @@ def _make_evaluator(
     The production binding of the slice-4 engine seam: each call is one
     standalone :func:`~brutex.engine.sweep_driver.metrics_for_mask` backtest at
     a quantized on-grid ``(sl_paisa, tp_paisa)`` — O(bars) per call, never O(1).
+    Every fill resolves on the TRAIN-CUT 1-minute execution stream through the
+    once-per-(instrument, tf) ``exec_map`` (DEC-FILL-EXEC-GRID-1M-001 — the
+    map is SL/TP-independent, so one build serves every refinement eval).
     The run's India-VIX stamper rides each evaluation's trade sim
     (DEC-VIX-STAMP-WIRE-001; required, no default — the caller decides).
     """
@@ -413,6 +457,8 @@ def _make_evaluator(
             mask,
             direction=side,
             tf_minutes=tf_minutes,
+            exec_bars_1m=exec_bars_1m,
+            exec_map=exec_map,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
@@ -644,10 +690,31 @@ def run_stage3_pass(
     leaderboards = group_survivors(grid_rows, top_k=grid.stage3_top_k)
     survivors_total = sum(len(rows) for rows in leaderboards.values())
 
+    # Dual-stream train slices (design §7.2/Q3, DEC-FILL-EXEC-GRID-1M-001):
+    # per instrument, ONE lockbox boundary — the EARLIEST across the decision
+    # stream(s) AND the 1-minute execution stream — applied to BOTH, so no
+    # train trade can ever price an exec bar at/after the boundary; a stream
+    # whose own boundary differs is a tail-skew WARN, never a silent split.
+    # The CUT exec slices enter the SAME train fold (train_hash) below.
     train_slices: dict[tuple[str, str], tuple[CandleBar, ...]] = {}
+    labels = list(dict.fromkeys([tf.label for tf in grid.timeframes] + [EXEC_INTERVAL_LABEL]))
     for instrument in grid.instruments:
-        for tf in grid.timeframes:
-            train_slices[(instrument, tf.label)] = train_slice_bars(bars_for(instrument, tf.label))
+        streams = {label: bars_for(instrument, label) for label in labels}
+        boundaries = {
+            label: bound
+            for label, stream in streams.items()
+            if (bound := lockbox_boundary(stream)) is not None
+        }
+        boundary = min(boundaries.values()) if boundaries else None
+        if boundary is not None and any(bound != boundary for bound in boundaries.values()):
+            _LOG.warning(
+                "stage3_wire.lockbox_tail_skew",
+                instrument=instrument,
+                boundaries=dict(sorted(boundaries.items())),
+                resolved=boundary,
+            )
+        for label, stream in streams.items():
+            train_slices[(instrument, label)] = train_slice_bars(stream, boundary=boundary)
     train_hash = data_snapshot_hash(
         exchange=exchange, segment=segment, start=start, end=end, slices=train_slices
     )
@@ -689,12 +756,25 @@ def run_stage3_pass(
         ],
         Sequence[int],
     ] = {}
+    exec_map_memo: dict[tuple[str, str], ExecGridMap] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
-        if not train_bars:
+        exec_train_bars = train_slices.get((key.instrument, EXEC_INTERVAL_LABEL), ())
+        if not train_bars or not exec_train_bars:
+            # No decision train window — or no 1-minute EXECUTION train
+            # window to fill on (the dual-feed law: a refinement eval without
+            # its exec stream would be a decision-TF-era backtest, never a
+            # silent fallback — DEC-FILL-EXEC-GRID-1M-001 §3.3).
             skipped_empty_train += 1
             continue
         tf = _timeframe_for_label(key.tf, grid)
+        exec_key = (key.instrument, key.tf)
+        exec_map = exec_map_memo.get(exec_key)
+        if exec_map is None:
+            # ONE map per (instrument, tf) over the TRAIN cuts — reused by
+            # every survivor + every refinement eval (mask/SL/TP-independent).
+            exec_map = build_exec_grid_map(train_bars, exec_train_bars, tf_minutes=tf.minutes)
+            exec_map_memo[exec_key] = exec_map
         roll_schedule = (
             roll_schedule_by_instrument.get(key.instrument)
             if roll_schedule_by_instrument is not None
@@ -735,6 +815,8 @@ def run_stage3_pass(
                     mask=row.mask_bits,
                     side=side,
                     tf_minutes=tf.minutes,
+                    exec_bars_1m=exec_train_bars,
+                    exec_map=exec_map,
                     start_equity_paisa=grid.start_equity_paisa,
                     reference_stamper=reference_stamper,
                 ),
@@ -786,6 +868,8 @@ def run_stage3_pass(
                     tf_minutes=tf.minutes,
                     sl_paisa=refined_eval.sl_paisa,
                     tp_paisa=refined_eval.tp_paisa,
+                    exec_bars_1m=exec_train_bars,
+                    exec_map=exec_map,
                     # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the refined
                     # row's re-simulation feeds the PERSISTED cell store.
                     reference_stamper=reference_stamper,

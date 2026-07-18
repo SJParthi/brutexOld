@@ -7094,6 +7094,7 @@ def cmd_sweep(
         resolve_futures_series,
     )
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
     from brutex.engine.stage1a import apply_1day_mask_for
     from brutex.engine.sweep_report import sweep_report
 
@@ -7170,6 +7171,26 @@ def cmd_sweep(
                 reconcile=False,  # cmd_sweep's no-reconcile law, preserved
                 resolution=resolution,
             )
+            # The 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001 design
+            # §1.2 D1): every fill resolves on the 1m grid, so the report
+            # loads the SAME window at "1minute" too — at interval=1minute
+            # the decision slice IS the exec slice (one load, one object).
+            exec_bars = (
+                bars
+                if interval == EXEC_INTERVAL_LABEL
+                else load_sweep_slice(
+                    cat=cat,
+                    lake_root=resolved_lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=EXEC_INTERVAL_LABEL,
+                    start=start_dt,
+                    end=end_dt,
+                    reconcile=False,  # cmd_sweep's no-reconcile law, preserved
+                    resolution=resolution,
+                )
+            )
     except FuturesSeriesError as exc:
         print(f"[brutex] sweep error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -7177,6 +7198,16 @@ def cmd_sweep(
         print(
             f"[brutex] no bars for {symbol} {interval} {start}→{end} "
             f"under {exchange}/{segment} (lake={resolved_lake})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if not exec_bars:
+        # The dual-feed law refuses LOUDLY — never a decision-TF-era report
+        # (DEC-FILL-EXEC-GRID-1M-001 §3.3: the exec slice is not waivable).
+        print(
+            f"[brutex] no 1-minute EXECUTION bars for {symbol} {start}→{end} under "
+            f"{exchange}/{segment} (lake={resolved_lake}) — every fill resolves on the "
+            f"1m grid (DEC-FILL-EXEC-GRID-1M-001); pull the symbol's 1-minute slice first",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
@@ -7202,6 +7233,7 @@ def cmd_sweep(
             direction=side,
             condition_bits=condition_bits,
             k=k,
+            exec_bars_1m=exec_bars,
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             top_n=top,
@@ -7360,6 +7392,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, ExecGridMap, build_exec_grid_map
     from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
@@ -7617,10 +7650,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
         # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
         # this launch loudly; once the bars are in memory the guard is released.
+        # DEC-FILL-EXEC-GRID-1M-001 (design §1.2 D1): the preload loads every
+        # swept symbol's interval_list ∪ {"1minute"} into the SAME slices
+        # mapping — the 1-minute EXECUTION stream rides the identical G10
+        # read-guard span / catalog reconcile / read-boundary guards, and
+        # data_snapshot_hash folds it mechanically (any single 1m bar
+        # difference re-keys the grid). At tf=1minute the key is identical,
+        # so no double load and no double fold.
+        preload_intervals = list(dict.fromkeys([*interval_list, EXEC_INTERVAL_LABEL]))
         slices: dict[tuple[str, str], list[Any]] = {}
         with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
             for symbol in symbol_list:
-                for interval in interval_list:
+                for interval in preload_intervals:
                     slices[(symbol, interval)] = load_sweep_slice(
                         cat=cat,
                         lake_root=resolved_lake,
@@ -7672,6 +7713,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
             f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
         )
+
+    # The EXEC-slice preflight (DEC-FILL-EXEC-GRID-1M-001 design §3.3): every
+    # symbol with ANY swept decision bars needs its 1-minute EXECUTION slice —
+    # a coordinate without one cannot fill under the dual-feed law, and
+    # --allow-missing-slices does NOT waive it (that flag opts into skipping
+    # DECISION coverage, never into a decision-TF-era fill). A symbol with
+    # ZERO decision bars everywhere has no swept coordinate — nothing to fill.
+    missing_exec = sorted(
+        symbol
+        for symbol in symbol_list
+        if not slices.get((symbol, EXEC_INTERVAL_LABEL))
+        and any(slices.get((symbol, interval)) for interval in interval_list)
+    )
+    if missing_exec:
+        print(
+            f"[brutex] REFUSED: {len(missing_exec)} swept symbol(s) have ZERO 1-minute "
+            f"EXECUTION bars: {', '.join(missing_exec)} — every fill resolves on the 1m "
+            f"grid (DEC-FILL-EXEC-GRID-1M-001) and --allow-missing-slices does not waive "
+            f"the exec slice. Remedy: pull the symbol's 1-minute data first "
+            f"(the pipeline pull fetches 1minute for every symbol).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
     # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
@@ -7888,6 +7952,27 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     def _bars_for(symbol: str, interval: str) -> list[Any]:
         return slices.get((symbol, interval), [])
+
+    # The once-per-coordinate ExecGridMap memo (DEC-FILL-EXEC-GRID-1M-001
+    # design §1.5): OWNED here beside the _bars_for memo — the signal→next-1m
+    # mapping is mask-independent, built ONCE per (symbol, tf) over the
+    # preloaded slices and reused by every tuple the sequential driver runs
+    # (parallel workers rebuild per tuple across the spawn boundary; same law,
+    # same bytes). tf minutes via the SAME trading-minutes vocabulary the
+    # Timeframe carries (the 1day wall-clock conversion lives in the builder).
+    _exec_maps: dict[tuple[str, str], ExecGridMap] = {}
+
+    def _exec_map_for(symbol: str, tf_label: str) -> ExecGridMap:
+        key = (symbol, tf_label)
+        mapped = _exec_maps.get(key)
+        if mapped is None:
+            mapped = build_exec_grid_map(
+                slices.get((symbol, tf_label), []),
+                slices.get((symbol, EXEC_INTERVAL_LABEL), []),
+                tf_minutes=trading_minutes_for_lake_interval(tf_label),
+            )
+            _exec_maps[key] = mapped
+        return mapped
 
     def _on_tuple(t: SweepTuple, summary: SweepRunSummary) -> None:
         print(
@@ -8118,6 +8203,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     store_quarantine=core.store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    exec_map_for=_exec_map_for,
                 )
             core.grid_done(result)
             core.stage("stage3")
@@ -9234,9 +9320,17 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 roll_schedule_by_instrument = dict.fromkeys(
                     recount_futures, resolution.roll_schedule
                 )
+            # The SAME interval union the launch preloaded
+            # (DEC-FILL-EXEC-GRID-1M-001 D1): the recorded snapshot folds the
+            # 1-minute EXECUTION slice, so the recount must reload it or the
+            # Tier-2 hash compare false-fails on every non-1minute grid — and
+            # the shadow re-sweep needs the exec stream to re-fill under the
+            # same dual-feed law.
+            from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
+
             with Catalog.open(catalog) as cat:
                 for symbol in symbol_list:
-                    for interval in interval_list:
+                    for interval in dict.fromkeys([*interval_list, EXEC_INTERVAL_LABEL]):
                         slices[(symbol, interval)] = load_sweep_slice(
                             cat=cat,
                             lake_root=resolved_lake,
@@ -10077,6 +10171,8 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     # ever sees spot rows on this path today.
     underlying = OptionsUnderlying(row.instrument)
 
+    from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
+
     with Catalog.open(catalog_path) as cat:
         bars = load_sweep_slice(
             cat=cat,
@@ -10088,8 +10184,25 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
             start=_parse_dt(start),
             end=_parse_dt(end),
         )
+        # The 1-minute EXECUTION stream (DEC-FILL-EXEC-GRID-1M-001): the
+        # replay's fills resolve on the 1m grid exactly like the sweep that
+        # minted the winner — at interval=1minute one load serves both.
+        exec_bars = (
+            bars
+            if interval == EXEC_INTERVAL_LABEL
+            else load_sweep_slice(
+                cat=cat,
+                lake_root=lake_root,
+                exchange=exchange,
+                segment=segment,
+                symbol=row.instrument,
+                interval=EXEC_INTERVAL_LABEL,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+            )
+        )
 
-    if not bars:
+    if not bars or not exec_bars:
         return []
     # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
     # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
@@ -10122,6 +10235,9 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-EXEC-GRID-1M-001: fills resolve on the 1-minute execution
+        # stream (the map derives once inside — one replay, one build).
+        exec_bars_1m=exec_bars,
         # DEC-FILL-WORST-CASE-ONLY-001: the replay simulates under the ONE
         # hardcoded worst-case fill law — the same law the winners were
         # swept under by construction. NOTE the honest pre-existing

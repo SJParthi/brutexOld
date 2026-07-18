@@ -156,6 +156,14 @@ _DEFAULT_FORCED_EXIT_SECONDS: Final[int] = 15 * 3600 + 20 * 60
 #: mapping's deterministic non-session fallback without importing it).
 _DEFAULT_SESSION_CLOSE_SECONDS: Final[int] = 15 * 3600 + 30 * 60
 
+#: The reference's OWN §6b restatement constants (never imported from
+#: exec_grid — the §3.11 AST ban): the timeframe vocabulary carries TRADING
+#: minutes and 1day is the 375-minute session (DEC-TF-VOCAB-21-001), but the
+#: close-instant law is WALL-CLOCK — a midnight-IST 1day label closes at the
+#: NEXT midnight, so every 1day arm point cross-session drops.
+_SESSION_TRADING_MINUTES: Final[int] = 375
+_DAY_WALL_MINUTES: Final[int] = 1440
+
 #: 2-decimal tick-grid quantum for the re-derived rupee→paisa snap.
 _PAISA_QUANTUM: Final[Decimal] = Decimal("0.01")
 
@@ -324,9 +332,14 @@ def _reference_arm_map(
     n_exec = len(exec_bars)
     armed = [-1] * n_exec
     close_cache: dict[date, int] = {}
+    # Independent §6b restatement (see the module constants — NOT imported
+    # from exec_grid, the AST ban): 1day's 375 TRADING minutes convert to the
+    # 1440-minute wall-clock day for the close-instant law, so every 1day arm
+    # point cross-session drops (structurally empty).
+    step_minutes = _DAY_WALL_MINUTES if tf_minutes == _SESSION_TRADING_MINUTES else tf_minutes
     j = 0
     for n, dbar in enumerate(bars):
-        close_instant = dbar.timestamp + timedelta(minutes=tf_minutes)
+        close_instant = dbar.timestamp + timedelta(minutes=step_minutes)
         while j < n_exec and exec_bars[j].timestamp < close_instant:
             j += 1
         if j >= n_exec:

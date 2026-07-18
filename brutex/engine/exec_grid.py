@@ -85,6 +85,7 @@ __all__ = [
     "EXEC_INTERVAL_LABEL",
     "ExecGridMap",
     "build_exec_grid_map",
+    "close_step_minutes",
     "exec_window_slice",
 ]
 
@@ -220,6 +221,35 @@ class ExecGridMap:
                     )
 
 
+#: The 1day timeframe's TRADING-minute count (DEC-TF-VOCAB-21-001: the engine
+#: ``Timeframe("1day").minutes`` is the 375-minute SESSION, never wall-clock
+#: 1440) and the wall-clock day it maps to for the CLOSE-INSTANT law only.
+#: Design §6b (DEC-FILL-EXEC-GRID-1M-001): a derived 1day decision bar is
+#: labelled midnight IST and its close instant is the NEXT midnight — so the
+#: first stored 1m bar at/after it is the NEXT session's 09:15, a different
+#: IST date, and the same-session gate drops EVERY 1day arm point (tf=1day is
+#: STRUCTURALLY EMPTY — zero trades, matching the pre-PR-B cross-session drop
+#: law). Every OTHER timeframe's trading minutes == its wall-clock bucket
+#: duration (09:15-anchored intraday buckets), so the conversion is exact.
+_SESSION_TRADING_MINUTES: Final[int] = 375
+_DAY_WALL_MINUTES: Final[int] = 1440
+
+
+def close_step_minutes(tf_minutes: int) -> int:
+    """Return the WALL-CLOCK minutes of one decision bucket for the mapping law.
+
+    The close-instant law (§1.2) is wall-clock arithmetic: ``close(N) =
+    ts_tf[N] + bucket duration``. The engine's timeframe vocabulary carries
+    TRADING minutes (DEC-TF-VOCAB-21-001: 1day == the 375-minute session), so
+    the ONE trading≠wall-clock timeframe — 1day — converts to 1440 here;
+    every intraday timeframe passes through unchanged (trading == wall-clock
+    within a session). Public so the seam/tests can pin the conversion; the
+    R45 diffcheck reference independently RE-STATES this law (never imports
+    it — the §3.11 AST import ban).
+    """
+    return _DAY_WALL_MINUTES if tf_minutes == _SESSION_TRADING_MINUTES else tf_minutes
+
+
 def _require_chronological(name: str, bars: Sequence[CandleBar]) -> None:
     """Refuse a REORDERED stream LOUDLY (the two-pointer precondition).
 
@@ -344,7 +374,9 @@ def build_exec_grid_map(
         decision_of[j] = k - 1
 
     # arm_source: the >=-close-instant mapping + the three build-time gates.
-    step = timedelta(minutes=tf_minutes)
+    # WALL-CLOCK bucket duration (§6b: 1day's 375 TRADING minutes convert to
+    # 1440 so its close instant is the NEXT midnight — structurally empty).
+    step = timedelta(minutes=close_step_minutes(tf_minutes))
     close_cache: dict[date, datetime] = {}
     j = 0
     for n, dbar in enumerate(decision_bars):
