@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
 from abc import ABCMeta
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -284,6 +286,131 @@ class TestSnapshotDifferential:
         assert h.hexdigest() == _snapshot_oracle("E", "S", "a", "b", slices)
 
 
+# ── hostile FFI input: the utcoffset checked-arithmetic fold ─────────────────────
+
+#: The subprocess proof body: a hostile ``utcoffset().days`` fold must raise
+#: a TYPED ValueError — never a process abort. Run out-of-process because the
+#: pre-fix failure mode (an i64 overflow panic under the since-retired
+#: ``panic = "abort"`` release profile) killed the WHOLE interpreter with
+#: SIGABRT — an in-process regression could never report it.
+_HOSTILE_UTCOFFSET_CHILD = """
+import brutex_identity
+
+
+class FakeOffset:
+    microseconds = 0
+    days = 1 << 60
+    seconds = 0
+
+
+class FakeTs:
+    year = 2024
+    month = 1
+    day = 2
+    hour = 9
+    minute = 15
+    second = 0
+    microsecond = 0
+
+    def utcoffset(self):
+        return FakeOffset()
+
+
+h = brutex_identity.SnapshotHasher("NSE", "INDEX", "2024-01-01", "2024-01-02")
+try:
+    h.add_bar(FakeTs(), "1", "1", "1", "1", 0, None)
+except ValueError as exc:
+    print("TYPED_VALUE_ERROR:", exc)
+"""
+
+
+class _HostileOffset:
+    """A duck-typed ``utcoffset()`` result with arbitrary integer attributes."""
+
+    def __init__(self, days: int, seconds: int = 0, microseconds: int = 0) -> None:
+        self.days = days
+        self.seconds = seconds
+        self.microseconds = microseconds
+
+
+class _HostileTs:
+    """A duck-typed timestamp whose ``utcoffset()`` is attacker-shaped."""
+
+    year = 2024
+    month = 1
+    day = 2
+    hour = 9
+    minute = 15
+    second = 0
+    microsecond = 0
+
+    def __init__(self, offset: _HostileOffset) -> None:
+        self._offset = offset
+
+    def utcoffset(self) -> _HostileOffset:
+        return self._offset
+
+
+class TestHostileUtcoffsetOverflow:
+    """Independent refuter round (DEC-RUST-RUNID-STORES-001): a hostile object
+    whose ``utcoffset().days`` is huge overflowed the kernel's i64
+    ``days * 86_400 + seconds`` fold — with the crate's
+    ``overflow-checks = true`` that PANICKED, and under the since-retired
+    ``panic = "abort"`` release profile the panic was an uncatchable process
+    SIGABRT (reproduced pre-fix: exit 134 at python.rs's fold). The fold is
+    now checked-arithmetic total: overflow = the SAME typed bad-shape
+    ValueError as every other malformed timestamp. Production-unreachable
+    (real ``datetime`` offsets have ``days`` ∈ {−1, 0}) — this pins the FFI
+    boundary's totality, not a live pull path.
+    """
+
+    def test_subprocess_proof_no_abort(self) -> None:
+        # The abort class kills the PROCESS, so the definitive regression
+        # runs the hostile call in a subprocess: pre-fix this died with
+        # returncode -6 (SIGABRT); post-fix it exits 0 having printed the
+        # typed-ValueError marker.
+        proc = subprocess.run(
+            [sys.executable, "-c", _HOSTILE_UTCOFFSET_CHILD],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"hostile utcoffset fold killed the process (rc={proc.returncode}; "
+            f"-6/134 = SIGABRT — the overflow panic escaped): {proc.stderr[-500:]}"
+        )
+        assert "TYPED_VALUE_ERROR:" in proc.stdout
+
+    @pytest.mark.parametrize(
+        ("days", "seconds"),
+        [
+            (1 << 60, 0),
+            (-(1 << 60), 0),
+            (0, 1 << 62),
+            (1 << 62, -(1 << 62)),
+        ],
+        ids=["huge-days", "huge-negative-days", "huge-seconds", "mul-overflow-only"],
+    )
+    def test_overflowing_offsets_raise_typed_value_error(self, days: int, seconds: int) -> None:
+        h = brutex_identity.SnapshotHasher("NSE", "INDEX", "2024-01-01", "2024-01-02")
+        # cast: the stub types `ts` as datetime; feeding the duck-typed hostile
+        # shape IS the point (the FFI extracts attributes, not the class).
+        hostile = cast(datetime, _HostileTs(_HostileOffset(days, seconds)))
+        with pytest.raises(ValueError, match="bar timestamp must be a datetime"):
+            h.add_bar(hostile, "1", "1", "1", "1", 0, None)
+
+    def test_real_offset_shapes_still_accepted(self) -> None:
+        # The checked fold changes NOTHING for real offsets — an IST-offset
+        # aware datetime still folds identically to the streaming oracle.
+        ts = datetime(2024, 1, 2, 9, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        h = brutex_identity.SnapshotHasher("NSE", "INDEX", "2024-01-01", "2024-01-02")
+        h.add_slice("S", "1minute", 1)
+        h.add_bar(ts, "1", "1", "1", "1", 0, None)
+        slices: _SliceMap = {("S", "1minute"): [(ts, "1", "1", "1", "1", 0, None)]}
+        assert h.hexdigest() == _snapshot_oracle("NSE", "INDEX", "2024-01-01", "2024-01-02", slices)
+
+
 # ── store laws: retired-body oracles ─────────────────────────────────────────
 
 
@@ -362,10 +489,15 @@ class TestWheelHandshake:
                 / "EXPECTED_BUILD.json"
             ).read_text(encoding="utf-8")
         )
+        # The doctor freshness stage fingerprints the compiled .so surface as
+        # {non-underscore names} ∪ {"__version__"} (the trading_core/fno_math
+        # convention), so EXPECTED_BUILD.json carries __version__ too
+        # (DEC-RUST-RUNID-STORES-001, independent refuter round 2 — the
+        # brutex_identity doctor stages).
         shim_symbols = {
             name for name in brutex_identity._EXPECTED_COMPILED_SYMBOLS if not name.startswith("__")
         }
-        assert set(expected_build["symbols"]) == shim_symbols
+        assert set(expected_build["symbols"]) == shim_symbols | {"__version__"}
 
     def test_expected_build_crate_version_matches_the_wheel(self) -> None:
         expected_build = json.loads(

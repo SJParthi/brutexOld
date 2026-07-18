@@ -407,9 +407,10 @@ class TestTopK:
             store.top_k(1, by="avg_entry_price")  # price columns are not rankable
 
     def test_ranks_money_above_2_53_exactly(self) -> None:
-        # int64 paisa above 2**53 must rank EXACTLY — `_field_getter` returns the
-        # raw int (no float() coercion that would tie 2**53 and 2**53 + 1). This
-        # guards a reproducibility-critical property (and kills the float mutant).
+        # int64 paisa above 2**53 must rank EXACTLY — the kernel's rank_top_k
+        # receives the raw int (the retired `_field_getter` helper's law: no
+        # float() coercion that would tie 2**53 and 2**53 + 1). This guards a
+        # reproducibility-critical property (and kills the float mutant).
         big = 2**53
         store = ResultsStore(path=Path("unused.parquet"))
         store.extend(

@@ -7,15 +7,19 @@ retired in Stage e), the PLANNED upsert (`plan_windows`), the throttled live
 flush, and the begin/end dry-run rule.
 """
 
-# Whitebox tests reach module-private decode helpers (`_read_ledger_file_rows` /
-# `_intern_cells` / `_INTERNED_COLUMNS`) — sanctioned per pyproject.toml.
+# Whitebox tests reach module-private decode surfaces (`_read_ledger_file_rows` /
+# `_INTERNED_COLUMNS` — the retired `_intern_cells` helper's law now lives in
+# the brutex_identity kernel's LedgerStringPool) — sanctioned per pyproject.toml.
 # pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import os
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -3119,3 +3123,156 @@ class TestSharedPullLedgerScope:
         assert holder[0] is not None
         after = begin_pull_ledger(tmp_path, dry_run=False)
         assert after is not holder[0]  # the finally reset ran
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Corrupt-parquet abort regression (DEC-RUST-RUNID-STORES-001, independent
+# refuter round 2 — the BLOCKER)
+# ────────────────────────────────────────────────────────────────────────
+
+#: The deterministic bounded corruption battery, run in a SUBPROCESS: parquet-rs
+#: PANICS on structurally-plausible-but-corrupt parquet ("column start and
+#: length should not be negative", `Option::unwrap()` on None in the footer
+#: thrift — each reachable by a SINGLE flipped byte of a canonical ledger
+#: file), and under the crate's since-retired `panic = "abort"` release
+#: profile that panic was an uncatchable SIGABRT (exit 134) killing the WHOLE
+#: pull — reproduced pre-fix, which is exactly why the battery must run
+#: out-of-process: an abort kills the runner, so only a subprocess can report
+#: it. The child renders a canonical ledger file via the production render
+#: seam, then for EVERY byte of the footer region (last 700 bytes; the thrift
+#: metadata lives there) applies BOTH an XOR 0x01 bit-flip (the zigzag-varint
+#: sign flip that mints the negative-offset panic class) and an XOR 0xFF
+#: inversion (the unwrap-None class), plus a stride over the body — and
+#: drives each corrupted file through the REAL `load_window_ledger`
+#: (the parent-path degrade contract) AND classifies the kernel-level error.
+_CORRUPTION_BATTERY_CHILD = """
+import json
+import sys
+from pathlib import Path
+
+import brutex_identity
+from brutex.data.window_ledger import SUCCESS, WindowLedger
+from brutex.data.fetch_coverage import WindowKey
+from datetime import UTC, date, datetime
+from brutex.data.window_ledger_store import ledger_path, load_window_ledger, save_window_ledger
+
+tmp = Path(sys.argv[1])
+ledger = WindowLedger()
+ledger.record(
+    WindowKey(market="groww", security_id="NSE-NIFTY", interval="1minute",
+              start=date(2024, 1, 1), end=date(2024, 1, 31)),
+    raw_bars=375, error_type=None, bars_appended=375,
+    now=datetime(2024, 1, 31, 16, 0, tzinfo=UTC),
+)
+save_window_ledger(ledger, tmp)
+path = ledger_path(tmp)
+base = bytearray(path.read_bytes())
+n = len(base)
+offsets = list(range(max(0, n - 700), n)) + list(range(0, max(0, n - 700), 97))
+counters = {"total": 0, "degraded": 0, "loaded_ok": 0,
+            "panicked_cases": 0, "negative_metadata_cases": 0}
+for off in offsets:
+    for mask in (0x01, 0xFF):
+        corrupted = bytearray(base)
+        corrupted[off] ^= mask
+        # Kernel-level classification: the caught-panic class must surface as
+        # a typed ValueError, never an abort / PanicException.
+        try:
+            brutex_identity.read_ledger_rows(bytes(corrupted), 3)
+        except ValueError as exc:
+            msg = str(exc)
+            if "parquet decode panicked" in msg:
+                counters["panicked_cases"] += 1
+                if "negative" in msg:
+                    counters["negative_metadata_cases"] += 1
+        # Parent-path law: the REAL production load DEGRADES (empty +
+        # load_failed) or reads clean (an immaterial byte) — never raises,
+        # never aborts.
+        path.write_bytes(bytes(corrupted))
+        loaded = load_window_ledger(tmp)
+        counters["total"] += 1
+        if loaded.load_failed:
+            counters["degraded"] += 1
+            assert loaded.count == 0, (off, mask, loaded.count)
+        else:
+            counters["loaded_ok"] += 1
+print(json.dumps(counters))
+"""
+
+
+class TestCorruptParquetNeverAborts:
+    """The refuter-round-2 BLOCKER regression: corrupt window-ledger parquet
+    must take the documented degrade path (empty + ``load_failed`` + ONE
+    structured WARNING) — never a process abort. Pre-fix (the crate's
+    ``panic = "abort"`` profile, no catch_unwind boundary) the battery's
+    subprocess died with returncode -6 (SIGABRT); the SAME corrupt bytes
+    under the retired pyarrow reader raised a catchable OSError.
+    """
+
+    def test_corruption_battery_subprocess_never_aborts(self, tmp_path: Path) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", _CORRUPTION_BATTERY_CHILD, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"corruption battery died rc={proc.returncode} (-6/134 = SIGABRT — a "
+            f"parquet-rs panic escaped the catch_unwind boundary): "
+            f"stdout={proc.stdout[-800:]!r} stderr={proc.stderr[-800:]!r}"
+        )
+        counters = json.loads(proc.stdout.splitlines()[-1])
+        # Anti-vacuous teeth: the sweep must actually EXERCISE the panic
+        # class — including the named negative-column-start/length metadata
+        # panic (the refuter's reproduced parquet-57.3.1 site).
+        assert counters["panicked_cases"] >= 1, counters
+        assert counters["negative_metadata_cases"] >= 1, counters
+        assert counters["degraded"] >= 1, counters
+        assert counters["degraded"] + counters["loaded_ok"] == counters["total"], counters
+
+    def test_panic_class_corruption_degrades_with_structured_warning(self, tmp_path: Path) -> None:
+        # The in-process parent-path proof over ONE panic-class corruption
+        # (located dynamically off the kernel error text, so the pin never
+        # depends on a byte offset): the REAL load degrades to empty with
+        # load_failed=True and the ONE structured WARNING — post-fix this is
+        # safe to run in-process because the panic is caught in the kernel.
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=375,
+            error_type=None,
+            bars_appended=375,
+            now=_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+        path = ledger_path(tmp_path)
+        base = bytearray(path.read_bytes())
+        panic_bytes: bytes | None = None
+        import brutex_identity
+
+        for off in range(max(0, len(base) - 700), len(base)):
+            for mask in (0x01, 0xFF):
+                corrupted = bytearray(base)
+                corrupted[off] ^= mask
+                try:
+                    brutex_identity.read_ledger_rows(bytes(corrupted), 3)
+                except ValueError as exc:
+                    if "parquet decode panicked" in str(exc):
+                        panic_bytes = bytes(corrupted)
+                        break
+            if panic_bytes is not None:
+                break
+        assert panic_bytes is not None, "no panic-class corruption found in the footer sweep"
+        path.write_bytes(panic_bytes)
+        with capture_logs() as logs:
+            loaded = load_window_ledger(tmp_path)
+        assert loaded.count == 0
+        assert loaded.load_failed is True
+        warnings = [
+            e
+            for e in logs
+            if e.get("event") == "window_ledger.load_failed" and e.get("log_level") == "warning"
+        ]
+        assert len(warnings) == 1
+        assert "parquet decode panicked" in str(warnings[0].get("error"))

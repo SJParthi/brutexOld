@@ -5,10 +5,24 @@
 //! [`crate::snapshot`]) or the object-walking canonicaliser
 //! ([`crate::canonical`]); this module extracts/builds Python objects and
 //! raises `ValueError` with the exact retired-Python message bytes (the
-//! Python wrappers re-raise their own domain error classes). Panics cannot
-//! cross silently: pyo3 converts an unwound panic into
-//! `pyo3_runtime.PanicException` at this boundary — the kernels are total
-//! functions over their validated inputs by construction.
+//! Python wrappers re-raise their own domain error classes).
+//!
+//! PANIC POSTURE (honest — the two independent refuter rounds of
+//! DEC-RUST-RUNID-STORES-001): the shipped wheel originally built with
+//! `panic = "abort"`, under which pyo3's unwound-panic →
+//! `pyo3_runtime.PanicException` conversion NEVER runs — a panic anywhere
+//! in the kernel was an uncatchable process SIGABRT (the earlier "total
+//! functions … PanicException" claim here was an overclaim, reproduced
+//! twice: an unchecked utcoffset fold overflow, and parquet-rs panicking on
+//! corrupt ledger bytes). The posture now: `panic = "abort"` is REMOVED
+//! (Cargo.toml records why), so a residual panic unwinds into
+//! `PanicException` — but that is a BaseException outside every caller's
+//! typed degrade set, so the boundary never RELIES on it: the one
+//! hostile-reachable arithmetic fold is checked-arithmetic total
+//! ([`isoformat_of`] → typed `ValueError` on overflow), and the one
+//! untrusted-bytes decode runs under the pure core's `catch_unwind`
+//! boundary ([`crate::parquet_codec::read_ledger_parquet`] → the plain
+//! error path → typed `ValueError`).
 
 use crate::ledger::{LedgerRow, RowKey};
 use crate::store_law::{AppendDecision, RankKey, ResultRowFfi};
@@ -166,7 +180,18 @@ fn isoformat_of(ts: &Bound<'_, PyAny>) -> PyResult<String> {
             .getattr("seconds")
             .and_then(|v| v.extract::<i64>())
             .map_err(|_| bad_shape())?;
-        let total = days * 86_400 + seconds;
+        // Checked fold (independent refuter round of DEC-RUST-RUNID-STORES-001):
+        // a hostile object's `.days`/`.seconds` are arbitrary i64s, and with
+        // `overflow-checks = true` an unchecked `days * 86_400 + seconds`
+        // PANICS on e.g. `days = 1 << 60` (under the retired
+        // `panic = "abort"` profile that was a process SIGABRT — reproduced,
+        // exit 134). Overflow is the SAME typed bad-shape ValueError as
+        // every other malformed timestamp; real datetime offsets
+        // (days ∈ {−1, 0}) never take this arm.
+        let total = days
+            .checked_mul(86_400)
+            .and_then(|x| x.checked_add(seconds))
+            .ok_or_else(bad_shape)?;
         Some(i32::try_from(total).map_err(|_| bad_shape())?)
     };
     Ok(snapshot::format_py_isoformat(
@@ -534,8 +559,8 @@ fn _brutex_identity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // for the shim's `_EXPECTED_COMPILED_SYMBOLS` handshake surface.
     m.add("__source_digest__", crate::SOURCE_DIGEST)?;
     m.add("SOURCE_DIGEST", crate::SOURCE_DIGEST)?;
-    // The fixed ledger column vocabulary — the ONE source `_COLUMNS` /
-    // `_CORE_COLUMNS` in window_ledger_store.py now derive from.
+    // The fixed ledger column vocabulary — the ONE schema source the
+    // window_ledger_store consumers (and their tests) read directly.
     m.add("LEDGER_COLUMNS", ledger::LEDGER_COLUMNS)?;
     m.add("LEDGER_CORE_COLUMNS", ledger::LEDGER_CORE_COLUMNS)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;

@@ -259,12 +259,57 @@ fn optional_int(
     }
 }
 
+/// Render a caught panic payload as text (`&str` / `String` payloads
+/// verbatim — the `panic!`/`assert!`/`unwrap` classes; anything else the
+/// honest placeholder).
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        text
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.as_str()
+    } else {
+        "<non-string panic payload>"
+    }
+}
+
 /// Decode one ledger-shaped Parquet byte buffer into RAW rows (the three
 /// legacy-derivable optional columns still unresolved — the caller applies
 /// `coerce_raw_row`). The 11 CORE columns are REQUIRED; a missing one, a
 /// wrong-dtype cell, or corrupt bytes all error (the caller's
 /// `_LEDGER_READ_ERRORS` degrade contract).
+///
+/// PANIC BOUNDARY (independent refuter round 2 of DEC-RUST-RUNID-STORES-001,
+/// a BLOCKER): parquet-rs PANICS — it does not `Err` — on
+/// structurally-plausible-but-corrupt bytes (reproduced at parquet-57.3.1:
+/// "column start and length should not be negative" + `Option::unwrap()` on
+/// `None` in the footer-thrift decode, each reachable by a SINGLE flipped
+/// byte in a canonical ledger file's footer). This is the ONE kernel surface
+/// fed UNTRUSTED on-disk bytes, so the decode runs under `catch_unwind` and
+/// a caught panic maps onto the SAME `Err(String)` path as every other
+/// malformed-buffer shape — the FFI edge turns it into a typed Python
+/// `ValueError` (a `_LEDGER_READ_ERRORS` member), never a process abort and
+/// never a `pyo3_runtime.PanicException` (a BaseException OUTSIDE that
+/// degrade set). The crate profile drops `panic = "abort"` for exactly this
+/// boundary (see Cargo.toml). Cosmetic residual: the default panic hook
+/// still prints the caught panic to stderr once per corrupt file — the
+/// operator surface is the caller's structured WARNING, not that line.
 pub fn read_ledger_parquet(bytes: bytes::Bytes) -> Result<Vec<RawLedgerRow>, String> {
+    // AssertUnwindSafe: the closure OWNS its only captured value (`bytes`,
+    // dropped on unwind) and writes no state observable after a panic.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        read_ledger_parquet_impl(bytes)
+    })) {
+        Ok(result) => result,
+        Err(payload) => Err(format!(
+            "ledger read: parquet decode panicked: {}",
+            panic_text(payload.as_ref())
+        )),
+    }
+}
+
+/// The unguarded decode body (see [`read_ledger_parquet`] for the panic
+/// boundary that wraps it).
+fn read_ledger_parquet_impl(bytes: bytes::Bytes) -> Result<Vec<RawLedgerRow>, String> {
     let reader = SerializedFileReader::new(bytes).map_err(|e| format!("ledger read: open: {e}"))?;
     // Fail fast on a missing CORE column (before any row decode).
     let file_fields: Vec<String> = reader
@@ -403,5 +448,69 @@ mod tests {
         let err = read_ledger_parquet(bytes::Bytes::from_static(b"not parquet at all"))
             .expect_err("corrupt");
         assert!(err.contains("ledger read"), "{err}");
+    }
+
+    /// The refuter-round-2 BLOCKER regression (DEC-RUST-RUNID-STORES-001):
+    /// a deterministic single-byte corruption sweep over a canonical ledger
+    /// file's footer region (both an XOR 0x01 bit-flip and an XOR 0xFF byte
+    /// inversion per offset, plus a stride over the body) must NEVER escape
+    /// [`read_ledger_parquet`] as a panic — parquet-rs panics on several of
+    /// these shapes ("column start and length should not be negative",
+    /// `Option::unwrap()` on `None` in the footer thrift) and the
+    /// catch_unwind boundary must map every one onto the `Err(String)`
+    /// degrade path. Fails-before: without the boundary this test dies as a
+    /// panic at the first such case (and the shipped `panic = "abort"` wheel
+    /// SIGABRTed the whole Python process — reproduced, exit 134).
+    /// Anti-vacuous teeth: the sweep must actually EXERCISE the panic class,
+    /// including the named negative-column-start/length metadata panic.
+    #[test]
+    fn corrupt_footer_sweep_panics_are_caught_not_escaped() {
+        let base = write_ledger_parquet(&sample_rows()).expect("write");
+        let n = base.len();
+        // Silence the default panic hook for the sweep (message printing
+        // only — behaviour is unchanged); restore it after.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut panicked_cases = 0usize;
+        let mut negative_metadata_cases = 0usize;
+        let mut offsets: Vec<usize> = (n.saturating_sub(700)..n).collect();
+        offsets.extend((0..n.saturating_sub(700)).step_by(97));
+        for offset in offsets {
+            for mask in [0x01u8, 0xFF] {
+                let mut corrupted = base.clone();
+                corrupted[offset] ^= mask;
+                // A panic HERE (not caught by the boundary) fails the test.
+                match read_ledger_parquet(bytes::Bytes::from(corrupted)) {
+                    Ok(_) => {} // an immaterial byte (padding / a value cell)
+                    Err(err) => {
+                        if err.contains("parquet decode panicked") {
+                            panicked_cases += 1;
+                            if err.contains("negative") {
+                                negative_metadata_cases += 1;
+                            }
+                        }
+                        assert!(err.contains("ledger read"), "{err}");
+                    }
+                }
+            }
+        }
+        std::panic::set_hook(previous_hook);
+        assert!(panicked_cases >= 1, "sweep never exercised the panic class");
+        assert!(
+            negative_metadata_cases >= 1,
+            "sweep never exercised the negative column start/length metadata panic"
+        );
+    }
+
+    /// A caught panic's message carries the payload text (the operator sees
+    /// WHAT parquet-rs refused, not just "panicked").
+    #[test]
+    fn panic_text_renders_str_and_string_payloads() {
+        let s: Box<dyn std::any::Any + Send> = Box::new("static payload");
+        assert_eq!(panic_text(s.as_ref()), "static payload");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned payload"));
+        assert_eq!(panic_text(owned.as_ref()), "owned payload");
+        let other: Box<dyn std::any::Any + Send> = Box::new(42usize);
+        assert_eq!(panic_text(other.as_ref()), "<non-string panic payload>");
     }
 }

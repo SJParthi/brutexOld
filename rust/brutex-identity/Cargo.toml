@@ -87,11 +87,26 @@ proptest = "1.6.0"
 # golden parity vector (the brutex-feed pattern). Test-only.
 blake3 = "1.5"
 
+# Release profile: the fno-math shape MINUS `panic = "abort"` (independent
+# refuter round 2 of DEC-RUST-RUNID-STORES-001, a BLOCKER): unlike
+# fno-math/trading-core/brutex-feed — which only compute over validated FFI
+# inputs — THIS crate decodes UNTRUSTED on-disk bytes (the window-ledger
+# Parquet), and parquet-rs PANICS on structurally-plausible-but-corrupt
+# files (reproduced at parquet-57.3.1 metadata thrift decode: negative
+# column start/length, Option::unwrap on None). Under `panic = "abort"`
+# that panic was an uncatchable SIGABRT (exit 134) mid-pull, violating
+# window_ledger_store.py's "never crash a pull, degrades to EMPTY"
+# contract. With the cargo-default unwind the `parquet_codec.rs`
+# catch_unwind boundary maps the panic to the plain error path (a typed
+# Python ValueError → the caller's `_LEDGER_READ_ERRORS` degrade) — the
+# brutex-lake precedent (its profile comment records the same reasoning).
+# `overflow-checks` STAYS: this crate's own arithmetic must never wrap
+# silently; the one hostile-reachable fold at the FFI edge is
+# checked-arithmetic total (python.rs `isoformat_of`).
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = "symbols"
 overflow-checks = true # Finance code — an overflow must never be silent.
 
