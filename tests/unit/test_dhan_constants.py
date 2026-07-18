@@ -81,6 +81,12 @@ def test_unverified_stamps() -> None:
     assert "EARLIEST_HISTORY_UNVERIFIED" in unverified_names
     assert "DHAN_WINDOW_DAYS_DAILY_UNVERIFIED" in unverified_names
     assert "DHAN_SCRIP_HEADERS_UNVERIFIED" in unverified_names
+    # round-2: the ASSUMED dhanClientId RenewToken header spelling carries the
+    # suffix too (the universal _UNVERIFIED-in-identifier convention holds
+    # literally); the un-suffixed name is GONE
+    assert "DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED" in unverified_names
+    assert c.DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED == "dhanClientId"
+    assert not hasattr(c, "DHAN_HEADER_DHAN_CLIENT_ID")
 
 
 def test_token_lifetime_and_ledger_namespaces() -> None:

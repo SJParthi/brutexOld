@@ -3,7 +3,14 @@
 DEC-DHAN-ADAPTER-001. A :class:`DhanClientPool` fans requests across K
 :class:`~brutex.adapters.dhan.client.DhanClient` leaves that share ONE
 :class:`~brutex.adapters.call_meter.CallMeter` (so the dashboard rate panel reports an
-aggregate) and, when wired, one refresher. It satisfies the same
+aggregate) — the meter sharing is ENFORCED by the constructor (every leaf is rebound
+onto the first leaf's meter). The refresher is NOT rebound: each leaf keeps the
+refresher it was constructed with, so the pool-wide reauth single-flight holds ONLY
+when the caller constructs every leaf with the SAME
+:class:`~brutex.adapters.dhan.reauth.DhanTokenRefresher` instance (the generation
+counter is instance-scoped — distinct per-leaf refreshers would degrade to per-leaf
+single-flight; the future live-wiring DEC must bind ONE shared refresher, named in
+ADR-0024 §5's wiring checklist). It satisfies the same
 :class:`~brutex.adapters.dhan.client.DhanClientProtocol` as a single client, so the
 adapter is identical for both.
 

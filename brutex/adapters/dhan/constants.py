@@ -66,14 +66,17 @@ DHAN_ENDPOINT_PROFILE: Final[str] = "/v2/profile"
 #: Access-token header sent on every request (JWT). VERIFIED — DhanHQ v2 docs.
 DHAN_HEADER_ACCESS_TOKEN: Final[str] = "access-token"  # noqa: S105  # header name, not a secret
 
-#: Client-id header — required by the option-chain endpoint (and ``RenewToken``
-#: via ``dhanClientId``). VERIFIED — DhanHQ v2 docs.
+#: Client-id header — required by the option-chain endpoint (``RenewToken``
+#: carries the ASSUMED ``dhanClientId`` spelling instead — see
+#: :data:`DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED`). VERIFIED — DhanHQ v2 docs.
 DHAN_HEADER_CLIENT_ID: Final[str] = "client-id"
 
-#: ``dhanClientId`` header name for ``RenewToken`` — ASSUMED field name (the docs
+#: ``dhanClientId`` header name for ``RenewToken`` — **UNVERIFIED** (the docs
 #: verify RenewToken itself + a generic client-id requirement on some endpoints;
-#: the exact ``dhanClientId`` spelling is model-inferred, probe-gated).
-DHAN_HEADER_DHAN_CLIENT_ID: Final[str] = "dhanClientId"
+#: the exact ``dhanClientId`` spelling is model-inferred — a probe-register gate,
+#: and the ``_UNVERIFIED`` suffix carries the honesty IN the identifier like
+#: every other assumed fact in this module).
+DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED: Final[str] = "dhanClientId"
 
 #: Access-token JWT lifetime (hours). VERIFIED — DhanHQ v2 docs (24-hour token).
 DHAN_TOKEN_LIFETIME_HOURS: Final[int] = 24
@@ -196,9 +199,14 @@ DHAN_INSTRUMENT_TYPES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: ``(EXCH_ID, SEGMENT)`` → Dhan ``exchangeSegment`` token. VERIFIED — DhanHQ v2
-#: docs (scrip-master segment derivation). Keyed on the two raw scrip-master
-#: columns so the header-driven instrument parser resolves a row's segment.
+#: ``(EXCH_ID, SEGMENT)`` → Dhan ``exchangeSegment`` token. The segment-token
+#: VALUES are VERIFIED — DhanHQ v2 docs; the single-letter ``(EXCH_ID, SEGMENT)``
+#: value-code KEYS (E/D/I/C/M) come from the **UNVERIFIED** scrip-master columns
+#: (:data:`DHAN_SCRIP_HEADERS_UNVERIFIED`) and the code ENCODING is
+#: model-inferred — probe-gated under the scrip-master gate. Keyed on the two raw
+#: scrip-master columns so the header-driven instrument parser resolves a row's
+#: segment; an unknown pair fails LOUD (``exchange_segment_for`` raises), never a
+#: silent mis-parse.
 DHAN_EXCH_SEGMENT_MAP: Final[Mapping[tuple[str, str], str]] = {
     ("NSE", "E"): "NSE_EQ",
     ("NSE", "D"): "NSE_FNO",
@@ -370,7 +378,7 @@ __all__ = [
     "DHAN_FUTURE_COVERAGE_MARKET",
     "DHAN_HEADER_ACCESS_TOKEN",
     "DHAN_HEADER_CLIENT_ID",
-    "DHAN_HEADER_DHAN_CLIENT_ID",
+    "DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED",
     "DHAN_INSTRUMENT_TYPES",
     "DHAN_MAX_REAUTHS",
     "DHAN_NON_TRADING_RATE_LIMIT_RPS",

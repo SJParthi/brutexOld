@@ -39,7 +39,7 @@ from brutex.adapters.dhan.constants import (
     DHAN_ENDPOINT_ROLLING_OPTION,
     DHAN_HEADER_ACCESS_TOKEN,
     DHAN_HEADER_CLIENT_ID,
-    DHAN_HEADER_DHAN_CLIENT_ID,
+    DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED,
     DHAN_MAX_REAUTHS,
 )
 from brutex.adapters.dhan.errors import (
@@ -161,12 +161,16 @@ class DhanClient:
         errors.body_signals_failure`): Dhan can deliver a DH-9xx /
         ``{status:"failure", remarks:{...}}`` failure envelope ON an HTTP 200 —
         the errors module's second failure mechanism — and it must ride the SAME
-        :func:`~brutex.adapters.dhan.errors.from_dhan_response` law (so a
-        200-delivered DH-901 drives the reauth/terminal-auth path and a
-        200-delivered throttle-classified error fires ``on_rate_limit``, never a
-        fake success dying downstream as a misleading parse error). The marker
-        gate is POSITIVE-presence only, so a clean success payload can never be
-        misclassified.
+        :func:`~brutex.adapters.dhan.errors.from_dhan_response` law: a
+        200-delivered DH-901 drives the reauth/terminal-auth path, and every
+        other 200-body failure classifies to its TYPED TERMINAL error (no DH
+        code maps to a rate limit and status 200 is not in the HTTP-status
+        table, so a 200-body failure without a mapped DH code lands on the
+        conservative terminal ``DhanError`` base) — never a fake success dying
+        downstream as a misleading parse error. ``on_rate_limit`` fires only on
+        the non-2xx branch (a 429 STATUS — where Dhan documents its throttles).
+        The marker gate is POSITIVE-presence only, so a clean success payload
+        can never be misclassified.
         """
         if _HTTP_OK_FLOOR <= status < _HTTP_OK_CEILING and not body_signals_failure(body):
             return None
@@ -406,13 +410,15 @@ class DhanClient:
         """Renew an ACTIVE token for another 24 h (``POST /v2/RenewToken``).
 
         VERIFIED — Dhan refreshes an ACTIVE token; renewing an EXPIRED token errors
-        (the vendor returns an auth error → the caller re-mints). Sends the
-        ``dhanClientId`` header. This is the NON-read-only renewal path (a read-only
+        (the vendor returns an auth error → the caller re-mints). Sends the ASSUMED
+        ``dhanClientId`` header (the spelling is model-inferred — probe-gated,
+        :data:`~brutex.adapters.dhan.constants.DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED`).
+        This is the NON-read-only renewal path (a read-only
         broker host self-heals via :attr:`refresher` re-read instead) — documented +
         tested but not wired into the inert reference-only pull.
         """
         headers = self._headers()
-        headers[DHAN_HEADER_DHAN_CLIENT_ID] = self.client_id
+        headers[DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED] = self.client_id
         return self._call(
             lambda: self.transport.post_json(
                 path=DHAN_ENDPOINT_RENEW_TOKEN, body={}, headers=headers

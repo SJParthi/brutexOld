@@ -21,7 +21,7 @@ from brutex.adapters.dhan.constants import (
     DHAN_ENDPOINT_ROLLING_OPTION,
     DHAN_HEADER_ACCESS_TOKEN,
     DHAN_HEADER_CLIENT_ID,
-    DHAN_HEADER_DHAN_CLIENT_ID,
+    DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED,
 )
 from brutex.adapters.dhan.errors import (
     DhanAuthError,
@@ -149,7 +149,7 @@ def test_renew_token_sends_dhan_client_id() -> None:
     transport = FakeDhanTransport(script=[_ok()])
     _client(transport).renew_token()
     assert transport.seen_paths == [DHAN_ENDPOINT_RENEW_TOKEN]
-    assert transport.seen_headers[0][DHAN_HEADER_DHAN_CLIENT_ID] == "1100"
+    assert transport.seen_headers[0][DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED] == "1100"
 
 
 def test_validate_token_true_on_2xx() -> None:

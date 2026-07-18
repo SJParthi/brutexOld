@@ -11,9 +11,13 @@ later (mirroring Groww's :class:`~brutex.adapters.groww.reauth.SdkRefresher`
 read-only re-read path).
 
 Thread-safe + single-flight: a generation counter lets a second concurrent reauth
-adopt the first's freshly-read token instead of re-reading (never a thundering herd).
-Imports only stdlib + the pure error leaf, so it never joins an import cycle with the
-client (the client imports it, not vice-versa).
+adopt the first's freshly-read token instead of re-reading — never a thundering herd
+on the ADOPTION path (the guarantee is scoped honestly: in the STILL-STALE case the
+generation does not advance, so each concurrent caller re-reads SERIALLY under the
+lock and raises the retryable stale error — K bounded, lock-serialized reads, not
+one; the window re-pulls later either way). Imports only stdlib + the pure error
+leaf, so it never joins an import cycle with the client (the client imports it, not
+vice-versa).
 """
 
 from __future__ import annotations

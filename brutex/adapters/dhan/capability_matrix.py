@@ -3,8 +3,10 @@
 DEC-DHAN-ADAPTER-001 + Golden Rule #10 (honest limits). A pure, I/O-free LEAF holding
 the adapter's per-endpoint capability record as DATA (not prose), so the truth is
 machine-checkable (a golden test pins it) and the ``_UNVERIFIED`` probe gates are
-enumerable. Every ``verified`` flag traces to the DhanHQ v2 docs; every ``False`` is a
-live-probe gate named in :data:`DHAN_UNVERIFIED_PROBE_GATES`.
+enumerable. Every ``verified`` flag traces to the DhanHQ v2 docs (path + REQUEST
+shape + limits); every ``unverified`` aspect — response-envelope / field-name /
+value-code assumptions included — is a live-probe gate named in
+:data:`DHAN_UNVERIFIED_PROBE_GATES`.
 """
 
 from __future__ import annotations
@@ -25,7 +27,10 @@ class EndpointCapability:
     verb
         HTTP verb.
     verified
-        ``True`` iff the endpoint's SHAPE + limits are VERIFIED against the docs.
+        ``True`` iff the endpoint's path + REQUEST shape + limits are VERIFIED
+        against the docs. A ``True`` here does NOT bless the response side —
+        any model-inferred response-envelope / field-name assumption is carried
+        in :attr:`unverified` (a non-empty tuple means probe gates remain).
     coverage
         Human-readable coverage note (depth / granularity).
     limits
@@ -73,7 +78,10 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
         verified=True,
         coverage="Per-strike OI/Greeks/volume/top bid-ask/price snapshot",
         limits="SPECIAL 1 request / 3 seconds",
-        unverified=("exact per-strike Greek field names",),
+        unverified=(
+            "exact per-strike Greek field names",
+            "response ENVELOPE shape ({data: {last_price, oc: {...}}} — model-inferred)",
+        ),
     ),
     EndpointCapability(
         name="expiry_list",
@@ -82,7 +90,7 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
         verified=True,
         coverage="Expiry dates for an underlying",
         limits="Data 5/s + 100,000/day",
-        unverified=(),
+        unverified=('response ENVELOPE shape ({data: [...], status: "success"} — model-inferred)',),
     ),
     EndpointCapability(
         name="rolling_option",
@@ -101,7 +109,7 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
         verified=True,
         coverage="Refresh an ACTIVE 24h token (renewing an EXPIRED token errors)",
         limits="Non-Trading 20/s",
-        unverified=(),
+        unverified=("the dhanClientId request-header field name (model-inferred)",),
     ),
     EndpointCapability(
         name="validate_token",
@@ -119,24 +127,36 @@ DHAN_CAPABILITY_MATRIX: tuple[EndpointCapability, ...] = (
         verified=True,
         coverage="Instrument master CSV (compact + detailed)",
         limits="static file",
-        unverified=("exact SEM_-prefixed column names + order",),
+        unverified=(
+            "exact SEM_-prefixed column names + order "
+            "(+ the single-letter EXCH_ID/SEGMENT value-code encoding)",
+        ),
     ),
 )
 
 #: The full ``_UNVERIFIED`` probe-gate register — every aspect a live credentialed
 #: probe must close (Golden Rule #1). Ordered, deduplicated, machine-enumerable;
-#: mirrors ADR-0024 §4's EIGHT gates 1:1 (the round-1 review caught gate #8 —
-#: the earliest-history floor — missing from this register while the ADR named it).
+#: mirrors ADR-0024 §4's ELEVEN gates 1:1 (the round-1 review caught gate #8 —
+#: the earliest-history floor — missing from this register while the ADR named
+#: it; the round-2 review grew it 8 → 11: gate #4 widened to the single-letter
+#: EXCH_ID/SEGMENT value-code encoding, and gates #9–#11 — the expiry-list +
+#: option-chain response ENVELOPES the parsers already flagged as model-inferred,
+#: plus the assumed ``dhanClientId`` RenewToken header spelling — were counted
+#: honestly instead of riding un-registered).
 DHAN_UNVERIFIED_PROBE_GATES: tuple[str, ...] = (
     "candle price unit (rupees-vs-paisa)",
     "daily max-range-per-call (no documented cap)",
     "option-chain per-strike Greek field names",
-    "exact scrip-master SEM_-prefixed column names + order",
+    "exact scrip-master SEM_-prefixed column names + order "
+    "(+ the single-letter EXCH_ID/SEGMENT value-code encoding)",
     "DH-902 / DH-903 / DH-904 / DH-907 error-code meanings",
     "expired-futures history existence (undocumented)",
     "subscription + credential provisioning (₹499/mo Data-API add-on + SSM SecureStrings)",
     "earliest-history floor (daily inception + intraday depth — "
     "EARLIEST_HISTORY_UNVERIFIED placeholder)",
+    "expiry-list response ENVELOPE shape ({data: [...], status} — model-inferred)",
+    "option-chain response ENVELOPE shape ({data: {last_price, oc: {...}}} — model-inferred)",
+    "the RenewToken dhanClientId header field name (model-inferred)",
 )
 
 

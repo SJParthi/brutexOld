@@ -111,18 +111,33 @@ def test_capability_matrix_golden_pin() -> None:
             "candle price unit (rupees-vs-paisa)",
             "intraday history depth (undocumented — the earliest-history probe gate)",
         ),
-        "option_chain": ("exact per-strike Greek field names",),
-        "expiry_list": (),
+        # round-2 re-pin (CONSCIOUS honesty correction): the option-chain +
+        # expiry-list response ENVELOPES were already flagged model-inferred in
+        # the parsers but the matrix under-scoped them; the renew_token
+        # dhanClientId header spelling + the scrip-master single-letter
+        # value-code encoding join the record the same way.
+        "option_chain": (
+            "exact per-strike Greek field names",
+            "response ENVELOPE shape ({data: {last_price, oc: {...}}} — model-inferred)",
+        ),
+        "expiry_list": (
+            'response ENVELOPE shape ({data: [...], status: "success"} — model-inferred)',
+        ),
         "rolling_option": ("expired-futures history existence (undocumented — no path provided)",),
-        "renew_token": (),
+        "renew_token": ("the dhanClientId request-header field name (model-inferred)",),
         "validate_token": (),
-        "scrip_master": ("exact SEM_-prefixed column names + order",),
+        "scrip_master": (
+            "exact SEM_-prefixed column names + order "
+            "(+ the single-letter EXCH_ID/SEGMENT value-code encoding)",
+        ),
     }
     got = {cap.name: cap.unverified for cap in DHAN_CAPABILITY_MATRIX}
     assert got == pinned
-    # the register mirrors ADR-0024 §4's EIGHT gates 1:1 (round-1 re-pin: gate #8,
-    # the earliest-history floor, was missing from the register while the ADR named it)
-    assert len(DHAN_UNVERIFIED_PROBE_GATES) == 8
+    # the register mirrors ADR-0024 §4's ELEVEN gates 1:1 (round-1 re-pin: gate #8,
+    # the earliest-history floor, was missing while the ADR named it; round-2
+    # re-pin: 8 → 11 — the two response ENVELOPES + the dhanClientId header
+    # spelling counted, gate #4 widened to the value-code encoding)
+    assert len(DHAN_UNVERIFIED_PROBE_GATES) == 11
     assert any("earliest-history" in gate for gate in DHAN_UNVERIFIED_PROBE_GATES)
 
 

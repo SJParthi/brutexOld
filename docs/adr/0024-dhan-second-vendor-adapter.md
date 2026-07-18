@@ -96,9 +96,13 @@ Every `_UNVERIFIED`-stamped fact is a live-probe gate. A credentialed probe
 3. **Option-chain per-strike Greek field NAMES** — the parser surfaces the raw
    per-strike mapping and extracts only nameable fields
    (`nameable_option_chain_fields`, assumed keys stamped).
-4. **Exact scrip-master `SEM_`-prefixed headers + order** — the parser is
-   header-driven (by name, order-tolerant); `DHAN_SCRIP_HEADERS_UNVERIFIED`
-   pins the depended-on names with a drift-guard test.
+4. **Exact scrip-master `SEM_`-prefixed headers + order, AND the
+   single-letter `EXCH_ID`/`SEGMENT` value-code ENCODING (E/D/I/C/M)** — the
+   parser is header-driven (by name, order-tolerant);
+   `DHAN_SCRIP_HEADERS_UNVERIFIED` pins the depended-on names with a
+   drift-guard test, and the segment-map KEYS are model-inferred codes from
+   those same unverified columns (only the segment-token VALUES are
+   doc-verified; an unknown code fails loud — round-2 widening).
 5. **DH-902 / DH-903 / DH-904 / DH-907 meanings** — model-inferred; mapped
    conservatively to the terminal base (never blindly retried).
 6. **Expired-futures history** — ABSENT/undocumented; no fetch path provided.
@@ -107,10 +111,22 @@ Every `_UNVERIFIED`-stamped fact is a live-probe gate. A credentialed probe
    closes, the adapter is inert by construction).
 8. **Earliest-history floor** — daily "from inception" / intraday rolling
    5 years; `EARLIEST_HISTORY_UNVERIFIED` is a conservative placeholder.
+9. **Expiry-list response ENVELOPE** — the request body is doc-verified; the
+   `{data: [...], status: "success"}` envelope the parser reads is
+   model-inferred (round-2 honesty recount — the parser always said so; the
+   register now counts it).
+10. **Option-chain response ENVELOPE** — the `{data: {last_price, oc: {...}}}`
+    envelope is model-inferred, ABOVE and beyond the per-strike Greek names of
+    gate 3 (round-2 honesty recount).
+11. **The `dhanClientId` RenewToken header field name** — the docs verify
+    RenewToken itself + a generic client-id requirement; the exact spelling is
+    model-inferred (`DHAN_HEADER_DHAN_CLIENT_ID_UNVERIFIED` — the suffix
+    joined the identifier at round 2).
 
 The machine-readable register is
 `brutex.adapters.dhan.capability_matrix.DHAN_UNVERIFIED_PROBE_GATES`
-(golden-pinned).
+(golden-pinned; 8 gates at hostile-review round 1, grown to these ELEVEN at
+round 2 — an honesty recount, no new assumption was introduced).
 
 ## 5. Consequences
 
@@ -134,7 +150,12 @@ The machine-readable register is
   vendor ceiling a ~750-symbol multi-window pull can approach, and NO shared
   per-day mechanism exists in-repo today (the shared `RateController` is
   per-second + per-minute only), so the tracker must be DESIGNED at wiring
-  time, never assumed; the ledger namespaces; the pull spine integration.
+  time, never assumed; **ONE shared `DhanTokenRefresher` instance across every
+  pool leaf** — the reauth single-flight generation counter is
+  instance-scoped and the pool enforces meter sharing only (per-leaf
+  refreshers would degrade to per-leaf single-flight: K serialized re-reads
+  on a token storm — the round-2 concurrency note); the ledger namespaces;
+  the pull spine integration.
 * **`DEC-DHAN-RUST-FACADE-001`** (deferred): optional Rust facades over the
   frozen pure-law leaves, only under a cross-repo uniformity mandate, with the
   Python law retained as the live oracle (the ADR-0020 pattern).

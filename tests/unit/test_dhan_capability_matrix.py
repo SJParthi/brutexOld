@@ -23,7 +23,8 @@ def test_matrix_covers_every_endpoint() -> None:
 
 
 def test_every_endpoint_is_verified_shape() -> None:
-    # every endpoint's SHAPE is VERIFIED; the UNVERIFIED aspects are named separately
+    # every endpoint's path + REQUEST shape + limits are VERIFIED; the UNVERIFIED
+    # aspects (response envelopes / field names / value codes) are named separately
     assert all(cap.verified for cap in cm.DHAN_CAPABILITY_MATRIX)
 
 
@@ -32,11 +33,15 @@ def test_verified_and_unverified_split() -> None:
     unverified = {cap.name for cap in cm.unverified_capabilities()}
     assert verified.isdisjoint(unverified)
     assert verified | unverified == {cap.name for cap in cm.DHAN_CAPABILITY_MATRIX}
-    # expiry_list / renew_token / validate_token are fully verified
-    assert "expiry_list" in verified
-    # historical/intraday/option_chain/rolling/scrip carry _UNVERIFIED aspects
+    # ONLY validate_token is fully verified (round-2 honesty recount: expiry_list's
+    # + option_chain's response ENVELOPES and renew_token's dhanClientId header
+    # spelling are model-inferred, so those endpoints carry _UNVERIFIED aspects)
+    assert verified == {"validate_token"}
+    # historical/intraday/option_chain/expiry_list/rolling/renew/scrip carry aspects
     assert "intraday" in unverified
     assert "rolling_option" in unverified
+    assert "expiry_list" in unverified
+    assert "renew_token" in unverified
 
 
 def test_probe_gates_enumerated() -> None:
@@ -47,6 +52,12 @@ def test_probe_gates_enumerated() -> None:
     assert any("DH-902" in g for g in gates)
     assert any("expired-futures" in g for g in gates)
     assert any("subscription" in g for g in gates)
+    # round-2 additions: the two response ENVELOPES + the dhanClientId header
+    # spelling + the value-code encoding widening of the scrip-master gate
+    assert any("expiry-list response ENVELOPE" in g for g in gates)
+    assert any("option-chain response ENVELOPE" in g for g in gates)
+    assert any("dhanClientId" in g for g in gates)
+    assert any("value-code encoding" in g for g in gates)
     # deduplicated + non-empty
     assert len(gates) == len(set(gates))
     assert gates

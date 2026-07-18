@@ -80,9 +80,14 @@ class DhanScripRow:
 def exchange_segment_for(exch_id: str, segment: str) -> str:
     """Map a ``(EXCH_ID, SEGMENT)`` scrip-master pair to a Dhan ``exchangeSegment`` token.
 
-    VERIFIED — DhanHQ v2 docs (e.g. ``("NSE","E") → "NSE_EQ"``,
-    ``("NSE","I") → "IDX_I"``). Raises :class:`~brutex.models.InstrumentFormatError`
-    for an unknown pair (fail-loud — never silently default a segment).
+    The segment-token VALUES are VERIFIED — DhanHQ v2 docs (e.g. ``"NSE_EQ"``,
+    ``"IDX_I"``); the single-letter ``(EXCH_ID, SEGMENT)`` value-code KEYS
+    (``("NSE","E")``, ``("NSE","I")``, …) come from the **UNVERIFIED**
+    scrip-master columns, so the code ENCODING is model-inferred — probe-gated
+    under the scrip-master gate. Raises
+    :class:`~brutex.models.InstrumentFormatError` for an unknown pair (fail-loud
+    — never silently default a segment, so an unexpected code can never
+    silently mis-parse).
     """
     key = (exch_id.strip().upper(), segment.strip().upper())
     token = DHAN_EXCH_SEGMENT_MAP.get(key)
