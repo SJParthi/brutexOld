@@ -278,7 +278,9 @@ class ResidentSweepSim:
         sl_next_open: bool = ...,
         tp_next_open: bool = ...,
         tp_first: bool = ...,
-    ) -> list[tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]]:
+    ) -> list[
+        tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
+    ]:
         """`simulate_masks` PLUS per-mask exit-reason counters (the additive twin).
 
         DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: `out[j]` is
@@ -359,7 +361,9 @@ class ResidentSweepSimU128:
         sl_next_open: bool = ...,
         tp_next_open: bool = ...,
         tp_first: bool = ...,
-    ) -> list[tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]]:
+    ) -> list[
+        tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
+    ]:
         """Batch trades PLUS per-mask exit-reason counters — the wide twin of
         `ResidentSweepSim.simulate_masks_with_exit_counts` (same vocabulary
         order, same `sum(counts) == len(trades)` law)."""
