@@ -69,8 +69,9 @@ def test_guard_fixture_exists_and_has_full_coverage() -> None:
 def test_guard_verdicts_match_frozen_oracle() -> None:
     """The LIVE guard reproduces the frozen verdict table structurally EQUAL.
 
-    This is the lane's byte-identity contract: the Python oracle (and, in
-    later phases, the flag-ON Rust arm consulted through it) must reproduce
+    This is the lane's byte-identity contract: the LIVE decision path — the
+    fail-closed Rust kernel consulted through ``pull_allowed_now``
+    (DEC-RUST-PULL-STATE-001 flip phase; no Python fallback) — must reproduce
     the pre-conversion capture over the whole covered calendar + the
     out-of-coverage fail-safe cases. A mismatch means either a predicate
     drift (a bug) or a legitimate calendar edit (regenerate DELIBERATELY).

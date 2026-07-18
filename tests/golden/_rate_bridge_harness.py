@@ -8,8 +8,10 @@ bit-for-bit.  This module is imported by BOTH the generator
 (``test_rate_bridge_golden.py``) — the ``_pull_intent_harness`` shape (never
 generator-imports-test, the CodeQL ``py/cyclic-import`` break).
 
-The verdict table is computed by DRIVING the LIVE Python module (the
-oracle): every enumerated raw-bytes shape is written to a real
+The verdict table is computed by DRIVING the LIVE, kernel-served
+``read_rate_snapshot`` (DEC-RUST-PULL-STATE-001 flip phase — the decision
+lattice IS the Rust kernel; the file read + JSON decode + coercion probes
+stay Python): every enumerated raw-bytes shape is written to a real
 ``<lake>/.rate/pull_rate.json`` and read back through the REAL
 :func:`brutex.data.rate_bridge.read_rate_snapshot`.  Outcomes:
 
@@ -18,11 +20,14 @@ oracle): every enumerated raw-bytes shape is written to a real
 * ``none`` — the honest degrade (absent / corrupt / wrong shape);
 * ``raises`` — the PRE-EXISTING latent envelope (Golden Rule #10, recorded
   honestly, never "fixed" by the port): a JSON payload whose ``float()`` /
-  ``int()`` coercion raises ``OverflowError`` (a 400-digit int in a float
-  field; ``Infinity`` in an int field) ESCAPES the oracle's
-  ``except (KeyError, TypeError, ValueError)`` — the seam keeps such
-  payloads on the DOCUMENTED Python arm (the classifier returns ``None``),
-  so flag-ON behaviour is identical by construction.
+  ``int()`` coercion raises ``OverflowError`` as the FIRST failure (a
+  400-digit int in a float field; ``Infinity`` in an int field) propagates
+  verbatim out of the classifier's own coercion PROBE — which runs BEFORE
+  the kernel is ever consulted — so it ESCAPES the
+  ``except (KeyError, TypeError, ValueError)`` exactly as the deleted Python
+  oracle's did; a classifier ``None`` (an earlier caught failure won) reads
+  ``None``.  Parity holds by construction because the classifier is the SAME
+  Python coercion the deleted oracle used.
 
 Beside each decodable case the harness records the MECHANICAL kernel-input
 classification (the ``_classify_payload_for_kernel`` mirror the Wave-3H seam

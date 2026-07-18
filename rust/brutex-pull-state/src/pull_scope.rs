@@ -21,7 +21,7 @@
 //! Python-side cross-language source pin
 //! (`tests/unit/test_pull_scope_rust_seam.py` asserts these exact literals
 //! appear in THIS file AND in the real `pipeline_pull` producer output),
-//! and the flag-ON differential parity tests. A `_complete_note` wording
+//! and the Rust-kernel differential parity tests. A `_complete_note` wording
 //! refactor therefore forces a conscious re-pin on BOTH languages, never a
 //! silent desync (the design §4.5 risk).
 //!

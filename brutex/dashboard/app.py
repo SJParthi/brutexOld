@@ -863,7 +863,9 @@ class DashboardState:
     ) -> dict[str, Any]:
         """Return the current live sweep-progress snapshot for the dashboard route.
 
-        Resolution order (crash-tolerant — a dashboard poll NEVER raises):
+        Resolution order (crash-tolerant on data faults — a dashboard poll
+        never raises on the DEFAULT arm; the injected NONBLOCK-CACHE file arm
+        can raise the fail-closed pull-state kernel error, see *file_read*):
 
         1. :attr:`sweep_progress_path` if configured + readable — the
            cross-process file bridge a CLI ``brutex sweep-all`` publishes to (the
@@ -882,8 +884,14 @@ class DashboardState:
         lake volume serves the last-known payload labelled ``unverified``
         instead of blocking) — it returns the file payload to serve, or
         ``None`` to fall through to (2)/(3), exactly like the direct
-        ``exists()`` check. The default ``None`` keeps the direct,
-        byte-identical legacy read (the in-process test/consumer contract).
+        ``exists()`` check. Post-flip that read's serve-arm DECISION is the
+        fail-closed Rust kernel (DEC-RUST-PULL-STATE-001), so a wheel-absent/
+        stale/poisoned kernel raises its typed error
+        (:class:`brutex.pull_state_rust.PullStateKernelError` /
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError`) out through
+        this method — the caller does NOT catch it. The default ``None`` keeps
+        the direct, byte-identical legacy read (the in-process test/consumer
+        contract), which never raises.
         """
         from brutex.engine.sweep_supervisor import idle_progress, read_progress
 
@@ -2649,7 +2657,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
         :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
         freshest of the cross-process file bridge, the in-process push, or an idle
-        snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        snapshot; a missing / malformed file degrades to the idle view, and the
+        only raise is the injected cache's fail-closed pull-state kernel error on
+        a wheel-absent/stale/poisoned kernel (see
+        :meth:`DashboardState.sweep_progress_view`, DEC-RUST-PULL-STATE-001).
 
         HONEST envelope (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — this route's
         prior "pure O(1) read that never touches the lake" claim was FALSE): the

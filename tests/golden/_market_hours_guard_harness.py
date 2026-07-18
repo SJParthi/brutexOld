@@ -9,7 +9,10 @@ consuming test (``test_market_hours_guard_golden.py``) — the shared-harness
 shape of ``_preopen_prevday_harness.py`` (never generator-imports-test, the
 CodeQL ``py/cyclic-import`` break).
 
-Two verdict tables are computed from the LIVE Python oracle:
+Two verdict tables are computed from the LIVE decision path — post-flip
+(DEC-RUST-PULL-STATE-001) ``pull_allowed_now`` / ``auto_pull_allowed`` /
+``muhurat_session_active`` all consult the fail-closed Rust kernel; the Python
+side owns only the ``detail`` byte-rendering, never the boundary decision:
 
 * :func:`compute_guard_table` — ``pull_allowed_now`` over the FULL covered
   NSE-calendar span (every date in
