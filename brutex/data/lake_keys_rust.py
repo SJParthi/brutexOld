@@ -134,13 +134,17 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
 class FoldLaw(Protocol):
     """Structural type of the law-A oracle (``_stock_drift_fold_python``)."""
 
-    def __call__(self, symbol: str) -> str: ...
+    def __call__(self, symbol: str) -> str:
+        """Fold *symbol* into its canonical drift-bucket key."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 class CandidatesLaw(Protocol):
     """Structural type of the law-B oracle (``_spot_key_candidates_python``)."""
 
-    def __call__(self, symbol: str, exchange: str) -> tuple[str, ...]: ...
+    def __call__(self, symbol: str, exchange: str) -> tuple[str, ...]:
+        """Return the ordered spot-key candidate rungs for *symbol*."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 class RecoveryLaw(Protocol):
@@ -153,7 +157,9 @@ class RecoveryLaw(Protocol):
         *,
         alias_pairs: Sequence[tuple[str, str]],
         drift_bucket: Sequence[str],
-    ) -> tuple[str, ...]: ...
+    ) -> tuple[str, ...]:
+        """Return the ordered recovery candidate rungs for *underlying*."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def lake_keys_rust_disabled() -> bool:

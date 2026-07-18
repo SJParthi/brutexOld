@@ -27,7 +27,7 @@ import importlib
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -133,7 +133,7 @@ def _install_crate(monkeypatch: pytest.MonkeyPatch, crate: object) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("BRUTEX_DATA_RUST", raising=False)
     lake_keys_rust.reset_lake_keys_rust_for_tests()
     fno_symbol_rust.reset_fno_symbol_rust_for_tests()
@@ -147,7 +147,7 @@ def _enable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @contextlib.contextmanager
-def _refuse_gate(monkeypatch: pytest.MonkeyPatch, crate: object, reason: str) -> Iterator[None]:
+def _refuse_gate(monkeypatch: pytest.MonkeyPatch, crate: object, reason: str) -> Generator[None]:
     """Install *crate*, force STEADY-STATE (remaining=0), assert the refuse warn.
 
     The r1-MAJOR fix: at the default burn-in budget the burn-in COMPARE
@@ -1146,23 +1146,6 @@ class TestRecoveryBurnInPass:
             lake_keys_rust.BURN_IN_SAMPLES - 1
         )
         assert lake_keys_rust.lake_keys_rust_disabled() is False
-
-
-class TestProtocolStubs:
-    def test_protocol_call_stubs_execute(self) -> None:
-        """Execute the Protocol ``...`` bodies (coverage of the stub defs)."""
-
-        class _Impl:
-            pass
-
-        assert lake_keys_rust.FoldLaw.__call__(_Impl(), "X") is None
-        assert lake_keys_rust.CandidatesLaw.__call__(_Impl(), "X", "NSE") is None
-        assert (
-            lake_keys_rust.RecoveryLaw.__call__(
-                _Impl(), "X", "NSE", alias_pairs=(), drift_bucket=()
-            )
-            is None
-        )
 
 
 class TestMutationWorkflowWiring:

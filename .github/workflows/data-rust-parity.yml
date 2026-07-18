@@ -159,4 +159,15 @@ jobs:
         run: BRUTEX_DATA_RUST=1 pytest -rs -q tests/unit/test_fno_symbol.py
 
       - name: Flag-ON verbatim leg (the UNMODIFIED lake_keys + lake_invariants suites)
-        run: BRUTEX_DATA_RUST=1 pytest -rs -q tests/unit/test_lake_keys.py tests/unit/test_lake_invariants.py
+        # ONE deselect HERE ONLY (the core-rust-parity.yml precedent): the
+        # greeks_enrich ALIAS-identity pin imports brutex.data.greeks_enrich
+        # -> brutex.engine -> combo_mask -> `import fno_math` INSIDE the test
+        # body, and this stdlib-pure lane deliberately never builds the
+        # fno_math wheel (the COST HONESTY header). The pin is flag-independent
+        # (an import-identity check, not a law value) and stays fully
+        # exercised in main CI, where the wheels are built.
+        run: |
+          BRUTEX_DATA_RUST=1 pytest -rs -q \
+            tests/unit/test_lake_keys.py \
+            tests/unit/test_lake_invariants.py \
+            --deselect "tests/unit/test_lake_keys.py::TestSpotRecoveryCandidates::test_greeks_enrich_alias_is_the_same_object"
