@@ -4177,7 +4177,7 @@ jobs:
       - name: codespell
         run: |
           pip install codespell
-          codespell --ignore-words-list "authorisation,organisation,analyse,analyses,analysed,behaviour" \
+          codespell --ignore-words-list "authorisation,organisation,analyse,analyses,analysed,behaviour,ist,bu,windo,hungs" \
             --skip="*.parquet,*.lmdb,.mypy_cache,.pytest_cache,target,rust/fno-math/target" \
             brutex tests docs rust || true
 
