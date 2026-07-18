@@ -720,3 +720,30 @@ class TestRecordShape:
         agg = _agg_with()
         with pytest.raises(ComboAggregateError, match="exit tallies"):
             replace(agg, n_trades=3)
+
+
+class TestExitReasonVocabularyDriftPin:
+    """DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR: the crate hardcodes the
+    walker exit-reason vocabulary — a future 7th reason appended to
+    ``trade_sim.EXIT_REASONS`` must fail HERE at test time (set AND order),
+    never flip the tolerant Python tally into a runtime crate ``KeyError``."""
+
+    def test_crate_vocabulary_equals_trade_sim_set_and_order(self) -> None:
+        import brutex_cascade
+        from brutex.engine.trade_sim import EXIT_REASONS
+
+        assert tuple(brutex_cascade.EXIT_REASONS) == EXIT_REASONS
+
+
+class TestFloatStatsEmptyInputPin:
+    """Round-2 NIT pin: the shim delegates ``_float_stats`` without an
+    empty-check, so an empty input raises the CRATE's ``ValueError`` (message
+    differs from the deleted Python's ``min() arg is empty`` — a disclosed,
+    production-unreachable drift; the caller guards non-empty). Pinning the
+    CURRENT behavior so any future message/type drift is a conscious change."""
+
+    def test_empty_input_raises_the_crate_valueerror(self) -> None:
+        from brutex.engine.combo_aggregates import _float_stats
+
+        with pytest.raises(ValueError, match="float_stats: values must be non-empty"):
+            _float_stats([])

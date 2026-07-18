@@ -103,6 +103,11 @@ run-raw: preflight
 		{ cd rust/brutex-feed && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
 			|| echo "==> brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST is default-OFF; the feed degrades to the Python oracle)"; \
 	}
+	@$(VPY) -c "import brutex_cascade" 2>/dev/null || { \
+		echo "==> brutex_cascade kernel not importable — building it (REQUIRED; DEC-RUST-CASCADE-RESULTS-001 — the cascade/results-depth laws are hosted on it)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-cascade && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
 	$(VPY) -m brutex run
 
 fmt:

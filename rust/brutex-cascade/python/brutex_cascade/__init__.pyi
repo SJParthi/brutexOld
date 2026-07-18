@@ -22,6 +22,8 @@ class MinuteIndexRs:
         exit_bar_full_range: bool,
     ) -> tuple[int | None, int | None, str]: ...
 
+EXIT_REASONS: list[str]
+
 def version() -> str: ...
 def session_equity_series(
     index: MinuteIndexRs | None,

@@ -553,5 +553,11 @@ fn _brutex_cascade(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(float_stats, m)?)?;
     m.add_function(wrap_pyfunction!(aggregate_fold, m)?)?;
     m.add_function(wrap_pyfunction!(build_cascade_join, m)?)?;
+    // The crate's hardcoded walker exit-reason vocabulary, exposed so the
+    // Python drift pin can assert set AND order equality against
+    // `trade_sim.EXIT_REASONS` (DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR:
+    // a future 7th reason must fail loudly at TEST time, not flip the
+    // tolerant tally into a runtime KeyError).
+    m.add("EXIT_REASONS", combo_aggregates::EXIT_REASONS)?;
     Ok(())
 }

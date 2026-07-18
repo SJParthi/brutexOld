@@ -128,12 +128,33 @@ else
   fi
 fi
 
-# ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
+# ────────── 6b. brutex_cascade wheel (REQUIRED) ──────────
+# DEC-RUST-CASCADE-RESULTS-001: the cascade/results-depth laws are HOSTED on
+# this crate (BRUTEX_CASCADE_RUST default-ON; the converted Python law is
+# DELETED), so cascade_join / minute_path / combo_aggregates — and their
+# consumers (/results, the results-depth pass, top100/trade_store) —
+# HARD-require the wheel. A build failure ABORTS bootstrap exactly like
+# fno_math / trading_core (never the optional brutex_feed warn shape).
+_step "Step 6b/7 — build + install brutex_cascade Rust extension (REQUIRED)"
+if python -c "import brutex_cascade" 2>/dev/null; then
+  _ok "brutex_cascade already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-cascade && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_cascade" 2>/dev/null; then
+    _ok "brutex_cascade built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
+# ────────── 6c. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push
 # fast gate (ruff + smoke). Best-effort: a missing pre-commit binary
 # warns but never aborts bootstrap (CI is the hard gate regardless).
-_step "Step 6b/7 — install git hooks (pre-commit + commit-msg + pre-push)"
+_step "Step 6c/7 — install git hooks (pre-commit + commit-msg + pre-push)"
 if command -v pre-commit >/dev/null 2>&1 || pip install -q pre-commit; then
   if pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push >/dev/null 2>&1; then
     _ok "git hooks installed (pre-commit + commit-msg + pre-push)"

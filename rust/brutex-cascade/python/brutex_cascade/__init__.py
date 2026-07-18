@@ -16,6 +16,7 @@ refusal naming the bootstrap remediation, never a silent degrade).
 from __future__ import annotations
 
 from brutex_cascade._brutex_cascade import (
+    EXIT_REASONS,
     MinuteIndexRs,
     aggregate_fold,
     build_cascade_join,
@@ -28,6 +29,7 @@ from brutex_cascade._brutex_cascade import (
 )
 
 __all__ = [
+    "EXIT_REASONS",
     "MinuteIndexRs",
     "aggregate_fold",
     "build_cascade_join",
