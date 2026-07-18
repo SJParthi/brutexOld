@@ -207,3 +207,136 @@ __all__ = [
     "rust_pull_allowed",
     "warn_degrade_once",
 ]
+
+
+# --- pull_outcome (Wave 1A) -------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 1A: the last-pull OUTCOME decision kernel
+# (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted). The wheel's
+# ``classify_pull_outcome`` returns MACHINE CODES only — ``(outcome, tone,
+# headline_code, detail_code)``, with the ``@verdict`` / ``@verdict_prepull``
+# markers handing the banner fold back to Python — and ``verdict_correlates``
+# carries the run-id correlation law. Every human string and the
+# ``verdict_banner`` colour authority stay in
+# ``brutex.dashboard.pull_outcome`` (CLAUDE.md §11 COMMON). This section is
+# APPEND-ONLY over the Phase-1 surface above (the integrator's hub-merge
+# convention); it reuses the SAME flag, warn-once registry and degrade
+# vocabulary (``wheel_missing`` / ``wheel_stale`` / ``kernel_error`` /
+# ``kernel_invalid``).
+
+
+class _ClassifyOutcomeKernel(Protocol):
+    """The ``brutex_pull_state.classify_pull_outcome`` callable (codes only)."""
+
+    def __call__(
+        self,
+        state: str,
+        detail: str,
+        failed: int,
+        stalled: bool,
+        wedged: bool,
+        has_verdict: bool,
+        /,
+    ) -> tuple[str, str, str, str]:
+        """Return the decision codes for the packed snapshot fields."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class _VerdictCorrelatesKernel(Protocol):
+    """The ``brutex_pull_state.verdict_correlates`` callable."""
+
+    def __call__(self, retained_id: str, verdict_id: str, /) -> bool:
+        """Return whether the verdict holder correlates with the retained run."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+def _resolve_wheel_symbol(symbol: str) -> object | None:
+    """Return the named wheel callable, or ``None`` (warn-once) when absent.
+
+    The Wave-1A twin of :func:`resolve_pull_state_kernel` (which stays
+    byte-untouched — append-only discipline): lazy in-function import, the
+    SAME ``wheel_missing`` / ``wheel_stale`` degrade tokens — a Phase-1-only
+    wheel that predates *symbol* degrades as ``wheel_stale``, never a crash.
+    """
+    try:
+        import brutex_pull_state
+    except (ImportError, AttributeError):
+        warn_degrade_once("wheel_missing")
+        return None
+    kernel: object | None = getattr(brutex_pull_state, symbol, None)
+    if kernel is None:
+        warn_degrade_once("wheel_stale", symbol=symbol)
+        return None
+    return kernel
+
+
+#: The outcome kernel's result arity — ``(outcome, tone, headline_code,
+#: detail_code)`` (the refuse-poison shape gate consults it).
+_OUTCOME_CODES_ARITY: Final[int] = 4
+
+
+def rust_classify_pull_outcome(
+    state: str,
+    detail: str,
+    failed: int,
+    stalled: bool,
+    wedged: bool,
+    has_verdict: bool,
+) -> tuple[str, str, str, str] | None:
+    """Consult the Rust outcome kernel; ``None`` = use the Python oracle.
+
+    Calls the kernel under the defensive belt (ANY raise — including the pyo3
+    ``OverflowError`` on an out-of-``i64`` *failed* — degrades as
+    ``kernel_error``, never a failed classification) and refuse-poison-gates
+    the result: anything but a 4-tuple of ``str`` can only mean a
+    stale/corrupt wheel → ``kernel_invalid`` → the oracle. The CODE-level
+    vocabulary itself is validated by the consumer
+    (``brutex.dashboard.pull_outcome``), which owns the composition tables.
+    """
+    kernel = _resolve_wheel_symbol("classify_pull_outcome")
+    if kernel is None:
+        return None
+    typed = cast("_ClassifyOutcomeKernel", kernel)
+    try:
+        raw = cast(
+            "object",
+            typed(state, detail, failed, bool(stalled), bool(wedged), bool(has_verdict)),
+        )
+    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
+        warn_degrade_once("kernel_error", error=repr(exc))
+        return None
+    if (
+        not isinstance(raw, tuple)
+        or len(raw) != _OUTCOME_CODES_ARITY
+        or not all(isinstance(part, str) for part in raw)
+    ):
+        warn_degrade_once("kernel_invalid", detail=type(raw).__name__)
+        return None
+    return cast("tuple[str, str, str, str]", raw)
+
+
+def rust_verdict_correlates(retained_id: str, verdict_id: str) -> bool | None:
+    """Consult the Rust correlation-law kernel; ``None`` = use the oracle.
+
+    The same belt + refuse-poison shape as :func:`rust_pull_allowed`: a raise
+    degrades as ``kernel_error``; a non-``bool`` result (a truthy pun from a
+    stale/corrupt wheel) degrades as ``kernel_invalid`` — never served.
+    """
+    kernel = _resolve_wheel_symbol("verdict_correlates")
+    if kernel is None:
+        return None
+    typed = cast("_VerdictCorrelatesKernel", kernel)
+    try:
+        raw = cast("object", typed(retained_id, verdict_id))
+    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
+        warn_degrade_once("kernel_error", error=repr(exc))
+        return None
+    if not isinstance(raw, bool):
+        warn_degrade_once("kernel_invalid", detail=type(raw).__name__)
+        return None
+    return raw
+
+
+__all__ += [
+    "rust_classify_pull_outcome",
+    "rust_verdict_correlates",
+]

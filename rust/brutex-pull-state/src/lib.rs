@@ -28,8 +28,13 @@
 //! pull start / per mid-run window check, never on a hot path.
 
 pub mod market_hours;
+// Wave 1A (DEC-RUST-PULL-STATE-001): the last-pull OUTCOME decision core
+// (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
+// + the banner colour authority stay Python.
+pub mod pull_outcome;
 
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
+pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
 /// baked at build time by `build.rs` under the shared FRAMING v1 of
