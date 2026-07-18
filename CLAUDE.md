@@ -43,11 +43,18 @@ GREENFIELD golden re-baseline: canonical ledger bytes are now parquet-rs
 (zstd-3; the `snap` feature reads legacy pyarrow-snappy files
 row-identically) with the #1917 cross-encoder ROW FIXED POINT kept as the
 correctness law (production reader ≡ pyarrow ≡ DuckDB, probe-pinned).
-The wheel is a REQUIRED install everywhere (ci.yml ×10 jobs + the
-scheduled workflows + Makefile + bootstrap Step 6b). ENGINE semantics
-UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
-change. This header carries the pointer, never the story — the full
-record lives in the §1 Active-branch blurb + MIGRATION.md #1962.)
+The wheel is a REQUIRED install everywhere (ci.yml ×11 jobs + the
+scheduled workflows + Makefile + bootstrap Step 6b). Merged-forward onto
+main `4c11f7aa` (club-P #1547 / DEC-STREAK-PROVENANCE-001 #1512 added the
+17th window-ledger column `streak_provenance`) — the kernel codec grows
+16→17 cols (opaque nullable passthrough; legacy 16-col files decode
+None-filled), the frozen oracle regenerated HONESTLY for the grown
+schema, and the SACRED run-id goldens proven BYTE-IDENTICAL (94 passed —
+`streak_provenance` is a pull-ledger column, never run identity). ENGINE
+semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1962.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3659,7 +3666,21 @@ hostile-review pass._
   (the per-PR `cargo test` battery is its gate — the #1892 precedent);
   ONE known sub-threshold dependency advisory (thrift@0.17.0
   CVE-2026-43868, MEDIUM, unfixable upstream, transitive via parquet-rs)
-  is disclosed in #1962. ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  is disclosed in #1962. THIRD MERGE-FORWARD onto main `4c11f7aa` (club-P
+  #1547 / DEC-STREAK-PROVENANCE-001 #1512 added the 17th window-ledger column
+  `streak_provenance`): the kernel ledger codec grows 16→17 cols as an OPAQUE
+  nullable passthrough (never read/mutated by the merge-on-save law — it
+  round-trips verbatim; legacy 16-col parquet decodes 17th-cell-None-filled,
+  the `snap` read arm included); the frozen oracle fixture was regenerated
+  HONESTLY for the grown 17-col schema (the on-disk schema grew, NOT a
+  run-identity change) with a `streak_provenance` merge-parity net + a
+  legacy-16-col-back-compat net; the SACRED `_GOLDEN_RUN_ID`/
+  `_GOLDEN_CONTENT_HASH` sweep-run golden family reproduces BYTE-IDENTICALLY
+  (94 passed — `streak_provenance` is a pull-ledger diagnostic column, never
+  in the bxsnap2 `data_snapshot_hash` or the results-store run identity); the
+  lane's Trivy `limit-severities-for-sarif: 'true'` ci.yml fold is CARRIED
+  (verified NOT yet on `4c11f7aa`) pending extraction to a CI-config vehicle.
+  ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes, no new env vars.)
   Earlier: `claude/rust-u128-enum-kernel`
@@ -10938,7 +10959,12 @@ hostile-review pass._
   fixed point production ≡ pyarrow ≡ DuckDB stays the correctness law,
   probe-pinned); the wheel wired REQUIRED across ci.yml/scheduled
   workflows/Makefile/bootstrap; the three converted modules 100.00%
-  line+branch;
+  line+branch; merged-forward onto main `4c11f7aa` (club-P #1547 /
+  DEC-STREAK-PROVENANCE-001 #1512 added the 17th window-ledger column
+  `streak_provenance`) — the kernel codec grows 16→17 cols (opaque nullable
+  passthrough; legacy 16-col decodes None-filled), the frozen oracle
+  regenerated HONESTLY for the grown schema, the SACRED run-id goldens proven
+  BYTE-IDENTICAL (94 passed — a pull-ledger column, never run identity);
   ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
   branch line — see §1 + MIGRATION.md #1962 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
