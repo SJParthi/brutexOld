@@ -46,7 +46,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from brutex.metrics.compute_rust import FoldWire
+    from brutex.metrics.compute_rust import FoldWire, RecencyWire
 
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.metrics.pbo import pbo_probability
@@ -1381,6 +1381,80 @@ def fold_recency(
     return RecencyFolds(trailing=trailing, decay_buckets=tuple(sorted(buckets.items())))
 
 
+def _resolve_recency_folds(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    trailing_anchor: datetime,
+) -> RecencyFolds:
+    """Serve the recency FOLD from the flag-gated Rust twin or the Python arm.
+
+    The recency dispatch chokepoint (DEC-METRICS-TRAILING-WINDOW-001
+    Stage-C2) — the exact :func:`_resolve_folds` shape over the SAME
+    ``BRUTEX_METRICS_RUST_FOLD`` flag: OFF (the default) is the verbatim
+    :func:`fold_recency` call — byte-identical by construction (the
+    never-routes bomb-kernel spy pins it); ON routes through
+    :func:`brutex.metrics.compute_rust.recency_wire_via_kernel`
+    (burn-in self-checked on its own budget, SHARED autorevert latch) and
+    ANY kernel fault degrades fail-closed to the SAME Python arm
+    (``MemoryError`` re-raises raw). A NAIVE anchor takes the Python arm
+    unconditionally so :func:`fold_recency`'s own boundary ``ValueError``
+    law holds verbatim (the seam's epoch conversion would raise a bare
+    ``TypeError`` instead). The window bounds cross as exact epoch µs —
+    ``cutoff = anchor − TRAILING_WINDOW`` computed HERE with the verbatim
+    Python expression, then converted on the seam's one epoch basis.
+    """
+    from brutex.metrics import compute_rust
+
+    if trailing_anchor.tzinfo is None or not compute_rust.metrics_rust_fold_enabled():
+        return fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+    anchor_us = compute_rust.datetime_to_epoch_us(trailing_anchor)
+    cutoff_us = compute_rust.datetime_to_epoch_us(trailing_anchor - TRAILING_WINDOW)
+    wire = compute_rust.recency_wire_via_kernel(
+        trades,
+        start_equity_paisa,
+        anchor_us=anchor_us,
+        cutoff_us=cutoff_us,
+        # The burn-in oracle, INJECTED (dependency inversion — the leaf
+        # never imports this module): the Python recency fold's wire
+        # projection for exactly these arguments.
+        oracle_wire=lambda: _recency_wire(
+            fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+        ),
+    )
+    if wire is None:
+        return fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor)
+    return _recency_folds_from_wire(wire)
+
+
+def _recency_wire(folds: RecencyFolds) -> RecencyWire:
+    """Project a :class:`RecencyFolds` onto the seam's plain-data wire shape.
+
+    The pure inverse pair of :func:`_recency_folds_from_wire` (round-trip
+    pinned by the pair suite): the trailing half through :func:`_fold_wire`
+    (``None`` passes through), the decay buckets verbatim — already the
+    wire's sorted exact-int tuple form.
+    """
+    return (
+        None if folds.trailing is None else _fold_wire(folds.trailing),
+        folds.decay_buckets,
+    )
+
+
+def _recency_folds_from_wire(wire: RecencyWire) -> RecencyFolds:
+    """Build the :class:`RecencyFolds` a seam-served recency wire denotes.
+
+    THIS module owns the construction (the plain-data boundary — the seam
+    leaf speaks only tuples). Values pass through UNCHANGED — bit-identity
+    is the seam's burn-in + the differential suites' proof.
+    """
+    trailing_wire, buckets = wire
+    return RecencyFolds(
+        trailing=None if trailing_wire is None else _folds_from_wire(trailing_wire),
+        decay_buckets=buckets,
+    )
+
+
 def combine_recency_from_folds(
     folds: RecencyFolds,
     *,
@@ -1511,7 +1585,7 @@ def _compute_metrics_impl(
         # a per-combo max-exit fabrication.
         return base
     recency = combine_recency_from_folds(
-        fold_recency(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
+        _resolve_recency_folds(trades, start_equity_paisa, trailing_anchor=trailing_anchor),
         decay_half_life_months=decay_half_life_months,
     )
     return replace(

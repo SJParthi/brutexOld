@@ -112,6 +112,7 @@ from __future__ import annotations
 
 import os
 import struct
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, cast
 
 import structlog
@@ -146,6 +147,8 @@ SELF_CHECK_SAMPLES: Final[int] = 16
 #: The kernel result's four wire-tuple arities (counts · sums · moments ·
 #: floats) — the frozen FFI shape ``metrics_fold_trades`` returns.
 _WIRE_ARITY: Final[int] = 4
+_RECENCY_WIRE_ARITY: Final[int] = 2
+_BUCKET_PAIR_ARITY: Final[int] = 2
 _COUNTS_ARITY: Final[int] = 7
 _SUMS_ARITY: Final[int] = 6
 _MOMENTS_ARITY: Final[int] = 5
@@ -166,9 +169,34 @@ FoldMomentsWire = tuple[int, float, float, float, float]
 FoldFloats = tuple[float, float, float]
 FoldWire = tuple[FoldCounts, FoldSums, FoldMomentsWire, FoldFloats]
 
+#: The recency pass's plain-data wire (DEC-METRICS-TRAILING-WINDOW-001
+#: Stage-C2 — the ``fold_recency`` twin's boundary): the trailing window's
+#: :data:`FoldWire` (``None`` when zero trades exit inside the window) plus
+#: the exact-integer ``(age_month_bucket, net_pnl_paisa)`` pairs sorted
+#: ascending by key. Every slot is an int (or the trailing ``FoldWire``'s
+#: mixed tuples), so the burn-in compare is exact ``==`` on the buckets and
+#: :func:`wire_compare_key` on the trailing half.
+RecencyBuckets = tuple[tuple[int, int], ...]
+RecencyWire = tuple[FoldWire | None, RecencyBuckets]
+
+#: The one epoch basis every µs instant this seam ships shares —
+#: correctness reads only DIFFERENCES of the instants (the window compare
+#: + the bucket key), but a single helper keeps anchor/cutoff/exit on one
+#: basis by construction (the C2 brief's epoch-basis watch item).
+_EPOCH_UTC: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
+_ONE_US: Final[timedelta] = timedelta(microseconds=1)
+
 #: Self-check samples still to run this process (single-cell mutable — the
 #: documented no-global-mutable-state exception, module docstring).
 _SELF_CHECK_REMAINING: Final[list[int]] = [SELF_CHECK_SAMPLES]
+
+#: The recency wire face's OWN burn-in budget (each kernel face burns in
+#: its first :data:`SELF_CHECK_SAMPLES` served calls independently — a
+#: fold-face pass must not exhaust the recency face's compare budget); the
+#: autorevert LATCH is SHARED (:func:`disable_kernel` — a mismatch on
+#: either face disables the whole kernel for the process, the #1605
+#: pattern).
+_RECENCY_SELF_CHECK_REMAINING: Final[list[int]] = [SELF_CHECK_SAMPLES]
 
 #: The autorevert latch: the mismatch reason once the kernel is disabled
 #: for this process, else ``None`` (same documented exception).
@@ -180,6 +208,11 @@ _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
 #: Memo key for the engaged-once INFO (namespaced apart from warn reasons).
 _ENGAGED_KEY: Final[str] = "__engaged__"
+
+#: The recency face's own engaged-once memo key (each face logs its first
+#: served call independently — a fold-face engage must not mute the
+#: recency face's evidence).
+_RECENCY_ENGAGED_KEY: Final[str] = "__recency_engaged__"
 
 
 def metrics_rust_fold_enabled() -> bool:
@@ -261,13 +294,30 @@ def consume_self_check_sample() -> None:
         _SELF_CHECK_REMAINING[0] -= 1
 
 
-def reset_self_check_for_tests(*, remaining: int = SELF_CHECK_SAMPLES) -> None:
-    """Reset the burn-in budget + autorevert latch (test isolation ONLY).
+def recency_self_check_pending() -> bool:
+    """Return ``True`` while the RECENCY face still owes burn-in samples."""
+    return _RECENCY_SELF_CHECK_REMAINING[0] > 0
 
-    ``remaining=0`` puts the process in the post-burn-in steady state; the
-    default restores a fresh-process view. Never called from production.
+
+def consume_recency_self_check_sample() -> None:
+    """Consume one recency burn-in sample after a PASSED bit-compare.
+
+    The recency twin of :func:`consume_self_check_sample` — clamped at
+    zero; a FAILED compare latches :func:`disable_kernel` instead.
+    """
+    if _RECENCY_SELF_CHECK_REMAINING[0] > 0:
+        _RECENCY_SELF_CHECK_REMAINING[0] -= 1
+
+
+def reset_self_check_for_tests(*, remaining: int = SELF_CHECK_SAMPLES) -> None:
+    """Reset the burn-in budgets + autorevert latch (test isolation ONLY).
+
+    ``remaining=0`` puts the process in the post-burn-in steady state for
+    BOTH kernel faces (fold + recency); the default restores a
+    fresh-process view. Never called from production.
     """
     _SELF_CHECK_REMAINING[0] = remaining
+    _RECENCY_SELF_CHECK_REMAINING[0] = remaining
     _KERNEL_DISABLED_REASON[0] = None
 
 
@@ -305,8 +355,8 @@ def wire_compare_key(wire: FoldWire) -> tuple[object, ...]:
     )
 
 
-def _resolve_kernel() -> Callable[..., object] | None:
-    """Return ``fno_math.metrics_fold_trades``, or ``None`` with a warn-once.
+def _resolve_kernel(symbol: str = "metrics_fold_trades") -> Callable[..., object] | None:
+    """Return the named ``fno_math`` kernel symbol, or ``None`` with a warn-once.
 
     The import is LAZY and in-function so this module — and the whole
     ``brutex.metrics`` package — imports cleanly with NO wheel present
@@ -314,18 +364,35 @@ def _resolve_kernel() -> Callable[..., object] | None:
     wheel (ImportError, including the shim's own stale-wheel handshake
     refusal, or the AttributeError a partially initialised module can
     raise) degrades as ``wheel_missing``; an importable wheel missing the
-    symbol degrades as ``wheel_stale`` (the ``feed_rust`` taxonomy).
+    symbol degrades as ``wheel_stale`` (the ``feed_rust`` taxonomy). Both
+    kernel faces (``metrics_fold_trades`` + the Stage-C2
+    ``metrics_fold_recency``) resolve through this ONE helper.
     """
     try:
         import fno_math
     except (ImportError, AttributeError):
         warn_fallback_once("wheel_missing")
         return None
-    kernel: Callable[..., object] | None = getattr(fno_math, "metrics_fold_trades", None)
+    kernel: Callable[..., object] | None = getattr(fno_math, symbol, None)
     if kernel is None:
-        warn_fallback_once("wheel_stale")
+        warn_fallback_once("wheel_stale", symbol=symbol)
         return None
     return kernel
+
+
+def datetime_to_epoch_us(ts: datetime) -> int:
+    """Convert a tz-aware datetime to exact epoch microseconds.
+
+    Pure integer floor division of the aware-datetime delta against the
+    ONE :data:`_EPOCH_UTC` basis — exact at CPython's full datetime
+    resolution (1 µs), lossless for pre-1970 instants (negative µs), and
+    tz-arithmetic-free beyond the aware subtraction itself. NEVER
+    ``ts.timestamp() * 1e6`` (float-lossy). Callers guarantee ``ts`` is
+    tz-aware (a naive value raises the aware-vs-naive ``TypeError`` from
+    the subtraction — the consumer routes naive anchors to the Python arm
+    BEFORE conversion so ``fold_recency``'s own ``ValueError`` law holds).
+    """
+    return (ts - _EPOCH_UTC) // _ONE_US
 
 
 def _is_int(value: object) -> bool:
@@ -458,16 +525,157 @@ def fold_wire_via_kernel(
     return wire
 
 
+def recency_wire_compare_key(wire: RecencyWire) -> tuple[object, ...]:
+    """Map a :data:`RecencyWire` to its BIT-exact comparison key.
+
+    The trailing half rides :func:`wire_compare_key` (``None`` compares
+    only to ``None``); the decay buckets are exact int pairs, so plain
+    tuple equality IS bit equality — no float normalisation exists on that
+    half, and the sorted-emit law makes the compare order-sensitive by
+    construction.
+    """
+    trailing, buckets = wire
+    return (None if trailing is None else wire_compare_key(trailing), buckets)
+
+
+def _valid_recency_wire(result: object, n_windowed: int, net_pnl_paisa: int) -> bool:
+    """Refuse-poison gate over a recency kernel result.
+
+    Structural laws (proven for every well-formed input by the crate's own
+    unit suite): a 2-tuple of (trailing, buckets); the trailing half is
+    ``None`` IFF zero trades exit inside the window, else a
+    :func:`_valid_fold_wire`-passing wire over exactly the windowed count;
+    the buckets a non-empty sequence of genuine-int 2-tuples with
+    NON-NEGATIVE STRICTLY-ASCENDING keys whose values sum EXACTLY to the
+    stream's net P&L (the fold is a pure integer partition — the
+    conservation law the property suite pins on the Python arm).
+    """
+    if not isinstance(result, tuple) or len(result) != _RECENCY_WIRE_ARITY:
+        return False
+    trailing, buckets = result
+    if n_windowed == 0:
+        if trailing is not None:
+            return False
+    elif not _valid_fold_wire(trailing, n_windowed):
+        return False
+    if not isinstance(buckets, (list, tuple)) or not buckets:
+        return False
+    prev_key = -1
+    total = 0
+    for pair in buckets:
+        if not (isinstance(pair, tuple) and len(pair) == _BUCKET_PAIR_ARITY):
+            return False
+        key, bucket_sum = pair
+        if not (_is_int(key) and _is_int(bucket_sum)):
+            return False
+        if key <= prev_key:  # also refuses a negative first key (prev -1)
+            return False
+        prev_key = key
+        total += bucket_sum
+    return total == net_pnl_paisa
+
+
+def recency_wire_via_kernel(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    anchor_us: int,
+    cutoff_us: int,
+    oracle_wire: Callable[[], RecencyWire],
+) -> RecencyWire | None:
+    """Run the Rust RECENCY fold; ``None`` ⇒ serve the row from Python.
+
+    The Stage-C2 wire face (DEC-METRICS-TRAILING-WINDOW-001) — the
+    ``fold_recency`` twin of :func:`fold_wire_via_kernel`, sharing its
+    whole fault taxonomy: the SAME autorevert latch (a mismatch on either
+    face disables the kernel process-wide), ``MemoryError`` re-raises RAW,
+    every other kernel-call exception degrades warn-once, a structurally
+    invalid result is refused LOUDLY, and the burn-in bit-compares the
+    first :data:`SELF_CHECK_SAMPLES` recency-served calls against the
+    INJECTED ``oracle_wire`` (its OWN budget — the shared-latch /
+    per-face-budget split is documented on
+    :data:`_RECENCY_SELF_CHECK_REMAINING`). ``anchor_us`` / ``cutoff_us``
+    are the consumer-converted epoch-µs window bounds
+    (:func:`datetime_to_epoch_us` — one basis by construction); the
+    returns column keeps the VERBATIM Python division (the fold face's
+    exactness law) and the buckets cross as exact ints. Callers guarantee
+    ``trades`` is non-empty, ``start_equity_paisa > 0``, every
+    ``exit_ts`` tz-aware, and ``oracle_wire`` the Python fold's wire for
+    EXACTLY these arguments.
+    """
+    if kernel_disabled():
+        warn_fallback_once("kernel_disabled")
+        return None
+    kernel = _resolve_kernel("metrics_fold_recency")
+    if kernel is None:
+        return None
+    # The verbatim Python-fold returns expression (the fold face's law) +
+    # the exact epoch-µs exit instants on the shared basis.
+    returns = [t.pnl_paisa / start_equity_paisa for t in trades]
+    exit_us = [datetime_to_epoch_us(t.exit_ts) for t in trades]
+    try:
+        result = kernel(
+            [t.pnl_paisa for t in trades],
+            [t.mfe_paisa for t in trades],
+            [t.mae_paisa for t in trades],
+            [t.holding_bars for t in trades],
+            returns,
+            exit_us,
+            anchor_us,
+            cutoff_us,
+        )
+    except MemoryError:
+        raise  # house law: MemoryError re-raises raw (never absorbed)
+    except Exception as exc:  # the shared autorevert-fence taxonomy
+        warn_fallback_once("kernel_error", error=repr(exc))
+        return None
+    n_windowed = sum(1 for us in exit_us if us >= cutoff_us)
+    net_pnl_paisa = sum(t.pnl_paisa for t in trades)
+    if not _valid_recency_wire(result, n_windowed, net_pnl_paisa):
+        # A structurally invalid result is a kernel BUG: refuse it LOUDLY
+        # (its own memo key — a fold-face refusal must not mute this one).
+        if "recency_kernel_result_refused" not in _OBSERVABILITY_MEMO:
+            _OBSERVABILITY_MEMO.add("recency_kernel_result_refused")
+            _LOG.error(
+                "metrics_rust_fold.recency_kernel_result_refused",
+                result=repr(result),
+                n_trades=len(trades),
+            )
+        return None
+    # The structural gate proves the shape; normalise the kernel's bucket
+    # LIST into the wire's tuple form and narrow for the type-checkers.
+    trailing_raw, buckets_raw = cast("tuple[FoldWire | None, list[tuple[int, int]]]", result)
+    wire: RecencyWire = (trailing_raw, tuple(buckets_raw))
+    if recency_self_check_pending():
+        oracle = oracle_wire()
+        if recency_wire_compare_key(wire) != recency_wire_compare_key(oracle):
+            # SHIP THE ORACLE VALUE + latch the SHARED kernel latch off.
+            disable_kernel("recency_burn_in_mismatch", n_trades=len(trades))
+            return oracle
+        consume_recency_self_check_sample()
+    if _RECENCY_ENGAGED_KEY not in _OBSERVABILITY_MEMO:
+        _OBSERVABILITY_MEMO.add(_RECENCY_ENGAGED_KEY)
+        _LOG.info("metrics_rust_fold.recency_engaged", n_trades=len(trades))
+    return wire
+
+
 __all__ = [
     "METRICS_RUST_FOLD_DEFAULT",
     "METRICS_RUST_FOLD_ENV",
     "SELF_CHECK_SAMPLES",
     "FoldWire",
+    "RecencyBuckets",
+    "RecencyWire",
+    "consume_recency_self_check_sample",
     "consume_self_check_sample",
+    "datetime_to_epoch_us",
     "disable_kernel",
     "fold_wire_via_kernel",
     "kernel_disabled",
     "metrics_rust_fold_enabled",
+    "recency_self_check_pending",
+    "recency_wire_compare_key",
+    "recency_wire_via_kernel",
     "reset_observability_memo_for_tests",
     "reset_self_check_for_tests",
     "self_check_pending",
