@@ -17,11 +17,13 @@ survivors, gate-rejecting candidates, and overfit ON / OFF / ABSTAIN
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from brutex.engine.sweep_stream import SurvivorColumns, rank_survivor_columns
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking import OverfitGateConfig, rank_combos
+from brutex.ranking.multi_select import SelectionInputs, compute_union_selection
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -53,6 +55,11 @@ def _metrics(draw: st.DrawFn) -> ResultMetrics:
         "avg_mae_paisa": draw(st.integers(0, 500)),
         "skewness": draw(_METRIC_VALUES),
         "kurtosis": draw(_METRIC_VALUES),
+        # LANE-W1 selection axes (DEC-RANK-PARETO-PERSIST-001) — small pools
+        # force frequent EXACT axis ties (the ε-dominance edges).
+        "net_pnl_paisa": draw(st.integers(-2_000, 2_000)),
+        "losing_trades": draw(st.integers(0, 8)),
+        "expectancy_paisa": draw(st.integers(-500, 500)),
     }
     return make_result_metrics(**overrides)
 
@@ -106,6 +113,64 @@ def test_bounded_rank_is_bit_identical_to_batch_rank(
         # EXACT equality — shared internals, never a tolerance (Golden Rule #4).
         assert finalist.composite_score == rc.composite_score
         assert finalist.deflated_sharpe == rc.deflated_sharpe
+
+
+@settings(max_examples=120, deadline=None)
+@given(
+    pool=_candidate_pool(),
+    overfit=_OVERFIT,
+    top_k=st.integers(1, 15),
+    quota_m=st.integers(0, 5),
+    frontier_cap=st.integers(1, 6),
+)
+def test_bounded_union_matches_batch_composer(
+    pool: list[tuple[int, ResultMetrics]],
+    overfit: OverfitGateConfig | None,
+    top_k: int,
+    quota_m: int,
+    frontier_cap: int,
+) -> None:
+    """LANE-W1 (DEC-RANK-PARETO-PERSIST-001 / DEC-RANK-QUOTA-PERSIST-1000-001):
+    the bounded arm's union selection ≡ the batch arm's, bit-for-bit — same
+    row set, same persist order, same ``selection_basis`` tags, same
+    ``pareto_member`` flags, same truncated / frontier_dropped counters.
+    """
+    ranked = rank_combos(pool, overfit=overfit)
+    inputs = SelectionInputs(
+        masks=tuple(rc.mask for rc in ranked),
+        composites=tuple(rc.composite_score for rc in ranked),
+        net_pnl_paisa=tuple(rc.metrics.net_pnl_paisa for rc in ranked),
+        win_rate=tuple(rc.metrics.win_rate for rc in ranked),
+        max_dd_pct=tuple(rc.metrics.max_drawdown_pct for rc in ranked),
+        losing_trades=tuple(rc.metrics.losing_trades for rc in ranked),
+        expectancy_paisa=tuple(rc.metrics.expectancy_paisa for rc in ranked),
+    )
+    selection = compute_union_selection(
+        inputs, top_k=top_k, quota_m=quota_m, frontier_cap=frontier_cap
+    )
+
+    columns = SurvivorColumns(with_overfit=overfit is not None)
+    for mask, metrics in pool:
+        columns.append(mask, metrics)
+    result = rank_survivor_columns(
+        columns,
+        overfit=overfit,
+        top_k=top_k,
+        union_selection_fn=partial(
+            compute_union_selection, quota_m=quota_m, frontier_cap=frontier_cap
+        ),
+    )
+
+    assert result.n_ranked == len(ranked)
+    assert [f.mask for f in result.finalists] == [ranked[i].mask for i in selection.order]
+    for finalist, index in zip(result.finalists, selection.order, strict=True):
+        # EXACT equality — shared internals, never a tolerance (Golden Rule #4).
+        assert finalist.composite_score == ranked[index].composite_score
+        assert finalist.deflated_sharpe == ranked[index].deflated_sharpe
+        assert finalist.selection_basis == selection.basis_by_index[index]
+        assert finalist.pareto_member == (index in selection.frontier)
+    assert result.truncated == selection.truncated
+    assert result.frontier_dropped == selection.frontier_dropped
 
 
 @settings(max_examples=60, deadline=None)
