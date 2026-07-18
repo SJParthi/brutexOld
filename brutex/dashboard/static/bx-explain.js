@@ -71,6 +71,8 @@ var BX_EXPLAIN = {
   dsr: "Deflated Sharpe — the odds the edge is real after counting how many combos were tried.",
   cpcv_pass_pct: "% of CPCV combinatorial train/test folds with positive out-of-sample Sharpe — measured at cascade filter #3 (gate: at least 50%). '—' means the cascade never measured this strategy.",
   cascade_status: "Stage-4 statistical-cascade verdict (nine filters: gates, DSR, CPCV, SPA, PBO, Romano-Wolf, walk-forward, lockbox, Monte-Carlo). 'PASS (provisional)' = DSR deflated against the pool-N fallback; '—'/'not validated' = not judged by the latest cascade.",
+  options_net_after_cost: "Net P&L after translating each spot signal to its ATM option and charging the full Indian cost stack (brokerage · STT · ETC · SEBI · IPFT · stamp · GST). Priceable only within the verified ETC window (from 2024-10-01) — '—' means the options sim did not price this strategy; see the coverage % in the entry's options_exec object.",
+  futures_net: "Net P&L re-priced on the front-month futures contract (index futures are cost-free — net equals gross). '—' means the futures sim did not run for this strategy.",
   vix_band: "The market-fear range (India VIX) where this strategy historically made its money.",
   family_id: "Strategies that traded almost identically are grouped — this names that family.",
   mask_hex: "The strategy's machine ID — its exact condition bits, written in hex.",

@@ -149,6 +149,13 @@ var BX_SCREENER_COLUMNS = [
      a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
      but-counted under a filter, the #1631 law — never a fabricated PASS). */
   { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
+  /* `DEC-OPTIONS-EXEC-FEEDBACK-001`: the post-sweep exec-sim verdicts.
+     Dotted paths into the additive options_exec/futures_exec objects — a
+     pre-change (or provider-None) artifact lacks the key entirely -> the
+     cell renders "—" via bxFieldValue's undefined and sorting puts the row
+     LAST (zero new mechanism; the absent-key law). */
+  { key: "options_exec.net_after_cost_paisa", label: "Opt net", type: "num", money: true, explain: "options_net_after_cost" },
+  { key: "futures_exec.net_pnl_paisa", label: "Fut net", type: "num", money: true, explain: "futures_net" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];
@@ -281,7 +288,10 @@ function bxVixOverlap(band, lo, hi) {
  *            never matches an active filter),
  *            min_win_rate: number|null, min_pf: number|null,
  *            max_abs_dd_paisa: number|null (magnitude cap — max_dd_paisa is
- *            stored NEGATIVE, the cap compares |dd|) }.
+ *            stored NEGATIVE, the cap compares |dd|),
+ *            executability: ""|"priced"|"positive"|undefined (the
+ *            options_exec selection — absent-key rows never match an active
+ *            filter, `DEC-OPTIONS-EXEC-FEEDBACK-001`) }.
  * A null/absent filter key never excludes.
  *
  * @param {object} row - a top100 contract row.
@@ -305,6 +315,27 @@ function bxFilterRow(row, filters) {
   // an artifact the dropdown stays empty and the filter is never active.
   if (filters.instrument && row.instrument !== filters.instrument) {
     return false;
+  }
+  // Executability (`DEC-OPTIONS-EXEC-FEEDBACK-001`): a row WITHOUT the
+  // additive options_exec object never matches an ACTIVE filter — a
+  // pre-change artifact (or a --no-options-sim run) filters to empty under
+  // "priced", never to a fabricated verdict; a not_priced row never matches
+  // either (presence of the KEY is not a priced verdict). Deliberately NO
+  // excluded-count line (unlike the null-VIX RANGE filter, where a null band
+  // is ambiguous evidence): this is a positive SELECTION whose whole point
+  // is presence — an absent/unpriced object is a definitive non-match.
+  if (filters.executability) {
+    var oe = row.options_exec;
+    var priced = !!oe && typeof oe === "object" && oe.status === "priced";
+    if (filters.executability === "priced" && !priced) {
+      return false;
+    }
+    if (
+      filters.executability === "positive" &&
+      !(priced && typeof oe.net_after_cost_paisa === "number" && oe.net_after_cost_paisa > 0)
+    ) {
+      return false;
+    }
   }
   var m = row.metrics || {};
   if (typeof filters.min_win_rate === "number" && !(m.win_rate >= filters.min_win_rate)) {

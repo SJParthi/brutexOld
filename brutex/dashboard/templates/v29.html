@@ -3008,6 +3008,13 @@
           <select id="scDir"><option value="">All</option></select></div>
         <div class="ctl"><label for="scInstrument">Instrument</label>
           <select id="scInstrument"><option value="">All</option></select></div>
+        <!-- `DEC-OPTIONS-EXEC-FEEDBACK-001` executability selection: rows
+             without the additive options_exec object never match an active
+             filter (absent-key law — bx-screener.js bxFilterRow). -->
+        <div class="ctl"><label for="scExec">Executability</label>
+          <select id="scExec"><option value="">All</option>
+            <option value="priced">Options-priced</option>
+            <option value="positive">Net &gt; 0 after costs</option></select></div>
         <div class="ctl"><label for="scMinWin">Min win %</label>
           <input id="scMinWin" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMinPf">Min PF</label>

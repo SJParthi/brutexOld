@@ -214,6 +214,10 @@ function bxHarvestFilterOptions(rows) {
     if (dir) { filters.direction = dir; }
     var inst = byId('scInstrument').value;
     if (inst) { filters.instrument = inst; }
+    /* Executability selection (`DEC-OPTIONS-EXEC-FEEDBACK-001`) — inactive
+       ("" = All) sends no key, so absent-object rows are untouched. */
+    var ex = byId('scExec').value;
+    if (ex) { filters.executability = ex; }
     var minWin = num('scMinWin');
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
@@ -428,7 +432,7 @@ function bxHarvestFilterOptions(rows) {
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scExec', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {

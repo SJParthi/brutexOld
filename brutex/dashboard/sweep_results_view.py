@@ -335,11 +335,27 @@ RANKABLE_COLUMNS: Final[tuple[str, ...]] = (
 #: ``SweepLeaderboard.inert_axes`` (``composite_score`` removed), closing the
 #: /results read-time half of HIGH #40; ``max_consecutive_losses`` stays inert
 #: (still not persisted anywhere readable per-row — the persist half is the
-#: named follow-up DEC-CASCADE-ROW-PERSIST-002).
-PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+#: named follow-up DEC-CASCADE-ROW-PERSIST-002). ``net_after_cost_paisa``
+#: (`DEC-OPTIONS-EXEC-FEEDBACK-001`) ships DISCLOSED-INERT on /results:
+#: ``?preset=net_after_cost`` is accepted (the writer-side top100 build ranks
+#: by it for real) but /results rows come from ``ResultsStore`` rows carrying
+#: NO options-exec verdict — the axis is constant-``None`` per row, ordering
+#: falls through to ``run_id`` ASC, and the payload names it inert. Dynamic
+#: activation (reading the newest run's top100 ``options_exec`` objects — the
+#: ``composite_join`` pattern) is the named follow-up
+#: `DEC-NETCOST-RESULTS-JOIN-001`.
+PRESET_INERT_AXES: Final[tuple[str, ...]] = (
+    "composite_score",
+    "max_consecutive_losses",
+    "net_after_cost_paisa",
+)
 
-#: The effective inert axes once the composite index joined non-empty.
-_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses",)
+#: The effective inert axes once the composite index joined non-empty
+#: (composite activation does NOT activate the net-cost axis).
+_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = (
+    "max_consecutive_losses",
+    "net_after_cost_paisa",
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -400,14 +400,27 @@ class TestCompositeActivation:
         # The joined index ORDERS the composite preset (was run_id-only inert).
         assert [r["run_id"] for r in board["rows"]] == [_run_id(2), _run_id(3), _run_id(1)]
         # The honest dynamic disclosure: composite_score LEFT the inert set.
-        assert board["preset_inert_axes"] == ["max_consecutive_losses"]
+        # Consciously extended (`DEC-OPTIONS-EXEC-FEEDBACK-001`): the
+        # net_after_cost preset is a top100-artifact-only axis — /results
+        # persists no per-row options-exec net, so it is DISCLOSED-INERT
+        # here (dynamic join = named follow-up DEC-NETCOST-RESULTS-JOIN-001).
+        assert board["preset_inert_axes"] == [
+            "max_consecutive_losses",
+            "net_after_cost_paisa",
+        ]
 
     def test_preset_without_index_keeps_full_inert_disclosure(self, tmp_path: Path) -> None:
         _seed_rows(tmp_path, [2, 1, 3])
         board = build_sweep_leaderboard(tmp_path, preset="composite").to_dict()
         # No index → the pre-change inert ordering (run_id ASC) + full set.
         assert [r["run_id"] for r in board["rows"]] == [_run_id(1), _run_id(2), _run_id(3)]
-        assert board["preset_inert_axes"] == ["composite_score", "max_consecutive_losses"]
+        # net_after_cost_paisa consciously joins the inert set
+        # (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+        assert board["preset_inert_axes"] == [
+            "composite_score",
+            "max_consecutive_losses",
+            "net_after_cost_paisa",
+        ]
 
     def test_empty_joined_index_stays_inert(self, tmp_path: Path) -> None:
         _seed_rows(tmp_path, [2, 1])
@@ -415,7 +428,13 @@ class TestCompositeActivation:
             tmp_path, preset="composite", composite=self._index({})
         ).to_dict()
         # A joined-but-EMPTY index cannot activate the axis (nothing scored).
-        assert board["preset_inert_axes"] == ["composite_score", "max_consecutive_losses"]
+        # net_after_cost_paisa consciously joins the inert set
+        # (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+        assert board["preset_inert_axes"] == [
+            "composite_score",
+            "max_consecutive_losses",
+            "net_after_cost_paisa",
+        ]
         assert [r["run_id"] for r in board["rows"]] == [_run_id(1), _run_id(2)]
         # …but the meta still discloses the join ran.
         assert board["composite_join"]["scored_rows"] == 0
