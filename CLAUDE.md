@@ -3481,7 +3481,10 @@ hostile-review pass._
   legs (a consistent disclosed basis); the B&H leg is price-return (no
   dividends — not in the lake). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; ONE new
-  env var, no new routes.)
+  env var, no new routes. Hostile review r1 folded (gate-honesty FIX-FIRST —
+  1 refuter-confirmed MINOR: the gate-ON `gate_passers` hard-count restore —
+  + 3 NITs + 1 latent baseline-write-ordering fix; per-item record in
+  MIGRATION.md #1956); r2 targeted CLEAN SHIP.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
