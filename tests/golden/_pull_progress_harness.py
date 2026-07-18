@@ -74,7 +74,8 @@ def f64_bits(value: float) -> str:
 
 def f64_from_bits(pattern: str) -> float:
     """Inverse of :func:`f64_bits`."""
-    return struct.unpack("<d", bytes.fromhex(pattern))[0]
+    value: float = struct.unpack("<d", bytes.fromhex(pattern))[0]
+    return value
 
 
 #: (total, completed, phase_base_completed) hostile lattice.

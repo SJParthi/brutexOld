@@ -100,8 +100,7 @@ class TestAntiVacuous:
 
     def test_a_nan_output_row_exists(self, frozen: dict[str, Any]) -> None:
         assert any(
-            math.isnan(f64_from_bits(row["out"]["units_per_sec"]["bits"]))
-            for row in frozen["rows"]
+            math.isnan(f64_from_bits(row["out"]["units_per_sec"]["bits"])) for row in frozen["rows"]
         )
 
     def test_huge_count_rows_exist(self, frozen: dict[str, Any]) -> None:

@@ -212,9 +212,7 @@ class TestDegrades:
         (event,) = logs
         assert event["reason"] == "wheel_missing"
 
-    def test_stale_wheel_degrades_naming_the_symbol(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stale_wheel_degrades_naming_the_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch)  # importable, but pre-Wave-2F surface
         with capture_logs() as logs:
             assert _derived() is None
@@ -321,10 +319,12 @@ class TestPropertySeam:
         """The kernel receives the PRE-COMPUTED running verdict, never a string."""
         monkeypatch.setenv(FLAG_ENV, "1")
         calls: list[tuple[Any, ...]] = []
-        _install(
-            monkeypatch,
-            progress_derived=lambda *a: (calls.append(a), (0.0, 0.0, 0.0, False, 0.0))[1],
-        )
+
+        def kernel(*args: Any) -> tuple[float, float, float, bool, float]:
+            calls.append(args)
+            return (0.0, 0.0, 0.0, False, 0.0)
+
+        _install(monkeypatch, progress_derived=kernel)
         _ = _snap(state=STATE_DONE).eta_seconds
         assert calls[0][0] is False  # state_running verdict, not "done"
 
@@ -343,7 +343,8 @@ def _require_wave2f_wheel() -> None:
 
 
 def _f64(cell: dict[str, Any]) -> float:
-    return struct.unpack("<d", bytes.fromhex(cell["bits"]))[0]
+    value: float = struct.unpack("<d", bytes.fromhex(cell["bits"]))[0]
+    return value
 
 
 def _assert_metric(got: float, want: float, what: str, case: dict[str, Any]) -> None:
