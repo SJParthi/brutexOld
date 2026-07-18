@@ -18,7 +18,31 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-18 (DEC-FILL-EXEC-GRID-1M-001 +
+DEC-OPTIONS-EXEC-FEEDBACK-001, MIGRATION.md #1979–#1980 / ADR-0025, branch
+`claude/fill-1m-exec-grid` — PR-B: THE 1-MINUTE EXECUTION GRID + the
+options/futures execution-feedback loop. Every fill now resolves on the
+NEXT 1-minute bar strictly after the signal bar's CLOSE, priced WORST-CASE
+within that 1m bar, for EVERY decision TF (SL/TP detection + fill on the 1m
+grid too): the dual-feed engine (decision stream = signals only, 1m stream =
+every fill), the exec-grid-native Rust u64/u128 kernels, the unconditional
+`execution_grid: "1m_next_bar"` identity token + refuse-on-absence mirrors,
+the SANCTIONED greenfield run-identity re-key (operator-approved 2026-07-18)
+with every golden re-locked by hand (the #1825 literals survive as frozen
+anti-alias pins), AGG_COLUMNS 50→55, the §6b 1day structurally-empty law,
+the ratified missing-1m SLIDE + the deferral/collision/selector laws, and
+the R13 fill-sensitivity annotation — the #1825 INTERIM decision-TF honesty
+clause is RETIRED (rider recorded there + in ADR-0023). #1980 wires the
+winners hook to BOTH translation executors (per-entry
+`options_exec`/`futures_exec` objects, the R45 persistence fix, the
+INT-EXACT `net_after_cost` preset, the /screener executability surfaces) —
+the FIRST production caller of the futures translation executor. ENGINE
+SEMANTICS CHANGED BY OPERATOR DIRECTIVE (PR-B of the fills track's
+sanctioned exception) — scope/vocab/rate/lake-schema UNCHANGED;
+NIFTY/BANKNIFTY/SENSEX. The per-item records live in the §1 Active-branch
+blurb + MIGRATION.md #1979–#1980 + ADR-0025 — this header carries the
+pointer, never the story.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
@@ -3297,7 +3321,122 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+- **Active branch:** `claude/fill-1m-exec-grid` (**DEC-FILL-EXEC-GRID-1M-001 +
+  DEC-OPTIONS-EXEC-FEEDBACK-001, MIGRATION.md #1979–#1980 / ADR-0025** — PR-B of the
+  worst-case-fills-only track: THE 1-MINUTE EXECUTION GRID + the options/futures
+  execution-feedback loop; the W4 band #1979–#1980 per the 2026-07-18 operator-approved lane
+  grant (the design's older reserved row #1826 stays unminted — both were free, the band
+  governs; renumber-at-fold per DEC-LEDGER-RENUMBER-001). **THE OPERATOR LAW (#1979):** every
+  fill resolves on the NEXT 1-minute bar strictly after the signal bar's CLOSE, priced
+  WORST-CASE within that 1m bar, for EVERY decision TF — SL/TP detection AND fill move to the
+  1m grid; supersedes the #1825 INTERIM decision-TF clause (rider recorded in #1825 +
+  ADR-0023; coarse-TF results generally become LESS punitive while staying never-optimistic).
+  DUAL-FEED: the preload loads `interval_list ∪ {"1minute"}` into the SAME slices mapping
+  (one G10 span, the `data_snapshot_hash` fold covers the 1m slice with zero hash-derivation
+  change); NEW engine-cycle-free stdlib leaf `brutex/engine/exec_grid.py` (`ExecGridMap` +
+  `build_exec_grid_map` — `exec_idx(N) = first ts_1m >= ts_tf[N] + close_step_minutes(tf)`,
+  pure UTC arithmetic, precomputed once per (symbol, tf) in the cmd_sweep_all-owned
+  `_exec_map_for` memo; `exec_window_slice` = the dual-stream OOS window-cut law); the walker
+  (FULL REWRITE — `push_1m`; `simulate_trades` takes REQUIRED `exec_bars_1m`, no silent
+  single-feed shape survives; tf=1minute = the fixed point whose ONE delta is the deferral)
+  and the Rust u64/u128 kernels (FULL REWRITE over the #1942 `MaskWord` core — decision OHLC
+  drops OUT of the FFI; 1m exec columns + `arm_source` in; DECISION-length bar_bits projected
+  per mask in-kernel; the `next_arm` flat-skip jump table — per-mask cost O(#signals +
+  Σ in-position minutes + #trades), jump-vs-full-walk parity-pinned) walk the EXECUTION
+  stream; the seam gains the `_kernel_exec_grid_current` stale-wheel probe (a pre-PR-B wheel
+  demotes to the dual-feed Python oracle warn-once `exec_grid_kernel_stale`, never a
+  wrong-law kernel answer). THE RATIFIED LAWS: entry at `exec_idx(N)`'s adverse extreme
+  (same-session, never a forced bar); SL/TP per 1m bar with the adverse-max-vs-level fill +
+  the B5 gap-open law; SL-first tie; the §2.4 SAME-BAR DEFERRAL (entry bar folds excursions,
+  never exits — counted `exits_deferred`); forced session-close via
+  `forced_exit_seconds_for_session` (missing boundary minute = a counted SLID fill); the B3
+  terminal CLOSE carve-out (the legalized `exit_idx == entry_idx` degenerate prices the entry
+  bar's CLOSE — the #1743 basis) on end_of_data AND session_gap (re-keyed on the 1m stream);
+  missing minutes = the RATIFIED session-bounded SLIDE unified with PR-A (cross-session
+  DROPS; every slid class counted `fill_slid_minutes`/`exit_fill_slid_minutes`/
+  `forced_fill_slid_minutes`; the WITHHOLD alternative stays fully drafted, flip-asymmetry
+  recorded); the B4 earliest-armed-wins collision law (`signals_dropped_collision`; one
+  statement, THREE independent implementations — walker/kernel/diffcheck, one fixture through
+  all three); the B6 bounded-distance selector refusal (`fill_selector_distance_refused`);
+  the B1 structural provenance law (primary-tree-only + no-Dhan-path AST pin + the snapshot
+  belt); the §5b volume-0 ENGINE firewall (a printed 1m bar is REAL + TRADABLE — deliberately
+  DISTINCT from the #1825 executor always-reject, two laws two surfaces). §6b: tf==1day is
+  STRUCTURALLY EMPTY (`close_step_minutes` 375→1440 — the close instant is the next midnight,
+  every arm point cross-session drops; zero-trade-pinned in BOTH implementations — a genuine
+  integration-caught gap). IDENTITY (the SANCTIONED greenfield re-key, operator-approved
+  2026-07-18): `canonical_trade_params` emits `execution_grid: "1m_next_bar"`
+  UNCONDITIONALLY beside `fill_mode`; mirrors = grid descriptor + tuple-cache params + tuple
+  digest + the cascade spec dict (REFUSES absence/wrong token naming the DEC) + sweep_verify
+  + the SWEEP_LAUNCH audit line (the A3c fix — pre-fix every real futures launch refused its
+  OWN sweep-verify, 4 executed fails-before); cascade exec coordinates derive as instruments
+  × "1minute" in manifest load AND hash; every run_id re-keys ⇒ a deploy re-sweeps
+  everything — documented, not fought. METRICS TAIL: exit indices are 1M indices translated
+  via `decision_of`; equity folds per DECISION bar (owning-bucket bisect); holding = 1M-bar
+  counts with `time_in_market_pct`'s denominator moved to the exec count; stage-3 lockbox =
+  ONE per-instrument boundary (EARLIEST across streams + the `lockbox_tail_skew` WARN);
+  AGG_COLUMNS 50→55 (after `exits_session_gap`: exits_deferred → signals_dropped_collision →
+  the slid trio; presence-tolerant honest-0 loads; the top100 exit-REASON `exits` dict
+  deliberately NOT extended). R45 diffcheck: `reference_simulate` REWRITTEN as its own
+  independent dual-stream walk (own two-pointer; `exec_grid.py` AST-import-banned; no
+  flat-skip). GOLDEN RE-LOCKS (hand-derived in-file, the #1825 ritual): `_GOLDEN_RUN_ID`
+  `caf0cb630c4a1c74…9390ca` (one-key preimage; the PR-A id `715212420d…62fc9` negative-pinned
+  as `_PRE_GRID_RUN_ID` beside `_PRECISE_ERA_RUN_ID`); `_GOLDEN_CONTENT_HASH`
+  `23ebaf1ccc…933f` with the hand-derived census **304 trades = 271×(+50 TP) + 22×(−115 SL) +
+  11×(−10 B3 terminal: 10 session_gap + 1 end_of_data) = +10,910 paisa** (the #1825 stream
+  was 203 = 181×(+50) + 22×(−115) = +6,520 — the deferral + 1m re-arm cadence legitimately
+  re-shapes it); futures-sweep/price-source/tuple-digest re-locks by the same one-key law;
+  capture/aggregate digests SCHEMA-ADDITIVE (five INT64 counter columns, counters measured 0
+  on those fixtures); rust/trade-sim/paisa/sensex absolute pins PROVEN UNCHANGED at the tf=1
+  fixed point; `tests/golden/fixtures/` BYTE-UNTOUCHED (empty diff — Stage-1A/60-vocab/
+  indicator_version out of scope). PARITY: the hypothesis dual-stream Python≡Rust property
+  (~850 examples/run, u64 AND u128, zero divergences) + 140 randomized differential trials
+  (100 dual-arm + 40 drawdown bit-key — zero mismatches, re-run at every integration head).
+  PREFLIGHT: the NON-WAIVABLE exec-slice refusal (`--allow-missing-slices` does not waive
+  it). THE R13 FILL-SENSITIVITY HALF: NEW pure leaf `brutex/engine/fill_sensitivity.py` —
+  ONE open-anchored reference re-sim per persisted finalist at results-depth time (entry at
+  entry-bar OPEN; tp/sl at the LEVEL; signal/forced at exit-bar OPEN; terminal at exit-bar
+  CLOSE), the per-entry additive `fill_sensitivity` object (worst_case vs reference net,
+  `haircut_paisa`, `sign_flip` null-on-zero-trades; not_priced over 6 named reasons) stamped
+  AFTER ranking — annotation NEVER re-ranks/hides; honest O(|top100|·bars) run-end batch
+  DISCLOSED, never the sweep hot path; provider-None ⇒ artifact BYTE-IDENTICAL (pinned).
+  **#1980 (DEC-OPTIONS-EXEC-FEEDBACK-001):** the winners hook widens to BOTH executors —
+  `_maybe_run_exec_sims_on_winners` returns in-memory per-run_id verdict maps (the #1749
+  threading law; ONE spot replay per row serves both legs); NEW `options/exec_verdict.py`
+  (ATM headline by `OPTIONS_EXEC_HEADLINE_RULE`; rejects dict incl. the counted
+  `cost_regime_unverified` pre-2024-10-01 class — `etc_verified_from_token()` DERIVED from
+  the refusal table, never hardcoded; `priced_trade_pct` ×100 law; `sign_flip`
+  null-on-0-priced); the R45 persistence FIX (fails-before-pinned — `FuturesRuleResult.suspect`
+  + `differential_checked` now stamped onto the returned result, previously computed then
+  DROPPED); `futures_exec_verdict` surfaces the executed futures leg (suspect +
+  differential_checked; the honest index-cost-free/refusal-window etc_note; STOCK arms
+  structural under #1790) — the FIRST production caller of the #1543 futures executor; the
+  `net_after_cost` preset (INT-EXACT key — paisa never through float, 2**53 distinctions
+  pinned; None-after-scored); top100 provider seams emit-on-present + emit-on-wired flags,
+  provider-None BYTE-IDENTICAL, wired-arm diff pinned ADDITIVE-ONLY; reader bridges on the
+  #1631 named-partial law; /results `net_after_cost_paisa` joins PRESET_INERT_AXES
+  (DISCLOSED-INERT; dynamic join = named follow-up DEC-NETCOST-RESULTS-JOIN-001); /screener
+  "Opt net"/"Fut net" columns + the executability filter (absent-key-never-matches,
+  node-executed pins; scExec mirrored into BOTH markup copies, T-N2 fence extended);
+  born-rust classification recorded + coordinator-FLAGGED (display-zone Python fold per the
+  #1749 `_cascade_payload` precedent; the executors' own Rust conversion is a separate
+  totality-law slice). HONEST: the exec sims replay ONLY the persisted winners (bounded
+  run-end, entries outside the set read `not_in_replay_set`); the CandleBar-list memory
+  figure stays UNMEASURED (named); the design §7.5 dedicated bench teeth are a named
+  residual (existing benches re-shaped dual-feed, 24 passed); the two #1825/ADR-0023
+  honest-limits rider sentences owed by the reclaim audit stay UNWRITTEN (verbatim source
+  unavailable — named follow-up). GATES (executed at head 639c445c9): whole-engine glob gate
+  100.00% (10,925/3,156; 3,949 passed); exec_grid 110/60 · trade_sim 234/74 · rust_trade_sim
+  249/98 · fill_sensitivity 55/22 · results_depth_pass 329/76 · exec_verdict 30/10 · futures
+  executor+leaderboard · ranking package 286/74 · oneclick_artifacts (332) ·
+  sweep_results_view 304/102 ALL 100.00%; cargo fno-math 623+4+1 `--locked` + fmt + clippy
+  `-D warnings` clean; golden tree 547 passed · property belt 549 passed · heavy CLI-chain
+  batches green; ruff/ruff-format clean; `mypy --strict` = the 9 env-only baselines; pyright
+  0 errors on touched files; `node --check` clean; ledger validators green. ENGINE SEMANTICS
+  CHANGED BY OPERATOR DIRECTIVE (PR-B of the fills-track sanctioned exception) —
+  scope/vocab/rate/lake-schema UNCHANGED; NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no new routes/env vars; draft PR #1564 (the design review vehicle) closes without merge
+  when this lands.)
+  Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
   first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
@@ -10159,7 +10298,46 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-u128-enum-kernel`
+- **Active feature branch:** `claude/fill-1m-exec-grid`
+  (DEC-FILL-EXEC-GRID-1M-001 + DEC-OPTIONS-EXEC-FEEDBACK-001, MIGRATION.md
+  #1979–#1980 / ADR-0025 — PR-B of the worst-case-fills-only track, the W4
+  band per the 2026-07-18 operator-approved lane grant (the design's older
+  reserved row #1826 stays unminted; both were free, the band governs): THE
+  1-MINUTE EXECUTION GRID — every fill resolves on the NEXT 1-minute bar
+  strictly after the signal bar's CLOSE, priced WORST-CASE within that 1m
+  bar, for EVERY decision TF (SL/TP detection + fill on the 1m grid; the
+  #1825 INTERIM decision-TF clause retired, rider recorded there +
+  ADR-0023); dual-feed engine (preload union `interval_list ∪ {"1minute"}`
+  into the ONE snapshot-hashed slices mapping; the NEW
+  `brutex/engine/exec_grid.py` `ExecGridMap` precomputed once per
+  (symbol, tf); walker + Rust u64/u128 kernels walk the EXECUTION stream —
+  decision OHLC drops out of the FFI, `arm_source` + 1m exec columns in,
+  flat-skip jump table; stale-wheel demotion `exec_grid_kernel_stale`); the
+  ratified laws (same-bar DEFERRAL · B5 gap-open · B3 terminal CLOSE
+  carve-out on the #1743 basis · session-gap on the 1m stream · the
+  session-bounded missing-1m SLIDE with every slid class counted · B4
+  earliest-armed-wins collisions · B6 bounded-distance selector refusal ·
+  §5b volume-0 engine firewall · §6b tf==1day structurally EMPTY); the
+  unconditional `execution_grid: "1m_next_bar"` identity token +
+  refuse-on-absence mirrors and the SANCTIONED greenfield run-identity
+  re-key (operator-approved 2026-07-18) — every golden re-locked by hand
+  (`_GOLDEN_RUN_ID` `caf0cb63…9390ca`; the 304-trade/+10,910-paisa census;
+  the PR-A id negative-pinned `_PRE_GRID_RUN_ID`; fixtures byte-untouched,
+  empty diff); AGG_COLUMNS 50→55; the R45 diffcheck reference rewritten
+  independent dual-stream; ~850-example hypothesis Python≡Rust parity + 140
+  randomized differential trials, zero divergences; the R13
+  fill-sensitivity annotation (open-anchored reference re-sim, per-entry
+  additive object, never re-ranks, provider-None byte-identical); + #1980 —
+  the winners hook widened to BOTH translation executors (per-entry
+  `options_exec`/`futures_exec` objects, the R45 persistence fails-before
+  fix, the INT-EXACT `net_after_cost` preset, /screener executability; the
+  FIRST production caller of the #1543 futures executor; named follow-up
+  DEC-NETCOST-RESULTS-JOIN-001). ENGINE SEMANTICS CHANGED BY OPERATOR
+  DIRECTIVE (the fills-track sanctioned exception) —
+  scope/vocab/rate/lake-schema UNCHANGED; NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1979–#1980 + ADR-0025
+  for the full blurbs)
+  Earlier: `claude/rust-u128-enum-kernel`
   (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
@@ -11584,7 +11762,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5158-5159` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5194-5195` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
