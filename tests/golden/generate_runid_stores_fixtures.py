@@ -531,6 +531,7 @@ def _ledger_row(
     bars_net_new: int | None = 375,
     empty_retries: int | None = 0,
     transient_retries: int | None = 0,
+    streak_provenance: str | None = None,
 ) -> tuple[Any, ...]:
     return (
         market,
@@ -549,6 +550,7 @@ def _ledger_row(
         bars_net_new,
         empty_retries,
         transient_retries,
+        streak_provenance,
     )
 
 
@@ -586,7 +588,12 @@ def ledger_merge_inputs() -> list[tuple[str, dict[str, Any]]]:
             "newer_attempt_wins",
             {
                 "memory_rows": [
-                    _ledger_row(**k1, last_attempt_at="2024-02-01T10:00:00+00:00", bars=10)
+                    _ledger_row(
+                        **k1,
+                        last_attempt_at="2024-02-01T10:00:00+00:00",
+                        bars=10,
+                        streak_provenance="EMPTY@p1|EMPTY@p2",
+                    )
                 ],
                 "disk_rows": [
                     _ledger_row(**k1, last_attempt_at="2024-01-31T10:00:00+00:00", bars=20)
@@ -767,6 +774,7 @@ def ledger_roundtrip_inputs() -> list[tuple[str, list[tuple[Any, ...]]]]:
                     bars_net_new=0,
                     empty_retries=2,
                     transient_retries=1,
+                    streak_provenance="EMPTY@p1|EMPTY@p2",
                 ),
             ],
         ),

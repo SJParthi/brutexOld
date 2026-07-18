@@ -53,7 +53,7 @@ from brutex.data.window_ledger_store import (
     save_window_ledger,
 )
 
-#: The canonical 16-column schema order — the kernel's ``LEDGER_COLUMNS`` as a
+#: The canonical 17-column schema order — the kernel's ``LEDGER_COLUMNS`` as a
 #: tuple (the ONE schema authority; the store's former ``_COLUMNS`` re-wrap is
 #: gone — DEC-RUST-RUNID-STORES-001).
 _COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
@@ -139,6 +139,7 @@ _STRING_COLUMNS = frozenset(
         "last_error",
         "first_seen_at",
         "last_attempt_at",
+        "streak_provenance",
     }
 )
 

@@ -370,11 +370,13 @@ class TestWheelHandshake:
         assert digest == brutex_identity.__source_digest__
 
     def test_ledger_column_vocabulary(self) -> None:
-        assert len(brutex_identity.LEDGER_COLUMNS) == 16
+        assert len(brutex_identity.LEDGER_COLUMNS) == 17
         assert len(brutex_identity.LEDGER_CORE_COLUMNS) == 11
         assert tuple(brutex_identity.LEDGER_COLUMNS[:11]) == tuple(
             brutex_identity.LEDGER_CORE_COLUMNS
         )
+        # streak_provenance (DEC-STREAK-PROVENANCE-001 #1512) = the 17th, optional col
+        assert brutex_identity.LEDGER_COLUMNS[16] == "streak_provenance"
 
 
 # ── the ledger merge law: retired-body oracle differential ───────────────────
@@ -431,6 +433,7 @@ _ROW_STRATEGY = st.tuples(
     st.none() | st.integers(min_value=0, max_value=500),
     st.none() | st.integers(min_value=0, max_value=5),
     st.none() | st.integers(min_value=0, max_value=5),
+    st.none() | st.sampled_from(["EMPTY@p1", "EMPTY@p1|EMPTY@p2", ""]),  # streak_provenance (17th)
 )
 
 

@@ -467,3 +467,63 @@ class TestStatTokenExpectedMove:
         wls.save_window_ledger(live, canonical_lake)
         after = db_view._ledger_stamp_token(wls.ledger_path(canonical_lake))
         assert before != after  # EXPECTED move — a full save moves base mtime + prunes deltas
+
+
+def _sp_row(security_id: str, streak_provenance: str | None) -> tuple[Any, ...]:
+    """A 17-field LedgerRow with an explicit ``streak_provenance`` (the 17th col)."""
+    return (
+        "groww",
+        security_id,
+        "1minute",
+        "2025-01-01",
+        "2025-01-31",
+        "EMPTY",
+        0,
+        2,
+        None,
+        "2025-01-31T16:00:00+00:00",
+        "2025-01-31T16:00:00+00:00",
+        2,
+        2,
+        0,
+        2,
+        1,
+        streak_provenance,
+    )
+
+
+class TestStreakProvenanceParity:
+    """The 17th column (DEC-STREAK-PROVENANCE-001 #1512, re-hosted under #1962)
+    survives the kernel codec Some+None, and a genuine pre-column 16-col file
+    decodes it as an honest ``None`` (Golden Rule #1 — never fabricated)."""
+
+    def test_some_and_none_round_trip_reader_equals_stored(self, tmp_path: Path) -> None:
+        rows = [_sp_row("NSE-A", "EMPTY@p1|EMPTY@p2"), _sp_row("NSE-B", None)]
+        path = tmp_path / "ledger.parquet"
+        path.write_bytes(wls.render_ledger_parquet(rows))
+        # production reader ≡ stored rows, 17th column byte-exact both arms
+        read_back = wls._read_ledger_file_rows(path)
+        assert read_back == rows
+        assert [r[-1] for r in read_back] == ["EMPTY@p1|EMPTY@p2", None]
+        # DuckDB agrees on the 17th column (reader ≡ DuckDB, extended to col 17)
+        with duckdb.connect() as conn:
+            sp = conn.execute(
+                "SELECT streak_provenance FROM read_parquet(?) ORDER BY security_id",
+                [path.as_posix()],
+            ).fetchall()
+        assert sp == [("EMPTY@p1|EMPTY@p2",), (None,)]
+
+    def test_legacy_16col_file_decodes_streak_provenance_none(self, tmp_path: Path) -> None:
+        """A genuine pre-#1512 16-col parquet (no ``streak_provenance`` column)
+        decodes with the 17th field ``None`` — the by-name read is back-compat
+        by construction (absent cell ⇒ honest unknown), every other field intact."""
+        rows = [_sp_row("NSE-A", "EMPTY@p1|EMPTY@p2")]
+        path = tmp_path / "legacy.parquet"
+        path.write_bytes(wls.render_ledger_parquet(rows))
+        table = pq.read_table(path).drop_columns(["streak_provenance"])
+        assert "streak_provenance" not in table.column_names  # a genuine 16-col file
+        pq.write_table(table, path)  # type: ignore[no-untyped-call, unused-ignore]
+        read_back = wls._read_ledger_file_rows(path)
+        assert len(read_back) == 1
+        assert read_back[0][-1] is None  # back-compat: absent ⇒ None
+        assert read_back[0][:16] == rows[0][:16]  # every other field byte-intact
