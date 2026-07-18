@@ -18,8 +18,9 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1954
-(provisional — renumber-at-landing law applies), branch
+_Last updated: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1955
+(provisional — renumbered #1954 → #1955 per the coordinator ledger
+allocation; the renumber-at-landing law still applies), branch
 `claude/notify-rust-core` — the notification PURE laws convert to Rust
 behind the default-OFF `BRUTEX_NOTIFY_RUST`: NEW crate `rust/brutex-notify/`
 (the brutex-feed template) owns the MarkdownV2 escape law + the
@@ -40,7 +41,7 @@ speed; ships INERT, a default flip needs its own DEC. NEW non-required
 notify-rust-parity.yml lane + the facade mutmut pair; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
-§1 Active-branch blurb + MIGRATION.md #1954.)
+§1 Active-branch blurb + MIGRATION.md #1955.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3267,8 +3268,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/notify-rust-core`
-  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1954** — provisional number,
-  renumber-at-landing law applies; the DEC-ID is the stable handle per
+  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1955** — provisional number,
+  renumbered #1954 → #1955 per the coordinator ledger allocation; the
+  renumber-at-landing law still applies; the DEC-ID is the stable handle per
   DEC-LEDGER-RENUMBER-001 — slice 1 of the notifications Rust lane: the
   FOUR pure notification laws convert to Rust behind the default-OFF
   `BRUTEX_NOTIFY_RUST` — (1) the MarkdownV2 escape law
@@ -9949,8 +9951,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/notify-rust-core`
-  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1954 — provisional,
-  renumber-at-landing law applies — the notification PURE laws convert to
+  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1955 — provisional,
+  renumbered #1954 → #1955 per the coordinator ledger allocation — the
+  notification PURE laws convert to
   Rust behind the default-OFF `BRUTEX_NOTIFY_RUST`: NEW crate
   `rust/brutex-notify/` (MarkdownV2 escape · `_count_or_question` ·
   the dedupe-window drop predicate over IEEE-754 bit patterns as ints ·
@@ -9964,7 +9967,7 @@ hostile-review pass._
   parity hazards — named follow-up DEC-NOTIFY-RUST-BUILDERS-002);
   expected payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1954 for the full blurb)
+  see §1 + MIGRATION.md #1955 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored

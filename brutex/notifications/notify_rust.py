@@ -1,6 +1,6 @@
 """notify_rust — the default-OFF Rust routing facade for the notification PURE laws.
 
-DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1954). Routes the FOUR pure
+DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1955). Routes the FOUR pure
 notification laws through the ``rust/brutex-notify`` crate behind the
 default-OFF ``BRUTEX_NOTIFY_RUST`` flag, with each verbatim Python law
 retained as the LIVE parity oracle (the ``window_ledger_rust`` /
