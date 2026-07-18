@@ -1,0 +1,2009 @@
+{
+ "append_law": [
+  {
+   "existing": null,
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "fresh_insert",
+   "outcome": {
+    "changed": true,
+    "kind": "ok",
+    "stored_vix": [
+     null,
+     null,
+     null
+    ]
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "identical_noop",
+   "outcome": {
+    "changed": false,
+    "kind": "ok",
+    "stored_vix": [
+     null,
+     null,
+     null
+    ]
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": 17.25,
+    "vix_mean": 14.5,
+    "vix_min": 12.0,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "vix_backfill",
+   "outcome": {
+    "changed": true,
+    "kind": "ok",
+    "stored_vix": [
+     14.5,
+     12.0,
+     17.25
+    ]
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": 12.0,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": 14.5,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "vix_partial_backfill",
+   "outcome": {
+    "changed": true,
+    "kind": "ok",
+    "stored_vix": [
+     14.5,
+     12.0,
+     null
+    ]
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": 17.25,
+    "vix_mean": 14.5,
+    "vix_min": 12.0,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "vix_reverse_noop",
+   "outcome": {
+    "changed": false,
+    "kind": "ok",
+    "stored_vix": [
+     14.5,
+     12.0,
+     17.25
+    ]
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": 14.5,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": 15.0,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "vix_conflict",
+   "outcome": {
+    "kind": "vix_conflict"
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150001,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "plain_conflict",
+   "outcome": {
+    "kind": "plain_conflict"
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": 0.42,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "gate_conflict_none_vs_float",
+   "outcome": {
+    "kind": "gate_conflict"
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": 0.41,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": 0.42,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "gate_conflict_float_vs_float",
+   "outcome": {
+    "kind": "gate_conflict"
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": 14.5,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 9.9,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": 15.0,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "mixed_vix_and_metric_conflict",
+   "outcome": {
+    "kind": "plain_conflict"
+   }
+  },
+  {
+   "existing": {
+    "avg_entry_price": "21500.10",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "incoming": {
+    "avg_entry_price": "21500.15",
+    "avg_exit_price": "21515.35",
+    "calmar_ratio": 0.8,
+    "deflated_sharpe": null,
+    "direction": "bull",
+    "expectancy_paisa": 1500,
+    "gross_loss_paisa": 250000,
+    "gross_profit_paisa": 400000,
+    "instrument": "NSE-NIFTY",
+    "losing_trades": 40,
+    "mask_bits": 4398046511232,
+    "max_drawdown_paisa": 90000,
+    "max_drawdown_pct": 0.09,
+    "mode": "A",
+    "net_pnl_paisa": 150000,
+    "profit_factor": 1.6,
+    "run_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "sharpe_ratio": 1.25,
+    "sortino_ratio": 1.5,
+    "tf": "5minute",
+    "total_trades": 100,
+    "vix_max": null,
+    "vix_mean": null,
+    "vix_min": null,
+    "win_rate": 0.6,
+    "winning_trades": 60
+   },
+   "name": "price_diff_conflict",
+   "outcome": {
+    "kind": "plain_conflict"
+   }
+  }
+ ],
+ "canonical_params": [
+  {
+   "expected_json": "{}",
+   "name": "empty"
+  },
+  {
+   "expected_json": "{\"b\":true,\"d\":\"1.5\",\"f\":\"1.5\",\"i\":42,\"n\":null,\"s\":\"plain\"}",
+   "name": "flat_scalars"
+  },
+  {
+   "expected_json": "{\"big_odd\":\"9007199254740992.0\",\"denormal_min\":\"5e-324\",\"half\":\"0.5\",\"long\":\"123456789012345.6\",\"max\":\"1.7976931348623157e+308\",\"neg_zero\":\"0.0\",\"one_e100\":\"1e+100\",\"one_e15\":\"1000000000000000.0\",\"one_e16\":\"1e+16\",\"one_e_neg4\":\"0.0001\",\"one_e_neg5\":\"1e-05\",\"point_one\":\"0.1\",\"sci_neg\":\"2.5e-10\",\"seventeen_sig\":\"1.2345678901234567\",\"tiny_norm\":\"2.2250738585072014e-308\",\"zero\":\"0.0\"}",
+   "name": "float_boundaries"
+  },
+  {
+   "expected_json": "{\"neg\":\"-12.345\",\"neg_zero\":\"-0\",\"plain\":\"1.5\",\"scaled\":\"1.00\",\"sci_dn\":\"1.5E-7\",\"sci_up\":\"1E+5\",\"small\":\"0.000001\",\"zero\":\"0\"}",
+   "name": "decimal_scales"
+  },
+  {
+   "expected_json": "{\"big\":1606938044258990275541962092341162602522202993782792835301376,\"i64_max\":9223372036854775807,\"i64_min\":-9223372036854775808,\"neg_big\":-369988485035126972924700782451696644186473100389722973815184405301748249,\"u64_edge\":18446744073709551616,\"zero\":0}",
+   "name": "int_extremes"
+  },
+  {
+   "expected_json": "{\"astral\":\"mask\\ud83d\\ude00tail\",\"bell\":\"\\u0007\",\"controls\":\"line\\nfeed\\ttab\\rret\",\"del_7f\":\"del\\u007fchar\",\"high_latin\":\"caf\\u00e9\",\"nul\":\"nul\\u0000byte\",\"quotes\":\"quo\\\"te\\\\back\",\"solidus\":\"a/b\",\"unicode\":\"\\u00b5-\\u0938\\u0942\\u091a\\u0915\\u093e\\u0902\\u0915-\\u6307\\u6570\"}",
+   "name": "strings_hostile"
+  },
+  {
+   "expected_json": "{\"empty_dict\":{},\"empty_list\":[],\"list_of_dict\":[{\"k1\":1,\"k2\":2}],\"outer\":{\"a\":{\"deep\":[true,false]},\"z\":[1,\"2.5\",\"three\",null]},\"range\":[0,1,2],\"tuple\":[1,\"two\"]}",
+   "name": "nested"
+  },
+  {
+   "expected_json": "{\"0\":6,\"B\":3,\"a\":2,\"b\":1,\"z\":5,\"\\u00e9\":4}",
+   "name": "key_sort_unicode"
+  },
+  {
+   "expected_json": "{\"fill_mode\":\"worst_case\",\"prior_n\":20,\"proximity\":{\"fib_bps\":10,\"pdh_pdl_bps\":15,\"pivot_bps\":25},\"roll_schedule\":[738521,738549,738577],\"sl_paisa\":2000,\"start_equity_paisa\":10000000,\"tp_paisa\":4000}",
+   "name": "sweep_realistic"
+  }
+ ],
+ "combo_hash": [
+  {
+   "expected_hex": "073ab15d08650cd54d07d7cf4a9f3bcd3f432a3d081a27c24d0bdc3c652372ab",
+   "name": "base"
+  },
+  {
+   "expected_hex": "1ab9b1e88fa4fb4594768e3c3f9f5b60c48b3ca7f8e26b9112fe4608b4f2219c",
+   "name": "direction"
+  },
+  {
+   "expected_hex": "41e915029c7daf85acff39fa62681ea7423821f5f1612e08fcc153abc1b94bc6",
+   "name": "instrument"
+  },
+  {
+   "expected_hex": "53b7af7c1198627967a4d7fa8d216e95a83c37d6f893fa44ad89d91a2dc1d3a2",
+   "name": "unicode_field"
+  },
+  {
+   "expected_hex": "94867ccc2525d30c365d1089338bd2df7fd65c4ccc4799a1e712414b4e8d5689",
+   "name": "params_rich"
+  },
+  {
+   "expected_hex": "c1f068fba39c50f42bfd47988ea110108e8bfcea511af9ecf7dc83fba96a1620",
+   "name": "empty_params"
+  },
+  {
+   "expected_hex": "39855cc9a53a336540162889dc3c76f0a67c6a9e1d50b166433891e88ded1f84",
+   "name": "mode"
+  }
+ ],
+ "ledger_legacy_derivations": [
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SUCCESS"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SUCCESS"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SUCCESS"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SUCCESS"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SUCCESS"
+  },
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "EMPTY"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 1,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "EMPTY"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 2,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "EMPTY"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "EMPTY"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 7,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "EMPTY"
+  },
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "FAILED"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "FAILED"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "FAILED"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "FAILED"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "FAILED"
+  },
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 0,
+   "retry_split": null,
+   "status": "PLANNED"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 0,
+   "retry_split": null,
+   "status": "PLANNED"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 0,
+   "retry_split": null,
+   "status": "PLANNED"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 0,
+   "retry_split": null,
+   "status": "PLANNED"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 0,
+   "retry_split": null,
+   "status": "PLANNED"
+  },
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SKIPPED"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SKIPPED"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SKIPPED"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SKIPPED"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 3,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "SKIPPED"
+  },
+  {
+   "attempts": 0,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "GARBAGE"
+  },
+  {
+   "attempts": 1,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "GARBAGE"
+  },
+  {
+   "attempts": 2,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "GARBAGE"
+  },
+  {
+   "attempts": 3,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "GARBAGE"
+  },
+  {
+   "attempts": 7,
+   "bars_net_new": null,
+   "empty_streak": 0,
+   "in_pull_fetches": 1,
+   "retry_split": null,
+   "status": "GARBAGE"
+  }
+ ],
+ "ledger_merge": [
+  {
+   "disk_rows": [],
+   "expected": [],
+   "memory_rows": [],
+   "name": "both_empty"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "boom",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "boom",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "memory_only_plus_disk_only"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "PLANNED",
+     0,
+     0,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "settled_beats_planned"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     20,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T10:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     10,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-02-01T10:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     10,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-02-01T10:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "newer_attempt_wins"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     2,
+     2,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     2,
+     2,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     1,
+     2,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "attempts_then_full_row_tiebreak"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "EMPTY",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "EMPTY",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "EMPTY",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     null,
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "none_last_attempt_sorts_oldest"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "PLANNED",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "PLANNED",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "GARBAGE",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "unknown_status_ranks_below"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-C",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-C",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "pruned_disk_only_dropped",
+   "pruned_keys": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31"
+    ]
+   ]
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SKIPPED",
+     375,
+     5,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "reopened",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "reopened",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "reopened_memory_wins",
+   "reopened_keys": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31"
+    ]
+   ]
+  },
+  {
+   "degraded_keys": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31"
+    ]
+   ],
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     9,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "INTERIOR_GAP",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     375,
+     1,
+     "INTERIOR_GAP",
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "degraded_memory_wins"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     3,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     3,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     3,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     null,
+     null,
+     null
+    ]
+   ],
+   "name": "none_optional_tail"
+  },
+  {
+   "disk_rows": [
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "expected": [
+    [
+     "groww",
+     "NSE-A",
+     "1day",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-A",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-B",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-C",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "memory_rows": [
+    [
+     "groww",
+     "NSE-C",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-A",
+     "1day",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ]
+   ],
+   "name": "sort_order_multi_key"
+  }
+ ],
+ "ledger_row_fixed_points": [
+  {
+   "name": "empty",
+   "rows": []
+  },
+  {
+   "name": "mixed",
+   "rows": [
+    [
+     "groww",
+     "NSE-NIFTY",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "SUCCESS",
+     375,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     0,
+     1,
+     375,
+     0,
+     0
+    ],
+    [
+     "groww",
+     "NSE-M&M",
+     "1minute",
+     "2024-01-01",
+     "2024-01-31",
+     "FAILED",
+     0,
+     3,
+     "429 rate limited\nline2\ttab",
+     "2024-01-31T16:00:00+00:00",
+     null,
+     0,
+     1,
+     null,
+     null,
+     null
+    ],
+    [
+     "groww",
+     "NSE-\u00c9-unicode",
+     "1day",
+     "2024-01-01",
+     "2024-01-31",
+     "EMPTY",
+     0,
+     1,
+     null,
+     "2024-01-31T16:00:00+00:00",
+     "2024-01-31T16:00:00+00:00",
+     2,
+     1,
+     0,
+     2,
+     1
+    ]
+   ]
+  }
+ ],
+ "provenance": "FROZEN pre-Rust-conversion Python outputs (DEC-RUST-RUNID-STORES-001); generated by tests/golden/generate_runid_stores_fixtures.py",
+ "schema_version": 1,
+ "snapshot_hash": [
+  {
+   "expected_hex": "1d631febe9f8ef6832bad55ef978a941d1975a7005d48c2874766dd3b6838499",
+   "name": "empty_slices"
+  },
+  {
+   "expected_hex": "a1b6c176ba738a13adeac1d5861c8711b34442866f1058d2840a09284c950e46",
+   "name": "one_empty_slice"
+  },
+  {
+   "expected_hex": "1fa998db022737f1c3e13f5681a76bc5734535141a28887d9d5960752da63084",
+   "name": "utc_bars"
+  },
+  {
+   "expected_hex": "3b0d542a0f615b7f82d8d2e51379d37a7e6b6234d22c42b0cfe9a784bfc9d9f5",
+   "name": "ist_micros_oi"
+  },
+  {
+   "expected_hex": "4d2697ccf082a983820ee80d1a4fbf6153145510c823168dadd45aff14039a9e",
+   "name": "multi_slice_sort"
+  },
+  {
+   "expected_hex": "8e1851b431c987850f63ad982837e9d6fe6b020e068b63f53865489fe6664acd",
+   "name": "odd_offset"
+  }
+ ],
+ "top_k": [
+  {
+   "by": "sharpe_ratio",
+   "descending": true,
+   "expected_run_ids": [
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+   ],
+   "k": 5
+  },
+  {
+   "by": "sharpe_ratio",
+   "descending": false,
+   "expected_run_ids": [
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ],
+   "k": 3
+  },
+  {
+   "by": "net_pnl_paisa",
+   "descending": true,
+   "expected_run_ids": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   ],
+   "k": 5
+  },
+  {
+   "by": "total_trades",
+   "descending": true,
+   "expected_run_ids": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ],
+   "k": 2
+  }
+ ]
+}
