@@ -946,7 +946,7 @@ class TestCascadeJoinAtWriter:
         #1749 ``cascade_join``/``cascade`` keys (this DEC's), main's
         DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
         ``metrics.exits["session_gap"]`` key, AND — since the club-O
-        integration merge — DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1956)'s
+        integration merge — DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959)'s
         per-entry ``resilience`` block, whose payload-shape change carries the
         DELIBERATE ``schema_version`` bump 1→2 (bump-on-any-shape-change law,
         documented on ``TOP100_SCHEMA_VERSION``). The strip normalizes all
@@ -966,7 +966,7 @@ class TestCascadeJoinAtWriter:
         payload = artifact.to_payload()
         stripped = dict(payload)
         stripped.pop("cascade_join")
-        # The #1956 deliberate version bump — asserted, then normalized so the
+        # The #1959 deliberate version bump — asserted, then normalized so the
         # remaining compare proves every OTHER delta is additive-only.
         assert stripped["schema_version"] == TOP100_SCHEMA_VERSION == 2
         assert frozen["schema_version"] == 1
@@ -989,15 +989,15 @@ class TestCascadeJoinAtWriter:
         assert stripped == frozen
 
     def test_frozen_pre_change_artifact_reads_absent_never_crashes(self, tmp_path: Path) -> None:
-        """The back-compat oracle UNDER the merged #1956 schema-v2 law.
+        """The back-compat oracle UNDER the merged #1959 schema-v2 law.
 
-        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1956) bumped
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959) bumped
         ``TOP100_SCHEMA_VERSION`` 1→2 with the documented reader law: an
         artifact at an UNKNOWN version reads ABSENT (→ deterministic rebuild),
         never a crash and never a silently mis-shaped load — so the frozen v1
         pre-change fixture now loads ``None`` via the NAMED
         ``schema_version_mismatch`` degrade (the pre-club version of this test
-        asserted a successful v1 load; superseded by the #1956 bump).
+        asserted a successful v1 load; superseded by the #1959 bump).
         """
         import shutil
 
@@ -1007,7 +1007,7 @@ class TestCascadeJoinAtWriter:
         shutil.copytree(_PRE_CASCADE_TOP100.parent.parent, tmp_path / "runs")
         with capture_logs() as logs:
             loaded = load_top100(tmp_path / "runs", run_id)
-        assert loaded is None  # absent-by-version, the #1956 rebuild law
+        assert loaded is None  # absent-by-version, the #1959 rebuild law
         (event,) = [e for e in logs if e["event"] == "top100.load_invalid"]
         assert event["reason"] == "schema_version_mismatch"
 
@@ -1026,7 +1026,7 @@ class TestCascadeJoinAtWriter:
         ``build_top100`` has stamped a cascade_join meta unconditionally since
         #1749, so the ``None`` arm is reachable only on a directly-constructed
         (legacy-shaped) artifact object — e.g. one whose stored payload lacked
-        the key at load. Regression pin: the club-O #1956 schema-v2 reader law
+        the key at load. Regression pin: the club-O #1959 schema-v2 reader law
         turned the frozen-v1 fixture load into an ABSENT read, which silently
         dropped the suite's only exercise of this arm (the CI 100%-branch
         coverage gate caught the hole — ``to_payload`` 368->370).

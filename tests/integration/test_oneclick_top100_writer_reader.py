@@ -642,9 +642,9 @@ class TestCascadeJoinWriterToWire:
     _client = staticmethod(TestEngineWriterThroughRoutes._client)
 
     def test_frozen_pre_change_fixture_reads_corrupt_on_the_wire(self, tmp_path: Path) -> None:
-        """The back-compat oracle end-to-end UNDER the merged #1956 schema-v2 law.
+        """The back-compat oracle end-to-end UNDER the merged #1959 schema-v2 law.
 
-        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1956) bumped
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1959) bumped
         ``TOP100_SCHEMA_VERSION`` 1→2 (per-entry ``resilience`` block —
         bump-on-any-shape-change) with the documented reader law: an artifact
         at an UNKNOWN version degrades to a NAMED ``corrupt`` through the route
@@ -653,7 +653,7 @@ class TestCascadeJoinWriterToWire:
         ``schema_version`` mismatch — the wire twin of the unit reconcile's
         ``test_frozen_pre_change_artifact_reads_absent_never_crashes``. The
         pre-club version of this test asserted a successful ``ok``-with-dashes
-        serve; superseded by the #1956 bump.
+        serve; superseded by the #1959 bump.
         """
         import shutil
 
