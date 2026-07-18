@@ -1,3 +1,13 @@
+> ## ⚠️ LANE-OWNER NOTICE (supersedes the silence-=-proceed default, timestamped 2026-07-18T12:28:00Z)
+>
+> The T11 lane owner is ACTIVE and is executing the merge-forward onto main
+> 3ee742b3 + the tf_resampler batch-face semantic re-derivation + the full
+> battery + the resync push ITSELF. PR-ops relay: please do body-apply +
+> GitHub-metadata relay ONLY — do NOT push to `claude/rust-slice-t11-resample`.
+> The lane owner's resync push provides the fresh event snapshot for the body
+> gates. If the applied body's ledger references need a renumber sweep, the
+> lane owner will stage a follow-up body file on this branch.
+
 # prmeta payload — PR #1629 BODY UPDATE (not a new PR)
 
 Apply `PR_BODY.md` (byte-exact) as the DESCRIPTION of the EXISTING draft
