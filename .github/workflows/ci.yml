@@ -183,6 +183,8 @@ jobs:
   type:
     name: Type check (mypy + pyright)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -203,79 +205,22 @@ jobs:
         # code the dual-env ignore can't cover).
         run: |
           pip install -e ".[dev,data,ui,optimize]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-050: required by pyright's strict mode which walks
-        # `tests/unit/test_fno_math_bridge.py` and needs the module
-        # actually importable.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The default-OFF feed decision kernel: this job drives the flag-ON
-        # parity/degrade/golden suites, so the wheel must be importable
-        # (absent wheel = those tests skip loudly and the ON arm goes
-        # unproven). Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-feed; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
-        # The default-OFF combo decision kernel (canonical-JSON render +
-        # \x1f first-offender scan): mypy/pyright must see the
-        # wheel-PRESENT import arm of brutex/strategies/combo_rust.py
-        # (the brutex-feed precedent above). Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-strategies; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -287,115 +232,107 @@ jobs:
         run: pyright brutex tests
 
   # ─────────────────────────────────────────────────────────────────
-  # UNIT TESTS + coverage gate (CG-01: 100% line + branch)
+  # BUILD WHEELS — the ONE maturin wheel build for the whole run
+  # (DEC-SWEEP-COVERAGE-SHARD-001). Previously ~10 jobs each rebuilt the
+  # same 2-4 crates from source per run (minutes each, crates.io-flake
+  # exposed); now this job builds all four ONCE — behind an actions/cache
+  # keyed on the crate sources, so an unchanged-Rust push restores the
+  # wheels in seconds — and every consumer job downloads + pip-installs
+  # them. run-smoke deliberately KEEPS its own from-source build: it
+  # proves the operator's `make run` from-source path works, and a
+  # prebuilt wheel there would mask exactly the class it exists to catch.
   # ─────────────────────────────────────────────────────────────────
-  test:
-    name: Unit tests + coverage (100% gate)
+  build-wheels:
+    name: Build Rust wheels (shared, cache-keyed)
     runs-on: ubuntu-24.04
-    # 15 -> 25 (DEC-STAGE3-WIRE-001): the job already ran 12-14 min before this
-    # PR; the Stage-3 wiring adds real test work (the F11 A/B oracle's three
-    # full sweep+refine pipeline runs + the 19i1c stage3_wire strict gate), and
-    # on 2026-06-10 the push-event copy - racing the pull_request copy on
-    # shared runners - was CANCELLED at exactly 15:11 mid-way through the
-    # strict per-module gates, failing the CI OK aggregate with zero real
-    # failures. 25 keeps an honest hang guard with headroom for contention.
-    # 25 -> 40 (2026-06-29): the suite re-crossed 25m; the PR-event coverage
-    # job was killed at 25:12 mid touched-module gate (reported `cancelled`,
-    # tests PASS at 100%). Continues the 2026-06-10 15->25 ratchet.
-    # 40 -> 55 (2026-07-04, run 28695534064): killed at 40:17 mid step 11
-    # "Touched-module 100% coverage gate" with EVERY completed step green
-    # (pytest+coverage 22:02 success, strict per-module gate 12:59 success,
-    # last log lines all passing); PR #1085 touches 10+ modules so the
-    # touched-module gate alone outgrew the remaining budget. Wall-clock
-    # budget only — no gate is weakened. Continues the 15->25->40 ratchet.
-    # 40 -> 60 (2026-07-04, DEC-TOKEN-STALE-PAUSE-001 PR #1107): the merged
-    # tree re-crossed 40m — run 28694858559 job 85102679929 started 04:27:04Z,
-    # cancelled 05:07:17Z (40m13s) MID strict per-module gate (step 10, on
-    # universe_pull) with EVERY executed test green and the whole-package
-    # coverage step already SUCCESS at 100.00%: zero real failures, pure
-    # wall-time growth (the #1102/#1105 sibling merges + this PR's 21 tests).
-    # 60 keeps an honest hang guard with ~45% headroom over the observed
-    # ~40m wall time. Continues the 15->25->40 ratchet (60 = the higher of
-    # the two concurrent 2026-07-04 raises, union-resolved at merge).
-    # 60 -> 75 (2026-07-07, PR #1230 run 28854276463): a fully-GREEN run on
-    # 56f29620 measured exactly 60:00 wall — 33m05 pytest+coverage + 13m25
-    # strict per-module gate + 11m43 touched-module gate + setup, EVERY
-    # executed step green — and was cancelled AT the wall, failing the
-    # CI OK aggregate with zero real failures. The PR legitimately grew the
-    # job (new scoped per-module gates + the ampersand-probe/doctor suites).
-    # 75 gives evidenced ~25% headroom over the measured ~60m wall;
-    # wall-clock budget only — no gate is weakened. Continues the
-    # 15->25->40->60 ratchet.
-    # 75 -> 110 (2026-07-09, DEC-SWEEP-UNKILLABLE-CORE-001, run 28988287641
-    # job 86022289736): the Phase-2 unkillable-run-core work adds 23,766 lines
-    # of new unit/integration/property tests (16 new 100%-covered modules +
-    # their suites). The job hit the 75m wall (started 01:47:42Z, cancelled
-    # 03:03:00Z) MID step 10 "Strict per-module gate" (orphan pytest reaped at
-    # teardown) with EVERY executed step green: step 8 whole-package coverage
-    # SUCCEEDED at 100.00% in 3946s (65.8m) and coverage-xml uploaded, step 10
-    # got only 442s before the wall. Measured attribution vs the pre-Phase-2
-    # baseline dc859da7 (run 28985489988, SUCCESS, 58m wall): step 8 grew
-    # 2513s -> 3946s (+23.9m) and step 10 (full) was 849s there, so the
-    # projected full Phase-2 wall is ~88m (setup ~2m + step 8 65.8m + smoke
-    # 0.2m + step 10 ~18-20m). 110 gives evidenced ~25% headroom over the
-    # projected ~88m wall. Zero real failures, zero coverage loss (100.00%
-    # reached) — pure wall-time growth from the new test volume. Continues the
-    # 15->25->40->60->75 ratchet.
-    # 75 -> 120 (2026-07-08, PR #1274 run 28922322988 job 85802830877): killed
-    # at exactly 75:13 wall with EVERY executed step green — pytest+coverage
-    # 54m12 SUCCESS (was 33m05 at the 60->75 raise; the VIX stamping PR adds
-    # ~800 tests incl. spawn-worker parallel byte-parity pins, on top of five
-    # merged-main sibling waves) + strict per-module gate 16m12 SUCCESS (was
-    # 13m25) + the touched-module gate cancelled only 2m54 IN (last measured
-    # 11m43, and this PR touches ~14 brutex modules so it alone outgrew the
-    # remaining budget). Projected full wall ~90-95m; 120 gives evidenced
-    # ~25-30% headroom over the projection while staying an honest hang
-    # guard; wall-clock budget only — no gate is weakened. Continues the
-    # 15->25->40->60->75 ratchet.
-    # 120 -> 150 (2026-07-09, PR #1274 run 29004754762 job 86073591937): killed
-    # at exactly 120:13 wall (08:28:04Z -> 10:28:17Z cancel) MID the per-module
-    # coverage gates with EVERY executed test green — the log's final line
-    # before "##[error]The operation was canceled." is a green per-module
-    # "TOTAL ... 100.00%" row, and the last 5000 log lines carry ZERO
-    # FAILED/FAILURES and only 100.00% coverage TOTALs (the sibling #1275
-    # depth pack + the absorbed main waves grew the suite past the 120
-    # budget; the ~90-95m projection above no longer held). 150 gives ~25%
-    # headroom over the observed 120:13 kill point while staying an honest
-    # hang guard; wall-clock budget only — no gate is weakened. Continues
-    # the 15->25->40->60->75->120 ratchet.
-    # 75 -> 90 (2026-07-10, run 29059772135 job 86258865417): killed at
-    # 75:14 mid step 11 "Touched-module 100% coverage gate" with EVERY
-    # executed step green — the suite grew past the 75m wall after the
-    # #1296/#1360/#1323 merges landed their test growth on main. 90 keeps
-    # an honest hang guard with headroom over the observed ~75m wall;
-    # wall-clock budget only — no gate is weakened. Continues the
-    # 15->25->40->60->75 ratchet.
-    # 75 -> 90 (2026-07-09, run 29006226255, landed on main via #1355):
-    # cancelled at 75m15s MID the doctor.py auto-discovery touched-module
-    # gate with EVERY executed gate green at 100.00% (whole-package + strict
-    # per-module steps SUCCESS, the cli.py + lake_invariants.py discovery
-    # gates both 100%): pure wall-time growth — main #1275
-    # (DEC-SWEEP-RESULTS-DEPTH-001) added ~12 new per-module gates + PACK1
-    # touches cli.py, whose discovery gate alone is 573 tests / 234s. Zero
-    # real failures; wall-clock budget only — no gate is weakened.
-    # MERGE UNION (2026-07-10, PR #1274 origin/main absorbs): main raised
-    # 75 -> 90 concurrently with this branch's 75 -> 120 -> 150 ratchet
-    # (main's 90 evidenced by runs 29006226255 + 29059772135, the latter
-    # also recorded above; both wall kills, zero real failures);
-    # union-resolved to 150 = the higher of the concurrent raises
-    # (the same rule as the 2026-07-04 60-raise union). Wall-clock budget
-    # only — no gate is weakened.
-    # MERGE UNION (2026-07-11, train T1 origin/main fold): the train's
-    # concurrent 75 -> 110 raise (DEC-SWEEP-UNKILLABLE-CORE-001, recorded
-    # above) union-resolves to main's 150 = the higher of the concurrent
-    # raises (same rule as the 2026-07-10 union note above). Wall-clock
-    # budget only — no gate is weakened.
-    # 150 -> 180 (2026-07-11: run 29150445450 measured the T1 train head
-    # needing >150 — whole-suite 100min + strict per-module gate 22min +
-    # touched-module discovery gate >26min, ZERO test failures; wall-clock
-    # budget only, no gate weakened; coverage-gate sharding stays the
-    # declared follow-up DEC-SWEEP-COVERAGE-SHARD-001)
-    timeout-minutes: 180
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Restore wheelhouse cache (keyed on crate sources)
+        id: wheel-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: wheelhouse
+          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**') }}
+      - name: Install Rust toolchain (cache miss only)
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Build the four maturin wheels (cache miss only)
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
+        run: |
+          # Belt-and-suspenders crates.io flake guard (the same 3-attempt
+          # retry the per-job build steps carried; CARGO_NET_RETRY=10 is
+          # workflow-level). `pip wheel` runs the SAME maturin PEP 517
+          # build that `pip install ./rust/<crate>` ran per-job before —
+          # the artifact wheel is what those jobs built and installed.
+          build_with_retry() {
+            crate="$1"
+            n=0
+            until pip wheel --no-deps -w wheelhouse "$crate"; do
+              n=$((n + 1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip wheel $crate failed after 3 attempts" >&2
+                return 1
+              fi
+              echo "pip wheel $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          }
+          build_with_retry ./rust/fno-math
+          build_with_retry ./rust/trading-core
+          build_with_retry ./rust/brutex-feed
+          build_with_retry ./rust/brutex-strategies
+      - name: Verify the wheels import (runs on the cache-hit arm too)
+        # A corrupt/stale cache entry must fail HERE, loudly, not in a
+        # dozen downstream jobs.
+        run: |
+          ls -l wheelhouse/
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 4
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies; print('all four kernels import OK')"
+      - name: Upload wheels artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-wheels
+          path: wheelhouse/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # UNIT TEST SHARDS — the whole-package pytest+coverage pass split
+  # across 6 parallel matrix shards (DEC-SWEEP-COVERAGE-SHARD-001; the
+  # follow-up the pre-shard `test` job's 180-minute timeout ratchet
+  # history named). Each shard runs the SAME invocation the monolithic
+  # job ran, restricted to its deterministic file partition
+  # (scripts/ci/shard_tests.py — total + disjoint by construction),
+  # records branch coverage into its own data file, and uploads it.
+  # Shards deliberately do NOT enforce --cov-fail-under (one shard only
+  # ever covers its slice of the package): the 100% line+branch
+  # enforcement moves UNWEAKENED to the `test` fan-in job, which
+  # `coverage combine`s every shard's data FIRST. Zero-skip / zero-dup
+  # is mechanically proven at the fan-in — the sum of per-shard
+  # collected test counts must equal the full-collection count.
+  # ─────────────────────────────────────────────────────────────────
+  test-shard:
+    name: Unit test shard ${{ matrix.shard }} (coverage data)
+    runs-on: ubuntu-24.04
+    needs: build-wheels
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    env:
+      # Keep in sync with the matrix list above; a mismatch cannot skip
+      # tests silently — the fan-in's collection-count law catches it.
+      SHARD_COUNT: "6"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -424,122 +361,133 @@ jobs:
         # (importorskip would silently skip it otherwise — the same masking
         # class the dashboard unmask closed).
         run: pip install -e ".[dev,data,ui,optimize]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
-        # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
-        # Rust may be older than the crate's `rust-version = "1.93.1"`
-        # floor, so install stable explicitly.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # `pip install` triggers maturin (declared in
-        # rust/fno-math/pyproject.toml's [build-system] requires) to
-        # build the cdylib + install it into the env so the unit tests
-        # can `import fno_math`.
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+      - name: Compute this shard's file list (deterministic partition)
         run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+          set -euo pipefail
+          python scripts/ci/shard_tests.py --self-check --shard-count "$SHARD_COUNT"
+          python scripts/ci/shard_tests.py --shard-index "${{ matrix.shard }}" --shard-count "$SHARD_COUNT" > shard-files.txt
+          echo "shard ${{ matrix.shard }}: $(wc -l < shard-files.txt) test files"
+      - name: Record this shard's collected test count (zero-skip/zero-dup proof, shard half)
+        # The SAME counting pipeline as the fan-in's full collection —
+        # the two sides must be byte-comparable (collect-only vs
+        # collect-only; never runtime-vs-collect, which module-level
+        # skips could legitimately skew).
         run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The default-OFF feed decision kernel: this job drives the flag-ON
-        # parity/degrade/golden suites, so the wheel must be importable
-        # (absent wheel = those tests skip loudly and the ON arm goes
-        # unproven). Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
+          set -euo pipefail
+          readarray -t SHARD_FILES < shard-files.txt
+          pytest --collect-only -q "${SHARD_FILES[@]}" > collect-out.txt || { tail -50 collect-out.txt; exit 1; }
+          grep -cE '^tests/.+::' collect-out.txt > "collected-count-shard${{ matrix.shard }}.txt"
+          echo "shard ${{ matrix.shard }} collected: $(cat "collected-count-shard${{ matrix.shard }}.txt") tests"
+      - name: pytest with coverage (shard slice — 100% enforced at the fan-in)
+        env:
+          # One data file per shard (no leading dot — upload-artifact
+          # excludes hidden files by default). pyproject's
+          # [tool.coverage.run] parallel=true subprocess data is combined
+          # into this base file by pytest-cov at session end, exactly as
+          # the monolithic job combined into .coverage.
+          COVERAGE_FILE: coverage-data-shard${{ matrix.shard }}
         run: |
-          n=0
-          until pip install ./rust/brutex-feed; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
-        # The default-OFF combo decision kernel: this job is the wheel-ON
-        # hypothesis differential's EXECUTION HOME — the coverage pass
-        # below runs tests/property, so
-        # tests/property/test_combo_rust_differential.py executes wheel-ON
-        # here, never skip-only (absent wheel = the ON arm goes unproven).
-        # The fail-loud retry means wheel-present-or-RED. Belt-and-
-        # suspenders crates.io flake guard (see the fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-strategies; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: pytest with coverage gate
-        run: |
-          # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
-          # dashboard/app.py — the last sub-100 module — was backfilled
-          # to 100.00% line+branch (46 targeted tests), making EVERY
-          # un-omitted module 100.00%.
-          # The [tool.coverage.run].omit list is now EMPTY — the key is
-          # REMOVED (DEC-COV-CLI-HARNESS-001, 2026-06-12): cli.py and
-          # __main__.py, its last two entries, were backfilled to 100.00%
-          # line+branch (test_cli_run.py / test_cli_retry_storm.py /
-          # test_cli_backfill.py + the integration CLI suites), so this
-          # fail_under=100 floor now covers the WHOLE brutex package.
-          # Ratchet history: 90 -> 99 (DEC-COV-SMALL-GAPS-001) -> 100
-          # (DEC-COV-APP-BACKFILL-001); earlier un-omits: execution/driver
-          # (DEC-COVERAGE-DRIVER-001), data/catalog (DEC-COVERAGE-CATALOG-001),
-          # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001),
-          # the #377 batch.
+          # The pre-shard whole-package invocation, restricted to this
+          # shard's file list. --cov-fail-under=0 is DELIBERATE and NOT
+          # a weakening: a single shard only ever covers its slice of
+          # the package, so the 100% line+branch gate is enforced on the
+          # COMBINED data in the `test` fan-in job (same --fail-under=100
+          # over the same --cov=brutex --cov-branch data — byte-exact).
+          # readarray (not xargs): an over-long arg list must hard-fail,
+          # never silently split into a second pytest run that would
+          # erase the first run's coverage data.
+          set -euo pipefail
+          readarray -t SHARD_FILES < shard-files.txt
           pytest \
             --cov=brutex \
             --cov-branch \
-            --cov-report=term-missing \
-            --cov-report=xml \
-            --cov-fail-under=100 \
+            --cov-report= \
+            --cov-fail-under=0 \
             --ignore=tests/bench \
-            tests/unit tests/integration tests/property
-      - name: Smoke + red-team gates (DEC-DASHBOARD-OMIT-AUDIT-001)
-        # The 5-agent verification (2026-06-01) found two test classes that
-        # never gated merges: tests/smoke (12 pre-push smoke tests, wired into
-        # NO workflow) and tests/redteam (32 gate-integrity meta-tests that
-        # assert each CI gate actually catches a planted bug — previously
-        # nightly-only, not in the `CI OK` aggregate). Wire both into the
-        # per-PR `test` job so a smoke break or a gate-detection regression
-        # fails the PR at merge time, not just nightly. Both are fast
-        # (<5s combined) and the [dev,data,ui] env satisfies their tool
-        # guards (ruff / mypy / bandit installed).
-        run: pytest -q tests/smoke tests/redteam
+            "${SHARD_FILES[@]}"
+      - name: Upload shard coverage data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: |
+            coverage-data-shard${{ matrix.shard }}
+            collected-count-shard${{ matrix.shard }}.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # PER-MODULE COVERAGE GATES (static list) — the strict per-module
+  # 100% step moved VERBATIM out of the `test` job so it runs in
+  # PARALLEL with the coverage shards (DEC-SWEEP-COVERAGE-SHARD-001).
+  # Gate content unchanged; the `test` fan-in REQUIRES this job (its
+  # explicit upstream-result check), so the required context still
+  # reflects these gates.
+  # ─────────────────────────────────────────────────────────────────
+  per-module-static:
+    name: Per-module coverage gates (static list)
+    runs-on: ubuntu-24.04
+    needs: build-wheels
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
+          # coverage gate can diff the PR against origin/main (the merge
+          # base) to find the TOUCHED modules. Shallow (depth-1) checkout
+          # has no base to diff against.
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps (includes [data] + [ui] extras)
+        # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
+        # pyarrow are installed in CI. Without these, ~6 tests in
+        # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
+        # fail at collection time, suppressing real coverage of the data lake.
+        # DEC-DASHBOARD-CI-UNMASK-001 (2026-06-01): added `[ui]` (FastAPI +
+        # uvicorn) + httpx/httpx2 (in [dev]) so the 4 dashboard HTTP test files
+        # — previously SILENTLY SKIPPED on CI via importorskip("fastapi"/"httpx")
+        # — now actually RUN and gate. This closes the masking hole that let a
+        # broken dashboard PR auto-merge green.
+        # DEC-STAGE3-OPTIMIZE-EXTRA-001: added `[optimize]` (exact-pinned pycma)
+        # so the Stage-3 optimizer pin + determinism smoke ACTUALLY RUNS on CI
+        # (importorskip would silently skip it otherwise — the same masking
+        # class the dashboard unmask closed).
+        run: pip install -e ".[dev,data,ui,optimize]"
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -2807,6 +2755,63 @@ jobs:
           else
             echo "(brutex.dashboard.composite_join test file not present yet — gate inactive)"
           fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # TOUCHED-MODULE COVERAGE GATE (auto-discovered) — moved VERBATIM out
+  # of the `test` job so it runs in PARALLEL with the coverage shards
+  # (DEC-SWEEP-COVERAGE-SHARD-001). Gate content unchanged; the `test`
+  # fan-in REQUIRES this job. fetch-depth 0 checkout retained — the
+  # discovery diffs the PR against its merge base.
+  # ─────────────────────────────────────────────────────────────────
+  per-module-touched:
+    name: Touched-module coverage gate (auto-discovered)
+    runs-on: ubuntu-24.04
+    needs: build-wheels
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
+          # coverage gate can diff the PR against origin/main (the merge
+          # base) to find the TOUCHED modules. Shallow (depth-1) checkout
+          # has no base to diff against.
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps (includes [data] + [ui] extras)
+        # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
+        # pyarrow are installed in CI. Without these, ~6 tests in
+        # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
+        # fail at collection time, suppressing real coverage of the data lake.
+        # DEC-DASHBOARD-CI-UNMASK-001 (2026-06-01): added `[ui]` (FastAPI +
+        # uvicorn) + httpx/httpx2 (in [dev]) so the 4 dashboard HTTP test files
+        # — previously SILENTLY SKIPPED on CI via importorskip("fastapi"/"httpx")
+        # — now actually RUN and gate. This closes the masking hole that let a
+        # broken dashboard PR auto-merge green.
+        # DEC-STAGE3-OPTIMIZE-EXTRA-001: added `[optimize]` (exact-pinned pycma)
+        # so the Stage-3 optimizer pin + determinism smoke ACTUALLY RUNS on CI
+        # (importorskip would silently skip it otherwise — the same masking
+        # class the dashboard unmask closed).
+        run: pip install -e ".[dev,data,ui,optimize]"
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -2832,6 +2837,182 @@ jobs:
             BASE="${{ github.event.merge_group.base_sha }}"
           fi
           python scripts/ci/coverage_gate_discovery.py --base "$BASE"
+
+  # ─────────────────────────────────────────────────────────────────
+  # UNIT TESTS + COVERAGE FAN-IN (CG-01: 100% line + branch)
+  # The REQUIRED branch-protection context "Unit tests + coverage
+  # (100% gate)" — name UNCHANGED (branch-protection-drift.yml expected
+  # snapshot). Since DEC-SWEEP-COVERAGE-SHARD-001 the whole-package
+  # pytest pass runs in the parallel `test-shard` matrix; THIS job
+  # combines the shard coverage data and enforces the SAME gate the
+  # monolithic job enforced (--fail-under=100 over --cov=brutex
+  # --cov-branch data — byte-exact, config-identical, NOT weakened),
+  # plus the fast smoke/red-team/crosswalk gates that stayed here.
+  # The pre-shard job's timeout ratchet history (15→25→40→60→75→120→
+  # 150→180 minutes — every raise a wall-kill with zero real failures)
+  # is retired with the monolith; see git history at the pre-shard
+  # revision for the full per-raise evidence.
+  #
+  # FAIL-CLOSED LAW: `if: ${{ !cancelled() }}` + the explicit
+  # upstream-result check as the FIRST step. Without it a red shard
+  # would SKIP this job via `needs`, and both ci-ok's loop
+  # (skipped==pass) and branch protection (a skipped required check
+  # satisfies the context) would read green — the exact silent-pass
+  # hole the check closes. The four upstream jobs are ALSO in ci-ok's
+  # needs for the same reason. `!cancelled()` — NOT `always()` — per
+  # the DEC-CI-PROOFBUNDLE-MKDIR-GATE-001 precedent: on a
+  # concurrency-cancelled/superseded run the upstream shards read
+  # `cancelled`, and an `always()` fan-in would still run and mint a
+  # spurious RED required context on the dead head (observed live on
+  # run 29644640240) while also resisting the cancellation itself; a
+  # cancelled run's fan-in must SKIP (the superseded head reports
+  # nothing — branch protection evaluates the new head's run).
+  # ─────────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests + coverage (100% gate)
+    runs-on: ubuntu-24.04
+    needs:
+      - build-wheels
+      - test-shard
+      - per-module-static
+      - per-module-touched
+    if: ${{ !cancelled() }}
+    timeout-minutes: 45
+    steps:
+      - name: Verify upstream shard + per-module gate jobs succeeded (fail-closed)
+        env:
+          WHEELS_RESULT: ${{ needs.build-wheels.result }}
+          SHARDS_RESULT: ${{ needs.test-shard.result }}
+          STATIC_RESULT: ${{ needs.per-module-static.result }}
+          TOUCHED_RESULT: ${{ needs.per-module-touched.result }}
+        run: |
+          set -euo pipefail
+          ok=1
+          for pair in \
+            "build-wheels:${WHEELS_RESULT}" \
+            "test-shard:${SHARDS_RESULT}" \
+            "per-module-static:${STATIC_RESULT}" \
+            "per-module-touched:${TOUCHED_RESULT}"; do
+            job="${pair%%:*}"
+            result="${pair##*:}"
+            echo "  ${job}: ${result}"
+            if [ "$result" != "success" ]; then
+              ok=0
+            fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::an upstream shard / per-module gate job did not succeed — failing the required coverage context (fail-closed: skipped==pass must never mask a red shard)"
+            exit 1
+          fi
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
+          # coverage gate can diff the PR against origin/main (the merge
+          # base) to find the TOUCHED modules. Shallow (depth-1) checkout
+          # has no base to diff against.
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps (includes [data] + [ui] extras)
+        # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
+        # pyarrow are installed in CI. Without these, ~6 tests in
+        # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
+        # fail at collection time, suppressing real coverage of the data lake.
+        # DEC-DASHBOARD-CI-UNMASK-001 (2026-06-01): added `[ui]` (FastAPI +
+        # uvicorn) + httpx/httpx2 (in [dev]) so the 4 dashboard HTTP test files
+        # — previously SILENTLY SKIPPED on CI via importorskip("fastapi"/"httpx")
+        # — now actually RUN and gate. This closes the masking hole that let a
+        # broken dashboard PR auto-merge green.
+        # DEC-STAGE3-OPTIMIZE-EXTRA-001: added `[optimize]` (exact-pinned pycma)
+        # so the Stage-3 optimizer pin + determinism smoke ACTUALLY RUNS on CI
+        # (importorskip would silently skip it otherwise — the same masking
+        # class the dashboard unmask closed).
+        run: pip install -e ".[dev,data,ui,optimize]"
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+      - name: Download shard coverage data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: coverage-shard-*
+          path: covdata
+          merge-multiple: true
+      - name: Zero-skip / zero-dup integrity guard (collection-count law)
+        # Proves the shard partition ran EVERY test exactly once: the
+        # full collect-only count must equal the sum of the per-shard
+        # collect-only counts (identical counting pipeline both sides;
+        # the partition is disjoint by construction — shard_tests.py
+        # --self-check — so sum-equality proves completeness). This
+        # subsumes missing-shard detection: a lost shard's tests would
+        # be absent from the sum and fail the equality loudly.
+        run: |
+          set -euo pipefail
+          ls -l covdata/
+          pytest --collect-only -q tests/unit tests/integration tests/property --ignore=tests/bench > full-collect.txt || { tail -50 full-collect.txt; exit 1; }
+          full=$(grep -cE '^tests/.+::' full-collect.txt)
+          shard_sum=0
+          for f in covdata/collected-count-shard*.txt; do
+            shard_sum=$((shard_sum + $(cat "$f")))
+          done
+          echo "full collection: ${full} tests; shard sum: ${shard_sum}"
+          if [ "$full" -ne "$shard_sum" ]; then
+            echo "::error::shard partition integrity FAILED — per-shard collected sum (${shard_sum}) != full collection (${full}). Zero-skip/zero-dup violated; failing the coverage gate."
+            exit 1
+          fi
+      - name: Combine shard coverage + enforce the 100% gate
+        run: |
+          # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
+          # dashboard/app.py — the last sub-100 module — was backfilled
+          # to 100.00% line+branch (46 targeted tests), making EVERY
+          # un-omitted module 100.00%.
+          # The [tool.coverage.run].omit list is now EMPTY — the key is
+          # REMOVED (DEC-COV-CLI-HARNESS-001, 2026-06-12): cli.py and
+          # __main__.py, its last two entries, were backfilled to 100.00%
+          # line+branch (test_cli_run.py / test_cli_retry_storm.py /
+          # test_cli_backfill.py + the integration CLI suites), so this
+          # fail_under=100 floor covers the WHOLE brutex package.
+          # Ratchet history: 90 -> 99 (DEC-COV-SMALL-GAPS-001) -> 100
+          # (DEC-COV-APP-BACKFILL-001); earlier un-omits: execution/driver
+          # (DEC-COVERAGE-DRIVER-001), data/catalog (DEC-COVERAGE-CATALOG-001),
+          # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001),
+          # the #377 batch.
+          # DEC-SWEEP-COVERAGE-SHARD-001: the SAME gate, now enforced on
+          # the COMBINED shard data — `coverage report --fail-under=100`
+          # over --cov=brutex --cov-branch data computes the same total
+          # the monolithic `pytest --cov-fail-under=100` computed
+          # (pyproject [tool.coverage.report] fail_under=100 +
+          # show_missing apply identically).
+          set -euo pipefail
+          coverage combine covdata/coverage-data-shard*
+          coverage report --fail-under=100
+          coverage xml -o coverage.xml
+      - name: Smoke + red-team gates (DEC-DASHBOARD-OMIT-AUDIT-001)
+        # The 5-agent verification (2026-06-01) found two test classes that
+        # never gated merges: tests/smoke (12 pre-push smoke tests, wired into
+        # NO workflow) and tests/redteam (32 gate-integrity meta-tests that
+        # assert each CI gate actually catches a planted bug — previously
+        # nightly-only, not in the `CI OK` aggregate). Wire both into the
+        # per-PR `test` job so a smoke break or a gate-detection regression
+        # fails the PR at merge time, not just nightly. Both are fast
+        # (<5s combined) and the [dev,data,ui] env satisfies their tool
+        # guards (ruff / mypy / bandit installed).
+        run: pytest -q tests/smoke tests/redteam
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
@@ -2849,6 +3030,8 @@ jobs:
   browser:
     name: Browser truth (headless Chromium dashboard DOM)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     # DEC-DASHBOARD-BROWSER-TRUTH-001: Playwright + Chromium renders the REAL
     # /universe /movers /db /results templates + static JS against
     # fixture-backed build_app apps and asserts the pinned DOM behaviors
@@ -2876,45 +3059,22 @@ jobs:
         # the main test job never installs it (the suite stays out of the
         # coverage paths by design).
         run: pip install -e ".[dev,data,ui,browser]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # brutex.dashboard.app transitively imports the Rust-backed
-        # fno_math + trading_core wheels (app.py → sweep_results_view →
-        # engine.combo_mask → fno_math), so the browser job needs the same
-        # wheel builds as the test job — verified by a real import probe
-        # during the design round, NOT assumed.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # Same dtolnay/rust-toolchain@stable + maturin/abi3 build as
-        # fno-math above; brutex.vocabulary imports it at module load.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -2960,6 +3120,8 @@ jobs:
   property:
     name: Property tests (hypothesis)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -2970,64 +3132,22 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
-        # at module load time. Every Python job that imports any
-        # brutex.orchestrator.* module must install the Rust extension.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
-        # A LIVE install site — deliberately unlike brutex-feed's pruned
-        # one (the comment below): the feed's dead-weight rationale is
-        # pyarrow-SPECIFIC and does not transfer. The combo differential
-        # (tests/property/test_combo_rust_differential.py) is
-        # wheel-only-gated with no pyarrow dependency, so this job is a
-        # second wheel-ON execution home for it. Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-strategies; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3070,6 +3190,8 @@ jobs:
   bench:
     name: Benchmarks (O(1) NFR gates)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     # Budget raised 15 -> 25 (DEC-CI-SWEEP-REHEARSAL-TIMEOUT-001, #1765):
     # a banked observation put the real bench wall-time at ~10.9 min, only
     # ~4.1 min under the old 15-min cap (~27% headroom) — thin enough that a
@@ -3120,60 +3242,22 @@ jobs:
         # passed / 11 skipped, every remaining skip the documented
         # BRUTEX_M4PRO_ABS class; the 6 route files ran 3× stable ~30 s).
         run: pip install -e ".[dev,data,ui]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The default-OFF feed decision kernel: this job drives the flag-ON
-        # parity/degrade/golden suites, so the wheel must be importable
-        # (absent wheel = those tests skip loudly and the ON arm goes
-        # unproven). Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-feed; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3206,6 +3290,8 @@ jobs:
   golden:
     name: Golden-master tests
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3221,79 +3307,22 @@ jobs:
         # fail at import (ModuleNotFoundError: polars), mirroring the [data]
         # install the unit-test job already uses.
         run: pip install -e ".[dev,data]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The default-OFF feed decision kernel: this job drives the flag-ON
-        # parity/degrade/golden suites, so the wheel must be importable
-        # (absent wheel = those tests skip loudly and the ON arm goes
-        # unproven). Belt-and-suspenders crates.io flake guard (see the
-        # fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-feed; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
-        # The default-OFF combo decision kernel: this job hosts the
-        # flag-ON golden WRAPPER (test_combo_rust_flag_on_golden.py —
-        # re-drives the frozen _GOLDEN_RUN_ID / content-hash / combo-hash
-        # corpus goldens flag-ON under an engagement spy, never by editing
-        # the frozen files) + the pytest half of the frozen cross-language
-        # canonical-params payload golden. Belt-and-suspenders crates.io
-        # flake guard (see the fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/brutex-strategies; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3744,6 +3773,8 @@ jobs:
   chaos-race:
     name: Chaos / race (randomized + crash-restart + concurrent)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -3754,47 +3785,22 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,data]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # brutex.orchestrator.__init__ transitively imports brutex.orchestrator.bloom,
-        # which needs the Rust-backed fno_math extension (mirrors stress-nightly).
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # The sweep-resume chaos suite (DEC-CHAOS-SWEEP-LAKE-001 #585) drives the
-        # real evaluate path, whose 52-condition vocabulary delegates to
-        # trading_core.evaluate_with_levels (brutex.vocabulary.evaluator imports
-        # it at module load). Same dtolnay/rust-toolchain@stable + maturin/abi3
-        # build as fno-math above; mirrors the test/property/golden/bench jobs.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -3841,6 +3847,8 @@ jobs:
   sweep-rehearsal:
     name: Sweep full-chain rehearsal (R38)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -3854,37 +3862,22 @@ jobs:
         # the REAL stage-3 BIPOP-CMA-ES refinement pass (pycma) so stage-3
         # CELL stamps are genuinely written + validated (design D-4).
         run: pip install -e ".[dev,data,optimize]"
-      - name: Install Rust toolchain (for the wheels)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (see chaos-race above).
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # The rehearsal drives the real evaluate path (52→60-condition vocab
-        # delegates to trading_core.evaluate_with_levels at module load).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4318,6 +4311,8 @@ jobs:
   mutation-py:
     name: Python mutation (mutmut on critical modules)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     # 20 -> 90 (DEC-SWEEP-UNKILLABLE-CORE-001 D-19): the four Phase-2
     # run-core critical modules join the gate. Measured GREEN path (ship
     # time): ~40 min of mutmut on the four + ~9 min state.py/money.py +
@@ -4334,44 +4329,22 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev]"
-      - name: Install Rust toolchain (for fno_math wheel)
-        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
-        # at module load; mutmut runs pytest which imports orchestrator.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (on top of the
-        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
-        # up to 3 times with a short backoff, so a hard download failure
-        # AFTER cargo's own retries still gets another full attempt. POSIX
-        # sh; installs exactly the same wheel — no app/test/coverage change.
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        # BruteX's 52-condition vocab delegates to the shared Rust core
-        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
-        # + maturin/abi3 build as fno-math above (identical edition 2024 /
-        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
-        # Belt-and-suspenders crates.io flake guard (see fno-math step).
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -4748,6 +4721,8 @@ jobs:
   bugfix-reversion-check:
     name: Bug-fix fix-reversion check (STANDARDS row 10 hardening)
     runs-on: ubuntu-24.04
+    # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
+    needs: build-wheels
     timeout-minutes: 20
     if: github.event_name == 'pull_request'
     steps:
@@ -4761,33 +4736,22 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,data,ui,optimize]"
-      - name: Install Rust toolchain (for fno_math + trading_core wheels)
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Install fno_math Rust extension
-        # Belt-and-suspenders crates.io flake guard (see mutation-py job).
-        run: |
-          n=0
-          until pip install ./rust/fno-math; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
-      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
-        run: |
-          n=0
-          until pip install ./rust/trading-core; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+      - name: Download prebuilt Rust wheels (DEC-SWEEP-COVERAGE-SHARD-001)
+        # Built ONCE per run by the `build-wheels` job (cache-keyed on the
+        # crate sources). `pip install ./rust/<crate>` itself builds a wheel
+        # via the same maturin PEP 517 backend and installs it, so
+        # installing the shared artifact wheel is equivalent by
+        # construction — same crates, same committed Cargo.locks, same
+        # backend — minus the repeated per-job cargo build. No gate change.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rust-wheels
+          path: wheelhouse
+      - name: Install prebuilt Rust wheels (fno_math + trading_core)
+        # EXACTLY the wheel subset this job built from source before
+        # the shared build landed — a superset install could flip
+        # wheel-gated skip tests, so each job's subset is preserved.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -4983,6 +4947,16 @@ jobs:
       # a workflow again (the DEC-DRIFT-YAML-FIX-001 bug class).
       - actionlint
       - type
+      # DEC-SWEEP-COVERAGE-SHARD-001: the shared wheel build, the six
+      # coverage shards and the split-out per-module gate jobs. Each is
+      # ALSO gated through the `test` fan-in's explicit upstream-result
+      # check; wiring them here too keeps ci-ok red even if the fan-in
+      # itself were skipped/cancelled (skipped==pass in the loop below
+      # must never mask a red shard — fail-closed at both layers).
+      - build-wheels
+      - test-shard
+      - per-module-static
+      - per-module-touched
       - test
       # DEC-DASHBOARD-BROWSER-TRUTH-001: the headless-Chromium dashboard DOM
       # truth job. Carries NO job-level `if:` (skipped==pass below would be
@@ -5106,6 +5080,10 @@ jobs:
           echo "  lint:          ${{ needs.lint.result }}"
           echo "  actionlint:    ${{ needs.actionlint.result }}"
           echo "  type:          ${{ needs.type.result }}"
+          echo "  build-wheels:  ${{ needs.build-wheels.result }}"
+          echo "  test-shard:    ${{ needs.test-shard.result }}"
+          echo "  per-module-static:${{ needs.per-module-static.result }}"
+          echo "  per-module-touched:${{ needs.per-module-touched.result }}"
           echo "  test:          ${{ needs.test.result }}"
           echo "  browser:       ${{ needs.browser.result }}"
           echo "  property:      ${{ needs.property.result }}"
@@ -5144,6 +5122,10 @@ jobs:
             "${{ needs.lint.result }}" \
             "${{ needs.actionlint.result }}" \
             "${{ needs.type.result }}" \
+            "${{ needs.build-wheels.result }}" \
+            "${{ needs.test-shard.result }}" \
+            "${{ needs.per-module-static.result }}" \
+            "${{ needs.per-module-touched.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.browser.result }}" \
             "${{ needs.property.result }}" \
