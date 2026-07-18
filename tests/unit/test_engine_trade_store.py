@@ -263,7 +263,7 @@ class TestWriteAndStamp:
             assert stamp.content_hashes[key] == hashlib.sha256(path.read_bytes()).hexdigest()
 
     def test_reference_fingerprint_defaults_absent(self, written: SidecarPaths) -> None:
-        """DEC-DEPTH-STAMP-REFDATA-001 (#1801): a stamp written with no
+        """DEC-DEPTH-STAMP-REFDATA-001 (#1926): a stamp written with no
         fingerprint reads ``None`` AND omits the JSON key entirely, so it is
         byte-identical to a pre-feature stamp (the additive back-compat law)."""
         stamp = load_stamp(written)

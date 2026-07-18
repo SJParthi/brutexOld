@@ -272,7 +272,7 @@ class TestReconcile:
         with _open(tmp_path) as cat, capture_logs() as logs:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             # The good partition reconciled; the corrupt one was skipped (not a crash).
-            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1799): the corrupt file's
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924): the corrupt file's
             # absolute path is also recorded DISTINCTLY on ``unreadable`` (the
             # sweep-launch refusal signal), while ``skipped`` still counts it.
             assert result == ReconcileResult(
@@ -338,7 +338,7 @@ class TestReconcile:
     def test_vanished_file_is_benign_skipped_not_unreadable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1799 round 1 M1, NARROWED by round 2 M3: a ``FileNotFoundError``
+        """#1924 round 1 M1, NARROWED by round 2 M3: a ``FileNotFoundError``
         (ENOENT — the file VANISHES between the glob listing and the read, a
         concurrent heal/fetch) is data ABSENCE, not data LOSS — counted in
         ``skipped`` (WARN kept) but NEVER on ``unreadable``, so the escape-less
@@ -383,7 +383,7 @@ class TestReconcile:
     def test_unreadable_names_only_the_corrupt_file_among_benign_skips(
         self, tmp_path: Path
     ) -> None:
-        """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1799): the skip classes
+        """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924): the skip classes
         disambiguate — a CORRUPT/unreadable partition lands on ``unreadable``, while
         a benign unparseable-path skip AND a benign zero-row skip do NOT (data
         ABSENCE is never data LOSS — the false-refuse guard). A clean partition
@@ -420,7 +420,7 @@ class TestReconcile:
         assert result.unreadable == (str(corrupt),)  # ONLY the corrupt file
 
     def test_data_bearing_directory_at_month_path_is_unreadable(self, tmp_path: Path) -> None:
-        """#1799 review round 2 M3 — THE refuter repro, REAL filesystem: a
+        """#1924 review round 2 M3 — THE refuter repro, REAL filesystem: a
         DIRECTORY named ``<mm>.parquet/`` holding a real parquet part (the #1558
         FIX-ROUND-8 dataset-directory shape) is PRESENT data the sweep would
         silently skip. ``pl.read_parquet`` reads the directory's rows fine, then
@@ -472,7 +472,7 @@ class TestReconcile:
         exc_factory: Callable[[Path], OSError],
         label: str,
     ) -> None:
-        """#1799 review round 2 M3: a chmod-000 / wrong-owner file
+        """#1924 review round 2 M3: a chmod-000 / wrong-owner file
         (``PermissionError``) and an ``EIO`` device fault are PRESENT data the
         process cannot read — data LOSS, not absence — so each lands on
         ``unreadable`` and REFUSES the launch. (Monkeypatched at the module's

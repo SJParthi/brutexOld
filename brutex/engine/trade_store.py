@@ -271,7 +271,7 @@ class TupleSidecarStamp:
     ``produced_at_utc`` is the ONLY non-deterministic field (B4 law).
 
     ``reference_fingerprint`` (additive, DEC-DEPTH-STAMP-REFDATA-001,
-    MIGRATION.md #1801) is a per-INSTRUMENT sha256 over the reference inputs the
+    MIGRATION.md #1926) is a per-INSTRUMENT sha256 over the reference inputs the
     depth pass folds into the sidecars — the VIX series content + the
     instrument's 1-minute/1-day reference bars + the WP3 provider-presence
     flags — so a reference-data change (e.g. a VIX feed pulled AFTER the first
@@ -449,7 +449,7 @@ def write_tuple_sidecars(
         Optional per-instrument reference-data fingerprint (64-char sha256 hex)
         recorded on the stamp so the run-end pass re-derives when the reference
         inputs (VIX / 1m / 1day / provider presence) change
-        (DEC-DEPTH-STAMP-REFDATA-001, MIGRATION.md #1801). ``None`` (the
+        (DEC-DEPTH-STAMP-REFDATA-001, MIGRATION.md #1926). ``None`` (the
         default) records no fingerprint — a stamp that predates the field.
 
     Raises
@@ -533,7 +533,7 @@ def write_tuple_sidecars(
         "trade_spans": {run_id: list(span) for run_id, span in stamp.trade_spans.items()},
         "produced_at_utc": stamp.produced_at_utc,
     }
-    # DEC-DEPTH-STAMP-REFDATA-001 (#1801): emit the key ONLY when present (the
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1926): emit the key ONLY when present (the
     # additive-column back-compat law). Byte-identity is scoped to the DEFAULT
     # ``reference_fingerprint=None`` primitive path (the direct ``write_tuple_sidecars``
     # callers + the trades/aggs/equity goldens) — a ``None`` stamp renders exactly a
@@ -625,7 +625,7 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
     the span belt); no repo writer ever rewrites a sidecar in place without a
     rename, so the stat probe tracks every sanctioned write.
 
-    DELIBERATE (disclosed trade-off, #1800 review round 2 LEAVE-AS-IS): the
+    DELIBERATE (disclosed trade-off, #1925 review round 2 LEAVE-AS-IS): the
     ``except OSError → None`` arm treats EVERY read fault on an EXISTING stamp
     — including a transient ``EIO`` device blip — as damage → rebuild, NEVER a
     raise. The worst case of a false "damage" verdict is ONE redundant,
@@ -703,7 +703,7 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
     if not isinstance(produced, str):
         _invalid("bad_produced_at_utc")
         return None
-    # DEC-DEPTH-STAMP-REFDATA-001 (#1801): tolerant additive parse — absent key
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1926): tolerant additive parse — absent key
     # (a pre-feature stamp) reads None; a PRESENT value must be canonical sha256
     # hex (a poisoned non-hex value is a damaged stamp → rebuild, never adopted).
     reference_fingerprint = payload.get("reference_fingerprint")

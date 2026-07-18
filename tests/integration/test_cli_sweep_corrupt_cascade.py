@@ -4,9 +4,9 @@
 ``CascadeWireError`` can surface there from TWO real classes:
 
 * a CORRUPT / old-schema finalist store reaching ``build_stage2_cascade_specs``
-  (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958), and
+  (DB-02, DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921), and
 * a disk-full (ENOSPC) at the atomic manifest / report write
-  (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1798).
+  (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1923).
 
 Both are now mapped at the ``cmd_sweep_all`` CLI boundary to a clean
 ``[brutex] REFUSED: …`` on stderr + ``EXIT_USER_ERROR`` — exactly like the
@@ -163,7 +163,7 @@ def test_enospc_cascade_manifest_write_refuses_clean(
     # both go through cascade_wire's module-level atomic_write_simple binding);
     # the sweep's own store writes use a DIFFERENT namespace binding and stay
     # clean, so build_stage2_cascade_specs succeeds and the fault lands exactly
-    # at the manifest write — the #1798 ENOSPC → CascadeWireError path.
+    # at the manifest write — the #1923 ENOSPC → CascadeWireError path.
     from brutex.engine import cascade_wire
 
     def _enospc(*_args: object, **_kwargs: object) -> object:
@@ -175,5 +175,5 @@ def test_enospc_cascade_manifest_write_refuses_clean(
     assert rc == EXIT_USER_ERROR
     err = capsys.readouterr().err
     assert "[brutex] REFUSED:" in err
-    assert "cascade manifest" in err  # the #1798 write-manifest ENOSPC wrap
+    assert "cascade manifest" in err  # the #1923 write-manifest ENOSPC wrap
     assert "Traceback" not in err

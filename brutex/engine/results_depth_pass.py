@@ -157,7 +157,7 @@ _N_TERMS: Final[int] = 7
 VIX_MISS_WARN_CAP: Final[int] = 20
 
 #: Per-tuple ``results_depth.missing_store`` INFO cap
-#: (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1800 — the house
+#: (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1925 — the house
 #: capped-20 idiom, the :data:`VIX_MISS_WARN_CAP` precedent). A grid tuple with
 #: no persisted store on disk is COUNTED (``tuples_missing_store``) and, for the
 #: first :data:`_MISSING_STORE_LOG_CAP` such tuples per pass, named in one INFO
@@ -221,7 +221,7 @@ class ResultsDepthReport:
     ``missing_store_sample`` (additive, capped
     :data:`_MISSING_STORE_SAMPLE_CAP`) carries the first absent BARS-PRESENT
     finalist-store paths so a missing-store WARN is actionable
-    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1800).
+    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1925).
     ``missing_expected_no_bars`` (additive, review round 1 M2) is the
     DETERMINISTICALLY-explained subset of ``tuples_missing_store``: the
     tuple's own bar slice is EMPTY, so the sweep can never have written a
@@ -324,7 +324,7 @@ def _bar_ts_us(ts: datetime) -> int:
 def _bars_sha256(bars: Sequence[CandleBar]) -> str:
     """Full-content sha256 over a bar stream's 7 canonical fields, in order.
 
-    DEC-DEPTH-STAMP-REFDATA-001 (MIGRATION.md #1801). Empty/absent series folds
+    DEC-DEPTH-STAMP-REFDATA-001 (MIGRATION.md #1926). Empty/absent series folds
     the literal token ``"absent"`` so a null-VIX pass and a real-VIX pass differ
     (forcing a re-derive) while two absent-vs-absent series match (no gratuitous
     re-derive). Full-content — a count+endpoints fingerprint can false-match an
@@ -385,7 +385,7 @@ def _note_missing_store(
 ) -> None:
     """Count + (capped) log + (capped) sample a grid tuple with no store on disk.
 
-    DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1800, review round 1 M2 +
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1925, review round 1 M2 +
     round 2 M1 — deterministic + identity classification). A missing finalist
     store falls into ONE of three classes, in precedence order:
 
@@ -748,7 +748,7 @@ def run_results_depth_pass(
     expected_missing
         The caller-known RUN-SCOPED **FAILED-only** allowance
         (``tuples_failed`` from the sweep's own summary) —
-        DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1800, review round 1 M2
+        DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1925, review round 1 M2
         + round 2 M1). A ``SweepComboError``-failed tuple genuinely never wrote
         a store (it raised before the store flush and was NOT cache-recorded),
         so its bars-present missing store is expected. This allowance is a
@@ -813,7 +813,7 @@ def run_results_depth_pass(
     else:
         stamper = TradeReferenceStamper.from_vix_bars(vix_bars)
 
-    # DEC-DEPTH-STAMP-REFDATA-001 (#1801): the shared VIX digest is computed ONCE
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1926): the shared VIX digest is computed ONCE
     # per pass (a null-VIX pass folds the "absent" token, so a VIX feed pulled
     # AFTER the first stamp re-derives every instrument's tuples).
     vix_digest = _bars_sha256(vix_bars or ())
@@ -853,7 +853,7 @@ def run_results_depth_pass(
         return context
 
     def _reference_fingerprint(instrument: str) -> str:
-        """Per-instrument reference-data fingerprint (memoised, #1801).
+        """Per-instrument reference-data fingerprint (memoised, #1926).
 
         Folds the shared VIX digest + this instrument's 1m/1day reference bars +
         the WP3 provider-presence flags. DISCLOSED cost (Golden Rule #10): a
@@ -912,7 +912,7 @@ def run_results_depth_pass(
             rows = ResultsStore.load(store_path).rows()
             stamp = load_stamp(paths)
             current_fp = _reference_fingerprint(tuple_.instrument)
-            # DEC-DEPTH-STAMP-REFDATA-001 (#1801): a current tuple must match BOTH
+            # DEC-DEPTH-STAMP-REFDATA-001 (#1926): a current tuple must match BOTH
             # the store bytes AND the reference fingerprint. An OLD stamp's None
             # fp can NEVER equal a hex digest → re-derive once, never a fabricated
             # match.
@@ -1048,7 +1048,7 @@ def run_results_depth_pass(
             error=str(exc),
         )
 
-    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 1 M2 + round 2 M1):
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1925, review round 1 M2 + round 2 M1):
     # a no-bars tuple (deterministic) AND a quarantined-prior tuple (identity in
     # the sidecar set) are BOTH classified above as expected-storeless; the
     # residual = bars-present AND not-quarantined. A residual beyond the caller's

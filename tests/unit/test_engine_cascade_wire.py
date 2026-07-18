@@ -1801,7 +1801,7 @@ class TestBuildStage2CascadeSpecs:
         assert all(len(spec.winners) == 1 for spec in specs)
 
     def test_corrupt_store_raises_typed_cascade_error(self, tmp_path: Path) -> None:
-        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958).
+        """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
 
         A corrupt / old-schema Stage-2 finalist store surfaces as a typed
         ``CascadeWireError`` naming the UNREADABLE file — never a raw error and
@@ -2327,7 +2327,7 @@ class TestEndToEnd:
 
 
 class TestCascadeSidecarAtomicWrite:
-    """R2N-08 (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1798).
+    """R2N-08 (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1923).
 
     The manifest / report writes are atomic (tmp→fsync→os.replace); a crash /
     ENOSPC mid-write leaves the prior complete copy INTACT (never torn), maps to a

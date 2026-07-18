@@ -296,7 +296,7 @@ class TestMapFullGraceful:
                 m.add_many([oversized])
 
 
-# ── R2-D2 (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1957) ──────────
+# ── R2-D2 (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1920) ──────────
 
 
 def _corrupt_data_mdb(env_dir: Path) -> None:

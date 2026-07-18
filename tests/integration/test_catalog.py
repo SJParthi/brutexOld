@@ -673,7 +673,7 @@ class TestClosedGuardsAndIdempotentClose:
 
 # ────────────────────────────────────────────────────────────────────────
 # R2N-02 / R2N-04 + NEW-1(a): corrupt / torn partition reads at get_bars.
-# DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1959.
+# DEC-CATALOG-READ-INTEGRITY-001, MIGRATION.md #1922.
 # ────────────────────────────────────────────────────────────────────────
 
 _pl = pytest.importorskip("polars")

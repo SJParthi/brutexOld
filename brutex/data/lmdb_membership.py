@@ -84,7 +84,7 @@ class LmdbCorruptEnvError(LmdbMembershipError):
     caller that KNOWS the store is a losslessly-rebuildable accelerator — the
     sweep dedup cache (:meth:`brutex.engine.sweep_cache.SweepCache.open`) —
     quarantines the corrupt directory aside and rebuilds a fresh empty store
-    (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1957). The other leaf
+    (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1920). The other leaf
     consumer (the option-dedup EXACT tier) is NOT a rebuildable accelerator, so
     auto-quarantine is deliberately NOT baked in here — this leaf only names the
     fault; the consumer decides the recovery policy.

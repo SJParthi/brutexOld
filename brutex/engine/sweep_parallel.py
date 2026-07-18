@@ -1342,7 +1342,7 @@ def _run_tuple_in_worker(
             reference_stamper=ctx.reference_stamper,
         )
     except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
-        # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958): a
+        # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921): a
         # CORRUPT / old-schema finalist store raised at its LOAD boundary is
         # CONTAINED as a failed outcome (surfaced through the supervisor's
         # SUPERVISOR_TUPLE_FAILED / sweep_parallel.tuple_failed lane, whose error

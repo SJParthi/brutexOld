@@ -562,7 +562,7 @@ def test_r38_adversarial_poisoned_lake_refuses_with_nothing_touched(
     """A garbage lake partition fails the chain LOUDLY at preload — with ZERO
     results-root artifacts created (R42 row 1: preflight fail = nothing touched).
 
-    Under DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1799) the catalog
+    Under DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1924) the catalog
     reconcile CATCHES the corrupt-partition ``PolarsError`` per file, records it
     on ``ReconcileResult.unreadable``, and ``cmd_sweep_all`` REFUSES the launch
     LOUDLY with a clean ``EXIT_USER_ERROR`` (a descriptive stderr message + a

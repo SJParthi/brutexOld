@@ -59,7 +59,7 @@ __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
 #: every sweep load + F&O window derivation is surfaced + skipped, never silent (GAP #9).
 #: A present-but-unreadable fault (corrupt decode, or a NON-ENOENT OSError — directory /
 #: permission / EIO) additionally lands on ``ReconcileResult.unreadable`` so the launch
-#: REFUSES; a ``FileNotFoundError`` vanished file stays a benign skip (#1799 round 2 M3).
+#: REFUSES; a ``FileNotFoundError`` vanished file stays a benign skip (#1924 round 2 M3).
 #: A PRESENT, readable, EXACTLY-0-row partition lands on the distinct
 #: ``ReconcileResult.empty_partitions`` (one ``catalog.reconcile.empty_partition`` WARN) so
 #: the launch REFUSES it too: no BruteX writer ever emits a valid 0-row parquet
@@ -106,7 +106,7 @@ class ReconcileResult:
     unreadable
         Absolute paths of the CORRUPT / PRESENT-but-unreadable Parquet
         partition files — the distinct data-LOSS subset of ``skipped``
-        (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1799). Populated
+        (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1924). Populated
         by (a) the ``except pl.exceptions.PolarsError`` arm (a corrupt /
         version-incompatible decode) AND (b) the ``except OSError`` arm for
         every NON-``FileNotFoundError`` OS fault — a data-bearing DIRECTORY
@@ -386,7 +386,7 @@ def reconcile_catalog_from_lake(
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         except _PARQUET_UNREADABLE_ERRORS as exc:
-            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1799): a CORRUPT /
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924): a CORRUPT /
             # version-incompatible partition file — or one whose Datetime column
             # holds an out-of-range value (the round-18 OverflowError class, folded
             # into THIS unreadable arm at the club-S1 merge: present-but-unreadable
@@ -402,7 +402,7 @@ def reconcile_catalog_from_lake(
             unreadable.append(str(path))
             continue
         except FileNotFoundError as exc:
-            # #1799 review round 2 (M3): ``FileNotFoundError`` (ENOENT) ONLY is a
+            # #1924 review round 2 (M3): ``FileNotFoundError`` (ENOENT) ONLY is a
             # genuine VANISHED file — a concurrent heal/fetch raced the glob and the
             # partition was gone by read time — data ABSENCE, not data LOSS. Count it
             # a benign ``skipped`` (WARN kept) and NEVER on ``unreadable``: the
@@ -413,7 +413,7 @@ def reconcile_catalog_from_lake(
             skipped += 1
             continue
         except OSError as exc:
-            # #1799 review round 2 (M3): a NON-ENOENT OSError is a PRESENT-but-
+            # #1924 review round 2 (M3): a NON-ENOENT OSError is a PRESENT-but-
             # UNREADABLE partition, NOT absence — the exact silent-partial class this
             # refusal exists to close. Concrete shapes: a data-bearing DIRECTORY named
             # ``<mm>.parquet/`` (``pl.read_parquet`` reads its real rows, then

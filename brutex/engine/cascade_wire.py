@@ -1857,7 +1857,7 @@ def build_stage2_cascade_specs(
         try:
             rows = ResultsStore.load(store_path).rows()
         except ResultsStoreSchemaError as exc:
-            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958): a
+            # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921): a
             # corrupt / old-schema finalist store surfaces as a typed cascade
             # abort naming the file, NEVER a raw error and NEVER a silent skip
             # (dropping a tuple's finalists would change Stage-2 selection
@@ -1922,7 +1922,7 @@ def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
     serves the last complete cascade). A disk-full maps to
     :class:`CascadeWireError` — a loud cascade-tail abort, deliberately NOT the
     lake-wide ``LakeWriteHalt`` escalation (DEC-CASCADE-SIDECAR-ATOMIC-001,
-    MIGRATION.md #1798).
+    MIGRATION.md #1923).
     """
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1957,7 +1957,7 @@ def write_report(results_root: Path, report: CascadeWireReport) -> Path:
     auto==manual golden re-runs unchanged); only durability changed. A
     disk-full maps to the same typed :class:`CascadeWireError` contract as
     :func:`write_manifest` (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md
-    #1798 — supersedes the interim raw-``OSError`` propagation).
+    #1923 — supersedes the interim raw-``OSError`` propagation).
     """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)

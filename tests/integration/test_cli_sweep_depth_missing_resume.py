@@ -1,6 +1,6 @@
 """Integration — the results-depth missing-store classification on a RESUME.
 
-DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1800), review round 1 M2. The
+DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1925), review round 1 M2. The
 unexplained-missing WARN originally allowed ``tuples_skipped_no_bars +
 tuples_failed + tuples_quarantined_prior`` — RUN-N counters. On a RESUMED run
 the prefix tuples fold into ``skipped_resume`` and are never re-classified, so

@@ -1,6 +1,6 @@
 """R2-D2 CLI byte-parity tooth: a corrupt dedup-cache LMDB self-heals; results stay identical.
 
-DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1957. The Bloom→LMDB combo
+DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1920. The Bloom→LMDB combo
 dedup cache is a losslessly-rebuildable ACCELERATOR (Golden Rule #7): a corrupt
 ``data.mdb`` is quarantined aside + rebuilt EMPTY, so the affected combos merely
 recompute — the persisted finalist stores are byte-identical to a

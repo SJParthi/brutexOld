@@ -1181,7 +1181,7 @@ def test_default_max_tuples_is_exposed() -> None:
 
 
 class TestRunSweepGridCorruptStoreContained:
-    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1958).
+    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
 
     A CORRUPT / old-schema finalist store raised at its LOAD boundary on resume is
     CONTAINED to a per-tuple ``TUPLE_FAILED`` (never a whole-grid abort), fires the

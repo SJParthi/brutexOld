@@ -1,6 +1,6 @@
 """Integration — the sweep-all CORRUPT-PARTITION launch refusal.
 
-DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1799). ``cmd_sweep_all``
+DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1924). ``cmd_sweep_all``
 reconciles the DuckDB catalog from the on-disk Parquet lake BEFORE the ReplayFeed
 preload. A CORRUPT / version-incompatible month partition the reconcile SKIPS
 (GAP #9) is an INTERIOR data hole invisible in the swept output — Stage-1A rolls
@@ -154,7 +154,7 @@ def _kwargs(lake_root: Path, catalog_path: Path, tmp_path: Path) -> dict[str, An
 
 
 def test_corrupt_month_refuses_launch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """THE #1799 pin: a corrupt Feb partition REFUSES the sweep loudly + logs the
+    """THE #1924 pin: a corrupt Feb partition REFUSES the sweep loudly + logs the
     ERROR event (pre-gate: the sweep launched over the silently-holed data)."""
     from structlog.testing import capture_logs
 
@@ -295,7 +295,7 @@ def test_thin_present_month_does_not_refuse(
 def test_vanished_file_does_not_refuse(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1799 review round 1 M1: a partition file that VANISHES between the
+    """#1924 review round 1 M1: a partition file that VANISHES between the
     reconcile's glob listing and its read (an ``OSError`` — ENOENT from a
     concurrent heal/fetch, an NFS blip) is data ABSENCE, not corruption — the
     launch PROCEEDS (EXIT_OK, no refusal, "absent != corrupt").
