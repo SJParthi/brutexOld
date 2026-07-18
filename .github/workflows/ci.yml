@@ -1952,7 +1952,7 @@ jobs:
             echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
-            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py tests/unit/test_auto_pull_gate_rust_seam.py
           else
             echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
           fi
@@ -2234,7 +2234,7 @@ jobs:
           fi
           if compgen -G "tests/unit/test_pull_progress.py" > /dev/null; then
             # + the ETA/open-ended/add_bars honesty suite (DEC-PULL-PROGRESS-HONESTY-001)
-            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py
+            pytest --cov=brutex.dashboard.pull_progress --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_progress.py tests/unit/test_pull_progress_honesty.py tests/unit/test_pull_progress_rust_seam.py
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
@@ -2588,7 +2588,7 @@ jobs:
           # the curated 4-file suite; the discovery gate excludes the facade
           # for the same structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
           if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
-            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py
+            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py
           else
             echo "(brutex.pull_state_rust test file not present yet — gate inactive)"
           fi
