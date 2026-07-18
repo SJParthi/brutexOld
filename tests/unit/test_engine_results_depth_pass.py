@@ -161,8 +161,15 @@ def _run_sweep(out_root: Path, grid: SweepGridConfig, bars: Sequence[CandleBar])
         for tuple_ in iter_sweep_tuples(grid):
             store = load_or_create_store(tuple_store_path(out_root, tuple_, grid))
             dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+            # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the SAME
+            # list serves as decision AND 1m execution stream.
             run_persisted_sweep(
-                bars, tuple_.to_run_config(grid), store=store, dedup=dedup, audit=audit
+                bars,
+                tuple_.to_run_config(grid),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                exec_bars_1m=bars,
             )
 
 
@@ -299,19 +306,32 @@ class TestFreshPass:
         assert all(row["mae_granularity"] == "1m" for row in page.rows)
         assert all(row["path_1m_status"] == "ok" for row in page.rows)
 
-    def test_no_minute_data_degrades_honestly(self, out_root: Path) -> None:
+    def test_no_minute_data_refuses_the_tuple_loudly(self, out_root: Path) -> None:
+        """No 1m stream ⇒ the 1m-grid re-sim is IMPOSSIBLE — refuse, never fake.
+
+        REWRITTEN for DEC-FILL-EXEC-GRID-1M-001: the old law (degrade the
+        capture to ``no_1m_data`` and still build sidecars off a decision-TF
+        re-sim) is RETIRED — every fill now resolves on the 1-minute execution
+        stream, so an instrument with no 1m bars cannot be re-simulated at
+        all. The pass records the tuple errored (the per-tuple fence catches
+        the loud ``ResultsDepthError``) and writes NO sidecars — the
+        correct-or-absent posture.
+        """
         grid = _grid()
         with capture_logs() as logs:
             report = _run_pass(out_root, grid, minute=False)
-        assert report.top100_written is True
+        assert report.tuples_errored == 1
+        assert report.tuples_processed == 0
+        assert report.pool == 0
+        assert report.top100_written is True  # the empty artifact still ships
         assert any(log["event"] == "results_depth.no_minute_data" for log in logs)
+        errors = [log for log in logs if log["event"] == "results_depth.tuple_error"]
+        assert len(errors) == 1
+        assert errors[0]["error_type"] == "ResultsDepthError"
+        # No sidecar trio was written for the refused tuple.
         paths = _tuple_paths(out_root, grid)
-        stamp = load_stamp(paths)
-        assert stamp is not None
-        run_id = next(iter(stamp.trade_spans))
-        page = read_trade_page(paths, run_id=run_id, offset=0, limit=5)
-        assert all(row["path_1m_status"] == "no_1m_data" for row in page.rows)
-        assert all(row["mae_granularity"] == "tf" for row in page.rows)
+        assert load_stamp(paths) is None
+        assert not paths.trades.exists()
 
     def test_vix_feed_stamps_every_trade(self, out_root: Path) -> None:
         with capture_logs() as logs:
@@ -642,7 +662,11 @@ class TestOldSchemaAggsBackCompat:
         the pool. Now the column defaults to the HONEST 0 (the pre-guard walker
         never emitted the ``session_gap`` label, so 0 IS that old artifact's
         true label count) per the WindowLedgerRecord / Ruling-5 optional-column
-        template, and the tuple pools normally.
+        template, and the tuple pools normally. EXTENDED for
+        DEC-FILL-EXEC-GRID-1M-001: the five 1m-grid counter columns
+        (``exits_deferred`` … ``forced_fill_slid_minutes``) get the SAME
+        presence-tolerant honest-0 default — dropping all six new-era columns
+        yields the genuine 49-column pre-#1743 artifact shape (55 − 6 = 49).
         """
         import polars as pl
 
@@ -651,14 +675,33 @@ class TestOldSchemaAggsBackCompat:
         assert fresh.tuples_processed == 1
         paths = _tuple_paths(out_root, grid)
 
-        # Rewrite the aggs sidecar WITHOUT the new column — the exact 49-column
-        # shape a pre-guard writer produced — and re-stamp its per-file hash the
-        # way the OLD code's own write_tuple_sidecars would have (the stamp's
-        # store_content_hash is untouched, so the tuple reads stamped-current —
-        # the #1743 honest clause (ii) shape).
+        # Rewrite the aggs sidecar WITHOUT the new columns — the exact
+        # 49-column shape a pre-#1743 writer produced — and re-stamp its
+        # per-file hash the way the OLD code's own write_tuple_sidecars would
+        # have (the stamp's store_content_hash is untouched, so the tuple
+        # reads stamped-current — the #1743 honest clause (ii) shape).
+        new_era_columns = [
+            "exits_session_gap",
+            "exits_deferred",
+            "signals_dropped_collision",
+            "fill_slid_minutes",
+            "exit_fill_slid_minutes",
+            "forced_fill_slid_minutes",
+        ]
         df = pl.read_parquet(paths.aggs)
-        assert "exits_session_gap" in df.columns
-        df.drop("exits_session_gap").write_parquet(paths.aggs)
+        assert all(col in df.columns for col in new_era_columns)
+        assert len(df.columns) - len(new_era_columns) == 49
+        # A REAL pre-#1743 artifact's FIVE tallies sum to n_trades (its
+        # walker never emitted the session_gap label — those trades closed
+        # under another label). The 1m-grid fixture legitimately produces
+        # session_gap exits, so fold that count into exits_end_of_data before
+        # dropping — emulating a self-consistent old record, never an
+        # invariant-violating one (the honest-0 default must re-satisfy the
+        # __post_init__ sum law on read-back).
+        df = df.with_columns(
+            (pl.col("exits_end_of_data") + pl.col("exits_session_gap")).alias("exits_end_of_data")
+        )
+        df.drop(new_era_columns).write_parquet(paths.aggs)
         import hashlib
         import json
 
@@ -674,6 +717,11 @@ class TestOldSchemaAggsBackCompat:
         aggs = _load_agg_records(paths)
         assert len(aggs) == 5
         assert all(agg.exits_session_gap == 0 for agg in aggs)
+        assert all(agg.exits_deferred == 0 for agg in aggs)
+        assert all(agg.signals_dropped_collision == 0 for agg in aggs)
+        assert all(agg.fill_slid_minutes == 0 for agg in aggs)
+        assert all(agg.exit_fill_slid_minutes == 0 for agg in aggs)
+        assert all(agg.forced_fill_slid_minutes == 0 for agg in aggs)
 
         # End-to-end: the stamped-current tuple is SKIPPED (not rebuilt) and
         # still POOLS — never the pre-fix errored/dropped double-count.
@@ -691,9 +739,11 @@ class TestOldSchemaAggsBackCompat:
         _run_pass(out_root, grid)
         paths = _tuple_paths(out_root, grid)
         records = pl.read_parquet(paths.aggs).to_dicts()
-        # Hand-shape the first row to carry a non-zero session_gap count,
+        # Hand-shape the first row to carry a DISTINCTIVE session_gap count,
         # keeping the exit-tally sum invariant (move ONE exit out of whichever
-        # real bucket holds it — the fixture's finalists all trade).
+        # real bucket holds it into session_gap — the fixture's finalists all
+        # trade, and under the 1m exec grid they already carry real
+        # session_gap counts, so the pin is the INCREMENTED value surviving).
         first = records[0]
         donor = next(
             name
@@ -706,15 +756,20 @@ class TestOldSchemaAggsBackCompat:
             )
             if int(first[name]) > 0
         )
+        prior_first = int(first["exits_session_gap"])
+        prior_total = sum(int(rec["exits_session_gap"]) for rec in records)
         first[donor] = int(first[donor]) - 1
-        first["exits_session_gap"] = 1
+        first["exits_session_gap"] = prior_first + 1
         pl.DataFrame(records).write_parquet(paths.aggs)
         from brutex.engine.results_depth_pass import _load_agg_records
 
         aggs = _load_agg_records(paths)
         by_id = {agg.run_id: agg for agg in aggs}
-        assert by_id[str(first["run_id"])].exits_session_gap == 1  # the real count survived
-        assert sum(agg.exits_session_gap for agg in aggs) == 1  # every other row stayed 0
+        # The real (incremented) count survived — a setdefault-clobber mutant
+        # would read the honest-0 default here instead.
+        assert by_id[str(first["run_id"])].exits_session_gap == prior_first + 1
+        # Every other row kept its own stored count (total moved by exactly 1).
+        assert sum(agg.exits_session_gap for agg in aggs) == prior_total + 1
 
 
 class TestCompositesFor:
@@ -746,7 +801,18 @@ class TestCompositesFor:
         from tests.fakes.wp5_depth_fixtures import make_agg
 
         row = make_result_row(run_id_of(1))
-        agg = make_agg(run_id_of(1), fingerprint=fingerprint_seed(1))
+        # The shared fake predates the 1m-grid counter family — thread the
+        # five now-required ComboAggregate fields as overrides
+        # (DEC-FILL-EXEC-GRID-1M-001; event tallies, honest 0).
+        agg = make_agg(
+            run_id_of(1),
+            fingerprint=fingerprint_seed(1),
+            exits_deferred=0,
+            signals_dropped_collision=0,
+            fill_slid_minutes=0,
+            exit_fill_slid_minutes=0,
+            forced_fill_slid_minutes=0,
+        )
         relaxed = replace(
             agg, mae_avg_paisa=None, mfe_avg_paisa=None, recovery_factor=None, win_loss_ratio=None
         )
@@ -931,6 +997,7 @@ class TestWorstCaseCaptureChain:
             tf_minutes=1,
             sl_paisa=200,
             tp_paisa=100,
+            exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
             minute_index=None,
             stamper=None,
         )
@@ -942,6 +1009,7 @@ class TestWorstCaseCaptureChain:
             mask_to_entry_signals(bar_bits, row.mask_bits),
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point — same list, both streams
             stop_loss_paisa=200,
             take_profit_paisa=100,
             detail_sink=detail_sink,  # type: ignore[arg-type]

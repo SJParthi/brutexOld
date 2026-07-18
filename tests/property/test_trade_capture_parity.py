@@ -99,6 +99,7 @@ class TestSinkGoldenSafety:
             entry_signals,
             direction=direction,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point (DEC-FILL-EXEC-GRID-1M-001)
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
         )
@@ -108,6 +109,7 @@ class TestSinkGoldenSafety:
             entry_signals,
             direction=direction,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
             detail_sink=sink,
@@ -175,6 +177,7 @@ class TestParityTooth:
             mask_to_entry_signals(bar_bits, mask),
             direction=side,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
         )
@@ -184,6 +187,7 @@ class TestParityTooth:
             bars=bars,
             bar_bits=bar_bits,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             sl_paisa=sl,
             tp_paisa=tp,
             minute_index=MinuteIndex.from_bars(bars),
@@ -199,6 +203,7 @@ class TestParityTooth:
             bars=bars,
             bar_bits=bar_bits,
             tf_minutes=1,
+            exec_bars_1m=bars,  # tf==1m fixed point
             sl_paisa=sl,
             tp_paisa=tp,
             minute_index=None,

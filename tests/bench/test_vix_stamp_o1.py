@@ -187,8 +187,11 @@ def test_converter_stamp_overhead_is_bounded_ab() -> None:
             for bar in bars
         ]
     )
-    plain = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
-    stamped = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=stamper)
+    # tf==1m fixed point (DEC-FILL-EXEC-GRID-1M-001): same list, both streams.
+    plain = ResidentTradeSim(bars, bar_bits, tf_minutes=1, exec_bars_1m=bars)
+    stamped = ResidentTradeSim(
+        bars, bar_bits, tf_minutes=1, exec_bars_1m=bars, reference_stamper=stamper
+    )
     # Self-honesty (review NIT): this bench gates the RUST-batch hoisted
     # converter's post-stamp seam. On a wheel-degraded env ResidentTradeSim
     # WARN-falls-back to the Python walker arm — a real A/B, but not the seam
