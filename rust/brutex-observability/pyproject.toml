@@ -1,0 +1,37 @@
+# Maturin build config for brutex-observability
+# (DEC-OBS-RUST-DETECTOR-CORE-001).
+#
+# Mixed Python + Rust layout (the brutex-feed shape): the cdylib ships as the
+# private submodule `brutex_observability._brutex_observability`;
+# `python/brutex_observability/__init__.py` re-exports it behind the
+# stale-wheel handshake. `features = ["python"]` turns on the optional pyo3
+# dependency (extension-module + abi3-py312) so the wheel includes the
+# binding.
+#
+# https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-observability"
+version = "0.1.0"
+description = "Observability decision-law kernel (stall/hung/SLA detectors + stage-stamp laws) for BruteX."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "brutex_observability._brutex_observability"
+features = ["python"]
+strip = true

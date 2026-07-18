@@ -1,0 +1,22 @@
+# DEC-OBS-RUST-DETECTOR-CORE-001 — the ONE cargo-mutants scope for
+# brutex-observability, resolved by BOTH the CI job (the future
+# rust-mutation-brutex-observability wiring in .github/workflows/mutation.yml)
+# and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; the trading-core/brutex-feed toml precedent).
+#
+# Scope: the ENTIRE decision core — the law-A tiered stall state machine +
+# the law-B/C detectors (src/detector.rs) and the law-D1/D2 stamp laws
+# (src/stamp.rs). The in-crate tests/edge_matrix.rs hand-derived matrix +
+# tests/proptest_detector.rs / tests/proptest_stamp.rs invariants are the
+# killing suite; zero-survivor is the standard (DEC-MUTATION-RUNTIME-003).
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
+# trading-core toml sets the disclosure standard):
+#   src/python.rs — the thin PyO3 scalar-mapping edge. cargo-mutants does not
+#                   resolve pyo3 macro expansions usefully (the trading-core
+#                   229-UNVIABLE measurement); the edge is exercised
+#                   end-to-end by the Python wheel suites (the flag-ON
+#                   differential/parity lane).
+#   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only; nothing
+#                   behavioural for cargo-mutants to perturb.
+examine_globs = ["src/detector.rs", "src/stamp.rs"]

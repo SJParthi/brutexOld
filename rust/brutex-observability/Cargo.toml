@@ -1,0 +1,84 @@
+# brutex-observability — the observability DECISION-law kernel (Rust).
+#
+# DEC-OBS-RUST-DETECTOR-CORE-001: re-hosts the four PURE observability
+# decision laws — the loop-watchdog tiered stall state machine (law A,
+# `brutex/observability/loop_watchdog.py::check_once`), the per-worker
+# HEALTHY↔HUNG decision (law B, `watchdog.Watchdog.check_once`'s loop core),
+# the SLA predicate + hysteresis edge (law C, `sla.SLADetector`) and the
+# stage-stamp shape-order / verdict-matrix laws (laws D1/D2, `stage_stamp`) —
+# behind the default-OFF `BRUTEX_OBSERVABILITY_RUST` facade
+# (`brutex/observability/observability_rust.py`), with Python retained as the
+# LIVE parity oracle (decide-in-Rust, materialize-in-Python — the
+# DEC-FEED-RUST-CORE-001 shape). SCALARS ONLY cross the FFI: f64 / u64 / i64 /
+# bool / &str / Option<&str> / tuples thereof — no datetime, no PyAny, no
+# dicts, no callables.
+#
+# ADR-0020 honesty banner (verbatim, mandatory): expected payoff ≈ 0 — the
+# conversion is for uniformity, not speed. Every routed law is
+# nanosecond-scale in Python and the FFI hop is a small SLOWDOWN, acceptable
+# because the seams run per monitor tick / per validate call (never a hot
+# mask path) and ship DEFAULT-OFF.
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed shape.
+
+[package]
+name = "brutex-observability"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Observability decision-law kernel (stall/hung/SLA detectors + stage-stamp laws) for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors fno-math / trading-core / brutex-feed).
+publish = false
+
+[lib]
+name = "brutex_observability"
+path = "src/lib.rs"
+# cdylib so `import brutex_observability` finds the maturin-built extension;
+# rlib so `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the identical
+# pin across all sibling kernel crates).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into
+# the artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Build-script-only: it does NOT enter the shipped rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — invariants + determinism over the pure core.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+# DEC-RUST-SOURCE-DIGEST-TWIN-001: tests/source_digest_parity.rs re-includes
+# the shared framing core to pin the golden parity vector. Test-only.
+blake3 = "1.5"
+
+# Release profile: NO `panic = "abort"` — DELIBERATE (the brutex-lake
+# reasoning, adapted for this crate): a law panic must surface across the FFI
+# as `pyo3_runtime.PanicException` so the facade's panic belt latches
+# `crate_panic` and degrades to the Python oracle — never a process abort
+# inside a monitor thread or a validate call. `overflow-checks = true` is
+# KEPT (the brutex-feed discipline): the one integer op in the laws
+# (`episodes + 1`) must never wrap silently — at u64::MAX it panics, crosses
+# as PanicException, and the facade serves the oracle (the safe direction;
+# disclosed in the facade docstring).
+[profile.release]
+overflow-checks = true

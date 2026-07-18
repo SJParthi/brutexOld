@@ -139,6 +139,10 @@ Cargo.lock
 # stay tracked; a NEW crate needs its own negation to be addable).
 !rust/brutex-feed/Cargo.lock
 !rust/brutex-feed/fuzz/Cargo.lock
+# Same law for the brutex-observability decision-law kernel
+# (DEC-OBS-RUST-DETECTOR-CORE-001 — a NEW crate needs its own negation to be
+# addable; the lock is the reproducible-build + security-audit trigger).
+!rust/brutex-observability/Cargo.lock
 # brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
 # application BINARY crate: its lockfile is tracked for reproducible builds
 # (Golden Rule #4) + the security-audit Cargo.lock trigger.
