@@ -60,6 +60,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "intent_shape_verdict",  # pull_intent (Wave 2E)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
     "muhurat_window_active",  # auto_pull_gate (Wave 2D)
+    "progress_derived",  # pull_progress (Wave 2F)
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
     "settle_token_verdict",  # auto_pull_gate (Wave 2D)
@@ -111,6 +112,7 @@ from ._brutex_pull_state import (  # noqa: E402
     intent_shape_verdict,
     market_hours_note_rewrite,
     muhurat_window_active,
+    progress_derived,
     pull_allowed_us,
     scope_token,
     settle_token_verdict,
@@ -143,6 +145,7 @@ __all__ = [
     "intent_shape_verdict",
     "market_hours_note_rewrite",
     "muhurat_window_active",
+    "progress_derived",
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",

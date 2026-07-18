@@ -113,3 +113,23 @@ def intent_refused_restore_decision(
     prior_present: bool,
 ) -> int: ...
 def intent_resume_enabled(raw: str | None) -> bool: ...
+
+# --- pull_progress (Wave 2F) ---
+# The derived-metrics plane of brutex/dashboard/pull_progress.py
+# (DEC-PULL-PROGRESS-HONESTY-001): counts as ints (facade-gated to the
+# spike-proven <= 2**53 exactness domain; out-of-domain raises ValueError),
+# the caller's injected-clock instants as floats (the kernel is clockless).
+# Returns (percent, elapsed_seconds, units_per_sec, eta_present,
+# eta_seconds) — percent reproduces CPython round(x, 1) HALF-EVEN
+# bit-exactly; Python folds (eta_present, eta_seconds) back to float | None.
+
+def progress_derived(
+    state_running: bool,
+    open_ended: bool,
+    total: int,
+    completed: int,
+    phase_base_completed: int,
+    updated_at: float,
+    started_at: float,
+    phase_started_at: float,
+) -> tuple[float, float, float, bool, float]: ...

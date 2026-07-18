@@ -298,6 +298,45 @@ fn intent_resume_enabled(raw: Option<&str>) -> bool {
     crate::intent::resume_enabled(raw)
 }
 
+// --- pull_progress (Wave 2F) ------------------------------------------------
+// The derived-metrics plane of `brutex/dashboard/pull_progress.py`
+// (DEC-PULL-PROGRESS-HONESTY-001). Counts cross as u64 (facade-gated to the
+// spike-proven <= 2**53 exactness domain; the kernel's own domain refusal
+// maps to ValueError as defense-in-depth), instants as f64 (the CALLER's
+// injected-clock stamps — the kernel is clockless); numbers only cross out.
+// Python composes ProgressSnapshot / to_dict / every string, and folds the
+// (eta_present, eta) pair back to the oracle's `float | None`.
+
+/// `(percent, elapsed_seconds, units_per_sec, eta_present, eta_seconds)` —
+/// see `crate::progress::progress_derived` for the full contract. An
+/// out-of-domain count raises `ValueError` (the facade's eligibility gate
+/// never sends one; its defensive belt degrades the raise to the oracle).
+#[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the snapshot's derived inputs
+#[pyfunction]
+#[pyo3(signature = (state_running, open_ended, total, completed, phase_base_completed, updated_at, started_at, phase_started_at))]
+fn progress_derived(
+    state_running: bool,
+    open_ended: bool,
+    total: u64,
+    completed: u64,
+    phase_base_completed: u64,
+    updated_at: f64,
+    started_at: f64,
+    phase_started_at: f64,
+) -> PyResult<(f64, f64, f64, bool, f64)> {
+    crate::progress::progress_derived(
+        state_running,
+        open_ended,
+        total,
+        completed,
+        phase_base_completed,
+        updated_at,
+        started_at,
+        phase_started_at,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -329,5 +368,7 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intent_resume_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_refused_restore_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_resume_enabled, m)?)?;
+    // --- pull_progress (Wave 2F) ---
+    m.add_function(wrap_pyfunction!(progress_derived, m)?)?;
     Ok(())
 }

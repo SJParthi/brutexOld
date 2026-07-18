@@ -1004,3 +1004,136 @@ __all__ += [
     "rust_intent_resume_enabled",
     "rust_intent_shape_verdict",
 ]
+
+
+# --- pull_progress (Wave 2F) -------------------------------------------------
+# The derived-metrics plane of ``brutex/dashboard/pull_progress.py``
+# (DEC-PULL-PROGRESS-HONESTY-001 — the ``ProgressSnapshot`` ``percent`` /
+# ``elapsed_seconds`` / ``units_per_sec`` / ``eta_seconds`` properties). ONE
+# consult serves all four metrics; the counter state machine, every string,
+# ``to_dict`` and the injected clock stay Python (the pyclass flip is a
+# LATER lane phase). Two degrade tiers:
+#
+# * the SILENT domain gate (:func:`_progress_inputs_in_domain`) — a snapshot
+#   whose counts leave the spike-proven ``[0, 2**53]`` exactness envelope,
+#   or whose instants are not genuine floats, is a LEGAL Python construction
+#   the kernel deliberately does not model: the oracle serves with NO
+#   warn (not an error — a documented domain boundary, unreachable from the
+#   production tracker whose counters are clamped non-negative ints);
+# * the shared belt/refuse-poison tiers (``wheel_missing`` / ``wheel_stale``
+#   / ``kernel_error`` / ``kernel_invalid``) — warn-once, oracle serves.
+
+#: The kernel count-domain ceiling (inclusive): both division operands stay
+#: exactly representable in f64, so the kernel's division equals CPython's
+#: correctly-rounded ``int/int`` true division (the Wave-2F spike law).
+PROGRESS_COUNT_MAX: Final[int] = 2**53
+
+#: The derived bundle's kernel arity —
+#: ``(percent, elapsed, units_per_sec, eta_present, eta_seconds)``.
+_PROGRESS_TUPLE_ARITY: Final[int] = 5
+
+
+def _progress_count_in_domain(value: int) -> bool:
+    """EXACTLY ``int`` (a ``bool`` pun degrades) inside ``[0, 2**53]``."""
+    return type(value) is int and 0 <= value <= PROGRESS_COUNT_MAX
+
+
+def _progress_inputs_in_domain(
+    open_ended: bool,
+    total: int,
+    completed: int,
+    phase_base_completed: int,
+    updated_at: float,
+    started_at: float,
+    phase_started_at: float,
+) -> bool:
+    """The SILENT eligibility gate for :func:`rust_progress_derived`.
+
+    Counts must be genuine ints in the exactness domain; instants must be
+    genuine ``float`` instances (a hostile int-typed instant would take
+    CPython's exact ``int`` arithmetic through the properties — a semantics
+    the f64 kernel deliberately does not model); ``open_ended`` must be a
+    genuine ``bool`` (the oracle consumes its TRUTHINESS — a truthy pun
+    stays on the oracle rather than raising at the strict pyo3 edge).
+    NaN/inf FLOATS are IN domain — the kernel mirrors the oracle's IEEE
+    comparisons exactly.
+    """
+    return (
+        type(open_ended) is bool
+        and _progress_count_in_domain(total)
+        and _progress_count_in_domain(completed)
+        and _progress_count_in_domain(phase_base_completed)
+        and type(updated_at) is float
+        and type(started_at) is float
+        and type(phase_started_at) is float
+    )
+
+
+def _validated_progress_tuple(
+    result: object,
+) -> tuple[float, float, float, float | None] | None:
+    """The refuse-poison gate + the ``eta_present`` fold.
+
+    EXACTLY a 5-tuple ``(float, float, float, bool, float)`` (bool puns in
+    the float slots and int puns in the bool slot each degrade — only a
+    stale/corrupt wheel produces them); folds to the facade quadruple
+    ``(percent, elapsed, units_per_sec, eta_or_None)``.
+    """
+    if (
+        isinstance(result, tuple)
+        and len(result) == _PROGRESS_TUPLE_ARITY
+        and type(result[0]) is float
+        and type(result[1]) is float
+        and type(result[2]) is float
+        and type(result[3]) is bool
+        and type(result[4]) is float
+    ):
+        return (result[0], result[1], result[2], result[4] if result[3] else None)
+    warn_degrade_once("kernel_invalid", symbol="progress_derived", detail=type(result).__name__)
+    return None
+
+
+def rust_progress_derived(
+    *,
+    state_running: bool,
+    open_ended: bool,
+    total: int,
+    completed: int,
+    phase_base_completed: int,
+    updated_at: float,
+    started_at: float,
+    phase_started_at: float,
+) -> tuple[float, float, float, float | None] | None:
+    """Consult the derived-metrics kernel; ``None`` = use the oracle.
+
+    Returns ``(percent, elapsed_seconds, units_per_sec, eta_seconds)`` —
+    each bit-identical to the corresponding ``ProgressSnapshot`` property
+    (``eta_seconds`` already folded to the oracle's ``float | None``). The
+    caller passes ``state_running`` as the PRE-COMPUTED ``state ==
+    STATE_RUNNING`` verdict (string comparison stays Python) and
+    ``open_ended`` as a genuine ``bool``.
+    """
+    if not _progress_inputs_in_domain(
+        open_ended, total, completed, phase_base_completed, updated_at, started_at, phase_started_at
+    ):
+        return None  # the SILENT domain gate — a legal input, not a fault
+    result = _call_kernel(
+        "progress_derived",
+        state_running,
+        open_ended,
+        total,
+        completed,
+        phase_base_completed,
+        updated_at,
+        started_at,
+        phase_started_at,
+    )
+    if result is _KERNEL_FAULT:
+        return None
+    return _validated_progress_tuple(result)
+
+
+__all__ += [
+    "PROGRESS_COUNT_MAX",
+    "rust_progress_derived",
+]
