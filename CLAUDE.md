@@ -18,7 +18,31 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-18 (DEC-METRICS-RUST-STATS-002, MIGRATION.md #1977,
+branch `claude/metrics-tails-rust` — slice 6 PR-2, the metrics-TAILS Rust
+conversion: PSR + expected-max Sharpe (deflated_sharpe.py) + PBO/CSCV
+(pbo.py) + the WFO walk pass-count (wfo.py) re-hosted on `rust/fno-math`
+behind the SAME landed default-OFF `BRUTEX_STATS_RUST` seam (per-function
+burn-in bit-compare + autorevert; the Python tails retained forever as the
+live oracles; `ranking/overfit.py` served TRANSITIVELY with ZERO edits —
+the narrowest seam, no ranking-package touch). BIT-EXACT by proof, not
+assertion: erf rides the ONE sanctioned SAME-SYMBOL libm FFI (an fdlibm
+transcription was measurement-REFUTED; CPython's `math.erf` proven the
+platform libm symbol — 0 mismatches over 3.5M points — so both engines
+dispatch literally the same symbol, ULP-bracket golden-pinned per
+platform), inv_cdf is the AS241 transcription (0/2.5M), the WFO Sharpe
+REPLICATES numpy's pairwise reduction order (0/4,000 trials; burn-in is
+the fence), PSR/SR_0/PBO are STRUCTURAL op-for-op transcriptions; the
+lockbox stretch is DROPPED + disclosed (np-internal cumsum orders on a
+cold path — never ship drift). Flag ships OFF — flag-OFF byte-identical,
+bomb-kernel-pinned; no speedup claimed (a default flip is its own DEC).
+DISCLOSED DEVIATION: the brief named `BRUTEX_METRICS_TAILS_RUST`; the
+landed `BRUTEX_STATS_RUST` seam is extended instead (COMMON — one flag,
+one latch registry). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; run identity untouched. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1977.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
@@ -3297,7 +3321,81 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+- **Active branch:** `claude/metrics-tails-rust`
+  (**DEC-METRICS-RUST-STATS-002, MIGRATION.md #1977** — slice 6 (Rust
+  Stage-3/4 statistics) PR-2, the metrics-TAILS conversion (entry #1977 =
+  the live ceiling #1953 + clear of the in-flight #1974–#1976 band;
+  renumber-at-landing law stands): PSR + expected-max Sharpe (SR_0), the
+  PBO/CSCV fold and the WFO walk pass-count re-hosted on `rust/fno-math`
+  (NEW `src/stats/{norm,deflated_sharpe,pbo,wfo}.rs`) behind the SAME
+  landed default-OFF `BRUTEX_STATS_RUST` seam of
+  DEC-METRICS-RUST-STATS-001 (#1928) — per-function burn-in bit-compare
+  (`struct.pack('<d', …)`) + autorevert latch + warn-once, the four
+  Python tails EXTRACTED verbatim into micro-oracles
+  (`_psr_tail`/`_expected_max_tail`/`_cscv_logits`/`_walk_pass_count`)
+  that are BOTH the burn-in comparanda and the forever-retained
+  fallbacks; `brutex/ranking/overfit.py` consumes DSR TRANSITIVELY
+  through deflated_sharpe.py with ZERO edits (the narrowest seam — the
+  "never in ranking/__init__.py" constraint satisfied structurally,
+  transitive-golden-pinned). BIT-EXACTNESS BY PROOF (the acceptance
+  bar — these outputs feed ranking + cascade verdicts): (a) erf = the
+  ONE sanctioned SAME-SYMBOL libm FFI (`norm.rs` binds the process
+  libm's `erf` via one scoped `unsafe extern "C"` under the crate's
+  `#![deny(unsafe_code)]` + SAFETY argument — an fdlibm transcription
+  was REFUTED by measurement (1-ULP off on ~1.1% of 3.5M hostile
+  points; glibc ≥ 2.28 is not fdlibm) while CPython's `math.erf` was
+  PROVEN the same platform symbol (ctypes differential, 0 mismatches),
+  so bit-equality holds BY CONSTRUCTION per platform — fenced at
+  runtime by the burn-in + the ±3-ULP branch-boundary golden pins
+  through the public PSR); (b) inv_cdf = the AS241 transcription from
+  CPython statistics.py, 0 mismatches over 2.5M points; (c) the WFO
+  Sharpe REPLICATES numpy's internal pairwise reduction order
+  (n<8 sequential · ≤128 eight-accumulator · recursive `n2 -= n2 % 8`
+  split; 0/4,000 trials — claim class REPLICATED, a numpy-internal
+  order change autoreverts at burn-in, never drifts); (d) PSR/SR_0/PBO
+  cores are STRUCTURAL op-for-op transcriptions (plain-float tails, no
+  fsum), with the PBO combination cap 2,000,000 (Err → oracle, never an
+  unbounded alloc under `panic=abort`) + the itertools-order
+  lexicographic enumerator + in-crate naive twins + proptest
+  differentials. STRETCH lockbox.py DROPPED + disclosed (cold
+  once-per-run path riding `np.cumsum`/`np.maximum.accumulate` —
+  further numpy-internal orders with no payoff; beside the already-OUT
+  spa.py + monte_carlo.py seeded-PCG64 streams + the cpcv remainder).
+  HARD EXCLUSIONS honored with ZERO edits (open-PR-owned:
+  metrics/compute.py #1605 · cascade.py #1554/#1580 · types.py +
+  ranking/phrases.py #1574 · ranking/__init__.py #1478/#1544 ·
+  tiers/temporal). Seam extension APPEND-ONLY: 4 bindings + the shared
+  exact-type arg/result gates (`_numeric_as_f64` · `_count_as_i64` ·
+  `_flat_exact_floats` · `_valid_float_result`/`_valid_pbo_result`);
+  burn-in budgets psr/sr_max 16 join the pre-registered pbo 4 / wfo 16;
+  handshake same-commit (fenced lib.rs appends · `EXPECTED_BUILD.json`
+  17→21 · `.pyi` · the facade golden `_EXPECTED_SURFACE` +4 — the
+  documented deliberate-surface-change path); the PBO binding engages
+  only on the default `sharpe_from_moments` evaluator (custom
+  evaluators honestly stay Python on both arms, pinned). DISCLOSED
+  DEVIATION: the T12 brief named `BRUTEX_METRICS_TAILS_RUST`; the
+  landed `BRUTEX_STATS_RUST` seam is extended instead (Golden Rule #11
+  COMMON — a rename is a one-constant change if the coordinator
+  overrides). GATES (all executed): cargo fmt/clippy `-D warnings`/test
+  `--release --locked` 636 green; the four touched modules 100.00%
+  line+branch the ci.yml way (rust_stats 348/138 · deflated_sharpe
+  56/20 · pbo 115/46 · wfo 84/26); unit 210+39+20+37 · NEW goldens 12
+  (merge-base-frozen literals, both flags, anti-vacuous engagement) ·
+  NEW hypothesis differential 10 (bit + exception parity over hostile
+  corpora incl. the erf ULP brackets) · facade 4 · neighbors 383
+  unmodified-green; ruff/ruff-format clean; `mypy --strict` 0 new (9
+  pre-existing, stash-diffed); pyright 0 errors on touched files.
+  HONEST: the same-symbol law is PER-PLATFORM (golden-fenced wherever
+  the suite runs); cargo-mutants not re-measured in this sandbox (the
+  binary absent) — `src/stats/*.rs` already sits in the fno-math
+  `examine_globs`, so the weekly mutation matrix covers the new modules
+  automatically; pbo.py/wfo.py stay out of the python mutmut loop
+  (pre-existing scope; rust_stats + deflated_sharpe already paired);
+  NO speedup claimed — the flag ships OFF, a default flip needs its own
+  DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run identity
+  untouched; no new routes, no new env vars.)
+  Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
   first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
@@ -10159,7 +10257,25 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-u128-enum-kernel`
+- **Active feature branch:** `claude/metrics-tails-rust`
+  (DEC-METRICS-RUST-STATS-002, MIGRATION.md #1977 — slice 6 PR-2, the
+  metrics-TAILS Rust conversion: PSR + expected-max Sharpe + PBO/CSCV +
+  the WFO walk pass-count on `rust/fno-math` behind the SAME landed
+  default-OFF `BRUTEX_STATS_RUST` seam (burn-in bit-compare + autorevert;
+  Python tails retained forever as the live oracles; overfit.py served
+  TRANSITIVELY with zero edits — no ranking-package touch); bit-exact by
+  proof — the SAME-SYMBOL libm erf FFI (fdlibm transcription
+  measurement-refuted; CPython `math.erf` proven the platform symbol,
+  ULP-bracket golden-pinned), the AS241 inv_cdf transcription (0/2.5M),
+  the numpy-pairwise-REPLICATED WFO sum (0/4,000; burn-in is the fence),
+  STRUCTURAL PSR/SR_0/PBO transcriptions; lockbox stretch DROPPED +
+  disclosed; hard exclusions honored with zero edits (compute.py #1605 ·
+  cascade.py #1554/#1580 · types/phrases #1574 · ranking/__init__.py
+  #1478/#1544); flag ships OFF — flag-OFF byte-identical,
+  bomb-kernel-pinned; no speedup claimed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1977 for the full blurb)
+  Earlier: `claude/rust-u128-enum-kernel`
   (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared

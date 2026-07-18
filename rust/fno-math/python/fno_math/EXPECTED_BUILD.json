@@ -18,6 +18,10 @@
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
     "stats_cpcv_pass_count",
+    "stats_expected_max_sharpe",
+    "stats_pbo_cscv",
+    "stats_psr",
+    "stats_wfo_pass_count",
     "sweep_drawdown_stats"
   ]
 }
