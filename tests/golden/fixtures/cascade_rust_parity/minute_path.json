@@ -1,0 +1,283 @@
+{
+  "dates": [
+    {
+      "expect": [
+        "2024-01-02",
+        "2024-01-03"
+      ],
+      "name": "two_days_shuffle_dedup"
+    },
+    {
+      "expect": [],
+      "name": "empty"
+    },
+    {
+      "expect": [
+        "2024-01-03"
+      ],
+      "name": "utc_date_differs_from_ist_date"
+    }
+  ],
+  "drawdowns": [
+    {
+      "expect": {
+        "max_dd_paisa": 150,
+        "max_dd_pct": 0.6
+      },
+      "name": "independent_pct_vs_paisa_maxima"
+    },
+    {
+      "expect": {
+        "max_dd_paisa": 500,
+        "max_dd_pct": 0.4166666666666667
+      },
+      "name": "none_lows_close_only"
+    },
+    {
+      "expect": {
+        "max_dd_paisa": 200,
+        "max_dd_pct": 0.4
+      },
+      "name": "no_start_equity_peak_seeds_from_first_close"
+    },
+    {
+      "expect": {
+        "max_dd_paisa": 0,
+        "max_dd_pct": 0.0
+      },
+      "name": "empty_points"
+    },
+    {
+      "expect": {
+        "max_dd_paisa": 150,
+        "max_dd_pct": 0.0
+      },
+      "name": "nonpositive_peak_pct_zero"
+    },
+    {
+      "expect": {
+        "max_dd_paisa": 0,
+        "max_dd_pct": 0.0
+      },
+      "name": "monotonic_up_no_drawdown"
+    }
+  ],
+  "equity": [
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            997500,
+            994570,
+            2
+          ],
+          [
+            "2024-01-03",
+            917500,
+            917500,
+            1
+          ]
+        ],
+        "status": "ok"
+      },
+      "name": "two_sessions_three_trades"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            997500,
+            null,
+            2
+          ],
+          [
+            "2024-01-03",
+            997500,
+            null,
+            0
+          ]
+        ],
+        "status": "no_1m_data"
+      },
+      "name": "no_index_close_only"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            495000,
+            null,
+            1
+          ]
+        ],
+        "status": "no_1m_data"
+      },
+      "name": "empty_index_close_only"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            995000,
+            995000,
+            1
+          ],
+          [
+            "2024-01-03",
+            915000,
+            null,
+            1
+          ]
+        ],
+        "status": "partial"
+      },
+      "name": "partial_session_without_bars"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            750000,
+            750000,
+            0
+          ],
+          [
+            "2024-01-03",
+            750000,
+            750000,
+            0
+          ]
+        ],
+        "status": "ok"
+      },
+      "name": "zero_trades_flat_series"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            999000,
+            1000000,
+            1
+          ]
+        ],
+        "status": "ok"
+      },
+      "name": "exit_minute_absent_end_of_session_flush"
+    },
+    {
+      "expect": {
+        "points": [
+          [
+            "2024-01-02",
+            995000,
+            995000,
+            1
+          ],
+          [
+            "2024-01-03",
+            995000,
+            null,
+            0
+          ],
+          [
+            "2024-01-04",
+            995000,
+            null,
+            0
+          ]
+        ],
+        "status": "partial"
+      },
+      "name": "trailing_empty_session"
+    }
+  ],
+  "excursions": [
+    {
+      "expect": {
+        "mae_paisa": 320,
+        "mfe_paisa": 300,
+        "status": "ok"
+      },
+      "name": "buy_full_range"
+    },
+    {
+      "expect": {
+        "mae_paisa": 275,
+        "mfe_paisa": 300,
+        "status": "ok"
+      },
+      "name": "buy_open_only_exit"
+    },
+    {
+      "expect": {
+        "mae_paisa": 250,
+        "mfe_paisa": 325,
+        "status": "ok"
+      },
+      "name": "sell_full_range"
+    },
+    {
+      "expect": {
+        "mae_paisa": 250,
+        "mfe_paisa": 325,
+        "status": "ok"
+      },
+      "name": "sell_open_only_exit"
+    },
+    {
+      "expect": {
+        "mae_paisa": null,
+        "mfe_paisa": null,
+        "status": "no_1m_data"
+      },
+      "name": "no_1m_data"
+    },
+    {
+      "expect": {
+        "mae_paisa": 275,
+        "mfe_paisa": 300,
+        "status": "partial"
+      },
+      "name": "partial_missing_entry_minute"
+    },
+    {
+      "expect": {
+        "mae_paisa": 300,
+        "mfe_paisa": 320,
+        "status": "partial"
+      },
+      "name": "partial_missing_exit_minute"
+    },
+    {
+      "expect": {
+        "mae_paisa": 220,
+        "mfe_paisa": 350,
+        "status": "ok"
+      },
+      "name": "holey_interior_still_ok"
+    },
+    {
+      "expect": {
+        "mae_paisa": 0,
+        "mfe_paisa": 0,
+        "status": "ok"
+      },
+      "name": "single_minute_trade_open_only"
+    },
+    {
+      "expect": {
+        "mae_paisa": 0,
+        "mfe_paisa": 0,
+        "status": "ok"
+      },
+      "name": "zero_excursions_never_negative"
+    }
+  ]
+}

@@ -1,0 +1,730 @@
+[
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "5minute"
+          },
+          "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2": {
+            "candidate_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.25,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": false,
+            "provisional": false,
+            "rejected_at": "dsr",
+            "survivor_rank": null,
+            "tf": "5minute"
+          },
+          "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+            "candidate_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "cascade_composite": -0.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "SENSEX",
+            "passed": true,
+            "provisional": true,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 2,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "5minute"
+          },
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "SENSEX",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 3,
+        "n_survived": 2,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-1",
+        "version": 1
+      },
+      "warn": null
+    },
+    "name": "clean_two_groups"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 40,
+        "n_survived": 3,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-2",
+        "version": 1
+      },
+      "warn": null
+    },
+    "name": "root_counts_present"
+  },
+  {
+    "expect": {
+      "error": "cascade report root is not a JSON object"
+    },
+    "name": "root_not_mapping"
+  },
+  {
+    "expect": {
+      "error": "cascade report version True is not a genuine integer"
+    },
+    "name": "version_bool_pun"
+  },
+  {
+    "expect": {
+      "error": "cascade report version 1.0 is not a genuine integer"
+    },
+    "name": "version_float"
+  },
+  {
+    "expect": {
+      "error": "cascade report version 99 is NEWER than the supported 1 \u2014 unknown future semantics are never guessed"
+    },
+    "name": "version_future"
+  },
+  {
+    "expect": {
+      "error": "cascade report sweep_id is missing or not a non-empty string"
+    },
+    "name": "sweep_id_missing"
+  },
+  {
+    "expect": {
+      "error": "cascade report sweep_id is missing or not a non-empty string"
+    },
+    "name": "sweep_id_empty"
+  },
+  {
+    "expect": {
+      "error": "cascade report groups is not a list"
+    },
+    "name": "groups_not_list"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "BANKNIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "3minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "BANKNIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "3minute"
+          }
+        ],
+        "n_input": 1,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 7,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-3",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "group entry is not an object",
+          "group lacks str instrument/tf or an object report",
+          "group lacks str instrument/tf or an object report",
+          "group lacks str instrument/tf or an object report",
+          "NIFTY/1minute: report lacks list verdicts / int headline counts"
+        ],
+        "duplicate_ids": 0,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 7,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-3"
+      }
+    },
+    "name": "group_junk_mix"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+            "candidate_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "",
+            "instrument": "NIFTY",
+            "passed": false,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": null,
+            "tf": "5minute"
+          },
+          "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": {
+            "candidate_id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "cascade_composite": null,
+            "cpcv_pass_rate": null,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": false,
+            "provisional": false,
+            "rejected_at": "cpcv",
+            "survivor_rank": null,
+            "tf": "5minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 7,
+            "n_survived": 0,
+            "pool_pbo": 0.25,
+            "tf": "5minute"
+          }
+        ],
+        "n_input": 7,
+        "n_survived": 0,
+        "nulled_values": 3,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 5,
+        "sweep_id": "sweep-4",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "NIFTY/5minute: verdict entry is not an object",
+          "NIFTY/5minute: verdict lacks a non-empty candidate_id",
+          "NIFTY/5minute: verdict lacks a non-empty candidate_id",
+          "NIFTY/5minute: verdict 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' passed is not a bool",
+          "NIFTY/5minute: passed verdict 'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2' carries rejected_at"
+        ],
+        "duplicate_ids": 0,
+        "nulled_values": 3,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 5,
+        "sweep_id": "sweep-4"
+      }
+    },
+    "name": "verdict_junk_mix"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": null,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          },
+          "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2": {
+            "candidate_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "cascade_composite": null,
+            "cpcv_pass_rate": null,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 2,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 2,
+            "n_survived": 2,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 2,
+        "n_survived": 2,
+        "nulled_values": 3,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-5",
+        "version": 1
+      },
+      "warn": {
+        "details": [],
+        "duplicate_ids": 0,
+        "nulled_values": 3,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-5"
+      }
+    },
+    "name": "rate_nan_and_negative"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        ],
+        "by_candidate": {},
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 2,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 2,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-6",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "NIFTY/1minute: duplicate candidate_id 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'"
+        ],
+        "duplicate_ids": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-6"
+      }
+    },
+    "name": "dup_within_group"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        ],
+        "by_candidate": {},
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          },
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "SENSEX",
+            "n_input": 1,
+            "n_survived": 0,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 2,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-7",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "duplicate candidate_id 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' across groups"
+        ],
+        "duplicate_ids": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-7"
+      }
+    },
+    "name": "dup_across_groups"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        ],
+        "by_candidate": {},
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          },
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "SENSEX",
+            "n_input": 2,
+            "n_survived": 0,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 3,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 1,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-8",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "SENSEX/1minute: duplicate candidate_id 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'",
+          "SENSEX/1minute: passed verdict 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' absent from survivor_ids"
+        ],
+        "duplicate_ids": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 1,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-8"
+      }
+    },
+    "name": "later_group_dup_sweeps_earlier"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          },
+          "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2": {
+            "candidate_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": false,
+            "provisional": false,
+            "rejected_at": "dsr",
+            "survivor_rank": null,
+            "tf": "1minute"
+          },
+          "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+            "candidate_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": null,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 3,
+            "n_survived": 5,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 3,
+        "n_survived": 5,
+        "nulled_values": 0,
+        "rank_inconsistencies": 5,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-9",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "NIFTY/1minute: survivor_id 'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2' has no passed verdict",
+          "NIFTY/1minute: survivor_id 'ghost' has no passed verdict",
+          "NIFTY/1minute: survivor_id 42 has no passed verdict",
+          "NIFTY/1minute: survivor_id None has no passed verdict",
+          "NIFTY/1minute: passed verdict 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1' absent from survivor_ids"
+        ],
+        "duplicate_ids": 0,
+        "nulled_values": 0,
+        "rank_inconsistencies": 5,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-9"
+      }
+    },
+    "name": "survivor_inconsistencies"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "",
+            "dsr_n_trials": null,
+            "dsr_trial_variance": null,
+            "instrument": "NIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": null,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 1,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-10",
+        "version": 1
+      },
+      "warn": null
+    },
+    "name": "group_stats_junk_numerics"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {},
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 9,
+            "n_survived": 0,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 9,
+        "n_survived": 0,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 9,
+        "sweep_id": "sweep-11",
+        "version": 1
+      },
+      "warn": {
+        "details": [
+          "NIFTY/1minute: verdict 'junk-0' passed is not a bool",
+          "NIFTY/1minute: verdict 'junk-1' passed is not a bool",
+          "NIFTY/1minute: verdict 'junk-2' passed is not a bool",
+          "NIFTY/1minute: verdict 'junk-3' passed is not a bool",
+          "NIFTY/1minute: verdict 'junk-4' passed is not a bool"
+        ],
+        "duplicate_ids": 0,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 9,
+        "sweep_id": "sweep-11"
+      }
+    },
+    "name": "warn_detail_cap_overflow"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {},
+        "groups": [],
+        "n_input": 0,
+        "n_survived": 0,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-12",
+        "version": 1
+      },
+      "warn": null
+    },
+    "name": "empty_groups"
+  },
+  {
+    "expect": {
+      "join": {
+        "ambiguous_ids": [],
+        "by_candidate": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+            "candidate_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "cascade_composite": 1.5,
+            "cpcv_pass_rate": 0.75,
+            "detail": "d",
+            "instrument": "NIFTY",
+            "passed": true,
+            "provisional": false,
+            "rejected_at": null,
+            "survivor_rank": 1,
+            "tf": "1minute"
+          }
+        },
+        "groups": [
+          {
+            "dsr_n_source": "pool",
+            "dsr_n_trials": 12,
+            "dsr_trial_variance": 0.5,
+            "instrument": "NIFTY",
+            "n_input": 1,
+            "n_survived": 1,
+            "pool_pbo": 0.25,
+            "tf": "1minute"
+          }
+        ],
+        "n_input": 1,
+        "n_survived": 1,
+        "nulled_values": 0,
+        "rank_inconsistencies": 0,
+        "skipped_groups": 0,
+        "skipped_verdicts": 0,
+        "sweep_id": "sweep-13",
+        "version": 0
+      },
+      "warn": null
+    },
+    "name": "version_zero_legacy"
+  }
+]
