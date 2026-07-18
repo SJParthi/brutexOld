@@ -519,7 +519,16 @@ class AutoPullScheduler:
     # ── durable state (in-memory mirror over the atomic sidecar) ─────────────
 
     def _state_locked(self) -> AutoPullState:
-        """The current state — first access loads the sidecar (never raises)."""
+        """The current state — first access loads the sidecar.
+
+        Never raises for any FILE shape (corrupt/unreadable ⇒ DISARMED via
+        :meth:`AutoPullStateStore.load`), but PROPAGATES the typed
+        :class:`~brutex.pull_state_rust.PullStateKernelError` /
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError` from the
+        Rust state-parse lattice on a present decodable file when the decision
+        kernel is unavailable or the removed ``BRUTEX_PULL_STATE_RUST`` knob is
+        still set (fail-closed, DEC-RUST-PULL-STATE-001).
+        """
         if self._state is None:
             self._state = self._store.load()
         return self._state

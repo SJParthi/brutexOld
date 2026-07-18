@@ -487,13 +487,29 @@ class PullIntentStore:
         return True
 
     def load(self) -> PullIntent | None:
-        """Read the persisted intent, or ``None`` — never raises.
+        """Read the persisted intent, or ``None`` — never raises for any FILE shape.
 
         A missing file is the normal "no pull died" answer. An unreadable file
         logs ``pull_intent.read_failed`` and reads as absent. A corrupt file
         (non-JSON / wrong shape) logs ``pull_intent.corrupt``, is DELETED
         best-effort (it can never become readable again and must not re-trip
-        every boot), and reads as absent — a boot can never crash here.
+        every boot), and reads as absent.
+
+        Flip-phase exception (DEC-RUST-PULL-STATE-001, fail-closed): the
+        shape-verdict lattice is the Rust kernel, so on a PRESENT decodable
+        payload :meth:`PullIntent.from_payload` consults it — a missing/stale/
+        raising wheel raises the typed
+        :class:`~brutex.pull_state_rust.PullStateKernelError` and a still-SET
+        removed ``BRUTEX_PULL_STATE_RUST`` knob raises
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError` (a
+        ``ValueError`` subclass), and BOTH PROPAGATE out of this method — the
+        ``from_payload`` call sits OUTSIDE the JSON-decode ``try`` on purpose:
+        folding a broken decision plane into ``None`` would fail OPEN (a
+        persisted spot-only scope silently dropped, widening the pull). The
+        boot helpers (:func:`run_auto_resume` and the orchestrator's
+        ``maybe_resume_on_boot``) let the typed refusal propagate fail-closed
+        rather than resume on a broken kernel; an ABSENT/corrupt file never
+        consults the kernel and reads as absent exactly as before.
 
         Hardened on the #1614 round-6 loader template via the shared
         :func:`read_sidecar_bytes` (refuter round 7 P-1,

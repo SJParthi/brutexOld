@@ -143,18 +143,25 @@ class ProgressSnapshot:
     open_ended: bool = False
 
     # --- pull_progress (flip phase) — the `DEC-RUST-PULL-STATE-001`
-    # derived-metrics plane. ONE kernel consult serves all four derived
-    # properties (the deleted Python oracle bodies' laws live in
+    # derived-metrics plane. ONE consult computes all four derived values in
+    # a single call, but it is invoked once PER derived-property ACCESS: the
+    # snapshot is ``frozen=True, slots=True`` and carries no memo, so ``percent``
+    # / ``elapsed_seconds`` / ``units_per_sec`` / ``eta_seconds`` each consult
+    # the kernel independently (``to_dict`` reads three of them ⇒ three
+    # consults; the deleted Python oracle bodies' laws live in
     # rust/brutex-pull-state — bit-identical, golden-pinned). The counter
     # state machine, ``to_dict``, ``running`` and every string stay Python.
     def _rust_derived(self) -> tuple[float, float, float, float | None]:
-        """One fail-closed kernel consult for all four derived metrics.
+        """One fail-closed kernel consult returning all four derived metrics.
 
-        Returns ``(percent, elapsed_seconds, units_per_sec, eta_seconds)``
-        bit-identical to the pre-flip oracle properties (``eta_seconds``
-        already folded to ``float | None``). The string comparison stays
-        Python — the kernel receives the PRE-COMPUTED running verdict. A
-        kernel fault or an out-of-domain snapshot raises
+        A SINGLE call computes ``(percent, elapsed_seconds, units_per_sec,
+        eta_seconds)`` bit-identical to the pre-flip oracle properties
+        (``eta_seconds`` already folded to ``float | None``), but each derived
+        property calls this once per access — the frozen+slots snapshot holds
+        no per-value memo, so accessing several derived metrics makes several
+        consults. The string comparison stays Python — the kernel receives the
+        PRE-COMPUTED running verdict. A kernel fault or an out-of-domain
+        snapshot raises
         :class:`~brutex.pull_state_rust.PullStateKernelError`.
         """
         return _pull_state_rust.rust_progress_derived(
