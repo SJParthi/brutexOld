@@ -444,6 +444,51 @@ class TestLeaderboardRouteRollup:
         assert again == legacy
         assert rr.rollup_stamp_path(sweeps_root).read_bytes() == stamp_bytes
 
+    def test_floored_stale_scan_never_feeds_hook_c(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Hook-C ``scan_computed`` freshness witness (the refold
+        composition fix over DEC-NAV-CACHES-FLOOR-REKEY-001): a level-1 slot
+        serve that did NOT compute the legacy scan in THIS request (the
+        floored/STALE cache-serve shape a mid-job generation move produces)
+        must NEVER feed ``rebuild_rollup_from_scan_best_effort`` — rebuilding
+        from a stale scan would stamp a FRESH glob + rev sweep over rows that
+        never folded the newer stores, so a later poll would serve it FRESH.
+
+        Fails-before: without the witness the route's condition
+        (``serve.scan is None`` + the once-per-revision gate) fires Hook C on
+        this exact request and writes the rollup artifact.
+        """
+        from brutex.dashboard.movers_cache import MoversSnapshotCache
+
+        lake_root = store.path.parent
+        _write_store(lake_root, [_row(1)])
+        sweeps_root = lake_root / SWEEPS_DIRNAME
+        assert not rr.rollup_parquet_path(sweeps_root).exists()
+        stale_scan = load_sweep_scan(lake_root)
+        real_get = MoversSnapshotCache.get_or_compute
+
+        def _floored(self: MoversSnapshotCache, key: str, **kwargs: object) -> object:
+            if key == "sweep_scan":
+                return stale_scan  # served WITHOUT computing — the floor shape
+            return real_get(self, key, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(MoversSnapshotCache, "get_or_compute", _floored)
+        rebuilds = {"n": 0}
+        real_rebuild = rr.rebuild_rollup_from_scan_best_effort
+
+        def _spy(root: Path, scan: SweepScan) -> bool:
+            rebuilds["n"] += 1
+            return real_rebuild(root, scan)
+
+        # The route imports the symbol at CALL time from the module, so the
+        # module-attr patch intercepts the real wiring.
+        monkeypatch.setattr(rr, "rebuild_rollup_from_scan_best_effort", _spy)
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert payload["available"] is True  # the stale scan still serves
+        assert rebuilds["n"] == 0  # no computed scan ⇒ Hook C never fires
+        assert not rr.rollup_parquet_path(sweeps_root).exists()
+
     def test_settled_tree_repeat_revision_serves_the_rollup(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:

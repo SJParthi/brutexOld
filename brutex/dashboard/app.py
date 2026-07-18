@@ -291,10 +291,12 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.dashboard.sweep_results_view import (
     SWEEPS_DIRNAME,
+    RollupServe,
     SweepScan,
     build_sweep_leaderboard,
     load_cascade_join_file,
     load_sweep_scan,
+    load_sweep_scan_via_rollup,
     resolve_preset_param,
     store_error_payload,
 )
@@ -2308,6 +2310,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             floor_bytes=_SWEEP_LEADERBOARD_CACHE_FLOOR_BYTES,
         ),
     )
+    # The rollup serve-path log gates (DEC-RESULTS-TOPK-ROLLUP-001, MINOR-2):
+    # `sweep_results.rollup_fallback` / `rollup_stale_served` are deduped per
+    # (revision, reason) through ONE LRU-bounded gate (the #1711 OutageGate
+    # precedent — a poll loop against one bad state logs ONCE, never per
+    # poll), and the Hook-C serve-side rebuild fires at most once per
+    # revision through its own gate. LogGate lives in the COMMON stdlib-only
+    # leaf (the PR #1436 CodeQL bidirectional-cycle fix) — imported from
+    # there, never from the engine rollup module.
+    from brutex.observability.log_gate import LogGate as _RollupLogGate
+
+    _rollup_log_gate = _RollupLogGate()
+    _rollup_rebuild_gate = _RollupLogGate()
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -8623,11 +8637,107 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # instance's pull-time adaptive floor (bounded, logged stale
             # serves) instead of paying the full scan per poll.
             gen = revision_generation(rev)
+            # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
+            # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
+            # tf / direction all ABSENT — an empty-string param is a
+            # DEGENERATE real filter and stays legacy). rank_by / preset /
+            # top are all rollup-servable (every axis is in the persisted
+            # union; top ≤ MAX_TOP_N=500 ≤ K=1000). The three-outcome ladder
+            # (fresh / stale-serve-with-note / legacy-fallback+rebuild) runs
+            # ONCE per revision generation (the level-1 slot below); repeat
+            # polls are level-2 payload hits. The slot rides the SAME stable-
+            # key + `revision_generation` doctrine as the legacy level-1 scan
+            # (DEC-NAV-CACHES-FLOOR-REKEY-001 — the branch-era rev-in-key
+            # fold is superseded by the generation bridge).
+            serve: RollupServe | None = None
+            if instrument is None and tf is None and direction is None:
+                serve = _sweep_leaderboard_cache.get_or_compute(
+                    "sweep_rollup",
+                    generation=gen,
+                    compute=lambda: load_sweep_scan_via_rollup(
+                        lake_root, rev=rev, log_gate=_rollup_log_gate
+                    ),
+                )
+            if serve is not None and serve.scan is not None:
+                rollup_scan = serve.scan
+                behind = serve.behind_stores
+                conflict = serve.conflict_suspect
+                key = (
+                    f"sweep_leaderboard|src=rollup"
+                    f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
+                    f"|b={behind}|c={int(conflict)}"
+                    f"|casc={casc_rev or 'outage'}|comp={comp_rev or 'outage'}"
+                )
+
+                def _rollup_payload() -> dict[str, Any]:
+                    # The rollup wire carries the SAME cascade + composite
+                    # decoration as the legacy level-2 build (the #1749 join
+                    # landed on main after the branch cut — a rollup serve
+                    # must never silently drop the verdicts/scores the legacy
+                    # wire carries). The composite slot is the SHARED level-1b
+                    # cache slot (same key + generation ⇒ one compute).
+                    payload = build_sweep_leaderboard(
+                        lake_root,
+                        rank_by=rank_by,
+                        top_n=top,
+                        scan=rollup_scan,
+                        preset=resolved_preset,
+                        cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
+                        composite=_sweep_leaderboard_cache.get_or_compute(
+                            "composite_index",
+                            generation=revision_generation(comp_rev or "outage"),
+                            compute=lambda: load_composite_index(sweeps_root),
+                        ),
+                    ).to_dict()
+                    # Honest additive staleness notes (MAJOR-1) — EMIT-ON-
+                    # nonzero/true so a FRESH serve's payload shape is
+                    # byte-identical to the legacy wire (parity-pinned).
+                    if behind > 0:
+                        payload["rollup_behind_stores"] = behind
+                    if conflict:
+                        payload["rollup_conflict_suspect"] = True
+                    return payload
+
+                return _sweep_leaderboard_cache.get_or_compute(
+                    key, generation=gen, compute=_rollup_payload
+                )
+            # Hook-C freshness witness (the refold composition fix over
+            # DEC-NAV-CACHES-FLOOR-REKEY-001): the level-1 slot below can be
+            # FLOOR-SERVED stale during a running job, and
+            # `rebuild_rollup_from_scan_best_effort` stamps a FRESH glob +
+            # rev sweep — rebuilding from a floored (stale) scan would
+            # mis-stamp the rollup as covering stores its rows never folded
+            # (a later poll would then serve it FRESH). Hook C therefore
+            # fires ONLY when the legacy scan was genuinely COMPUTED in this
+            # request (the branch-era rev-in-key fold made that implicit; the
+            # generation bridge does not).
+            scan_computed = False
+
+            def _legacy_scan() -> SweepScan:
+                nonlocal scan_computed
+                scan_computed = True
+                return load_sweep_scan(lake_root)
+
             scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
                 "sweep_scan",
                 generation=gen,
-                compute=lambda: load_sweep_scan(lake_root),
+                compute=_legacy_scan,
             )
+            if (
+                serve is not None
+                and serve.scan is None
+                and scan_computed
+                and _rollup_rebuild_gate.should_emit(("rebuild", rev))
+            ):
+                # Hook C (DEC-RESULTS-TOPK-ROLLUP-001): the fallback poll just
+                # built the full legacy scan anyway — write the rollup FROM it
+                # as a best-effort byproduct (fenced inside; at most once per
+                # revision via the gate), so the NEXT revision serves rollup-
+                # first and the system converges with Hooks A/B as pure
+                # latency optimizations.
+                from brutex.engine.results_rollup import rebuild_rollup_from_scan_best_effort
+
+                rebuild_rollup_from_scan_best_effort(lake_root / SWEEPS_DIRNAME, scan)
             # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
             # ONE composite-index read per `composite_index_revision` token —
             # the slot's generation rides the ONE `revision_generation` digest

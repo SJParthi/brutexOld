@@ -743,14 +743,67 @@ def _grid() -> Any:
         directions=[Side.BUY],
         k_values=[1],
         condition_bits=[0, 1, 2, 3, 4],
-        stop_losses=[80],
-        take_profits=[50],
+        # EOD-only exits — the ranked-fixture default under the ONE worst-case
+        # fill law (DEC-FILL-WORST-CASE-ONLY-001): a tight SL/TP over the
+        # wide-range synthetic bars of `_real_grid_bars` always fills at the
+        # adverse extreme and gate-rejects every combo (the
+        # test_engine_sweep_orchestrator/_sweep_run `_grid` twin).
+        stop_losses=[None],
+        take_profits=[None],
         proximities=[None],
         mode="A",
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
     )
+
+
+def _real_grid_bars(n_days: int = 45, per_day: int = 120) -> list[Any]:
+    """A mostly-up drift with every-5th-day DOWN sessions (the orchestrator twin).
+
+    The `TestFenceThroughRealGrid` input fixture, re-derived under the ONE
+    worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) — the twin of
+    `test_engine_sweep_orchestrator._trending_bars` / the sweep_run copy: a
+    BUY enters at the signal bar's HIGH and closes at the session boundary (the
+    #1743 ``session_gap`` retroactive close at the day-last bar's LOW). Up days
+    win despite the adverse haircut; every 5th day drifts DOWN and loses,
+    keeping ``profit_factor`` FINITE so :func:`brutex.ranking.passes_gates` can
+    pass, and 45 days clears MIN_TRADES=30 at ~one session-gap trade per day
+    per mask — so the grid genuinely ranks + persists rows for the hook to
+    roll up.
+    """
+    from datetime import UTC, datetime, timedelta, timezone
+
+    from brutex.data.models import CandleBar
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+
+    def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
+        ts = (
+            datetime(2026, 1, 5, 9, 16, tzinfo=ist) + timedelta(days=day, minutes=minute)
+        ).astimezone(UTC)
+        return CandleBar(
+            timestamp=ts,
+            open=Decimal(str(round(o, 2))),
+            high=Decimal(str(round(max(o, c) + 0.5, 2))),
+            low=Decimal(str(round(min(o, c) - 0.5, 2))),
+            close=Decimal(str(round(c, 2))),
+            volume=100,
+            open_interest=None,
+        )
+
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        down_day = d % 5 == 4
+        for m in range(per_day):
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
+            bars.append(_bar(d, m, price, close))
+            price = close
+    return bars
 
 
 class TestRollupMergeHook:
@@ -1111,37 +1164,11 @@ class TestFenceThroughRealGrid:
     ) -> None:
         """BLOCKER-1 regression: a mid-grid merge failure completes the grid
         with byte-identical sweep results and a latched, once-logged fence."""
-        from datetime import UTC, datetime, timedelta, timezone
-
-        from brutex.data.models import CandleBar
         from brutex.data.option_dedup import OptionDedupIndex
         from brutex.engine.sweep_orchestrator import make_store_for, run_sweep_grid
         from brutex.engine.sweep_run import ComboDedup
 
-        ist = timezone(timedelta(hours=5, minutes=30))
-
-        def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
-            ts = (
-                datetime(2026, 1, 5, 9, 16, tzinfo=ist) + timedelta(days=day, minutes=minute)
-            ).astimezone(UTC)
-            return CandleBar(
-                timestamp=ts,
-                open=Decimal(str(round(o, 2))),
-                high=Decimal(str(round(max(o, c) + 0.5, 2))),
-                low=Decimal(str(round(min(o, c) - 0.5, 2))),
-                close=Decimal(str(round(c, 2))),
-                volume=100,
-                open_interest=None,
-            )
-
-        bars: list[CandleBar] = []
-        for d in range(3):
-            price = 100.0
-            for m in range(60):
-                close = price + 0.6 if m % 3 else price - 0.3
-                bars.append(_bar(d, m, price, close))
-                price = close
-
+        bars = _real_grid_bars()
         grid = _grid()
 
         def _run(root: Path, hook: rr.RollupMergeHook | None) -> Any:
@@ -1182,34 +1209,11 @@ class TestFenceThroughRealGrid:
             assert (poisoned_root / rel).read_bytes() == (control_root / rel).read_bytes()
 
     def test_healthy_hook_through_the_real_grid_writes_the_rollup(self, tmp_path: Path) -> None:
-        from datetime import UTC, datetime, timedelta, timezone
-
-        from brutex.data.models import CandleBar
         from brutex.data.option_dedup import OptionDedupIndex
         from brutex.engine.sweep_orchestrator import make_store_for, run_sweep_grid
         from brutex.engine.sweep_run import ComboDedup
 
-        ist = timezone(timedelta(hours=5, minutes=30))
-        bars: list[CandleBar] = []
-        for d in range(3):
-            price = 100.0
-            for m in range(60):
-                close = price + 0.6 if m % 3 else price - 0.3
-                ts = (
-                    datetime(2026, 1, 5, 9, 16, tzinfo=ist) + timedelta(days=d, minutes=m)
-                ).astimezone(UTC)
-                bars.append(
-                    CandleBar(
-                        timestamp=ts,
-                        open=Decimal(str(round(price, 2))),
-                        high=Decimal(str(round(max(price, close) + 0.5, 2))),
-                        low=Decimal(str(round(min(price, close) - 0.5, 2))),
-                        close=Decimal(str(round(close, 2))),
-                        volume=100,
-                        open_interest=None,
-                    )
-                )
-                price = close
+        bars = _real_grid_bars()
         grid = _grid()
         root = tmp_path / "sweeps"
         root.mkdir()
