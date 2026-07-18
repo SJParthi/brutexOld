@@ -83,6 +83,11 @@ import blake3
 import structlog
 
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos
+from brutex.engine.exec_grid import (
+    EXEC_INTERVAL_LABEL,
+    EXECUTION_GRID_1M_NEXT_BAR,
+    ExecGridMap,
+)
 from brutex.engine.results_store import ResultsStore, ResultsStoreError, VixTrioConflictError
 from brutex.engine.stage1a import apply_1day_mask_for
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
@@ -889,6 +894,10 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     # worst-case store addresses with the frozen precise-era addresses, so a
     # resume could silently adopt precise-priced tuple stores.
     descriptor["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the execution-grid twin — eliding it would
+    # alias 1m-grid store addresses with the frozen decision-TF-era
+    # addresses, so a resume could silently adopt pre-grid tuple stores.
+    descriptor["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).
@@ -1054,6 +1063,7 @@ def run_one_tuple(
     store_quarantine: StoreQuarantine | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -1150,6 +1160,14 @@ def run_one_tuple(
                 f"(skip_empty=False)"
             )
         return None
+    # DEC-FILL-EXEC-GRID-1M-001 (design §1.2 D1): the 1-minute EXECUTION
+    # stream rides the SAME bars_for contract under the "1minute" label — at
+    # tf=1minute the two calls are the same key, so the memoised loader
+    # serves ONE object for both streams (no double load, no double fold).
+    exec_bars = bars_for(tuple_.instrument, EXEC_INTERVAL_LABEL)
+    exec_map = (
+        exec_map_for(tuple_.instrument, tuple_.tf.label) if exec_map_for is not None else None
+    )
     roll_schedule = (
         roll_schedule_by_instrument.get(tuple_.instrument)
         if roll_schedule_by_instrument is not None
@@ -1167,6 +1185,7 @@ def run_one_tuple(
             ema_source=tuple_.price_source.ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
+            exec_bars_1m=exec_bars,
         )
         if kernel_cache is not None
         else None
@@ -1179,6 +1198,8 @@ def run_one_tuple(
             store=store_for(tuple_),
             dedup=dedup,
             audit=audit,
+            exec_bars_1m=exec_bars,
+            exec_map=exec_map,
             kernel=kernel,
             # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
             # the digest is the same collision guard the store filename carries.
@@ -1228,6 +1249,7 @@ def run_sweep_grid(
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,
     diffcheck: TupleDiffCheck | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
     store_quarantine: StoreQuarantine | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
@@ -1406,6 +1428,7 @@ def run_sweep_grid(
                 store_quarantine=store_quarantine,
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
                 reference_stamper=reference_stamper,
+                exec_map_for=exec_map_for,
             )
         except (SweepComboError, VixTrioConflictError) as exc:
             tuples_failed += 1

@@ -168,6 +168,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
 from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_mem_budget import BUDGET_WORKERS_ENV, MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
@@ -915,6 +916,7 @@ def _run_tuple_in_worker(
     index: int,
     tuple_: SweepTuple,
     bars: Sequence[CandleBar],
+    exec_bars: Sequence[CandleBar],
 ) -> TupleWorkResult:
     """Run ONE tuple's UNCHANGED per-tuple body inside a worker; return plain data.
 
@@ -965,7 +967,10 @@ def _run_tuple_in_worker(
         summary = run_one_tuple(
             ctx.grid,
             tuple_,
-            bars_for=lambda _instrument, _tf: bars,
+            # The dual feed rides the SAME trivial loader (design §1.2 D1):
+            # the exec stream serves under the "1minute" label; at
+            # tf=1minute the dispatch passes ONE object for both.
+            bars_for=lambda _instrument, tf: exec_bars if tf == EXEC_INTERVAL_LABEL else bars,
             store_for=store_for,
             dedup=_NoDedup(),
             audit=collector,
@@ -1591,7 +1596,8 @@ class ParallelGridDriver:
             # fall through to dispatch; the checkpoint-tier WARN (if any) is
             # not duplicated here.
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
-        future = pool.submit(_run_tuple_in_worker, index, tuple_, bars)
+        exec_bars = self._bars_for(tuple_.instrument, EXEC_INTERVAL_LABEL)
+        future = pool.submit(_run_tuple_in_worker, index, tuple_, bars, exec_bars)
         pending[future] = _Dispatched(
             index=index, tuple_=tuple_, work=self._tuple_work(tuple_, len(bars))
         )

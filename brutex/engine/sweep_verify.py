@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
 from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -529,6 +530,23 @@ def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path)
                 f"worst_case is the only fill model; this generation's stores "
                 f"were priced under the deleted mode machinery and cannot be "
                 f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+        # DEC-FILL-EXEC-GRID-1M-001 (the fill_mode law's twin): every
+        # post-DEC context line's params ALSO carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An absent key (or any other
+        # token) identifies a decision-TF-era generation whose stores hold
+        # fills resolved on the DECISION bar — verifying them as 1m-grid
+        # results would launder pre-grid prices. Refuse LOUDLY; the
+        # remediation is a fresh sweep.
+        raw_grid = params.get("execution_grid") if isinstance(params, dict) else None
+        if raw_grid is None or str(raw_grid) != EXECUTION_GRID_1M_NEXT_BAR:
+            raise SweepVerifyError(
+                f"decision-TF-era sweep tree refused (DEC-FILL-EXEC-GRID-1M-001): "
+                f"{audit_path} (seq {entry.seq}) records "
+                f"execution_grid={raw_grid!r} — the 1-minute execution grid is "
+                f"the only fill grid; this generation's stores were priced on "
+                f"the retired decision-TF grid and cannot be verified. Re-run "
+                f"the sweep to produce a 1m-grid tree"
             )
 
 

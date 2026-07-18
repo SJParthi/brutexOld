@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -1397,6 +1398,12 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # twin) — the reader REFUSES a manifest without it (precise-era) so a
         # manual replay can never re-score precise-priced winners.
         "fill_mode": FillMode.WORST_CASE.value,
+        # DEC-FILL-EXEC-GRID-1M-001: the manifest carries the law BY
+        # DERIVATION, never payload (design §4.2/Q2) — the execution_grid key
+        # is the ONE schema addition; the reader REFUSES a manifest without
+        # it (decision-TF-era) so a manual replay can never re-score winners
+        # under the retired decision-TF fill grid.
+        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
         # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
         # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
         # when non-default, so a baseline manifest is byte-identical to a pre-axis one
@@ -1424,6 +1431,24 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
             "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
             f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
             "model; re-run the sweep to produce a worst-case manifest"
+        )
+    if (
+        raw.get("execution_grid") is None
+        or str(raw["execution_grid"]) != EXECUTION_GRID_1M_NEXT_BAR
+    ):
+        # DEC-FILL-EXEC-GRID-1M-001 legacy-artifact refusal (the fill_mode
+        # law's twin): the 1-minute execution grid is the ONLY fill grid and
+        # every post-DEC manifest carries the unconditional
+        # "execution_grid": "1m_next_bar" key. An ABSENT key identifies a
+        # decision-TF-era manifest whose winners were ranked under fills
+        # resolved on the DECISION bar — re-scoring them here would silently
+        # launder decision-TF-priced results as 1m-grid results. Refuse
+        # LOUDLY; the remediation is a fresh sweep.
+        raise CascadeWireError(
+            "decision-TF-era cascade manifest refused (DEC-FILL-EXEC-GRID-1M-001): "
+            f"execution_grid={raw.get('execution_grid')!r} — the 1-minute "
+            "execution grid is the only fill grid; re-run the sweep to produce "
+            "a 1m-grid manifest"
         )
     try:
         proximity = raw["proximity_bps"]

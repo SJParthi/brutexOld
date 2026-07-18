@@ -81,11 +81,31 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
 
 __all__ = [
+    "EXECUTION_GRID_1M_NEXT_BAR",
+    "EXEC_INTERVAL_LABEL",
     "ExecGridMap",
     "build_exec_grid_map",
+    "exec_window_slice",
 ]
 
 _LOG = structlog.get_logger(__name__)
+
+#: The canonical run-identity token for the PR-B 1-minute execution grid
+#: (design §4.2, DEC-FILL-EXEC-GRID-1M-001). Emitted UNCONDITIONALLY as
+#: ``params["execution_grid"]`` by ``canonical_trade_params`` and mirrored at
+#: the exact PR-A ``fill_mode`` mirror set (grid descriptor, tuple cache
+#: params, tuple store digest, cascade manifest spec, sweep-verify's recorded
+#: generation gate). ONE source of the literal (CLAUDE.md §11 COMMON): every
+#: emitter and every refusal law imports this name — a drifted spelling can
+#: never silently alias a decision-TF-era identity.
+EXECUTION_GRID_1M_NEXT_BAR: Final[str] = "1m_next_bar"
+
+#: The lake interval label of the EXECUTION stream (design §1.2 D1): the
+#: preload loads every swept symbol's ``interval_list ∪ {"1minute"}`` into the
+#: SAME slices mapping, and every spine consumer fetches the exec stream via
+#: ``bars_for(symbol, EXEC_INTERVAL_LABEL)`` — at tf=1minute the key is
+#: identical, so no double load and no double snapshot fold.
+EXEC_INTERVAL_LABEL: Final[str] = "1minute"
 
 #: Cap on per-class build WARNs (`exec_grid.*`) — everything past it rolls
 #: into ONE ``*_suppressed`` summary per class (the house
@@ -380,3 +400,37 @@ def build_exec_grid_map(
         distance_refused=tuple(distance_refused),
         cross_session_dropped=tuple(cross_session_dropped),
     )
+
+
+def exec_window_slice(
+    decision_window: Sequence[CandleBar],
+    exec_bars_1m: Sequence[CandleBar],
+) -> tuple[int, int]:
+    """Return ``[lo, hi)`` bounds of the exec-stream sub-window serving *decision_window*.
+
+    The dual-stream WINDOW-CUT law (design §7.2/Q3 — ONE boundary applied to
+    BOTH streams): a sliced decision window (a walk-forward fold, an
+    out-of-sample split, a Stage-3 train slice) is served by exactly the
+    execution bars from the window's FIRST decision label through the END of
+    the LAST decision bar's IST session. Nothing earlier can ever fill (the
+    earliest fill instant is ``first_label + tf``); nothing later can either
+    (the slide law is session-bounded — a fill never crosses out of the last
+    decision bar's session, §2.9), so the cut is loss-free by construction.
+
+    Pure UTC/IST-boundary arithmetic — two ``bisect`` probes over the exec
+    timestamps, ``O(N_1m)`` to materialise the key list (paid per call; the
+    callers are per-fold/per-split seams, never per mask). An empty decision
+    window returns ``(0, 0)``.
+    """
+    if not decision_window:
+        return (0, 0)
+    from bisect import bisect_left
+
+    ts_keys = [bar.timestamp for bar in exec_bars_1m]
+    lo = bisect_left(ts_keys, decision_window[0].timestamp)
+    last_day_ist = decision_window[-1].timestamp.astimezone(IST).date()
+    next_midnight_ist = datetime(
+        last_day_ist.year, last_day_ist.month, last_day_ist.day, tzinfo=IST
+    ) + timedelta(days=1)
+    hi = bisect_left(ts_keys, next_midnight_ist, lo)
+    return (lo, hi)

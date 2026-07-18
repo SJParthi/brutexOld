@@ -936,6 +936,17 @@ class ResidentTradeSim:
         return len(self._exec_bars)
 
     @property
+    def exec_bars(self) -> tuple[CandleBar, ...]:
+        """The resident 1-minute EXECUTION stream (the fill/walk domain).
+
+        PUBLIC so the sweep spine's metrics tail validates each mask's exit
+        1m indices against the SAME stream the kernel walked
+        (DEC-FILL-EXEC-GRID-1M-001 §3.8) — never a second copy that could
+        drift from the resident window.
+        """
+        return self._exec_bars
+
+    @property
     def exec_map(self) -> ExecGridMap:
         """The window's :class:`~brutex.engine.exec_grid.ExecGridMap`.
 

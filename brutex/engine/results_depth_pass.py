@@ -86,6 +86,7 @@ import structlog
 
 from brutex.engine.baseline import baseline_filename, compute_baseline, write_baseline
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.minute_path import MinuteIndex
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.results_store import ResultsStore
@@ -231,6 +232,7 @@ class _InstrumentContext:
     """Per-instrument reference context, built once and reused across tuples."""
 
     minute_index: MinuteIndex | None
+    minute_bars: Sequence[CandleBar]
     lens: SessionLens
 
 
@@ -376,6 +378,19 @@ def _build_tuple_sidecars(
         vwap_source=tuple_.price_source.vwap_source,
         ema_source=tuple_.price_source.ema_source,
     )
+    # DEC-FILL-EXEC-GRID-1M-001: the re-simulation prices on the SAME
+    # 1-minute execution stream the sweep filled on — the minute bars already
+    # loaded for MAE/MFE double as the exec stream (one load, two consumers).
+    # An absent 1m stream makes the 1m-grid re-sim IMPOSSIBLE — refuse loudly
+    # (the per-tuple fence records tuples_errored), never re-sim on a
+    # fabricated stream (correct-or-absent).
+    if not context.minute_bars:
+        raise ResultsDepthError(
+            f"no 1-minute bars for {tuple_.instrument!r} — the 1m execution-grid "
+            "re-simulation (DEC-FILL-EXEC-GRID-1M-001) requires the same 1-minute "
+            "stream the sweep filled on; re-pull the 1-minute lake"
+        )
+    exec_map = build_exec_grid_map(bars, context.minute_bars, tf_minutes=tuple_.tf.minutes)
     captures = []
     aggs: list[ComboAggregate] = []
     for row in rows:
@@ -386,6 +401,8 @@ def _build_tuple_sidecars(
             tf_minutes=tuple_.tf.minutes,
             sl_paisa=tuple_.sl_paisa,
             tp_paisa=tuple_.tp_paisa,
+            exec_bars_1m=context.minute_bars,
+            exec_map=exec_map,
             minute_index=context.minute_index,
             stamper=stamper,
             start_equity_paisa=grid.start_equity_paisa,
@@ -453,6 +470,15 @@ def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
     records: list[ComboAggregate] = []
     for record in df.iter_rows(named=True):
         record.setdefault("exits_session_gap", 0)
+        # The DEC-FILL-EXEC-GRID-1M-001 counter family rides the SAME
+        # presence-tolerant template: a pre-1m-grid aggs sidecar predates the
+        # deferral/collision/slide machinery entirely, so 0 is factually the
+        # true count of those EVENTS in that old artifact (never fabricated).
+        record.setdefault("exits_deferred", 0)
+        record.setdefault("signals_dropped_collision", 0)
+        record.setdefault("fill_slid_minutes", 0)
+        record.setdefault("exit_fill_slid_minutes", 0)
+        record.setdefault("forced_fill_slid_minutes", 0)
         records.append(ComboAggregate(**record))
     return records
 
@@ -635,7 +661,11 @@ def run_results_depth_pass(
             )
         daily_bars = None if daily_bars_for is None else daily_bars_for(instrument)
         lens = build_session_lens(daily_bars if daily_bars else (), instrument=instrument)
-        context = _InstrumentContext(minute_index=minute_index, lens=lens)
+        context = _InstrumentContext(
+            minute_index=minute_index,
+            minute_bars=tuple(minute_bars) if minute_bars else (),
+            lens=lens,
+        )
         contexts[instrument] = context
         return context
 

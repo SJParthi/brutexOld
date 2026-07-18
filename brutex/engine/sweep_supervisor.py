@@ -111,6 +111,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import blake3
 import structlog
 
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR, ExecGridMap
 from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -400,6 +401,10 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     # mirror) — eliding it would alias worst-case checkpoints with the frozen
     # precise-era grid identities, so a resume could adopt precise work.
     descriptor["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the 1m-execution-grid twin of the fill_mode
+    # key — eliding it would alias PR-B checkpoints with the frozen
+    # decision-TF-era grid identities, so a resume could adopt pre-grid work.
+    descriptor["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return descriptor
 
 
@@ -501,6 +506,10 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     # without it would falsely skip a worst-case tuple as already-done
     # precise-era work (the fib_anchor precedent, elision retired).
     params["fill_mode"] = FillMode.WORST_CASE.value
+    # DEC-FILL-EXEC-GRID-1M-001: the execution-grid twin — a cache-skip keyed
+    # without it would falsely skip a 1m-grid tuple as already-done
+    # decision-TF-era work.
+    params["execution_grid"] = EXECUTION_GRID_1M_NEXT_BAR
     return params
 
 
@@ -609,6 +618,7 @@ def run_supervised_grid(
     store_path_for: Callable[[SweepTuple], Path] | None = None,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    exec_map_for: Callable[[str, str], ExecGridMap] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -1028,6 +1038,7 @@ def run_supervised_grid(
                     store_quarantine=store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    exec_map_for=exec_map_for,
                 )
             except (SweepComboError, VixTrioConflictError) as exc:
                 tuples_failed += 1
