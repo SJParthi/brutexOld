@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
+`integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
+scoped) as ONE merge event off main tip 3ee742b3, in binding order:
+**#1618** DEC-DATA-PARSER-DEAD-DELETE-001 (MIGRATION.md #1941 — delete the
+dead `brutex/data/parser.py`; the delete taken OVER main's #1929 edit on a
+re-run zero-production-consumer proof; the one #1929-added orphaned test pin
+removed with it) · **#1513** the session-integrity pack
+(DEC-SESSION-DENSITY-CENSUS-001 #1744 + DEC-HALT-DAY-TREATMENT-001 #1745 +
+DEC-EXTENDED-SESSION-OUTAGE-001 #1746; the extended_session_trades golden
+REPRODUCE-ONLY re-verified on the merged tree via the member's own generator
+— byte-identical, no delta) · **#1539** DEC-PREBUILD-FRAME-WRITE-001
+(MIGRATION.md #1956, renumbered #1793 → #1795 → #1956 — bare #1795 may not
+coexist with main's landed #1795a–#1795d suffixed block; the
+verify-or-degrade frame-direct derived-TF write, dark) · **#1399 SCOPED** —
+ONLY DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 (#1626; the bad-tick screen
+family #1625/#1687/#1688/#1683 was NOT folded — landed-differently vs the
+FOUR interlocking screen consumers main grew after the member's cut, the
+named residual lane in the vehicle PR body) · **#1358 RESIDUAL R1** —
+DEC-SWEEP-1DAY-FRESHNESS-GATE-001 (#1957; the derived-1day sweep-preflight
+gate, re-derived onto #1932's screened base read — the member's other
+backend features are FULLY SUPERSEDED by the landed #1795a/#1931/#1932 and
+its display buckets R2-R5 stay a named residual; #1358 NOT closed) ·
+**#1579 LAST** — DEC-LAKE-READ-INODE-GUARD-001/-002 (#1896/#1898; the
+guarded lake-read wrap folded OVER every earlier edit with the #1919
+`glob=False` metachar law preserved — incl. the load-bearing
+`scan_parquet_regular` explicit-list-arm `glob=False` re-derive). #1590 is
+CLOSED-AS-SUPERSEDED (a subset of #1579). ENGINE semantics change ONLY on
+Muhurat-crossing weekly-anchor grids (#1626) — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries pointers, never
+the story; each member's full record lives in its MIGRATION.md entry + the
+vehicle PR body.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3466,7 +3497,24 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `integration/club-lap8-lake-guards`
+  (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
+  scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
+  #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1957) →
+  #1579 LAST; #1590 closed-as-superseded (a subset of #1579). Union files
+  docs/MIGRATION.md + CLAUDE.md woven per the club convention; ledger
+  renumber: #1539's #1795 → #1956 (the ONE collision — bare-vs-suffixed
+  #1795a–d); every other member number verified FREE on main (ceiling #1955
+  at assembly; gaps are legal per DEC-LEDGER-RENUMBER-001). The #1513
+  extended-session trades golden re-verified REPRODUCE-ONLY on the merged
+  tree (byte-identical). ENGINE semantics change only on Muhurat-crossing
+  weekly-anchor grids (#1626); no lake/schema/scope/vocab/rate change. This
+  blurb carries pointers, never round narration — each member's full record
+  lives in its own MIGRATION.md entry (#1941 · #1744-#1746 · #1956 · #1626 ·
+  #1957 · #1896/#1898) + the vehicle PR body, which also carries the #1358
+  triage verdict, the #1618 delete-proof, and the #1399 screen-family
+  deferral record.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -4941,6 +4989,7 @@ hostile-review pass._
   gates (discovery gate executed green); ruff/ruff-format clean; `mypy
   --strict brutex` clean (461 files); pyright 0 errors on touched files.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/lake-read-inode-guard`
   (**DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
   MIGRATION.md #1896 + #1898** — ONE stacked landing vehicle: the DEC-002
@@ -5020,111 +5069,6 @@ hostile-review pass._
   discloses — the probe closes the PLANTED-inode class, not a racing
   writer); healthy lakes byte-identical (parity-pinned). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
-  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
-  Earlier: `claude/lake-read-inode-guard`
-  (**DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1896** — the file-read
-  boundaries gain the COMMON two-defense inode/stall guard, closing the
-  planted-non-regular-inode / wedged-volume hang class REPO-WIDE. DEFENSE
-  (a) — PLANTED INODE: every guarded read opens
-  `os.open(path, O_RDONLY|O_NONBLOCK)` then `S_ISREG`-checks `os.fstat(fd)`
-  on the SAME descriptor (TOCTOU-safe; NEVER a pre-open `stat()`, NEVER
-  `st_size` as the gate — a `/dev/zero` char-device symlink reads size 0), so
-  a planted FIFO / device / socket / directory raises the NEW
-  `NotRegularFileError(OSError)` instead of blocking forever or OOMing —
-  fails-before PROVEN: the health_hub FIFO hang reproduced at merge-base
-  6b9947d9 (SIGALRM probe exit 42). DEFENSE (b) — WEDGED-VOLUME STALL:
-  tier-1 (route / lock-held) sites ride
-  `read_regular_bytes_deadline`/`read_regular_text_deadline` over the COMMON
-  `run_with_deadline` (READ_DEADLINE_S=5.0; `DeadlineExceeded`/spawn-failure
-  → the NEW `ReadStallError(OSError)` with `__cause__`; the abandoned worker
-  is a daemon — the #999 no-kill stance). BOTH errors are `OSError`
-  subclasses, so every site's EXISTING `except OSError` /
-  `parquet_read_skip_errors()` degrade arm absorbs them with ZERO per-site
-  except-clause churn (the one sanctioned error-token change:
-  `NotRegularFileError` replaces `IsADirectoryError` at guarded sites — a
-  directory IS a non-regular inode). ONE COMMON module
-  `brutex/data/guarded_read.py`: the primitives
-  (`NotRegularFileError`/`open_regular_binary`/`read_regular_bytes`) are
-  HOMED in the stdlib-only `sidecar_read.py` (the #1793 leaf; guarded_read
-  re-exports THE SAME objects, identity-pinned) beside the pre-existing
-  capped `read_sidecar_bytes`; guarded_read adds `read_regular_text`, the
-  deadline variants, and the parquet helpers
-  (`read_parquet_regular`/`read_parquet_glob_regular`/
-  `read_parquet_schema_regular` — polars imported function-locally,
-  wheel-free import posture; polars receives the validated OPEN handle, so
-  path-glob interpretation is STRUCTURALLY impossible — subsumes the #1594
-  round-15 `glob=False` law at every wired site). WIRED across the tiered
-  site enumeration (~70 modules: boot/config/token sidecars · engine sweep
-  verify/checkpoint/stage-stamp/diag-bundle · crossverify journal/S3 staging
-  · lake manifest/invariants/heal/stats · dashboard health_hub / oneclick /
-  window-ledger / caches — per-tier table in MIGRATION.md #1896; the
-  ALREADY-SAFE list + `app.py:8514`/`app.py:8863` deliberately untouched per
-  the task fence). BONUS GUARD (the #1721 byte-watermark): `movers_cache.py`
-  gains `native_frame_in_payload` + the warn-once `_size_payload` probe — a
-  cached payload never holds a polars/Arrow frame (deep_size undercounts
-  off-heap buffers → silent OOM). HONEST: severity is DoS/hang, NOT
-  corruption; regular-file behavior BYTE-IDENTICAL (byte-identity +
-  frame-identity pins); the stall deadline covers tier-1 sites only (tier-2
-  batch/CLI reads stay fd-gated but undeadlined — disclosed); a wedged read's
-  daemon thread cannot be killed (#999). TESTS: NEW
-  `tests/unit/test_guarded_read.py` (31 — FIFO/dev-zero/dir/dangling-symlink/
-  fstat-fault-closes-fd/byte-identity/parquet-frame+glob-identity/deadline
-  stall+spawn/OSError-membership/wheel-free-import) + NEW
-  `tests/unit/test_inode_guard_sites.py` (4 tier-1 site regressions under
-  the SIGALRM watchdog) + 7 primitive tests appended to
-  `test_sidecar_read.py`; 7 existing-suite seam-drift repoints (monkeypatch
-  targets moved from `Path.read_text`/`Path.read_bytes`/`builtins.open` to
-  the module-level guarded seams — each test's teeth preserved).
-  HOSTILE-REVIEW FIX ROUND folded (same branch, pre-merge — coordinator SHIP
-  verdict; the per-finding record lives in MIGRATION.md #1896): (MINOR-1)
-  `health_hub._read_report_json` — the one polled-route read with defense (a)
-  only — gains the deadline via NEW COMMON
-  `guarded_read.read_capped_bytes_deadline` (the #1614 cap + one-byte
-  over-probe under BOTH defenses; a wedged report volume now degrades the
-  nightly lane to the honest `unknown` in bounded time); (MINOR-2) the
-  deadline tier gains a per-path NON-BLOCKING single-flight stall gate in
-  `_deadline_read` (the #1522 posture — a persistently wedged volume costs
-  AT MOST ONE abandoned daemon per path; later polls refuse instantly with
-  `ReadStallError`, the entry self-heals on the late return, spawn-failure +
-  completed-just-after-expiry never register — landed as a FIX, 100% reached
-  cleanly); (NIT-4) the stale `IsADirectoryError` comments in
-  `sweep_parallel.load_quarantined_tuple_labels` reworded; (NIT-3) the
-  glob-helper byte-identity docstring VERIFIED present. GATES (fix-round
-  re-measure): `guarded_read.py` 100.00% (68/14, 38 tests) +
-  `health_hub.py` 100.00% (176/38, 51 tests) + `sidecar_read.py` 100.00%
-  (51/10) + `movers_cache.py` 100.00% (455/174) on their ci.yml stanzas; the
-  139-file unit battery 5729 passed / 0 failed; the 17-file integration
-  batch 245 passed / 2 env-skips; the sweep_parallel trio 166 passed;
-  ruff/ruff-format clean; `mypy --strict` 0 new (the
-  one `stage3_refine` cma import note is the pre-existing baseline,
-  stash-verified); pyright 0 errors. FIX ROUND 2 folded (same branch,
-  pre-merge — the coordinator's three-directive round; per-item record in
-  MIGRATION.md #1896): (R2-1) the CONFIRMED residual hang — the
-  `lake_invariants._missing_columns_reason` diagnostic arm RE-OPENED the
-  same inode with a bare `pl.read_parquet_schema(path)` (reachable from the
-  scan loop's except arms after the guarded primary read raised — a planted
-  FIFO wedged the whole scan in C-level fifo_open) — fixed via
-  `read_parquet_schema_regular`, and the WHOLE diff swept for the
-  diagnostic-arm re-open class: 4 more sites found + fixed the same way
-  (greeks_backfill driver-frame schema probe · sweep_verify's two footer
-  probes · option_parquet_writer's merge-dest read [glob=False now holds
-  structurally — handle-fed] + quarantine before-image read); NEW
-  bars+options `TestPlantedFifoScanSurvival` SIGALRM-watchdog scan-level
-  regressions (they would have caught the residual); the flock-held merge
-  pin's spy retargeted onto the guarded seam (teeth preserved). (R2-2) the
-  bench fixes — the greeks stamp-projection spy repointed onto the guarded
-  seam; the #1721 native-frame probe gains the `_NATIVE_FRAME_MAX_ITEMS=32`
-  width cap AND moves to the deep-size fallback arm only (bench-caught
-  91 ms vs the 50 ms ceiling at 200k records, both benches re-run green).
-  (R2-3) CodeQL — the alert-#1160 ERROR fixed via the module-level `_T`
-  TypeVar + documented noqa; the 9 import-style NOTES normalized across 7
-  test files onto string-target monkeypatch + identity-pinned delegates
-  (every seam tooth preserved, suites green). Round-2 gate re-measure:
-  guarded_read 69/14 · lake_invariants 630/228 (180) · sweep_verify
-  528/224 (156) · greeks_backfill 494/150 (172) · option_parquet_writer
-  192/42 (78) · movers_cache trio 460/178 (121) — ALL 100.00%; ruff/mypy
-  --strict/pyright clean. ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
@@ -10836,7 +10780,13 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `integration/club-lap8-lake-guards`
+  (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
+  the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1957)
+  + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md
+  entries #1941 · #1744-#1746 · #1956 · #1626 · #1957 · #1896/#1898 for the
+  full blurbs)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -11324,23 +11274,6 @@ hostile-review pass._
   touch; authored off the DEC-001 branch head 7636bb0, landing WITH #1579; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1896/#1898 for the full blurbs)
-  Earlier: `claude/lake-read-inode-guard`
-  (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1896 — the file-read
-  boundaries gain the COMMON two-defense inode/stall guard: the fd-level
-  `O_NONBLOCK`+`S_ISREG`-on-`fstat` gate (`NotRegularFileError(OSError)` — a
-  planted FIFO/device/directory never hangs the boot / a sweep / a route;
-  fails-before proven at merge-base via the health_hub FIFO SIGALRM probe)
-  + the tier-1 `run_with_deadline` stall bound (`ReadStallError(OSError)`,
-  READ_DEADLINE_S=5.0, the #999 daemon stance); both fold into every site's
-  existing `except OSError` degrade arm — zero except-clause churn; ONE
-  COMMON `brutex/data/guarded_read.py` (primitives homed in
-  `sidecar_read.py`, identity-pinned re-exports; parquet helpers hand polars
-  the validated OPEN handle — glob interpretation structurally impossible)
-  wired across ~70 modules + the #1721 movers_cache native-frame watermark
-  guard; DoS/hang severity, NOT corruption; regular-file behavior
-  byte-identical (pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  matches §1's Active branch line — see §1 + MIGRATION.md #1896 for the
-  full blurb)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
