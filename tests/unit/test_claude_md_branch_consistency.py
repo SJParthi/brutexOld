@@ -39,7 +39,18 @@ import re
 from pathlib import Path
 from typing import Final
 
-_CLAUDE_MD: Final[Path] = Path(__file__).resolve().parents[2] / "CLAUDE.md"
+# 2026-07-18 CLAUDE.md split: the root became a lean charter/index and every
+# guarded region moved VERBATIM into docs/claude/ (byte-identical concat).
+# These pins keep enforcing the SAME discipline at the new homes.
+_DOCS_CLAUDE: Final[Path] = Path(__file__).resolve().parents[2] / "docs" / "claude"
+#: old §1 Active-branch blurb (its first line IS the Active-branch line).
+_ACTIVE_BRANCH_MD: Final[Path] = _DOCS_CLAUDE / "03-active-branch-history.md"
+#: old §3 (Branching and Commits) — the whole file.
+_BRANCHING_MD: Final[Path] = _DOCS_CLAUDE / "05-branching-and-commits.md"
+#: old §2 Golden Rules.
+_GOLDEN_RULES_MD: Final[Path] = _DOCS_CLAUDE / "04-golden-rules.md"
+#: old ``_Last updated:`` header/changelog ledger.
+_HEADER_MD: Final[Path] = _DOCS_CLAUDE / "01-header-changelog-ledger.md"
 
 #: §1 line: ``- **Active branch:** `claude/...` (...``
 _S1_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -60,7 +71,8 @@ def _single_branch(pattern: re.Pattern[str], text: str, label: str) -> str:
     """
     matches = [m.group("branch") for m in pattern.finditer(text)]
     assert len(matches) == 1, (
-        f"expected exactly one {label} line in CLAUDE.md, found {len(matches)}: {matches!r}"
+        f"expected exactly one {label} line in the docs/claude split home, "
+        f"found {len(matches)}: {matches!r}"
     )
     return matches[0]
 
@@ -69,9 +81,16 @@ class TestActiveBranchConsistency:
     """§1 and §3 must name the SAME active branch (one source of truth)."""
 
     def test_section1_and_section3_name_the_same_branch(self) -> None:
-        text = _CLAUDE_MD.read_text(encoding="utf-8")
-        s1 = _single_branch(_S1_PATTERN, text, "§1 '**Active branch:**'")
-        s3 = _single_branch(_S3_PATTERN, text, "§3 '**Active feature branch:**'")
+        s1 = _single_branch(
+            _S1_PATTERN,
+            _ACTIVE_BRANCH_MD.read_text(encoding="utf-8"),
+            "§1 '**Active branch:**'",
+        )
+        s3 = _single_branch(
+            _S3_PATTERN,
+            _BRANCHING_MD.read_text(encoding="utf-8"),
+            "§3 '**Active feature branch:**'",
+        )
         assert s1 == s3, (
             f"CLAUDE.md names two different active branches: §1 says {s1!r} "
             f"but §3 says {s3!r} — an update-merge resolved one line and "
@@ -88,7 +107,7 @@ class TestActiveBranchConsistency:
         branch itself as active, per Golden Rule #10, rather than faking a
         ``claude/`` name. Any other form is a merge artifact.
         """
-        text = _CLAUDE_MD.read_text(encoding="utf-8")
+        text = _ACTIVE_BRANCH_MD.read_text(encoding="utf-8")
         s1 = _single_branch(_S1_PATTERN, text, "§1 '**Active branch:**'")
         assert s1.startswith(("claude/", "integration/")), f"unexpected active-branch form: {s1!r}"
 
@@ -113,7 +132,7 @@ class TestStrictTierClaimFreshness:
     """
 
     def test_rule5_states_the_live_runner_and_all_measured_allowances(self) -> None:
-        text = _CLAUDE_MD.read_text(encoding="utf-8")
+        text = _GOLDEN_RULES_MD.read_text(encoding="utf-8")
         rule5 = _normalized_region(text, "5. **O(1) discipline.**", "6. **Rate-limit safety.**")
         assert "DORMANT" not in rule5, (
             "CLAUDE.md §2 Rule 5 resurrected the stale strict-tier dormancy claim — "
@@ -153,7 +172,7 @@ class TestHeaderRoundNarrationRetired:
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
-        text = _CLAUDE_MD.read_text(encoding="utf-8")
+        text = _HEADER_MD.read_text(encoding="utf-8")
         header = _normalized_region(
             text, "(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #", "Earlier:"
         )
@@ -343,13 +362,16 @@ class TestSection3EarlierChainShape:
     """
 
     @staticmethod
-    def _section3(text: str) -> str:
-        start = text.index("## 3. Branching and Commits")
-        end = text.index("## 4. Coding Standards", start)
-        return text[start:end]
+    def _section3() -> str:
+        # Post-split, docs/claude/05-branching-and-commits.md IS old §3.
+        text = _BRANCHING_MD.read_text(encoding="utf-8")
+        assert text.startswith("## 3. Branching and Commits"), (
+            "05-branching-and-commits.md no longer starts at the §3 heading"
+        )
+        return text
 
     def test_no_duplicate_earlier_branch_entries(self) -> None:
-        section = self._section3(_CLAUDE_MD.read_text(encoding="utf-8"))
+        section = self._section3()
         names = re.findall(r"^\s*Earlier: `(?P<branch>[^`]+)`", section, re.MULTILINE)
         duplicates = sorted({name for name in names if names.count(name) > 1})
         assert not duplicates, (
@@ -359,7 +381,7 @@ class TestSection3EarlierChainShape:
         )
 
     def test_every_earlier_entry_carries_its_description(self) -> None:
-        section = self._section3(_CLAUDE_MD.read_text(encoding="utf-8"))
+        section = self._section3()
         lines = section.splitlines()
         for index, line in enumerate(lines):
             match = re.match(r"^\s*Earlier: `[^`]+`(?P<rest>.*)$", line)

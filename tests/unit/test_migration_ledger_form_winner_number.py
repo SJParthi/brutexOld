@@ -29,7 +29,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = REPO_ROOT / "docs" / "MIGRATION.md"
-CLAUDE_MD_PATH = REPO_ROOT / "CLAUDE.md"
+#: 2026-07-18 CLAUDE.md split: the two citation surfaces (the ``_Last
+#: updated:`` headline chain + the Active-branch blurb) moved verbatim into
+#: docs/claude/ — the pin now reads their concatenation.
+CITATION_HOME_PATHS = (
+    REPO_ROOT / "docs" / "claude" / "01-header-changelog-ledger.md",
+    REPO_ROOT / "docs" / "claude" / "03-active-branch-history.md",
+)
 
 #: The decision whose number keeps colliding with live main's fresh mints.
 DEC_ID = "DEC-FORM-WINNER-PERSIST-001"
@@ -115,13 +121,13 @@ def test_claude_md_citations_match_ledger_number() -> None:
     renumber — a missed surface would cite main's unrelated #1557 entry.
     """
     number, _ = _form_winner_entry()
-    text = CLAUDE_MD_PATH.read_text(encoding="utf-8")
+    text = "\n".join(p.read_text(encoding="utf-8") for p in CITATION_HOME_PATHS)
     cited = [int(match.group(1)) for match in _CITATION_RE.finditer(text)]
     assert len(cited) >= 2, (
-        f"expected >= 2 numbered CLAUDE.md citations of {DEC_ID} "
+        f"expected >= 2 numbered docs/claude citations of {DEC_ID} "
         f"(headline + Active-branch blurb), found {len(cited)}"
     )
     assert set(cited) == {number}, (
-        f"CLAUDE.md cites MIGRATION.md #{sorted(set(cited))} for {DEC_ID}, "
+        f"the docs/claude ledger homes cite MIGRATION.md #{sorted(set(cited))} for {DEC_ID}, "
         f"but the ledger entry is numbered #{number}"
     )

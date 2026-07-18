@@ -836,7 +836,9 @@ class TestDocWordingHonesty:
         "doc",
         [
             Path(db_view.__file__),
-            _REPO_ROOT / "CLAUDE.md",
+            # 2026-07-18 CLAUDE.md split: the Active-branch blurb that carried
+            # the time-bound wording moved verbatim to docs/claude/.
+            _REPO_ROOT / "docs" / "claude" / "03-active-branch-history.md",
             _REPO_ROOT / "docs" / "MIGRATION.md",
         ],
         ids=["db_view", "claude_md", "migration_md"],
