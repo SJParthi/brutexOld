@@ -298,6 +298,61 @@ fn intent_resume_enabled(raw: Option<&str>) -> bool {
     crate::intent::resume_enabled(raw)
 }
 
+// --- auto_pull_scheduler (Wave 3G) ------------------------------------------
+// The tick-decision ladder + durable-state-parse verdict of
+// `brutex/dashboard/auto_pull_scheduler.py`. Codes/bools only cross; the
+// ticker thread, store I/O, log dedup and every human string stay Python.
+
+/// `tick_once`'s decision ladder token (0=disarmed .. 5=fire) — see
+/// `crate::auto_pull_scheduler::auto_tick_decision`.
+#[allow(clippy::fn_params_excessive_bools)] // 1:1 FFI mirror of the ladder facts
+#[pyfunction]
+#[pyo3(signature = (armed, succeeded_today, attempted_today, gate_allowed, launcher_bound))]
+fn auto_tick_decision(
+    armed: bool,
+    succeeded_today: bool,
+    attempted_today: bool,
+    gate_allowed: bool,
+    launcher_bound: bool,
+) -> u8 {
+    crate::auto_pull_scheduler::auto_tick_decision(
+        armed,
+        succeeded_today,
+        attempted_today,
+        gate_allowed,
+        launcher_bound,
+    )
+}
+
+/// `_state_from_payload`'s validation verdict over classified codes — see
+/// `crate::auto_pull_scheduler::auto_state_verdict`. An out-of-i64 /
+/// out-of-u64 slot raises `OverflowError` at the pyo3 edge (the facade's
+/// defensive belt degrades such a call to the oracle).
+#[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the classified payload
+#[pyfunction]
+#[pyo3(signature = (root_mapping, schema_kind, schema_i64, schema_f64_bits, armed_is_bool, armed_at_kind, last_attempt_kind, last_success_kind))]
+fn auto_state_verdict(
+    root_mapping: bool,
+    schema_kind: u8,
+    schema_i64: i64,
+    schema_f64_bits: u64,
+    armed_is_bool: bool,
+    armed_at_kind: u8,
+    last_attempt_kind: u8,
+    last_success_kind: u8,
+) -> u8 {
+    crate::auto_pull_scheduler::auto_state_verdict(
+        root_mapping,
+        schema_kind,
+        schema_i64,
+        schema_f64_bits,
+        armed_is_bool,
+        armed_at_kind,
+        last_attempt_kind,
+        last_success_kind,
+    )
+}
+
 // --- pull_progress (Wave 2F) ------------------------------------------------
 // The derived-metrics plane of `brutex/dashboard/pull_progress.py`
 // (DEC-PULL-PROGRESS-HONESTY-001). Counts cross as u64 (facade-gated to the
@@ -368,6 +423,9 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intent_resume_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_refused_restore_decision, m)?)?;
     m.add_function(wrap_pyfunction!(intent_resume_enabled, m)?)?;
+    // --- auto_pull_scheduler (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(auto_tick_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(auto_state_verdict, m)?)?;
     // --- pull_progress (Wave 2F) ---
     m.add_function(wrap_pyfunction!(progress_derived, m)?)?;
     Ok(())

@@ -31,6 +31,10 @@
 // Muhurat margined-window + settle-token verdict kernels — codes only;
 // every human string + the fail-loud env raise stay Python.
 pub mod auto_pull_gate;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the auto-pull-scheduler tick-decision
+// ladder + durable-state-parse verdict kernels — codes only; the ticker
+// thread, store I/O, log-dedup memo and every human string stay Python.
+pub mod auto_pull_scheduler;
 // Wave 2E (DEC-RUST-PULL-STATE-001): the pull-intent parse-shape +
 // resume-decision core (DEC-PULL-INTENT-RESUME-001 re-hosted) — codes only;
 // the JSON decode (CPython's whole failure taxonomy), every warn string and
@@ -55,6 +59,7 @@ pub use auto_pull_gate::{
     GATE_OK, SETTLE_BAD_SHAPE, SETTLE_BELOW_FLOOR, SETTLE_NO_VALUE, SETTLE_NOT_WALL_CLOCK,
     SETTLE_OK, auto_gate_decision, muhurat_window_active, settle_token_verdict,
 };
+pub use auto_pull_scheduler::{auto_state_verdict, auto_tick_decision};
 pub use intent::{refused_restore_decision, resume_decision, resume_enabled, shape_verdict};
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use progress::{COUNT_DOMAIN_MAX, CountDomainError, progress_derived};
