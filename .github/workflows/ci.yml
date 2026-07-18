@@ -2751,6 +2751,17 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
+          # DEC-ALPHA-BUYHOLD-METRIC-001: the alpha-vs-buy-&-hold metric —
+          # the shared domain law, the pure-Python oracle, the kernel routing
+          # (wheel-missing/poisoned degrades), the refuse-poison cross-check
+          # and the DEFAULT-OFF BRUTEX_ALPHA_GATE resolution; plus the
+          # hypothesis Rust↔Python differential + the frozen hand-derived
+          # golden vectors (both arms).
+          if compgen -G "tests/unit/test_engine_alpha_metric.py" > /dev/null; then
+            pytest --cov=brutex.engine.alpha_metric --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_alpha_metric.py tests/property/test_alpha_differential.py tests/golden/test_alpha_metric_golden.py
+          else
+            echo "(brutex.engine.alpha_metric test file not present yet — gate inactive)"
+          fi
           # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
           # pure cascade-report → display-join law (flattener/validator shared
           # by the top-100 writer and the /results loader) + the read-time
