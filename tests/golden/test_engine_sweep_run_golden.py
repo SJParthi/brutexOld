@@ -185,7 +185,19 @@ def test_golden_run_id_is_byte_stable() -> None:
 # loosening admitted NO new combo on this fixture) and every run_id is
 # byte-stable (test_golden_run_id_is_byte_stable UNMODIFIED — run identity
 # untouched); ONLY the three appended columns differ.
-_GOLDEN_CONTENT_HASH = "60d3949461975101bf4075dac3f78ae6e1433b4d2905cefab071ab3d4a09dd4d"
+# Re-locked AGAIN for DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B
+# (schema-additive, the same audited-re-lock precedent): the persisted schema
+# gained the ONE appended nullable sl_hit_rate column
+# (results_store.EXIT_QUALITY_FIELDS), CONCRETE on every row of this fixture
+# because the sweep spine always threads the trade-sim's exit-reason counters
+# (audited values [0.31922…, 0.33048…, 0.30769…, 0.32491…, 0.33127…] — equal
+# to loss_rate here since every loss on this SL-configured AT_LEVEL fixture
+# is a stop-loss exit; zero nulls). AUDIT: the ROW SET is UNCHANGED —
+# enumerated/evaluated/ranked/persisted stay 5/5/5/5
+# (test_golden_summary_is_stable passed UNMODIFIED) and every run_id is
+# byte-stable (test_golden_run_id_is_byte_stable UNMODIFIED — run identity
+# untouched); ONLY the one appended column differs.
+_GOLDEN_CONTENT_HASH = "3b6ce42724f3eb4004f9822c351474c1fa6ced12b21836cbd4437256adc5752e"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

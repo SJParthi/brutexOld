@@ -259,6 +259,25 @@ class ResultMetrics:
     #: fold/combine split's exactness law).
     log_growth_at_half_kelly: float | None
 
+    # ── Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ────
+    #: Stop-loss-exit share of all closed trades: ``sl_exit_count /
+    #: total_trades`` when the trade-sim's per-mask exit-reason counters were
+    #: threaded in (the sweep spine always threads them — the position under
+    #: ``brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX``); ``0.0`` for the
+    #: zero-trade row (a vacuous truth — the ``win_rate`` precedent); and
+    #: ``None`` (the default) when the counters were NOT supplied — a caller
+    #: without reason attribution reads the honest unknown, never a
+    #: fabricated ``0.0`` (Golden Rule #1). COMBINE-side pure arithmetic
+    #: over the threaded scalar — NO new fold state (the Rust fold wire is
+    #: untouched). HONESTY NOTE: an SL exit is provably a LOSS only under
+    #: ``LevelFill.AT_LEVEL`` (the default policy — the worst-case fill law
+    #: clamps the fill at or beyond the level, so pnl <= −sl_distance < 0); a
+    #: ``LevelFill.NEXT_OPEN`` SL fill can gap PROFITABLE, so
+    #: ``sl_count <= losing_trades`` is NOT a universal invariant and is
+    #: deliberately not enforced here (property-pinned for the default
+    #: policy only).
+    sl_hit_rate: float | None = None
+
     # ── Statistical validity (Stage 4 only — NULL before then; spec 581-583) ──
     # Filled by with_stage4_statistics(); left None (NULL) by compute_metrics,
     # whose per-result pass lacks the cross-trial inputs (trial count, Sharpe
@@ -442,6 +461,10 @@ def _empty_metrics(drawdown: tuple[int, float, int, float]) -> ResultMetrics:
         returns_std_dev=None,
         kelly_fraction=None,
         log_growth_at_half_kelly=None,
+        # Zero trades ⇒ zero SL exits of zero trades — a vacuous truth, so
+        # 0.0 is honest here regardless of counter availability (the
+        # win_rate=0.0 precedent; DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+        sl_hit_rate=0.0,
     )
 
 
@@ -541,6 +564,7 @@ def compute_metrics(
     benchmark_return_pct: float = 0.0,
     *,
     drawdown: tuple[int, float, int, float] | None = None,
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics:
     """Compute every per-result metric in the Track 1 Result Row Schema.
 
@@ -574,6 +598,12 @@ def compute_metrics(
         output for this curve; the sweep seam validates the kernel
         result before injecting (never a fabricated number,
         Golden Rule #1).
+    sl_exit_count
+        Optional stop-loss-exit counter for ``trades``
+        (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — threaded like
+        ``drawdown``; see :func:`combine_metrics_from_folds`). ``None``
+        (the default) yields the honest ``sl_hit_rate=None`` on a
+        non-empty trade set — never a fabricated ``0.0``.
 
     Returns
     -------
@@ -583,7 +613,8 @@ def compute_metrics(
     Raises
     ------
     ValueError
-        If ``total_bars < 1``.
+        If ``total_bars < 1`` or ``sl_exit_count`` is out of range (see
+        :func:`combine_metrics_from_folds`).
 
     Notes
     -----
@@ -606,6 +637,7 @@ def compute_metrics(
         start_equity_paisa=equity.start_equity_paisa,
         span_years=equity.span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
     )
 
 
@@ -617,6 +649,7 @@ def compute_metrics_from_scalars(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics:
     """Curve-less :func:`compute_metrics`: scalars in place of an :class:`EquityCurve`.
 
@@ -635,11 +668,16 @@ def compute_metrics_from_scalars(
     pre-checks them and falls back to the curve path, which raises the
     curve's own messages):
 
+    ``sl_exit_count`` threads exactly as on :func:`compute_metrics`
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the sweep's kernel-arm
+    tail passes the mask's stop-loss counter here).
+
     Raises
     ------
     ValueError
         If ``start_equity_paisa <= 0``, ``span_years`` is not a strictly
-        positive finite float, or ``total_bars < 1``.
+        positive finite float, ``total_bars < 1``, or ``sl_exit_count`` is
+        out of range (see :func:`combine_metrics_from_folds`).
     """
     if start_equity_paisa <= 0:
         raise ValueError(
@@ -657,6 +695,7 @@ def compute_metrics_from_scalars(
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
     )
 
 
@@ -803,6 +842,7 @@ def combine_metrics_from_folds(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics:
     """COMBINE a :class:`TradeFolds` into the :class:`ResultMetrics` row.
 
@@ -828,11 +868,24 @@ def combine_metrics_from_folds(
     ``start_equity_paisa > 0``, finite positive ``span_years``) stays the
     caller's own boundary.
 
+    ``sl_exit_count`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the
+    mask's stop-loss-exit counter — position
+    ``brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX`` of the trade-sim's
+    per-mask exit-reason counters, extracted by the ENGINE caller (this
+    module stays below the engine layer, so the vocabulary position never
+    duplicates here). Threaded like the ``drawdown`` 4-tuple: a pure
+    COMBINE-side scalar, NO new fold state. ``None`` (the default — a
+    caller without reason attribution) yields the honest
+    ``sl_hit_rate=None``, never a fabricated ``0.0``.
+
     Raises
     ------
     ValueError
         If ``folds.n_trades < 1`` — the zero-trade row is
-        :func:`_empty_metrics`, computed by the caller.
+        :func:`_empty_metrics`, computed by the caller — or a supplied
+        ``sl_exit_count`` is outside ``[0, folds.n_trades]`` (the counters
+        sum to the trade count by construction, so an out-of-range value is
+        a threading bug, refused loudly — never a silently wrong rate).
 
     Spec citations live on the inline comments; conventions where the
     spec is silent are recorded in DEC-METRICS-001 (MIGRATION.md #305).
@@ -841,6 +894,12 @@ def combine_metrics_from_folds(
         raise ValueError(
             f"combine_metrics_from_folds: folds.n_trades must be >= 1, got "
             f"{folds.n_trades} — the zero-trade row is _empty_metrics, the caller's arm"
+        )
+    if sl_exit_count is not None and not 0 <= sl_exit_count <= folds.n_trades:
+        raise ValueError(
+            f"combine_metrics_from_folds: sl_exit_count={sl_exit_count} is outside "
+            f"[0, {folds.n_trades}] (n_trades) — the exit-reason counters sum to the "
+            f"trade count by construction, so this is a threading bug"
         )
     n_trades = folds.n_trades
     net_pnl = folds.net_pnl_paisa
@@ -972,6 +1031,12 @@ def combine_metrics_from_folds(
         n_trades, winners, losers, gross_profit, gross_loss_abs
     )
 
+    # ── Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ───
+    # sl_hit_rate = SL exits / all closed trades — pure COMBINE arithmetic
+    # over the threaded counter; None (absent counters) stays the honest
+    # unknown, never a fabricated 0.0 (Golden Rule #1).
+    sl_hit_rate = None if sl_exit_count is None else sl_exit_count / n_trades
+
     return ResultMetrics(
         net_pnl_paisa=net_pnl,
         total_return_pct=total_return_pct,
@@ -1013,6 +1078,7 @@ def combine_metrics_from_folds(
         returns_std_dev=std_dev,
         kelly_fraction=kelly_fraction,
         log_growth_at_half_kelly=log_growth_at_half_kelly,
+        sl_hit_rate=sl_hit_rate,
     )
 
 
@@ -1137,6 +1203,7 @@ def _compute_metrics_impl(
     start_equity_paisa: int,
     span_years: float,
     drawdown: tuple[int, float, int, float],
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics:
     """Shared metric body behind :func:`compute_metrics` / the scalar entry.
 
@@ -1158,6 +1225,15 @@ def _compute_metrics_impl(
     arm — :func:`combine_metrics_from_folds` requires ``n_trades >= 1``.
     """
     if not trades:
+        if sl_exit_count not in (None, 0):
+            # The counters sum to the trade count by construction, so a
+            # positive SL counter over ZERO trades is a threading bug —
+            # refused loudly, mirroring combine_metrics_from_folds' bound.
+            raise ValueError(
+                f"sl_exit_count={sl_exit_count} supplied for a zero-trade result — "
+                f"the exit-reason counters sum to the trade count, so this is a "
+                f"threading bug"
+            )
         return _empty_metrics(drawdown)
     return combine_metrics_from_folds(
         _resolve_folds(trades, start_equity_paisa),
@@ -1166,6 +1242,7 @@ def _compute_metrics_impl(
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
     )
 
 

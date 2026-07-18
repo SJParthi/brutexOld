@@ -86,7 +86,17 @@ _EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1
 #: the prior literal ``82211c97…``): dropping the trio leaves the 4×25 frame
 #: byte-for-byte frame-equal — every non-VIX row value, every run_id, the
 #: roll_schedule / snapshot-hash / run-id literals above all unchanged.
-_EXPECTED_STORE_HASH = "27c92c83159b8cadff6e39e099d73038b3c82c055ea0ef127be52df01d3d8482"
+#: Re-locked AGAIN for DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B
+#: (schema-additive, the same audited-re-lock precedent): the persisted
+#: schema gained the ONE appended nullable ``sl_hit_rate`` column
+#: (``results_store.EXIT_QUALITY_FIELDS``), CONCRETE on every row (the
+#: sweep spine always threads the trade-sim exit-reason counters; audited
+#: values [0.31950…, 0.30769…, 0.31944…, 0.31081…] — equal to loss_rate
+#: on this SL-configured AT_LEVEL fixture, zero nulls). AUDIT: the row set
+#: stays 5 enumerated / 4 persisted, and the snapshot-hash + run-id
+#: literals above pass UNMODIFIED (run identity untouched); ONLY the one
+#: appended column differs.
+_EXPECTED_STORE_HASH = "2a612204e1f24d123f7d41844f00d66c5dd1553584b87e314d5140bc15897bb0"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:

@@ -58,7 +58,10 @@ from brutex.engine.stage1a import (
     build_bar_bits,
     build_walk_forward_schedule,
 )
-from brutex.engine.trade_sim import simulate_trades_with_exit_indices
+from brutex.engine.trade_sim import (
+    STOP_LOSS_REASON_INDEX,
+    simulate_trades_with_exit_counts,
+)
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
 
@@ -285,9 +288,11 @@ def metrics_for_mask(
     those callers need not duplicate the chain (CLAUDE.md §11 COMMON). The
     walker's certified exit indices are threaded into the metrics tail
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
-    byte-identical with or without it.
+    byte-identical with or without it — and so are the walker's exit-reason
+    counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), which feed the
+    metrics' ``sl_hit_rate``.
     """
-    trades, exit_indices = _simulate_window(
+    trades, exit_indices, exit_reason_counts = _simulate_window(
         bars,
         bar_bits,
         required_mask,
@@ -303,6 +308,7 @@ def metrics_for_mask(
         start_equity_paisa=start_equity_paisa,
         tf_minutes=tf_minutes,
         exit_indices=exit_indices,
+        exit_reason_counts=exit_reason_counts,
     )
 
 
@@ -316,19 +322,22 @@ def _simulate_window(
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     reference_stamper: TradeReferenceStamper | None = None,
-) -> tuple[list[ClosedTrade], list[int] | None]:
+) -> tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]:
     """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
 
     The signal→trade half of :func:`metrics_for_mask`, factored out so the
     walk-forward scorer can get a fold's realized trades (to run the P-06
     confinement guard over them) without duplicating the chain or re-simulating
-    (CLAUDE.md §11 COMMON). Returns ``(trades, exit_indices)`` — the walker's
-    certified exit-bar indices (``None`` for an uncertified window,
-    DEC-SWEEP-EXIT-INDEX-FASTPATH-001) so the metrics tail can skip its
-    per-mask ``exit_ts``→index dict build.
+    (CLAUDE.md §11 COMMON). Returns ``(trades, exit_indices,
+    exit_reason_counts)`` — the walker's certified exit-bar indices (``None``
+    for an uncertified window, DEC-SWEEP-EXIT-INDEX-FASTPATH-001) so the
+    metrics tail can skip its per-mask ``exit_ts``→index dict build, plus the
+    walker's per-reason exit counters in
+    :data:`~brutex.engine.trade_sim.EXIT_REASONS` order
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
     """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
-    return simulate_trades_with_exit_indices(
+    return simulate_trades_with_exit_counts(
         bars,
         entry_signals,
         direction=direction,
@@ -346,6 +355,7 @@ def metrics_from_trades(
     start_equity_paisa: int,
     tf_minutes: int,
     exit_indices: Sequence[int] | None = None,
+    exit_reason_counts: Sequence[int] | None = None,
 ) -> ResultMetrics:
     """Build the equity curve from already-simulated trades and compute metrics.
 
@@ -378,7 +388,21 @@ def metrics_from_trades(
     kernel arm (validated per trade, demoted to the historical dict build on
     any inconsistency — never to the Python oracle); the OFF arm ignores it
     entirely, so results are byte-identical with or without it on BOTH arms.
+
+    ``exit_reason_counts`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is
+    the trade stream's per-reason exit counters in
+    :data:`~brutex.engine.trade_sim.EXIT_REASONS` order, as the counted
+    simulators return alongside the trades. The stop-loss position
+    (:data:`~brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX` — extracted
+    HERE, the engine layer, so the vocabulary position never duplicates
+    into :mod:`brutex.metrics`) feeds the metrics' ``sl_hit_rate`` on BOTH
+    the kernel arm and the Python tail. ``None`` (a legacy caller without
+    reason attribution) yields the honest ``sl_hit_rate=None`` on a
+    non-empty trade set — never a fabricated ``0.0``.
     """
+    sl_exit_count = (
+        None if exit_reason_counts is None else exit_reason_counts[STOP_LOSS_REASON_INDEX]
+    )
     if sweep_rust_metrics_enabled():
         metrics = _metrics_from_trades_via_kernel(
             bars,
@@ -386,13 +410,14 @@ def metrics_from_trades(
             start_equity_paisa=start_equity_paisa,
             tf_minutes=tf_minutes,
             exit_indices=exit_indices,
+            sl_exit_count=sl_exit_count,
         )
         if metrics is not None:
             return metrics
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
-    return compute_metrics(trades, equity, total_bars=len(bars))
+    return compute_metrics(trades, equity, total_bars=len(bars), sl_exit_count=sl_exit_count)
 
 
 def _exit_pairs(
@@ -500,6 +525,7 @@ def _metrics_from_trades_via_kernel(
     start_equity_paisa: int,
     tf_minutes: int,
     exit_indices: Sequence[int] | None = None,
+    sl_exit_count: int | None = None,
 ) -> ResultMetrics | None:
     """ON-arm metrics tail: fused Rust drawdown + curve-less compute_metrics.
 
@@ -566,6 +592,7 @@ def _metrics_from_trades_via_kernel(
         start_equity_paisa=start_equity_paisa,
         span_years=span_years,
         drawdown=drawdown,
+        sl_exit_count=sl_exit_count,
     )
 
 
@@ -1158,7 +1185,7 @@ def _score_fold(
         reference_stamper=reference_stamper,
     )
     test_bars = bars[fold.test_start_bar : fold.test_end_bar]
-    test_trades, test_exit_indices = _simulate_window(
+    test_trades, test_exit_indices, test_exit_counts = _simulate_window(
         test_bars,
         bar_bits[fold.test_start_bar : fold.test_end_bar],
         required_mask,
@@ -1175,6 +1202,7 @@ def _score_fold(
         start_equity_paisa=start_equity_paisa,
         tf_minutes=tf_minutes,
         exit_indices=test_exit_indices,
+        exit_reason_counts=test_exit_counts,
     )
     return FoldResult(
         fold_index=fold.fold_index,

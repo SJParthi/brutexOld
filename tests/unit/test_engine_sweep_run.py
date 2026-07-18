@@ -173,7 +173,7 @@ def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[Residen
     """A ResidentTradeSim subclass whose BATCH call raises — chunk-failure injection."""
 
     class _RaisingSim(ResidentTradeSim):
-        def simulate_masks_with_exit_indices(self, *args: object, **kwargs: object) -> NoReturn:
+        def simulate_masks_with_exit_counts(self, *args: object, **kwargs: object) -> NoReturn:
             raise exc_factory()
 
     return _RaisingSim
@@ -190,10 +190,10 @@ class _ShortChunkSim(ResidentTradeSim):
     ``ValueError`` escaping ``run_persisted_sweep`` as a grid-wide abort.
     """
 
-    def simulate_masks_with_exit_indices(
+    def simulate_masks_with_exit_counts(
         self, masks: Sequence[int], **kwargs: Any
-    ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
-        return super().simulate_masks_with_exit_indices(masks, **kwargs)[:-1]
+    ) -> list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]:
+        return super().simulate_masks_with_exit_counts(masks, **kwargs)[:-1]
 
 
 def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[object]:
@@ -2782,7 +2782,7 @@ class TestChunkLengthContract:
         msg = str(excinfo.value)
         # The SweepComboError names the CHUNK + carries the length ValueError.
         assert "trade-sim chunk of 5 masks" in msg
-        assert "returned 4 trade/exit-index pairs for a chunk of 5 masks" in msg
+        assert "returned 4 trade/exit-index/exit-count triples for a chunk of 5 masks" in msg
         assert "batch-contract violation" in msg
         assert "every mask passed the per-mask Python-oracle re-run" in msg
         assert isinstance(excinfo.value.__cause__, ValueError)

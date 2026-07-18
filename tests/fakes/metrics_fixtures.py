@@ -61,6 +61,11 @@ def make_result_metrics(**overrides: Any) -> ResultMetrics:
         "loss_rate": 0.4,
         "kelly_fraction": None,
         "log_growth_at_half_kelly": None,
+        # Exit quality (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): a
+        # concrete SL-exit share consistent with the counts above (10 SL
+        # exits of 50 trades — a subset of the 20 losers); passes the
+        # default-inactive max_sl_hit_rate door. Override per test.
+        "sl_hit_rate": 0.2,
     }
     base.update(overrides)
     return ResultMetrics(**base)

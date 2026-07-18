@@ -56,13 +56,14 @@ Optional-column back-compat (the ``WindowLedger.bars_net_new`` template)
 Columns added AFTER a store format ships are **appended LAST** in the Parquet
 column order and read back via :func:`_optional_float`: a store written before
 the column existed loads that field as ``None`` — the honest unknown, never a
-fabricated value. Three such generations exist today: ``deflated_sharpe``
+fabricated value. Four such generations exist today: ``deflated_sharpe``
 (DEC-SWEEP-WINNERS-BY-NAME-001 era), the ``vix_mean``/``vix_min``/``vix_max``
-trio (DEC-VIX-STAMP-WIRE-001), and the loss/growth trio
+trio (DEC-VIX-STAMP-WIRE-001), the loss/growth trio
 ``loss_rate``/``kelly_fraction``/``log_growth_at_half_kelly``
 (:data:`GROWTH_FIELDS` — DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
-DEC-METRICS-KELLY-GROWTH-001), pinned by the committed pre-column fixtures in
-``tests/golden/fixtures/``.
+DEC-METRICS-KELLY-GROWTH-001), and ``sl_hit_rate``
+(:data:`EXIT_QUALITY_FIELDS` — the Stage-B exit-reason-counter column),
+pinned by the committed pre-column fixtures in ``tests/golden/fixtures/``.
 
 Idempotence + byte-determinism (Golden Rule #4 / #7, mirrors
 ``brutex/data/parquet_writer.py``)
@@ -254,15 +255,38 @@ GROWTH_FIELDS: Final[tuple[str, ...]] = (
     "kelly_fraction",
     "log_growth_at_half_kelly",
 )
+#: Float64 **nullable** exit-quality column(s)
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): ``sl_hit_rate`` — the
+#: stop-loss-exit share of the combo's closed trades, written from
+#: :class:`~brutex.metrics.compute.ResultMetrics` by the ONE projector as a
+#: PLAIN pass-through (deliberately NO ``_metric_or_zero`` coercion — a
+#: ``None`` means the metrics were computed WITHOUT the trade-sim's
+#: exit-reason counters, and coercing it to ``0.0`` would fabricate a
+#: perfect-looking SL record). The sweep spine ALWAYS threads the counters,
+#: so a sweep-written row is concrete; ``None`` appears from a counter-less
+#: legacy caller or a store written BEFORE the column existed (the Ruling-5
+#: presence-tolerant boundary — the honest unknown). Full precision, NEVER
+#: rounded. Appended LAST in the on-disk column order, AFTER the growth trio
+#: (the optional-column back-compat template). Rankable under the same
+#: NULLS-LAST law as the growth trio (:data:`_NULLABLE_RANKABLE_FIELDS`);
+#: deterministic per run identity (a pure function of the run's own trade
+#: stream + code), so a value-vs-value conflict under one ``run_id`` is a
+#: genuine reproducibility breach. NEVER in the run identity. PUBLIC — the
+#: ONE cross-module source of truth for the column name(s) (CLAUDE.md §2
+#: Rule 11 COMMON).
+EXIT_QUALITY_FIELDS: Final[tuple[str, ...]] = ("sl_hit_rate",)
 
 #: Nullable fields that ride the DIRECTIONAL ``None`` → value backfill lane
 #: of :meth:`ResultsStore.append` (the DEC-VIX-STAMP-WIRE-001 law, extended
-#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001): a redo into a
+#: to the growth trio by DEC-METRICS-KELLY-GROWTH-001 and to the
+#: exit-quality column by the Stage-B extension): a redo into a
 #: pre-extension store (``load_or_create_store`` PRE-LOADS the old file)
 #: appends rows that now CARRY values where the stored row honestly holds
 #: ``None`` — an upgrade, never a conflict. Value-vs-value disagreement
 #: still raises (typed per family — see :func:`_merge_nullable_backfill`).
-_BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(VIX_FIELDS + GROWTH_FIELDS)
+_BACKFILLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS
+)
 
 #: Non-nullable numeric columns a leaderboard may rank by (metrics + money +
 #: counts). The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio
@@ -282,7 +306,7 @@ _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
 #: unmeasurable metric never outranks a measured one), with the same stable
 #: ``run_id``-ASC tie-break as :data:`_RANKABLE_FIELDS`. Kept a SEPARATE set
 #: so every pre-existing rankable column's behaviour stays byte-identical.
-_NULLABLE_RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(GROWTH_FIELDS)
+_NULLABLE_RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(GROWTH_FIELDS + EXIT_QUALITY_FIELDS)
 
 
 class ResultsStoreError(BruteXError):
@@ -462,6 +486,16 @@ class ResultRow:
         (the honest unknown — Ruling 5). Round-trips as a Parquet null.
         Rankable under the NULLS-LAST law
         (:data:`_NULLABLE_RANKABLE_FIELDS`); NEVER in the run identity.
+    sl_hit_rate
+        The nullable stop-loss-exit share (:data:`EXIT_QUALITY_FIELDS` —
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), written from the
+        combo's :class:`~brutex.metrics.compute.ResultMetrics` by the ONE
+        projector as a PLAIN pass-through (NO ``_metric_or_zero`` coercion
+        — ``None`` means the metrics lacked exit-reason counters, the
+        honest unknown; the sweep spine always threads them so a
+        sweep-written row is concrete). Full precision; must be finite
+        when present. Round-trips as a Parquet null. Rankable under the
+        NULLS-LAST law; NEVER in the run identity.
 
     Raises
     ------
@@ -501,6 +535,7 @@ class ResultRow:
     loss_rate: float | None = None
     kelly_fraction: float | None = None
     log_growth_at_half_kelly: float | None = None
+    sl_hit_rate: float | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -557,7 +592,12 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS, *GROWTH_FIELDS):
+        for name in (
+            *_NULLABLE_METRIC_FIELDS,
+            *VIX_FIELDS,
+            *GROWTH_FIELDS,
+            *EXIT_QUALITY_FIELDS,
+        ):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -654,7 +694,7 @@ class ResultsStore:
         three-branch rule (DEC-VIX-STAMP-WIRE-001, extended to the growth trio
         by DEC-METRICS-KELLY-GROWTH-001) on the nullable backfillable fields
         (:data:`_BACKFILLABLE_FIELDS` — the REFERENCE-ONLY VIX trio +
-        :data:`GROWTH_FIELDS`), per field:
+        :data:`GROWTH_FIELDS` + :data:`EXIT_QUALITY_FIELDS`), per field:
 
         1. **Identical value** (including both-``None``) → OK, a silent no-op.
         2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
@@ -673,6 +713,9 @@ class ResultsStore:
            the OTHER stored columns + the run's code (inside the run identity
            via ``code_commit_sha``), so two known values under one ``run_id``
            ARE a genuine reproducibility breach, never a lake-moved story.
+           On an exit-quality field the SAME plain error — ``sl_hit_rate``
+           is a deterministic function of the run's own trade stream + code,
+           the same reproducibility class.
 
         Every other field keeps the strict rule: any difference raises the
         plain :class:`ResultsStoreError` run-identity conflict (a genuine
@@ -750,6 +793,11 @@ class ResultsStore:
                 for name in GROWTH_FIELDS
                 if getattr(existing, name) is None and getattr(merged, name) is not None
             )
+            exit_quality_backfilled = tuple(
+                name
+                for name in EXIT_QUALITY_FIELDS
+                if getattr(existing, name) is None and getattr(merged, name) is not None
+            )
             if vix_backfilled:
                 _LOG.info(
                     "results_store.vix_backfill",
@@ -761,6 +809,12 @@ class ResultsStore:
                     "results_store.growth_backfill",
                     run_id=row.run_id,
                     backfilled_fields=growth_backfilled,
+                )
+            if exit_quality_backfilled:
+                _LOG.info(
+                    "results_store.exit_quality_backfill",
+                    run_id=row.run_id,
+                    backfilled_fields=exit_quality_backfilled,
                 )
             self._rows[row.run_id] = merged
             return True
@@ -956,17 +1010,19 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
-        for name in (*VIX_FIELDS, *GROWTH_FIELDS):
+        for name in (*VIX_FIELDS, *GROWTH_FIELDS, *EXIT_QUALITY_FIELDS):
             # The nullable REFERENCE-ONLY VIX trio + the nullable growth trio
-            # — appended LAST, in that order (the optional-column back-compat
-            # template, each generation strictly after the previous one);
-            # None → Parquet null.
+            # + the nullable exit-quality column — appended LAST, in that
+            # order (the optional-column back-compat template, each
+            # generation strictly after the previous one); None → Parquet
+            # null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices → the VIX trio → the growth trio LAST
+        # metrics → deflated → prices → the VIX trio → the growth trio →
+        # the exit-quality column LAST
         # for legacy-file back-compat) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
@@ -982,6 +1038,7 @@ class ResultsStore:
                         *_PRICE_FIELDS,
                         *VIX_FIELDS,
                         *GROWTH_FIELDS,
+                        *EXIT_QUALITY_FIELDS,
                     ),
                     pl.Float64,
                 ),
@@ -1084,6 +1141,30 @@ def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> Result
             f"genuine reproducibility breach — a metric-formula drift without a "
             f"code-identity re-key. Refusing to overwrite (Golden Rule #4)."
         )
+    exit_quality_conflicting = tuple(
+        name
+        for name in EXIT_QUALITY_FIELDS
+        if getattr(existing, name) is not None
+        and getattr(incoming, name) is not None
+        and getattr(existing, name) != getattr(incoming, name)
+    )
+    if exit_quality_conflicting:
+        _LOG.error(
+            "results_store.exit_quality_conflict",
+            run_id=existing.run_id,
+            conflicting_fields=exit_quality_conflicting,
+            stored={name: getattr(existing, name) for name in EXIT_QUALITY_FIELDS},
+            incoming={name: getattr(incoming, name) for name in EXIT_QUALITY_FIELDS},
+        )
+        raise ResultsStoreError(
+            f"exit-quality conflict for {existing.run_id}: the stored row and the "
+            f"redo carry different known values for "
+            f"{', '.join(exit_quality_conflicting)} while every non-backfillable "
+            f"column is identical. sl_hit_rate is a deterministic function of the "
+            f"run's own trade stream + code (inside the BLAKE3 run identity via "
+            f"code_commit_sha), so two known values under one run_id ARE a genuine "
+            f"reproducibility breach. Refusing to overwrite (Golden Rule #4)."
+        )
     conflicting = tuple(
         name
         for name in VIX_FIELDS
@@ -1129,6 +1210,7 @@ def _merge_nullable_backfill(existing: ResultRow, incoming: ResultRow) -> Result
         loss_rate=resolved["loss_rate"],
         kelly_fraction=resolved["kelly_fraction"],
         log_growth_at_half_kelly=resolved["log_growth_at_half_kelly"],
+        sl_hit_rate=resolved["sl_hit_rate"],
     )
 
 
@@ -1255,6 +1337,7 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         loss_rate=_optional_float(record, "loss_rate"),
         kelly_fraction=_optional_float(record, "kelly_fraction"),
         log_growth_at_half_kelly=_optional_float(record, "log_growth_at_half_kelly"),
+        sl_hit_rate=_optional_float(record, "sl_hit_rate"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1289,6 +1372,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 __all__ = [
     "CONDITION_NAME_SEP",
+    "EXIT_QUALITY_FIELDS",
     "GROWTH_FIELDS",
     "MASK_BITS_MAX",
     "VIX_FIELDS",
