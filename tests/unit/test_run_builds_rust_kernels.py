@@ -208,6 +208,22 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-RUST-OBSERVABILITY-001 (MIGRATION.md #1961): brutex_observability is
+    # the observability decision-law crate behind a deliberately default-OFF
+    # import-guarded facade (BRUTEX_OBSERVABILITY_RUST). It is consumed ONLY
+    # through brutex/observability/observability_rust.py
+    # (`importlib.import_module("brutex_observability")` inside the guard —
+    # an absent or stale wheel latches crate_unavailable/crate_stale with one
+    # loud WARN and the Python oracle serves, byte-identical). It is NOT
+    # wired into the always-on kernel build: never module-top imported, in NO
+    # cargo workspace, built + tested by its own observability-rust-parity CI
+    # lane (.github/workflows/observability-rust-parity.yml). A module-top
+    # `import brutex_observability` anywhere in brutex/ would make a clean
+    # clone crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_observability": (
+        "brutex/observability/observability_rust.py",
+        ".github/workflows/observability-rust-parity.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {

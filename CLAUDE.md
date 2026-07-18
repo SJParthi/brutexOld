@@ -18,7 +18,47 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957
+_Last updated: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
+provisional, branch `claude/rust-observability-lane` — the observability
+Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
+(loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
+decide · sla predicate+hysteresis edge · stage_stamp shape-index + verdict
+matrix) re-hosted on the NEW standalone crate `rust/brutex-observability`
+behind the ONE default-OFF per-call flag `BRUTEX_OBSERVABILITY_RUST` via the
+ONE facade `brutex/observability/observability_rust.py` (the
+window_ledger_rust template — LOCAL tristate+panic-belt twins equality-pinned
+vs lake_rust_render, no data-package import edge; all-or-nothing `_CRATE_API`
+handshake incl. the crate-exported PanicException with
+crate_unavailable/crate_stale; NO polars version guard — the documented
+polars-free deviation; per-law 16-sample burn-in + ship-the-oracle
+autorevert; exact-type refuse-poison gates both directions). Verbatim-move
+oracles + branch-free routers — flag OFF (default) BYTE-IDENTICAL,
+bomb-spy pinned; the four consumer ci.yml 100% stanzas green over
+UNMODIFIED test lists. PANIC CONTAINMENT: pyo3's PanicException is a
+per-extension static — the crate exports its OWN class, the belt resolves
+it FIRST (name-based homes kept as fallback; the siblings' name-based-only
+narrowing documented NOT edited — its house-wide fix needs its own DEC);
+the one overflow-capable op (`episodes + 1`) is checked_add → ValueError
+degrade → the oracle's unbounded-int value; `content_hash_of` STAYS hashlib
+(I/O not decision — a negative-payoff port). The mutmut pair is
+de-survivored to a verified 270/270 killed / 0 survivors (the phantom
+cache-row + PEP-563 annotation-mutant classes closed by RESTRUCTURE, never
+a pragma; the untimed-pair killed-but-slow flake class disclosed); review
+round 1 SHIP/FIX-FIRST/SHIP/SHIP (the one confirmed MAJOR — the
+mutation-gate survivors — fixed), round 2 CLEAN; workspace-health HEALTHY.
+ADR-0020 banner verbatim: expected payoff ≈ 0 — conversion is for
+uniformity, not speed; ships INERT — a default flip needs its own DEC +
+soak, oracle deletion only via the H.2 rail
+(DEC-OBSERVABILITY-ORACLE-DELETE-001). Named follow-ups:
+DEC-RUST-OBSERVABILITY-TRIPWIRES-002 ·
+DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the ci.yml crate job + weekly
+cargo-mutants wiring (the non-required parity lane + the mutmut pair ARE
+wired). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; ONE
+new env var (`BRUTEX_OBSERVABILITY_RUST`). This header carries the
+pointer, never the story — the full record lives in the §1 Active-branch
+blurb + MIGRATION.md #1961.)
+Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957
 (renumbered #1954 → #1955 → #1957 — the last hop at the 2026-07-18
 merge-reconcile, main took #1955 for DEC-STRATEGIES-RUST-COMBO-001;
 DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001), branch
@@ -3548,7 +3588,130 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/notify-rust-core`
+- **Active branch:** `claude/rust-observability-lane`
+  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
+  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  #1956 at the 3ee742b3 resync — main took #1954 for
+  DEC-TEST-AWS-HERMETICITY-001 + #1955 for DEC-STRATEGIES-RUST-COMBO-001;
+  #1956 → #1961 at the 71fb2ee5 resync — main took #1956 for
+  DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master allocation;
+  the DEC-ID is the stable handle per DEC-LEDGER-RENUMBER-001); the id itself is adopted from the coordinator
+  partition's T27 row (the in-code citations swept from the spec's interim
+  working id to this resolving handle in the packaging commit) — the
+  observability Rust decision-kernel lane, FIRST
+  CUT. THE SLICE: the four pure detector/stamp laws — (A) `loop_watchdog.
+  check_once`, the tiered OK→WARNED→CRITICAL→recovered stall state machine ·
+  (B) the watchdog per-worker heartbeat HEALTHY↔HUNG decide (strict `>`,
+  deliberately distinct from A's `>=` — never harmonized) · (C) sla's
+  `_predicate_holds` + hysteresis edge law (`_predicate_holds` itself stays
+  VERBATIM in place — imported-by-name by its test) · (D) stage_stamp's
+  strict-parse shape-index (D1) + `validate_stage_stamp` verdict matrix
+  (D2) — re-hosted on the NEW standalone crate `rust/brutex-observability`
+  (feed-style feature split, pyo3 0.29 abi3-py312, committed Cargo.lock,
+  build.rs source digest, deny.toml, in-crate `.cargo/mutants.toml`; release
+  profile keeps `overflow-checks = true` and deliberately NO `panic="abort"`
+  — the lake reasoning, panics must cross catchable) behind the ONE
+  default-OFF per-call flag `BRUTEX_OBSERVABILITY_RUST` via the ONE facade
+  `brutex/observability/observability_rust.py` — the window_ledger_rust
+  template: LOCAL `_TRUTHY`/`_FALSY` + `_panic_belt_errors` twins
+  equality-pinned vs `lake_rust_render` (NO `brutex.data` import edge —
+  the data⇄observability package cycles are live both directions), lazy
+  crate import + the all-or-nothing 6-symbol `_CRATE_API` handshake
+  INCLUDING the crate-exported PanicException
+  (`crate_unavailable`/`crate_stale` — a pre-containment-fix wheel latches
+  `crate_stale`, the symbol set not the version is the teeth), NO polars
+  version guard (the documented polars-free deviation — handshake + burn-in
+  are the drift teeth), per-law 16-sample burn-in bit-compare
+  (struct.pack'd float legs) + ship-the-ORACLE autorevert, the degrade set
+  (ValueError/RuntimeError/TypeError/OverflowError/AttributeError), the
+  escape clause (KeyboardInterrupt/SystemExit/MemoryError raise RAW) ABOVE
+  the panic belt, exact-type refuse-poison INPUT gates (non-float numerics
+  → the oracle's exact arbitrary-precision compare) + OUTPUT gates (tuple
+  shapes + token vocabularies), the warn-once memo (the documented unlocked
+  exception, thread-fuzz-pinned) and the `remaining=0`-steady reset seam.
+  SEAMS: verbatim-move oracles + branch-free routers in all four consumer
+  modules (`_check_once_python` · `_worker_decide_python` ·
+  `_sla_decide_python` · `_stamp_shape_index_python`/`_stamp_verdict_python`)
+  — ZERO new branches per consumer, so the four existing ci.yml 100%
+  stanzas stay green over UNMODIFIED test lists; flag OFF (default) is
+  BYTE-IDENTICAL (bomb-crate spy pinned; law A's OK→OK state OBJECT
+  identity preserved OFF — the ON arm's equal-not-identical recomposition
+  disclosed); `content_hash_of` still called through the module global
+  (the always-recompute spy law) and `StampVerdict(token)` mints the member
+  singleton (every consumer `is`-identity holds). PANIC CONTAINMENT (the
+  IMPL-2 refuter finding, closed structurally): pyo3's PanicException is a
+  PER-EXTENSION static a name-based belt can never resolve — the crate
+  exports its OWN class on all four handshake surfaces and the belt
+  resolves the `brutex_observability` home FIRST (name homes kept as
+  fallback; the sibling facades' name-based-only narrowing is documented
+  NOT edited — a house-wide fix needs its own DEC); the ONE
+  overflow-capable op (`episodes + 1`, law-A warn edge) is `checked_add` →
+  typed EpisodesOverflow → FFI ValueError → degrade → the oracle's honest
+  unbounded-int value, with u64::MAX RE-INCLUDED in the differential
+  domain and both containment flavors pinned (real-wheel degrade +
+  injected genuine-panic latch — no natural panic path remains post-audit,
+  disclosed). HONEST (ADR-0020 banner verbatim): expected payoff ≈ 0 —
+  conversion is for uniformity, not speed; every law is already O(1)
+  sub-microsecond Python per check and the ON arm ADDS an FFI hop (small
+  slowdown, no speedup claimed); ships INERT — a default flip needs its
+  own DEC + soak, and oracle deletion happens ONLY via the H.2 rail
+  (DEC-OBSERVABILITY-ORACLE-DELETE-001: parity → flip DEC → soak →
+  delete); ONE lane flag = a poisoned-crate autorevert latches all five
+  laws together (disclosed); the exact-type gates make the routed domain
+  deliberately narrower (the oracle serves the rest). T27 DEVIATIONS
+  (recorded for coordinator reconcile): standalone crate not
+  `rust/brutex-core` (avoids serializing on the brutex-core mint); flag
+  `BRUTEX_OBSERVABILITY_RUST` not `BRUTEX_OBS_RUST` (the lane brief wins).
+  GATES (executed): cargo fmt/clippy `-D warnings` clean +
+  `cargo test --release --locked` 52 green ×2 feature sets; wheel built
+  (maturin abi3-py312); the two new suites 171 passed wheel-present
+  (unit 161 + integration 10) / 148 passed + 14 skipped wheel-absent
+  (meta_path blocker); facade `observability_rust.py` 283/92, 0 missed,
+  100.00% line+branch on BOTH arms; the flag-ON parity pass 302 passed
+  (both new suites + the four consumer-module suites, oracles BOMBED);
+  the four consumer stanzas 100.00%
+  (sla 92/16 · watchdog 71/8 · loop_watchdog 190/46 · stage_stamp 152/42)
+  over unmodified test lists; the 28 protected consumer/law files 673
+  passed, 1 skipped (the pre-existing env-only `cma` skip,
+  baseline-identical) with zero edits to any; discovery gate 5 touched
+  modules at 100%; ruff/ruff-format clean; `mypy --strict` 0 new; pyright
+  0 errors on touched files; all commits Conventional-Commits green;
+  the mutmut pair wired AND de-survivored to a verified 270/270 killed /
+  0 survivors on the CI-replica shape (run-1 survivors hand-killed with
+  named killers; the PEP-563 annotation-mutant class + the NOVEL
+  phantom-cache-row CI-gate-breaker class both closed by RESTRUCTURE —
+  never a pragma; the untimed-pair killed-but-slow OK_SUSPICIOUS flake
+  class disclosed for the weekly gate);
+  hypothesis differentials at `remaining=0` incl. the recorded 20k-sample
+  per-law ad-hoc evidence (A/B/C — 0 bitwise mismatches) + D1 all-64
+  exhaustive + D2 truth table with oracles BOMBED. REVIEW RECORD: round 1
+  = 4 hostile lenses + refuters (13 agents; SHIP/FIX-FIRST/SHIP/SHIP; the
+  1 confirmed MAJOR — the mutation-gate survivors — fixed; 1 refuted set);
+  round 2 = CLEAN (SHIP/SHIP, zero confirmed findings; independent claims
+  verification — 5/5 mutant spot-kills, coverage re-measured 100.00%,
+  OFF-arm bomb inertness anti-vacuously proven); workspace-health HEALTHY
+  (obs family 714 · engine 3682 · dashboard 3010 · consumer suites 382 ·
+  chaos 23 · property 18; the full ~25k-unit sweep time-boxed at ~8%
+  sampled clean, disclosed). SIBLING EXPOSURE flagged to the coordinator:
+  the PEP-563 annotation-mutant class is executed-proven latent in the
+  enrolled pairs lake_rust_stats.py:72 + today_completeness.py:373, with
+  candidates in lake_rust_locks/lake_rust_resample/feed replay — other
+  lanes' files, deliberately not fixed here. Wired here: the mutation.yml
+  pair line + the NEW non-required `observability-rust-parity.yml`
+  lane; DEFERRED wiring (named follow-up — required-checks/weekly-graph
+  surface): the ci.yml crate job + ci-ok.needs + the weekly cargo-mutants
+  job + mutation path triggers. Named follow-ups:
+  DEC-RUST-OBSERVABILITY-TRIPWIRES-002 (run_tripwires core, ~1.5–2
+  sessions) · DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 (the
+  CPython-json.loads parse twin) · the
+  structlog→tracing endgame lane (the H.1 map) · the pull_eta.py +
+  throttle.py dead-file removal track (noted, deliberately NOT deleted
+  here) · the remaining pure-law modules (pull_health rules/dwell ·
+  chain_map · pull_journal sleep_gaps · run_manifest/flight_recorder/
+  metrics-render laws). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
+  lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
+  routes; ONE new env var.)
+  Earlier: `claude/notify-rust-core`
   (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957** — renumbered
   #1954 → #1955 → #1957: first per the coordinator ledger allocation, then at
   the 2026-07-18 merge-reconcile (main took #1955 for
@@ -10889,7 +11052,40 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/notify-rust-core`
+- **Active feature branch:** `claude/rust-observability-lane`
+  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
+  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  #1956 at the 3ee742b3 resync, main took #1954 for
+  DEC-TEST-AWS-HERMETICITY-001; #1956 → #1961 at the 71fb2ee5 resync,
+  main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master
+  allocation; DEC-LEDGER-RENUMBER-001) — the
+  observability Rust decision-kernel lane, FIRST CUT: the four pure
+  detector/stamp laws (loop_watchdog tiered stall machine · watchdog
+  heartbeat decide · sla predicate+hysteresis edge · stage_stamp
+  shape-index + verdict matrix) on the NEW standalone crate
+  `rust/brutex-observability` behind the ONE default-OFF per-call flag
+  `BRUTEX_OBSERVABILITY_RUST` via the ONE facade
+  `brutex/observability/observability_rust.py` (window_ledger_rust
+  template — local tristate+panic-belt twins equality-pinned vs
+  lake_rust_render; all-or-nothing handshake incl. the crate-exported
+  PanicException, crate_unavailable/crate_stale; NO polars version guard —
+  documented polars-free deviation; per-law 16-sample burn-in +
+  ship-the-oracle autorevert); verbatim-move oracles + branch-free
+  routers — flag OFF byte-identical, bomb-spy pinned; the belt resolves
+  the crate's OWN panic class first (siblings' name-based narrowing
+  documented not edited); `episodes+1` checked_add → ValueError degrade →
+  the oracle's unbounded-int value; `content_hash_of` stays hashlib; the
+  mutmut pair de-survivored to a verified 270/270 killed / 0 survivors
+  (restructure never pragma); review round 1 SHIP/FIX-FIRST/SHIP/SHIP
+  (the one confirmed MAJOR fixed) + round 2 CLEAN; workspace-health
+  HEALTHY; ADR-0020 banner verbatim — payoff ≈ 0, uniformity not speed;
+  ships INERT (default flip = own DEC + soak; oracle deletion only via
+  the H.2 rail, DEC-OBSERVABILITY-ORACLE-DELETE-001); named follow-ups
+  DEC-RUST-OBSERVABILITY-TRIPWIRES-002 ·
+  DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the ci.yml crate job + weekly
+  cargo-mutants wiring; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1961 for the full blurb)
+  Earlier: `claude/notify-rust-core`
   (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957 — renumbered
   #1954 → #1955 → #1957, the last hop at the 2026-07-18 merge-reconcile
   (main took #1955 for DEC-STRATEGIES-RUST-COMBO-001; the DEC-ID is the

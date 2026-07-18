@@ -46,6 +46,7 @@ from typing import Final
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
+from brutex.observability import observability_rust
 from brutex.observability.flight_recorder import FlightRecorder
 
 __all__ = [
@@ -80,6 +81,19 @@ SNAPSHOT_EXTRA_KEY: Final[str] = "data_snapshot_hash"
 
 #: Streamed-hash read chunk (1 MiB) — bounded memory on multi-GB artifacts.
 _HASH_CHUNK_BYTES: Final[int] = 1 << 20
+
+#: The three string contract fields, in the FROZEN acceptance order the D1
+#: shape law indexes (reject indices 1..3 → these names).
+_SHAPE_FIELD_NAMES: Final[tuple[str, str, str]] = ("stage", "run_id", "content_hash")
+
+#: The D1 reject index for the last string contract field (indices 1..3).
+_SHAPE_REJECT_FIELD_MAX: Final[int] = 3
+
+#: The D1 reject index for a non-number ``produced_at_utc``.
+_SHAPE_REJECT_PRODUCED: Final[int] = 4
+
+#: The D1 reject index for a non-str→str ``extra``.
+_SHAPE_REJECT_EXTRA: Final[int] = 5
 
 
 class StageStampError(BruteXError):
@@ -209,33 +223,85 @@ def write_stage_stamp(
     return dest
 
 
+def _stamp_shape_index_python(
+    root_is_dict: bool,
+    stage_is_str: bool,
+    run_id_is_str: bool,
+    hash_is_str: bool,
+    produced_ok: bool,
+    extra_ok: bool,
+) -> int:
+    """The strict-parse acceptance-ORDER law (D1) — the LIVE parity oracle.
+
+    First-false wins, in the FROZEN order of the pre-seam ``_parse_stamp``
+    raise chain (DEC-RUST-OBSERVABILITY-001). Index vocabulary: ``-1``
+    accept · ``0`` root-not-dict · ``1`` stage · ``2`` run_id ·
+    ``3`` content_hash · ``4`` produced_at_utc · ``5`` extra.
+    """
+    checks = (root_is_dict, stage_is_str, run_id_is_str, hash_is_str, produced_ok, extra_ok)
+    for index, ok in enumerate(checks):
+        if not ok:
+            return index
+    return -1
+
+
 def _parse_stamp(text: str, *, source: Path) -> StageStamp:
-    """Parse stamp JSON *text* strictly — :class:`StageStampError` on any defect."""
+    """Parse stamp JSON *text* strictly — :class:`StageStampError` on any defect.
+
+    ``json.loads`` stays Python (the CPython-parse twin is the named
+    follow-up ``DEC-RUST-OBSERVABILITY-STAMP-PARSE-003``); the post-parse shape checks
+    are probed into bools (side-effect-free ``isinstance`` + ``dict.get``,
+    hoisted unconditionally above the raises — behavior-identical) and the
+    acceptance ORDER routes through the default-OFF ``observability_rust``
+    facade (law D1) with :func:`_stamp_shape_index_python` as the oracle;
+    this function materializes the EXACT pre-seam error message for the
+    returned reject index.
+    """
     try:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise StageStampError(f"malformed stamp JSON at {source}: {exc}") from exc
-    if not isinstance(raw, dict):
+    root_is_dict = isinstance(raw, dict)
+    if root_is_dict:
+        stage_is_str = isinstance(raw.get("stage"), str)
+        run_id_is_str = isinstance(raw.get("run_id"), str)
+        hash_is_str = isinstance(raw.get("content_hash"), str)
+        produced = raw.get("produced_at_utc")
+        produced_ok = isinstance(produced, int | float) and not isinstance(produced, bool)
+        extra_raw = raw.get("extra", {})
+        extra_ok = isinstance(extra_raw, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in extra_raw.items()
+        )
+    else:
+        # A non-dict root cannot be probed further (`raw.get` may not even
+        # exist); the shape law rejects at index 0 regardless, so the
+        # remaining probes are vacuous constants — identical on both arms,
+        # never consulted by the first-false-wins ordering.
+        stage_is_str = run_id_is_str = hash_is_str = produced_ok = extra_ok = True
+    reject = observability_rust.routed_stamp_shape_index(
+        root_is_dict,
+        stage_is_str,
+        run_id_is_str,
+        hash_is_str,
+        produced_ok,
+        extra_ok,
+        python_law=_stamp_shape_index_python,
+    )
+    if reject == 0:
         raise StageStampError(f"stamp root at {source} must be an object, got {type(raw).__name__}")
-    for key in ("stage", "run_id", "content_hash"):
-        if not isinstance(raw.get(key), str):
-            raise StageStampError(
-                f"stamp {source} field {key!r} must be a str, got {raw.get(key)!r}"
-            )
-    produced = raw.get("produced_at_utc")
-    if not isinstance(produced, int | float) or isinstance(produced, bool):
+    if 1 <= reject <= _SHAPE_REJECT_FIELD_MAX:
+        key = _SHAPE_FIELD_NAMES[reject - 1]
+        raise StageStampError(f"stamp {source} field {key!r} must be a str, got {raw.get(key)!r}")
+    if reject == _SHAPE_REJECT_PRODUCED:
         raise StageStampError(f"stamp {source} field 'produced_at_utc' must be a number")
-    extra_raw = raw.get("extra", {})
-    if not isinstance(extra_raw, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in extra_raw.items()
-    ):
+    if reject == _SHAPE_REJECT_EXTRA:
         raise StageStampError(f"stamp {source} field 'extra' must be a str→str object")
     return StageStamp(
         stage=raw["stage"],
         run_id=raw["run_id"],
         content_hash=raw["content_hash"],
-        produced_at_utc=float(produced),
-        extra=dict(extra_raw),
+        produced_at_utc=float(raw["produced_at_utc"]),
+        extra=dict(raw.get("extra", {})),
     )
 
 
@@ -263,6 +329,38 @@ def read_stage_stamp(artifact: Path) -> StageStamp:
     except OSError as exc:
         raise StageStampError(f"cannot read stamp {sidecar}: {exc}") from exc
     return _parse_stamp(text, source=sidecar)
+
+
+def _stamp_verdict_python(
+    recomputed: str,
+    content_hash: str,
+    stage: str,
+    expected_stage: str,
+    run_id: str,
+    expected_run_id: str | None,
+    stamped_snapshot: str | None,
+    expected_snapshot_hash: str | None,
+) -> str:
+    """The ``validate_stage_stamp`` mismatch matrix (D2) — the LIVE parity oracle.
+
+    The identical boolean expression, scalarized (``stamp.<field>``
+    attribute reads became parameters — DEC-RUST-OBSERVABILITY-001, a
+    disclosed verbatim move). Returns the :class:`StampVerdict` VALUE token;
+    the caller mints the enum member from it.
+    """
+    mismatch = (
+        recomputed != content_hash
+        or stage != expected_stage
+        or (expected_run_id is not None and run_id != expected_run_id)
+        or (
+            expected_snapshot_hash is not None
+            and stamped_snapshot is not None
+            and stamped_snapshot != expected_snapshot_hash
+        )
+    )
+    if mismatch:
+        return "hash_mismatch"
+    return "ok"
 
 
 def validate_stage_stamp(
@@ -324,21 +422,27 @@ def validate_stage_stamp(
         stamp = _parse_stamp(sidecar.read_text(encoding="utf-8"), source=sidecar)
     except (StageStampError, OSError):
         return (StampVerdict.MALFORMED, None)
+    # The always-recompute call goes through the MODULE GLOBAL (I-5 — the
+    # test_r42_always_recomputes_hash spy monkeypatches it by name).
     recomputed = content_hash_of(artifact)
     stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY)
-    mismatch = (
-        recomputed != stamp.content_hash
-        or stamp.stage != expected_stage
-        or (expected_run_id is not None and stamp.run_id != expected_run_id)
-        or (
-            expected_snapshot_hash is not None
-            and stamped_snapshot is not None
-            and stamped_snapshot != expected_snapshot_hash
-        )
+    # The mismatch matrix routes through the default-OFF observability_rust
+    # facade (law D2) with `_stamp_verdict_python` as the live oracle
+    # (DEC-RUST-OBSERVABILITY-001; branch-free here). `StampVerdict(token)`
+    # is an Enum VALUE-call — it returns the member SINGLETON, so consumers'
+    # `verdict is StampVerdict.OK` identity checks hold bit-for-bit.
+    token = observability_rust.routed_stamp_verdict(
+        recomputed,
+        stamp.content_hash,
+        stamp.stage,
+        expected_stage,
+        stamp.run_id,
+        expected_run_id,
+        stamped_snapshot,
+        expected_snapshot_hash,
+        python_law=_stamp_verdict_python,
     )
-    if mismatch:
-        return (StampVerdict.HASH_MISMATCH, stamp)
-    return (StampVerdict.OK, stamp)
+    return (StampVerdict(token), stamp)
 
 
 def stamp_stage3_cells(
