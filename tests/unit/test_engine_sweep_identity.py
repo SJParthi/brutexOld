@@ -67,6 +67,29 @@ class TestGateConfigFragment:
         assert frag is not None
         assert set(frag) == {"overfit", "stage3"}
 
+    def test_max_sl_hit_rate_folds_active_only(self) -> None:
+        """The opt-in SL-hit-rate knob (DEC-METRICS-KELLY-GROWTH-001) is an
+        active-gate axis: a SET ceiling re-keys, the default None contributes
+        nothing. Exercised through the structural ``_GateConfigInput`` seam —
+        the real ``SweepGridConfig`` refuses a set value until Stage B wires
+        the enforcement (the fold must already be correct so the flip is a
+        one-line deletion there)."""
+
+        class _FakeGrid:
+            overfit = None
+            max_sl_hit_rate: float | None = 0.5
+            stage3_enable = False
+            stage3_top_k = 10_000
+            stage3_max_fevals = 200
+            stage3_max_restarts = 3
+
+        assert _gate_config_fragment(_FakeGrid()) == {"max_sl_hit_rate": 0.5}
+
+        class _FakeGridOff(_FakeGrid):
+            max_sl_hit_rate = None
+
+        assert _gate_config_fragment(_FakeGridOff()) is None
+
 
 class TestReExportShim:
     def test_supervisor_reexports_same_object(self) -> None:

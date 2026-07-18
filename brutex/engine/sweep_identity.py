@@ -51,6 +51,17 @@ class _GateConfigInput(Protocol):
         raise NotImplementedError
 
     @property
+    def max_sl_hit_rate(self) -> float | None:
+        """The opt-in SL-hit-rate gate ceiling, or ``None`` when the gate is off.
+
+        DEC-METRICS-KELLY-GROWTH-001 (Stage A): the knob exists + folds into
+        the identity fragment, but ``SweepGridConfig`` REFUSES a set value
+        until the gate's enforcement lands (Stage B) — a store address must
+        never claim an sl-hit-rate gate that never ran.
+        """
+        raise NotImplementedError
+
+    @property
     def stage3_enable(self) -> bool:
         """Whether the Stage-3 refinement pass is enabled."""
         raise NotImplementedError
@@ -100,6 +111,15 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
             overfit.default_skew,
             overfit.default_excess_kurtosis,
         ]
+    if grid.max_sl_hit_rate is not None:
+        # The opt-in SL-hit-rate gate (DEC-METRICS-KELLY-GROWTH-001) is an
+        # active-gate axis exactly like overfit: a SET ceiling changes what a
+        # tuple's persisted rows MEAN, so it re-keys; the default None
+        # contributes NOTHING and every existing digest is byte-identical
+        # (the frozen 5b020e892247deac default-digest pin). Stage A:
+        # production-unreachable — SweepGridConfig refuses a set value until
+        # Stage B wires the enforcement (covered via a Protocol fake).
+        fragment["max_sl_hit_rate"] = grid.max_sl_hit_rate
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a
         # disabled pass leaves them inert, so they never re-key a light grid.

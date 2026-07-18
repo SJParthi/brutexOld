@@ -75,7 +75,7 @@ import itertools
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from math import prod
+from math import isfinite, prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -239,6 +239,13 @@ class SweepGridConfig:
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
         own backtested-combo count is its authoritative trial count ``N``.
+    max_sl_hit_rate
+        Opt-in SL-hit-rate gate ceiling (DEC-METRICS-KELLY-GROWTH-001).
+        ``None`` (the default) is fully inert — identity digests
+        byte-identical. A SET value is range-validated (a finite fraction in
+        ``(0, 1]``) then REFUSED at Stage A: the ``sl_hit_rate`` metric does
+        not exist until the Stage-B exit-reason wire, and a store address
+        must never claim a gate that never ran (see the field comment).
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -285,6 +292,17 @@ class SweepGridConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    #: Opt-in SL-hit-rate gate CEILING (DEC-METRICS-KELLY-GROWTH-001, Stage A
+    #: config plumbing): when set, combos whose stop-loss-exit fraction
+    #: exceeds it are rejected — and the knob joins the gate-config identity
+    #: fragment (``_gate_config_fragment``) so gated and ungated trees can
+    #: never share a store address. STAGE-A REFUSAL: the ``sl_hit_rate``
+    #: metric does not exist yet (the Stage-B exit-reason wire), so a SET
+    #: value is REFUSED at construction — a store address must never claim an
+    #: sl-hit-rate gate that never ran (the exact "ungated rows served as
+    #: institutional winners" trap the fragment exists to prevent). ``None``
+    #: (the default) is fully inert: every existing digest byte-identical.
+    max_sl_hit_rate: float | None = None
     #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
     #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
@@ -427,6 +445,21 @@ class SweepGridConfig:
             raise ValueError(f"SweepGridConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepGridConfig.min_hits must be >= 0, got {self.min_hits}")
+        if self.max_sl_hit_rate is not None:
+            # Range-validate FIRST (Stage B keeps this arm verbatim), then the
+            # Stage-A refusal (Stage B deletes ONLY the refusal raise).
+            if not isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0:
+                raise ValueError(
+                    f"SweepGridConfig.max_sl_hit_rate must be a finite fraction in "
+                    f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+                )
+            raise ValueError(
+                "SweepGridConfig.max_sl_hit_rate is not yet enforced — the sl_hit_rate "
+                "metric lands with the Stage-B exit-reason wire "
+                "(DEC-METRICS-KELLY-GROWTH-001). Refusing a set value so a store "
+                "address can never claim an sl-hit-rate gate that never ran; leave it "
+                "None until the enforcement ships."
+            )
 
         # Per-tuple guard: reject up front any k whose mask count exceeds the cap,
         # so a tuple can never raise mid-grid AFTER earlier tuples persisted.
