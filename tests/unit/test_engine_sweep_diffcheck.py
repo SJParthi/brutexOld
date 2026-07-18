@@ -651,6 +651,28 @@ def _ref_trade(exit_idx: int, pnl: int) -> RefTrade:
     )
 
 
+class TestReferenceArmMap:
+    """Direct pins on the reference's OWN §3.11 arming fold (B4/B6 arms)."""
+
+    def test_b6_fill_at_or_after_session_close_is_refused(self) -> None:
+        # Decision bar at 15:28 IST (minute 373), tf=5 ⇒ close_instant 15:33;
+        # the only same-date candidate sits at 15:35 IST — at/after the
+        # 15:30 session close, so the arm is REFUSED (B6), never a late fill.
+        bars = [_bar(373, 100, 100, 100, 100)]
+        exec_bars = [_bar(0, 100, 100, 100, 100), _bar(380, 100, 100, 100, 100)]
+        armed = sweep_diffcheck._reference_arm_map(bars, exec_bars, tf_minutes=5)
+        assert armed == [-1, -1]
+
+    def test_b4_earliest_armed_decision_bar_wins_the_shared_fill(self) -> None:
+        # Two decision bars (minutes 0 and 1) both map onto the ONE stored 1m
+        # bar at minute 2 (the minute-1 bar is missing) — the EARLIEST-armed
+        # decision bar wins (B4); the later one's claim is dropped.
+        bars = [_bar(0, 100, 100, 100, 100), _bar(1, 100, 100, 100, 100)]
+        exec_bars = [_bar(0, 100, 100, 100, 100), _bar(2, 100, 100, 100, 100)]
+        armed = sweep_diffcheck._reference_arm_map(bars, exec_bars, tf_minutes=1)
+        assert armed == [-1, 0]
+
+
 class TestReferenceDrawdown:
     def test_hand_computed_exact(self) -> None:
         # 1-minute decision labels (minutes 0..4): each trade's exit_ts is

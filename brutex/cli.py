@@ -8117,17 +8117,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # re-launch compares recorded == fresh instead of refusing.
                 # Spot launches append nothing — their audit stays
                 # byte-identical.
+                from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
-                    # DEC-FILL-WORST-CASE-ONLY-001: the launch context line
-                    # records the one fill law ALWAYS AND EXPLICITLY —
-                    # matching canonical_trade_params' unconditional emit —
-                    # so sweep-verify's precise-era refusal can judge any
-                    # generation from its own audit lines.
+                    # DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001:
+                    # the launch context line records BOTH permanent law
+                    # tokens ALWAYS AND EXPLICITLY — matching
+                    # canonical_trade_params' unconditional emit — so
+                    # sweep-verify's precise-era AND decision-TF-era refusals
+                    # can judge any generation from its own audit lines.
                     launch_params: dict[str, object] = {
                         "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
                         "fill_mode": FillMode.WORST_CASE.value,
+                        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
                     }
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,

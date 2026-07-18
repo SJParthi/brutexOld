@@ -145,6 +145,54 @@ class TestSpecFillModeManifestLaw:
 
         assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
 
+
+class TestSpecExecGridManifestLaw:
+    """DEC-FILL-EXEC-GRID-1M-001: the unconditional manifest token + the
+    decision-TF-era refusal law (the fill_mode law's twin — the 1-minute
+    execution grid is the ONLY fill grid)."""
+
+    def test_spec_dict_carries_the_permanent_grid_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["execution_grid"] == "1m_next_bar"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_decision_tf_era(self) -> None:
+        # Fails-before pin: a PR-A manifest (no execution_grid key) must
+        # refuse LOUDLY naming the DEC, never replay under the wrong grid.
+        payload = cw._spec_to_dict(_spec())
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"decision-TF-era cascade manifest refused \(DEC-FILL-EXEC-GRID-1M-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_grid_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["execution_grid"] = "decision_bar"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a 1m-grid manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_fill_mode_refusal_takes_precedence_when_both_laws_fail(self) -> None:
+        # Per-entry check ORDER pin: fill_mode is validated FIRST.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        del payload["execution_grid"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_execution_grid_field(self) -> None:
+        # Killed-token pin: the grid is a global law, never a per-spec knob.
+        from dataclasses import fields
+
+        assert "execution_grid" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
     def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
         # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): the same list
         # serves as decision AND 1m execution stream throughout this suite.

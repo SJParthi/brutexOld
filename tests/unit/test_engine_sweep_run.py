@@ -1436,6 +1436,50 @@ class TestRunPersistedSweep:
                 [], _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=[]
             )
 
+    def test_empty_exec_stream_raises(self, tmp_path: Path) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001 (design §3.3): a decision slice without
+        # its 1-minute execution stream is an unrunnable coordinate — the
+        # spine-level belt refuses LOUDLY, never a silent single-feed degrade.
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="exec_bars_1m must be non-empty"),
+        ):
+            run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, exec_bars_1m=[]
+            )
+
+    def test_prebuilt_exec_map_is_adopted_not_rebuilt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001 (design §1.5): a caller-supplied exec_map
+        # (the launcher's preload-scoped per-coordinate memo) is ADOPTED — the
+        # spine must not rebuild it per tuple. Bomb the module-level builder.
+        import brutex.engine.sweep_run as sweep_run_mod
+        from brutex.engine.exec_grid import build_exec_grid_map
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=cfg.tf_minutes)
+
+        def _bomb(*args: object, **kwargs: object) -> object:
+            raise AssertionError("build_exec_grid_map must not be called — map supplied")
+
+        monkeypatch.setattr(sweep_run_mod, "build_exec_grid_map", _bomb)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                exec_map=exec_map,
+            )
+        assert summary.enumerated >= 1
+
     def test_hold_direction_rejected(self, tmp_path: Path) -> None:
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -2303,6 +2347,33 @@ class TestResidentKernelBarMismatch:
                 exec_bars_1m=bars,
             )
         assert summary.enumerated >= 1
+
+    def test_kernel_built_from_other_exec_stream_raises(self, tmp_path: Path) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001 twin of the n_bars guard: a kernel whose
+        # resident execution stream has a DIFFERENT length than the tuple's
+        # would hand misaligned 1m columns — refused at config time.
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, exec_bars_1m=bars[:-1]
+        )
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel holds .* execution bars but .* were supplied"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+                exec_bars_1m=bars,
+            )
 
     def test_kernel_built_for_other_fib_anchor_raises(self, tmp_path: Path) -> None:
         """A kernel whose Fib anchor disagrees with the tuple's is rejected (R-1).
