@@ -8,6 +8,7 @@
     "auto_gate_decision",
     "auto_state_verdict",
     "auto_tick_decision",
+    "census_fold",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "intent_refused_restore_decision",

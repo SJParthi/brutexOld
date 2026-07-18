@@ -252,9 +252,7 @@ def compute_tsv(payload: dict[str, Any]) -> str:
             ",".join(f"{_hex(s)}.{_hex(i)}.{int(ok)}" for s, i, ok in case["kernel_rows"])
             or "@none"
         )
-        written = (
-            ",".join(f"{_hex(s)}.{_hex(i)}" for s, i in case["kernel_written"]) or "@none"
-        )
+        written = ",".join(f"{_hex(s)}.{_hex(i)}" for s, i in case["kernel_written"]) or "@none"
         out = case["out"]
         samples = (
             ",".join(f"{kind}.{_hex(sym)}.{_hex(iv)}" for kind, sym, iv in case["kernel_samples"])

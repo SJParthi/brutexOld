@@ -40,6 +40,8 @@ from typing import Any
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
+
 _LOG = structlog.get_logger("brutex.dashboard.pull_census")
 
 #: Max mismatch samples carried on the census / named in the log line — the
@@ -119,6 +121,17 @@ def build_written_vs_settled_census(
     WrittenSettledCensus
         The series-level verdict; O(rows + spans) with O(1) lookups.
     """
+    # --- pull_census (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001): the
+    # fold consulted in Rust over the SAME pre-extracted, scope-filtered
+    # inputs (the extraction expressions below are the oracle's own, run in
+    # the oracle's own order — a raising ``str()``/``int()``/short row
+    # raises identically on both arms); the ``repr()`` sample strings are
+    # rendered HERE from the returned triples.  Any degrade falls through
+    # to the byte-identical oracle body (re-running the pure extraction).
+    if _pull_state_rust.pull_state_rust_enabled():
+        served = _rust_census(ledger_rows, spans, intervals=intervals, symbols=symbols)
+        if served is not None:
+            return served
     interval_set = set(intervals)
     symbol_set = set(symbols)
 
@@ -154,6 +167,57 @@ def build_written_vs_settled_census(
     return WrittenSettledCensus(
         settled_unwritten=len(settled_unwritten),
         written_unsettled=len(written_unsettled),
+        samples=tuple(samples),
+        scanned=scanned,
+    )
+
+
+def _rust_census(
+    ledger_rows: Sequence[tuple[Any, ...]],
+    spans: Sequence[Mapping[str, Any]],
+    *,
+    intervals: Collection[str],
+    symbols: Collection[str],
+) -> WrittenSettledCensus | None:
+    """Kernel-served census; ``None`` = use the oracle (Wave 3G seam).
+
+    Runs the oracle's OWN extraction/filter expressions (``str()`` on the
+    three row slots for every row; span ``bars`` read only AFTER the scope
+    filter), counts ``scanned`` itself, and consults the kernel for the
+    set-difference/sort/cap fold only.
+    """
+    interval_set = set(intervals)
+    symbol_set = set(symbols)
+    scoped_rows: list[tuple[str, str, bool]] = []
+    scanned = 0
+    for row in ledger_rows:
+        symbol, interval, status = str(row[1]), str(row[2]), str(row[5])
+        if symbol not in symbol_set or interval not in interval_set:
+            continue
+        scanned += 1
+        scoped_rows.append((symbol, interval, status == _SUCCESS_STATUS))
+    written_pairs: list[tuple[str, str]] = []
+    for span in spans:
+        symbol, interval = str(span["symbol"]), str(span["interval"])
+        if symbol not in symbol_set or interval not in interval_set:
+            continue
+        if int(span["bars"]) > 0:
+            written_pairs.append((symbol, interval))
+    served = _pull_state_rust.rust_census_fold(scoped_rows, written_pairs)
+    if served is None:
+        return None
+    settled_unwritten, written_unsettled, triples = served
+    samples: list[str] = []
+    for kind, symbol, interval in triples:
+        prefix = (
+            "settled-unwritten"
+            if kind == _pull_state_rust.SAMPLE_KIND_SETTLED_UNWRITTEN
+            else "written-unsettled"
+        )
+        samples.append(f"{prefix}: {symbol!r} {interval!r}")
+    return WrittenSettledCensus(
+        settled_unwritten=settled_unwritten,
+        written_unsettled=written_unsettled,
         samples=tuple(samples),
         scanned=scanned,
     )

@@ -42,7 +42,7 @@ the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent), never this one.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Final, Protocol, cast
 
@@ -1303,4 +1303,87 @@ __all__ += [
     "TICK_CODE_LAUNCHER_UNBOUND",
     "rust_auto_state_verdict",
     "rust_auto_tick_decision",
+]
+
+
+# --- pull_census (Wave 3G) ---------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/pull_census``
+# fold accessor — the SAME guarded-consult discipline (``_call_kernel``
+# defensive belt → refuse-poison gate → ``None`` = the byte-identical
+# Python oracle).  Append-only section (the wave-worker convention).
+#
+# BOUNDARY: the seam pre-extracts + scope-filters the ledger rows / lake
+# spans (the ``str()``/``int()`` conversions over arbitrary payload objects
+# and the lazy-``int()``-after-the-scope-filter law stay Python) and renders
+# the ``repr()`` sample strings from the returned triples; the kernel folds
+# sets, sorts (UTF-8 byte order ≡ code-point order — valid UTF-8 only; a
+# lone-surrogate symbol fails the pyo3 edge and the belt degrades) and caps.
+
+#: Sample-kind codes (mirrors ``rust/brutex-pull-state/src/pull_census.rs``).
+SAMPLE_KIND_SETTLED_UNWRITTEN: Final[int] = 0
+SAMPLE_KIND_WRITTEN_UNSETTLED: Final[int] = 1
+
+_SAMPLE_KINDS: Final[frozenset[int]] = frozenset(
+    {SAMPLE_KIND_SETTLED_UNWRITTEN, SAMPLE_KIND_WRITTEN_UNSETTLED}
+)
+
+#: The kernel's sample cap — sync-pinned against the Python
+#: ``pull_census.CENSUS_SAMPLE_CAP`` by the seam suite; a longer sample list
+#: can only mean a stale/corrupt wheel (refused below).
+_CENSUS_SAMPLE_CAP: Final[int] = 20
+
+#: The census result arity — ``(settled_unwritten, written_unsettled, samples)``.
+_CENSUS_TRIPLE_ARITY: Final[int] = 3
+
+
+def _census_count_ok(value: object) -> bool:
+    """EXACTLY a non-negative ``int`` (a ``bool`` pun degrades)."""
+    return type(value) is int and value >= 0
+
+
+def rust_census_fold(
+    rows: Sequence[tuple[str, str, bool]],
+    written_pairs: Sequence[tuple[str, str]],
+) -> tuple[int, int, tuple[tuple[int, str, str], ...]] | None:
+    """Consult the kernel's census fold; ``None`` = use the oracle.
+
+    Refuse-poison gate: EXACTLY a 3-tuple of two non-negative ints + a
+    ≤-cap sequence of ``(kind, symbol, interval)`` triples with kind in the
+    two-token vocabulary — anything else is a stale/corrupt wheel.
+    """
+    result = _call_kernel("census_fold", list(rows), list(written_pairs))
+    if result is _KERNEL_FAULT:
+        return None
+    if not isinstance(result, tuple) or len(result) != _CENSUS_TRIPLE_ARITY:
+        warn_degrade_once("kernel_invalid", symbol="census_fold", detail=type(result).__name__)
+        return None
+    settled_unwritten, written_unsettled, samples = result
+    if (
+        not _census_count_ok(settled_unwritten)
+        or not _census_count_ok(written_unsettled)
+        or not isinstance(samples, (list, tuple))
+        or len(samples) > _CENSUS_SAMPLE_CAP
+    ):
+        warn_degrade_once("kernel_invalid", symbol="census_fold", detail=repr(result)[:80])
+        return None
+    validated: list[tuple[int, str, str]] = []
+    for item in samples:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != _CENSUS_TRIPLE_ARITY
+            or type(item[0]) is not int
+            or item[0] not in _SAMPLE_KINDS
+            or type(item[1]) is not str
+            or type(item[2]) is not str
+        ):
+            warn_degrade_once("kernel_invalid", symbol="census_fold", detail=repr(item)[:80])
+            return None
+        validated.append((item[0], item[1], item[2]))
+    return (settled_unwritten, written_unsettled, tuple(validated))
+
+
+__all__ += [
+    "SAMPLE_KIND_SETTLED_UNWRITTEN",
+    "SAMPLE_KIND_WRITTEN_UNSETTLED",
+    "rust_census_fold",
 ]

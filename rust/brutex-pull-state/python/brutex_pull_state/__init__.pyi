@@ -158,3 +158,14 @@ def auto_state_verdict(
     last_attempt_kind: int,
     last_success_kind: int,
 ) -> int: ...
+
+# --- pull_census (Wave 3G) ---
+# The written-vs-settled census fold of brutex/dashboard/pull_census.py:
+# scoped (symbol, interval, is_success) rows + scoped bars>0 pairs in,
+# (settled_unwritten, written_unsettled, capped (kind, symbol, interval)
+# sample triples) out — the repr() renders + `scanned` stay Python.
+
+def census_fold(
+    rows: list[tuple[str, str, bool]],
+    written_pairs: list[tuple[str, str]],
+) -> tuple[int, int, list[tuple[int, str, str]]]: ...
