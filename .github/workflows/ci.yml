@@ -260,15 +260,15 @@ jobs:
             sleep 10
           done
       - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The default-OFF pull-state guard kernel (the lane's own ledger row
-        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
-        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
-        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
-        # module must resolve for `mypy --strict brutex` (the wheel here; the
-        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
-        # real-wheel suites importorskip without it (absent wheel = those
-        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
         run: |
           n=0
           until pip install ./rust/brutex-pull-state; do
@@ -490,15 +490,15 @@ jobs:
             sleep 10
           done
       - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The default-OFF pull-state guard kernel (the lane's own ledger row
-        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
-        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
-        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
-        # module must resolve for `mypy --strict brutex` (the wheel here; the
-        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
-        # real-wheel suites importorskip without it (absent wheel = those
-        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
         run: |
           n=0
           until pip install ./rust/brutex-pull-state; do
@@ -2888,6 +2888,27 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -2989,6 +3010,27 @@ jobs:
       # dual-arm parity gate's execution home is the `test:` job
       # ([dev,data,ui] + the wheel), which runs tests/property in its
       # coverage pass.
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -3129,15 +3171,15 @@ jobs:
             sleep 10
           done
       - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The default-OFF pull-state guard kernel (the lane's own ledger row
-        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
-        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
-        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
-        # module must resolve for `mypy --strict brutex` (the wheel here; the
-        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
-        # real-wheel suites importorskip without it (absent wheel = those
-        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
         run: |
           n=0
           until pip install ./rust/brutex-pull-state; do
@@ -3251,15 +3293,15 @@ jobs:
             sleep 10
           done
       - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
-        # The default-OFF pull-state guard kernel (the lane's own ledger row
-        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
-        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
-        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
-        # module must resolve for `mypy --strict brutex` (the wheel here; the
-        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
-        # real-wheel suites importorskip without it (absent wheel = those
-        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
-        # crates.io flake guard (see the fno-math step).
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
         run: |
           n=0
           until pip install ./rust/brutex-pull-state; do
@@ -3607,7 +3649,7 @@ jobs:
       # operator's runtime dependency set is self-sufficient.
       - name: Install brutex[data,ui] — the make run set (NO dev)
         run: pip install -e ".[data,ui]"
-      - name: Build both Rust kernels (the make run way)
+      - name: Build the required Rust kernels (the make run way)
         # Belt-and-suspenders crates.io flake guard (on top of the
         # workflow-level CARGO_NET_RETRY=10): retry each wheel build up to
         # 3 times. POSIX sh; installs exactly the same kernels.
@@ -3627,9 +3669,10 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          install_with_retry ./rust/brutex-pull-state
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
-          python -c "import trading_core, fno_math; print('kernels OK')"
+          python -c "import trading_core, fno_math, brutex_pull_state; print('kernels OK')"
           python -c "import brutex.indicators.fib_levels; print('fib_levels OK')"
           python -c "import brutex.engine; print('engine OK')"
       - name: CLI smoke — build_parser must not crash (cli.py:329)
@@ -3725,6 +3768,27 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -3813,6 +3877,27 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Run the full-chain rehearsal + byte-identity proof
@@ -4302,6 +4387,27 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -4709,6 +4815,27 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The pull-state DECISION kernels are Rust-ONLY (the lane's own
+        # ledger row `DEC-RUST-PULL-STATE-001` lands with its final phase;
+        # the ported guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the
+        # flip phase DELETED the Python oracles, and the facade
+        # brutex/pull_state_rust.py is FAIL-CLOSED — a missing/stale wheel
+        # raises PullStateKernelError (never a silent fallback), so EVERY
+        # job that imports brutex and can touch a pull-state path installs
+        # the wheel. Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Revert fix to merge-base + run shipped tests
