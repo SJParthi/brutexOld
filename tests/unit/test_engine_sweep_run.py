@@ -3456,3 +3456,25 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ── sweep concreteness pin (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ─────
+
+
+class TestSlHitRateConcretePersist:
+    """The sweep spine ALWAYS threads exit-reason counters, so every
+    sweep-persisted row's ``sl_hit_rate`` is CONCRETE — never the counter-less
+    ``None`` (the row-level honesty pin the projector's no-coercion law
+    depends on)."""
+
+    def test_persisted_rows_carry_concrete_sl_hit_rate(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.persisted >= 1  # anti-vacuity
+        for row in store.rows():
+            assert row.sl_hit_rate is not None
+            assert 0.0 <= row.sl_hit_rate <= 1.0

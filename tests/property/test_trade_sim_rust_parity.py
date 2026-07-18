@@ -139,6 +139,14 @@ def test_rust_seam_equals_python_oracle(
         )
         assert counts == py_counts
         assert sum(counts) == len(trades)
+        if policy.stop_loss is LevelFill.AT_LEVEL:
+            # AT_LEVEL (the default) SL fills clamp at/beyond the level, so
+            # every stop_loss close is a loss: sl_count <= losers. This is
+            # deliberately NOT asserted for NEXT_OPEN — a next-bar-open SL
+            # fill can gap PROFITABLE (the documented non-invariant on
+            # ResultMetrics.sl_hit_rate).
+            losers = sum(1 for t in trades if t.pnl_paisa < 0)
+            assert counts[0] <= losers
 
 
 # ── u128 domain parity (DEC-TRADE-SIM-U128-KERNEL-001) ────────────────────────

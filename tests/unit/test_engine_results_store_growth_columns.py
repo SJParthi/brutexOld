@@ -29,6 +29,7 @@ import pytest
 from brutex.engine.results_store import (
     _NULLABLE_RANKABLE_FIELDS,
     _RANKABLE_FIELDS,
+    EXIT_QUALITY_FIELDS,
     GROWTH_FIELDS,
     VIX_FIELDS,
     ResultRow,
@@ -277,9 +278,10 @@ class TestNullsLastRanking:
         assert got == [_rid(2), _rid(1)]
 
     def test_scope_sets_are_disjoint(self) -> None:
-        # The growth trio ranks ONLY under the nulls-last law; the plain
-        # rankable set is untouched, and VIX stays non-rankable everywhere.
-        assert frozenset(GROWTH_FIELDS) == _NULLABLE_RANKABLE_FIELDS
+        # The growth trio + the Stage-B exit-quality column rank ONLY under
+        # the nulls-last law; the plain rankable set is untouched, and VIX
+        # stays non-rankable everywhere.
+        assert frozenset(GROWTH_FIELDS + EXIT_QUALITY_FIELDS) == _NULLABLE_RANKABLE_FIELDS
         assert _RANKABLE_FIELDS.isdisjoint(_NULLABLE_RANKABLE_FIELDS)
         assert _NULLABLE_RANKABLE_FIELDS.isdisjoint(VIX_FIELDS)
         assert "deflated_sharpe" not in _RANKABLE_FIELDS | _NULLABLE_RANKABLE_FIELDS

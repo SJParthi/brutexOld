@@ -315,17 +315,19 @@ class TestVixFlushLoad:
         store.flush()
         schema = pl.read_parquet_schema(path)
         # Ruling-5 generation order: the VIX trio, then the growth trio
-        # STRICTLY AFTER it (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
-        # DEC-METRICS-KELLY-GROWTH-001 — each optional-column generation is
-        # appended after the previous one; the pre-change pin ended at the
-        # VIX trio and was consciously extended, not weakened).
-        assert [*schema][-6:] == [
+        # STRICTLY AFTER it, then the Stage-B exit-quality column
+        # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001
+        # — each optional-column generation is appended after the previous
+        # one; the pre-change pin ended at the growth trio and was
+        # consciously extended, not weakened).
+        assert [*schema][-7:] == [
             "vix_mean",
             "vix_min",
             "vix_max",
             "loss_rate",
             "kelly_fraction",
             "log_growth_at_half_kelly",
+            "sl_hit_rate",
         ]
         assert all(schema[name] == pl.Float64 for name in VIX_FIELDS)
 

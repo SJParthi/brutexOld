@@ -1599,3 +1599,86 @@ class TestFoldWireRoundTrip:
         wire = _fold_wire(folds)
         assert isinstance(wire[3][0], float)
         assert wire[3][0] == 0.0
+
+
+# ── sl_hit_rate at COMBINE (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ─────
+
+
+class TestSlHitRate:
+    """The exit-quality COMBINE arithmetic + its honesty/refusal laws."""
+
+    def test_counters_threaded_yield_concrete_rate(self) -> None:
+        trades = [_trade(100), _trade(-50, offset_min=10), _trade(-30, offset_min=20)]
+        curve = _curve([1_000_000, 1_000_100, 1_000_050, 1_000_020])
+        m = compute_metrics(trades, curve, total_bars=4, sl_exit_count=2)
+        assert m.sl_hit_rate == 2 / 3
+
+    def test_absent_counters_yield_honest_none(self) -> None:
+        """No counters ⇒ None on a non-empty trade set — never a fabricated 0.0."""
+        trades = [_trade(100), _trade(-50, offset_min=10)]
+        curve = _curve([1_000_000, 1_000_100, 1_000_050])
+        m = compute_metrics(trades, curve, total_bars=3)
+        assert m.sl_hit_rate is None
+
+    def test_zero_trades_yield_vacuous_zero(self) -> None:
+        """Zero trades ⇒ 0.0 (0 SL exits of 0 trades — the win_rate precedent)."""
+        curve = _curve([1_000_000, 1_000_000])
+        m = compute_metrics([], curve, total_bars=2)
+        assert m.sl_hit_rate == 0.0
+
+    def test_zero_sl_count_is_concrete_zero_not_none(self) -> None:
+        """sl_exit_count=0 with counters PRESENT is a measured 0.0, not None."""
+        trades = [_trade(100)]
+        curve = _curve([1_000_000, 1_000_100])
+        m = compute_metrics(trades, curve, total_bars=2, sl_exit_count=0)
+        assert m.sl_hit_rate == 0.0
+
+    def test_out_of_range_count_refused_at_combine(self) -> None:
+        folds = _fold_trades([_trade(-50)], 1_000_000)
+        with pytest.raises(ValueError, match="sl_exit_count=2 is outside"):
+            combine_metrics_from_folds(
+                folds,
+                total_bars=2,
+                benchmark_return_pct=0.0,
+                start_equity_paisa=1_000_000,
+                span_years=1.0,
+                drawdown=(0, 0.0, 0, 0.0),
+                sl_exit_count=2,
+            )
+        with pytest.raises(ValueError, match="sl_exit_count=-1 is outside"):
+            combine_metrics_from_folds(
+                folds,
+                total_bars=2,
+                benchmark_return_pct=0.0,
+                start_equity_paisa=1_000_000,
+                span_years=1.0,
+                drawdown=(0, 0.0, 0, 0.0),
+                sl_exit_count=-1,
+            )
+
+    def test_positive_count_over_zero_trades_refused(self) -> None:
+        curve = _curve([1_000_000, 1_000_000])
+        with pytest.raises(ValueError, match="zero-trade result"):
+            compute_metrics([], curve, total_bars=2, sl_exit_count=1)
+
+    def test_from_scalars_threads_the_count(self) -> None:
+        """The curve-less entry threads sl_exit_count identically."""
+        trades = [_trade(100), _trade(-50, offset_min=10)]
+        curve = _curve([1_000_000, 1_000_100, 1_000_050])
+        via_curve = compute_metrics(trades, curve, total_bars=3, sl_exit_count=1)
+        via_scalars = compute_metrics_from_scalars(
+            trades,
+            3,
+            start_equity_paisa=curve.start_equity_paisa,
+            span_years=curve.span_years,
+            drawdown=_drawdown_stats(curve),
+            sl_exit_count=1,
+        )
+        assert via_scalars == via_curve
+        assert via_scalars.sl_hit_rate == 0.5
+
+    def test_full_rate_at_all_sl_exits(self) -> None:
+        trades = [_trade(-50), _trade(-60, offset_min=10)]
+        curve = _curve([1_000_000, 999_950, 999_890])
+        m = compute_metrics(trades, curve, total_bars=3, sl_exit_count=2)
+        assert m.sl_hit_rate == 1.0
