@@ -778,6 +778,21 @@ jobs:
           else
             echo "(brutex.strategies.errors test file not present yet — gate inactive)"
           fi
+          # DEC-BOX-AUTODEPLOY-LANE-001 (§10 CI gating): the nightly box
+          # auto-deploy leg (guards/merge/wheel-rebuild/gate/rollback/
+          # repair/alarm-dedupe state machine) + the §12 removed-env-flag
+          # pre-flight — each 100% line+branch STANDALONE over its own
+          # unit matrix (the fill_mode-precedent shape above).
+          if compgen -G "tests/unit/test_nightly_box_update.py" > /dev/null; then
+            pytest --cov=brutex.nightly.box_update --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nightly_box_update.py
+          else
+            echo "(brutex.nightly.box_update test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_nightly_env_preflight.py" > /dev/null; then
+            pytest --cov=brutex.nightly.env_preflight --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nightly_env_preflight.py
+          else
+            echo "(brutex.nightly.env_preflight test file not present yet — gate inactive)"
+          fi
           # DEC-VENDOR-PIVOT-001 (2026-05-26): groww.constants strict-100%
           # gate deleted with the Groww wipe. The legacy step 8 deferral
           # for groww.types is no longer relevant — the Groww adapter is
@@ -1409,11 +1424,13 @@ jobs:
           else
             echo "(brutex.data.models test file not present yet — gate inactive)"
           fi
-          # 19i · brutex.engine.combo_mask (133 stmts, 52 branches — grown for
-          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012). The
-          # base scalar suite is test_engine_combo_mask.py; the u128 two-limb
-          # numpy oracle/fallback paths (the >=64-bit headroom + the
-          # kernel-unavailable ResidentBars fallback) live in the dedicated
+          # 19i · brutex.engine.combo_mask (183 stmts, 72 branches — grown for
+          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012, then the
+          # u128 Rust kernel dispatch, DEC-ENUM-KERNEL-U128-001). The base
+          # scalar suite is test_engine_combo_mask.py; the >=64-bit kernel
+          # dispatch paths (the wide Rust routing + lazy promotion + the
+          # LOUD-FAIL WideKernelUnavailableError law + the retained numpy
+          # oracle / <=64-bit ResidentBars fallback) live in the dedicated
           # test_engine_combo_mask_u128.py — BOTH are required to reach 100%
           # line+branch (COMMON, composed not duplicated — mirrors the
           # quota_tracker two-file gate above).
