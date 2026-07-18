@@ -29,7 +29,7 @@ so demotions survive). This suite pins:
   cross-process base save, never on a mark_dirty/generation storm;
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
-* drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
+* drift pins: ``_WINDOW_KEY_COLUMNS == brutex_identity.LEDGER_COLUMNS[:5]`` and
   ``append_ledger_delta`` writing the full 16-column schema (the base-less
   probe-skip's safety precondition).
 
@@ -46,6 +46,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import brutex_identity
 import duckdb
 import pytest
 from brutex.dashboard.db_view import (
@@ -76,6 +77,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
+#: The store schema — the kernel's ``LEDGER_COLUMNS`` as a tuple (the ONE
+#: schema authority; the store's former ``_COLUMNS`` re-wrap is gone —
+#: DEC-RUST-RUNID-STORES-001).
+_STORE_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
+
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 _ISO = "2026-06-08T12:00:00+00:00"
 
@@ -98,7 +104,7 @@ def _row(
     bars: int = 0,
     attempts: int = 1,
 ) -> tuple[Any, ...]:
-    """One 16-field ledger row tuple (the exact ``_COLUMNS`` shape).
+    """One 16-field ledger row tuple (the exact kernel ``LEDGER_COLUMNS`` shape).
 
     The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
     honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
@@ -175,8 +181,8 @@ class _SpyConn:
 
 
 def test_window_key_columns_pinned_to_the_store_schema() -> None:
-    """The fold identity MUST be the store's leading 5 columns (the ``row[0:5]`` key)."""
-    assert wls._COLUMNS[:5] == _WINDOW_KEY_COLUMNS
+    """The fold identity MUST be the schema's leading 5 columns (the ``row[0:5]`` key)."""
+    assert _STORE_COLUMNS[:5] == _WINDOW_KEY_COLUMNS
 
 
 def test_append_ledger_delta_emits_all_14_columns(tmp_path: Path) -> None:
@@ -188,7 +194,7 @@ def test_append_ledger_delta_emits_all_14_columns(tmp_path: Path) -> None:
     assert wls.append_ledger_delta(ledger, tmp_path) == 1
     (delta,) = wls.list_ledger_deltas(tmp_path)
     schema = pq.read_schema(delta)  # type: ignore[no-untyped-call, unused-ignore]
-    assert tuple(schema.names) == wls._COLUMNS
+    assert tuple(schema.names) == _STORE_COLUMNS
 
 
 def test_db_view_no_window_ledger_store_import() -> None:
@@ -462,7 +468,7 @@ def _write_legacy_base(lake: Path, security_id: str) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    schema = pa.schema([(name, pa.string()) for name in wls._CORE_COLUMNS[:6]])
+    schema = pa.schema([(name, pa.string()) for name in _STORE_COLUMNS[:6]])
     table = pa.table(
         {
             "market": ["groww"],

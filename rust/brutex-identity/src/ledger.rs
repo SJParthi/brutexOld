@@ -56,7 +56,7 @@ pub const LEDGER_COLUMNS: [&str; 16] = [
     "transient_retries",
 ];
 
-/// The CORE columns every ledger Parquet MUST carry (`_CORE_COLUMNS` twin).
+/// The CORE columns every ledger Parquet MUST carry (the read-side REQUIRED set).
 pub const LEDGER_CORE_COLUMNS: [&str; 11] = [
     "market",
     "security_id",

@@ -32,6 +32,7 @@ import pytest
 pytest.importorskip("pyarrow")
 pytest.importorskip("duckdb")
 
+import brutex_identity
 import duckdb
 from brutex.dashboard import db_view
 from brutex.dashboard.db_view import (
@@ -45,6 +46,11 @@ from brutex.data import window_ledger_store as wls
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from structlog.testing import capture_logs
+
+#: The store schema — the kernel's ``LEDGER_COLUMNS`` as a tuple (the ONE
+#: schema authority; the store's former ``_COLUMNS`` re-wrap is gone —
+#: DEC-RUST-RUNID-STORES-001).
+_STORE_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 _ISO = "2026-07-01T12:00:00+00:00"
@@ -176,9 +182,9 @@ class _NoneCountConn(_SpyConn):
 
 
 def test_ledger_row_columns_pinned_to_the_store_schema() -> None:
-    """The 16-column projection MUST equal the store's ``_COLUMNS`` exactly
-    (the ``_WINDOW_KEY_COLUMNS`` precedent — pinned, never imported)."""
-    assert wls._COLUMNS == _LEDGER_ROW_COLUMNS
+    """The 16-column projection MUST equal the kernel's ``LEDGER_COLUMNS``
+    exactly (the ``_WINDOW_KEY_COLUMNS`` precedent — pinned, never imported)."""
+    assert _STORE_COLUMNS == _LEDGER_ROW_COLUMNS
 
 
 def test_ledger_table_path_constants_pinned_to_the_store() -> None:
@@ -332,7 +338,7 @@ class TestDegradeLaw:
         import pyarrow.parquet as pq
 
         table = pa.table(
-            {name: [row[i]] for i, name in enumerate(wls._COLUMNS)},
+            {name: [row[i]] for i, name in enumerate(_STORE_COLUMNS)},
             schema=pa.schema(
                 [
                     (
@@ -341,7 +347,7 @@ class TestDegradeLaw:
                         if isinstance(row[i], str) or (row[i] is None and i in (8, 10))
                         else pa.int64(),
                     )
-                    for i, name in enumerate(wls._COLUMNS)
+                    for i, name in enumerate(_STORE_COLUMNS)
                 ]
             ),
         )

@@ -893,8 +893,10 @@ class TestSignedZeroPriceNoop:
         stored = _row(avg_entry_price=Decimal("0.00"))
         incoming = replace(stored, avg_entry_price=Decimal("-0.00"))
         assert stored == incoming  # the retired NUMERIC law: equal rows
-        assert store.append(stored) is True
-        assert store.append(incoming) is False  # noop — never a conflict
+        appended = store.append(stored)
+        assert appended is True
+        reappended = store.append(incoming)
+        assert reappended is False  # noop — never a conflict
         assert len(store) == 1
 
     def test_price_ffi_text_normalises_only_zero(self) -> None:

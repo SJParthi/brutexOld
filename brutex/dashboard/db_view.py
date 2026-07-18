@@ -6283,7 +6283,8 @@ def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
 
 #: The window-ledger fold identity — the leading 5 columns of the ledger schema
 #: (the ``row[0:5]`` key ``load_window_ledger``'s Python dict fold uses). MUST
-#: equal ``window_ledger_store._COLUMNS[:5]`` — pinned by test, not imported
+#: equal the ``brutex_identity`` kernel's ``LEDGER_COLUMNS[:5]`` (the ledger
+#: schema authority — DEC-RUST-RUNID-STORES-001) — pinned by test, not imported
 #: (the :data:`_LEDGER_DELTAS_DIRNAME` precedent: this module deliberately
 #: carries no module-level ``window_ledger_store`` edge).
 _WINDOW_KEY_COLUMNS: Final[tuple[str, ...]] = (
@@ -6821,7 +6822,8 @@ def _window_counts_since(
 
 
 #: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
-#: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal the ``brutex_identity`` kernel's
+#: ``LEDGER_COLUMNS`` (the ledger schema authority — DEC-RUST-RUNID-STORES-001)
 #: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
 #: this module deliberately carries no module-level ``window_ledger_store``
 #: edge — CodeQL ``py/cyclic-import``).

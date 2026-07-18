@@ -16,9 +16,9 @@ SOURCE_DIGEST: Final[str]
 #: the wheel-handshake suite reads it, so the stub must declare it).
 _EXPECTED_COMPILED_SYMBOLS: Final[tuple[str, ...]]
 
-#: The fixed 16-column window-ledger schema order (`_COLUMNS` source).
+#: The fixed 16-column window-ledger schema order (the ONE schema authority).
 LEDGER_COLUMNS: Final[tuple[str, ...]]
-#: The 11 required core columns (`_CORE_COLUMNS` source).
+#: The 11 required core columns (the read-side wrong-shape guard).
 LEDGER_CORE_COLUMNS: Final[tuple[str, ...]]
 
 #: One serialised window-ledger row — the 16-field tuple of

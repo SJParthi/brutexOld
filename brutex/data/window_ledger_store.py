@@ -151,28 +151,6 @@ def resolve_ledger_save_slow_warn_seconds() -> float:
     return value
 
 
-#: The CORE columns every ledger Parquet MUST carry — their absence is a
-#: wrong-shape file that degrades to an empty ledger (a re-pull, never a crash).
-#: The ONE source of truth is the ``brutex_identity`` kernel's
-#: ``LEDGER_CORE_COLUMNS`` (DEC-RUST-RUNID-STORES-001 — the codec enforces it);
-#: this name is the documented Python import surface.
-_CORE_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_CORE_COLUMNS)
-
-#: The full on-disk column order — fixed so the Parquet schema is stable + the row
-#: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
-#: ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
-#: ``transient_retries`` split were each appended LAST
-#: (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
-#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001), so a legacy
-#: file written before any of the optional columns existed loads cleanly: the
-#: core columns are read and each optional column is filled per-row by the
-#: kernel decoder (an absent ``bars_net_new`` / ``empty_retries`` /
-#: ``transient_retries`` is an honest ``None``). Backward-compatible, never a
-#: re-pull. Derived from the kernel's ``LEDGER_COLUMNS`` (the codec's schema
-#: declaration order — ONE source of truth, DEC-RUST-RUNID-STORES-001).
-_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
-
-
 def ledger_dir(lake_root: Path) -> Path:
     """Return the ledger directory for *lake_root* (``<lake_root>/window_ledger``)."""
     return lake_root / LEDGER_DIRNAME
@@ -504,7 +482,23 @@ def merge_ledger_rows(
 
 
 def render_ledger_parquet(rows: Sequence[LedgerRow]) -> bytes:
-    """Serialise ledger rows to CANONICAL Parquet bytes — the fixed :data:`_COLUMNS` schema.
+    """Serialise ledger rows to CANONICAL Parquet bytes — the kernel's fixed schema.
+
+    Schema contract (the ONE source of truth is the ``brutex_identity``
+    kernel — DEC-RUST-RUNID-STORES-001; the former ``_CORE_COLUMNS`` /
+    ``_COLUMNS`` module globals were dead re-wraps of the kernel constants
+    and are gone): the 11 ``brutex_identity.LEDGER_CORE_COLUMNS`` are
+    REQUIRED on read — their absence is a wrong-shape file that degrades to
+    an empty ledger (a re-pull, never a crash) — and the full on-disk order
+    is the fixed ``brutex_identity.LEDGER_COLUMNS``, where ``empty_streak``
+    then ``in_pull_fetches`` then ``bars_net_new`` then the
+    ``empty_retries`` / ``transient_retries`` split were each appended LAST
+    (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
+    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001), so a
+    legacy file written before any of the optional columns existed loads
+    cleanly: the core columns are read and each absent optional column is
+    filled per-row by the kernel decoder (an absent ``bars_net_new`` /
+    ``empty_retries`` / ``transient_retries`` is an honest ``None``).
 
     The ONE render (CLAUDE.md §11 COMMON) shared by the full
     :func:`save_window_ledger` and the incremental :func:`append_ledger_delta`, so
@@ -646,7 +640,7 @@ def save_window_ledger(
     (DEC-WINDOW-LEDGER-DEGRADED-TOMBSTONE-001) — keeps the in-memory demotion,
     so a concurrent disk ``SUCCESS`` can never silently re-mask a confirmed
     interior gap), then (3) serialises the merged rows to a
-    Parquet table with the fixed :data:`_COLUMNS` schema and atomically replaces the
+    Parquet table with the kernel's fixed ``LEDGER_COLUMNS`` schema and atomically replaces the
     file. Two concurrent pulls on one lake therefore NEVER clobber each other's rows
     (the later writer reads AFTER the earlier writer's ``os.replace``). The ledger
     directory is created if absent. O(N) over the recorded windows plus one on-disk
@@ -1554,8 +1548,8 @@ def make_locked_flush(flush: Callable[[], None]) -> Callable[[], None]:
 
 
 #: The round-robin skipped-audit cursor sidecar (DEC-SKIPPED-AUDIT-ROUNDROBIN-001)
-#: — a tiny JSON next to the ledger, NOT a new ledger Parquet column (the fixed
-#: ``_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
+#: — a tiny JSON next to the ledger, NOT a new ledger Parquet column (the kernel's
+#: fixed ``LEDGER_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
 SKIPPED_AUDIT_CURSOR_FILENAME: str = "skipped_audit_cursor.json"
 
 #: The 5-field window identity arity the cursor key must carry.

@@ -39,18 +39,23 @@ import hashlib
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import brutex_identity
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
-    _COLUMNS,
     _read_ledger_file_rows,
     ledger_path,
     render_ledger_parquet,
     save_window_ledger,
 )
+
+#: The canonical 16-column schema order — the kernel's ``LEDGER_COLUMNS`` as a
+#: tuple (the ONE schema authority; the store's former ``_COLUMNS`` re-wrap is
+#: gone — DEC-RUST-RUNID-STORES-001).
+_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 

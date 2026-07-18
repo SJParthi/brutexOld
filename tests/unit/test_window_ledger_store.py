@@ -2976,13 +2976,15 @@ class TestInternedDecode:
     def test_timestamp_columns_are_deliberately_not_interned(self) -> None:
         # µs-ISO timestamps are essentially unique — a memo would double-hold
         # them; the exclusion is per-COLUMN policy, pinned here.
-        from brutex.data.window_ledger_store import _CORE_COLUMNS, _INTERNED_COLUMNS
+        import brutex_identity
+        from brutex.data.window_ledger_store import _INTERNED_COLUMNS
 
         assert "first_seen_at" not in _INTERNED_COLUMNS
         assert "last_attempt_at" not in _INTERNED_COLUMNS
         # Every interned column IS a core column (the optional int columns
-        # never carry strings — nothing to intern there).
-        assert frozenset(_CORE_COLUMNS) >= _INTERNED_COLUMNS
+        # never carry strings — nothing to intern there). The core set is the
+        # kernel's — the ONE schema authority (DEC-RUST-RUNID-STORES-001).
+        assert frozenset(brutex_identity.LEDGER_CORE_COLUMNS) >= _INTERNED_COLUMNS
 
     def test_pool_collapses_equal_cells_and_passes_none_through(self, tmp_path: Path) -> None:
         # The kernel pool law (DEC-RUST-RUNID-STORES-001, replacing the retired

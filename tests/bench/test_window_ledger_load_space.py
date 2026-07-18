@@ -30,10 +30,6 @@ reduces the PER-ROW constant only: the ledger base itself still grows without
 bound (the F1-FU1 archival follow-up — named, not claimed).
 """
 
-# Whitebox bench: the uninterned teeth twin replays the pre-fix decode over the
-# module-private `_COLUMNS` schema — sanctioned per pyproject.toml.
-# pyright: reportPrivateUsage=none
-
 from __future__ import annotations
 
 import gc
@@ -42,13 +38,18 @@ import tracemalloc
 from pathlib import Path
 from typing import Any
 
+import brutex_identity
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
-    _COLUMNS,
     ledger_path,
     load_window_ledger,
     save_window_ledger,
 )
+
+#: The ledger schema the uninterned teeth twin replays the pre-fix decode over —
+#: the kernel's ``LEDGER_COLUMNS`` as a tuple (the ONE schema authority; the
+#: store's former ``_COLUMNS`` re-wrap is gone — DEC-RUST-RUNID-STORES-001).
+_COLUMNS: tuple[str, ...] = tuple(brutex_identity.LEDGER_COLUMNS)
 
 #: Rows generated (unique window keys land slightly lower — the count is read
 #: off the loaded ledger, never assumed).
