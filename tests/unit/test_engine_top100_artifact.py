@@ -1045,8 +1045,11 @@ class TestAlphaMetricsAtWriter:
         candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
         default_payload = _build(candidates).to_payload()
         alpha_payload = _build(candidates, **_alpha_kwargs()).to_payload()
-        for entry in alpha_payload["entries"]:
+        entries = alpha_payload["entries"]
+        assert isinstance(entries, list)
+        for entry in entries:
             metrics = entry["metrics"]
+            assert isinstance(metrics, dict)
             for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
                 assert key in metrics
                 metrics.pop(key)
@@ -1056,6 +1059,7 @@ class TestAlphaMetricsAtWriter:
         # net +₹100 on ₹10,000 = +1%; B&H ₹20,000 → ₹20,400 = +2%; alpha −1.0.
         artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], **_alpha_kwargs())
         metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
         assert metrics["strategy_return_pct"] == 1.0
         assert metrics["bh_return_pct"] == 2.0
         assert metrics["alpha_pct"] == -1.0
@@ -1066,6 +1070,7 @@ class TestAlphaMetricsAtWriter:
             **_alpha_kwargs(alpha_baselines={"SENSEX": _ALPHA_BASELINE}),
         )
         metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
         for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
             assert key not in metrics
 
@@ -1076,6 +1081,7 @@ class TestAlphaMetricsAtWriter:
             start_equity_paisa=None,
         )
         metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
         assert "alpha_pct" not in metrics
 
 
