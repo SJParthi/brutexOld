@@ -100,10 +100,51 @@ class TestMinDdFirstLaw:
         assert PRESETS["min_dd_first"].sort_records([second, first]) == (first, second)
 
     def test_key_shape(self) -> None:
+        # CONSCIOUSLY RE-LOCKED (DEC-RANK-DD-BAND-ORDER-001): key 1 is now the
+        # DD ε-BAND index, not the raw DD — hand-derivation: dd 10.0 at band
+        # width 0.5 → floor(10.0 / 0.5) = band 20 (was the raw 10.0 pre-W1).
         scored = min_dd_first_key(_rec("a" * 64, composite_score=2.0))
-        assert scored == (10.0, 0, -2.0, 3)
+        assert scored == (20, 0, -2.0, 3)
         unscored = min_dd_first_key(_rec("a" * 64, composite_score=None))
-        assert unscored == (10.0, 1, -0.0, 3)
+        assert unscored == (20, 1, -0.0, 3)
+
+    def test_composite_beats_tiny_dd_edge_within_band(self) -> None:
+        # [FB] The item-5 pathology killer: pre-band, Y (DD 4.99%, weak) sat
+        # ABOVE X (DD 5.01%, strong) forever on a 2bp DD edge. Both quantize
+        # to band 9 (floor(4.99/0.5) = floor(5.01/0.5) = 9... hand-derive:
+        # 4.99/0.5 = 9.98 → 9; 5.01/0.5 = 10.02 → 10 — DIFFERENT bands!) —
+        # so use a genuinely in-band pair: 5.01 vs 5.20 (bands 10, 10).
+        strong = _rec("a" * 64, max_drawdown_pct=5.20, composite_score=9.0)
+        weak = _rec("b" * 64, max_drawdown_pct=5.01, composite_score=0.1)
+        assert PRESETS["min_dd_first"].sort_records([weak, strong]) == (strong, weak)
+
+    def test_cross_band_smaller_band_still_wins(self) -> None:
+        # Across bands "least pain" holds: band 9 (DD 4.99) beats band 10
+        # (DD 5.01) even against a far stronger composite.
+        low_band = _rec("a" * 64, max_drawdown_pct=4.99, composite_score=0.1)
+        high_band = _rec("b" * 64, max_drawdown_pct=5.01, composite_score=9.0)
+        assert PRESETS["min_dd_first"].sort_records([high_band, low_band]) == (
+            low_band,
+            high_band,
+        )
+
+    def test_band_boundary_floor_rule(self) -> None:
+        from brutex.ranking.presets import DD_BAND_PCT, dd_band_index
+
+        assert DD_BAND_PCT == 0.5
+        # A DD exactly on a band edge joins the UPPER band via floor.
+        assert dd_band_index(0.0) == 0
+        assert dd_band_index(0.49) == 0
+        assert dd_band_index(0.5) == 1
+        assert dd_band_index(0.99) == 1
+        assert dd_band_index(5.0) == 10
+
+    def test_band_index_non_finite_refused(self) -> None:
+        from brutex.ranking.presets import dd_band_index
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="must be finite"):
+                dd_band_index(bad)
 
 
 class TestDescendingPresets:

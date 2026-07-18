@@ -6,12 +6,24 @@ top-100 builder (:mod:`brutex.engine.top100_artifact`) delegates its whole
 ordering law here, so a preset can never fork between the artifact build and
 any future re-ranking surface (P4's screener).
 
-## The R30 total order
+## The R30 total order (as amended by DEC-RANK-DD-BAND-ORDER-001)
 
-Default ``min_dd_first``: smallest ``max_drawdown_pct`` FIRST → composite
+Default ``min_dd_first``: smallest ``max_drawdown_pct`` **ε-BAND** first
+(LANE W1 item 5 — the DD is quantized into :data:`DD_BAND_PCT`-wide bands via
+:func:`dd_band_index`, killing the 2bp-DD-beats-58×-P&L pathology of the old
+strict-DD first key; the band index, not the raw DD, is key 1) → composite
 score (full precision, never rounded) descending as the tiebreak — a ``None``
 composite ranks AFTER every real one, never coerced to a fake number →
 fewest ``max_consecutive_losses`` → ``run_id`` ASC (the store's tie law).
+BOUNDARY RULE (documented, deterministic): the band is
+``math.floor(dd / DD_BAND_PCT)`` — a DD exactly on a band edge (e.g. 0.5 at
+band width 0.5) joins the UPPER band index via floor. The quantizer is
+bit-mirrored by the born-Rust batch kernel ``fno_math.rank_dd_band_indices``
+(same IEEE division + floor — drift-pinned by the parity vectors in
+``tests/unit/test_engine_rust_rank_select.py``); the per-record sort key
+computes the same floor locally because this module is a stdlib-only leaf (a
+per-record scalar FFI call inside a sort key would be a pessimization — the
+recon brief's recommended shape, disclosed in MIGRATION.md #1973).
 Alternates ``composite`` / ``profit_factor`` / ``win_rate`` / ``calmar``:
 each DESCENDING on the RAW uncoerced value with the same ``run_id``-ASC
 stable pre-sort — the exact ``ResultsStore.top_k`` two-pass law
@@ -35,6 +47,7 @@ law lives with the builder).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -46,12 +59,14 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 _LOG = structlog.get_logger("brutex.ranking.presets")
 
 __all__ = [
+    "DD_BAND_PCT",
     "DEFAULT_PRESET",
     "PRESETS",
     "PRESET_MIN_DD_FIRST",
     "PRESET_NAMES",
     "RankRecord",
     "RankingPreset",
+    "dd_band_index",
     "min_dd_first_key",
     "resolve_preset",
     "sort_by_preset",
@@ -60,6 +75,30 @@ __all__ = [
 #: The R30 default preset token + the one-click alternates, in display order.
 PRESET_MIN_DD_FIRST: Final[str] = "min_dd_first"
 DEFAULT_PRESET: Final[str] = PRESET_MIN_DD_FIRST
+
+#: The min_dd_first DD ε-band width in max_drawdown_pct percentage points
+#: (DEC-RANK-DD-BAND-ORDER-001, LANE W1 item 5). The design map's example
+#: value ("e.g. 0.5% steps, operator constant") adopted as the W1 DEFAULT —
+#: DISCLOSED as standing in for the un-ruled operator constant
+#: (MIGRATION.md #1973). Within one band the composite decides; across bands
+#: the smaller band still wins ("least pain" preserved at band granularity).
+DD_BAND_PCT: Final[float] = 0.5
+
+
+def dd_band_index(max_drawdown_pct: float, *, band_pct: float = DD_BAND_PCT) -> int:
+    """Quantize a max-drawdown %% into its ε-band index — ``floor(dd / band)``.
+
+    Deterministic pure function; the boundary rule is FLOOR (a DD exactly on
+    a band edge joins the UPPER band index — module docstring). Bit-mirrored
+    by the born-Rust batch kernel ``fno_math.rank_dd_band_indices``
+    (drift-pinned). A non-finite DD is refused loudly (``ResultRow``
+    guarantees finite metrics; a hand-built record must not silently sort).
+    """
+    if not math.isfinite(max_drawdown_pct):
+        raise ValueError(
+            f"dd_band_index: max_drawdown_pct must be finite, got {max_drawdown_pct!r}"
+        )
+    return math.floor(max_drawdown_pct / band_pct)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,22 +120,25 @@ class RankRecord:
     calmar_ratio: float
 
 
-#: A preset sort key — either the 4-part min-DD ascending key or the
+#: A preset sort key — either the 4-part banded min-DD ascending key or the
 #: ``(value_present, raw_value)`` descending key of the alternates.
-type PresetKey = tuple[float, int, float, int] | tuple[int, float]
+type PresetKey = tuple[int, int, float, int] | tuple[int, float]
 
 
-def min_dd_first_key(record: RankRecord) -> tuple[float, int, float, int]:
-    """The R30 ``min_dd_first`` sort key (ascending sort).
+def min_dd_first_key(record: RankRecord) -> tuple[int, int, float, int]:
+    """The R30 ``min_dd_first`` sort key (ascending sort) — DD ε-BANDED.
 
-    Smallest stored max drawdown % first; then composite score DESC (a
-    ``None`` composite ranks AFTER every real one — an unscored combo never
-    outranks a scored one); then fewest consecutive losses. Ties fall through
-    to the stable ``run_id``-ASC pre-sort.
+    DEC-RANK-DD-BAND-ORDER-001 (LANE W1 item 5): key 1 is the
+    :func:`dd_band_index` of the stored max drawdown %% (bands of
+    :data:`DD_BAND_PCT` points — a 2bp DD edge no longer outranks a 58× P&L
+    edge); then composite score DESC within the band (a ``None`` composite
+    ranks AFTER every real one — an unscored combo never outranks a scored
+    one); then fewest consecutive losses (RETAINED from the pre-band law).
+    Ties fall through to the stable ``run_id``-ASC pre-sort (RETAINED).
     """
     composite = record.composite_score
     return (
-        record.max_drawdown_pct,
+        dd_band_index(record.max_drawdown_pct),
         0 if composite is not None else 1,
         -(composite if composite is not None else 0.0),
         record.max_consecutive_losses,
@@ -170,8 +212,8 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
     PRESET_MIN_DD_FIRST: RankingPreset(
         name=PRESET_MIN_DD_FIRST,
         describe=(
-            "least pain wins — smallest max drawdown first, composite score "
-            "tiebreak, fewest consecutive losses"
+            "least pain wins — smallest max-drawdown ε-band first (0.5% "
+            "bands), composite score within band, fewest consecutive losses"
         ),
         reverse=False,
         key=min_dd_first_key,
