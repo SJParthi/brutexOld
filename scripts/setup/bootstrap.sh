@@ -128,6 +128,24 @@ else
   fi
 fi
 
+# ────────── 6c. brutex_pull_state wheel ──────────
+# The pull-state decision plane is Rust-only and fail-closed (module-top
+# imported by brutex/), so it is a REQUIRED build prerequisite — build it the
+# same way as fno_math/trading_core and ABORT bootstrap on failure.
+_step "Step 6c/7 — build + install brutex_pull_state Rust extension"
+if python -c "import brutex_pull_state" 2>/dev/null; then
+  _ok "brutex_pull_state already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-pull-state && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_pull_state" 2>/dev/null; then
+    _ok "brutex_pull_state built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

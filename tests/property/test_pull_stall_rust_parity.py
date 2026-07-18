@@ -41,6 +41,7 @@ from tests.golden._pull_stall_harness import (
     WedgeCase,
     _drive_alive_case,
     _drive_wedge_case,
+    _make_clock,
     f64_from_bits,
 )
 
@@ -198,13 +199,7 @@ class TestEndToEndLifecycle:
     def _lifecycle(self) -> tuple[list[str], bool, str | None]:
         """Drive start → HUNG edge → wedge-window silence and trace the arms."""
 
-        class _Clock:
-            t = 0.0
-
-            def __call__(self) -> float:
-                return self.t
-
-        clock = _Clock()
+        clock, box = _make_clock()
         hungs: list[object] = []
         wedges: list[object] = []
         wd = PullWatchdog(
@@ -220,12 +215,12 @@ class TestEndToEndLifecycle:
         wd.start()
         trace: list[str] = []
         # silence past the timeout → HUNG edge + baseline capture (revA)
-        clock.t = 31.0
+        box.t = 31.0
         wd.check_once()
         trace.append(f"hung={len(hungs)}")
         # past the wedge window: token still revA on this poll → ESCALATE?
         # no — the second draw is revA, equal baseline, no restart → fires.
-        clock.t = 200.0
+        box.t = 200.0
         wd.check_once()
         trace.append(f"wedges={len(wedges)}")
         trace.append(f"fired={wd._wedged_fired}")

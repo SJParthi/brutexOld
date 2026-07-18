@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -60,6 +60,35 @@ from brutex.dashboard.pull_stall import (
     resolve_wedge_multiplier,
 )
 from brutex.observability.watchdog import WorkerEvent, WorkerState
+
+
+class _ClockBox:
+    """Mutable time holder for the manually-advanced fake clock (no sleeping)."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def _make_clock() -> tuple[Callable[[], float], _ClockBox]:
+    """A manually-advanced monotonic clock as a PLAIN ``def`` closure.
+
+    Not a callable class: CodeQL's cross-function points-to analysis flags the
+    production ``clock()`` call sites as ``py/call/non-callable-called`` when a
+    test passes a callable-class instance as the injected clock (the known
+    false-positive pattern in the team playbook) — a plain ``def`` is
+    unambiguously callable. Set/advance time through the returned
+    :class:`_ClockBox`.
+    """
+    box = _ClockBox()
+
+    def clock() -> float:
+        return box.t
+
+    return clock, box
+
 
 #: Wedge-decision arm names, index == the Rust kernel's token value
 #: (``rust/brutex-pull-state/src/stall.rs`` — the shared vocabulary).
@@ -122,14 +151,7 @@ def _drive_wedge_case(case: WedgeCase) -> int:
     the module's guard logic.
     """
 
-    class _Clock:
-        def __init__(self) -> None:
-            self.t = 0.0
-
-        def __call__(self) -> float:
-            return self.t
-
-    clock = _Clock()
+    clock, box = _make_clock()
     hungs: list[WorkerEvent] = []
     wd = PullWatchdog(
         on_hung=hungs.append,
@@ -141,11 +163,11 @@ def _drive_wedge_case(case: WedgeCase) -> int:
     wd.start()
     if case.hung:
         # Drive the REAL underlying watchdog into HUNG via genuine silence.
-        clock.t = case.timeout + 1.0
+        box.t = case.timeout + 1.0
         wd._wd.check_once()
         assert wd.state() is WorkerState.HUNG, case.label
         assert len(hungs) == 1, case.label
-    clock.t = T_EVAL
+    box.t = T_EVAL
     wedges: list[WorkerEvent] = []
     # Whitebox state install (the test suite's whitebox precedent): every
     # stored instant is an ABSOLUTE derived from the case's relative age so
@@ -393,14 +415,7 @@ def compute_wedge_table() -> list[dict[str, Any]]:
 def _drive_alive_case(since_last: float, interval: float) -> bool:
     """Drive the REAL throttle: True iff a line would be emitted (payload not None)."""
 
-    class _Clock:
-        def __init__(self) -> None:
-            self.t = 0.0
-
-        def __call__(self) -> float:
-            return self.t
-
-    clock = _Clock()
+    clock, box = _make_clock()
     wd = PullWatchdog(
         on_hung=lambda _e: None,
         timeout_seconds=600.0,
@@ -408,7 +423,7 @@ def _drive_alive_case(since_last: float, interval: float) -> bool:
         clock=clock,
     )
     wd.start()
-    clock.t = T_EVAL
+    box.t = T_EVAL
     wd._alive_interval = interval
     wd._last_alive_log = T_EVAL - since_last
     payload = wd._alive_payload_locked()

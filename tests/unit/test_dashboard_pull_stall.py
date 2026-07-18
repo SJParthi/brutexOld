@@ -54,17 +54,31 @@ from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
 
-class _FakeClock:
-    """Manually-advanced monotonic clock (no sleeping)."""
+class _ClockBox:
+    """Mutable time holder for the manually-advanced fake clock (no sleeping)."""
 
     def __init__(self) -> None:
         self.t = 0.0
 
-    def __call__(self) -> float:
-        return self.t
-
     def advance(self, dt: float) -> None:
         self.t += dt
+
+
+def _make_clock() -> tuple[Callable[[], float], _ClockBox]:
+    """A manually-advanced monotonic clock as a PLAIN ``def`` closure.
+
+    Not a callable class: CodeQL's cross-function points-to analysis flags the
+    production ``clock()`` call sites as ``py/call/non-callable-called`` when a
+    test passes a callable-class instance as the injected clock (the known
+    false-positive pattern in the team playbook) — a plain ``def`` is
+    unambiguously callable. Advance time through the returned :class:`_ClockBox`.
+    """
+    box = _ClockBox()
+
+    def clock() -> float:
+        return box.t
+
+    return clock, box
 
 
 def _capturing_spawn() -> tuple[list[Callable[[], None]], Callable[[Callable[[], None]], None]]:
@@ -124,7 +138,7 @@ class TestPullWatchdog:
 
     def test_start_registers_worker_and_spawns_timer(self) -> None:
         captured, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
         wd.start()
         assert len(captured) == 1  # the timer loop body was spawned
@@ -132,12 +146,12 @@ class TestPullWatchdog:
 
     def test_hung_fires_on_dwell_timeout(self) -> None:
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         events: list[WorkerEvent] = []
         wd = PullWatchdog(on_hung=events.append, timeout_seconds=30.0, spawn=spawn, clock=clock)
         wd.start()
         # No beat; advance past the timeout → check_once declares HUNG.
-        clock.advance(31.0)
+        box.advance(31.0)
         fired = wd.check_once()
         assert len(fired) == 1
         assert fired[0].new_state == WorkerState.HUNG
@@ -147,13 +161,13 @@ class TestPullWatchdog:
 
     def test_beat_keeps_worker_healthy(self) -> None:
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         events: list[WorkerEvent] = []
         wd = PullWatchdog(on_hung=events.append, timeout_seconds=30.0, spawn=spawn, clock=clock)
         wd.start()
         # Beat just before each timeout — a slow-but-progressing pull never hangs.
         for _ in range(3):
-            clock.advance(20.0)
+            box.advance(20.0)
             wd.beat()
             assert wd.check_once() == ()  # never an edge
         assert wd.state() == WorkerState.HEALTHY
@@ -161,11 +175,11 @@ class TestPullWatchdog:
 
     def test_recovery_edge_is_logged_only(self) -> None:
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         events: list[WorkerEvent] = []
         wd = PullWatchdog(on_hung=events.append, timeout_seconds=30.0, spawn=spawn, clock=clock)
         wd.start()
-        clock.advance(31.0)
+        box.advance(31.0)
         wd.check_once()  # HUNG
         assert wd.state() == WorkerState.HUNG
         # A late beat + check recovers the worker (HUNG→HEALTHY edge) — informational,
@@ -179,12 +193,12 @@ class TestPullWatchdog:
     def test_recovery_edge_forwards_to_the_on_recovery_hook(self) -> None:
         """DEC-PIPELINE-STALL-HEARTBEAT-001: the post-construction hook fires on recovery."""
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
         recovered: list[WorkerEvent] = []
         wd.on_recovery = recovered.append
         wd.start()
-        clock.advance(31.0)
+        box.advance(31.0)
         wd.check_once()  # HUNG
         wd.beat()
         wd.check_once()  # HUNG→HEALTHY — must reach the hook
@@ -194,7 +208,7 @@ class TestPullWatchdog:
     def test_recovery_hook_raising_is_swallowed(self) -> None:
         """A raising on_recovery hook is swallowed + logged — the timer never crashes."""
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
 
         def _boom(_event: WorkerEvent) -> None:
@@ -202,7 +216,7 @@ class TestPullWatchdog:
 
         wd.on_recovery = _boom
         wd.start()
-        clock.advance(31.0)
+        box.advance(31.0)
         wd.check_once()  # HUNG
         wd.beat()
         recovered = wd.check_once()  # must NOT raise out of the recovery forward
@@ -210,7 +224,7 @@ class TestPullWatchdog:
 
     def test_drive_loop_polls_until_stopped(self) -> None:
         """The real timer-loop body polls check_once each tick until stop() fires."""
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         polls: list[int] = []
         wd = PullWatchdog(
             on_hung=lambda _e: None,
@@ -233,7 +247,7 @@ class TestPullWatchdog:
 
     def test_stop_before_any_poll_exits_immediately(self) -> None:
         """stop() before the loop starts → the wait returns True on the first iteration."""
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         polls: list[int] = []
 
         wd = PullWatchdog(
@@ -252,7 +266,7 @@ class TestPullWatchdog:
 
     def test_default_poll_seconds_is_timeout_over_three(self) -> None:
         """start() with no poll_seconds uses timeout/3 as the cadence."""
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         captured: list[float] = []
 
         def _capture_interval(interval: float) -> None:
@@ -781,10 +795,10 @@ class _TokenProbe:
 
 def _wedge_watchdog(
     *, probe: _TokenProbe | None, timeout: float = 30.0, multiplier: float = 6.0
-) -> tuple[PullWatchdog, _FakeClock, list[WorkerEvent], list[WorkerEvent]]:
+) -> tuple[PullWatchdog, _ClockBox, list[WorkerEvent], list[WorkerEvent]]:
     """Build a PullWatchdog wired for wedge tests: fake clock, capturing hooks."""
     _, spawn = _capturing_spawn()
-    clock = _FakeClock()
+    clock, box = _make_clock()
     hungs: list[WorkerEvent] = []
     wd = PullWatchdog(
         on_hung=hungs.append,
@@ -798,7 +812,7 @@ def _wedge_watchdog(
     if probe is not None:
         wd.revision_probe = probe
     wd.start()
-    return wd, clock, hungs, wedges
+    return wd, box, hungs, wedges
 
 
 class TestPullWatchdogWedgeEscalation:
@@ -1000,7 +1014,7 @@ class TestPullWatchdogWedgeEscalation:
         """With no on_wedged hook the escalation short-circuits (zero probe reads)."""
         probe = _TokenProbe("rev-1")
         _, spawn = _capturing_spawn()
-        clock = _FakeClock()
+        clock, box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None,
             timeout_seconds=30.0,
@@ -1010,10 +1024,10 @@ class TestPullWatchdogWedgeEscalation:
         )
         wd.revision_probe = probe
         wd.start()
-        clock.advance(31.0)
+        box.advance(31.0)
         wd.check_once()
         hung_edge_reads = probe.calls  # the HUNG edge itself captures a baseline
-        clock.advance(500.0)
+        box.advance(500.0)
         wd.check_once()
         assert probe.calls == hung_edge_reads  # no escalation-path probe read
 
@@ -1061,13 +1075,13 @@ class TestWatchdogAliveBeat:
 
     def test_first_check_logs_then_throttles_within_interval(self) -> None:
 
-        clock = _FakeClock()
+        clock, box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
         wd.start()
         with capture_logs() as logs:
             wd.check_once()  # first check → an early proof of life
-            clock.advance(50.0)
+            box.advance(50.0)
             wd.check_once()  # 50 s < 200 s → throttled
         alive = self._alive(logs)
         assert len(alive) == 1
@@ -1080,7 +1094,7 @@ class TestWatchdogAliveBeat:
         checks/hour; simulating one hour of timer ticks yields exactly 18 lines —
         the documented bound falls out of the existing cadence, no new thread."""
 
-        clock = _FakeClock()
+        clock, box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
         wd.start()
@@ -1088,7 +1102,7 @@ class TestWatchdogAliveBeat:
             for _ in range(18):  # one hour of 200 s timer ticks
                 wd.beat()  # a progressing worker (never hung)
                 wd.check_once()
-                clock.advance(200.0)
+                box.advance(200.0)
         assert len(self._alive(logs)) == 18
 
     def test_shrunk_env_timeout_still_respects_the_floor(self) -> None:
@@ -1096,7 +1110,7 @@ class TestWatchdogAliveBeat:
         ALIVE_LOG_MIN_INTERVAL_S — an hour of 10 s checks still logs ≤ 18 lines."""
         from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S
 
-        clock = _FakeClock()
+        clock, box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=30.0, spawn=spawn, clock=clock)
         wd.start()  # cadence timeout/3 = 10 s → the throttle floors at 200 s
@@ -1104,7 +1118,7 @@ class TestWatchdogAliveBeat:
             for _ in range(360):  # one hour of 10 s checks
                 wd.beat()
                 wd.check_once()
-                clock.advance(10.0)
+                box.advance(10.0)
         alive = self._alive(logs)
         assert len(alive) <= 18
         assert alive[0]["interval_seconds"] == ALIVE_LOG_MIN_INTERVAL_S
@@ -1112,15 +1126,15 @@ class TestWatchdogAliveBeat:
     def test_explicit_poll_seconds_above_floor_sets_the_interval(self) -> None:
         """start(poll_seconds=300) → the alive interval tracks the ACTUAL cadence."""
 
-        clock = _FakeClock()
+        clock, box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
         wd.start(poll_seconds=300.0)
         with capture_logs() as logs:
             wd.check_once()
-            clock.advance(250.0)
+            box.advance(250.0)
             wd.check_once()  # 250 < 300 → throttled (a 200 s floor alone would log)
-            clock.advance(60.0)
+            box.advance(60.0)
             wd.check_once()  # 310 ≥ 300 → logs
         alive = self._alive(logs)
         assert len(alive) == 2
@@ -1131,12 +1145,12 @@ class TestWatchdogAliveBeat:
         ``hung`` (the happy-path line never masks a stall; the edge events are
         byte-identical, logging is the only delta)."""
 
-        clock = _FakeClock()
+        clock, box = _make_clock()
         _captured, spawn = _capturing_spawn()
         edges: list[WorkerEvent] = []
         wd = PullWatchdog(on_hung=edges.append, timeout_seconds=600.0, spawn=spawn, clock=clock)
         wd.start()
-        clock.advance(601.0)  # past the timeout with no beat → HUNG on the next check
+        box.advance(601.0)  # past the timeout with no beat → HUNG on the next check
         with capture_logs() as logs:
             events = wd.check_once()
         assert len(events) == 1  # PARITY: the hung edge fired exactly as before
@@ -1148,7 +1162,7 @@ class TestWatchdogAliveBeat:
     def test_bare_check_once_without_start_reads_unregistered(self) -> None:
         """A never-started wrapper logs ``state="unregistered"`` instead of raising."""
 
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
         with capture_logs() as logs:
@@ -1163,7 +1177,7 @@ class TestWatchdogAliveBeat:
         ``(on_hung)``), and rides the alive event as an ADDITIVE ``pull_id`` field.
         Event name + throttle behaviour byte-unchanged."""
 
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         _captured, spawn = _capturing_spawn()
         wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
         assert wd.run_id == ""  # the unstamped default
@@ -1174,7 +1188,7 @@ class TestWatchdogAliveBeat:
         assert len(alive) == 1
         assert alive[0]["pull_id"] == ""  # a bare/test watchdog reads honestly empty
 
-        clock2 = _FakeClock()
+        clock2, _box2 = _make_clock()
         wd2 = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock2
         )
@@ -1237,10 +1251,10 @@ def _install_stall_kernel(
     monkeypatch.setitem(sys.modules, "brutex_pull_state", ns)
 
 
-def _seam_wedge_watchdog() -> tuple[PullWatchdog, _FakeClock, list[WorkerEvent]]:
+def _seam_wedge_watchdog() -> tuple[PullWatchdog, _ClockBox, list[WorkerEvent]]:
     """A started, genuinely-HUNG watchdog with a captured 'revA' baseline,
     silent past the full wedge window — the escalate-shaped module state."""
-    clock = _FakeClock()
+    clock, box = _make_clock()
     wd = PullWatchdog(
         on_hung=lambda _e: None,
         timeout_seconds=30.0,
@@ -1251,14 +1265,14 @@ def _seam_wedge_watchdog() -> tuple[PullWatchdog, _FakeClock, list[WorkerEvent]]
     wedges: list[WorkerEvent] = []
     wd.on_wedged = wedges.append
     wd.start()
-    clock.advance(31.0)
+    box.advance(31.0)
     wd._wd.check_once()  # the real HUNG edge
     assert wd.state() is WorkerState.HUNG
     wd._baseline_capture_pending = False
     wd._hung_baseline_captured = True
     wd._hung_baseline_token = "revA"
-    clock.advance(180.0)  # total silence 211 s > 6 x 30 s
-    return wd, clock, wedges
+    box.advance(180.0)  # total silence 211 s > 6 x 30 s
+    return wd, box, wedges
 
 
 class TestPullStateRustKernelStall:
@@ -1290,7 +1304,7 @@ class TestPullStateRustKernelStall:
         (fires on a HEALTHY worker the pre-flip law would refuse) — proving
         the kernel is the decision authority, not a re-derived Python law."""
         _install_stall_kernel(monkeypatch, wedge=lambda *a: 5)
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
         )
@@ -1355,7 +1369,7 @@ class TestPullStateRustKernelStall:
             return 1  # abstain-shaped: the guards passed, current is None
 
         _install_stall_kernel(monkeypatch, wedge=kernel)
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
         )
@@ -1383,7 +1397,7 @@ class TestPullStateRustKernelStall:
             return 0
 
         _install_stall_kernel(monkeypatch, wedge=kernel)
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=30.0, spawn=lambda _fn: None, clock=clock
         )
@@ -1457,22 +1471,22 @@ class TestPullStateRustKernelStall:
         """A fake due=True verdict is SERVED (the pre-flip law would
         throttle at since==0) and the retained stamp body runs."""
         _install_stall_kernel(monkeypatch, alive=lambda *_a: True)
-        clock = _FakeClock()
+        clock, box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
         )
         wd.start()
-        wd._last_alive_log = clock.t  # the law would THROTTLE (since == 0)
+        wd._last_alive_log = box.t  # the law would THROTTLE (since == 0)
         payload = wd._alive_payload_locked()
         assert payload is not None  # the kernel verdict is served
         assert payload["state"] == "healthy"
-        assert wd._last_alive_log == clock.t  # the shared stamp body ran
+        assert wd._last_alive_log == box.t  # the shared stamp body ran
 
     def test_alive_kernel_false_suppresses_even_the_first_check(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _install_stall_kernel(monkeypatch, alive=lambda *_a: False)
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
         )
@@ -1482,7 +1496,7 @@ class TestPullStateRustKernelStall:
     def test_alive_real_kernel_first_check_emits_then_throttles(self) -> None:
         """The REAL kernel serves the pre-flip throttle law: the ``-inf``
         first-check seed emits, the immediate repeat throttles."""
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
         )
@@ -1493,7 +1507,7 @@ class TestPullStateRustKernelStall:
     def test_alive_missing_wheel_raises_fail_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
 
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
-        clock = _FakeClock()
+        clock, _box = _make_clock()
         wd = PullWatchdog(
             on_hung=lambda _e: None, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
         )
