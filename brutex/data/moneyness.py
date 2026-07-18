@@ -15,9 +15,15 @@ where :mod:`brutex.options.strike_grid` only knows the 3 index grids (NIFTY/BANK
 and would ``KeyError`` on a stock. Golden Rule #1: never assume a step for a symbol we did
 not measure.
 
-Pure (stdlib + :class:`~decimal.Decimal`). It **never raises** — a future (no strike), an
-absent spot, or any junk input classifies as :attr:`Moneyness.NA` / :attr:`Moneyness.UNKNOWN`
-so a per-bar browse or a movers render never crashes on one bad value.
+Pure decision math (stdlib + :class:`~decimal.Decimal`, plus the flag-gated
+:mod:`brutex.optcost_rust` seam leaf — DEC-OPTCOST-TAILS-RUST-001: with
+``BRUTEX_OPTCOST_TAILS_RUST`` truthy the graded classify / ATM-offset /
+strike-step decisions run on the ``fno_math`` ``optcost_*`` kernels; flag OFF —
+the default — is byte-identical and never imports the wheel). It **never
+raises** — a future (no strike), an absent spot, or any junk input classifies as
+:attr:`Moneyness.NA` / :attr:`Moneyness.UNKNOWN` so a per-bar browse or a movers
+render never crashes on one bad value; the seam preserves that contract on every
+path (kernel faults degrade to the Python oracle inside the facade).
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_DOWN, Decimal
 from enum import StrEnum
 from typing import Final, TypeGuard
+
+from brutex import optcost_rust
 
 
 class Moneyness(StrEnum):
@@ -95,6 +103,21 @@ def classify(
     if not _is_positive_finite(strike) or not _is_positive_finite(spot):
         return Moneyness.UNKNOWN
     band = atm_band if (atm_band is not None and atm_band >= 0) else Decimal(0)
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.classify_graded(
+            is_put=option_type == OPTION_PUT,
+            strike=strike,
+            spot=spot,
+            band=band,
+            python=lambda: _classify_graded_python(option_type, strike, spot, band),
+        )
+    return _classify_graded_python(option_type, strike, spot, band)
+
+
+def _classify_graded_python(
+    option_type: str, strike: Decimal, spot: Decimal, band: Decimal
+) -> Moneyness:
+    """The verbatim graded arm of :func:`classify` — the live oracle."""
     diff = spot - strike  # > 0 → spot above strike
     if abs(diff) <= band:
         return Moneyness.ATM
@@ -133,7 +156,17 @@ def derive_strike_step(
     """
     if authoritative_strikes is not None:
         return resolve_strike_step(strikes, authoritative_strikes=authoritative_strikes).step
-    unique = sorted({s for s in strikes if _is_positive_finite(s)})
+    qualifying = tuple(s for s in strikes if _is_positive_finite(s))
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.strike_step(
+            qualifying, python=lambda: _derive_strike_step_python(qualifying)
+        )
+    return _derive_strike_step_python(qualifying)
+
+
+def _derive_strike_step_python(qualifying: tuple[Decimal, ...]) -> Decimal | None:
+    """The verbatim min-gap arm of :func:`derive_strike_step` — the live oracle."""
+    unique = sorted(set(qualifying))
     if len(unique) < _MIN_DISTINCT_STRIKES:
         return None
     # A distinct, ascending ladder ⇒ every consecutive gap is strictly positive, so the
@@ -258,6 +291,15 @@ def atm_offset(strike: Decimal | None, spot: Decimal | None, step: Decimal | Non
         or not _is_positive_finite(spot)
     ):
         return None
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.atm_offset_paisa(
+            strike, spot, step, python=lambda: _atm_offset_python(strike, spot, step)
+        )
+    return _atm_offset_python(strike, spot, step)
+
+
+def _atm_offset_python(strike: Decimal, spot: Decimal, step: Decimal) -> int:
+    """The verbatim graded arm of :func:`atm_offset` — the live oracle."""
     return int(((strike - spot) / step).to_integral_value(rounding=ROUND_HALF_DOWN))
 
 

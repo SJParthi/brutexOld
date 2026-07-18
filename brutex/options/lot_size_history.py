@@ -42,6 +42,8 @@ from datetime import date
 from enum import Enum
 from typing import Final
 
+from brutex import optcost_rust
+
 
 class OptionsUnderlying(Enum):
     """The 3 underlyings supported in Track 2."""
@@ -109,8 +111,34 @@ def get_lot_size(instrument: OptionsUnderlying, on_date: date) -> int:
     Raises:
         ValueError: if `on_date` is before the start of our recorded
             history (Jan 1, 2021).
+
+    DEC-OPTCOST-TAILS-RUST-001: with ``BRUTEX_OPTCOST_TAILS_RUST`` truthy
+    the bisect runs on the ``fno_math`` ``optcost_history_lookup`` kernel
+    via :mod:`brutex.optcost_rust` (the pre-history ``ValueError`` keeps its
+    exact message bytes, composed Python-side from this same table); flag
+    OFF — the default — is byte-identical.
     """
     history = _HISTORY_BY_UNDERLYING[instrument]
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.history_value(
+            "lot_size",
+            history,
+            on_date,
+            prehistory_message=lambda: (
+                f"on_date {on_date} is before recorded history start "
+                f"({history[0][0]} for {instrument.value})"
+            ),
+            python=lambda: _get_lot_size_python(history, on_date, instrument),
+        )
+    return _get_lot_size_python(history, on_date, instrument)
+
+
+def _get_lot_size_python(
+    history: tuple[tuple[date, int], ...],
+    on_date: date,
+    instrument: OptionsUnderlying,
+) -> int:
+    """The verbatim Python arm of :func:`get_lot_size` — the live oracle."""
     if on_date < history[0][0]:
         raise ValueError(
             f"on_date {on_date} is before recorded history start "

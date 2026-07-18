@@ -26,6 +26,7 @@ from itertools import pairwise
 from operator import attrgetter
 from typing import Final
 
+from brutex import optcost_rust
 from brutex.costs.types import UnverifiedCostRegimeError
 
 # ─────────────────────────────────────────────────────────────────
@@ -357,7 +358,37 @@ def rate_for_date(
         If the selected row is a refusal row (``rate_bps_x100 is None``)
         — REACHABLE and load-bearing for the ETC tables' pre-2024-10-01
         window (DEC-ETC-REGIME-HISTORY-001).
+
+    Notes
+    -----
+    DEC-OPTCOST-TAILS-RUST-001: with ``BRUTEX_OPTCOST_TAILS_RUST`` truthy
+    the DECISION runs on the ``fno_math`` ``optcost_regime_rate`` kernel via
+    :mod:`brutex.optcost_rust`; the refusal exceptions above keep their
+    exact type + message bytes (composed Python-side from these same rows —
+    VERIFIED-RATES-ONLY, no runtime escape hatch). Flag OFF (the default)
+    is byte-identical to the pre-seam behaviour.
     """
+    if optcost_rust.optcost_rust_enabled():
+        return optcost_rust.regime_rate(
+            regimes,
+            on_date,
+            charge=charge,
+            exchange=exchange,
+            python=lambda: _rate_for_date_python(
+                regimes, on_date, charge=charge, exchange=exchange
+            ),
+        )
+    return _rate_for_date_python(regimes, on_date, charge=charge, exchange=exchange)
+
+
+def _rate_for_date_python(
+    regimes: Sequence[RegimeRow],
+    on_date: date,
+    *,
+    charge: str,
+    exchange: str,
+) -> int:
+    """The verbatim Python arm of :func:`rate_for_date` — the live oracle."""
     if not regimes:
         msg = "rate_for_date: empty regime table"
         raise ValueError(msg)
