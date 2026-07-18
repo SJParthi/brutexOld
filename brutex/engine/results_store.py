@@ -131,7 +131,6 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.money import round_money
-from brutex.ranking.multi_select import BASIS_FRONTIER, join_basis_tokens
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from brutex.vocabulary.describe import matched_condition_names
@@ -554,6 +553,21 @@ class ResultRow:
         # (brutex.ranking.multi_select.join_basis_tokens — imported, never a
         # mirrored literal). A poisoned/misordered tag is refused at
         # construction, never persisted.
+        #
+        # The import is deliberately FUNCTION-level (a sys.modules dict hit
+        # after the first call — negligible beside this method's Decimal
+        # validation work): importing brutex.ranking.multi_select executes
+        # brutex/ranking/__init__.py, whose brutex.metrics re-export imports
+        # numpy — and `import brutex.engine` MUST stay numpy-free at import
+        # time. ci.yml's dotted per-module coverage stanzas
+        # (--cov=brutex.engine.<mod>) import the parent package at coverage
+        # start and re-import it under measurement; numpy 2.x's
+        # single-phase-init extension refuses that second load
+        # ("cannot load module more than once per process"), so a
+        # module-level edge here broke EVERY dotted engine stanza in CI
+        # (run 29651181531 — DEC-RANK-PARETO-PERSIST-001 CI seam fix).
+        from brutex.ranking.multi_select import BASIS_FRONTIER, join_basis_tokens
+
         if self.selection_basis is not None:
             if not self.selection_basis:
                 raise ResultsStoreError(
