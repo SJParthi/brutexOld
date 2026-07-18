@@ -1301,17 +1301,18 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # schema anchors; a missing column null-fills, an extra one is ignored —
         # the `.select(*columns)` below needs only the base OHLCV(+OI) columns,
         # which every shape carries, so the output is byte-identical for a
-        # uniform tree.
-        df = pl.scan_parquet(
-            files,
-            missing_columns="insert",
-            extra_columns="ignore",
-            # LITERAL month-file list — never glob (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
-            # a `[`-carrying symbol dir otherwise glob-reads its SIBLINGS' bars
-            # into this symbol's derived 1day.
-            glob=False,
-        ).collect()
+        # uniform tree. Lazily scanned through the EAGER per-file fd probe
+        # (DEC-LAKE-READ-INODE-GUARD-002): a planted FIFO among the month files
+        # raises NotRegularFileError at scan-build instead of hanging the
+        # collect in C-level fifo_open; regular files byte-identical. The
+        # helper's explicit-list arm scans LITERALLY (glob=False inside —
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15 metachar
+        # law on the bars tree, re-derived at the lap-8 fold: a `[`-carrying
+        # symbol dir must never glob-read its SIBLINGS' bars into this
+        # symbol's derived 1day).
+        from brutex.data.guarded_read import scan_parquet_regular
+
+        df = scan_parquet_regular(files, missing_columns="insert", extra_columns="ignore").collect()
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + ist_offset_duration()).dt.date()

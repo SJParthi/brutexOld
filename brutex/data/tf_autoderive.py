@@ -210,14 +210,13 @@ def read_lake_bars_frame(
     (a derived bucket's legitimate coarse move could false-trip the in-session
     ratio test). Default ``False`` keeps every other read byte-identical.
     """
-    import polars as pl
-
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     resolved_source = source or f"{symbol_dir.name}/{interval}"
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
+        read_parquet_glob_regular((symbol_dir / interval).as_posix() + "/**/*.parquet"),
         source=resolved_source,
     )
     frame = (

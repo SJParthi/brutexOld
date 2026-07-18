@@ -42,6 +42,7 @@ from brutex.dashboard.nse_constituents import (
     convention_constituent_url,
     fetch_rows_at_url,
 )
+from brutex.data.guarded_read import read_regular_text_deadline
 
 __all__ = [
     "ConstituentResult",
@@ -152,7 +153,7 @@ def read_cache(cache_root: Path, index: str) -> dict[str, object] | None:
     """
     path = cache_path(cache_root, index)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_regular_text_deadline(path, what="constituents cache read")
         data: object = json.loads(text)
     except (OSError, ValueError):
         return None

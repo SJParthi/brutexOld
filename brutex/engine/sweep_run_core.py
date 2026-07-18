@@ -74,6 +74,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.run_layout import mirror_run_dir, run_dir
 from brutex.engine.run_verdicts import VERDICTS_FILENAME, build_run_verdicts
 from brutex.engine.sweep_diffcheck import (
@@ -1012,7 +1013,7 @@ class RunCoreHandles:
         if self._progress_path is None:
             return
         try:
-            payload = json.loads(self._progress_path.read_text(encoding="utf-8"))
+            payload = json.loads(read_regular_text(self._progress_path))
         except (OSError, json.JSONDecodeError):
             return
         if not isinstance(payload, dict):
@@ -1457,7 +1458,7 @@ def _append_run_manifest_line(manifest_path: Path, chain_path: Path, *, run_id: 
     """Append the ONE additive D-3 ``RUN_MANIFEST`` action to the CLI SHA-256 chain."""
     from brutex.orchestrator.audit import AuditWriter
 
-    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    doc = json.loads(read_regular_text(manifest_path))
     payload = {"manifest": doc, "manifest_content_hash": content_hash_of(manifest_path)}
     chain_path.parent.mkdir(parents=True, exist_ok=True)
     with AuditWriter.open(chain_path, resume=chain_path.exists()) as audit:

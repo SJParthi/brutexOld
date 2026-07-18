@@ -1071,7 +1071,6 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
     object-identical (zero-copy); clean lakes stay byte-identical.
     """
-    import polars as pl
 
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
     from brutex.data.price_sanity import (
@@ -1121,19 +1120,27 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         # OPTION contract's month files may mix the raw 7-column and the
         # Greeks-enriched 17-column shape (plan §15.3); only the base
         # OHLCV(+OI) columns are selected below, which every shape carries —
-        # byte-identical for a uniform tree.
-        df = pl.scan_parquet(
+        # byte-identical for a uniform tree. Lazily scanned through the EAGER
+        # per-file fd probe (DEC-LAKE-READ-INODE-GUARD-002) — covers BOTH
+        # source shapes (the months-bounded file LIST and the whole-tree GLOB
+        # string): a planted FIFO raises NotRegularFileError at scan-build
+        # instead of hanging the collect; regular files byte-identical.
+        from brutex.data.guarded_read import scan_parquet_regular
+
+        # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
+        # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
+        # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
+        # siblings otherwise glob-reads the SIBLINGS' bars into this
+        # symbol. Held INSIDE scan_parquet_regular (the lap-8 fold re-derive:
+        # its explicit-list arm passes glob=False; its path/glob-STRING arm —
+        # the deliberate whole-tree `**` discovery branch — keeps polars'
+        # glob semantics), so this call needs no glob kwarg. The writer
+        # additionally refuses to mint such dirs
+        # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
+        df = scan_parquet_regular(
             source,
             missing_columns="insert",
             extra_columns="ignore",
-            # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
-            # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
-            # siblings otherwise glob-reads the SIBLINGS' bars into this
-            # symbol. The whole-tree branch is deliberate `**` discovery and
-            # keeps glob; the writer additionally refuses to mint such dirs
-            # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
-            glob=isinstance(source, str),
         ).collect()
         frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
         context = f"{exchange}/{segment}/{symbol}/1minute"

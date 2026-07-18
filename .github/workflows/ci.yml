@@ -2000,6 +2000,14 @@ jobs:
           else
             echo "(brutex.data.session_density test file not present yet — gate inactive)"
           fi
+          # DEC-LAKE-READ-INODE-GUARD-001: the COMMON two-defense gated file
+          # reader (fd-level S_ISREG gate + deadline-wrapped stall variants).
+          # Ships at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_guarded_read.py" > /dev/null; then
+            pytest --cov=brutex.data.guarded_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_guarded_read.py
+          else
+            echo "(brutex.data.guarded_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.

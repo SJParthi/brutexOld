@@ -39,6 +39,7 @@ pytest.importorskip("trading_core", reason="greeks enrichment needs the trading_
 pytest.importorskip("polars")
 
 import polars as pl
+from brutex.data import greeks_backfill
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.greeks_backfill import (
     BackfillScan,
@@ -133,22 +134,26 @@ def test_probe_reads_only_the_stamp_column_on_a_clean_lake(
     """The clean-file probe is a SINGLE stamp-column projection per month file.
 
     The flat-ratio gate above cannot see a full-table-read regression (it is
-    per-file too); this spy can: every ``read_parquet`` the scan issues against
+    per-file too); this spy can: every parquet read the scan issues against
     an option month partition of a fully-CURRENT lake must project EXACTLY
     ``["greeks_provenance_id"]`` — once per file (the fixability read is paid
-    ONLY on the null-stamp branch, absent here).
+    ONLY on the null-stamp branch, absent here). The spy pins the module's
+    GUARDED read seam (``greeks_backfill.read_parquet_regular`` —
+    DEC-LAKE-READ-INODE-GUARD-001 hands polars the fd-validated OPEN handle,
+    so a ``pl.read_parquet`` spy filtering on path strings goes blind:
+    ``str(source)`` is a ``FileIO`` repr, never the ``.parquet`` path).
     """
     n_files = _build_lake(tmp_path, _SHALLOW_CONTRACTS)
-    real_read = pl.read_parquet
+    real_read = greeks_backfill.read_parquet_regular
     month_reads: list[tuple[str, Any]] = []
 
-    def _spy(source: Any, *args: Any, **kwargs: Any) -> Any:
-        text = str(source)
+    def _spy(path: Any, *, columns: Any = None) -> Any:
+        text = str(path)
         if "/FNO/" in text and text.endswith(".parquet"):
-            month_reads.append((text, kwargs.get("columns")))
-        return real_read(source, *args, **kwargs)
+            month_reads.append((text, columns))
+        return real_read(path, columns=columns)
 
-    monkeypatch.setattr(pl, "read_parquet", _spy)
+    monkeypatch.setattr(greeks_backfill, "read_parquet_regular", _spy)
     scan = scan_stale_greeks_targets(tmp_path, rate_source=_RATE)
     assert scan.files_probed == n_files
     assert len(month_reads) == n_files  # exactly ONE read per month file

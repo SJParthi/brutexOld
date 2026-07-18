@@ -108,6 +108,7 @@ import structlog
 from brutex.data import frame_write_gate as _frame_gate
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import LakeWriteHalt, WriterError, parquet_read_skip_errors
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.lake_stats_manifest import (
     KIND_BARS,
@@ -2087,7 +2088,7 @@ class ParquetWriter:
         """
         try:
             with lake_write_guard():
-                return dest.read_bytes()
+                return read_regular_bytes(dest)
         except OSError as exc:
             raise WriterError(f"unreadable existing partition {dest}: {exc}") from exc
 
