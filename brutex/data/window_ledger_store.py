@@ -450,7 +450,8 @@ def merge_ledger_rows(
       :meth:`~brutex.data.window_ledger.WindowLedger.prune_superseded`), which is
       dropped so the DEC-WINDOW-TRAILING-GC-001 orphan GC is not undone by the merge.
     * **both (a genuine semantic conflict — same key, both updated)** → the winner by
-      :func:`_row_preference`: the MORE-SETTLED status first
+      the kernel's preference law (the retired ``_row_preference``, now in
+      ``brutex_identity``): the MORE-SETTLED status first
       (``SUCCESS``/``SKIPPED`` > ``EMPTY`` > ``FAILED`` > ``PLANNED``), then the newer
       ``last_attempt_at`` timestamp, then the higher ``attempts``, then a
       deterministic full-row tie-break — so the merged file is IDENTICAL regardless
