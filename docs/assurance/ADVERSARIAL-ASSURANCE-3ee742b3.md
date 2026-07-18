@@ -39,7 +39,7 @@ Verdicts are the O(1)-claims supplemental lane's per-claim `evidence[]` (all exe
 | hunt:crash | **REAL** | durable-ledger crash-resume fold + Python↔Rust render byte-parity probe | 0 |
 | hunt:correctness | **REAL** | money differential: 18 hostile boundary values `str(round_money)` HALF_UP flip-exact | 0 |
 | hunt:o1 | **REAL** | `pytest test_o1_tiers.py → 11 passed`; ceilings tighten under STRICT, never weakened (hot-path benches driven in delta = 21 passed) | 0 |
-| hunt:sec-secrets | **REAL** | `git grep -nIE AKIA…/BEGIN PRIVATE KEY/totp_secret` P1 secret-literal sweep clean | 0 |
+| hunt:sec-secrets | **REAL** | `git grep -nIE <AWS-KEY-PREFIX>/<PRIVATE-KEY-HEADER>/<TOTP-VAR>` P1 secret-literal sweep clean | 0 |
 | hunt:sec-injection | **REAL** | `pytest` lake_heal.partition_error repr-token fails-before/pass-after; option-tree escaping guards | 2 candidates → both **REFUTED 3/3** |
 | hunt:sec-ssrf | **REAL** | `pytest test_groww_instrument…/nse_constituents/bhavcopy` http/file/non-allowlist/env-override refusals | 1 candidate → **REFUTED 3/3** |
 | hunt:sec-ci | **REAL** | `pytest test_redteam_fork_pr_harden.py` + premerge + automerge redteam suites | 0 |

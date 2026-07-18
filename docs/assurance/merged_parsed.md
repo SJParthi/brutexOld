@@ -17,7 +17,7 @@ Journal: `wf_b20607e5-5d2/journal.jsonl` (66 lines: 28 result + 38 started).
 | hunt:crash | 18/18 | REAL | probe: pull1 records 3 windows, durable-ledger crash-resume fold Python+Rust render byte-parity | 0 |
 | hunt:correctness | 17/17 | REAL | money differential: 18 hostile boundary values `str(round_money)` HALF_UP flip-exact | 0 |
 | hunt:o1 | 29/30 (+22/24 rerun) | REAL* | `pytest test_o1_tiers.py -q → 11 passed`; ceilings tighten under STRICT, never weakened (*tests/bench/ hot-path p99 UNDRIVEN) | 0 |
-| hunt:sec-secrets | 5/6 | REAL | `git grep -nIE AKIA…/BEGIN PRIVATE KEY/totp_secret` P1 secret-literal sweep clean | 0 |
+| hunt:sec-secrets | 5/6 | REAL | `git grep -nIE <AWS-KEY-PREFIX>/<PRIVATE-KEY-HEADER>/<TOTP-VAR>` P1 secret-literal sweep clean | 0 |
 | hunt:sec-injection | 15/17 (+11/14 rerun) | REAL | `pytest` lake_heal.partition_error repr token/error fails-before/pass-after; option-tree escaping guards | 2 (both REFUTED) |
 | hunt:sec-ssrf | 8/10 (+9/10 rerun) | REAL | `pytest test_groww_instrument…/nse_constituents/bhavcopy` http/file/non-allowlist/env-override refusals | 1 (REFUTED) |
 | hunt:sec-ci | 14/14 | REAL | `pytest test_redteam_fork_pr_harden.py …` + premerge + automerge redteam suites | 0 |
