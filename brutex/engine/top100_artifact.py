@@ -456,6 +456,11 @@ def _rank_record(candidate: Top100Candidate) -> RankRecord:
         # persisted half-Kelly log growth — None on a pre-extension store
         # (honestly unscored, ranks last under the preset's presence flag).
         log_growth_at_half_kelly=candidate.row.log_growth_at_half_kelly,
+        # The win_rate_safe-preset input (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        # Stage B): the row's persisted SL-hit rate — None on a pre-extension
+        # store (honestly unknown, ranks after every concrete rate within an
+        # equal win rate under the preset's presence flag).
+        sl_hit_rate=candidate.row.sl_hit_rate,
     )
 
 

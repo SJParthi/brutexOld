@@ -15,12 +15,14 @@ from brutex.ranking.presets import (
     DEFAULT_PRESET,
     PRESET_MIN_DD_FIRST,
     PRESET_NAMES,
+    PRESET_WIN_RATE_SAFE,
     PRESETS,
     RankingPreset,
     RankRecord,
     min_dd_first_key,
     resolve_preset,
     sort_by_preset,
+    win_rate_safe_key,
 )
 from structlog.testing import capture_logs
 
@@ -41,8 +43,10 @@ def _rec(run_id: str, **overrides: Any) -> RankRecord:
 
 class TestPresetVocabulary:
     def test_display_order_and_default(self) -> None:
-        # "growth" appended last (DEC-METRICS-KELLY-GROWTH-001 — the half-Kelly
-        # log-growth preset; a sanctioned additive vocabulary extension).
+        # "growth" appended after the R30 five (DEC-METRICS-KELLY-GROWTH-001)
+        # and "win_rate_safe" appended LAST
+        # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) — each a sanctioned
+        # additive vocabulary extension.
         assert PRESET_NAMES == (
             "min_dd_first",
             "composite",
@@ -50,8 +54,10 @@ class TestPresetVocabulary:
             "win_rate",
             "calmar",
             "growth",
+            "win_rate_safe",
         )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
+        assert PRESET_WIN_RATE_SAFE == "win_rate_safe"
 
     def test_every_preset_names_itself(self) -> None:
         for token, preset in PRESETS.items():
@@ -59,9 +65,12 @@ class TestPresetVocabulary:
             assert preset.describe.strip()
 
     def test_direction_flags(self) -> None:
-        # min_dd_first is the ONE ascending preset; the alternates all rank
-        # descending on the raw value (the ResultsStore.top_k law).
+        # min_dd_first + win_rate_safe are the multi-part ASCENDING presets
+        # (in-tuple sign flips, ONE reverse per preset); the single-metric
+        # alternates all rank descending on the raw value (the
+        # ResultsStore.top_k law).
         assert PRESETS["min_dd_first"].reverse is False
+        assert PRESETS["win_rate_safe"].reverse is False
         for token in ("composite", "profit_factor", "win_rate", "calmar", "growth"):
             assert PRESETS[token].reverse is True
 
@@ -157,6 +166,75 @@ class TestDescendingPresets:
     def test_rank_record_growth_field_defaults_none(self) -> None:
         # Defaulted-last so pre-extension record builders stay valid.
         assert _rec("a" * 64).log_growth_at_half_kelly is None
+
+
+class TestWinRateSafeLaw:
+    """DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: the win_rate_safe order."""
+
+    def test_higher_win_rate_wins(self) -> None:
+        low = _rec("a" * 64, win_rate=0.4, sl_hit_rate=0.0)
+        high = _rec("b" * 64, win_rate=0.9, sl_hit_rate=1.0)
+        # Win rate dominates — even a worse SL-hit rate cannot outrank it.
+        assert PRESETS["win_rate_safe"].sort_records([low, high]) == (high, low)
+
+    def test_lower_sl_hit_rate_breaks_win_rate_tie(self) -> None:
+        stopped = _rec("a" * 64, sl_hit_rate=0.8)
+        safe = _rec("b" * 64, sl_hit_rate=0.1)
+        assert PRESETS["win_rate_safe"].sort_records([stopped, safe]) == (safe, stopped)
+
+    def test_none_sl_hit_rate_ranks_after_every_concrete_one(self) -> None:
+        # A pre-extension row (None rate) ranks AFTER even an all-SL row
+        # within an equal win rate — None is "honestly unknown", never
+        # coerced to a fake 0.0 that would read "never hits SL".
+        unknown = _rec("a" * 64, sl_hit_rate=None)
+        all_sl = _rec("b" * 64, sl_hit_rate=1.0)
+        assert PRESETS["win_rate_safe"].sort_records([unknown, all_sl]) == (all_sl, unknown)
+
+    def test_higher_win_rate_outranks_unknown_penalty(self) -> None:
+        # The None penalty applies WITHIN an equal win rate only — a higher
+        # win rate with an unknown SL-hit rate still ranks first.
+        unknown_high = _rec("a" * 64, win_rate=0.9, sl_hit_rate=None)
+        concrete_low = _rec("b" * 64, win_rate=0.4, sl_hit_rate=0.0)
+        assert PRESETS["win_rate_safe"].sort_records([unknown_high, concrete_low]) == (
+            unknown_high,
+            concrete_low,
+        )
+
+    def test_composite_breaks_sl_hit_rate_tie_descending(self) -> None:
+        weak = _rec("a" * 64, sl_hit_rate=0.2, composite_score=0.5)
+        strong = _rec("b" * 64, sl_hit_rate=0.2, composite_score=2.5)
+        assert PRESETS["win_rate_safe"].sort_records([weak, strong]) == (strong, weak)
+
+    def test_none_composite_ranks_after_every_scored_one(self) -> None:
+        unscored = _rec("a" * 64, sl_hit_rate=0.2, composite_score=None)
+        negative = _rec("b" * 64, sl_hit_rate=0.2, composite_score=-4.0)
+        assert PRESETS["win_rate_safe"].sort_records([unscored, negative]) == (
+            negative,
+            unscored,
+        )
+
+    def test_full_tie_falls_to_run_id_asc(self) -> None:
+        first = _rec("1" * 64, sl_hit_rate=0.3)
+        second = _rec("2" * 64, sl_hit_rate=0.3)
+        assert PRESETS["win_rate_safe"].sort_records([second, first]) == (first, second)
+
+    def test_key_shape(self) -> None:
+        concrete = win_rate_safe_key(
+            _rec("a" * 64, win_rate=0.6, sl_hit_rate=0.25, composite_score=2.0)
+        )
+        assert concrete == (-0.6, 0, 0.25, 0, -2.0)
+        unknown = win_rate_safe_key(
+            _rec("a" * 64, win_rate=0.6, sl_hit_rate=None, composite_score=None)
+        )
+        assert unknown == (-0.6, 1, 0.0, 1, -0.0)
+
+    def test_rank_record_sl_hit_rate_field_defaults_none(self) -> None:
+        # Defaulted-LAST so pre-extension record builders stay valid.
+        assert _rec("a" * 64).sl_hit_rate is None
+
+    def test_registered_appended_last(self) -> None:
+        assert PRESET_NAMES[-1] == PRESET_WIN_RATE_SAFE
+        assert PRESETS[PRESET_WIN_RATE_SAFE].key is win_rate_safe_key
 
 
 class TestSortByPresetGeneric:

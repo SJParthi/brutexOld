@@ -639,6 +639,11 @@ def _preset_rank_record(
         # the row; None on a pre-extension store — honestly unscored, ranks
         # last under the preset's presence flag (never a fabricated 0).
         log_growth_at_half_kelly=row.log_growth_at_half_kelly,
+        # The win_rate_safe-preset input (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        # Stage B): persisted on the row; None on a pre-extension store —
+        # honestly unknown, ranks after every concrete rate within an equal
+        # win rate under the preset's presence flag (never a fabricated 0).
+        sl_hit_rate=row.sl_hit_rate,
     )
 
 

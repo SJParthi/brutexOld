@@ -33,7 +33,11 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.ranking.presets import PRESET_NAMES
 from fastapi.testclient import TestClient
 
-from tests.fakes.leaderboard_preset_fixtures import make_leaderboard_row, write_tuple_store
+from tests.fakes.leaderboard_preset_fixtures import (
+    make_leaderboard_row,
+    run_id_hex,
+    write_tuple_store,
+)
 
 
 def _nifty() -> Instrument:
@@ -154,6 +158,31 @@ class TestPresetParam:
         assert default_again == default_first
         assert [r["max_drawdown_pct"] for r in preset["rows"]] == [2.0, 25.0]
         assert [r["sharpe_ratio"] for r in default_again["rows"]] == [3.0, 1.0]
+
+    def test_win_rate_safe_preset_threads_sl_hit_rate(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: the view's
+        _preset_rank_record threads the persisted sl_hit_rate — tied win
+        rates rank by SL-hit rate ASC with a None rate (a pre-extension row)
+        last, then win rate DESC dominates over any SL-hit rate."""
+        write_tuple_store(
+            store.path.parent,
+            [
+                make_leaderboard_row(1, win_rate=0.5, sl_hit_rate=0.8),
+                make_leaderboard_row(2, win_rate=0.5, sl_hit_rate=0.1),
+                make_leaderboard_row(3, win_rate=0.5, sl_hit_rate=None),
+                make_leaderboard_row(4, win_rate=0.9, sl_hit_rate=1.0),
+            ],
+        )
+        payload = client.get("/api/v1/sweep/leaderboard?preset=win_rate_safe").json()
+        assert payload["preset"] == "win_rate_safe"
+        assert [r["run_id"] for r in payload["rows"]] == [
+            run_id_hex(4),  # win rate 0.9 dominates even at SL-hit 1.0
+            run_id_hex(2),  # tied 0.5: lowest SL-hit rate first
+            run_id_hex(1),
+            run_id_hex(3),  # None rate last within the tied win rate
+        ]
 
     def test_preset_on_empty_tree_is_honest_empty_board(self, client: TestClient) -> None:
         """A preset over an empty sweeps tree is the honest empty board, preset echoed."""

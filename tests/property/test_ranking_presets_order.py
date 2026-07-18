@@ -15,6 +15,8 @@ the input, and re-sorting is idempotent.
 # this file only; `reportCallIssue` stays a hard error everywhere else.
 from __future__ import annotations
 
+from itertools import pairwise
+
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -36,6 +38,10 @@ def _records(draw: st.DrawFn) -> list[RankRecord]:
             profit_factor=draw(st.floats(0.0, 20.0, allow_nan=False)),
             win_rate=draw(st.floats(0.0, 1.0, allow_nan=False)),
             calmar_ratio=draw(_metric),
+            # The nullable Stage-B axes: both None arms drawn so the growth +
+            # win_rate_safe presets' presence-flag laws ride every property.
+            log_growth_at_half_kelly=draw(_composite),
+            sl_hit_rate=draw(st.one_of(st.none(), st.floats(0.0, 1.0, allow_nan=False))),
         )
         for run_id in ids
     ]
@@ -70,3 +76,22 @@ def test_min_dd_first_orders_drawdown_monotonically(records: list[RankRecord]) -
     ordered = PRESETS["min_dd_first"].sort_records(records)
     drawdowns = [record.max_drawdown_pct for record in ordered]
     assert drawdowns == sorted(drawdowns)
+
+
+@given(records=_records())
+@settings(max_examples=60, deadline=None)
+def test_win_rate_safe_orders_win_rate_monotonically(records: list[RankRecord]) -> None:
+    # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: win rate dominates the
+    # key — descending across the whole order; and within any equal win
+    # rate, concrete SL-hit rates precede None (presence-flag law) and rank
+    # ascending among themselves.
+    ordered = PRESETS["win_rate_safe"].sort_records(records)
+    win_rates = [record.win_rate for record in ordered]
+    assert win_rates == sorted(win_rates, reverse=True)
+    for earlier, later in pairwise(ordered):
+        if earlier.win_rate != later.win_rate:
+            continue
+        if earlier.sl_hit_rate is None:
+            assert later.sl_hit_rate is None
+        elif later.sl_hit_rate is not None:
+            assert earlier.sl_hit_rate <= later.sl_hit_rate

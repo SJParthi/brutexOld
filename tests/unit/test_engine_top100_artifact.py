@@ -313,6 +313,32 @@ class TestRankCandidates:
             unscored.row.run_id,
         ]
 
+    def test_win_rate_safe_preset_threads_sl_hit_rate(self) -> None:
+        # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: win rate DESC first,
+        # then SL-hit rate ASC breaks the tie, a None rate (the fixture
+        # default — a pre-extension row) ranks last within the tied win
+        # rate — threaded row → RankRecord by _rank_record's projection.
+        unknown = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unknown.row.sl_hit_rate is None
+        stopped = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"sl_hit_rate": 0.8}
+        )
+        safe = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"sl_hit_rate": 0.1}
+        )
+        winner = make_candidate(
+            4,
+            fingerprint=fingerprint_seed(4),
+            row_overrides={"win_rate": 0.9, "sl_hit_rate": 1.0},
+        )
+        ranked = rank_candidates([unknown, stopped, safe, winner], preset="win_rate_safe")
+        assert [c.row.run_id for c in ranked] == [
+            winner.row.run_id,  # higher win rate dominates even at SL 1.0
+            safe.row.run_id,  # tied win rate: lowest SL-hit rate first
+            stopped.row.run_id,
+            unknown.row.run_id,  # None rate last within the tied win rate
+        ]
+
     def test_composite_preset_ranks_descending_none_last(self) -> None:
         none_score = make_candidate(
             1, fingerprint=fingerprint_seed(1), agg_overrides={"composite_score": None}

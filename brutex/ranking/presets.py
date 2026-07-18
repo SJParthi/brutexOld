@@ -18,7 +18,12 @@ growth ranks after every scored one, the composite None-after-scored idiom):
 each DESCENDING on the RAW uncoerced value with the same ``run_id``-ASC
 stable pre-sort — the exact ``ResultsStore.top_k`` two-pass law
 (recon-ranking §3), so every preset is a strict, discovery-order-free total
-order (property-pinned).
+order (property-pinned). ``win_rate_safe``
+(DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the second MULTI-part
+ascending preset (the ``min_dd_first`` in-tuple sign-flip idiom): win rate
+DESC → SL-hit rate ASC (a ``None`` rate — a pre-extension store row — ranks
+AFTER every concrete one within an equal win rate, the None-presence-flag
+law) → composite DESC (``None`` after scored) → ``run_id`` ASC.
 
 ## Inputs
 
@@ -52,16 +57,22 @@ __all__ = [
     "PRESETS",
     "PRESET_MIN_DD_FIRST",
     "PRESET_NAMES",
+    "PRESET_WIN_RATE_SAFE",
     "RankRecord",
     "RankingPreset",
     "min_dd_first_key",
     "resolve_preset",
     "sort_by_preset",
+    "win_rate_safe_key",
 ]
 
 #: The R30 default preset token + the one-click alternates, in display order.
 PRESET_MIN_DD_FIRST: Final[str] = "min_dd_first"
 DEFAULT_PRESET: Final[str] = PRESET_MIN_DD_FIRST
+
+#: The Stage-B ``win_rate_safe`` preset token
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) — appended LAST to :data:`PRESETS`.
+PRESET_WIN_RATE_SAFE: Final[str] = "win_rate_safe"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +98,22 @@ class RankRecord:
     #: the ``_growth_key`` presence flag, exactly like an unscored
     #: composite. Defaulted so pre-extension record builders stay valid.
     log_growth_at_half_kelly: float | None = None
+    #: The persisted SL-hit rate feeding the ``win_rate_safe`` preset
+    #: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B). ``None`` = honestly
+    #: unknown (a pre-extension store row) — ranks AFTER every concrete rate
+    #: within an equal win rate under the :func:`win_rate_safe_key` presence
+    #: flag, never coerced to a fake 0.0 (which would rank a pre-extension
+    #: row as "never hits SL"). Defaulted-LAST so pre-extension record
+    #: builders stay valid.
+    sl_hit_rate: float | None = None
 
 
-#: A preset sort key — either the 4-part min-DD ascending key or the
-#: ``(value_present, raw_value)`` descending key of the alternates.
-type PresetKey = tuple[float, int, float, int] | tuple[int, float]
+#: A preset sort key — the 4-part min-DD ascending key, the 5-part
+#: win-rate-safe ascending key, or the ``(value_present, raw_value)``
+#: descending key of the single-metric alternates.
+type PresetKey = (
+    tuple[float, int, float, int] | tuple[int, float] | tuple[float, int, float, int, float]
+)
 
 
 def min_dd_first_key(record: RankRecord) -> tuple[float, int, float, int]:
@@ -147,6 +169,29 @@ def _growth_key(record: RankRecord) -> tuple[int, float]:
     if growth is None:
         return (0, 0.0)
     return (1, growth)
+
+
+def win_rate_safe_key(record: RankRecord) -> tuple[float, int, float, int, float]:
+    """The Stage-B ``win_rate_safe`` sort key (ascending sort).
+
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001: highest win rate first (in-tuple
+    sign flip — the :func:`min_dd_first_key` idiom, ONE ``reverse`` per
+    preset); then SL-hit rate ASCENDING (fewest stop-loss exits wins the
+    win-rate tie — a ``None`` rate ranks AFTER every concrete one via the
+    presence flag: an unknown-exit-quality row never outranks a measured
+    one); then composite score DESC (``None`` after scored — the
+    :func:`min_dd_first_key` composite arms verbatim). Ties fall through to
+    the stable ``run_id``-ASC pre-sort.
+    """
+    sl_hit_rate = record.sl_hit_rate
+    composite = record.composite_score
+    return (
+        -record.win_rate,
+        0 if sl_hit_rate is not None else 1,
+        sl_hit_rate if sl_hit_rate is not None else 0.0,
+        0 if composite is not None else 1,
+        -(composite if composite is not None else 0.0),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +272,15 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         describe=("half-Kelly log growth, descending (unscored/pre-extension rows rank last)"),
         reverse=True,
         key=_growth_key,
+    ),
+    PRESET_WIN_RATE_SAFE: RankingPreset(
+        name=PRESET_WIN_RATE_SAFE,
+        describe=(
+            "win rate first, fewest stop-loss exits break the tie (unknown "
+            "SL-hit rates rank last within a win rate), composite tiebreak"
+        ),
+        reverse=False,
+        key=win_rate_safe_key,
     ),
 }
 
