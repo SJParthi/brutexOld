@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-18 (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956
+(provisional; renumber-at-landing per DEC-LEDGER-RENUMBER-001), branch
+`claude/alpha-buyhold-benchmark` — the ALPHA-vs-BUY&HOLD benchmark: every
+persisted top100 candidate gains the kernel-routed DISPLAY triple
+`alpha_pct`/`strategy_return_pct`/`bh_return_pct` (the strategy's % return
+on the sweep notional MINUS the instrument's R27 buy-&-hold % return over
+the SAME window — RETURN-PERCENT terms, the honest comparability verdict:
+paisa P&L and the notional-free baseline are not directly comparable) via
+the NEW BORN-RUST `fno_math.alpha_vs_buyhold_pct` scalar (additive #1942-
+style registration, crate stays 0.3.0, run identity untouched; the verbatim
+Python oracle retained LIVE in `brutex/engine/alpha_metric.py`, bit-identity
+hypothesis-differential-proven; wheel-missing/poisoned degrades warn-once to
+the oracle) + the APPENDED `alpha` ranking preset (None-after-scored;
+permanently inert on /results, disclosed) + the DEFAULT-OFF operator-gated
+`BRUTEX_ALPHA_GATE` rejection gate at the top100 BUILD only (computable
+alpha <= 0 excluded, counted + named; ARTIFACT-LEVEL scope — stores + the
+#1715 tuple digest byte-untouched; junk env refuses at launch); default
+builds byte-identical (top100 golden UNMODIFIED); /screener + /strategy +
+operator rank-1 render the honest "—" on absence. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1956.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3390,7 +3412,77 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/alpha-buyhold-benchmark`
+  (**DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956 — provisional;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001** — the ALPHA-vs-BUY&HOLD
+  benchmark, the operator-ordered institutional precision layer. THE FORMULA
+  (grounded, not guessed): `alpha_pct = strategy_return_pct − bh_return_pct`
+  where `strategy_return_pct = float(net_pnl_paisa)/float(start_equity_paisa)
+  × 100.0` (signal-only gross paisa on the sweep notional) and
+  `bh_return_pct = float(last_close_paisa − anchor_open_paisa)/
+  float(anchor_open_paisa) × 100.0` (the R27 baseline's anchor OPEN + last
+  session CLOSE as exact 2-dp paisa — the SAME computed `BaselineSeries`,
+  one source); RETURN-PERCENT terms because paisa P&L and the notional-free
+  price-return baseline are NOT directly comparable in paisa (the honest
+  comparability verdict); convert-FIRST `float(int)` is load-bearing (Rust
+  `as f64` ≡ CPython — bit-identity past 2⁵³). BORN-RUST: the NEW
+  `rust/fno-math/src/stats/alpha.rs` kernel (fenced-additive registration in
+  lib.rs + `_EXPECTED_COMPILED_SYMBOLS`/.pyi/EXPECTED_BUILD.json/the frozen
+  math-facade golden — the #1942 precedent; NO crate bump, 0.3.0; run
+  identity untouched) behind the NEW facade `brutex/engine/alpha_metric.py`
+  — the verbatim Python oracle retained LIVE, ONE shared domain law
+  validated Python-side first, wheel-missing/symbol-missing/kernel-raise/
+  non-float degrades warn-once to the oracle, and `compute_alpha_values`
+  cross-checks the kernel value against the leg subtraction (a well-shaped
+  wrong float latches OFF — a poisoned wheel can only degrade, never serve
+  junk); bit-identity proven by the 500-example hypothesis differential over
+  ±2⁶⁰ paisa + the frozen hand-derived golden vectors pinned on BOTH arms;
+  structural properties pinned (alpha == strat − bh exactly; the sign law
+  over the computed legs; alpha(buy-&-hold-itself) == 0; the ulp-band honest
+  limit at the extremes stated). WRITER: `build_top100` gains kw-only
+  `alpha_baselines`/`start_equity_paisa`/`alpha_gate` — the three metric
+  keys are EMIT-ON-KNOWN (the cpcv_pass_pct pattern; an uncovered instrument
+  emits NOTHING → the display "—", never 0), so the DEFAULT build is
+  BYTE-IDENTICAL (strip-pin + the frozen top100 golden UNMODIFIED — no
+  re-lock); the reader needs ZERO change (the #1631 no-sub-key-mandate
+  boundary; writer→reader→route chain integration-pinned). RANKING: the
+  APPENDED `alpha` preset (descending, None-after-scored;
+  `RankRecord.alpha_pct` defaulted LAST — every existing construction
+  byte-identical) reachable via the existing `?preset=` plumbing; on
+  /results the axis is PERMANENTLY INERT (`alpha_pct` joins
+  `PRESET_INERT_AXES` — artifact-level, never on ResultRow; the /results
+  join is the named follow-up DEC-ALPHA-RESULTS-JOIN-001). THE GATE
+  (DEFAULT-OFF, operator-gated): `BRUTEX_ALPHA_GATE` — unset/falsy
+  byte-identical; junk refuses AT LAUNCH (eager cmd_sweep_all resolve +
+  the pass's own entry resolve — the resume_store_guard precedent); ON =
+  gate-passing candidates with COMPUTABLE alpha <= 0 excluded from the
+  top100 BUILD before family collapse, counted
+  (`source["alpha_gate_excluded"]`, emit-on-non-default) + named (one
+  capped WARN); uncomputable never excludes; ARTIFACT-LEVEL scope ruled —
+  stores/run identity/the #1715 `sweep_identity` tuple digest
+  byte-UNTOUCHED (post-hoc display selection, deliberately NOT a
+  store-address fold — investigated + recorded). MEASURED gate effect:
+  fixture corpus 5/5 rejected (synthetic B&H ≈ +300% dwarfs the fixture
+  strategies); unit corpus 2/4; no real run artifacts in the build env —
+  stated. DISPLAY: /screener `Alpha %` column · operator `r1_alpha` ·
+  /strategy `stAlpha` in BOTH markup copies (the T-N2 inventory extended) ·
+  bx-explain line; node --check clean. GATES EXECUTED: `alpha_metric.py`
+  100.00% (116/32, 70 tests, NEW ci.yml stanza) · `top100_artifact.py`
+  100.00% (297/102, 91) · `results_depth_pass.py` 100.00% (279/60, 53) ·
+  `brutex.ranking` 100.00% (286/74, 206); cargo fmt/clippy(-D warnings,
+  --locked)/test --release --locked 617 passed (611 pre-existing
+  UNMODIFIED + 6 new); ruff/ruff-format clean; `mypy --strict` clean (490
+  files); pyright 0 errors on touched files; the frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` sweep goldens + the vocab fixture
+  byte-untouched; FIVE hand-applied mutants killed (oracle sign flip 20F ·
+  operand swap 21F · gate-drop · boundary flip · the REBUILT-wheel Rust
+  sign flip 7F). HONEST: payoff ≈ 0 (seven IEEE ops; the FFI hop costs
+  more — the BORN-RUST uniformity mandate); alpha is gross-of-costs both
+  legs (a consistent disclosed basis); the B&H leg is price-return (no
+  dividends — not in the lake). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; ONE new
+  env var, no new routes.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10466,7 +10558,27 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/alpha-buyhold-benchmark`
+  (DEC-ALPHA-BUYHOLD-METRIC-001, MIGRATION.md #1956 — provisional;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001 — the ALPHA-vs-BUY&HOLD
+  benchmark: the kernel-routed display triple
+  `alpha_pct`/`strategy_return_pct`/`bh_return_pct` on every top100 entry
+  (strategy return % on the sweep notional minus the instrument's R27
+  buy-&-hold return % over the same window — return-percent terms, the
+  honest comparability verdict; emit-on-known, absent = "—" never 0), the
+  NEW `fno_math.alpha_vs_buyhold_pct` BORN-RUST scalar (#1942-style
+  additive registration, crate stays 0.3.0, run identity untouched; the
+  verbatim Python oracle retained LIVE with warn-once degrades +
+  refuse-poison cross-check; bit-identity hypothesis-differential-proven
+  over ±2⁶⁰ paisa), the APPENDED `alpha` ranking preset (None-after-scored;
+  permanently inert on /results, disclosed), and the DEFAULT-OFF
+  operator-gated `BRUTEX_ALPHA_GATE` rejection gate at the top100 BUILD
+  only (computable alpha <= 0 excluded, counted + named; artifact-level —
+  stores + the #1715 tuple digest byte-untouched; junk refuses at launch);
+  default builds byte-identical, the frozen top100/sweep/vocab goldens
+  UNMODIFIED; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1956 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
