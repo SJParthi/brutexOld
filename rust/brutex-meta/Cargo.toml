@@ -68,13 +68,23 @@ proptest = "1.6.0"
 # the shared framing core to pin the golden parity vector. Test-only.
 blake3 = "1.5"
 
+# Release profile: the fno-math shape MINUS the panic knob (the brutex-lake
+# precedent, refuter r2 E2-1):
+#   * NO `panic = "abort"` — a kernel panic must surface across the FFI as a
+#     catchable Python error (the catch_unwind boundary in src/python.rs) so
+#     the facade (brutex/meta/meta_rust.py) degrades to the Python oracle
+#     (ship-the-oracle); never a process abort mid-annotate. With abort the
+#     belt would be DEAD in the shipped wheel — the panic would SIGABRT
+#     before catch_unwind ever ran.
+#   * `overflow-checks = true` stays (finance code — an overflow must never
+#     be silent); an overflow panic now UNWINDS into the same belt instead
+#     of aborting the process.
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = "symbols"
-overflow-checks = true # Finance code — an overflow must never be silent.
+overflow-checks = true
 
 [profile.bench]
 inherits = "release"
