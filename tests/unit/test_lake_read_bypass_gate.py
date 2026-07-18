@@ -124,10 +124,6 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "lake_read dedup chokepoint governs lake bar reads only "
         "(DEC-RESULTS-CASCADE-VERDICT-JOIN-001)"
     ),
-    "brutex/data/window_ledger_store.py": (
-        "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
-        "bar/options lake — dedup identity does not apply"
-    ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"
     ),
