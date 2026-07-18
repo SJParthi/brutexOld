@@ -51,8 +51,15 @@ repos:
         name: ruff format
 
   # ── Python: mypy --strict (only changed files) ──────────────────
+  # rev MUST track the pyproject `mypy>=1.10,<3.0` toolchain (the same law
+  # as the ruff hook above): the stale v1.13.0 pin false-flagged two
+  # main-landed files (rust_stats.py / movers_snapshot.py) at the pre-push
+  # stage of a merge-forward — inference bugs fixed in later mypy — while
+  # the BINDING venv-faithful `mypy --strict brutex` (2.3.0) is clean on
+  # both (DEC-TEST-AWS-HERMETICITY-001 session, 2026-07-17; the exact
+  # stale-ruff-pin incident class documented above).
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+    rev: v2.3.0
     hooks:
       - id: mypy
         name: mypy --strict
@@ -66,6 +73,11 @@ repos:
         additional_dependencies:
           - pydantic>=2.7
           - types-requests
+          # polars ships inline types; without it the hook env degrades every
+          # polars-typed return to Any → phantom no-any-return on files like
+          # movers_snapshot.py (the same wheel-less-env class the
+          # --follow-imports=silent note above documents).
+          - polars>=1.0,<2.0
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust
