@@ -220,6 +220,31 @@ class TestStampEntry:
         assert stamp is None
 
 
+class TestOverflowContainmentEntry:
+    def test_u64_max_episodes_degrades_to_oracle_through_public_check_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The panic-containment fix at the PUBLIC surface: a warn edge at
+        # episodes == u64::MAX takes the crate's checked_add ValueError
+        # refusal ("episodes counter overflow") → the degrade set → the
+        # ORACLE serves the unbounded-int truth — pre-fix this exact call
+        # propagated the wheel's per-extension PanicException (a
+        # BaseException NEITHER name-based belt home could resolve) out of
+        # the monitor tick. The oracle is deliberately NOT bombed here —
+        # the degrade arm legitimately consults it.
+        with capture_logs() as logs:
+            verdict = loop_watchdog.check_once(10.0, 0.0, WatchdogState(episodes=2**64 - 1))
+        assert verdict.warn_edge is True
+        assert verdict.state.episodes == 2**64  # Python ints are unbounded
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == "loop_error"
+        assert "episodes counter overflow" in warns[0]["error_detail"]
+        assert observability_rust.rust_observability_disabled() is False
+        # NOT latched: the very next in-domain call is crate-served again.
+        monkeypatch.setattr(loop_watchdog, "_check_once_python", _oracle_bomb)
+        assert loop_watchdog.check_once(0.0, 0.0, WatchdogState()).lag_s == 0.0
+
+
 class TestBurnInLifecycleOnRealWheel:
     def test_burn_in_completes_then_steady(self, monkeypatch: pytest.MonkeyPatch) -> None:
         observability_rust.reset_observability_rust_for_tests(remaining=1)

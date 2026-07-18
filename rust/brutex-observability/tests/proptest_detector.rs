@@ -3,8 +3,8 @@
 //! (DEC-OBS-RUST-DETECTOR-CORE-001 §8.2).
 
 use brutex_observability::{
-    TIER_CRITICAL, TIER_OK, TIER_WARNED, loop_watchdog_check_once, predicate_holds, sla_decide,
-    watchdog_decide,
+    EpisodesOverflow, TIER_CRITICAL, TIER_OK, TIER_WARNED, loop_watchdog_check_once,
+    predicate_holds, sla_decide, watchdog_decide,
 };
 use proptest::prelude::*;
 
@@ -25,9 +25,10 @@ fn tier_token() -> impl Strategy<Value = String> {
 
 proptest! {
     /// Law A never panics and honours its state-law invariants over the
-    /// full raw-f64 plane × arbitrary tier tokens. `episodes` is bounded
-    /// below `u64::MAX` — the MAX+warn-edge overflow panic is the
-    /// separately-pinned disclosed edge (edge_matrix.rs).
+    /// full raw-f64 plane × arbitrary tier tokens × the FULL u64 episodes
+    /// domain — u64::MAX INCLUDED: the warn-edge increment at u64::MAX is
+    /// the `checked_add` `Err(EpisodesOverflow)` refusal (never a panic,
+    /// never a wrap); every other input returns `Ok`.
     #[test]
     fn loop_law_invariants(
         now in raw_f64(),
@@ -36,16 +37,27 @@ proptest! {
         ssb in raw_f64(),
         lla in raw_f64(),
         laa in raw_f64(),
-        episodes in 0..u64::MAX,
+        episodes in any::<u64>(),
         warn_after_s in raw_f64(),
         critical_after_s in raw_f64(),
         relog_every_s in raw_f64(),
         realert_every_s in raw_f64(),
     ) {
-        let v = loop_watchdog_check_once(
+        let result = loop_watchdog_check_once(
             now, last_beat, &tier, ssb, lla, laa, episodes,
             warn_after_s, critical_after_s, relog_every_s, realert_every_s,
         );
+        let v = match result {
+            Err(err) => {
+                // The refusal arm is EXACTLY the warn-edge increment at
+                // u64::MAX (the ok-token tier is a precondition of the edge).
+                prop_assert_eq!(err, EpisodesOverflow);
+                prop_assert_eq!(episodes, u64::MAX);
+                prop_assert_eq!(tier.as_str(), TIER_OK);
+                return Ok(());
+            }
+            Ok(v) => v,
+        };
         // lag is clamped: never NaN, never negative.
         prop_assert!(!v.lag_s.is_nan());
         prop_assert!(v.lag_s >= 0.0);
@@ -83,7 +95,10 @@ proptest! {
         prop_assert!(among(v.last_alerted_at, laa));
     }
 
-    /// Law A is a pure function — bit-identical on repeat calls.
+    /// Law A is a pure function — bit-identical on repeat calls. Episodes
+    /// bounded below u64::MAX so both calls take the `Ok` arm (the `Err`
+    /// arm is a value-free constant — its determinism is trivial and pinned
+    /// in edge_matrix.rs).
     #[test]
     fn loop_law_deterministic(
         now in raw_f64(),
@@ -96,10 +111,10 @@ proptest! {
     ) {
         let a = loop_watchdog_check_once(
             now, last_beat, &tier, ssb, lla, laa, episodes, 5.0, 30.0, 60.0, 300.0,
-        );
+        ).expect("in-domain law-A call");
         let b = loop_watchdog_check_once(
             now, last_beat, &tier, ssb, lla, laa, episodes, 5.0, 30.0, 60.0, 300.0,
-        );
+        ).expect("in-domain law-A call");
         // Bitwise field compare — `PartialEq` would read NaN != NaN, but
         // determinism here means BIT-identical outputs (NaN payloads too).
         prop_assert_eq!(a.tier, b.tier);

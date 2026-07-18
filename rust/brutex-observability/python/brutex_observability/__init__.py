@@ -20,6 +20,13 @@ materialize-in-Python):
   (first-false index, ``-1`` accept).
 * ``stamp_verdict`` — law D2, the validate verdict matrix
   (``"ok"`` / ``"hash_mismatch"``).
+* ``PanicException`` — THIS wheel's own pyo3 panic class. pyo3's
+  ``PanicException`` is a PER-EXTENSION-MODULE static (each abi3 wheel
+  lazily inits its OWN type object), so a name-resolved class from
+  ``pyo3_runtime`` (never a real importable module) or another extension
+  (e.g. polars) can NEVER be this wheel's class — exporting our own lets
+  the facade's panic belt resolve the EXACT class a panic from this wheel
+  would raise (the measured IMPL-2 escape, closed structurally).
 * ``SOURCE_DIGEST`` / ``__source_digest__`` — the crate-source BLAKE3 digest
   baked by ``build.rs`` (DEC-RUST-SOURCE-DIGEST-TWIN-001, MIGRATION.md #1258).
 
@@ -55,6 +62,7 @@ from collections.abc import Sequence
 #: in-repo ``EXPECTED_BUILD.json`` mirrors these names; a test pins the two
 #: equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
+    "PanicException",
     "SOURCE_DIGEST",
     "__version__",
     "loop_watchdog_check_once",
@@ -96,6 +104,7 @@ _assert_compiled_surface(_compiled)
 # wheel raises the actionable message, not a bare from-import failure.
 from ._brutex_observability import (  # noqa: E402
     SOURCE_DIGEST,
+    PanicException,
     __version__,
     loop_watchdog_check_once,
     sla_decide,
@@ -117,6 +126,7 @@ __source_digest__: str = SOURCE_DIGEST
 
 __all__ = [
     "SOURCE_DIGEST",
+    "PanicException",
     "__version__",
     "loop_watchdog_check_once",
     "sla_decide",

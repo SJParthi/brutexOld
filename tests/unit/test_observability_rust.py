@@ -7,10 +7,13 @@ member / the panic-belt latch / the MemoryError-KeyboardInterrupt-SystemExit
 escape pins / every refuse-poison input + output gate / the warn-once memo /
 the engaged-INFO / the reset seam (incl. ``remaining=0`` steady state) / the
 OFF-arm bomb-crate inertness + identity pins / the two mirror pins vs
-``lake_rust_render`` (tristate vocabulary + panic-belt fold — the documented
-no-import-edge law) / thread-fuzz on latch + memo — every path exercised
-WITHOUT the wheel (fake crate modules injected via ``sys.modules``), so the
-100% line+branch discovery gate holds on wheel-less CI.
+``lake_rust_render`` (tristate vocabulary equality + the panic-belt FOLD law:
+the sibling fold is a pinned SUBSET of ours, the crate's OWN per-extension
+``PanicException`` the one sanctioned extra — the panic-containment fix) /
+the crate_stale teeth for a pre-fix wheel missing the ``PanicException``
+export / thread-fuzz on latch + memo — every path exercised WITHOUT the
+wheel (fake crate modules injected via ``sys.modules``), so the 100%
+line+branch discovery gate holds on wheel-less CI.
 
 ``TestRealWheelDifferential`` (the hypothesis differentials per law at
 ``remaining=0`` + the D1 all-64 exhaustive sweep + the D2 truth table) runs
@@ -22,6 +25,7 @@ cleanly otherwise — the window_ledger_rust precedent); the dedicated
 from __future__ import annotations
 
 import ast
+import importlib
 import itertools
 import json
 import re
@@ -132,11 +136,18 @@ def _delegating_loop(
     return obs._loop_verdict_tuple(verdict)
 
 
+class _FakeCratePanic(BaseException):
+    """The fake crate's own per-extension panic class (a BaseException, like
+    pyo3's real per-extension ``PanicException`` static — NOT an Exception)."""
+
+
 def _fake_crate(**overrides: object) -> types.ModuleType:
     """A stand-in ``brutex_observability`` module exposing the lane API surface.
 
     Defaults DELEGATE to the Python oracles, so burn-in compares clean;
     overrides swap individual law fns for raisers / poison / wrong values.
+    ``PanicException`` defaults to :class:`_FakeCratePanic` (the real wheel's
+    per-extension-class shape — part of the ``_CRATE_API`` handshake).
     """
     module = types.ModuleType("brutex_observability")
     surface: dict[str, object] = {
@@ -145,6 +156,7 @@ def _fake_crate(**overrides: object) -> types.ModuleType:
         "sla_decide": _sla_decide_python,
         "stamp_shape_index": _stamp_shape_index_python,
         "stamp_verdict": _stamp_verdict_python,
+        "PanicException": _FakeCratePanic,
         "__version__": "0.1.0-fake",
     }
     surface.update(overrides)
@@ -363,8 +375,41 @@ class TestMirrorPins:
     def test_tristate_function_matches_lake_rust_render(self, raw: str) -> None:
         assert obs._env_flag_tristate(raw) == lake_rust_render.env_flag_tristate(raw)
 
-    def test_panic_belt_matches_the_lake_rust_render_twin(self) -> None:
-        assert obs._panic_belt_errors() == lake_rust_render._panic_belt_errors()
+    def test_panic_belt_folds_the_lake_rust_render_twin(self) -> None:
+        # The belt LAW after the panic-containment fix: ours = the sibling
+        # name-based fold ∪ {the crate's OWN PanicException when the wheel
+        # is loaded}. The shared fold stays pinned (a subset of ours — the
+        # sibling-shape parity the fallback homes exist for); the ONE
+        # sanctioned extra is the per-extension class the name-based homes
+        # structurally cannot resolve (see _panic_belt_errors' docstring).
+        ours = set(obs._panic_belt_errors())
+        sibling = set(lake_rust_render._panic_belt_errors())
+        assert sibling <= ours
+        extras = ours - sibling
+        try:
+            crate = importlib.import_module("brutex_observability")
+        except ImportError:
+            assert extras == set()  # wheel absent → exact sibling-fold equality
+        else:
+            assert extras == {crate.PanicException}
+
+    def test_crate_own_panic_class_joins_the_belt_when_wheel_present(self) -> None:
+        # The wheel-gated half of the fold pin: the crate class JOINS.
+        crate = pytest.importorskip("brutex_observability")
+        belt = obs._panic_belt_errors()
+        assert crate.PanicException in belt
+        assert issubclass(crate.PanicException, BaseException)
+        assert not issubclass(crate.PanicException, Exception)
+
+
+def _block_belt_homes(monkeypatch: pytest.MonkeyPatch, *homes: str) -> None:
+    """Make each named belt home unimportable (``None`` in ``sys.modules``)."""
+    for home in homes:
+        monkeypatch.setitem(sys.modules, home, None)
+
+
+#: Every home `_panic_belt_errors` resolves — the crate's own FIRST.
+_BELT_HOMES: Final[tuple[str, ...]] = ("brutex_observability", "pyo3_runtime", "polars.exceptions")
 
 
 class TestPanicBeltResolution:
@@ -374,8 +419,32 @@ class TestPanicBeltResolution:
     def test_no_homes_importable_yields_bare_exception(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setitem(sys.modules, "pyo3_runtime", None)
-        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        _block_belt_homes(monkeypatch, *_BELT_HOMES)
+        assert obs._panic_belt_errors() == (Exception,)
+
+    def test_crate_home_class_resolves_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The crate's OWN class is resolved BEFORE the name-based fallback
+        # homes (the per-extension-class law — the fix's load-bearing order).
+        class PyO3Panic(BaseException):
+            pass
+
+        home = types.ModuleType("pyo3_runtime")
+        home.PanicException = PyO3Panic  # type: ignore[attr-defined]
+        _install(monkeypatch, _fake_crate())
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", home)
+        _block_belt_homes(monkeypatch, "polars.exceptions")
+        assert obs._panic_belt_errors() == (Exception, _FakeCratePanic, PyO3Panic)
+
+    def test_crate_home_without_panic_attr_is_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Belt-side grace for a crate module lacking the export (the belt
+        # never crashes; the HANDSHAKE is what refuses such a wheel — see
+        # test_pre_fix_wheel_missing_panic_class_latches_stale).
+        crate = _fake_crate()
+        delattr(crate, "PanicException")
+        _install(monkeypatch, crate)
+        _block_belt_homes(monkeypatch, "pyo3_runtime", "polars.exceptions")
         assert obs._panic_belt_errors() == (Exception,)
 
     def test_valid_panic_class_is_appended(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,35 +454,33 @@ class TestPanicBeltResolution:
         fake = types.ModuleType("pyo3_runtime")
         fake.PanicException = FakePanic  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "pyo3_runtime", fake)
-        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        _block_belt_homes(monkeypatch, "brutex_observability", "polars.exceptions")
         assert obs._panic_belt_errors() == (Exception, FakePanic)
 
     def test_non_class_panic_attr_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = types.ModuleType("pyo3_runtime")
         fake.PanicException = "not-a-class"  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "pyo3_runtime", fake)
-        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        _block_belt_homes(monkeypatch, "brutex_observability", "polars.exceptions")
         assert obs._panic_belt_errors() == (Exception,)
 
     def test_non_baseexception_class_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = types.ModuleType("pyo3_runtime")
         fake.PanicException = type("NotAnError", (), {})  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "pyo3_runtime", fake)
-        monkeypatch.setitem(sys.modules, "polars.exceptions", None)
+        _block_belt_homes(monkeypatch, "brutex_observability", "polars.exceptions")
         assert obs._panic_belt_errors() == (Exception,)
 
     def test_duplicate_class_across_homes_is_deduped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class FakePanic(BaseException):
-            pass
-
-        first = types.ModuleType("pyo3_runtime")
-        first.PanicException = FakePanic  # type: ignore[attr-defined]
-        second = types.ModuleType("polars.exceptions")
-        second.PanicException = FakePanic  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "pyo3_runtime", first)
-        monkeypatch.setitem(sys.modules, "polars.exceptions", second)
+        # The crate home and a name-based home carrying the SAME class fold
+        # to one belt member (`panic not in belt`).
+        name_home = types.ModuleType("pyo3_runtime")
+        name_home.PanicException = _FakeCratePanic  # type: ignore[attr-defined]
+        _install(monkeypatch, _fake_crate())
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", name_home)
+        _block_belt_homes(monkeypatch, "polars.exceptions")
         belt = obs._panic_belt_errors()
-        assert belt.count(FakePanic) == 1
+        assert belt.count(_FakeCratePanic) == 1
 
 
 class TestResetSeam:
@@ -477,6 +544,24 @@ class TestCrateGuards:
         assert _call_shape() == -1
         assert obs.rust_observability_disabled() is True
         assert obs._DISABLED_REASON[0] == "crate_stale"
+
+    def test_pre_fix_wheel_missing_panic_class_latches_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The crate_stale TEETH of the panic-containment fix: a stale
+        # PRE-FIX wheel carries all five law fns but NOT the PanicException
+        # export — the all-or-nothing _CRATE_API handshake refuses it, so
+        # the belt can never run against a wheel whose own panic class it
+        # cannot resolve (an uncatchable per-extension panic would be back).
+        _flag_on(monkeypatch)
+        crate = _fake_crate()
+        delattr(crate, "PanicException")
+        _install(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert _call_sla() == (True, True)
+        assert obs._DISABLED_REASON[0] == "crate_stale"
+        events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
+        assert "PanicException" in events[0]["error_detail"]
 
     @pytest.mark.parametrize("case", _LAW_CASES, ids=_LAW_IDS)
     def test_crate_absent_every_law_serves_oracle(
@@ -654,6 +739,22 @@ def _call_loop_with_state(state: WatchdogState) -> WatchdogVerdict:
     )
 
 
+def _call_loop_warn_edge(state: WatchdogState, *, python_law: Any) -> WatchdogVerdict:
+    """A routed law-A call at a WARN edge (lag 10 ≥ warn_after 5)."""
+    return obs.routed_loop_check_once(
+        10.0,
+        0.0,
+        state,
+        warn_after_s=5.0,
+        critical_after_s=30.0,
+        relog_every_s=60.0,
+        realert_every_s=300.0,
+        python_law=python_law,
+        state_factory=WatchdogState,
+        verdict_factory=WatchdogVerdict,
+    )
+
+
 class TestRoutedLawMatrix:
     """The shared per-law arms: degrade / escape / panic / refused / mismatch / steady."""
 
@@ -718,19 +819,26 @@ class TestRoutedLawMatrix:
         events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
         assert events[0]["reason"] == "crate_panic"
 
-    def test_panic_exception_class_latches_crate_panic(
+    def test_crate_own_panic_class_latches_crate_panic(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pyo3-PanicException-SHAPED BaseException latches via the belt."""
+        """The belt resolves the CRATE's own PanicException — end to end.
 
-        class FakePanic(BaseException):
-            pass
-
+        A genuine per-extension-shaped panic (a bare BaseException raised
+        under the crate's own ``PanicException`` name) is CONTAINED with the
+        name-based homes blocked — only the crate home can resolve the
+        class. No ``_panic_belt_errors`` patching: this drives the real
+        belt-resolution logic (the fake-crate injection the fix mandates,
+        since the checked_add refusal removed the last natural panic path).
+        """
         _flag_on(monkeypatch)
-        _install(monkeypatch, _fake_crate(sla_decide=_raiser(FakePanic("rust panicked"))))
-        monkeypatch.setattr(obs, "_panic_belt_errors", lambda: (Exception, FakePanic))
-        assert _call_sla() == (True, True)
+        _install(monkeypatch, _fake_crate(sla_decide=_raiser(_FakeCratePanic("rust panicked"))))
+        _block_belt_homes(monkeypatch, "pyo3_runtime", "polars.exceptions")
+        with capture_logs() as logs:
+            assert _call_sla() == (True, True)
         assert obs._DISABLED_REASON[0] == "crate_panic"
+        events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
+        assert events[0]["reason"] == "crate_panic"
 
     @pytest.mark.parametrize("case", _LAW_CASES, ids=_LAW_IDS)
     def test_result_poison_refused_to_oracle(
@@ -934,6 +1042,7 @@ class TestContractPins:
             "sla_decide",
             "stamp_shape_index",
             "stamp_verdict",
+            "PanicException",  # the panic-belt anchor — the crate_stale teeth
         )
 
     def test_check_once_and_oracle_share_signature_and_defaults(self) -> None:
@@ -1028,11 +1137,15 @@ class TestRealWheelDifferential:
         stall_started_beat=_FLOATS,
         last_logged_at=_FLOATS,
         last_alerted_at=_FLOATS,
-        # u64::MAX itself is EXCLUDED: a warn edge at episodes == 2**64 - 1
-        # trips the crate's DISCLOSED `episodes + 1` overflow panic (its own
-        # #[should_panic] pin) — pinned separately below as the honest
-        # belt-escape residual, never folded into the differential domain.
-        episodes=st.integers(min_value=0, max_value=2**64 - 2),
+        # The FULL u64 domain, u64::MAX INCLUDED (+ the two boundary values
+        # oversampled): a warn edge at episodes == 2**64 - 1 now takes the
+        # crate's checked_add ValueError refusal → the degrade set → the
+        # ORACLE value (Python ints are unbounded), so the differential
+        # equality holds over the whole domain — the pre-fix belt-escaping
+        # overflow panic is dead at the root (the flipped containment pin
+        # below: test_u64_max_episodes_warn_edge_degrades_via_value_error).
+        episodes=st.integers(min_value=0, max_value=2**64 - 1)
+        | st.sampled_from([2**64 - 1, 2**64 - 2]),
         warn_after_s=_FLOATS,
         critical_after_s=_FLOATS,
         relog_every_s=_FLOATS,
@@ -1221,10 +1334,10 @@ class TestRealWheelDifferential:
         )
 
     def test_out_of_u64_episodes_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Production-unreachable (episodes only ever increments from 0) — the
-        # honest scope note for the u64-domain differential above: a negative
-        # int raises OverflowError at the pyo3 edge → the degrade set → the
-        # oracle serves it.
+        # Production-unreachable (episodes only ever increments from 0): a
+        # NEGATIVE int fails the u64 conversion with OverflowError at the
+        # pyo3 edge → the degrade set → the oracle serves it (the in-u64
+        # overflow at MAX is the separate checked_add ValueError pin above).
         self._require_wheel(monkeypatch)
         state = WatchdogState(episodes=-1)
         with capture_logs() as logs:
@@ -1233,42 +1346,77 @@ class TestRealWheelDifferential:
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
         assert warns[0]["reason"] == "loop_error"
 
-    def test_u64_max_episodes_warn_edge_panic_escapes_the_belt(
+    def test_u64_max_episodes_warn_edge_degrades_via_value_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The crate's DISCLOSED `episodes + 1` overflow edge (overflow-checks
-        # = true; mirrored by the crate's own #[should_panic] pin): at
-        # episodes == u64::MAX a warn edge panics, and the resulting
-        # PanicException is THIS wheel's own per-extension static — a bare
-        # BaseException subclass resolvable from NEITHER belt home
-        # (`pyo3_runtime` is not a real importable module; polars'
-        # PanicException is a DIFFERENT extension's static) — so it ESCAPES
-        # the facade's panic belt un-latched. This is the sibling facades'
-        # documented honest narrowing ("a distinct per-extension
-        # PanicException type propagates") measured true for this lane's own
-        # crate; production-unreachable (episodes counts real stall episodes
-        # up from 0). Pinned so any future belt/crate change that closes the
-        # gap is a conscious, visible flip — never a silent drift.
+        # THE FLIPPED CONTAINMENT PIN. Pre-fix this test pinned the ESCAPE:
+        # the `episodes + 1` overflow-checks panic crossed the FFI as THIS
+        # wheel's per-extension PanicException — a BaseException resolvable
+        # from NEITHER name-based belt home — and propagated un-latched.
+        # The fix kills the panic at the ROOT (the crate's checked_add maps
+        # the warn-edge increment at u64::MAX to a ValueError naming the
+        # field) so the facade's degrade set serves the ORACLE value —
+        # honest, since Python ints are unbounded and the oracle computes
+        # u64::MAX + 1 fine. One warn, no latch, no autorevert.
         self._require_wheel(monkeypatch)
         state = WatchdogState(episodes=2**64 - 1)
-        with pytest.raises(BaseException, match="attempt to add with overflow") as excinfo:
-            obs.routed_loop_check_once(
-                10.0,
-                0.0,
-                state,
-                warn_after_s=5.0,
-                critical_after_s=30.0,
-                relog_every_s=60.0,
-                realert_every_s=300.0,
-                python_law=_oracle_bomb,  # the escape never consults the oracle
-                state_factory=WatchdogState,
-                verdict_factory=WatchdogVerdict,
-            )
-        panic_type = type(excinfo.value)
-        assert panic_type.__name__ == "PanicException"
-        assert not isinstance(excinfo.value, Exception)
-        assert not any(issubclass(panic_type, member) for member in obs._panic_belt_errors())
-        assert obs.rust_observability_disabled() is False  # not even latched
+        with capture_logs() as logs:
+            verdict = _call_loop_warn_edge(state, python_law=_check_once_python)
+        oracle = _check_once_python(
+            10.0,
+            0.0,
+            state,
+            warn_after_s=5.0,
+            critical_after_s=30.0,
+            relog_every_s=60.0,
+            realert_every_s=300.0,
+        )
+        assert verdict == oracle
+        assert verdict.warn_edge is True
+        assert verdict.state.episodes == 2**64  # the unbounded-int truth
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == "loop_error"
+        assert "episodes counter overflow" in warns[0]["error_detail"]
+        assert obs.rust_observability_disabled() is False  # degrade, never a latch
+        assert [e for e in logs if e["event"] == "observability_rust.autoreverted"] == []
+
+    def test_u64_max_minus_one_warn_edge_increments_through_the_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The Ok boundary sibling: checked_add at u64::MAX − 1 still
+        # increments and the CRATE serves it (oracle bombed, steady state).
+        self._require_wheel(monkeypatch)
+        state = WatchdogState(episodes=2**64 - 2)
+        verdict = _call_loop_warn_edge(state, python_law=_oracle_bomb)
+        assert verdict.warn_edge is True
+        assert verdict.state.episodes == 2**64 - 1
+
+    def test_wheel_panic_instance_is_contained_and_latches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No NATURAL panic path survives the checked_add fix, so a genuine
+        # instance of the WHEEL's own per-extension PanicException is
+        # injected through a fake crate law — proving end-to-end
+        # containment of exactly the class that pre-fix ESCAPED: belt catch
+        # → crate_panic latch → oracle served, never a propagating
+        # BaseException out of a monitor tick.
+        wheel = pytest.importorskip("brutex_observability")
+        _flag_on(monkeypatch)
+        obs.reset_observability_rust_for_tests()
+        _install(
+            monkeypatch,
+            _fake_crate(
+                sla_decide=_raiser(wheel.PanicException("injected rust panic")),
+                PanicException=wheel.PanicException,
+            ),
+        )
+        assert not issubclass(wheel.PanicException, Exception)  # the escape shape
+        with capture_logs() as logs:
+            assert _call_sla() == (True, True)  # the oracle's value, served
+        assert obs._DISABLED_REASON[0] == "crate_panic"
+        events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
+        assert events[0]["reason"] == "crate_panic"
+        assert "injected rust panic" in events[0]["error_detail"]
 
     def test_lone_surrogate_string_degrades_to_oracle(
         self, monkeypatch: pytest.MonkeyPatch

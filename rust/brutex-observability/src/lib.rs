@@ -27,8 +27,8 @@ pub mod detector;
 pub mod stamp;
 
 pub use detector::{
-    LoopVerdict, SLA_EPS, TIER_CRITICAL, TIER_OK, TIER_WARNED, loop_watchdog_check_once,
-    predicate_holds, sla_decide, watchdog_decide,
+    EPISODES_OVERFLOW_MSG, EpisodesOverflow, LoopVerdict, SLA_EPS, TIER_CRITICAL, TIER_OK,
+    TIER_WARNED, loop_watchdog_check_once, predicate_holds, sla_decide, watchdog_decide,
 };
 pub use stamp::{VERDICT_HASH_MISMATCH, VERDICT_OK, stamp_shape_index, stamp_verdict};
 

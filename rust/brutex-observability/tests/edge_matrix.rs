@@ -11,9 +11,9 @@
 //! 64 boolean combinations; D2 is the option-arm truth table.
 
 use brutex_observability::{
-    LoopVerdict, TIER_CRITICAL, TIER_OK, TIER_WARNED, VERDICT_HASH_MISMATCH, VERDICT_OK,
-    loop_watchdog_check_once, predicate_holds, sla_decide, stamp_shape_index, stamp_verdict,
-    watchdog_decide,
+    EPISODES_OVERFLOW_MSG, EpisodesOverflow, LoopVerdict, TIER_CRITICAL, TIER_OK, TIER_WARNED,
+    VERDICT_HASH_MISMATCH, VERDICT_OK, loop_watchdog_check_once, predicate_holds, sla_decide,
+    stamp_shape_index, stamp_verdict, watchdog_decide,
 };
 
 /// The Python module defaults (loop_watchdog.py constants).
@@ -22,7 +22,9 @@ const CRITICAL: f64 = 30.0;
 const RELOG: f64 = 60.0;
 const REALERT: f64 = 300.0;
 
-/// Law-A helper at the module defaults over a decomposed state.
+/// Law-A helper at the module defaults over a decomposed state. In-domain
+/// episodes (< u64::MAX on a warn edge) always return `Ok` — the sole `Err`
+/// arm is pinned by `a_episodes_at_u64_max_warn_edge_errors_never_panics`.
 #[allow(clippy::too_many_arguments)]
 fn check(
     now: f64,
@@ -36,6 +38,7 @@ fn check(
     loop_watchdog_check_once(
         now, last_beat, tier, ssb, lla, laa, episodes, WARN, CRITICAL, RELOG, REALERT,
     )
+    .expect("in-domain law-A call")
 }
 
 /// Law-A helper on a FRESH state (the Python `WatchdogState()` default).
@@ -118,7 +121,8 @@ fn a_relog_cap_while_stalled() {
     let far = 1000.0;
     let s = loop_watchdog_check_once(
         6.0, 0.0, TIER_OK, 0.0, 0.0, 0.0, 0, WARN, far, RELOG, REALERT,
-    );
+    )
+    .expect("in-domain law-A call");
     let quiet = loop_watchdog_check_once(
         6.0 + RELOG - 1.0,
         0.0,
@@ -131,7 +135,8 @@ fn a_relog_cap_while_stalled() {
         far,
         RELOG,
         REALERT,
-    );
+    )
+    .expect("in-domain law-A call");
     assert!(!quiet.relog); // inside the 60 s window — silent
     let loud = loop_watchdog_check_once(
         6.0 + RELOG,
@@ -145,7 +150,8 @@ fn a_relog_cap_while_stalled() {
         far,
         RELOG,
         REALERT,
-    );
+    )
+    .expect("in-domain law-A call");
     assert!(loud.relog); // at the window — re-log with the grown lag
     assert_eq!(loud.last_logged_at, 6.0 + RELOG);
 }
@@ -269,7 +275,8 @@ fn a_nan_thresholds_read_ok_tier() {
         f64::NAN,
         RELOG,
         REALERT,
-    );
+    )
+    .expect("in-domain law-A call");
     assert_eq!(v.tier, TIER_OK);
     assert!(no_flags(&v));
 }
@@ -298,12 +305,49 @@ fn a_infinite_lag_is_critical() {
 }
 
 #[test]
-#[should_panic(expected = "attempt to add with overflow")]
-fn a_episodes_at_u64_max_panics_never_wraps() {
-    // The disclosed overflow-checks edge: a warn edge at episodes ==
-    // u64::MAX panics (→ PanicException across the FFI → the facade's panic
-    // belt serves the oracle) rather than silently wrapping.
-    let _ = check(5.0, 0.0, TIER_OK, 0.0, 0.0, 0.0, u64::MAX);
+fn a_episodes_at_u64_max_warn_edge_errors_never_panics() {
+    // The former disclosed overflow-checks PANIC is dead at the root: the
+    // warn-edge `episodes + 1` is `checked_add` — at u64::MAX it returns the
+    // typed refusal (→ ValueError across the FFI → the facade's degrade set
+    // serves the oracle's unbounded-int value) instead of a panic whose
+    // per-extension PanicException no name-based belt home could resolve.
+    let result = loop_watchdog_check_once(
+        5.0,
+        0.0,
+        TIER_OK,
+        0.0,
+        0.0,
+        0.0,
+        u64::MAX,
+        WARN,
+        CRITICAL,
+        RELOG,
+        REALERT,
+    );
+    assert_eq!(result, Err(EpisodesOverflow));
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("episodes counter overflow"), "{message}");
+    assert_eq!(message, EPISODES_OVERFLOW_MSG);
+}
+
+#[test]
+fn a_episodes_at_u64_max_without_warn_edge_is_ok_carried() {
+    // Only the warn-edge INCREMENT can overflow — an already-stalled tier at
+    // u64::MAX carries the counter untouched (Ok), and recovery too.
+    let v = check(6.0, 0.0, TIER_WARNED, 0.0, 6.0, 0.0, u64::MAX);
+    assert_eq!(v.episodes, u64::MAX);
+    assert!(!v.warn_edge);
+    let r = check(1.0, 0.9, TIER_WARNED, 0.0, 6.0, 0.0, u64::MAX);
+    assert!(r.recovered);
+    assert_eq!(r.episodes, u64::MAX);
+}
+
+#[test]
+fn a_episodes_at_u64_max_minus_one_warn_edge_increments_to_max() {
+    // The Ok boundary sibling: checked_add at u64::MAX − 1 still increments.
+    let v = check(5.0, 0.0, TIER_OK, 0.0, 0.0, 0.0, u64::MAX - 1);
+    assert!(v.warn_edge);
+    assert_eq!(v.episodes, u64::MAX);
 }
 
 // ── Law B — the watchdog decision rows ───────────────────────────────────

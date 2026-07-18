@@ -8,9 +8,19 @@
 //! Argument-conversion faults (a non-float where f64 is expected, a
 //! negative/huge int where u64 is expected, a lone-surrogate string where
 //! `&str` is expected) raise `TypeError`/`OverflowError`/`ValueError` at
-//! this edge — all members of the facade's degrade set, which serves the
-//! Python oracle instead.
+//! this edge, and the law-A `episodes + 1` overflow refusal
+//! ([`crate::EpisodesOverflow`], the `checked_add` law) maps to `ValueError`
+//! here — all members of the facade's degrade set, which serves the Python
+//! oracle instead.
+//!
+//! The module ALSO exports **`PanicException`** — pyo3's panic class is a
+//! PER-EXTENSION-MODULE static (each abi3 wheel lazily inits its OWN type
+//! object), so a name-resolved class from `pyo3_runtime` (never a real
+//! importable module) or another extension (e.g. polars) can NEVER be this
+//! wheel's class. Exporting our own lets the facade's panic belt resolve
+//! the EXACT class a panic from THIS wheel would raise.
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -41,7 +51,9 @@ type LoopVerdictTuple = (
 /// last_alerted_at, episodes, lag_s, warn_edge, critical_edge, relog,
 /// realert, recovered, stall_total_s)` — the scalar decomposition of the
 /// Python `WatchdogVerdict` (the facade recomposes via the caller-passed
-/// dataclass factories).
+/// dataclass factories). A warn edge at `episodes == u64::MAX` raises
+/// `ValueError` (the `checked_add` refusal, message naming the field) — the
+/// facade's degrade set serves the oracle.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (now, last_beat, tier, stall_started_beat, last_logged_at, last_alerted_at, episodes, warn_after_s, critical_after_s, relog_every_s, realert_every_s))]
@@ -57,7 +69,7 @@ fn loop_watchdog_check_once(
     critical_after_s: f64,
     relog_every_s: f64,
     realert_every_s: f64,
-) -> LoopVerdictTuple {
+) -> PyResult<LoopVerdictTuple> {
     let v = detector::loop_watchdog_check_once(
         now,
         last_beat,
@@ -70,8 +82,9 @@ fn loop_watchdog_check_once(
         critical_after_s,
         relog_every_s,
         realert_every_s,
-    );
-    (
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok((
         v.tier,
         v.stall_started_beat,
         v.last_logged_at,
@@ -84,7 +97,7 @@ fn loop_watchdog_check_once(
         v.realert,
         v.recovered,
         v.stall_total_s,
-    )
+    ))
 }
 
 /// Law B — the per-worker HEALTHY↔HUNG decision: `(elapsed, hung, edge)`.
@@ -156,6 +169,16 @@ fn stamp_verdict(
 #[pymodule]
 fn _brutex_observability(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // THIS wheel's own panic class (a per-extension-module static — module
+    // docs): the facade's panic belt resolves the EXACT class from here,
+    // because neither name-based home (`pyo3_runtime`, another extension's
+    // `PanicException`) can ever be this wheel's class. Part of the shim's
+    // `_EXPECTED_COMPILED_SYMBOLS` + the facade's `_CRATE_API` all-or-nothing
+    // handshake — a stale pre-fix wheel missing it latches `crate_stale`.
+    m.add(
+        "PanicException",
+        m.py().get_type::<pyo3::panic::PanicException>(),
+    )?;
     // Dunder-named build stamp (sibling convention): invisible to
     // non-underscore symbol-surface checks.
     m.add("__source_digest__", crate::SOURCE_DIGEST)?;

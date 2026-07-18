@@ -12,6 +12,9 @@ __version__: str
 __build_crate_version__: str
 __source_digest__: str
 
+class PanicException(BaseException):
+    """THIS wheel's own pyo3 panic class (a per-extension-module static)."""
+
 def loop_watchdog_check_once(
     now: float,
     last_beat: float,

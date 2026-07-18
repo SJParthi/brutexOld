@@ -32,7 +32,10 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
 * **Import guard / SYMBOL handshake** — an absent wheel latches
   ``crate_unavailable``; a wheel that imports but lacks ANY
   :data:`_CRATE_API` callable is a pre-lane (or foreign/broken) install and
-  latches ``crate_stale``. Both serve the oracle with one loud WARN.
+  latches ``crate_stale``. Both serve the oracle with one loud WARN. The
+  handshake includes the crate's own ``PanicException`` class (the panic
+  belt's anchor — a pre-fix wheel without it reads ``crate_stale``, so the
+  belt never runs against a wheel whose panic class it cannot resolve).
   **NO version guard — the documented deviation**: every routed law is
   polars-free pure arithmetic/string compare, so there is no third-party
   lockstep to attest; the symbol handshake + burn-in are the drift teeth
@@ -44,13 +47,18 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
   to the oracle (never served — a poisoned crate can only degrade).
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
   FFI error surface; a lone-surrogate string's ``UnicodeEncodeError`` ⊂
-  ``ValueError`` lands here), ``TypeError``/``OverflowError`` (PyO3 argument
-  conversion — a negative/huge ``episodes`` int lands here),
-  ``AttributeError`` (broken-crate-internals belt). The ESCAPE clause
+  ``ValueError`` lands here, and so does the crate's checked ``episodes +
+  1`` overflow refusal — "episodes counter overflow" at a warn edge on
+  ``episodes == 2**64 - 1``, where the oracle's unbounded Python int is the
+  honest value), ``TypeError``/``OverflowError`` (PyO3 argument conversion —
+  a negative/out-of-u64 ``episodes`` int lands here), ``AttributeError``
+  (broken-crate-internals belt). The ESCAPE clause
   (``KeyboardInterrupt``/``SystemExit``/``MemoryError``) re-raises RAW and
   sits ABOVE the panic belt so the belt's ``Exception`` member can never
-  swallow an OOM. The panic belt (:func:`_panic_belt_errors`, a LOCAL twin —
-  see below) latches ``crate_panic`` + serves the oracle.
+  swallow an OOM. The panic belt (:func:`_panic_belt_errors`) resolves the
+  crate's OWN per-extension ``PanicException`` class FIRST (plus the
+  name-based sibling homes as fallback members), latches ``crate_panic``
+  and serves the oracle.
 * **Burn-in + autorevert** — the first :data:`BURN_IN_SAMPLES` engaged calls
   PER LAW bit-compare the Rust value against the live oracle
   (``struct.pack('<d', …)`` float legs — signed zeros + NaN payload bits
@@ -73,14 +81,17 @@ This module must NOT import ``brutex.data.lake_rust_render``:
 both directions, and law B/C's host modules (``watchdog.py``/``sla.py``) are
 deliberately brutex-import-free leaves. So the flag vocabulary
 (:data:`_TRUTHY`/:data:`_FALSY`) and the panic belt
-(:func:`_panic_belt_errors`) are LOCAL twins, equality-pinned by test
-against ``lake_rust_render``'s sets and resolved panic-belt fold (the
-feed_rust mirror-pin precedent). The panic-belt twin keeps the SAME guarded
-two-home resolution (``pyo3_runtime`` + ``polars.exceptions``) so the
-equality pin is literal — the polars home is vacuous for this crate but
-harmless. Module imports are stdlib + structlog ONLY (loop_watchdog's leaf
-weight); the crate import is LAZY, so this module imports clean with no
-wheel present (the repo-wide doctest walker depends on that).
+(:func:`_panic_belt_errors`) are LOCAL twins, mirror-pinned by test against
+``lake_rust_render`` (the feed_rust precedent). The panic belt goes ONE
+step further than the sibling fold: it resolves the crate's OWN exported
+``PanicException`` class first (pyo3 panic classes are per-extension
+statics — a name-resolved class can never be OUR wheel's; see the
+:func:`_panic_belt_errors` docstring), keeping the sibling name-based homes
+(``pyo3_runtime`` + ``polars.exceptions``) as fallback members so the
+sibling fold stays a pinned SUBSET of ours. Module imports are stdlib +
+structlog ONLY (loop_watchdog's leaf weight); the crate import is LAZY, so
+this module imports clean with no wheel present (the repo-wide doctest
+walker depends on that).
 
 ## Log-event vocabulary (literal, greppable)
 
@@ -162,12 +173,19 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
 
 #: The crate callables the lane needs — the ALL-OR-NOTHING symbol handshake
 #: surface. A wheel missing any is a pre-lane install (``crate_stale``).
+#: ``PanicException`` (a class — callable) is DELIBERATELY part of the
+#: handshake: the panic belt resolves the crate's OWN per-extension panic
+#: class (:func:`_panic_belt_errors`), so a stale pre-fix wheel that lacks
+#: the export must latch ``crate_stale`` — the belt never runs against a
+#: wheel whose own panic class it cannot resolve (the crate_stale teeth of
+#: the panic-containment fix).
 _CRATE_API: Final[tuple[str, ...]] = (
     "loop_watchdog_check_once",
     "watchdog_decide",
     "sla_decide",
     "stamp_shape_index",
     "stamp_verdict",
+    "PanicException",
 )
 
 #: Once-per-process-per-reason log memo (the seams run per monitor tick /
@@ -397,22 +415,32 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
 def _panic_belt_errors() -> tuple[type[BaseException], ...]:
     """The narrow FFI panic-belt catch set — ``(Exception, *panic classes)``.
 
-    A LOCAL twin of ``lake_rust_render._panic_belt_errors`` (equality-pinned
-    by test; module docstring's import-edge decision), keeping the SAME
-    guarded two-home resolution: ``pyo3_runtime.PanicException`` is the one
-    ``BaseException`` subclass a pyo3 boundary can leak (a Rust panic
-    escaping ``catch_unwind`` — e.g. the disclosed ``episodes + 1`` overflow
-    edge), but the repo convention (CodeQL ``py/catch-base-exception``)
-    forbids a non-re-raising literal ``except BaseException``, so the class
-    is resolved GUARDEDLY by name from its two plausible homes and folded
-    beside ``Exception``. The ``polars.exceptions`` home is vacuous for this
-    polars-free crate but kept so the equality pin is literal. Resolved
-    lazily per raise; ``Exception`` membership keeps every out-of-degrade-set
-    ``Exception`` latching, while ``KeyboardInterrupt``/``SystemExit``/
-    ``MemoryError`` re-raise in the clause ABOVE the belt.
+    THE PER-EXTENSION-CLASS TRUTH: pyo3's ``PanicException`` is a
+    per-extension-module STATIC — each abi3 wheel lazily inits its OWN type
+    object (its module name reads ``pyo3_runtime`` cosmetically, but no such
+    module is ever importable), so a class resolved BY NAME from
+    ``pyo3_runtime`` or another extension (``polars.exceptions``) can NEVER
+    be OUR wheel's class. The belt therefore resolves the crate's OWN
+    exported ``PanicException`` FIRST (the ``brutex_observability`` home —
+    the same lazy-import chokepoint :func:`_resolve_crate` guards; the class
+    is part of the :data:`_CRATE_API` handshake, so an engaged crate always
+    carries it) and keeps the two name-based homes as FALLBACK members —
+    they cost nothing and keep the sibling-shape parity (the
+    ``lake_rust_render`` fold stays a subset of ours, pinned by test; the
+    sibling facades' name-based-only resolution is THEIR documented
+    narrowing, deliberately not edited from this lane). The repo convention
+    (CodeQL ``py/catch-base-exception``) forbids a non-re-raising literal
+    ``except BaseException``, so every class is resolved GUARDEDLY and
+    folded beside ``Exception``. Resolved lazily per raise (an absent wheel
+    just skips the crate home); ``Exception`` membership keeps every
+    out-of-degrade-set ``Exception`` latching, while ``KeyboardInterrupt``/
+    ``SystemExit``/``MemoryError`` re-raise in the clause ABOVE the belt.
+    (The formerly-disclosed ``episodes + 1`` overflow edge no longer
+    panics at all — the crate's ``checked_add`` maps it to a ``ValueError``
+    the degrade set serves; the belt guards any OTHER future panic.)
     """
     belt: list[type[BaseException]] = [Exception]
-    for home in ("pyo3_runtime", "polars.exceptions"):
+    for home in ("brutex_observability", "pyo3_runtime", "polars.exceptions"):
         try:
             module = importlib.import_module(home)
         except ImportError:

@@ -28,6 +28,30 @@
 //! explicit form documents the Python argument-order law and is
 //! signed-zero/NaN exact by construction).
 
+/// The law-A `episodes + 1` overflow refusal message (names the field — the
+/// facade's degrade-set `ValueError` carries it verbatim to the WARN log).
+pub const EPISODES_OVERFLOW_MSG: &str =
+    "episodes counter overflow: episodes + 1 exceeds u64::MAX on the warn edge";
+
+/// The ONE law arithmetic fault: the warn-edge `episodes + 1` increment
+/// overflowing u64 (`checked_add` — module docs). Crate-wide integer-op
+/// audit (this fix's scope): this is the ONLY overflow-capable integer op in
+/// the laws — every other detector op is IEEE f64 (never panics) and
+/// stamp.rs holds only string compares plus a bounded `usize → i64` cast
+/// (index ≤ 5, lossless). Maps to a `PyValueError` at the FFI edge, a
+/// facade degrade-set member: the oracle ships the honest value (Python
+/// ints are unbounded — `u64::MAX + 1` is a fine Python episodes count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpisodesOverflow;
+
+impl core::fmt::Display for EpisodesOverflow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(EPISODES_OVERFLOW_MSG)
+    }
+}
+
+impl core::error::Error for EpisodesOverflow {}
+
 /// The three loop-watchdog tier tokens (mirrors `loop_watchdog.TIER_*`).
 pub const TIER_OK: &str = "ok";
 /// The WARNED tier token.
@@ -95,9 +119,14 @@ fn clamp_non_negative(d: f64) -> f64 {
 /// * Recovery (target back at OK from a stalled tier) resets to a fresh
 ///   state (three stamps 0.0, episodes CARRIED) and reports
 ///   `stall_total_s = max(0.0, last_beat - stall_started_beat)`.
-/// * `episodes + 1` on the warn edge — under `overflow-checks = true` a
-///   `u64::MAX` input PANICS rather than wrapping; the panic crosses the FFI
-///   as `PanicException` and the facade serves the oracle (disclosed).
+/// * `episodes + 1` on the warn edge is `checked_add` — a `u64::MAX` input
+///   returns `Err(EpisodesOverflow)` instead of panicking/wrapping (the
+///   pre-fix overflow-checks panic crossed the FFI as a PER-EXTENSION
+///   `PanicException` no name-based belt home could resolve — the escape
+///   this refusal kills at the root); the FFI edge maps it to `ValueError`
+///   and the facade's degrade set serves the ORACLE value, which is honest —
+///   Python ints are unbounded, so the oracle computes `u64::MAX + 1` fine.
+///   Every in-u64-domain call returns `Ok`.
 #[allow(clippy::too_many_arguments)]
 pub fn loop_watchdog_check_once(
     now: f64,
@@ -111,7 +140,7 @@ pub fn loop_watchdog_check_once(
     critical_after_s: f64,
     relog_every_s: f64,
     realert_every_s: f64,
-) -> LoopVerdict {
+) -> Result<LoopVerdict, EpisodesOverflow> {
     let lag = clamp_non_negative(now - last_beat);
     let target = if lag >= critical_after_s {
         TIER_CRITICAL
@@ -125,7 +154,7 @@ pub fn loop_watchdog_check_once(
         if tier == TIER_OK {
             // OK→OK: the Python law returns the caller's state UNCHANGED
             // (object passthrough there; value passthrough here).
-            return LoopVerdict {
+            return Ok(LoopVerdict {
                 tier: TIER_OK,
                 stall_started_beat,
                 last_logged_at,
@@ -138,10 +167,10 @@ pub fn loop_watchdog_check_once(
                 realert: false,
                 recovered: false,
                 stall_total_s: 0.0,
-            };
+            });
         }
         let total = clamp_non_negative(last_beat - stall_started_beat);
-        return LoopVerdict {
+        return Ok(LoopVerdict {
             tier: TIER_OK,
             stall_started_beat: 0.0,
             last_logged_at: 0.0,
@@ -154,7 +183,7 @@ pub fn loop_watchdog_check_once(
             realert: false,
             recovered: true,
             stall_total_s: total,
-        };
+        });
     }
 
     let warn_edge = tier == TIER_OK;
@@ -162,7 +191,14 @@ pub fn loop_watchdog_check_once(
     let relog = !warn_edge && !critical_edge && now - last_logged_at >= relog_every_s;
     let realert =
         target == TIER_CRITICAL && !critical_edge && now - last_alerted_at >= realert_every_s;
-    LoopVerdict {
+    let episodes_next = if warn_edge {
+        // The ONE overflow-capable integer op in the laws — checked, never
+        // a panic across the FFI, never a silent wrap (module docs).
+        episodes.checked_add(1).ok_or(EpisodesOverflow)?
+    } else {
+        episodes
+    };
+    Ok(LoopVerdict {
         tier: target,
         stall_started_beat: if warn_edge {
             last_beat
@@ -179,7 +215,7 @@ pub fn loop_watchdog_check_once(
         } else {
             last_alerted_at
         },
-        episodes: if warn_edge { episodes + 1 } else { episodes },
+        episodes: episodes_next,
         lag_s: lag,
         warn_edge,
         critical_edge,
@@ -187,7 +223,7 @@ pub fn loop_watchdog_check_once(
         realert,
         recovered: false,
         stall_total_s: 0.0,
-    }
+    })
 }
 
 /// The two-state hysteresis edge law B and C genuinely share (module docs).

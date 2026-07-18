@@ -73,12 +73,17 @@ blake3 = "1.5"
 
 # Release profile: NO `panic = "abort"` — DELIBERATE (the brutex-lake
 # reasoning, adapted for this crate): a law panic must surface across the FFI
-# as `pyo3_runtime.PanicException` so the facade's panic belt latches
-# `crate_panic` and degrades to the Python oracle — never a process abort
-# inside a monitor thread or a validate call. `overflow-checks = true` is
-# KEPT (the brutex-feed discipline): the one integer op in the laws
-# (`episodes + 1`) must never wrap silently — at u64::MAX it panics, crosses
-# as PanicException, and the facade serves the oracle (the safe direction;
-# disclosed in the facade docstring).
+# as a `PanicException` so the facade's panic belt latches `crate_panic` and
+# degrades to the Python oracle — never a process abort inside a monitor
+# thread or a validate call. pyo3's PanicException is a PER-EXTENSION static,
+# so the compiled module exports its OWN class (`PanicException` in
+# src/python.rs) and the facade's belt resolves that EXACT class — the
+# name-based homes alone could never catch this wheel's panics (the measured
+# IMPL-2 finding, closed). `overflow-checks = true` is KEPT (the brutex-feed
+# discipline) as the belt for any FUTURE unchecked op — the one
+# overflow-capable integer op in the laws (`episodes + 1`) is now
+# `checked_add`, mapped to a ValueError naming the field ("episodes counter
+# overflow") so the facade's degrade set serves the oracle (Python ints are
+# unbounded — the honest value).
 [profile.release]
 overflow-checks = true
