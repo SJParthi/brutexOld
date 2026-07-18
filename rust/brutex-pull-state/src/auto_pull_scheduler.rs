@@ -87,8 +87,8 @@ pub const STATE_BAD_LAST_ATTEMPT: u8 = 5;
 /// `last_success_date` violated the string-or-null law.
 pub const STATE_BAD_LAST_SUCCESS: u8 = 6;
 /// An input code was outside its vocabulary — a classifier/wheel mismatch,
-/// NEVER a verdict: the facade's refuse-poison gate maps it to
-/// `kernel_invalid` and the Python oracle decides.
+/// NEVER a verdict: the facade's refuse-poison gate maps it to the typed
+/// `kernel_invalid` raise (fail-closed, never a served verdict).
 pub const STATE_BAD_INPUT: u8 = 255;
 
 /// `tick_once`'s decision ladder — clockless, pure, TOTAL.

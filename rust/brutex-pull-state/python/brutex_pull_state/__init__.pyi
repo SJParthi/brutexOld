@@ -3,7 +3,8 @@
 # INTEGERS ONLY across the FFI: `pull_allowed_us` takes microsecond-of-day
 # (i64 in [0, 86_400_000_000)) + the caller-resolved trading-day flag and
 # returns the market-hours guard verdict. An out-of-range instant raises
-# ValueError (the facade degrades to the Python oracle); no float, string,
+# ValueError (the facade re-raises it as the typed PullStateKernelError —
+# fail-closed, the Python oracles are deleted); no float, string,
 # or timestamp object ever crosses (the structural bit-identity guarantee).
 
 SOURCE_DIGEST: str
@@ -63,7 +64,7 @@ def alive_log_due(since_last_s: float, interval_s: float) -> bool: ...
 # caller-resolved calendar flags + microsecond-of-day instants in; reason /
 # verdict codes out (Python composes every human string and keeps the
 # fail-loud env raise). Out-of-range inputs raise ValueError (the facade
-# degrades to the oracle).
+# re-raises it as the typed PullStateKernelError — fail-closed).
 
 def auto_gate_decision(
     trading_day: bool,

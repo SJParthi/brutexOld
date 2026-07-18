@@ -2597,13 +2597,14 @@ jobs:
           else
             echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
           fi
-          # DEC-RUST-PULL-STATE-001 (Waves 1A/1B/1C): the pull-state Rust
-          # facade brutex/pull_state_rust.py — its 100% line+branch is a
+          # DEC-RUST-PULL-STATE-001: the pull-state Rust facade
+          # brutex/pull_state_rust.py — its 100% line+branch is a
           # MULTI-FILE-suite property by construction (each wave's accessor
           # section is exercised by that wave's OWN seam suite, stem-named for
           # the CONSUMER module it gates), so this STATIC gate runs exactly
-          # the curated 4-file suite; the discovery gate excludes the facade
-          # for the same structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
+          # the curated static suite enumerated below (every per-wave seam
+          # file); the discovery gate excludes the facade for the same
+          # structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
           if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
             pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py tests/unit/test_pull_census_rust_seam.py tests/unit/test_dashboard_auto_pull_rust_seam.py tests/unit/test_rate_bridge_rust_seam.py tests/unit/test_rate_bridge_cache_rust_seam.py
           else

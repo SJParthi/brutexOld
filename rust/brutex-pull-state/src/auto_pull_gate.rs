@@ -18,9 +18,10 @@
 //! * [`settle_token_verdict`] — the strict `HH:MM` settle-token parse
 //!   verdict + the `BLOCK_END` floor check. Python OWNS the fail-loud env
 //!   posture: the three refusal `ValueError` texts are composed (and
-//!   raised) by the retained Python oracle — this kernel only ever serves
-//!   the OK arm's value; a non-OK verdict routes the seam back to the
-//!   oracle, which raises the byte-identical message.
+//!   raised) by the Python consumer (`brutex/calendars/auto_pull_gate.py`)
+//!   FROM this kernel's verdict code — the kernel only ever serves the OK
+//!   arm's value; a non-OK verdict makes the consumer raise the deleted
+//!   oracle's byte-identical refusal message, preserved Python-side.
 //!
 //! Times cross as MICROSECOND-OF-DAY (`i64` in `[0, DAY_US)`) — the crate's
 //! established discipline: order-isomorphic to Python `datetime.time`
@@ -90,7 +91,8 @@ fn check_us_of_day(name: &str, us: i64) -> Result<(), String> {
 ///
 /// An out-of-range `now_us_of_day` / `settle_us_of_day` is a caller defect
 /// and is REFUSED with a message (validated FIRST — total over the input
-/// domain; the Python facade degrades such a call to the oracle).
+/// domain; the Python facade re-raises it as the typed
+/// `PullStateKernelError`, fail-closed).
 pub fn auto_gate_decision(
     trading_day: bool,
     coverage_available: bool,
@@ -132,7 +134,8 @@ pub fn auto_gate_decision(
 /// Out-of-range instants (`now`/`open`/`close` outside `[0, DAY_US)`) and
 /// out-of-envelope margins (outside `[0, DAY_US)` — a negative or
 /// beyond-a-day margin is a caller defect) are REFUSED with a message; the
-/// Python facade degrades such a call to the oracle.
+/// Python facade re-raises it as the typed `PullStateKernelError`
+/// (fail-closed).
 pub fn muhurat_window_active(
     now_us_of_day: i64,
     open_us_of_day: i64,

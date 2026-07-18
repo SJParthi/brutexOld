@@ -46,7 +46,7 @@ impl core::fmt::Display for CountDomainError {
         write!(
             f,
             "count outside the pull-progress kernel domain [0, 2**53] \
-             (the facade degrades such snapshots to the Python oracle)"
+             (the facade raises the typed PullStateKernelError — fail-closed)"
         )
     }
 }
@@ -107,7 +107,8 @@ pub fn percent(total: u64, completed: u64) -> Result<f64, CountDomainError> {
     }
     if total == 0 {
         // The oracle's `total <= 0` arm (u64: only 0 reaches it here; the
-        // facade routes negative Python ints to the oracle at the gate).
+        // facade's domain gate refuses negative Python ints — the typed
+        // `kernel_invalid` raise).
         return Ok(0.0);
     }
     // Both operands exact in f64 → IEEE division == CPython int/int true

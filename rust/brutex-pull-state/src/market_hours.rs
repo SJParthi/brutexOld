@@ -42,7 +42,8 @@ pub const DAY_US: i64 = 86_400_000_000;
 ///
 /// A `us_of_day` outside `[0, DAY_US)` is a caller defect (no valid
 /// `datetime.time` maps there) and is REFUSED with a message — never
-/// silently clamped; the Python facade degrades such a call to the oracle.
+/// silently clamped; the Python facade re-raises it as the typed
+/// `PullStateKernelError` (fail-closed).
 pub fn pull_allowed_us(us_of_day: i64, is_trading_day: bool) -> Result<bool, String> {
     if !(0..DAY_US).contains(&us_of_day) {
         return Err(format!(

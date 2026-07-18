@@ -9,7 +9,8 @@
 //!
 //! Panic belt: the core is TOTAL over its input domain (the out-of-range arm
 //! returns `Err`, mapped to `ValueError` here — the Python facade's
-//! defensive `except Exception` belt degrades such a call to the oracle);
+//! `_call_kernel` belt re-raises it as the typed `PullStateKernelError`,
+//! fail-closed: the Python oracles are deleted);
 //! `2**63`-and-beyond inputs raise `OverflowError` at the pyo3 `i64` edge,
 //! never a silent wrap (the brutex-feed FFI probe precedent).
 
@@ -30,8 +31,8 @@ fn version() -> &'static str {
 /// `True` iff a vendor pull is allowed at the given IST instant.
 ///
 /// See `crate::market_hours::pull_allowed_us` for the full contract. An
-/// out-of-range `us_of_day` raises `ValueError` (the Python seam's
-/// defensive belt catches it and degrades to the oracle).
+/// out-of-range `us_of_day` raises `ValueError` (the Python seam's belt
+/// re-raises it as the typed `PullStateKernelError` — fail-closed).
 #[pyfunction]
 #[pyo3(signature = (us_of_day, is_trading_day))]
 fn pull_allowed_us(us_of_day: i64, is_trading_day: bool) -> PyResult<bool> {
@@ -47,7 +48,7 @@ fn pull_allowed_us(us_of_day: i64, is_trading_day: bool) -> PyResult<bool> {
 ///
 /// Total over every input: strings cross as UTF-8, `failed` as `i64` (an
 /// out-of-`i64` int raises `OverflowError` at the pyo3 edge — the facade's
-/// defensive belt degrades such a call to the oracle).
+/// belt re-raises it as the typed `PullStateKernelError`, fail-closed).
 #[pyfunction]
 #[pyo3(signature = (state, detail, failed, stalled, wedged, has_verdict))]
 fn classify_pull_outcome(
@@ -161,8 +162,8 @@ fn alive_log_due(since_last_s: f64, interval_s: f64) -> bool {
 // re-hosted). Codes/bools only cross Rust -> Python output; the calendar
 // predicates cross IN as caller-resolved flags (brutex/calendars/nse.py stays
 // the one calendar source of truth) and times as microsecond-of-day. Every
-// out-of-range input maps to ValueError -- the facade's defensive belt
-// degrades such a call to the Python oracle.
+// out-of-range input maps to ValueError -- the facade's belt re-raises it
+// as the typed PullStateKernelError (fail-closed).
 
 /// The whole `auto_pull_allowed` decision ladder -> `(reason_code,
 /// coverage_warn)` -- see `crate::auto_pull_gate::auto_gate_decision`.
@@ -226,7 +227,8 @@ fn settle_token_verdict(token: &str, block_end_us: i64) -> PyResult<(u8, i64)> {
 // every warn string / structlog event / the frozen PullIntent dataclass stay
 // Python.  The ONE string edge is `intent_resume_enabled`'s raw env token
 // (the strip+lower+falsy-set law IS a string law); a lone-surrogate value
-// fails the pyo3 `&str` edge and the facade's belt degrades to the oracle.
+// fails the pyo3 `&str` edge and the facade's belt raises the typed
+// PullStateKernelError (fail-closed).
 
 /// `PullIntent.from_payload`'s strict shape lattice over classified codes —
 /// see `crate::intent::shape_verdict` (0 = valid; 1..=8 name the first
@@ -327,7 +329,7 @@ fn auto_tick_decision(
 /// `_state_from_payload`'s validation verdict over classified codes — see
 /// `crate::auto_pull_scheduler::auto_state_verdict`. An out-of-i64 /
 /// out-of-u64 slot raises `OverflowError` at the pyo3 edge (the facade's
-/// defensive belt degrades such a call to the oracle).
+/// belt re-raises it as the typed `PullStateKernelError` — fail-closed).
 #[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the classified payload
 #[pyfunction]
 #[pyo3(signature = (root_mapping, schema_kind, schema_i64, schema_f64_bits, armed_is_bool, armed_at_kind, last_attempt_kind, last_success_kind))]
@@ -382,7 +384,7 @@ fn should_reload_master(
 // (observe-only). The seam pre-extracts + scope-filters the rows/pairs
 // (`str()`/`int()` stay Python) and renders the `repr()` sample strings from
 // the returned triples; a lone-surrogate symbol fails the pyo3 String edge
-// and the facade belt degrades that call to the oracle.
+// and the facade belt raises the typed PullStateKernelError (fail-closed).
 
 /// `(settled_unwritten, written_unsettled, samples)` — see
 /// `crate::pull_census::census_fold`.
@@ -407,7 +409,8 @@ fn census_fold(
 /// `(percent, elapsed_seconds, units_per_sec, eta_present, eta_seconds)` —
 /// see `crate::progress::progress_derived` for the full contract. An
 /// out-of-domain count raises `ValueError` (the facade's eligibility gate
-/// never sends one; its defensive belt degrades the raise to the oracle).
+/// never sends one; its belt re-raises it as the typed
+/// `PullStateKernelError` — fail-closed).
 #[allow(clippy::too_many_arguments)] // 1:1 FFI mirror of the snapshot's derived inputs
 #[pyfunction]
 #[pyo3(signature = (state_running, open_ended, total, completed, phase_base_completed, updated_at, started_at, phase_started_at))]
@@ -443,13 +446,15 @@ fn progress_derived(
 // pairs / arm tokens / a bool cross out. The one string edge is the content
 // token pair of `token_revalidates` (production tokens are ASCII
 // `mtime:size:ino` triples; a lone-surrogate token fails the pyo3 `&str`
-// edge and the facade's belt degrades to the oracle — verdict-identical).
+// edge and the facade's belt raises the typed PullStateKernelError —
+// fail-closed).
 
 /// `(verdict, pull_active_arm)` — see
 /// `crate::rate_bridge::bridge_payload_verdict` for the full contract.
 /// Out-of-vocabulary inputs answer `(255, 0)` (the facade's refuse-poison
-/// gate degrades them); an out-of-`u8`/`i64` int raises `OverflowError` at
-/// the pyo3 edge (the facade's defensive belt degrades the raise).
+/// gate refuses them — the typed `kernel_invalid` raise); an
+/// out-of-`u8`/`i64` int raises `OverflowError` at the pyo3 edge (the
+/// facade's belt re-raises it as the typed `PullStateKernelError`).
 #[pyfunction]
 #[pyo3(signature = (root_mapping, schema_kind, schema_int, schema_float, field_kinds, pa_kind))]
 fn bridge_payload_verdict(

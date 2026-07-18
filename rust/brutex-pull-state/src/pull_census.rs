@@ -14,7 +14,7 @@
 //! POINT; Rust's `BTreeSet<(String, String)>` orders by UTF-8 BYTES — the
 //! two coincide for all valid UTF-8 (UTF-8 preserves code-point order; a
 //! lone-surrogate CPython str cannot cross the pyo3 edge at all — the seam's
-//! defensive belt degrades that call to the oracle).  The `repr()`-rendered
+//! belt raises the typed `PullStateKernelError`, fail-closed).  The `repr()`-rendered
 //! sample STRINGS stay Python; only `(kind, symbol, interval)` triples cross
 //! back.
 

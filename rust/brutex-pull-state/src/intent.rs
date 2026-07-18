@@ -91,8 +91,8 @@ pub const SHAPE_BAD_RESTARTS: u8 = 7;
 /// `created_at` violated the string-if-present law.
 pub const SHAPE_BAD_CREATED_AT: u8 = 8;
 /// An input code was outside its vocabulary — a classifier/wheel mismatch,
-/// NEVER a verdict: the facade's refuse-poison gate maps it to
-/// `kernel_invalid` and the Python oracle decides.
+/// NEVER a verdict: the facade's refuse-poison gate maps it to the typed
+/// `kernel_invalid` raise (fail-closed, never a served verdict).
 pub const SHAPE_BAD_INPUT: u8 = 255;
 
 // ── resume-decision arm tokens ───────────────────────────────────────────────
@@ -259,7 +259,8 @@ const FALSY: [&str; 4] = ["0", "false", "no", "off"];
 /// any of them, so UCD-version skew cannot flip membership; a fullwidth
 /// `ｎｏ` stays fullwidth and stays truthy, exactly as CPython).  A raw
 /// value carrying lone surrogates never reaches this kernel — the pyo3
-/// `&str` edge refuses it and the facade's belt degrades to the oracle.
+/// `&str` edge refuses it and the facade's belt raises the typed
+/// `PullStateKernelError` (fail-closed).
 #[must_use]
 pub fn resume_enabled(raw: Option<&str>) -> bool {
     let Some(raw) = raw else {

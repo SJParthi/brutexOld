@@ -113,9 +113,10 @@ fn is_cpython_strip_whitespace(c: char) -> bool {
 ///
 /// `None` / blank / whitespace-only → [`SCOPE_CODE_FULL`] (the byte-identical
 /// default); a known token (post the CPython-parity strip) → its code;
-/// anything else → [`SCOPE_CODE_UNKNOWN`] — the Python seam falls through to
-/// the retained oracle, which composes the `ValueError` refusal text (it
-/// embeds `{token!r}` CPython-repr, deliberately never reproduced here).
+/// anything else → [`SCOPE_CODE_UNKNOWN`] — the Python consumer
+/// (`brutex/dashboard/pull_scope.py`) composes + raises the `ValueError`
+/// refusal text from that verdict (it embeds `{token!r}` CPython-repr,
+/// deliberately never reproduced here).
 #[must_use]
 pub fn scope_token(token: Option<&str>) -> u8 {
     let stripped = token
@@ -157,7 +158,7 @@ pub fn market_hours_note_rewrite(note: &str, phases_replacement: &str) -> String
 ///
 /// Returns `(rewritten_note, prefix_present, clause_present)` — the two
 /// booleans are computed AFTER the market-hours rewrite + stop-clause
-/// replacement, exactly where the Python oracle computes them; the seam
+/// replacement, exactly where the pre-flip Python oracle computed them; the seam
 /// fires the `note_surgery_miss` WARN off `prefix_present != clause_present`
 /// and appends the Greeks + crossverify clauses itself.
 #[must_use]

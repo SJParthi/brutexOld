@@ -23,12 +23,14 @@
 //! concrete-type / coercibility FACTS into the small codes below, and a
 //! payload whose coercion probe raises `OverflowError` (the documented
 //! pre-existing raises envelope — a 400-digit int in a float field)
-//! NEVER reaches this kernel (the classifier abstains to the Python arm).
+//! NEVER reaches this kernel (the Python classifier owns that raises
+//! envelope itself — the raise propagates, this kernel is not consulted).
 //! Codes cross in; ONE `(verdict, pull_active_arm)` pair crosses out;
 //! every warn string and the `RateBridgeSnapshot` construction stay
-//! Python (a VALID verdict falls through to the byte-identical oracle).
+//! Python (on a VALID verdict Python constructs the snapshot — the
+//! pre-flip constructor's byte-identical retained code).
 
-/// Verdict 0 — the payload decodes: the oracle constructs the snapshot.
+/// Verdict 0 — the payload decodes: Python constructs the snapshot.
 pub const BRIDGE_VERDICT_VALID: u8 = 0;
 /// Verdict 1 — the decoded root is not a JSON object.
 pub const BRIDGE_VERDICT_NOT_MAPPING: u8 = 1;
@@ -38,7 +40,8 @@ pub const BRIDGE_VERDICT_SCHEMA: u8 = 2;
 /// (constructor probe order) is absent or uncoercible.
 pub const BRIDGE_VERDICT_FIELD_BASE: u8 = 3;
 /// The out-of-vocabulary-INPUT answer (a classifier/wheel mismatch) — the
-/// facade's refuse-poison gate degrades it, never serves it.
+/// facade's refuse-poison gate refuses it (the typed `kernel_invalid`
+/// raise), never serves it.
 pub const BRIDGE_VERDICT_BAD_INPUT: u8 = 255;
 
 /// The number of required snapshot fields (the classifier's slot count).
@@ -58,14 +61,14 @@ pub const SCHEMA_KIND_FLOAT: u8 = 4;
 /// `schema` kind 5 — any other JSON type (never numerically equal).
 pub const SCHEMA_KIND_OTHER: u8 = 5;
 
-/// Field kind 0 — absent (`KeyError` in the oracle).
+/// Field kind 0 — absent (the pre-flip constructor's `KeyError` arm).
 pub const FIELD_ABSENT: u8 = 0;
 /// Field kind 1 — the CPython coercion probe succeeded.
 pub const FIELD_OK: u8 = 1;
 /// Field kind 2 — the probe raised `TypeError`/`ValueError`.
 pub const FIELD_BAD: u8 = 2;
 
-/// `pull_active` arm 0 — not a genuine bool: the oracle reads `None`.
+/// `pull_active` arm 0 — not a genuine bool: Python reads `None`.
 pub const PA_NONE: u8 = 0;
 /// `pull_active` arm 1 — JSON `false`.
 pub const PA_FALSE: u8 = 1;
@@ -95,7 +98,8 @@ fn schema_accepted(kind: u8, int_value: i64, float_value: f64) -> bool {
 ///
 /// Total over every classified input; an out-of-vocabulary code (wrong
 /// slot count, unknown kind) answers [`BRIDGE_VERDICT_BAD_INPUT`] so the
-/// facade degrades loudly instead of serving a guess.
+/// facade refuses loudly (the typed `kernel_invalid` raise) instead of
+/// serving a guess.
 #[must_use]
 pub fn bridge_payload_verdict(
     root_mapping: bool,

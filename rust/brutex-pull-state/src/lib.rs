@@ -14,10 +14,16 @@
 //! are byte-preserved by construction against the frozen golden
 //! (`tests/golden/fixtures/market_hours_guard_verdicts.json`).
 //!
-//! Shipped default-OFF behind `BRUTEX_PULL_STATE_RUST` (Pattern A opt-in);
-//! the retained Python predicate is the parity oracle. The default flip +
-//! oracle deletion are LATER lane phases (burn-in + autorevert per the
-//! DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent), never this one.
+//! FLIP PHASE (shipped): these kernels are the ONLY decision path. The
+//! pre-flip Python oracles are DELETED and the `BRUTEX_PULL_STATE_RUST`
+//! opt-in knob is REMOVED (a SET value makes the facade raise
+//! `PullStateFlagRemovedError`). The facade (`brutex/pull_state_rust.py`)
+//! is FAIL-CLOSED: a missing/stale wheel, a kernel raise, or a
+//! refused/poisoned result raises the typed `PullStateKernelError` — for
+//! the guard chain protecting the shared-TOTP Groww account a pull is
+//! REFUSED, never silently allowed. Throughout this crate's docs "the
+//! (Python) oracle" names the pre-flip Python implementation each kernel
+//! was transcribed from — the LAW reference, not a live fallback.
 //!
 //! ## Honest envelope (Golden Rule #10)
 //!

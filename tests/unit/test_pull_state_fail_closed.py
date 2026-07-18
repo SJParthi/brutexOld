@@ -174,10 +174,12 @@ class TestAutoGateConsultFailsClosed:
         raises wheel-less, so a kernel-backed ``auto_pull_allowed`` can never
         answer 'ok' without the kernel.
 
-        NOTE: ``brutex.calendars.auto_pull_gate`` still carries its flag-gated
-        seam until the sibling worker lands its flip — the module-level
-        ``auto_pull_allowed`` fail-closed pin lands with that module's own
-        flip; THIS pin proves the facade chokepoint it will bind to.
+        NOTE: ``brutex.calendars.auto_pull_gate`` is fully flipped on this
+        branch — ``auto_pull_allowed`` binds this chokepoint directly, with
+        no flag seam. The module-level ``auto_pull_allowed`` fail-closed
+        pins live in ``tests/unit/test_auto_pull_gate_rust_seam.py``
+        (raising-kernel / poisoned-verdict / missing-wheel / removed-knob);
+        THIS pin proves the facade chokepoint they bind to.
         """
         from brutex.pull_state_rust import rust_auto_gate_decision
 

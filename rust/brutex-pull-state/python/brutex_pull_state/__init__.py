@@ -23,19 +23,23 @@ this shim re-exports (``_EXPECTED_COMPILED_SYMBOLS``) BEFORE the re-export
 runs, so a stale installed wheel that predates a source-tree symbol raises a
 clear, actionable ``ImportError`` naming the missing symbol(s) instead of a
 bare symbol-not-found deep inside the consumer. The handshake is deliberately
-UNCONDITIONAL — no env escape; the CONSUMER side is nonetheless soft: the
-default-OFF ``brutex/pull_state_rust.py`` resolver catches this ImportError
-and degrades to the byte-identical Python oracle (``wheel_missing`` /
-``wheel_stale`` warn-once), so a stale wheel can never fail a pull decision.
+UNCONDITIONAL — no env escape; the CONSUMER side is equally FAIL-CLOSED
+(DEC-RUST-PULL-STATE-001, flip phase): the ``brutex/pull_state_rust.py``
+resolver catches this ImportError and raises the typed
+``PullStateKernelError`` (``reason=wheel_missing`` / ``wheel_stale``) — the
+Python oracles are DELETED, so a stale/absent wheel STOPS the pull-state
+decision; for the market-hours guard chain a pull is REFUSED, never
+silently allowed.
 
 HONEST residual gap (Golden Rule #10, the siblings' envelope): the version +
 symbol-set handshake catches a stale wheel that dropped/added a symbol or
 changed crate version. It does NOT catch same-version, symbol-compatible
 BEHAVIORAL drift at runtime — the catches for that class are the frozen
 guard-verdict golden (``tests/golden/test_market_hours_guard_golden.py``, a
-CI-time net over the whole covered calendar), the hypothesis differential
-(Rust arm ≡ Python oracle), and the flip-time burn-in of the LATER lane
-phases; this slice ships the stamp surfaces + the CI nets only.
+CI-time net over the whole covered calendar), the committed pre-conversion
+verdict goldens, and the hypothesis differentials against in-test INLINE
+laws (``tests/property/test_pull_state_rust_parity.py`` — the pre-flip
+Python oracles are deleted, so the differential partner is the inline law).
 """
 
 from __future__ import annotations
