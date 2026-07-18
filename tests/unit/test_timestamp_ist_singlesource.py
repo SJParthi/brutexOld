@@ -13,8 +13,9 @@ Three law families, one file:
 2. **Per-swap equality laws** — every production module whose private IST /
    session constant was collapsed onto a root still binds the EXACT same value
    (identity where the object is shared; equality + the pre-existing
-   representation detail where a derivation is kept, e.g. ``data/parser``'s
-   ``name="IST"`` tzname).
+   representation detail where a derivation is kept — the former
+   ``data/parser`` ``name="IST"`` example died with that module's delete,
+   DEC-DATA-PARSER-DEAD-DELETE-001).
 
 3. **Cross-language drift pins** — the Rust / JS / SQL copies CANNOT import
    Python, so their literals are pinned against the Python roots by reading
@@ -78,7 +79,7 @@ class TestRootLaws:
     def test_fixed_offset_family_root(self) -> None:
         assert timezone(timedelta(hours=5, minutes=30)) == IST_FIXED_OFFSET
         assert IST_FIXED_OFFSET.utcoffset(None) == IST_UTC_OFFSET
-        # the unnamed fixed-offset representation (data/parser keeps its own
+        # the unnamed fixed-offset representation (the deleted data/parser kept its own
         # named derivation — see TestPerSwapEquality)
         assert IST_FIXED_OFFSET.tzname(None) == "UTC+05:30"
 
@@ -171,13 +172,11 @@ class TestPerSwapEquality:
         assert spot_daily_resample._IST is IST_FIXED_OFFSET
         assert backup_run._IST is IST_FIXED_OFFSET
 
-    def test_data_parser_keeps_its_named_tzname_derived_offset(self) -> None:
-        # data/parser's tz keeps its pre-existing name="IST" representation
-        # detail (byte-identical tzname) while its OFFSET derives from the root.
-        from brutex.data import parser as data_parser
-
-        assert data_parser._IST.utcoffset(None) == IST_UTC_OFFSET
-        assert data_parser._IST.tzname(None) == "IST"
+    # NOTE: the former test_data_parser_keeps_its_named_tzname_derived_offset
+    # pin died with its subject — the dead ``brutex/data/parser.py`` module was
+    # deleted (DEC-DATA-PARSER-DEAD-DELETE-001, MIGRATION.md #1941; zero
+    # production consumers — the delete supersedes the #1929 representation
+    # pin for that module only; every other family pin above is unchanged).
 
     def test_session_open_mirrors_bind_the_root(self) -> None:
         from brutex.dashboard import db_view

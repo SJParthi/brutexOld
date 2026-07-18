@@ -507,7 +507,6 @@ jobs:
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
-            "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \
             "brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:" \
