@@ -126,7 +126,8 @@ fn clamp_non_negative(d: f64) -> f64 {
 ///   this refusal kills at the root); the FFI edge maps it to `ValueError`
 ///   and the facade's degrade set serves the ORACLE value, which is honest —
 ///   Python ints are unbounded, so the oracle computes `u64::MAX + 1` fine.
-///   Every in-u64-domain call returns `Ok`.
+///   Every call whose `episodes + 1` fits in `u64` returns `Ok`; only the
+///   `u64::MAX` warn edge returns `Err`.
 #[allow(clippy::too_many_arguments)]
 pub fn loop_watchdog_check_once(
     now: f64,

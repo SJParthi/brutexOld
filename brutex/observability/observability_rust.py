@@ -67,12 +67,17 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
 
 ## MemoryError scoping (where an OOM lands)
 
-``MemoryError`` is NEVER degraded — it re-raises RAW from either arm. For
-laws A–C the OOM propagates into the caller's monitor thread / check pass
-exactly as the pure-Python path does today (``LoopWatchdog.sample_once`` has
-no blanket guard around ``check_once``; ``MonitorLoop.tick_once``'s guards
-catch ``(OSError, ValueError, RuntimeError)`` only); for law D it propagates
-out of ``validate_stage_stamp``/``_parse_stamp`` exactly as today.
+``MemoryError`` is NEVER degraded — it re-raises RAW from either arm, so it
+lands exactly where the pure-Python path lands it today (ON ≡ OFF). For law
+A it propagates into the caller's monitor thread
+(``LoopWatchdog.sample_once`` has no blanket guard around ``check_once``).
+For laws B–C driven through ``MonitorLoop.tick_once``, the loop's broad
+``except Exception`` guards (the DEC-MONITOR-NEVER-DIE-001 never-die law)
+CATCH the ``MemoryError`` — an ``Exception`` subclass — log "… raised; loop
+continues" and keep ticking, identically on both arms; a direct
+``Watchdog.check_once``/``SLADetector.check_once`` caller outside
+``MonitorLoop`` sees the raw raise. For law D it propagates out of
+``validate_stage_stamp``/``_parse_stamp`` exactly as today.
 
 ## Import-edge decision (the LOCAL twins)
 
@@ -159,8 +164,17 @@ _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 #: The falsy twin of :data:`_TRUTHY` (same local-twin rationale).
 _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 
-#: Process-local OFF latch — the disable reason, or ``None`` when live.
-_DISABLED_REASON: Final[list[str | None]] = [None]
+#: Process-local OFF latch — EMPTY = live; latched holds the winning
+#: disable reason at ``[0]`` (first call wins). DELIBERATE shape deviation
+#: from the sibling facades' ``[None]`` single slot: the slot's
+#: ``list[str | None]`` AnnAssign union mints a runtime-invisible mutmut
+#: annotation mutant (PEP 563 — the annotation is never evaluated), an
+#: unkillable breaker of the zero-survivor mutation gate; the #1614
+#: endgame precedent restructures the line away rather than pragma it.
+#: Semantics are unchanged (and the unlocked-race worst case improves:
+#: two racing first latches APPEND, so ``[0]`` keeps the FIRST winner
+#: instead of the slot shape's last-assign-wins).
+_DISABLED_REASON: Final[list[str]] = []
 
 #: Per-law burn-in budgets (mutated in place; reset seam below).
 _BURN_IN_REMAINING: Final[dict[str, int]] = {
@@ -370,7 +384,7 @@ def observability_rust_enabled() -> bool:
 
 def rust_observability_disabled() -> bool:
     """``True`` iff a guard/autorevert latched the Rust path OFF this process."""
-    return _DISABLED_REASON[0] is not None
+    return bool(_DISABLED_REASON)
 
 
 def reset_observability_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
@@ -381,7 +395,7 @@ def reset_observability_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> N
     depend on that). Test isolation ONLY — never called from production
     paths (the sibling facades' reset-seam convention).
     """
-    _DISABLED_REASON[0] = None
+    _DISABLED_REASON.clear()
     for law in _BURN_IN_REMAINING:
         _BURN_IN_REMAINING[law] = remaining
     _OBSERVABILITY_MEMO.clear()
@@ -403,9 +417,9 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``observability_rust.rust_path_disabled`` at WARN. Repeats are no-ops
     (first call wins).
     """
-    if _DISABLED_REASON[0] is not None:
+    if _DISABLED_REASON:
         return
-    _DISABLED_REASON[0] = reason
+    _DISABLED_REASON.append(reason)
     if error:
         _LOG.error("observability_rust.autoreverted", reason=reason, **context)
     else:
@@ -553,6 +567,34 @@ def _loop_verdict_tuple(verdict: WatchdogVerdict) -> tuple[Any, ...]:
         verdict.recovered,
         verdict.stall_total_s,
     )
+
+
+def _watchdog_result_ok(value: object) -> bool:
+    """Law-B output refuse-poison gate — the exact ``(float, bool, bool)`` triple.
+
+    A named helper like :func:`_loop_result_ok` (NOT an inline chain): the
+    inline spelling duplicated the ``type(rust_value[1]) is bool`` line
+    TEXT across the law-B and law-C gates, and mutmut 2.5.1 keys mutants
+    by (line text, index) — a duplicated multi-mutation line text mints a
+    PHANTOM registered-but-never-run cache row whose "untested" id trips
+    the zero-survivor gate's ``^[0-9]+`` results grep exactly like a
+    survivor. Distinct unpacked names keep every gate line text unique.
+    """
+    if type(value) is not tuple or len(value) != _WATCHDOG_TUPLE_LEN:
+        return False
+    elapsed, hung, edge = value
+    return type(elapsed) is float and type(hung) is bool and type(edge) is bool
+
+
+def _sla_result_ok(value: object) -> bool:
+    """Law-C output refuse-poison gate — the exact ``(bool, bool)`` pair.
+
+    Named for the same phantom-row reason as :func:`_watchdog_result_ok`.
+    """
+    if type(value) is not tuple or len(value) != _SLA_TUPLE_LEN:
+        return False
+    breached, edge = value
+    return type(breached) is bool and type(edge) is bool
 
 
 def _loop_result_ok(value: object) -> bool:
@@ -741,13 +783,7 @@ def routed_watchdog_decide(
     except _panic_belt_errors() as exc:
         _disable("crate_panic", error_detail=repr(exc))
         return python_law(now, last_beat, timeout_seconds, prev_hung)
-    if not (
-        type(rust_value) is tuple
-        and len(rust_value) == _WATCHDOG_TUPLE_LEN
-        and type(rust_value[0]) is float
-        and type(rust_value[1]) is bool
-        and type(rust_value[2]) is bool
-    ):
+    if not _watchdog_result_ok(rust_value):
         _warn_once("watchdog_result_refused", result_type=type(rust_value).__name__)
         return python_law(now, last_beat, timeout_seconds, prev_hung)
     _log_engaged_once(crate)
@@ -804,12 +840,7 @@ def routed_sla_decide(
     except _panic_belt_errors() as exc:
         _disable("crate_panic", error_detail=repr(exc))
         return python_law(predicate, value, threshold, prev_breach)
-    if not (
-        type(rust_value) is tuple
-        and len(rust_value) == _SLA_TUPLE_LEN
-        and type(rust_value[0]) is bool
-        and type(rust_value[1]) is bool
-    ):
+    if not _sla_result_ok(rust_value):
         _warn_once("sla_result_refused", result_type=type(rust_value).__name__)
         return python_law(predicate, value, threshold, prev_breach)
     _log_engaged_once(crate)

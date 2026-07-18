@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import itertools
 import json
 import re
@@ -497,9 +498,27 @@ class TestResetSeam:
 
     def test_reset_remaining_zero_is_the_steady_state(self) -> None:
         obs.reset_observability_rust_for_tests(remaining=0)
-        assert obs._DISABLED_REASON[0] is None
+        assert not obs._DISABLED_REASON  # empty latch = live
         assert not obs._OBSERVABILITY_MEMO
         assert all(budget == 0 for budget in obs._BURN_IN_REMAINING.values())
+
+    def test_fresh_module_load_starts_unlatched(self) -> None:
+        # The import-time INITIALIZER semantics: a fresh process must start
+        # live (un-latched, empty memo, full budgets). Every in-suite test
+        # runs AFTER the autouse reset — which would mask a poisoned
+        # initializer — so execute the module SOURCE fresh under a
+        # throwaway name and probe the pristine module-level state.
+        spec = importlib.util.spec_from_file_location("obs_fresh_load_probe", obs.__file__)
+        assert spec is not None and spec.loader is not None
+        fresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fresh)
+        assert not fresh._DISABLED_REASON  # empty latch = live
+        assert fresh.rust_observability_disabled() is False
+        assert not fresh._OBSERVABILITY_MEMO
+        budgets = dict.fromkeys(
+            ("loop", "watchdog", "sla", "stamp_shape", "stamp_verdict"), fresh.BURN_IN_SAMPLES
+        )
+        assert budgets == fresh._BURN_IN_REMAINING
 
     def test_warn_once_suppresses_repeats(self) -> None:
         with capture_logs() as logs:
@@ -525,7 +544,17 @@ class TestCrateGuards:
         events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
         assert len(events) == 1
         assert events[0]["reason"] == "crate_unavailable"
-        assert "remedy" in events[0]
+        # EXACT remedy wording (the sibling-facade discipline —
+        # test_lake_rust_resample pins remedy == the literal): key-presence
+        # alone let mutmut's XX-wrap string mutants survive, and a substring
+        # assertion cannot kill an XX-wrap (the original stays a substring).
+        assert events[0]["remedy"] == (
+            "pip install rust/brutex-observability (or `maturin develop --release` "
+            "inside rust/brutex-observability with the project venv active)"
+        )
+        # The latch arm must return None — the caller takes the oracle branch
+        # DIRECTLY, so no degrade warn ever fires on the unavailable path.
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
 
     def test_crate_stale_missing_symbol_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
@@ -537,6 +566,18 @@ class TestCrateGuards:
         assert obs.rust_observability_disabled() is True
         events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
         assert events[0]["reason"] == "crate_stale"
+        # EXACT message wording (see the crate_unavailable pin above for why
+        # substring/key-presence assertions have no mutation teeth here).
+        assert events[0]["error_detail"] == (
+            "brutex_observability.stamp_verdict missing or not callable — "
+            "the installed wheel predates the observability laws (or is foreign/broken)"
+        )
+        assert events[0]["remedy"] == (
+            "rebuild + reinstall rust/brutex-observability "
+            "(`maturin develop --release` with the project venv active)"
+        )
+        # The stale arm also returns None — oracle branch, no degrade warn.
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
 
     def test_crate_stale_noncallable_symbol_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
@@ -885,6 +926,61 @@ class TestRoutedLawMatrix:
         assert obs._BURN_IN_REMAINING[case.law] == obs.BURN_IN_SAMPLES - 1
         assert [e for e in logs if e["event"] == "observability_rust.burn_in_complete"] == []
 
+    def test_burn_in_clean_ships_the_crate_value_not_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A CLEAN burn-in compare must ship the CRATE value (`_burn_in_check`
+        # returns True), not fall back to the oracle: on law A's OK→OK arm
+        # the two are distinguishable by OBJECT identity — the oracle's
+        # verdict carries the input state object ITSELF, the crate path
+        # recomposes a fresh (equal) one. This kills the `return True` →
+        # `return False` mutant, which the value-equality burn-in pins above
+        # cannot see (both arms are value-equal during a clean burn-in).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        assert obs._BURN_IN_REMAINING["loop"] > 0  # genuinely inside burn-in
+        verdict = _call_loop()
+        assert verdict == _oracle_loop()
+        assert verdict.state is not _STATE_OK  # the recomposed CRATE object shipped
+
+    def test_watchdog_burn_in_clean_when_hung_differs_from_edge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A burn-in-clean compare whose oracle triple has hung != edge
+        # (steady-hung: prev_hung=True, still hung → (20.0, True, False)).
+        # The canonical (20.0, True, True) case leaves the two bool slots
+        # EQUAL, so a pack-leg index garble (`oracle[1]` → `oracle[2]`) was
+        # invisible — a real mutmut survivor pre-fix. A garbled pack leg
+        # fabricates a mismatch → a FALSE autorevert; pin the compare CLEAN.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_watchdog_decide(
+                20.0, 0.0, 15.0, True, python_law=_worker_decide_python
+            )
+        assert result == (20.0, True, False)
+        assert obs.rust_observability_disabled() is False
+        assert [e for e in logs if e["event"] == "observability_rust.autoreverted"] == []
+        assert obs._BURN_IN_REMAINING["watchdog"] == obs.BURN_IN_SAMPLES - 1
+
+    def test_sla_burn_in_clean_when_breached_differs_from_edge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The sla twin: a still-breached observation (prev_breach=True) has
+        # (breached, edge) == (True, False) — the two slots DIFFER, so a
+        # pack-leg index garble (`oracle[0]` → `oracle[1]`) fabricates a
+        # mismatch → a FALSE autorevert (a real mutmut survivor pre-fix).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_sla_decide(
+                SLAPredicate.GREATER_THAN, 150.0, 100.0, True, python_law=_sla_decide_python
+            )
+        assert result == (True, False)
+        assert obs.rust_observability_disabled() is False
+        assert [e for e in logs if e["event"] == "observability_rust.autoreverted"] == []
+        assert obs._BURN_IN_REMAINING["sla"] == obs.BURN_IN_SAMPLES - 1
+
 
 class TestBurnInLifecycle:
     def test_burn_in_completes_per_law_then_steady(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -911,6 +1007,43 @@ class TestBurnInLifecycle:
         engaged = [e for e in logs if e["event"] == "observability_rust.engaged"]
         assert len(engaged) == 1
         assert engaged[0]["crate_version"] == "0.1.0-fake"
+        # The once-only latch lives in the SHARED warn memo under the
+        # documented dunder-namespaced literal (namespaced APART from the
+        # fallback reasons, so neither can silence the other) — pinned by
+        # VALUE so a memo-key garble cannot survive.
+        assert "__engaged__" in obs._OBSERVABILITY_MEMO
+
+    @pytest.mark.parametrize("case", _LAW_CASES, ids=_LAW_IDS)
+    def test_engaged_info_carries_crate_version_from_every_law(
+        self, monkeypatch: pytest.MonkeyPatch, case: _LawCase
+    ) -> None:
+        # EVERY routed fn must hand the RESOLVED crate to _log_engaged_once
+        # — per CALL SITE (fresh memo per case, so each law's own site mints
+        # the INFO): a `_log_engaged_once(None)` garble reads crate_version
+        # None (four real mutmut survivors pre-fix — every site the shared
+        # once-across-laws test did not reach FIRST).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            assert case.call_real() == case.oracle()
+        engaged = [e for e in logs if e["event"] == "observability_rust.engaged"]
+        assert len(engaged) == 1
+        assert engaged[0]["crate_version"] == "0.1.0-fake"
+
+    def test_engaged_crate_version_defaults_none_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `__version__` is NOT in the _CRATE_API handshake (it is metadata,
+        # not a law) — an engaged crate without it reads the honest None,
+        # never a fabricated token.
+        _flag_on(monkeypatch)
+        crate = _fake_crate()
+        delattr(crate, "__version__")
+        _install(monkeypatch, crate)
+        with capture_logs() as logs:
+            _call_loop()
+        engaged = [e for e in logs if e["event"] == "observability_rust.engaged"]
+        assert engaged[0]["crate_version"] is None
 
 
 class TestLoopRoutingExtras:
@@ -968,6 +1101,77 @@ class TestLoopRoutingExtras:
         assert verdict.state.stall_started_beat == 0.0
         assert verdict.state.last_logged_at == 10.0
         assert verdict.state.episodes == 1
+
+    def test_loop_critical_edge_values_recomposed_from_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The CRITICAL-tier mirror of the warn-edge pin above: a delegating
+        # crate return carrying tier "critical" must pass the _LOOP_TIERS
+        # output gate and ship (oracle BOMBED — a gate refusal would consult
+        # it and fail). This is the one wheel-free drive of the gate's
+        # "critical" member: without it, garbling that vocabulary token
+        # silently degrades every critical-tier verdict to the oracle (a
+        # confirmed mutmut survivor in BOTH envs pre-fix — the wheel-present
+        # differentials also hold through the refusal fallback).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        verdict = obs.routed_loop_check_once(
+            40.0,  # lag 40 ≥ critical_after_s 30 — straight past both edges
+            0.0,
+            _STATE_OK,
+            warn_after_s=5.0,
+            critical_after_s=30.0,
+            relog_every_s=60.0,
+            realert_every_s=300.0,
+            python_law=_oracle_bomb,
+            state_factory=WatchdogState,
+            verdict_factory=WatchdogVerdict,
+        )
+        assert verdict.critical_edge is True
+        assert verdict.warn_edge is True  # one starved sample fires both edges
+        assert verdict.lag_s == 40.0
+        assert verdict.state.tier == "critical"
+        assert verdict.state.last_alerted_at == 40.0
+        assert verdict.state.episodes == 1
+        assert "loop_result_refused" not in obs._OBSERVABILITY_MEMO
+
+    @pytest.mark.parametrize(
+        "poison",
+        [(1, True), (True, 1), 42, (True, True, True)],
+        ids=["int_slot0", "int_slot1", "non_tuple", "wrong_arity"],
+    )
+    def test_sla_result_per_slot_type_gate_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, poison: object
+    ) -> None:
+        # Per-CLAUSE teeth for the sla output gate: (1, True) is refused
+        # ONLY by the slot-0 `type(...) is bool` clause, (True, 1) only by
+        # the slot-1 clause — the shared matrix's (1, 0) poison alone let a
+        # single-clause drop survive (a confirmed hand-mutant escape: a
+        # foreign crate's (1, True) was served RAW). The non-tuple and
+        # wrong-arity shapes drive _sla_result_ok's FIRST arm individually
+        # (the shared matrix never fed the sla gate a non-pair).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(sla_decide=lambda *a: poison))
+        assert _call_sla() == (True, True)
+        assert "sla_result_refused" in obs._OBSERVABILITY_MEMO
+
+    @pytest.mark.parametrize(
+        "poison",
+        [(20, True, True), (20.0, True, 1), 7, (20.0, True)],
+        ids=["int_elapsed", "int_edge", "non_tuple", "wrong_arity"],
+    )
+    def test_watchdog_result_per_slot_type_gate_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, poison: object
+    ) -> None:
+        # The watchdog twin of the per-slot sla matrix: the shared (20.0, 1,
+        # True) poison pins only slot 1 — these pin the slot-0 float clause,
+        # the slot-2 bool clause, and _watchdog_result_ok's first arm
+        # (non-tuple / wrong arity) individually.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(watchdog_decide=lambda *a: poison))
+        assert _call_watchdog() == (20.0, True, True)
+        assert "watchdog_result_refused" in obs._OBSERVABILITY_MEMO
 
     @pytest.mark.parametrize("poison", [True, 6, -2], ids=["bool", "past_max", "past_min"])
     def test_stamp_shape_index_vocabulary_gate_refuses(
@@ -1127,6 +1331,10 @@ class TestRealWheelDifferential:
 
     _EPS_BOUNDARY = st.sampled_from([100.0, 100.0 + 1e-12, 100.0 + 1e-9, 100.0 - 1e-9, 1e-9])
 
+    # Lone surrogates are deliberately OUTSIDE this domain (`st.text()`
+    # never emits surrogate code points): they cannot cross the pyo3 &str
+    # edge, so they DEGRADE to the oracle instead of differentiating — the
+    # dedicated test_lone_surrogate_string_degrades_to_oracle pins that arm.
     _D2_STR = st.sampled_from(["a", "b", "deadbeef", ""]) | st.text(max_size=8)
 
     @settings(max_examples=200, deadline=None)
@@ -1195,6 +1403,11 @@ class TestRealWheelDifferential:
             relog_every_s=relog_every_s,
             realert_every_s=realert_every_s,
         )
+        # HONEST LIMIT: both sides run through the facade's OWN _pack_loop,
+        # so this differential cannot detect a _pack_loop bug (both arms
+        # transform identically); the pack legs are exercised for real by
+        # the burn-in compare pins (clean-decrement / mismatch-autorevert)
+        # and _pack_loop's own lines sit under the zero-survivor mutmut pair.
         assert obs._pack_loop(obs._loop_verdict_tuple(routed)) == obs._pack_loop(
             obs._loop_verdict_tuple(oracle)
         )
