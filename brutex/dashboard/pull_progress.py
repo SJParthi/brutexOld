@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
+from brutex import pull_state_rust as _pull_state_rust
+
 #: The four lifecycle states a pull job moves through.
 STATE_IDLE: Final[str] = "idle"
 STATE_RUNNING: Final[str] = "running"
@@ -129,9 +131,38 @@ class ProgressSnapshot:
     phase_base_completed: int = 0
     open_ended: bool = False
 
+    # --- pull_progress (Wave 2F) — the `DEC-RUST-PULL-STATE-001` derived-metrics
+    # seam. ONE kernel consult serves all four derived properties; ``None``
+    # (flag OFF / out-of-domain snapshot / wheel degrade) means the retained
+    # byte-identical Python oracle below serves. The counter state machine,
+    # ``to_dict``, ``running`` and every string stay Python.
+    def _rust_derived(self) -> tuple[float, float, float, float | None] | None:
+        """Consult the Rust derived-metrics kernel; ``None`` = use the oracle.
+
+        Returns ``(percent, elapsed_seconds, units_per_sec, eta_seconds)``
+        bit-identical to the oracle properties (``eta_seconds`` already
+        folded to ``float | None``). The string comparison stays Python —
+        the kernel receives the PRE-COMPUTED running verdict.
+        """
+        if not _pull_state_rust.pull_state_rust_enabled():
+            return None
+        return _pull_state_rust.rust_progress_derived(
+            state_running=self.state == STATE_RUNNING,
+            open_ended=self.open_ended,
+            total=self.total,
+            completed=self.completed,
+            phase_base_completed=self.phase_base_completed,
+            updated_at=self.updated_at,
+            started_at=self.started_at,
+            phase_started_at=self.phase_started_at,
+        )
+
     @property
     def percent(self) -> float:
         """Completion percentage in ``[0, 100]`` — ``0.0`` when *total* is 0."""
+        derived = self._rust_derived()
+        if derived is not None:
+            return derived[0]
         if self.total <= 0:
             return 0.0
         return min(100.0, round(self.completed / self.total * 100.0, 1))
@@ -139,6 +170,9 @@ class ProgressSnapshot:
     @property
     def elapsed_seconds(self) -> float:
         """Seconds between :meth:`PullProgress.start` and the last mutation (clamped ≥ 0)."""
+        derived = self._rust_derived()
+        if derived is not None:
+            return derived[1]
         elapsed = self.updated_at - self.started_at
         return elapsed if elapsed > 0.0 else 0.0
 
@@ -153,6 +187,9 @@ class ProgressSnapshot:
         completed past the baseline over a positive elapsed span (avoids a
         divide-by-zero and never fabricates a rate from a cross-run count jump).
         """
+        derived = self._rust_derived()
+        if derived is not None:
+            return derived[2]
         progressed = self.completed - self.phase_base_completed
         span = self.updated_at - self.phase_started_at
         if span <= 0.0 or progressed <= 0:
@@ -171,6 +208,9 @@ class ProgressSnapshot:
         illusion, so none is shown. Honest envelope: an extrapolation from the
         CURRENT phase rate, not a guarantee.
         """
+        derived = self._rust_derived()
+        if derived is not None:
+            return derived[3]
         if self.state != STATE_RUNNING or self.open_ended or self.total <= 0:
             return None
         rate = self.units_per_sec

@@ -54,6 +54,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
+    "progress_derived",  # pull_progress (Wave 2F)
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
@@ -98,6 +99,7 @@ from ._brutex_pull_state import (  # noqa: E402
     classify_pull_outcome,
     fno_only_note_surgery,
     market_hours_note_rewrite,
+    progress_derived,
     pull_allowed_us,
     scope_token,
     spot_only_note_surgery,
@@ -123,6 +125,7 @@ __all__ = [
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "market_hours_note_rewrite",
+    "progress_derived",
     "pull_allowed_us",
     "scope_token",
     "spot_only_note_surgery",
