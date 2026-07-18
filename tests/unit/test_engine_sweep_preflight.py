@@ -177,6 +177,22 @@ class TestFreshnessPreflight:
         assert "delete the symbol's derived TF partition dirs" in remedy
         assert "re-run the prebuild" in remedy
 
+
+    def test_daily_pair_folds_like_any_other(self) -> None:
+        """DEC-MOVERS-STORED-FRESHNESS-001 fold-in (the BND-5b closure): a
+        ``(symbol, '1day')`` verdict rides the SAME pure fold — a stale derived
+        ``1day`` blocks the launch, counted + sorted, with zero code change to
+        the fold itself (the gate is fail-closed on any non-'fresh' string)."""
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        report = preflight_derived_freshness(
+            {("NIFTY", "1day"): "stale", ("NIFTY", "5minute"): "fresh"}
+        )
+        assert report.ok is False
+        assert report.stale == (("NIFTY", "1day"),)
+        assert report.checked == 2
+        assert "prebuild" in report.remediation()
+
     def test_unexpected_verdict_fails_closed(self) -> None:
         """Anything not EXACTLY 'fresh' counts stale — an unknown verdict string
         can never silently pass the gate (fail-closed)."""
