@@ -1,0 +1,29 @@
+# DEC-NOTIFY-RUST-CORE-001 — the ONE cargo-mutants scope for brutex-notify,
+# resolved by any local `cargo mutants` run from this crate dir (CLAUDE.md
+# §2 Rule 11 COMMON; the brutex-feed / trading-core toml precedent).
+#
+# Scope: src/laws.rs — the four pure notification laws (the escape set +
+# per-code-point scan, the "?"-on-None law, the bit-pattern dedupe compare,
+# the 12-code-point truncation). The in-crate `tests/laws_tests.rs` edge
+# matrix + `tests/laws_proptest.rs` naive-reference differential are the
+# killing suite.
+#
+# HONEST disclosure (Golden Rule #10): this crate is NOT (yet) wired into
+# .github/workflows/mutation.yml's cargo-mutants shard matrix — the
+# ledgered hand-kill / documented-out-of-scope precedent
+# (DEC-GREEKS-RUST-BATCH-001 #1892 / DEC-LAKE-RUST-MERGE-DEDUP-001 #1911:
+# lake crates carry no mutation.yml wiring either). The Python FACADE
+# (brutex/notifications/notify_rust.py) IS in the weekly mutmut pair loop.
+# Wiring a rust-mutation-brutex-notify shard is follow-up material for the
+# default-ON flip DEC, not this default-OFF slice.
+#
+# DELIBERATELY OUT (documented, not silent):
+#   src/python.rs — the thin PyO3 law-delegating edge. cargo-mutants does
+#                   not resolve PyErr-constructing wrappers usefully (the
+#                   trading-core 229-UNVIABLE measurement); the edge is
+#                   exercised end-to-end by the Python-side facade suite +
+#                   the hypothesis differential (real wheel) in
+#                   tests/unit/test_notify_rust.py.
+#   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only; nothing
+#                   behavioural for cargo-mutants to perturb.
+examine_globs = ["src/laws.rs"]

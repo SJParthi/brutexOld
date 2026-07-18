@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957
+(renumbered #1954 → #1955 → #1957 — the last hop at the 2026-07-18
+merge-reconcile, main took #1955 for DEC-STRATEGIES-RUST-COMBO-001;
+DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001), branch
+`claude/notify-rust-core` — the notification PURE laws convert to Rust
+behind the default-OFF `BRUTEX_NOTIFY_RUST`: NEW crate `rust/brutex-notify/`
+(the brutex-feed template) owns the MarkdownV2 escape law + the
+`_count_or_question` honest-unknown law + the dedupe-window drop predicate
+(floats cross the FFI as IEEE-754 BIT PATTERNS in `int` — bit-exact vs
+CPython, no float object ever crosses) + the `[:12]` code-point truncation,
+each routed at its ONE definition site through the NEW facade
+`brutex/notifications/notify_rust.py` (stdlib+structlog leaf; feed_rust
+local flag twin mirror-pinned; symbol handshake, NO polars version guard —
+the window_ledger_rust documented deviation; per-law 16-call burn-in
+bit-compare + ship-the-oracle autorevert) with the verbatim Python law
+bodies retained as the LIVE parity oracle — flag OFF (default) is
+byte-identical and never imports the crate (bomb-spy pinned); the Telegram
+HTTP send / threads / wiring / the ~30 f-string builders STAY Python
+(network I/O + the 12 fixed-spec float parity hazards — named follow-up
+DEC-NOTIFY-RUST-BUILDERS-002); expected payoff ≈ 0 — uniformity, not
+speed; ships INERT, a default flip needs its own DEC. NEW non-required
+notify-rust-parity.yml lane + the facade mutmut pair; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1957.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3523,7 +3548,102 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/notify-rust-core`
+  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957** — renumbered
+  #1954 → #1955 → #1957: first per the coordinator ledger allocation, then at
+  the 2026-07-18 merge-reconcile (main took #1955 for
+  DEC-STRATEGIES-RUST-COMBO-001); the DEC-ID is the stable handle per
+  DEC-LEDGER-RENUMBER-001 — slice 1 of the notifications Rust lane: the
+  FOUR pure notification laws convert to Rust behind the default-OFF
+  `BRUTEX_NOTIFY_RUST` — (1) the MarkdownV2 escape law
+  (`sweep_alerts.escape_markdown_v2` — the 18-char `_MDV2_SPECIALS`
+  per-code-point scan; the backslash deliberately NOT self-escaped,
+  preserved bit-exactly; Rust iterates `chars()`, never bytes), (2) the
+  `_count_or_question` honest-unknown law (`"?"` on None, never a
+  fabricated 0), (3) the dedupe-window drop predicate
+  (`telegram.check_dedupe_locked`'s pure tail — the floats cross the FFI
+  as IEEE-754 BIT PATTERNS carried in `int` (`struct` pack →
+  `f64::from_bits`), bit-exact vs CPython over the full float plane incl.
+  NaN/inf/signed zeros while honoring the ints-only FFI discipline; the
+  window table, `window <= 0` short-circuit, cache dict, lock and
+  monotonic clock ALL stay Python — state, not law), (4) the `[:12]`
+  code-point id truncation (the 6 inline sweep_alerts sites consolidate
+  onto the NEW `_short_id`; `chars().take(12)` ≡ the Python code-point
+  slice, astral-straddle pinned). NEW crate `rust/brutex-notify/` (the
+  brutex-feed template: pyo3 0.29 abi3-py312 optional `python` feature,
+  build.rs source digest + EXPECTED_BUILD.json handshake, committed
+  Cargo.lock, 20-case edge matrix + proptest naive-reference differential
+  + digest parity — 30 cargo tests, clippy `-D warnings` clean; panic-free
+  laws + release `panic="abort"`; the crate is NOT in mutation.yml's
+  cargo-mutants shards — the #1892/#1911 precedent, documented in
+  `.cargo/mutants.toml`). NEW facade `brutex/notifications/notify_rust.py`
+  (stdlib + structlog ONLY — the notifications package is deliberately
+  wheel-free at import for its isolated ci.yml gates, and an engine import
+  would be an outright cycle: the feed_rust LOCAL `_TRUTHY`/`_FALSY` twin
+  is mirror-pinned against `sweep_lookahead`'s sets, the engine imported
+  only inside the test): Pattern-A flag read per call (junk → OFF +
+  warn-once), lazy import + SYMBOL handshake (`crate_unavailable` /
+  `crate_stale`; NO polars version guard — stdlib-only laws, the
+  window_ledger_rust documented deviation), the ONE generic `_routed`
+  engine (per-law 16-call burn-in bit-compare vs the live oracle;
+  mismatch ships the ORACLE value + autorevert latch + ONE
+  `notify_rust.autoreverted` ERROR), degrade set
+  ValueError(⊇UnicodeEncodeError — the lone-surrogate pyo3 edge; the
+  notifier's never-raises contract is load-bearing at 30+ call
+  sites)/RuntimeError/TypeError/OverflowError/AttributeError → oracle
+  warn-once, MemoryError/KeyboardInterrupt/SystemExit re-raise RAW,
+  exact-type refuse-poison gates, the local by-name PanicException belt
+  (a documented small copy — importing lake_rust_render's would pull
+  polars into the wheel-free leaf). Flag OFF (default) BYTE-IDENTICAL —
+  the crate NEVER imported (bomb-spy + poisoned-sys.modules pinned); the
+  extracted verbatim oracles (`_escape_markdown_v2_python` /
+  `_count_or_question_python` / `_truncate_id_12_python` /
+  `_dedupe_should_drop_python`) are the Slice-0 idiom. STAY PYTHON
+  (disclosed honestly): the Telegram HTTP send (network-bound I/O), the
+  notifier thread/queue/atexit lifecycle, the wiring singleton,
+  `TelegramConfig.from_env`, `conflict_alert_threshold` (Decimal never
+  crosses the FFI) and the ~30 f-string message builders — their 12
+  fixed-spec float format sites are a Rust parity hazard; the named
+  follow-up DEC-NOTIFY-RUST-BUILDERS-002 (pre-format-at-the-seam is its
+  precondition); Python-oracle deletion is a LATER lane. TESTS:
+  `tests/unit/test_notify_rust.py` — facade 100.00% line+branch
+  STANDALONE (119/36 — the round-1 NIT corrected the "120" stmt-count
+  drift) in the wheel-free (54 passed/11 skipped) AND wheel-installed
+  (65 passed) arms; wheel-gated hypothesis differentials
+  per law (hostile Unicode; the full-u64-bit-plane dedupe; lone
+  surrogates degrade to oracle — never crash, never different bytes) +
+  the flag-ON-vs-OFF byte-identity A/B through the REAL SweepAlerter
+  builders (8-builder battery, tuples byte-equal, zero autoreverts; since
+  the HOSTILE-REVIEW ROUND 1 fold the ON arm ALSO asserts genuine crate
+  ENGAGEMENT — `notify_rust.engaged` + escape/truncate burn-in-budget
+  consumption — and the NEW wheel-free `TestDefinitionSiteEngagement`
+  per-site spies pin that each of the FOUR definition sites decrements
+  ITS law's budget with the other three untouched, so the executed
+  round-1 mutation class — all four sites silently un-wired back onto
+  their byte-identical Python oracles — now fails 4/4 wheel-free + 5
+  with the wheel, fails-before proven then reverted); the
+  exact ci.yml isolated gates re-run green WHEEL-FREE (telegram 239/46 ·
+  sweep_alerts 393/42 · wiring 83/24 — ALL 100.00%) and the 14-file
+  notifications family battery re-runs VERBATIM green under
+  `BRUTEX_NOTIFY_RUST=1` with the real wheel (283 passed). CI hub-light:
+  NEW non-required `.github/workflows/notify-rust-parity.yml` (the
+  lake-lane template — gates the FUTURE default-ON flip, never an
+  unrelated merge); mutation.yml gains the facade mutmut pair; ci.yml
+  UNTOUCHED (the stem-matched test rides the discovery gate — the #1912
+  precedent). GATES: cargo fmt/clippy `-D warnings`/test --release/check
+  --features python green; ruff + ruff-format clean; `mypy --strict
+  brutex` 0 new (the one `cma` import-not-found is env-only,
+  stash-measured identical at the origin/main baseline); pyright 0 errors
+  on touched files; jscpd 0.12% (« the 1% gate). HONEST (the ADR-0020
+  banner): expected payoff ≈ 0 — conversion is for uniformity, not speed;
+  the FFI hop is a small slowdown on a rare, network-I/O-dominated emit
+  path; ships INERT — a default flip needs its own DEC citing a fresh
+  green parity-lane run. No secret ever crosses the FFI (message text +
+  integer bit patterns only; the R2-OCLI-F6 token-leak guards untouched).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; ONE new env var
+  `BRUTEX_NOTIFY_RUST`, default OFF.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10769,7 +10889,27 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/notify-rust-core`
+  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957 — renumbered
+  #1954 → #1955 → #1957, the last hop at the 2026-07-18 merge-reconcile
+  (main took #1955 for DEC-STRATEGIES-RUST-COMBO-001; the DEC-ID is the
+  stable handle per DEC-LEDGER-RENUMBER-001) — the
+  notification PURE laws convert to
+  Rust behind the default-OFF `BRUTEX_NOTIFY_RUST`: NEW crate
+  `rust/brutex-notify/` (MarkdownV2 escape · `_count_or_question` ·
+  the dedupe-window drop predicate over IEEE-754 bit patterns as ints ·
+  the `[:12]` code-point truncation) + NEW facade
+  `brutex/notifications/notify_rust.py` (feed_rust local flag twin,
+  symbol handshake, per-law 16-call burn-in + ship-the-oracle
+  autorevert, the verbatim Python laws retained as the LIVE parity
+  oracle); flag OFF (default) byte-identical, crate never imported
+  (bomb-spy pinned); the Telegram HTTP send / threads / wiring / the
+  ~30 f-string builders STAY Python (network I/O + the fixed-spec float
+  parity hazards — named follow-up DEC-NOTIFY-RUST-BUILDERS-002);
+  expected payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1957 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
