@@ -1,4 +1,97 @@
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
+three lake_keys candidate-ladder builders (stock_drift_fold ·
+spot_key_candidates · spot_recovery_candidates core) join the PR-1
+`rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST`
+flag via the NEW sibling facade `brutex/data/lake_keys_rust.py` (own
+3-symbol handshake + per-law burn-in + ship-oracle autorevert — a
+lake_keys fault never degrades fno_symbol_rust, pinned both directions);
+verbatim Python bodies retained as the LIVE oracles; the
+HEAL-FINDINGS-PARITY integration pin is the tier gate (OFF-vs-ON
+LegacyKeyDrift scan equality + twin-lake heal sha-identical trees); flag
+unset/falsy byte-identical (bomb-spy-pinned); the data-rust-parity.yml
+lane EXTENDED (paths + flag-ON verbatim lake_keys/lake_invariants legs —
+no new lane); expected payoff ≈ 0 — uniformity, not speed; ships INERT.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1952.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
+branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
+NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
+`BRUTEX_DATA_RUST` facade `brutex/data/fno_symbol_rust.py` routing
+`parse_fno_symbol` (integers-only FFI — spans + expiry y/m/d; the strike
+stays Python; non-ASCII routes to the oracle via the ASCII pre-gate; a
+fail-closed LOCALE guard — the version-guard analogue for the
+LC_TIME-driven `%b` law — keeps a non-English locale on the oracle; BruteX
+pins LC_TIME nowhere, so the OFF path was already locale-variable — a
+pre-existing envelope surfaced honestly, not widened); the verbatim Python
+law retained as the LIVE parity oracle; flag unset/falsy byte-identical
+(bomb-spy-pinned); built ONLY by the NEW non-required data-rust-parity.yml
+lane; expected payoff ≈ 0 — conversion is for uniformity, not speed; ships
+INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in the
+§1 Active-branch blurb + MIGRATION.md #1940.)
+Earlier: 2026-07-17 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943 —
+slice T35 root-leaf Rust conversion, milestones 1-3: the NEW `rust/brutex-core`
+crate (0.3.0 as shipped) + FIVE default-OFF seams — `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001
+money laws as exact decimal-string HALF_UP arithmetic; STORED-BYTES critical —
+frozen literal-corpus rounding goldens + the brutex-lake `_snap_price_expr`
+twin-impl coordination pins) and `BRUTEX_CORE_RUST_HWENV` (the
+hardware-envelope DERIVATION laws only — detection stays Python) plus the
+milestone-3 trio `BRUTEX_CORE_RUST_PATHS`/`_DOTENV`/`_BACKUPENV` over the ONE
+shared `brutex/config/seam_core.py` engaged-call core. Flag OFF
+(default) is behavior-identical + crate-untouched; "expected payoff ≈ 0 —
+conversion is for uniformity, not speed" (the ADR-0020 banner verbatim);
+ships INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record + the T35 HOLDS live in the §1
+Active-branch blurb + MIGRATION.md #1943 — this header carries the pointer,
+never the story.)
+Earlier: 2026-07-17 (DEC-STRATEGIES-RUST-COMBO-001, MIGRATION.md #1955
+(QM-confirmed — renumbered from the provisional #1933 at the 2026-07-17 QM
+ledger correction; #1933 taken by DEC-DERIVED-GHOST-BUCKET-PRUNE-001),
+branch `claude/rust-slice-t16-strategies` — T16 PR-1 of the Rust-first
+mandate: combo.py's TWO pure byte laws — the `\x1f` first-offender scan +
+the canonical-JSON render over the ALREADY-lowered tree — re-hosted on the
+NEW standalone `rust/brutex-strategies` crate behind the default-OFF
+`BRUTEX_STRATEGIES_RUST_COMBO` facade `brutex/strategies/combo_rust.py`
+(local flag/panic-belt twins — a verified engine import cycle forbids the
+engine import; per-law 16-sample burn-in + ship-the-oracle autorevert; NO
+polars version guard — polars-free laws). Canonicalisation / error taxonomy
+/ message bytes / the 9-field join + blake3 ALL STAY PYTHON (the lowered-tree
+law: the Rust kernel never reproduces `float.__repr__`/`Decimal.__str__`);
+run identity UNTOUCHED — every frozen golden passes UNMODIFIED on both arms
+(the flag-ON wrapper re-drives them under an engagement spy; the vocab
+fixture byte-untouched). Flag OFF (default) is byte-identical
+(bomb-spy-pinned); a default flip needs its own DEC + the disclosed
+burn-in-coverage flip preconditions. The honesty banner holds verbatim —
+"expected payoff ≈ 0 — conversion is for uniformity, not speed". ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1955.)
+Earlier: 2026-07-17 (DEC-TEST-AWS-HERMETICITY-001 (proposed — pending
+queue-master confirmation), MIGRATION.md #1954 (provisional; renumber-at-landing
+per DEC-LEDGER-RENUMBER-001), branch `claude/test-aws-hermeticity` — TEST-side
+AWS hermeticity: two `test_dashboard_results_route.py` sweep tests started a
+`BackgroundPullJob` whose DEFAULT account-key resolver reads the Groww
+credentials from LIVE AWS SSM (a real decrypting `ssm:GetParameter` on a
+boto3-equipped box — a hermeticity failure + a secret-exposure class; green on
+boto3-less CI only via the graceful `CredentialsError` degrade); both tests now
+inject the established `account_key_resolver=lambda: None` seam, and a
+suite-wide autouse BELT in `tests/conftest.py` patches the real-SSM-client
+factory (+ its from-import bindings, + `boto3.client`/`Session` when boto3 is
+importable) to raise a loud remediation-naming refusal — every box now behaves
+like boto3-less CI deterministically, and a live AWS call from any IN-PROCESS
+test path is structurally impossible (the belt is an in-process monkeypatch —
+subprocess children + hypothetical direct botocore use sit outside it,
+verified unreached by every current test; self-test
+`tests/unit/test_aws_hermeticity_belt.py`).
+ZERO brutex/ source change — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1954.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)

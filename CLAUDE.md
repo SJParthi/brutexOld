@@ -9,11 +9,11 @@
 >    Session start: also honor docs/claude/12-session-etiquette.md (old §10 — it mandates reading docs/TRACK1_BACKTEST_SPEC.md + docs/MIGRATION.md at session start).
 > 2. Defaults
 >
-> **2026-07-18 restructure:** the previous 997 KB single-file CLAUDE.md
+> **2026-07-18 restructure:** the previous 1,026 KB single-file CLAUDE.md
 > was split. This root is a lean charter + index; EVERY line of the old
 > file was moved VERBATIM into `docs/claude/` — the in-order
 > concatenation of the 13 files there is byte-identical to the old file
-> (sha256 `70bef37c8fd6c11dccbeec434f02d1f8c281c5fb05212d453d7d1209dae05697`).
+> (sha256 `32b923432d2203fb3d24d5d88ea2a2c814cde18508e637d0f5e23b74b2964af4`).
 > Read topic files on demand only — never bulk-read them at session start.
 
 ## Identity (summary)
