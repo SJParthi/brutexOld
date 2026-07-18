@@ -1338,6 +1338,15 @@ jobs:
           #        closed its 5-line kernel-OK/oracle-arm gap, but that
           #        wheel-free property is UNENFORCED — never rely on it when
           #        re-wiring this stanza (round-1 coverage finding).
+          #        The SIX call-site module gates in this job
+          #        (brutex.costs.constants · brutex.data.moneyness ·
+          #        brutex.options.{expiry_calendar, lot_size_history,
+          #        strike_grid, strike_rules}) share the same coupling:
+          #        each gained a flag-ON branch whose coverage rests on the
+          #        hard wheel install too — wheel absent ⇒ the importorskip
+          #        ON test skips ⇒ the gated line goes uncovered ⇒ the gate
+          #        FAILS under --cov-fail-under=100. Fail-closed, never a
+          #        false green (round-2 coverage note).
           if compgen -G "tests/unit/test_optcost_rust.py" > /dev/null; then
             pytest --cov=brutex.optcost_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_optcost_rust.py
           else

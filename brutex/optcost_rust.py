@@ -109,9 +109,19 @@ pinned as conscious in the unit suite (round-1 review).
 
 Expected payoff ≈ 0 — these are cold/warm per-trade + read-side paths, not
 the ~33B-trial mask path; the conversion is for Rust uniformity (ADR-0020
-banner), no speedup is claimed. The engaged path ADDS per call: one env
-probe, table→ordinal list builds (N ≤ 6 rows), one FFI crossing, and —
-during burn-in — the full oracle run. The latch / warn memo / burn-in
+banner), no speedup is claimed. The engaged path ADDS per call — steady
+state included: one env probe; the :func:`_resolve_kernel` guard re-run
+(a ``sys.modules``-cached ``importlib.import_module`` lookup PLUS the full
+11-symbol getattr/callable handshake, on EVERY engaged call — never
+memoised); table→ordinal list builds (N ≤ 6 rows); one FFI crossing; the
+refuse-poison validation of every kernel return; and — during burn-in —
+the full oracle run (round-2 review: this list is the exhaustive
+enumeration, doc-pinned). A persistently ``result_refused`` kernel NEVER
+latches the seam OFF — it re-pays the crossing + validation on every call
+and the oracle serves every time, a deliberate per-call degrade mirroring
+``kernel_error`` (only the import-guard reasons, ``kernel_panic`` and
+``burn_in_mismatch`` latch; this class never converges to a latch —
+behavior-pinned). The latch / warn memo / burn-in
 counters are the same *documented exception* to the no-global-mutable-state
 rule as ``rust_metrics``'s (plain unlocked writes: a racing thread can at
 worst run an extra burn-in compare or emit a duplicate warn line, never
@@ -242,7 +252,10 @@ class KernelResultRefused(Exception):
     Raised ONLY inside this facade's kernel-outcome composition wrappers;
     :func:`_route` maps it to one ``optcost_rust.fallback`` WARN (reason
     ``result_refused``) + the Python oracle — a poisoned/stale wheel can
-    only ever degrade, never serve.
+    only ever degrade, never serve. Deliberately NON-latching (unlike
+    ``kernel_panic``): every occurrence re-pays the FFI crossing +
+    validation on the next call and serves the oracle again (the module
+    docstring's honest-envelope note).
     """
 
 

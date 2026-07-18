@@ -412,6 +412,51 @@ class TestRouteEngine:
         assert len([e for e in logs if e["event"] == "optcost_rust.rust_path_disabled"]) == 1
 
 
+class TestHonestEnvelopeDisclosure:
+    """Round-2 seam NIT: the honest-envelope per-call cost list must stay
+    EXHAUSTIVE and the never-latching ``result_refused`` class acknowledged
+    (Golden Rule #10 — two disclosure doc-pins + the behavior twin)."""
+
+    def test_docstring_names_every_steady_state_per_call_cost(self) -> None:
+        # (a) _resolve_kernel re-runs (cached import lookup + the 11-symbol
+        #     handshake) on EVERY engaged call, steady state included;
+        # (b) refuse-poison validation runs on every kernel return.
+        doc = ocr.__doc__
+        assert doc is not None
+        # Whitespace-normalized so a reflow can never break the pin.
+        envelope = " ".join(doc[doc.index("## Honest envelope") :].split())
+        assert "guard re-run" in envelope
+        assert "getattr/callable handshake" in envelope
+        assert "refuse-poison validation of every kernel return" in envelope
+
+    def test_docstring_acknowledges_result_refused_never_latches(self) -> None:
+        doc = ocr.__doc__
+        assert doc is not None
+        envelope = " ".join(doc[doc.index("## Honest envelope") :].split())
+        assert "``result_refused`` kernel NEVER latches" in envelope
+
+    def test_persistently_refused_kernel_repays_the_crossing_every_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The behavior twin: a persistently ``result_refused`` kernel never
+        converges to a latch — the kernel is RE-invoked (and its return
+        re-validated) on every call, the oracle serving each time (a
+        deliberate per-call degrade mirroring ``kernel_error``, unlike the
+        latching ``kernel_panic``)."""
+        calls = {"kernel": 0}
+
+        def _poisoned(starts: list[int], values: list[int], ordinal: int) -> tuple[int, int]:
+            calls["kernel"] += 1
+            return (0, 999)  # never a table value → refuse-poison every call
+
+        _install(monkeypatch, _fake_kernel(optcost_history_lookup=_poisoned))
+        _flag_on(monkeypatch, steady=True)
+        for _ in range(5):
+            assert _history_value() == 75  # the oracle serves every time
+        assert calls["kernel"] == 5  # the crossing is re-paid per call — no memo
+        assert not ocr.optcost_rust_disabled()  # and no latch ever forms
+
+
 # ─────────────────────────────────────────────────────────────────
 # Outcome plumbing + pure helpers
 # ─────────────────────────────────────────────────────────────────
