@@ -18,7 +18,18 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
+twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
+`MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
++ the `combo_mask.py` >=64-bit width dispatch with lazy wide-kernel
+promotion and the LOUD-FAIL inversion vs #1549 — a missing wide kernel at a
+>=64-bit dispatch raises the typed `WideKernelUnavailableError`, NEVER a
+silent numpy degrade; the u64 path byte-identical (goldens unmodified,
+bomb-spy-pinned). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1942 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
@@ -3243,7 +3254,62 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-day-freshness-guard`
+- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+  queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
+  DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
+  first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
+  u64/u128 impls move VERBATIM from `trade_sim.rs` to the NEW first-class shared
+  `rust/fno-math/src/mask_word.rs` (`trait` → `pub(crate) trait` is the one widening; a PURE MOVE —
+  frozen-behaviour-gated by the pre-existing fno-math cargo suite passing UNMODIFIED, 582/0). THE KERNEL:
+  `count_supermasks_u128s` · `count_supermask_u128s` · `ResidentBarsU128` — the native-`Vec<u128>` twins of
+  the u64 Stage-2 SUPERSET-count kernels (the #1549 probe-verified FFI crossing, REUSED — no new probe); the
+  count inner loop + serial/parallel batch dispatch genericize as `count_one_core<W>` /
+  `count_supermasks_dispatch_core<W>` over the hoisted trait, the u64 names kept as thin `W = u64`
+  delegators (the trade-sim `simulate_one_core` idiom — every pre-existing call site + test compiles
+  UNCHANGED); ONE dispatch boundary + order-preserving collect for both widths (Golden Rule #4 pure-integer
+  determinism); fenced additive lib.rs registration + additive facade entries (`_EXPECTED_COMPILED_SYMBOLS`
+  / `.pyi` / `EXPECTED_BUILD.json` / the frozen `brutex.math` facade golden — keep-both union seams with the
+  sibling fno-math lanes; crate stays 0.3.0). THE DISPATCH (`combo_mask.py`): `count_supermasks` routes any
+  wide (>64-bit) bar/mask batch to the u128 kernel; `ResidentBarBuffer` builds `ResidentBarsU128` for wide
+  bars and lazily PROMOTES a u64-resident window on its first wide mask batch (built once from the kept raw
+  bars, ONE `combo_mask.wide_kernel_promoted` INFO per instance — the #1549 promotion shape). **THE
+  LOUD-FAIL INVERSION vs #1549 (the recorded design deviation):** #1549's trade-sim twin is future headroom
+  and silently serves its Python oracle on wheel-missing; THIS kernel is the ACTIVE production path once the
+  vocabulary crosses 64 bits, so wheel-missing at ANY >=64-bit dispatch raises the NEW typed greppable
+  `WideKernelUnavailableError(RuntimeError)` naming the DEC + reason `wheel_missing_u128` + the
+  `maturin develop --release` remediation — the numpy two-limb reference is RETAINED strictly as the
+  tests-side parity ORACLE (+ the pre-existing <=64-bit stale-wheel construction fallback, byte-identical)
+  and is structurally unreachable as a silent >=64-bit production fallback (the silenced-loud-fail mutant
+  hand-applied + verified KILLED). Second recorded deviation: NO `bar_bits_beyond_u128`/`mask_beyond_u128`
+  oracle-fallback analogue — the numpy count oracle itself refuses beyond-u128 (`uint64` hi-limb cast), so
+  beyond-u128 keeps TODAY'S `OverflowError` class raised at the `Vec<u128>` FFI edge, while a negative
+  value routes narrow and refuses at the u64 FFI edge as before (no triple-limb invention, pinned).
+  OBSERVABLES (the PR-B interface, mirroring #1549's `rust_active`):
+  `ResidentBarBuffer.kernel_kind` ∈ {rust-u64, rust-u128, numpy} + `wide_kernel_active` + the pure
+  `dispatch_kernel_kind` classifier + the `KERNEL_*`/`U128_MASK` exports — a >=64-bit grid is verifiable
+  Rust-served WITHOUT monkeypatching (documented supported test surface). U64 PATH BYTE-IDENTICAL: the u64
+  golden corpus + the frozen run-identity/sweep-run/combo-digest goldens pass UNMODIFIED (fixtures
+  byte-untouched); a bomb-spy pins the wide twins never invoked for <=64-bit inputs incl. the exact
+  `U64_MASK` boundary. MEASURED (sandbox 2026-07-17, best-of-5, 94k dense-120-bit bars × 1k two-limb masks,
+  outputs bit-identical): numpy oracle 179.5 ms · Rust free 27.7 ms (6.5×) · Rust resident 20.0 ms (9.0×) —
+  observed, NO SLA claimed, nothing asserted on it (the M4-Pro figure rides bench-m4pro later). HONEST:
+  test-only-reachable at today's 60-bit vocabulary (the u64 path stays the norm until the vocab-66 lane
+  lands); each batch stays O(N_masks · N_bars) compute — O(1) is strictly per-mask amortised; the
+  in-session cargo-mutants sweep was PARTIAL (10/10 MaskWord + 5/5 lib.rs dispatch mutants caught; its two
+  missed `Walker::levels` arithmetic mutants are PRE-EXISTING #1825-era main debt, named as a follow-up
+  observation, not fixed in-scope); the u64 suite's inert sys.modules-poison fallback idiom is a
+  pre-existing observed blind spot (out of scope — the real coverage lives in the u128 file's
+  attr-monkeypatch tests). GATES: cargo 597/0 --locked + fmt + clippy -D warnings; `combo_mask.py` 100.00%
+  line+branch on the ci-exact two-file gate (183/72; ci.yml 19i comment updated); the wide-kernel hypothesis
+  differential (hostile corpus: hi-limb-only · bit-63/64 straddles · sign-bit 63+127 · random wide grids) +
+  the u128==u64-on-u64-domain anti-drift property; NEW bench
+  `tests/bench/test_engine_combo_mask_wide_kernel_o1.py` (O(1)-per-mask ratio via `cache_tier_ceiling` + the
+  measured-never-asserted comparison); 6/6 hand-applied dispatch mutants killed (combo_mask stays out of the
+  mutmut loop — the hand-kill precedent); consumer/golden batteries 179 + 335 + 57 green;
+  ruff/ruff-format clean; `mypy --strict` clean (472 files); pyright 0 errors (baseline 0; +3 house
+  `reportPrivateUsage` test warnings). ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run identity untouched; no new routes/env vars.)
+  Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard + the B-3 derived-intraday null-OI
@@ -9841,7 +9907,28 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/rust-u128-enum-kernel`
+  (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
+  v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
+  `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
+  `rust/fno-math/src/mask_word.rs` (pure move, its own severable first commit;
+  #1549's cargo suite unmodified-green) + the native-`Vec<u128>` count twins
+  `count_supermasks_u128s`/`count_supermask_u128s`/`ResidentBarsU128` over ONE
+  width-generic core/dispatch (u64 names kept as thin delegators — every
+  pre-existing call site + test unchanged) + the `combo_mask.py` >=64-bit
+  width dispatch with lazy wide-kernel promotion and the LOUD-FAIL inversion
+  vs #1549 (wheel-missing at a >=64-bit dispatch raises the typed
+  `WideKernelUnavailableError` naming the DEC + `wheel_missing_u128` + the
+  maturin remediation — the numpy two-limb reference is retained strictly as
+  the tests-side parity oracle, structurally unreachable as a silent >=64-bit
+  production fallback); observables `kernel_kind`/`wide_kernel_active`/
+  `dispatch_kernel_kind` are the supported no-monkeypatch test surface; u64
+  path byte-identical (u64 goldens + frozen run-identity goldens unmodified,
+  bomb-spy-pinned incl. the exact `U64_MASK` boundary); measured sandbox
+  179.5 ms numpy vs 27.7/20.0 ms Rust free/resident at 94k×1k — observed,
+  never asserted; ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1942 for the full blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample
