@@ -207,3 +207,153 @@ __all__ = [
     "rust_pull_allowed",
     "warn_degrade_once",
 ]
+
+
+# --- pull_scope (Wave 1B) ---
+# DEC-RUST-PULL-STATE-001 Wave 1B: the ``brutex/dashboard/pull_scope.py``
+# note-surgery / scope-token kernel accessors — the SAME guarded-consult
+# discipline as ``rust_pull_allowed`` above (lazy resolve → defensive belt →
+# refuse-poison gate → ``None`` = use the byte-identical Python oracle).
+# STRINGS cross this edge (the ONE sanctioned exception to the integers-only
+# law — the surgery outputs ARE strings, so byte-exactness IS the contract;
+# every anchor literal is drift-pinned by the committed golden fixture pair +
+# the cross-language source pin in ``tests/unit/test_pull_scope_rust_seam.py``).
+# Append-only section (the wave-worker convention); integrator note: the
+# generic ``_resolve_kernel_symbol`` below can absorb
+# ``resolve_pull_state_kernel``'s body post-merge (one resolver, zero copies).
+
+from collections.abc import Callable  # noqa: E402 — append-only section import
+
+#: ``scope_token``'s unknown-token verdict code — the Python seam falls
+#: through to the oracle, which composes the ``{token!r}`` refusal itself
+#: (CPython repr is never re-minted in Rust).
+SCOPE_CODE_UNKNOWN: Final[int] = 255
+
+#: The whole ``scope_token`` verdict vocabulary (0=full · 1=spot-only ·
+#: 2=fno-only · 255=unknown) — anything else is a stale/corrupt wheel.
+_SCOPE_TOKEN_CODES: Final[frozenset[int]] = frozenset({0, 1, 2, SCOPE_CODE_UNKNOWN})
+
+#: The ``_call_kernel`` fault sentinel — distinct from EVERY legitimate
+#: kernel return (incl. a poisoned literal ``None``, which must reach the
+#: per-accessor refuse-poison gate as ``kernel_invalid``, never silently
+#: read as a degrade).
+_KERNEL_FAULT: Final[object] = object()
+
+
+def _resolve_kernel_symbol(name: str) -> object | None:
+    """Resolve one ``brutex_pull_state`` symbol, or ``None`` (warn-once).
+
+    The generic sibling of :func:`resolve_pull_state_kernel` (same lazy
+    import + degrade tokens): a missing wheel — including the shim's
+    stale-wheel handshake refusal — degrades as ``wheel_missing``; an
+    importable wheel missing *name* (a pre-Wave-1B wheel) degrades as
+    ``wheel_stale`` with the symbol named.
+    """
+    try:
+        import brutex_pull_state
+    except (ImportError, AttributeError):
+        warn_degrade_once("wheel_missing")
+        return None
+    kernel = getattr(brutex_pull_state, name, None)
+    if kernel is None:
+        warn_degrade_once("wheel_stale", symbol=name)
+        return None
+    return kernel
+
+
+def _call_kernel(name: str, *args: object) -> object:
+    """One guarded kernel call: resolve + the defensive belt.
+
+    Returns the kernel's RAW result (the caller's refuse-poison gate types
+    it), or the :data:`_KERNEL_FAULT` sentinel when the wheel is
+    missing/stale or the kernel raised (each a named warn-once; ANY kernel
+    raise degrades — never a failed note build / scope parse).
+    """
+    kernel = _resolve_kernel_symbol(name)
+    if kernel is None:
+        return _KERNEL_FAULT
+    try:
+        return cast("Callable[..., object]", kernel)(*args)
+    except Exception as exc:  # the defensive belt (the rust_pull_allowed law)
+        warn_degrade_once("kernel_error", symbol=name, error=repr(exc))
+        return _KERNEL_FAULT
+
+
+def rust_scope_token(token: str | None) -> int | None:
+    """Consult the kernel's ``scope_token`` verdict; ``None`` = use the oracle.
+
+    Refuse-poison gate: EXACTLY ``int`` (``bool`` is an ``int`` subclass —
+    a ``True`` pun from a stale wheel must degrade loudly, never read as
+    spot-only) and EXACTLY one of the four vocabulary codes.
+    """
+    verdict = _call_kernel("scope_token", token)
+    if verdict is _KERNEL_FAULT:
+        return None
+    if type(verdict) is not int or verdict not in _SCOPE_TOKEN_CODES:
+        warn_degrade_once("kernel_invalid", symbol="scope_token", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+def rust_market_hours_note_rewrite(note: str, phases_replacement: str) -> str | None:
+    """Consult the kernel's market-hours note rewrite; ``None`` = the oracle."""
+    result = _call_kernel("market_hours_note_rewrite", note, phases_replacement)
+    if result is _KERNEL_FAULT:
+        return None
+    if type(result) is not str:
+        warn_degrade_once(
+            "kernel_invalid",
+            symbol="market_hours_note_rewrite",
+            detail=type(result).__name__,
+        )
+        return None
+    return result
+
+
+def _validated_surgery_triple(name: str, result: object) -> tuple[str, bool, bool] | None:
+    """The surgery accessors' shared refuse-poison gate.
+
+    EXACTLY a 3-tuple of ``(str, bool, bool)`` — the rewritten note + the
+    two ``note_surgery_miss`` WARN inputs; anything else (wrong arity,
+    a list pun, an int-for-bool pun) can only mean a stale/corrupt wheel.
+    """
+    if (
+        isinstance(result, tuple)
+        and len(result) == 3
+        and type(result[0]) is str
+        and type(result[1]) is bool
+        and type(result[2]) is bool
+    ):
+        return (result[0], result[1], result[2])
+    warn_degrade_once("kernel_invalid", symbol=name, detail=type(result).__name__)
+    return None
+
+
+def rust_spot_only_note_surgery(base_note: str) -> tuple[str, bool, bool] | None:
+    """Consult the kernel's spot-only note surgery; ``None`` = the oracle.
+
+    Returns ``(rewritten_note, prefix_present, clause_present)`` — the seam
+    fires the ``note_surgery_miss`` WARN off the booleans and appends the
+    Greeks + crossverify clauses itself (they compose the tail outcome).
+    """
+    result = _call_kernel("spot_only_note_surgery", base_note)
+    if result is _KERNEL_FAULT:
+        return None
+    return _validated_surgery_triple("spot_only_note_surgery", result)
+
+
+def rust_fno_only_note_surgery(base_note: str) -> tuple[str, bool, bool] | None:
+    """Consult the kernel's fno-only note surgery; ``None`` = the oracle."""
+    result = _call_kernel("fno_only_note_surgery", base_note)
+    if result is _KERNEL_FAULT:
+        return None
+    return _validated_surgery_triple("fno_only_note_surgery", result)
+
+
+__all__ += [
+    "SCOPE_CODE_UNKNOWN",
+    "rust_fno_only_note_surgery",
+    "rust_market_hours_note_rewrite",
+    "rust_scope_token",
+    "rust_spot_only_note_surgery",
+]

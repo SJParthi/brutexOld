@@ -1,9 +1,13 @@
 {
-  "_comment": "Wheel-source freshness fingerprint (DEC-RUST-PULL-STATE-001; the brutex_feed / fno_math / trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_pull_state._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-pull-state surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught only by the frozen guard-verdict golden + the hypothesis differential (CI-time nets) and the flip-time burn-in of the LATER lane phases — never claimed as a runtime catch in this slice.",
+  "_comment": "Wheel-source freshness fingerprint (DEC-RUST-PULL-STATE-001; the brutex_feed / fno_math / trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_pull_state._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-pull-state surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught only by the frozen guard-verdict golden + the hypothesis differential (CI-time nets) and the flip-time burn-in of the LATER lane phases \u2014 never claimed as a runtime catch in this slice.",
   "crate_version": "0.1.0",
   "symbols": [
     "SOURCE_DIGEST",
     "__version__",
-    "pull_allowed_us"
+    "fno_only_note_surgery",
+    "market_hours_note_rewrite",
+    "pull_allowed_us",
+    "scope_token",
+    "spot_only_note_surgery"
   ]
 }
