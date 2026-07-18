@@ -1834,6 +1834,22 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          # DEC-AUDIT-ALERT-CLAMP-OBS-001: strict gate on the idle server
+          # heartbeat (pure observability daemon, no dashboard import — the
+          # spawn/clock/RSS-probe seams are injected, so it is standalone-gateable).
+          if compgen -G "tests/unit/test_server_heartbeat.py" > /dev/null; then
+            pytest --cov=brutex.observability.server_heartbeat --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_server_heartbeat.py
+          else
+            echo "(brutex.observability.server_heartbeat test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-KEEPAWAKE-001: strict gate on the macOS keep-awake guard
+          # (pure observability context manager, injected spawn/platform seams —
+          # standalone-gateable at 100% line+branch with no real caffeinate).
+          if compgen -G "tests/unit/test_power_keepawake.py" > /dev/null; then
+            pytest --cov=brutex.observability.power_keepawake --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_power_keepawake.py
+          else
+            echo "(brutex.observability.power_keepawake test file not present yet — gate inactive)"
+          fi
           # DEC-STORED-DATA-VALIDATION-001: the frame-level stored-OHLC price-sanity
           # checks (positivity + ordering) consumed by the prebuild 1-minute read
           # boundary + the lake invariant scanner. Pure polars expressions,
@@ -2053,8 +2069,13 @@ jobs:
           else
             echo "(re-pull-until-clean property test file not present yet — gate inactive)"
           fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: option_dedup gained the L3
+          # candle_dedup_key (+ the shared _blake3_key core); its dedicated
+          # suite test_option_dedup_candle_key.py joins the module's static
+          # pairing (the PR #1090/#1096 lesson: a new test file for a gated
+          # module joins that module's static pairing).
           if compgen -G "tests/unit/test_option_dedup.py" > /dev/null; then
-            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py
+            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py tests/unit/test_option_dedup_candle_key.py
           else
             echo "(brutex.data.option_dedup test file not present yet — gate inactive)"
           fi
@@ -2062,6 +2083,25 @@ jobs:
             pytest --cov=brutex.data.lmdb_membership --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lmdb_membership.py
           else
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
+          fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the P-20/L3 replay-capture
+          # producer (env-gated BarSink wrapper buffering LAKE_APPEND_WRITTEN
+          # + L3 "add" records for the controller-thread drains) — NEW module
+          # -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_audit_capture_sink.py" > /dev/null; then
+            pytest --cov=brutex.data.audit_capture --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_audit_capture_sink.py
+          else
+            echo "(brutex.data.audit_capture test file not present yet — gate inactive)"
+          fi
+          # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the audit->Parquet replay engine
+          # + byte oracle (replay_lake_from_audit / check_capture_anchors /
+          # assert_lake_byte_equal) — NEW module -> its own strict 100%
+          # line+branch gate (orchestrator per-module gates are safe post
+          # DEC-ORCH-LAZY-BLOOM-001).
+          if compgen -G "tests/unit/test_lake_replay.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.lake_replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lake_replay.py
+          else
+            echo "(brutex.orchestrator.lake_replay test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
           # HISTORICAL NOTE (resolved): orchestrator modules originally could
@@ -2248,6 +2288,11 @@ jobs:
           # tests/unit/test_pull_jobs_beat_channel.py (stem-matched for the
           # discovery gate), which MUST join this gate so its coverage of
           # those lines registers (without it the module reads 96.95%).
+          # DEC-SWEEP-JOB-LOCK-POSTURE-001 (#1770): the REAL-path one-click
+          # sweep regression (the unfaked route → cmd_sweep_all chain that
+          # exposed the sweep-kind job's pull-EX self-deadlock) is co-run in
+          # tests/integration/test_dashboard_sweep_run_real.py so the
+          # fixture-blindspot closer stays co-located with the module gate.
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
@@ -2257,7 +2302,8 @@ jobs:
               tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
-              tests/integration/test_dashboard_e2e.py
+              tests/integration/test_dashboard_e2e.py \
+              tests/integration/test_dashboard_sweep_run_real.py
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
@@ -2815,7 +2861,13 @@ jobs:
   # The pre-shard job's timeout ratchet history (15→25→40→60→75→120→
   # 150→180 minutes — every raise a wall-kill with zero real failures)
   # is retired with the monolith; see git history at the pre-shard
-  # revision for the full per-raise evidence.
+  # revision for the full per-raise evidence. Club P's concurrent
+  # 75 -> 95 raise (2026-07-09, PR #1369 run 29051387891 — a 75:17
+  # wall-kill with every executed step green; sibling green run
+  # 29045280302 measured 74:56) and its MERGE-UNION-to-150 note
+  # (2026-07-11, PR #1369 origin/main fold) retire into this same
+  # history — recorded here because the monolith block they annotated
+  # is gone (same union rule, no gate weakened).
   #
   # FAIL-CLOSED LAW: `if: ${{ !cancelled() }}` + the explicit
   # upstream-result check as the FIRST step. Without it a red shard

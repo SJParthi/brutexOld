@@ -8,7 +8,9 @@ bridge, in-process push, idle), and the ``GET /api/v1/sweep-progress`` route.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,52 @@ def _running_snapshot() -> dict[str, object]:
     progress.start(enumerated=100)
     progress.advance(current="NIFTY/1minute/bull")
     return progress.snapshot().to_dict()
+
+
+@contextmanager
+def _entered_run_core(results_root: Path, progress_path: Path) -> Generator[None, None, None]:
+    """Enter the REAL run core so its G4 launch baseline lands at *progress_path*.
+
+    The scoped-review round-2 harness: no faked payload — the on-disk bridge
+    file is exactly what ``RunCoreHandles._reset_progress_at_launch`` writes at
+    core ENTER, before any per-tuple ``publish_progress`` tick.
+    """
+    from typing import Any, cast
+
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.engine.sweep_run_core import sweep_run_core
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.observability.run_tripwires import TripwireConfig
+    from brutex.strategies.types import Side
+
+    class _SpyAlerter:
+        def __getattr__(self, name: str) -> Any:
+            return lambda *a, **k: None
+
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+    )
+    with sweep_run_core(
+        results_root=results_root,
+        grid=grid,
+        alerter=cast("SweepAlerter", _SpyAlerter()),
+        entry_label="unit test",
+        tripwire_config=TripwireConfig(),
+        diffcheck_k=0,
+        progress_path=progress_path,
+    ):
+        yield
 
 
 class TestSweepProgressState:
@@ -47,10 +95,72 @@ class TestSweepProgressState:
         progress_file = tmp_path / "sweep-progress.json"
         on_disk = _running_snapshot()
         on_disk["enumerated"] = 999
+        # A FRESH wall_time stamp, as publish_progress writes it — a running
+        # claim without one is DEAD EVIDENCE and would (correctly) be ignored.
+        on_disk["wall_time"] = time.time()
         progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
         state.sweep_progress_path = progress_file
         view = state.sweep_progress_view()
         assert view["enumerated"] == 999  # file wins over the in-process push
+
+    def test_stale_running_file_decays_to_in_process(self, tmp_path: Path) -> None:
+        """A SIGKILLed writer's frozen running=True file is dead evidence (review fold).
+
+        Fails-before: ``sweep_progress_view`` preferred the file whenever it
+        existed with NO freshness bound, so a killed ``brutex sweep-all`` left a
+        phantom "running" view (+ Stop button) on the dashboard FOREVER.
+        """
+        from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+        state = DashboardState()
+        state.update_sweep_progress(_running_snapshot())
+        progress_file = tmp_path / "sweep-progress.json"
+        on_disk = _running_snapshot()
+        on_disk["enumerated"] = 999
+        on_disk["wall_time"] = time.time() - SWEEP_PROGRESS_MAX_AGE_S - 60.0
+        progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
+        state.sweep_progress_path = progress_file
+        view = state.sweep_progress_view()
+        assert view["enumerated"] == 100  # the stale file is ≡ absent
+
+    def test_stale_running_file_and_no_push_is_idle(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+        state = DashboardState()
+        progress_file = tmp_path / "sweep-progress.json"
+        on_disk = _running_snapshot()
+        on_disk["wall_time"] = time.time() - SWEEP_PROGRESS_MAX_AGE_S - 60.0
+        progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
+        state.sweep_progress_path = progress_file
+        view = state.sweep_progress_view()
+        assert view["state"] == "idle"
+        assert view["running"] is False
+
+    def test_running_file_without_wall_time_is_dead_evidence(self, tmp_path: Path) -> None:
+        """A pre-stamp / junk running file decays too (the #1593 non-finite posture)."""
+        state = DashboardState()
+        progress_file = tmp_path / "sweep-progress.json"
+        progress_file.write_text(json.dumps(_running_snapshot()), encoding="utf-8")
+        state.sweep_progress_path = progress_file
+        assert state.sweep_progress_view()["state"] == "idle"
+
+    def test_stale_terminal_file_never_decays(self, tmp_path: Path) -> None:
+        """A finished sweep's done/cancelled record stands regardless of age."""
+        from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+        state = DashboardState()
+        progress = SweepProgress()
+        progress.start(enumerated=3)
+        progress.advance(current="NIFTY/1minute")
+        progress.finish(detail="done")
+        on_disk = progress.snapshot().to_dict()
+        on_disk["wall_time"] = time.time() - SWEEP_PROGRESS_MAX_AGE_S - 3600.0
+        progress_file = tmp_path / "sweep-progress.json"
+        progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
+        state.sweep_progress_path = progress_file
+        view = state.sweep_progress_view()
+        assert view["state"] == "done"
+        assert view["running"] is False
 
     def test_missing_file_falls_back_to_in_process(self, tmp_path: Path) -> None:
         state = DashboardState()
@@ -64,6 +174,25 @@ class TestSweepProgressState:
         state = DashboardState()
         state.sweep_progress_path = tmp_path / "absent.json"
         assert state.sweep_progress_view()["state"] == "idle"
+
+    def test_fresh_run_core_launch_baseline_reads_running(self, tmp_path: Path) -> None:
+        """The REAL run-core launch baseline serves ``running: true`` pre-first-slot.
+
+        Fails-before (scoped-review round 2, the SUSTAINED MAJOR): the G4
+        ``_reset_progress_at_launch`` baseline carried ``wall_time_utc`` but NO
+        ``wall_time`` decay stamp, and ``progress_bridge_stale`` reads a
+        running claim with a missing stamp as DEAD evidence — so for the whole
+        first-tuple window (HOURS on a heavy k=5 tuple, before the first
+        APPLIED slot publishes) this view read idle and the v29 Stop button
+        never showed while the sweep was live.
+        """
+        progress_path = tmp_path / "progress" / "sweep-progress.json"
+        with _entered_run_core(tmp_path, progress_path):
+            state = DashboardState()
+            state.sweep_progress_path = progress_path
+            view = state.sweep_progress_view()
+            assert view["running"] is True
+            assert view["state"] == "running"
 
 
 class TestSweepProgressRoute:
@@ -134,6 +263,24 @@ class TestSweepProgressViewFileReadSeam:
 
         assert state.sweep_progress_view(file_read=_must_not_call)["state"] == "idle"
 
+    def test_file_read_stale_running_payload_decays(self, tmp_path: Path) -> None:
+        """The DEC-JOB-COOPERATIVE-CANCEL-001 staleness law covers the cached arm too.
+
+        A ``running=True`` payload served through the ``file_read`` seam whose
+        ``wall_time`` stamp is older than ``SWEEP_PROGRESS_MAX_AGE_S`` is DEAD
+        EVIDENCE ≡ absent — the view falls through to idle, exactly like the
+        direct-read arm (merge fold: #1640 cache seam × the staleness law).
+        """
+        from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+        state = DashboardState()
+        state.sweep_progress_path = tmp_path / "sweep-progress.json"
+        stale = _running_snapshot()
+        stale["wall_time"] = time.time() - SWEEP_PROGRESS_MAX_AGE_S - 60.0
+        view = state.sweep_progress_view(file_read=lambda path: stale)
+        assert view["state"] == "idle"
+        assert view["running"] is False
+
     def test_route_serves_cache_backed_file_bridge(self, tmp_path: Path) -> None:
         """End-to-end: the route's injected cache serves the file payload, stamped."""
         pytest.importorskip("fastapi")
@@ -145,6 +292,10 @@ class TestSweepProgressViewFileReadSeam:
         progress_file = tmp_path / "sweep-progress.json"
         on_disk = _running_snapshot()
         on_disk["enumerated"] = 999
+        # A FRESH wall_time stamp, as publish_progress writes it — a running
+        # claim without one is DEAD EVIDENCE under progress_bridge_stale
+        # (DEC-JOB-COOPERATIVE-CANCEL-001), on the cached arm too.
+        on_disk["wall_time"] = time.time()
         progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
         state.sweep_progress_path = progress_file
         app = build_app(state, sweep_progress_cache=SweepProgressCache(ttl_s=0.0))

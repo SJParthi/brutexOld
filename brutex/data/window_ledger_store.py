@@ -74,6 +74,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -246,6 +247,24 @@ def _derive_retry_count() -> int | None:
     return None
 
 
+def _derive_streak_provenance() -> str | None:
+    """Honest ``streak_provenance`` for a LEGACY row that predates the column: ``None``.
+
+    DEC-STREAK-PROVENANCE-001, the :func:`_derive_bars_net_new` twin of the
+    optional-column template: a legacy pull's contributing (channel, pull_id)
+    bumps are genuinely UNRECORDED — any reconstruction would be a fabrication
+    (Golden Rule #1), and ``""`` in particular would falsely claim "a KNOWN zero
+    contributing bumps" (the tri-state's honest reset value, reserved for a real
+    SUCCESS/reopen/plan reset). The absent column therefore ALWAYS loads as
+    ``None`` (unknown lineage). This trivial honest-unknown helper survives the
+    DEC-RUST-RUNID-STORES-001 codec move (the pyarrow ``_rows_to_records`` /
+    ``_rows_to_table`` bodies did not — the kernel's ``coerce_raw_row`` owns
+    per-row coercion) because it is the legacy status-log migration's
+    honest-``None`` derivation, not a codec body.
+    """
+    return None
+
+
 #: The exception set a per-file ledger Parquet read degrades on — the SAME set the
 #: pre-delta loader caught (wrong shape / IO / import), ONE source of truth for the
 #: base-degrade AND the per-delta skip (DEC-LEDGER-DELTA-FLUSH-001). The kernel
@@ -292,7 +311,7 @@ _INTERNED_COLUMNS: Final[frozenset[str]] = frozenset(
 def _read_ledger_file_rows(
     path: Path, *, pool: brutex_identity.LedgerStringPool | None = None
 ) -> list[tuple[Any, ...]]:
-    """Read ONE ledger-shaped Parquet into the coerced 16-field row tuples.
+    """Read ONE ledger-shaped Parquet into the coerced 17-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
     the per-DELTA fold — since DEC-RUST-RUNID-STORES-001 one byte read plus the
@@ -393,13 +412,14 @@ def load_window_ledger(
     return ledger
 
 
-#: One serialised ledger row — EXACTLY the 16-field tuple :meth:`WindowLedger.to_rows`
+#: One serialised ledger row — EXACTLY the 17-field tuple :meth:`WindowLedger.to_rows`
 #: emits (and :meth:`WindowLedger.from_rows` restores); the ONE spelling lives on the
 #: ledger module as :data:`~brutex.data.window_ledger.LedgerRowTuple` (CLAUDE.md §11
 #: COMMON) and this store-side name aliases it. The merge-on-save operates on this
 #: shape directly so the conflict rule below is pure + unit-testable. The trailing
-#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` are ``int | None``
-#: (``None`` = honest unknown for a legacy row).
+#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` (``int | None``)
+#: and ``streak_provenance`` (``str | None``) are nullable (``None`` = honest
+#: unknown for a legacy row).
 LedgerRow = LedgerRowTuple
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
@@ -515,6 +535,10 @@ def render_ledger_parquet(rows: Sequence[LedgerRow]) -> bytes:
     ``tests/golden/test_window_ledger_bytes_probe.py``). Deterministic: same
     rows → same bytes (one row group, zstd-3, no clock/randomness).
     """
+    # L14-PHASE-B: post merge-forward onto main 4c11f7aa the record-side (window_ledger.py)
+    # emits 17-field row tuples incl. streak_provenance (DEC-STREAK-PROVENANCE-001, #1512),
+    # but the brutex_identity kernel is still 16-col. This delegation is intentionally
+    # left thin; Phase B extends LEDGER_COLUMNS/codec/coerce/python.rs to 17 (see spec §6).
     return bytes(brutex_identity.render_ledger_parquet(rows))
 
 
@@ -917,6 +941,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # retries — honest unknown (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=_derive_retry_count(),
                 transient_retries=_derive_retry_count(),
+                # ...nor the streak's per-bump lineage — honest unknown
+                # (DEC-STREAK-PROVENANCE-001).
+                streak_provenance=_derive_streak_provenance(),
             )
         )
 
@@ -939,6 +966,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.bars_net_new,
                 r.empty_retries,
                 r.transient_retries,
+                r.streak_provenance,
             )
             for r in by_window.values()
         ),
@@ -1171,6 +1199,7 @@ def seed_enclosed_windows(
     *,
     now: datetime,
     today_ist: date | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for each candidate window the lake ENCLOSES — the COMMON core.
 
@@ -1242,17 +1271,23 @@ def seed_enclosed_windows(
     detector; note the abstain now keys on the DATASET's first/last covered
     dates, so a span reaching past holiday coverage abstains for ALL its
     windows — conservative in the seed direction, byte-identical to the
-    span-only path); the seed calls :func:`interior_gap_runs` WITHOUT the
-    DEC-CALENDAR-OBSERVED-SESSIONS-001 ``observed=`` drift overlay the
-    fetch-time detector threads (``ingest.observe_interior_gap`` passes
-    ``observed=observed_holidays``; the reconcile chokepoints have no overlay
-    plumbed), so on a vendor-observed holiday the seed counts one more bar-less
-    "session" than the classifier would — the overlay is REMOVE-only, so the
-    omission can only EXTEND a run: at worst ONE conservative refusal → one
-    idempotent re-fetch, after which the recorded row trips ``has_window`` and
-    the gate is permanently silent (a single drift day can never mint a
-    >tolerance run alone; threading the overlay to the reconcile callers is a
-    named follow-up, NOT claimed — wiring-review fold, PR #1158);
+    span-only path); the seed threads the DEC-CALENDAR-OBSERVED-SESSIONS-001
+    *observed* drift overlay into :func:`interior_gap_runs` — CLOSED by
+    DEC-SEED-OBSERVED-OVERLAY-001 (previously the reconcile chokepoints had no
+    overlay plumbed, so on a vendor-observed holiday the seed counted one more
+    bar-less "session" than the fetch-time classifier and refused a window the
+    classifier called continuous — one redundant vendor re-fetch per cold
+    start); the caller HOISTS its ONE per-pull ``load_observed_holidays`` read
+    above the reconcile so the seed and the fetch-time detectors share ONE
+    consistent snapshot (single source of truth; the shared run-walker breaks
+    a run on every COVERED static session BEFORE consulting the overlay, so
+    threading the remove-only overlay can only SHORTEN runs — the seed
+    becomes strictly MORE permissive, never newly refusing, for EVERY overlay
+    shape: a STALE entry over a since-backfilled covered day — reachable,
+    because an entry self-heals only when ``brutex detect-session-drift``
+    next re-runs, NOT the moment bars appear — can no longer MERGE its two
+    flanking runs into a super-tolerance refusal; the property-pinned
+    monotonicity law, pinned WITHOUT a disjointness restriction);
     sub-tolerance holes still seed; and CONVERGENCE after a
     refusal is fetch-verdict-dependent — a run CONTAINED in one window is
     demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a
@@ -1330,7 +1365,12 @@ def seed_enclosed_windows(
                     continue
                 if span_key not in runs_by_span:
                     try:
-                        runs_by_span[span_key] = interior_gap_runs(covered_dates=sessions)
+                        # SAME per-pull *observed* snapshot the fetch-time detectors
+                        # read (DEC-SEED-OBSERVED-OVERLAY-001) — the memo stays valid
+                        # because *observed* is constant per call.
+                        runs_by_span[span_key] = interior_gap_runs(
+                            covered_dates=sessions, observed=observed
+                        )
                     except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
                         runs_by_span[span_key] = exc
                 runs = runs_by_span[span_key]
@@ -1381,6 +1421,7 @@ def reconcile_ledger_windows(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
 
@@ -1404,6 +1445,12 @@ def reconcile_ledger_windows(
     would land a SUCCESS row at a window boundary the bounded plan never created — an
     ORPHAN row the completeness page would miscount. ``None`` (the default) tiles the
     global range, byte-identical to the pre-feature behaviour.
+
+    *observed* (DEC-SEED-OBSERVED-OVERLAY-001): the per-pull observed-sessions
+    drift overlay (``load_observed_holidays``), threaded into the seed's
+    interior-gap continuity gate so the seed and the fetch-time detectors judge
+    the SAME calendar (see :func:`seed_enclosed_windows`). ``frozenset()`` (the
+    default) is byte-identical to the pre-threading behaviour.
     """
     # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
     # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
@@ -1461,7 +1508,7 @@ def reconcile_ledger_windows(
                         span_key,
                     )
 
-    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp)
+    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp, observed=observed)
 
 
 def reconcile_ledger_with_lake(
@@ -1476,6 +1523,7 @@ def reconcile_ledger_with_lake(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Load the lake spans + seed the ledger cold-start (the wired entry point).
 
@@ -1508,6 +1556,7 @@ def reconcile_ledger_with_lake(
         market=market,
         window_days_for=window_days_for,
         symbol_windows=symbol_windows,
+        observed=observed,
     )
 
 

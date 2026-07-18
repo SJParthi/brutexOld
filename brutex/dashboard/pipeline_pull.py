@@ -79,11 +79,6 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.dashboard.composite_pull import CompositePullReport
-from brutex.dashboard.metadata_pull import MetadataPullReport
-from brutex.dashboard.movers_warm import MoversWarmResult
-from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
-
 # The verdict dataclass lives in the LEAF brutex.dashboard.pipeline_verdict
 # (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
 # sit BELOW this sequencer in the module import graph, so housing it here made
@@ -93,6 +88,11 @@ from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 # The ``as`` self-alias is the explicit-re-export idiom mypy strict's
 # no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
 # the per-line noqa (the repo's per-line-noqa-with-rationale house style).
+from brutex.adapters.ingest_common import CancelCheck
+from brutex.dashboard.composite_pull import CompositePullReport
+from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
+from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
@@ -165,6 +165,18 @@ PHASE_PREBUILD = "prebuild"
 SEGMENT_SPOT = "spot"
 SEGMENT_FUTURES = "futures"
 SEGMENT_OPTIONS = "options"
+
+#: The honest cancelled-pipeline headline (DEC-JOB-COOPERATIVE-CANCEL-001):
+#: an amber PARTIAL, never a red error, never a fabricated "complete".
+_CANCEL_NOTE: Final[str] = (
+    "pull cancelled by operator — completed windows are durable "
+    "(ledger checkpointed); the next pull resumes the remainder"
+)
+
+
+def _cancel_requested(should_stop: CancelCheck | None) -> bool:
+    """``True`` iff the cooperative-cancel probe is wired AND reads ``True`` — O(1)."""
+    return should_stop is not None and should_stop()
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -1073,6 +1085,7 @@ def _run_staged_pipeline(
     warm_futures_movers: Callable[[], MoversWarmResult] | None,
     warm_options_movers: Callable[[], MoversWarmResult] | None,
     strict_gate: bool,
+    should_stop: CancelCheck | None,
     market_closed: Callable[[], bool] | None,
     vendor: str,
 ) -> PipelinePullReport:
@@ -1103,6 +1116,19 @@ def _run_staged_pipeline(
       predicate — a guard-free vendor profile passes ``market_closed=None``
       and never defers (the ADR Decision 4 per-vendor guard binding; the
       binder is WS-C).
+    * **Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001, the staged
+      mirror of the legacy between-phases probe):** *should_stop* is
+      consulted after EVERY invoked stage — a cancel observed after stage k
+      stops the chain with the SEQUENCER-minted
+      ``stopped_after = "<stage k> (cancelled)"`` (cancel WINS over the gate
+      verdict, the legacy ordering law — the cancel check precedes the
+      phase gate), the just-run stage's status stays HONEST (``settled`` /
+      ``failed`` as measured — never fake-settled), every later PRESENT
+      stage is marked ``skipped`` by the fail-closed arm, ABSENT stages
+      keep their vacuous ``absent`` token (the Decision 3 contract is
+      undisturbed), and the movers warm is withheld (``stopped_after`` set).
+      Durable work stands; the next pull resumes the remainder. ``None``
+      (every cancel-free caller) is byte-identical.
     * **Halts (§11):** any other exception is a vendor-halt — ONE
       ``pipeline.stage.halted`` event (vendor + stage tokens) then RE-RAISE
       to the job layer's CRITICAL pull-halt handling; ``LakeWriteHalt`` is
@@ -1158,6 +1184,7 @@ def _run_staged_pipeline(
     )
     status: dict[str, str] = {}
     stopped_after: str | None = None
+    cancelled = False
     with shared_pull_ledger_scope():
         for token, fn, vendor_stage in plan:
             if fn is None:
@@ -1223,6 +1250,21 @@ def _run_staged_pipeline(
                 status[token] = STAGE_STATUS_FAILED
                 stopped_after = token
                 _LOG.warning("pipeline.stage.settled", vendor=vendor, stage=token, ok=False)
+            if _cancel_requested(should_stop):
+                # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001)
+                # — the staged mirror of the legacy between-phases probe,
+                # consulted after EVERY invoked stage. CANCEL WINS over the
+                # gate verdict (the legacy ordering law: the cancel check
+                # precedes the phase gate), so the minted token reads
+                # "<stage> (cancelled)" either way, while the stage's own
+                # status above stays honest (settled/failed as measured —
+                # never fake-settled). Every later PRESENT stage takes the
+                # fail-closed `skipped` arm; ABSENT stages keep their vacuous
+                # token (the Decision 3 contract is undisturbed). Durable
+                # work stands; the next pull resumes the remainder.
+                cancelled = True
+                stopped_after = f"{token} (cancelled)"
+                _LOG.warning("pipeline.stage.cancelled", vendor=vendor, stage=token, ok=ok)
     # Movers warm — the §4.1 supersession-4 staged-graph law (no terminal
     # prebuild exists to gate on): spot-prebuild ok ∧ futures-prebuild ok ∧
     # options settled, each vacuously ok when ABSENT (Decision 3), and only
@@ -1255,9 +1297,13 @@ def _run_staged_pipeline(
                 failed=dict(segment_movers_failed),
                 vendor=vendor,
             )
-    note = _staged_note(vendor, stopped_after, status) + _movers_note_clause(
-        segment_movers_warmed, segment_movers_failed
-    )
+    note = _staged_note(vendor, stopped_after, status)
+    if cancelled:
+        # The honest amber-partial guidance rides the staged note too
+        # (DEC-JOB-COOPERATIVE-CANCEL-001 — one cancel vocabulary across
+        # both shapes).
+        note += f" — {_CANCEL_NOTE}"
+    note += _movers_note_clause(segment_movers_warmed, segment_movers_failed)
     return PipelinePullReport(
         spot=None,
         metadata=None,
@@ -1282,6 +1328,7 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    should_stop: CancelCheck | None = None,
     market_closed: Callable[[], bool] | None = None,
     run_spot_daily: Callable[[], StageOutcome] | None = None,
     run_prebuild_spot: Callable[[], StageOutcome] | None = None,
@@ -1292,6 +1339,21 @@ def run_full_pipeline(
     vendor: str = "groww",
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, consulted BETWEEN phases (the phase bodies additionally
+    thread it to their own window boundaries): a cancel observed after phase k
+    stops the chain with ``stopped_after = "<phase k> (cancelled)"`` and an
+    honest note — the completed phases' durable state stands, the skipped
+    phases run on the next pull. ``None`` (every legacy caller) is
+    byte-identical. Composes with the existing gate-failure stop (a cancelled
+    report is never ``ok``). The STAGED shape
+    (DEC-STAGED-SEQUENCER-SEAMS-001) threads the SAME probe through
+    :func:`_run_staged_pipeline` — consulted after every invoked stage, the
+    sequencer-minted ``stopped_after = "<stage> (cancelled)"`` stop, later
+    PRESENT stages honestly ``skipped``, ABSENT stages vacuously settled
+    (the Decision 3 contract undisturbed), movers warm withheld — a staged
+    caller's cancel is NEVER silently ignored.
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -1508,6 +1570,7 @@ run_options, run_greeks
             warm_futures_movers=warm_futures_movers,
             warm_options_movers=warm_options_movers,
             strict_gate=strict_gate,
+            should_stop=should_stop,
             market_closed=market_closed,
             vendor=vendor,
         )
@@ -1564,6 +1627,21 @@ run_options, run_greeks
                 f"BulkSpotReport; got {type(spot).__name__} — bind the staged "
                 "callables for a protocol-shaped vendor graph"
             )
+        if _cancel_requested(should_stop) or spot.cancelled:
+            # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spot
+            # phase either observed the cancel at a window boundary (report
+            # ``cancelled=True``) or the request landed between phases. Stop the
+            # chain honestly — durable work stands, the next pull resumes.
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=f"{PHASE_SPOT} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
         if not spot_phase_ok(spot):
             quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
             return PipelinePullReport(
@@ -1617,6 +1695,17 @@ run_options, run_greeks
                 stopped_after=PHASE_MARKET_HOURS,
                 note=_market_hours_stop_note(),
             )
+        if _cancel_requested(should_stop):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=f"{PHASE_METADATA} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
         if not metadata_phase_ok(metadata):
             quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
             return PipelinePullReport(
@@ -1657,6 +1746,21 @@ run_options, run_greeks
                 note=_market_hours_stop_note(),
             )
         historical = run_historical(prior)
+        if _cancel_requested(should_stop):
+            # A cancel observed during/after the historical phase: skip the
+            # post-steps (prebuild + movers warm) — nothing is lost, the next
+            # clean pull derives (DEC-JOB-COOPERATIVE-CANCEL-001).
+            quarantined_names = derive_quarantined_name_set(spot, historical)
+            quarantined, quarantined_count = _cap_quarantined(quarantined_names)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=historical,
+                stopped_after=f"{PHASE_HISTORICAL} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of

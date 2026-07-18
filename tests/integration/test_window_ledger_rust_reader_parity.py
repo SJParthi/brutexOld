@@ -441,7 +441,7 @@ class TestEmptyLedgerWatchItem:
                 assert conn.execute(
                     "SELECT COUNT(*) FROM read_parquet(?)", [f.as_posix()]
                 ).fetchone() == (0,)
-            assert descs[0] == descs[1] and len(descs[0]) == 16
+            assert descs[0] == descs[1] and len(descs[0]) == 17
         for lake in lakes.values():
             assert wls.load_window_ledger(lake).to_rows() == []
             db_view._reset_ledger_read_cache()

@@ -77,7 +77,9 @@ __all__ = [
     "AUTO_RESUME_ON_BOOT_ENV",
     "IncompletePull",
     "LedgerLike",
+    "MasterGateVerdict",
     "ResumeVerdict",
+    "classify_auto_resume_master",
     "detect_incomplete_pull",
     "maybe_resume_on_boot",
     "resolve_auto_resume_master",
@@ -103,6 +105,14 @@ AUTO_RESUME_ON_BOOT_ENV: Final[str] = "BRUTEX_AUTO_RESUME_ON_BOOT"
 #: The truthy set (case-insensitive) that ENABLES the flag — identical to the
 #: sibling fetch-gate toggles so the operator learns ONE convention (CLAUDE.md §11).
 _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+#: The EXPLICIT falsy set (case-insensitive) — the same disable tokens the
+#: sibling ``pull_intent._FALSY`` accepts, so the operator writes the same
+#: words everywhere (CLAUDE.md §11 COMMON). Used ONLY to classify a disabled
+#: master gate for log honesty (:func:`classify_auto_resume_master`): an
+#: explicit falsy token is a deliberate operator choice, junk is not — both
+#: still disable (fail-safe), but the boot gate logs them differently.
+_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 
 
 class _ProgressCounts(Protocol):
@@ -219,6 +229,53 @@ def resolve_auto_resume_on_boot(env: Mapping[str, str] | None = None) -> bool:
     return raw.strip().lower() in _TRUTHY
 
 
+@dataclass(frozen=True, slots=True)
+class MasterGateVerdict:
+    """The classified master-gate reading — one honest verdict per boot.
+
+    Produced by :func:`classify_auto_resume_master` so the boot gate can log
+    the TRUE reason auto-resume stayed off (DEC-AUTO-RESUME-DEFAULT-OFF-001
+    review round 1): an unset/blank env is the silent default, an explicit
+    falsy token is a deliberate operator choice, and junk is loud (a WARNING —
+    the operator probably meant to enable it). Every non-truthy state disables
+    (fail-safe); only the LOG treatment differs.
+    """
+
+    #: ``True`` iff the gate is explicitly enabled (a ``_TRUTHY`` token).
+    enabled: bool
+    #: One of ``"enabled"`` / ``"default_off"`` (unset or blank) /
+    #: ``"explicit_off"`` (a ``_FALSY`` token) / ``"junk_off"`` (unrecognised).
+    state: str
+    #: The RAW env value as read (``None`` when unset) — for honest log echo.
+    raw: str | None
+
+
+def classify_auto_resume_master(env: Mapping[str, str] | None = None) -> MasterGateVerdict:
+    """Read + classify :data:`AUTO_RESUME_MASTER_ENV` — the honest gate verdict.
+
+    The ONE reader of the master gate (``resolve_auto_resume_master`` delegates
+    here, so the boolean and the classification can never drift). Unset and
+    blank both read ``"default_off"`` (nothing was chosen); an explicit
+    :data:`_FALSY` token reads ``"explicit_off"``; any other non-truthy value
+    reads ``"junk_off"`` — STILL disabled (fail-safe, never raises; CLAUDE.md
+    §2 Rule 6 — a gate can never be enabled by accident) but distinguishable so
+    the boot gate can WARN instead of silently ignoring a probable typo. *env*
+    defaults to :data:`os.environ`; a test injects its own mapping. O(1).
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    raw = source.get(AUTO_RESUME_MASTER_ENV)
+    if raw is None:
+        return MasterGateVerdict(enabled=False, state="default_off", raw=None)
+    token = raw.strip().lower()
+    if token in _TRUTHY:
+        return MasterGateVerdict(enabled=True, state="enabled", raw=raw)
+    if not token:
+        return MasterGateVerdict(enabled=False, state="default_off", raw=raw)
+    if token in _FALSY:
+        return MasterGateVerdict(enabled=False, state="explicit_off", raw=raw)
+    return MasterGateVerdict(enabled=False, state="junk_off", raw=raw)
+
+
 def resolve_auto_resume_master(env: Mapping[str, str] | None = None) -> bool:
     """Resolve the MASTER boot-resume kill switch from the env — default OFF.
 
@@ -229,23 +286,23 @@ def resolve_auto_resume_master(env: Mapping[str, str] | None = None) -> bool:
     identical to the sibling :func:`resolve_auto_resume_on_boot` truthy set, so
     the operator learns ONE convention (CLAUDE.md §11 COMMON). ANY other value —
     unset, blank, ``"0"``, ``"false"``, or unrecognised — returns ``False``
-    (junk is mapped to the safe default-OFF SILENTLY, never raising, mirroring
-    the sibling resolvers exactly; CLAUDE.md §2 Rule 6 — a gate can never be
-    enabled by accident). *env* defaults to :data:`os.environ`; a test injects
-    its own mapping. O(1).
+    (junk still disables — fail-safe, never raises; CLAUDE.md §2 Rule 6 — a
+    gate can never be enabled by accident — but the boot gate logs it LOUDLY
+    via :func:`classify_auto_resume_master`, ``auto_resume.junk_value_disabled``,
+    instead of silently ignoring a probable typo). *env* defaults to
+    :data:`os.environ`; a test injects its own mapping. O(1).
 
     HONEST (Golden Rule #10): making the crash-recovery boot-resume OPT-IN is a
     DELIBERATE behaviour change by operator directive — it overrides the prior
     default-ON of the intent arm (``BRUTEX_PULL_INTENT_RESUME``), so a leftover
     ``<lake>/.pull_intent.json`` can no longer auto-launch a full-universe pull
     on boot. The two per-arm sub-gates still apply BENEATH this master gate once
-    it is on.
+    it is on. A persisted intent carries NO age bound today (a stale-intent TTL
+    is a NAMED follow-up, deferred to the #1699 pack) — so an AGED intent fires
+    only after this explicit opt-in; at the default OFF it surfaces as a
+    WARNING + banner, never a launch.
     """
-    source: Mapping[str, str] = os.environ if env is None else env
-    raw = source.get(AUTO_RESUME_MASTER_ENV)
-    if raw is None:
-        return False
-    return raw.strip().lower() in _TRUTHY
+    return classify_auto_resume_master(env).enabled
 
 
 def detect_incomplete_pull(ledger: LedgerLike) -> IncompletePull | None:
