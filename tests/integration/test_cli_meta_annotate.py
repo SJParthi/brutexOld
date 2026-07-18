@@ -33,7 +33,7 @@ pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
 
 from brutex import cli
-from brutex.cli import EXIT_OK, EXIT_USER_ERROR, cmd_sweep_all
+from brutex.cli import EXIT_INTERNAL_ERROR, EXIT_OK, EXIT_USER_ERROR, cmd_sweep_all
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
@@ -174,6 +174,58 @@ class TestCliOverSeededRun:
             ["meta-annotate", "--lake-root", str(tmp_path / "absent"), "--run-id", RUN_ID]
         )
         assert rc == EXIT_USER_ERROR
+
+    def test_malformed_lens_date_is_a_clean_user_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        lake = _seed_run(tmp_path / "lake")
+        rc = cli.main(
+            [
+                "meta-annotate",
+                "--lake-root",
+                str(lake),
+                "--run-id",
+                RUN_ID,
+                "--lens-start",
+                "not-a-date",
+            ]
+        )
+        assert rc == EXIT_USER_ERROR
+        assert "meta-annotate:" in capsys.readouterr().err
+
+    def test_explicit_lens_end_is_honored(self, tmp_path: Path) -> None:
+        lake = _seed_run(tmp_path / "lake")
+        rc = cli.main(
+            [
+                "meta-annotate",
+                "--lake-root",
+                str(lake),
+                "--run-id",
+                RUN_ID,
+                "--no-lens",
+                "--lens-end",
+                "2024-12-31",
+            ]
+        )
+        assert rc == EXIT_OK
+        meta, _summary = _artifacts(lake)
+        assert meta.is_file()
+
+    def test_skipped_stem_reads_internal_error_and_names_the_reason(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A corrupt stamp is a COUNTED skip (correct-or-absent): the CLI exits
+        # EXIT_INTERNAL_ERROR and names the stem + reason on stderr.
+        lake = _seed_run(tmp_path / "lake")
+        stamp = lake / "sweep_runs" / RUN_ID / "results-depth" / "NSE-NIFTY" / "5minute"
+        (next(stamp.glob("*.stamp.json"))).write_text("{not json", encoding="utf-8")
+        rc = cli.main(["meta-annotate", "--lake-root", str(lake), "--run-id", RUN_ID, "--no-lens"])
+        assert rc == EXIT_INTERNAL_ERROR
+        err = capsys.readouterr().err
+        assert "SKIPPED" in err
+        assert "stamp_invalid" in err
+        meta, _summary = _artifacts(lake)
+        assert not meta.exists()
 
 
 # ── the REAL sweep chain + the dormant in-sim gate refusal ──────────────────
