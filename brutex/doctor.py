@@ -30,13 +30,16 @@ Currently implemented checks
    DEC-FNOMATH-WHEEL-FRESHNESS-001 extends the SAME common check to
    the ``fno_math`` trade-sim wheel, urgent since
    DEC-SWEEP-RUST-TRADESIM-WIRE-001 #1182 wired ``ResidentSweepSim``
-   unflagged into the sweep hot path). ONE generic helper
+   unflagged into the sweep hot path;
+   DEC-RUST-RUNID-STORES-001's independent refuter round extends it
+   again to the ``brutex_identity`` run-identity + stores wheel, the
+   THIRD hard import). ONE generic helper
    (:func:`_check_one_wheel_freshness` over :class:`_WheelSpec`)
    compares each INSTALLED wheel (compiled-symbol surface +
    ``__build_crate_version__``) against its in-repo expected
    fingerprint (``rust/<crate>/python/<package>/EXPECTED_BUILD.json``).
    A mismatch is a non-fatal ``WARN`` with an actionable rebuild
-   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips BOTH wheel stages
+   message; ``BRUTEX_SKIP_WHEEL_FRESHNESS=1`` skips EVERY wheel stage
    ONLY (one escape hatch, deliberately shared).
    HONEST reachability envelope (Golden Rule #10): via the ``brutex``
    CLI these stages' WARN teeth are the drift classes that still
@@ -46,9 +49,10 @@ Currently implemented checks
    UNCONDITIONAL import-time handshake (no env escape; see the
    respective ``__init__.py`` for why one could not help) raises its
    own actionable ImportError first, because ``brutex.cli``
-   transitively imports both wheels at module import
+   transitively imports all three wheels at module import
    (``brutex.vocabulary`` → ``trading_core``; ``brutex.math`` →
-   ``fno_math``). That ImportError IS the operator remedy for the
+   ``fno_math``; ``brutex.strategies.combo`` → ``brutex_identity``).
+   That ImportError IS the operator remedy for the
    symbol-stale class; the "not importable" WARN arm is reachable
    only from programmatic ``run_doctor`` embeddings.
 4. **Wheel source digest** (DEC-RUST-SOURCE-DIGEST-TWIN-001 — closes the
@@ -598,9 +602,16 @@ class _WheelSpec:
     """One compiled-wheel freshness target for :func:`_check_one_wheel_freshness`.
 
     The COMMON descriptor (Golden Rule #11) that lets ONE generic check body
-    serve every PyO3 wheel BruteX ships — ``trading_core`` (R2-CC-G1) and
-    ``fno_math`` (DEC-FNOMATH-WHEEL-FRESHNESS-001) today; a future kernel is
-    one more spec, zero copy-paste.
+    serve every HARD-imported PyO3 wheel BruteX ships — ``trading_core``
+    (R2-CC-G1), ``fno_math`` (DEC-FNOMATH-WHEEL-FRESHNESS-001) and
+    ``brutex_identity`` (DEC-RUST-RUNID-STORES-001, added at its independent
+    refuter round — the round caught this docstring claiming "every PyO3
+    wheel" while the third hard wheel had no stage); a future kernel is one
+    more spec, zero copy-paste. HONEST census (Golden Rule #10): the
+    OPTIONAL default-OFF kernels (``brutex_feed`` — its doctor stage is the
+    named follow-up DEC-FEED-RUST-DOCTOR-STAGE-001 — and ``brutex_lake``)
+    are NOT yet covered; a stale one degrades to its Python oracle rather
+    than corrupting results, which is why the hard wheels came first.
 
     Attributes
     ----------
@@ -638,6 +649,13 @@ _FNO_MATH_WHEEL = _WheelSpec(
     crate_dir="rust/fno-math",
 )
 
+_BRUTEX_IDENTITY_WHEEL = _WheelSpec(
+    check_name="wheel_freshness_brutex_identity",
+    package="brutex_identity",
+    compiled_submodule="_brutex_identity",
+    crate_dir="rust/brutex-identity",
+)
+
 
 def _check_one_wheel_freshness(
     spec: _WheelSpec,
@@ -664,8 +682,9 @@ def _check_one_wheel_freshness(
       (Golden Rule #10): this arm is reachable ONLY from a programmatic
       :func:`run_doctor` / check call (tests, embeddings). Through the
       ``brutex`` CLI it can never execute — ``brutex.cli`` transitively
-      imports both wheels at module import (``brutex.vocabulary`` →
-      ``trading_core``; ``brutex.math`` → ``fno_math``), so a symbol-stale
+      imports all three wheels at module import (``brutex.vocabulary`` →
+      ``trading_core``; ``brutex.math`` → ``fno_math``;
+      ``brutex.strategies.combo`` → ``brutex_identity``), so a symbol-stale
       wheel kills the process with the shim's own actionable ImportError
       before any doctor stage runs. That ImportError names the missing
       symbols + the same rebuild command, so the operator remedy is
@@ -712,7 +731,7 @@ def _check_one_wheel_freshness(
         # stage is fingerprinting the installed .so itself, not the shim.
         # Dynamic import (ONE style — CodeQL py/import-and-import-from) still
         # raises ImportError on a missing/stale .so, so the WARN arm below is
-        # behavior-identical for both wheels.
+        # behavior-identical for every wheel spec.
         compiled = importlib.import_module(f"{spec.package}.{spec.compiled_submodule}")
     except ImportError as exc:
         return CheckResult(
@@ -835,6 +854,31 @@ def check_fno_math_wheel_freshness(
     return _check_one_wheel_freshness(_FNO_MATH_WHEEL, fingerprint_file, env)
 
 
+def check_brutex_identity_wheel_freshness(
+    fingerprint_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel-source freshness handshake for the brutex_identity wheel.
+
+    DEC-RUST-RUNID-STORES-001 (independent refuter round 2) — the
+    run-identity + stores kernel is the THIRD hard-imported wheel
+    (``brutex.strategies.combo`` / ``brutex.engine`` /
+    ``brutex.data.window_ledger_store`` import it unconditionally; the
+    Python computation bodies were deleted in the same lane), so it joins
+    the SAME common freshness helper the trading_core/fno_math wheels ride.
+
+    Parameters
+    ----------
+    fingerprint_file
+        Explicit path to the expected-fingerprint JSON. ``None`` = the
+        ``EXPECTED_BUILD.json`` next to the installed ``brutex_identity``
+        package (which IS the repo copy under ``maturin develop``).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_freshness(_BRUTEX_IDENTITY_WHEEL, fingerprint_file, env)
+
+
 def _default_crate_root(spec: _WheelSpec) -> Path:
     """Repo-checkout crate directory for ``spec`` (``rust/<crate>``).
 
@@ -891,7 +935,7 @@ def _check_one_wheel_source_digest(
     influence its own expected value. ONE NAMED residual: FRAMING v1
     excludes the crate's ``python/`` shim, yet maturin's mixed layout
     packages ``rust/<crate>/python/<pkg>/__init__.py`` INTO the wheel — so
-    a local wheel stale ONLY in the shim escapes all four wheel stages
+    a local wheel stale ONLY in the shim escapes all six wheel stages
     (this digest covers the compiled kernel's source; the freshness stages
     fingerprint the compiled module's version+symbols, not shim content).
     Folding the shim into a future FRAMING v2 is the named follow-up.
@@ -980,6 +1024,13 @@ _FNO_MATH_SOURCE_DIGEST = _WheelSpec(
     crate_dir=_FNO_MATH_WHEEL.crate_dir,
 )
 
+_BRUTEX_IDENTITY_SOURCE_DIGEST = _WheelSpec(
+    check_name="wheel_source_digest_brutex_identity",
+    package=_BRUTEX_IDENTITY_WHEEL.package,
+    compiled_submodule=_BRUTEX_IDENTITY_WHEEL.compiled_submodule,
+    crate_dir=_BRUTEX_IDENTITY_WHEEL.crate_dir,
+)
+
 
 def check_wheel_source_digest(
     crate_root: Path | None = None,
@@ -1024,6 +1075,30 @@ def check_fno_math_wheel_source_digest(
     return _check_one_wheel_source_digest(_FNO_MATH_SOURCE_DIGEST, crate_root, env)
 
 
+def check_brutex_identity_wheel_source_digest(
+    crate_root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """Wheel source-digest handshake for the brutex_identity wheel.
+
+    The brutex_identity twin of :func:`check_wheel_source_digest`, bound to
+    the SAME common helper (DEC-RUST-SOURCE-DIGEST-TWIN-001 mechanism;
+    DEC-RUST-RUNID-STORES-001 independent refuter round 2 — added together
+    with the freshness stage so the third hard-imported wheel gets BOTH
+    drift nets).
+
+    Parameters
+    ----------
+    crate_root
+        Explicit crate directory to digest. ``None`` = the repo checkout's
+        ``rust/brutex-identity`` resolved next to the installed ``brutex``
+        package (absent → honest SKIP).
+    env
+        Environment mapping (injected for tests). ``None`` = ``os.environ``.
+    """
+    return _check_one_wheel_source_digest(_BRUTEX_IDENTITY_SOURCE_DIGEST, crate_root, env)
+
+
 def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
@@ -1033,8 +1108,10 @@ def run_doctor(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -1073,6 +1150,14 @@ def run_doctor(
     fno_math_wheel_source_crate_root
         Explicit crate directory for the fno_math wheel-source-digest stage.
         ``None`` = the repo checkout's ``rust/fno-math``.
+    brutex_identity_wheel_fingerprint_file
+        Explicit expected-fingerprint JSON for the brutex_identity
+        wheel-freshness stage (DEC-RUST-RUNID-STORES-001). ``None`` = the
+        ``EXPECTED_BUILD.json`` shipped next to the installed
+        ``brutex_identity`` package.
+    brutex_identity_wheel_source_crate_root
+        Explicit crate directory for the brutex_identity wheel-source-digest
+        stage. ``None`` = the repo checkout's ``rust/brutex-identity``.
 
     Returns
     -------
@@ -1098,8 +1183,18 @@ def run_doctor(
     report.add(check_lake_uniqueness(resolved_lake))
     report.add(check_wheel_freshness(fingerprint_file=wheel_fingerprint_file))
     report.add(check_fno_math_wheel_freshness(fingerprint_file=fno_math_wheel_fingerprint_file))
+    report.add(
+        check_brutex_identity_wheel_freshness(
+            fingerprint_file=brutex_identity_wheel_fingerprint_file
+        )
+    )
     report.add(check_wheel_source_digest(crate_root=wheel_source_crate_root))
     report.add(check_fno_math_wheel_source_digest(crate_root=fno_math_wheel_source_crate_root))
+    report.add(
+        check_brutex_identity_wheel_source_digest(
+            crate_root=brutex_identity_wheel_source_crate_root
+        )
+    )
     return report
 
 
@@ -1112,8 +1207,10 @@ def main(
     lake_root: Path | None = None,
     wheel_fingerprint_file: Path | None = None,
     fno_math_wheel_fingerprint_file: Path | None = None,
+    brutex_identity_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    brutex_identity_wheel_source_crate_root: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -1125,8 +1222,10 @@ def main(
         lake_root=lake_root,
         wheel_fingerprint_file=wheel_fingerprint_file,
         fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
+        brutex_identity_wheel_fingerprint_file=brutex_identity_wheel_fingerprint_file,
         wheel_source_crate_root=wheel_source_crate_root,
         fno_math_wheel_source_crate_root=fno_math_wheel_source_crate_root,
+        brutex_identity_wheel_source_crate_root=brutex_identity_wheel_source_crate_root,
     )
     print(report.format())
     return 0 if report.ok else 1
