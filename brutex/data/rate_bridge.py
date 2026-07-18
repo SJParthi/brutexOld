@@ -50,8 +50,9 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.data.atomic_io import atomic_write_simple, lake_write_guard
 
 __all__ = [
@@ -289,6 +290,102 @@ def publish_from_snapshots(
     )
 
 
+#: The ten REQUIRED snapshot fields in the oracle's constructor probe order,
+#: with their coercion kind — the classifier's slot order (mirrored by the
+#: golden harness ``tests/golden/_rate_bridge_harness.py``, drift-pinned).
+_REQUIRED_BRIDGE_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("effective_rps", "float"),
+    ("current_rps", "float"),
+    ("recent_minute", "int"),
+    ("recent_429", "int"),
+    ("ceiling_per_min", "int"),
+    ("recent_1s", "int"),
+    ("recent_600s", "int"),
+    ("recent_3600s", "int"),
+    ("wall_time", "float"),
+    ("monotonic", "float"),
+)
+
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def _bridge_field_kind(payload: Mapping[str, Any], key: str, kind: str) -> int | None:
+    """One field's coercibility FACT — CPython's own taxonomy, probed.
+
+    ``None`` = the coercion raises ``OverflowError`` (a class the oracle's
+    ``except (KeyError, TypeError, ValueError)`` does NOT catch — the
+    documented pre-existing raises envelope): the whole payload stays on
+    the Python arm so flag-ON behaviour is identical by construction.
+    """
+    if key not in payload:
+        return _pull_state_rust.BRIDGE_FIELD_ABSENT
+    value = payload[key]
+    try:
+        if kind == "float":
+            float(value)
+        else:
+            int(value)
+    except (TypeError, ValueError):
+        return _pull_state_rust.BRIDGE_FIELD_BAD
+    except OverflowError:
+        return None
+    return _pull_state_rust.BRIDGE_FIELD_OK
+
+
+def _classify_bridge_payload_for_kernel(
+    data: object,
+) -> tuple[int, int, int, float, list[int], int] | None:
+    """MECHANICAL kernel-input classification of a decoded payload — no law.
+
+    The Wave-3H seam projection (DEC-RUST-PULL-STATE-001): every slot is a
+    concrete-type / coercibility FACT (``isinstance`` tags — ``bool``
+    probed before ``int`` because it subclasses ``int``; the schema
+    ``== 3`` equality, the all-ten-fields-coerce lattice and the
+    ``pull_active`` bool-or-None law all live in the Rust kernel).  A
+    non-Mapping root zeroes the field slots; the kernel refuses on the root
+    code before reading them.  ``None`` = the Python arm (an
+    ``OverflowError``-raising coercion probe — see
+    :func:`_bridge_field_kind`).  Mirrored 1:1 by the golden harness
+    (``tests/golden/_rate_bridge_harness.py``) and drift-pinned by the
+    frozen fixture + the seam suite.
+    """
+    if not isinstance(data, Mapping):
+        zero = [_pull_state_rust.BRIDGE_FIELD_ABSENT] * len(_REQUIRED_BRIDGE_FIELDS)
+        return (0, _pull_state_rust.BRIDGE_SCHEMA_MISSING, 0, 0.0, zero, 0)
+    schema = data.get("schema")
+    schema_int = 0
+    schema_float = 0.0
+    if schema is None:
+        schema_kind = _pull_state_rust.BRIDGE_SCHEMA_MISSING
+    elif isinstance(schema, bool):
+        schema_kind = _pull_state_rust.BRIDGE_SCHEMA_BOOL
+        schema_int = int(schema)
+    elif isinstance(schema, int):
+        if _I64_MIN <= schema <= _I64_MAX:
+            schema_kind = _pull_state_rust.BRIDGE_SCHEMA_INT
+            schema_int = schema
+        else:
+            schema_kind = _pull_state_rust.BRIDGE_SCHEMA_INT_HUGE
+    elif isinstance(schema, float):
+        schema_kind = _pull_state_rust.BRIDGE_SCHEMA_FLOAT
+        schema_float = schema
+    else:
+        schema_kind = _pull_state_rust.BRIDGE_SCHEMA_OTHER
+    field_kinds: list[int] = []
+    for key, kind in _REQUIRED_BRIDGE_FIELDS:
+        code = _bridge_field_kind(data, key, kind)
+        if code is None:
+            return None
+        field_kinds.append(code)
+    raw_pa = data.get("pull_active")
+    if isinstance(raw_pa, bool):
+        pa_kind = _pull_state_rust.BRIDGE_PA_TRUE if raw_pa else _pull_state_rust.BRIDGE_PA_FALSE
+    else:
+        pa_kind = _pull_state_rust.BRIDGE_PA_NONE
+    return (1, schema_kind, schema_int, schema_float, field_kinds, pa_kind)
+
+
 def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     """Best-effort read the lake-root bridge snapshot, or ``None`` (never raises).
 
@@ -319,6 +416,25 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     except (json.JSONDecodeError, ValueError):
         # A partial / corrupt write (a torn file, or non-UTF-8 bytes). Ignore it.
         return None
+    # --- rate_bridge (Wave 3H) Rust seam (DEC-RUST-PULL-STATE-001): the
+    # payload-verdict LATTICE consulted in Rust over the mechanically-
+    # classified codes (the file read + JSON decode — CPython's whole
+    # failure taxonomy — happened ABOVE; the coercion PROBES run in the
+    # classifier).  An INVALID kernel verdict is SERVED (the ``None``
+    # answer); a VALID one deliberately falls THROUGH to the byte-identical
+    # oracle body below, so the snapshot is only ever constructed on the
+    # ONE Python path (zero construction duplication; a kernel-vs-oracle
+    # disagreement on the valid arm is decided by the oracle — fail-safe).
+    # Any degrade (wheel missing/stale, kernel raise, out-of-vocabulary
+    # code) falls through too, and an OverflowError-probing payload never
+    # consults the kernel at all (classifier ``None`` — the documented
+    # Python arm whose oracle RAISE is preserved byte-for-byte).
+    if _pull_state_rust.pull_state_rust_enabled():
+        classified = _classify_bridge_payload_for_kernel(data)
+        if classified is not None:
+            verdict = _pull_state_rust.rust_bridge_payload_verdict(*classified)
+            if verdict is not None and verdict[0] != _pull_state_rust.BRIDGE_VERDICT_VALID:
+                return None
     if not isinstance(data, dict):
         return None
     if data.get("schema") != _SCHEMA_VERSION:

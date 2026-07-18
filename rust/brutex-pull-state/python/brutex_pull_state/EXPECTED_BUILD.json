@@ -8,6 +8,7 @@
     "auto_gate_decision",
     "auto_state_verdict",
     "auto_tick_decision",
+    "bridge_payload_verdict",
     "census_fold",
     "classify_pull_outcome",
     "fno_only_note_surgery",
@@ -16,6 +17,7 @@
     "intent_resume_enabled",
     "intent_shape_verdict",
     "market_hours_note_rewrite",
+    "memo_serve_arm",
     "muhurat_window_active",
     "progress_derived",
     "pull_allowed_us",
@@ -23,6 +25,7 @@
     "settle_token_verdict",
     "should_reload_master",
     "spot_only_note_surgery",
+    "token_revalidates",
     "verdict_correlates",
     "wedge_decision"
   ]

@@ -1438,3 +1438,178 @@ def rust_should_reload_master(
 __all__ += [
     "rust_should_reload_master",
 ]
+
+
+# --- rate_bridge + rate_bridge_cache (Wave 3H) -------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3H: the ``brutex/data/rate_bridge.py``
+# payload-verdict kernel + the ``brutex/dashboard/rate_bridge_cache.py``
+# memo decision kernels — the SAME guarded-consult discipline as the
+# sections above (lazy resolve via the ONE shared ``_resolve_kernel_symbol``
+# → ``_call_kernel`` defensive belt → refuse-poison gate → ``None`` = use
+# the byte-identical Python oracle).  Append-only section (the wave-worker
+# convention).
+#
+# BOUNDARY (the Wave-2E decode-stays-Python precedent): the bridge-file
+# read, the JSON decode (CPython's WHOLE failure taxonomy) and the
+# ``float()``/``int()`` coercion PROBES stay Python — the seam classifies
+# the already-decoded payload's concrete types / coercibility FACTS into
+# the small integer codes below (a MECHANICAL projection in
+# ``rate_bridge._classify_bridge_payload_for_kernel``); a payload whose
+# coercion probe raises ``OverflowError`` (the documented pre-existing
+# raises envelope — a 400-digit int in a float field, ``Infinity`` in an
+# int field) NEVER consults the kernel (the classifier abstains to the
+# Python arm, preserving the oracle's raise byte-for-byte).  For the cache,
+# the caller computes the age from ONE monotonic-clock read (clocks never
+# cross the FFI) and the thread core — lock, deadline guard, ``_inflight``
+# clearing law, degrade latch — is PERMANENT-PYTHON (the design §2.3
+# ruling); the seam's own fail-safe belt FORCES the follower arm while
+# ``_inflight`` is set, so a poisoned kernel can only ever degrade, never
+# spawn a second refresh.
+
+#: ``bridge_payload_verdict``'s VALID verdict — the seam falls through to
+#: the oracle's construction; every other in-vocabulary code (1..=12, the
+#: first violation in the oracle's probe order) means the ``None`` answer.
+BRIDGE_VERDICT_VALID: Final[int] = 0
+
+#: The whole served bridge-verdict vocabulary (0=valid · 1=not-mapping ·
+#: 2=schema · 3..=12 the ten required fields in constructor probe order) —
+#: anything else (incl. the kernel's own 255 bad-input answer, a
+#: classifier/wheel mismatch) is a stale/corrupt wheel and degrades.
+_BRIDGE_VERDICT_CODES: Final[frozenset[int]] = frozenset(range(13))
+
+#: ``schema``-kind codes (mirrors ``rust/brutex-pull-state/src/rate_bridge.rs``
+#: — ``bool`` probed before ``int`` because it subclasses ``int``; the
+#: ``== 3`` EQUALITY law itself lives in the kernel).
+BRIDGE_SCHEMA_MISSING: Final[int] = 0
+BRIDGE_SCHEMA_BOOL: Final[int] = 1
+BRIDGE_SCHEMA_INT: Final[int] = 2
+BRIDGE_SCHEMA_INT_HUGE: Final[int] = 3
+BRIDGE_SCHEMA_FLOAT: Final[int] = 4
+BRIDGE_SCHEMA_OTHER: Final[int] = 5
+
+#: Required-field coercibility codes (CPython-PROBED facts — the taxonomy
+#: stays Python; the all-ten-must-coerce LAW lives in the kernel).
+BRIDGE_FIELD_ABSENT: Final[int] = 0
+BRIDGE_FIELD_OK: Final[int] = 1
+BRIDGE_FIELD_BAD: Final[int] = 2
+
+#: ``pull_active`` arm codes (the kernel echoes the bool-or-None
+#: normalisation arm so the cross-language golden pins the law).
+BRIDGE_PA_NONE: Final[int] = 0
+BRIDGE_PA_FALSE: Final[int] = 1
+BRIDGE_PA_TRUE: Final[int] = 2
+
+_BRIDGE_PA_CODES: Final[frozenset[int]] = frozenset(range(BRIDGE_PA_TRUE + 1))
+
+#: The bridge verdict's kernel arity — ``(verdict, pull_active_arm)``.
+_BRIDGE_PAIR_ARITY: Final[int] = 2
+
+
+def rust_bridge_payload_verdict(
+    root_mapping: int,
+    schema_kind: int,
+    schema_int: int,
+    schema_float: float,
+    field_kinds: list[int],
+    pa_kind: int,
+) -> tuple[int, int] | None:
+    """Consult the kernel's bridge payload verdict; ``None`` = use the oracle.
+
+    Takes the classified-payload tuple UNPACKED (the
+    ``rate_bridge._classify_bridge_payload_for_kernel`` output —
+    ``root_mapping`` rides as the classifier's 0/1 int and is boolified
+    here).  Refuse-poison gate: EXACTLY a 2-tuple of EXACTLY-``int`` codes
+    inside the served vocabularies — the kernel's own 255
+    out-of-vocabulary-input answer (a classifier/wheel mismatch) degrades
+    as ``kernel_invalid``, never a verdict.
+    """
+    result = _call_kernel(
+        "bridge_payload_verdict",
+        bool(root_mapping),
+        schema_kind,
+        schema_int,
+        schema_float,
+        field_kinds,
+        pa_kind,
+    )
+    if result is _KERNEL_FAULT:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == _BRIDGE_PAIR_ARITY
+        and type(result[0]) is int
+        and type(result[1]) is int
+        and result[0] in _BRIDGE_VERDICT_CODES
+        and result[1] in _BRIDGE_PA_CODES
+    ):
+        return (result[0], result[1])
+    warn_degrade_once("kernel_invalid", symbol="bridge_payload_verdict", detail=repr(result)[:80])
+    return None
+
+
+#: The memo serve-arm vocabulary (mirrors
+#: ``rust/brutex-pull-state/src/rate_bridge_cache.rs`` — index == token).
+MEMO_ARM_CACHED_HIT: Final[int] = 0
+MEMO_ARM_FOLLOWER: Final[int] = 1
+MEMO_ARM_OWNER: Final[int] = 2
+
+_MEMO_ARMS: Final[frozenset[int]] = frozenset(range(MEMO_ARM_OWNER + 1))
+
+
+def rust_memo_serve_arm(age_s: float | None, ttl_s: float, inflight: bool) -> int | None:
+    """Consult the three-arm memo serve kernel; ``None`` = use the oracle.
+
+    ``age_s`` is the caller's PRE-COMPUTED clamped monotonic delta
+    (``None`` = never probed); the caller maps the arm to its ACTIONS
+    verbatim in Python — under its own fail-safe belt (an OWNER arm while
+    ``_inflight`` is set is FORCED to follower, so a poisoned kernel can
+    never break the single-flight law).  Belt + int-exact vocabulary gate
+    as everywhere on this facade.
+    """
+    token = _call_kernel("memo_serve_arm", age_s, ttl_s, inflight)
+    if token is _KERNEL_FAULT:
+        return None
+    if type(token) is not int or token not in _MEMO_ARMS:
+        warn_degrade_once("kernel_invalid", symbol="memo_serve_arm", detail=repr(token)[:80])
+        return None
+    return token
+
+
+def rust_token_revalidates(token: str | None, prior: str | None) -> bool | None:
+    """Consult the token-revalidation kernel; ``None`` = use the oracle.
+
+    The ``RateBridgeCache._refresh_body`` law — ``True`` = keep the memo,
+    skip the read; ``False`` = re-read.  A lone-surrogate token fails the
+    pyo3 ``&str`` edge inside the belt and degrades to the oracle
+    (verdict-identical — the oracle handles surrogates natively).
+    """
+    verdict = _call_kernel("token_revalidates", token, prior)
+    if verdict is _KERNEL_FAULT:
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once("kernel_invalid", symbol="token_revalidates", detail=repr(verdict)[:80])
+        return None
+    return verdict
+
+
+__all__ += [
+    "BRIDGE_FIELD_ABSENT",
+    "BRIDGE_FIELD_BAD",
+    "BRIDGE_FIELD_OK",
+    "BRIDGE_PA_FALSE",
+    "BRIDGE_PA_NONE",
+    "BRIDGE_PA_TRUE",
+    "BRIDGE_SCHEMA_BOOL",
+    "BRIDGE_SCHEMA_FLOAT",
+    "BRIDGE_SCHEMA_INT",
+    "BRIDGE_SCHEMA_INT_HUGE",
+    "BRIDGE_SCHEMA_MISSING",
+    "BRIDGE_SCHEMA_OTHER",
+    "BRIDGE_VERDICT_VALID",
+    "MEMO_ARM_CACHED_HIT",
+    "MEMO_ARM_FOLLOWER",
+    "MEMO_ARM_OWNER",
+    "rust_bridge_payload_verdict",
+    "rust_memo_serve_arm",
+    "rust_token_revalidates",
+]

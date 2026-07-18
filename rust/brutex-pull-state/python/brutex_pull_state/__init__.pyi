@@ -181,3 +181,23 @@ def should_reload_master(
     stale_economics: bool,
     stale_eligibility: bool,
 ) -> bool: ...
+
+# --- rate_bridge + rate_bridge_cache (Wave 3H) ---
+# The rate-bridge payload verdict (brutex/data/rate_bridge.py) + the
+# rate-bridge-cache memo laws (brutex/dashboard/rate_bridge_cache.py).
+# Classified codes / pre-computed ages cross in (the JSON decode, the
+# CPython float()/int() coercion probes and the monotonic clock stay
+# Python); a (verdict, pull_active_arm) pair / an arm token / a bool cross
+# out. The token pair is the one string edge (production tokens are ASCII
+# mtime:size:ino triples).
+
+def bridge_payload_verdict(
+    root_mapping: bool,
+    schema_kind: int,
+    schema_int: int,
+    schema_float: float,
+    field_kinds: list[int],
+    pa_kind: int,
+) -> tuple[int, int]: ...
+def memo_serve_arm(age_s: float | None, ttl_s: float, inflight: bool) -> int: ...
+def token_revalidates(token: str | None, prior: str | None) -> bool: ...

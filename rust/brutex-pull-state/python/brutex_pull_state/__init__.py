@@ -54,6 +54,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "auto_gate_decision",  # auto_pull_gate (Wave 2D)
     "auto_state_verdict",  # auto_pull_scheduler (Wave 3G)
     "auto_tick_decision",  # auto_pull_scheduler (Wave 3G)
+    "bridge_payload_verdict",  # rate_bridge (Wave 3H)
     "census_fold",  # pull_census (Wave 3G)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
@@ -62,6 +63,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "intent_resume_enabled",  # pull_intent (Wave 2E)
     "intent_shape_verdict",  # pull_intent (Wave 2E)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
+    "memo_serve_arm",  # rate_bridge_cache (Wave 3H)
     "muhurat_window_active",  # auto_pull_gate (Wave 2D)
     "progress_derived",  # pull_progress (Wave 2F)
     "pull_allowed_us",
@@ -69,6 +71,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "settle_token_verdict",  # auto_pull_gate (Wave 2D)
     "should_reload_master",  # auto_pull (Wave 3G)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
+    "token_revalidates",  # rate_bridge_cache (Wave 3H)
     "verdict_correlates",  # pull_outcome (Wave 1A)
     "wedge_decision",  # pull_stall (Wave 1C)
 )
@@ -110,6 +113,7 @@ from ._brutex_pull_state import (  # noqa: E402
     auto_gate_decision,
     auto_state_verdict,
     auto_tick_decision,
+    bridge_payload_verdict,
     census_fold,
     classify_pull_outcome,
     fno_only_note_surgery,
@@ -118,6 +122,7 @@ from ._brutex_pull_state import (  # noqa: E402
     intent_resume_enabled,
     intent_shape_verdict,
     market_hours_note_rewrite,
+    memo_serve_arm,
     muhurat_window_active,
     progress_derived,
     pull_allowed_us,
@@ -125,6 +130,7 @@ from ._brutex_pull_state import (  # noqa: E402
     settle_token_verdict,
     should_reload_master,
     spot_only_note_surgery,
+    token_revalidates,
     verdict_correlates,
     wedge_decision,
 )
@@ -147,6 +153,7 @@ __all__ = [
     "auto_gate_decision",
     "auto_state_verdict",
     "auto_tick_decision",
+    "bridge_payload_verdict",
     "census_fold",
     "classify_pull_outcome",
     "fno_only_note_surgery",
@@ -155,6 +162,7 @@ __all__ = [
     "intent_resume_enabled",
     "intent_shape_verdict",
     "market_hours_note_rewrite",
+    "memo_serve_arm",
     "muhurat_window_active",
     "progress_derived",
     "pull_allowed_us",
@@ -162,6 +170,7 @@ __all__ = [
     "settle_token_verdict",
     "should_reload_master",
     "spot_only_note_surgery",
+    "token_revalidates",
     "verdict_correlates",
     "wedge_decision",
 ]

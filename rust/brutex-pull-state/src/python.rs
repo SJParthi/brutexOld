@@ -434,6 +434,58 @@ fn progress_derived(
     .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+// --- rate_bridge + rate_bridge_cache (Wave 3H) -------------------------------
+// The rate-bridge payload verdict (`brutex/data/rate_bridge.py`,
+// DEC-CLI-RATE-BRIDGE-001) + the rate-bridge-cache memo laws
+// (`brutex/dashboard/rate_bridge_cache.py`, the design's §2.3 minimal
+// kernel). Classified codes / pre-computed ages cross in (the JSON decode,
+// the CPython coercion probes and the monotonic clock stay Python); code
+// pairs / arm tokens / a bool cross out. The one string edge is the content
+// token pair of `token_revalidates` (production tokens are ASCII
+// `mtime:size:ino` triples; a lone-surrogate token fails the pyo3 `&str`
+// edge and the facade's belt degrades to the oracle — verdict-identical).
+
+/// `(verdict, pull_active_arm)` — see
+/// `crate::rate_bridge::bridge_payload_verdict` for the full contract.
+/// Out-of-vocabulary inputs answer `(255, 0)` (the facade's refuse-poison
+/// gate degrades them); an out-of-`u8`/`i64` int raises `OverflowError` at
+/// the pyo3 edge (the facade's defensive belt degrades the raise).
+#[pyfunction]
+#[pyo3(signature = (root_mapping, schema_kind, schema_int, schema_float, field_kinds, pa_kind))]
+fn bridge_payload_verdict(
+    root_mapping: bool,
+    schema_kind: u8,
+    schema_int: i64,
+    schema_float: f64,
+    field_kinds: Vec<u8>,
+    pa_kind: u8,
+) -> (u8, u8) {
+    crate::rate_bridge::bridge_payload_verdict(
+        root_mapping,
+        schema_kind,
+        schema_int,
+        schema_float,
+        &field_kinds,
+        pa_kind,
+    )
+}
+
+/// The three-arm memo serve decision — see
+/// `crate::rate_bridge_cache::memo_serve_arm` for the full contract.
+#[pyfunction]
+#[pyo3(signature = (age_s, ttl_s, inflight))]
+fn memo_serve_arm(age_s: Option<f64>, ttl_s: f64, inflight: bool) -> u8 {
+    crate::rate_bridge_cache::memo_serve_arm(age_s, ttl_s, inflight)
+}
+
+/// The token revalidation law — see
+/// `crate::rate_bridge_cache::token_revalidates` for the full contract.
+#[pyfunction]
+#[pyo3(signature = (token, prior))]
+fn token_revalidates(token: Option<&str>, prior: Option<&str>) -> bool {
+    crate::rate_bridge_cache::token_revalidates(token, prior)
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -474,5 +526,9 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(census_fold, m)?)?;
     // --- pull_progress (Wave 2F) ---
     m.add_function(wrap_pyfunction!(progress_derived, m)?)?;
+    // --- rate_bridge + rate_bridge_cache (Wave 3H) ---
+    m.add_function(wrap_pyfunction!(bridge_payload_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(memo_serve_arm, m)?)?;
+    m.add_function(wrap_pyfunction!(token_revalidates, m)?)?;
     Ok(())
 }
