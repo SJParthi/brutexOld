@@ -25,7 +25,7 @@ exception escapes ``cmd_sweep_all``.
 from __future__ import annotations
 
 import errno
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -35,6 +35,7 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 
+from brutex.calendars.nse import get_session
 from brutex.cli import EXIT_USER_ERROR, cmd_sweep_all
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
@@ -45,30 +46,60 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _EXCH, _SEG, _SYM, _INT = "NSE", "INDEX", "NIFTY", "1minute"
 
 
-def _trending_bars(n_days: int = 6, per_day: int = 60) -> list[CandleBar]:
-    bars: list[CandleBar] = []
-    for d in range(n_days):
+def _trading_days(start: date, n: int) -> list[date]:
+    """The first *n* REAL NSE trading days on/after *start* (calendar-true)."""
+    out: list[date] = []
+    d = start
+    while len(out) < n:
+        if get_session(d) is not None:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _trending_bars(n_days: int = 40, per_day: int = 12) -> list[CandleBar]:
+    """The worst-case-rankable gap-up drift: BUY masks pass the 5 hard gates.
+
+    DEC-FILL-WORST-CASE-ONLY-001 (#1825) re-craft, mirroring the proven
+    ``test_sweep_full_chain_rehearsal._bars`` fixture (the original pre-#1825
+    zigzag exited every worst-case entry at a NEGATIVE fill — persisted=0 →
+    ``mark_cascade_absent()`` — so the cascade manifest write was never
+    reached and the ENOSPC bomb in test (b) never fired): narrow gap-up bars
+    (range 0.50 < the SL 0.80; the next gap-up's low clears the TP level →
+    +50 wins), a shallow bearish bar each 7-bar cycle, and a DEEP bearish bar
+    (range 0.85) every 4th cycle whose stop-out keeps profit_factor finite.
+    """
+    out: list[CandleBar] = []
+    cycle = 0
+    for day in _trading_days(date(2024, 1, 1), n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            ts = (
-                datetime(2024, 1, 2, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
-            ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
-            bars.append(
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
+            out.append(
                 CandleBar(
-                    timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    timestamp=ts.astimezone(UTC),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=1000,
                     open_interest=None,
                 )
             )
-            price = close
-    return bars
+            price = c
+    return out
 
 
 def _build_lake(root: Path) -> tuple[Path, Path]:
@@ -90,8 +121,8 @@ def _sweep_kwargs(lake_root: Path, catalog_path: Path, results_root: Path) -> di
         "segment": _SEG,
         "symbols": _SYM,
         "intervals": _INT,
-        "start": "2024-01-02",
-        "end": "2024-01-10",
+        "start": "2024-01-01",
+        "end": "2024-03-05",
         "directions": "BUY",
         "k": "1",
         "conditions": "0,1,2,3,4",
@@ -177,3 +208,22 @@ def test_enospc_cascade_manifest_write_refuses_clean(
     assert "[brutex] REFUSED:" in err
     assert "cascade manifest" in err  # the #1923 write-manifest ENOSPC wrap
     assert "Traceback" not in err
+
+    # ANTI-ROT fixture sanity (the #1825 fill-law rot class): the refusal above
+    # is meaningful only because the fixture genuinely ranked >= 1 gate-passing
+    # finalist UNDER WORST-CASE FILLS — with zero finalists cmd_sweep_all takes
+    # the mark_cascade_absent() branch and never reaches the manifest write, so
+    # the ENOSPC bomb would sit unexercised. The finalist stores were written
+    # BEFORE the cascade tail through results_store's OWN atomic binding (the
+    # monkeypatch above hits only cascade_wire's), so they are readable here; a
+    # future fill/gate-law change that rots this fixture fails LOUDLY at the
+    # fixture, never a vacuous pass.
+    from brutex.engine.results_store import ResultsStore
+
+    finalist_rows = [
+        row for store in _finalist_stores(results_root) for row in ResultsStore.load(store).rows()
+    ]
+    assert finalist_rows, (
+        "fixture rot: no gate-passing finalist persisted under worst-case fills — "
+        "the cascade manifest write (and the ENOSPC bomb) was never reachable"
+    )
