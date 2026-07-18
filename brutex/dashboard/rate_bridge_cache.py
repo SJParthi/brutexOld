@@ -96,6 +96,7 @@ from typing import Any, ClassVar, Final
 
 import structlog
 
+from brutex import pull_state_rust as _pull_state_rust
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
 from brutex.dashboard.lake_revision import rate_bridge_revision
 from brutex.data import rate_bridge
@@ -388,13 +389,37 @@ class NonBlockingFileMemoBase[MemoValueT]:
         with self._lock:
             now = self._clock()
             age = None if self._probed_at is None else max(0.0, now - self._probed_at)
-            if age is not None and self._ttl_s > 0 and age < self._ttl_s:
+            # --- rate_bridge_cache (Wave 3H) Rust seam
+            # (DEC-RUST-PULL-STATE-001): the three-arm serve DECISION
+            # consulted in Rust over the PRE-COMPUTED age (the clock read +
+            # the lock stay Python — the design §2.3 "decision-kernel-only,
+            # thread core PERMANENT-PYTHON" ruling).  ``None`` (flag off /
+            # any degrade) falls back to the byte-identical oracle
+            # conditions below; the single-flight law is BELT-guarded — the
+            # follower return keeps its own ``or self._inflight`` arm, so a
+            # poisoned kernel answering OWNER while a refresh is in flight
+            # is FORCED to the follower serve and can never spawn a second
+            # refresh daemon.
+            arm = None
+            if _pull_state_rust.pull_state_rust_enabled():
+                arm = _pull_state_rust.rust_memo_serve_arm(age, self._ttl_s, self._inflight)
+            if arm is None:
+                # The oracle conditions (byte-identical — the pre-seam law).
+                if age is not None and self._ttl_s > 0 and age < self._ttl_s:
+                    arm = _pull_state_rust.MEMO_ARM_CACHED_HIT
+                elif self._inflight:
+                    arm = _pull_state_rust.MEMO_ARM_FOLLOWER
+                else:
+                    arm = _pull_state_rust.MEMO_ARM_OWNER
+            if arm == _pull_state_rust.MEMO_ARM_CACHED_HIT:
                 # The zero-syscall O(1) hot path between refreshes.
                 return (self._memo_value(), MEMO_SOURCE_CACHED, age)
-            if self._inflight:
+            if arm == _pull_state_rust.MEMO_ARM_FOLLOWER or self._inflight:
                 # Non-blocking single-flight: NEVER wait on the in-flight
                 # refresh (the load-bearing difference from a timeout-less
-                # Event wait) — serve last-known, honestly labelled.
+                # Event wait) — serve last-known, honestly labelled.  The
+                # trailing ``or self._inflight`` is the Wave-3H fail-safe
+                # belt (see the seam comment above).
                 return (self._memo_value(), MEMO_SOURCE_UNVERIFIED, age)
             self._inflight = True
         try:
@@ -615,7 +640,17 @@ class RateBridgeCache(NonBlockingFileMemoBase[rate_bridge.RateBridgeSnapshot]):
         token = self._probe(target)
         with self._lock:
             prior_token = self._token
-        if token is not None and token == prior_token:
+        # --- rate_bridge_cache (Wave 3H) Rust seam (DEC-RUST-PULL-STATE-001):
+        # the token-revalidation law consulted in Rust; ``None`` (flag off /
+        # any degrade, incl. a lone-surrogate token failing the pyo3 ``&str``
+        # edge inside the belt) falls back to the byte-identical oracle
+        # compare.  The read itself + the LATE-BOUND reader seam stay Python.
+        revalidates = None
+        if _pull_state_rust.pull_state_rust_enabled():
+            revalidates = _pull_state_rust.rust_token_revalidates(token, prior_token)
+        if revalidates is None:
+            revalidates = token is not None and token == prior_token
+        if revalidates:
             # Revalidated: the file is byte-unchanged (atomic-replace
             # publisher ⇒ same mtime_ns:size:ino = same content) — keep the
             # memo, skip the read.
