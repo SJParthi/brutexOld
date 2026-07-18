@@ -232,6 +232,7 @@ from brutex.engine.sweep_run import (
 from brutex.engine.sweep_supervisor import (
     RESUME_STORE_GUARD_WARN_CAP,
     SUPERVISOR_ACTION_ABORT,
+    SUPERVISOR_ACTION_CANCELLED,
     SUPERVISOR_ACTION_COMPLETE,
     SUPERVISOR_ACTION_START,
     SUPERVISOR_ACTION_TUPLE_CACHE,
@@ -1660,6 +1661,7 @@ class ParallelGridDriver:
 
     __slots__ = (
         "_bars_for",
+        "_cancelled",
         "_grid",
         "_guard_warns",
         "_guard_warns_suppressed",
@@ -1677,6 +1679,7 @@ class ParallelGridDriver:
         "_reference_stamper",
         "_roll_schedule_by_instrument",
         "_root",
+        "_should_stop",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
         "_store_guard",
@@ -1699,6 +1702,7 @@ class ParallelGridDriver:
         stall_seconds: float | None = None,
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        should_stop: Callable[[], bool] | None = None,
         on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
         on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
         on_quarantine: Callable[[str, str], None] | None = None,
@@ -1739,17 +1743,38 @@ class ParallelGridDriver:
             environment via :func:`resolve_stall_min_mask_bars_per_sec`.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        should_stop
+            Optional cooperative-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001),
+            consulted PARENT-side at the dispatch gate — it never crosses the
+            process boundary (nothing new is pickled). See :func:`run_parallel_grid`.
         on_progress
-            Optional hook fired with the fresh
-            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after
-            every progress mutation (G3, DEC-SWEEP-UNKILLABLE-CORE-001) —
+            Optional PARENT-side hook receiving the fresh
+            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` on
+            every NON-SKIP apply-loop advance (a contiguous run of
+            parent-synchronous resume/cache/quarantined-prior skips is
+            BATCHED into one cumulative publish per drain — fix round 4, the
+            sequential resume batch's parallel twin; a resumed prefix never
+            storms one fsync'd bridge write per skipped tuple) plus the
+            in-driver ``cancelled`` / ``fail`` terminals — the G3
+            (DEC-SWEEP-UNKILLABLE-CORE-001) exact-count law: a CLEAN run
+            observes EXACTLY one tick per applied slot (no leading ``start``
+            tick, no trailing ``finish`` tick — fold reconcile of the
+            DEC-JOB-COOPERATIVE-CANCEL-001 publish set with the #1445 run-core
+            pins). The CLI wires
+            :func:`~brutex.engine.sweep_supervisor.publish_progress` here, so
+            the cross-process ``/api/v1/sweep-progress`` file bridge is fed on
+            the PRODUCTION parallel path too; the ``running=True`` launch
+            baseline (the Stop button's key) is written by the run-core's G4
+            reset-at-launch at core enter, and ``cmd_sweep_all`` publishes the
+            ``done`` terminal snapshot after this driver returns. ``None``
+            (every pre-existing caller) is byte-identical. Never crosses the
+            process boundary (parent-only, like the progress mutation itself);
             ticked from the single-threaded writer-actor apply path, so the
-            parallel run now streams live progress exactly like the sequential
+            parallel run streams live progress exactly like the sequential
             driver; FENCED via
             :func:`~brutex.engine.sweep_supervisor.publish_progress_safe`
             (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a failed progress
-            write never aborts the sweep. ``None`` (default) is byte-identical
-            to before.
+            write never aborts the sweep.
         on_tuple
             Optional per-SUCCESSFUL-tuple hook fired with
             ``(tuple, SweepRunSummary)`` from the single-threaded writer-actor
@@ -1820,7 +1845,6 @@ class ParallelGridDriver:
         #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
         self._n_unique = len(set(grid.condition_bits))
         self._monotonic = monotonic
-        self._on_progress = on_progress
         self._on_tuple = on_tuple
         self._on_quarantine = on_quarantine
         self._roll_schedule_by_instrument = (
@@ -1844,6 +1868,15 @@ class ParallelGridDriver:
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
+        #: Cooperative-cancel probe + latch (DEC-JOB-COOPERATIVE-CANCEL-001):
+        #: parent-side only. ``_cancelled`` flips ONCE in :meth:`_drive`'s
+        #: dispatch gate; :meth:`run` then emits the cancelled terminal instead
+        #: of the normal completion.
+        self._should_stop = should_stop
+        self._cancelled = False
+        #: Parent-side progress-stream hook (``None`` = no publish) — fired by
+        #: :meth:`_publish_progress` after every progress mutation.
+        self._on_progress = on_progress
         #: Labels a PRIOR run's broken pool quarantined (loaded from the durable
         #: sidecar in :meth:`run`) — gated FIRST in :meth:`_gate_or_dispatch` so a
         #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
@@ -1890,6 +1923,17 @@ class ParallelGridDriver:
         resume_from = self._guards.checkpoint.next_index
 
         self._guards.progress.start(enumerated=total, detail=self._subject)
+        # NO start publish here (fold reconcile with the #1445 run-core G3
+        # exact-count law: `on_progress` observes EXACTLY one tick per applied
+        # slot on a clean run — never a leading evaluated=0 tick). The
+        # dashboard's Stop button still shows before a heavy first tuple
+        # completes (the #1608 arithmetic): on the production path the
+        # run-core's G4 launch baseline stamps BOTH `wall_time_utc` AND
+        # PROGRESS_WALL_TIME_KEY from ONE `_wall()` tick at core ENTER
+        # (9aabba52), so `progress_bridge_stale` reads the just-launched run
+        # LIVE before this driver runs — pinned by the real-payload
+        # regressions test_launch_baseline_is_fresh_bridge_evidence_not_stale
+        # + test_fresh_run_core_launch_baseline_reads_running.
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,
@@ -1953,6 +1997,11 @@ class ParallelGridDriver:
             with contextlib.suppress(Exception):
                 self._guards.progress.fail(detail)
             with contextlib.suppress(Exception):
+                # Stream the honest ERROR terminal to the bridge — otherwise the
+                # progress file freezes at the last running tick and the
+                # dashboard shows a phantom live sweep until the staleness decay.
+                self._publish_progress()
+            with contextlib.suppress(Exception):
                 self._guards.audit.append(
                     action=SUPERVISOR_ACTION_ABORT,
                     subject=self._subject,
@@ -1967,6 +2016,45 @@ class ParallelGridDriver:
                 suppressed=self._guard_warns_suppressed,
                 total_forced=self._store_guard_forced,
             )
+        if self._cancelled:
+            # COOPERATIVE cancel terminal (DEC-JOB-COOPERATIVE-CANCEL-001): every
+            # in-flight tuple was drained + applied above, the checkpoint holds
+            # the contiguous clean prefix, and NOTHING was recorded for unrun
+            # tuples — on-disk state ≡ a graceful stop at this boundary. ONE
+            # audit line + the honest ``cancelled`` progress terminal (never a
+            # fabricated COMPLETE, never an ERROR).
+            cancel_payload = {
+                "index_reached": self._next_apply,
+                "tuples_run": acc.tuples_run,
+                "checkpoint_next_index": self._guards.checkpoint.next_index,
+            }
+            self._guards.audit.append(
+                action=SUPERVISOR_ACTION_CANCELLED,
+                subject=self._subject,
+                payload=cancel_payload,
+            )
+            self._guards.progress.cancelled(detail=f"cancelled at tuple {self._next_apply}/{total}")
+            self._publish_progress()
+            _LOG.warning("sweep_parallel.cancelled", subject=self._subject, **cancel_payload)
+            return SupervisedGridSummary(
+                sweep_id=sweep_id,
+                tuples_total=total,
+                tuples_run=acc.tuples_run,
+                tuples_skipped_no_bars=acc.tuples_skipped_no_bars,
+                skipped_cache=acc.skipped_cache,
+                skipped_resume=acc.skipped_resume,
+                enumerated=acc.enumerated,
+                conflict_pruned=acc.conflict_pruned,
+                skipped_dedup=acc.skipped_dedup,
+                evaluated=acc.evaluated,
+                ranked=acc.ranked,
+                persisted=acc.persisted,
+                tuples_failed=acc.tuples_failed,
+                tuples_quarantined_prior=acc.tuples_quarantined_prior,
+                cancelled=True,
+                store_guard_forced=self._store_guard_forced,
+            )
+
         payload = {
             "sweep_id": sweep_id,
             "tuples_total": total,
@@ -2000,18 +2088,16 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
-        # The terminal-DONE "finish" publish: after ``progress.finish()`` flips
-        # the state to DONE, re-publish the snapshot to ``on_progress`` so the
-        # dashboard's cross-process ``sweep-progress.json`` lands on a DONE
-        # snapshot — parity with the sequential ``run_supervised_grid``
-        # completion publish, closing the parallel-path G3 gap
-        # (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001; pinned by
-        # ``test_parallel_run_writes_sweep_progress_file``). This is ONE terminal
-        # tick after the per-tuple ticks — ``evaluated`` is unchanged (== total),
-        # ``state`` becomes DONE — exactly mirroring the sequential path's
-        # "one per applied tuple + the finish publish" tick sequence.
-        if self._on_progress is not None:
-            publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
+        # NO finish publish here (fold reconcile with the #1445 run-core G3
+        # exact-count law — the trailing tick would duplicate the last apply's
+        # `evaluated` on the hook). `cmd_sweep_all`'s parallel arm publishes
+        # this `done` snapshot to the file bridge itself, right after this
+        # driver returns, so the DEC-JOB-COOPERATIVE-CANCEL-001 dashboard
+        # terminal render is unchanged on the production path. (Merge seam:
+        # this supersedes the DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 in-driver
+        # terminal-DONE publish — the call-site publish carries the SAME DONE
+        # snapshot to the bridge, and the fenced per-tick publishes below keep
+        # the G11 never-abort law.)
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_COMPLETE, subject=self._subject, payload=payload
         )
@@ -2081,6 +2167,25 @@ class ParallelGridDriver:
 
         try:
             while not exhausted or pending or self._heap:
+                # 0. COOPERATIVE cancel gate (DEC-JOB-COOPERATIVE-CANCEL-001):
+                #    on a cancel request STOP DISPATCHING (treat the grid as
+                #    exhausted) but NEVER cancel a running future — the loop
+                #    below DRAINS every in-flight tuple normally, so each
+                #    in-worker durable store write lands and its parent-side
+                #    apply (cache.record + checkpoint.record) runs in order.
+                #    The contiguous-clean-prefix law holds by construction.
+                #    Probed ONCE per outer iteration — O(1) (one os.stat on
+                #    the production sidecar probe).
+                if not self._cancelled and self._should_stop is not None and self._should_stop():
+                    self._cancelled = True
+                    exhausted = True
+                    _LOG.warning(
+                        "sweep_parallel.cancel_requested",
+                        subject=self._subject,
+                        in_flight=len(pending),
+                        next_apply=self._next_apply,
+                        note="dispatch stopped; draining in-flight tuples to the durable boundary",
+                    )
                 # 1. Dispatch until the in-flight window OR the heap cap is full (or
                 #    the grid is done). Coupling dispatch to the heap cap is the
                 #    memory bound under head-of-line blocking (Golden Rule #5).
@@ -2330,17 +2435,36 @@ class ParallelGridDriver:
         Returns ``True`` if at least one outcome was applied (advancing progress
         for the stall clock). This is the single point where ALL ordered state is
         mutated, in canonical enumeration order.
+
+        PUBLISH BATCHING (fix round 4 — the resume/cache-skip storm): a parent-
+        synchronous SKIP apply (resume / cache / quarantined_prior — no worker
+        involved, applied in a tight loop) defers its bridge publish; after the
+        drain, a trailing run of deferred skips is flushed as ONE publish of the
+        cumulative snapshot. A resumed/cached prefix therefore costs O(1)
+        fsync'd bridge writes per drain — the parallel twin of the sequential
+        arm's explicit single-publish resume batch — instead of one per skipped
+        tuple. Non-skip applies (done / no_bars / failed / pool_broken) still
+        publish immediately, and their cumulative snapshot subsumes any earlier
+        deferred skips in the same drain.
         """
         applied = False
+        publish_deferred = False
         while self._heap and self._heap[0].index == self._next_apply:
             outcome = heapq.heappop(self._heap)
-            self._apply(outcome, acc)
+            publish_deferred = not self._apply(outcome, acc)
             self._next_apply += 1
             applied = True
+        if publish_deferred:
+            self._publish_progress()
         return applied
 
-    def _apply(self, outcome: _Outcome, acc: _Accumulator) -> None:
+    def _apply(self, outcome: _Outcome, acc: _Accumulator) -> bool:
         """Apply ONE enumeration slot's ordered state (audit + checkpoint + cache).
+
+        Returns ``True`` iff the apply PUBLISHED its progress snapshot; a
+        parent-synchronous skip (resume / cache / quarantined_prior) ticks
+        progress but DEFERS the publish to :meth:`_apply_ready_prefix`'s
+        end-of-drain flush (fix round 4 — see its docstring).
 
         Mirrors, branch-for-branch, the body of the sequential
         ``run_supervised_grid`` loop — but the CHECKPOINT advance is guarded by a
@@ -2356,25 +2480,25 @@ class ParallelGridDriver:
 
         if outcome.kind == "resume":
             acc.skipped_resume += 1
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_RESUME,
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return False
 
         if outcome.kind == "cache":
             acc.skipped_cache += 1
             if not acc.had_failure:
                 self._guards.checkpoint.record(index)
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_CACHE,
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return False
 
         if outcome.kind == "quarantined_prior":
             # A tuple a PRIOR run's broken pool quarantined (the durable sidecar).
@@ -2387,7 +2511,7 @@ class ParallelGridDriver:
             # next resume re-dispatches the tuple (nothing else marks it done).
             acc.tuples_quarantined_prior += 1
             acc.had_failure = True
-            self._advance(current=label, survived=False, skipped=True)
+            self._advance(current=label, survived=False, skipped=True, publish=False)
             self._guards.audit.append(
                 action=SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR,
                 subject=self._subject,
@@ -2404,7 +2528,7 @@ class ParallelGridDriver:
                 tuple=label,
                 sidecar=str(quarantine_sidecar_path(self._root)),
             )
-            return
+            return False
 
         if outcome.kind == "pool_broken":
             # A worker OOM/crash poisoned the pool while this tuple was in flight.
@@ -2436,7 +2560,7 @@ class ParallelGridDriver:
                 tuple=label,
                 reason=outcome.failed_error,
             )
-            return
+            return True
 
         # A worker outcome — replay its buffered ingest-audit records into the
         # real chain FIRST (in enumeration order), then apply the supervisor line
@@ -2492,7 +2616,7 @@ class ParallelGridDriver:
                     error=error_text,
                     remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
                 )
-            return
+            return True
 
         if outcome.kind == "no_bars":
             acc.tuples_skipped_no_bars += 1
@@ -2504,7 +2628,7 @@ class ParallelGridDriver:
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
             )
-            return
+            return True
 
         # The remaining branch is a successful ("done") tuple. By construction of
         # ``_result_to_outcome`` a "done" outcome ALWAYS carries a summary (that is
@@ -2554,6 +2678,7 @@ class ParallelGridDriver:
         # already in parent memory — no closure crosses the spawn boundary.
         if self._on_tuple is not None:
             self._on_tuple(outcome.tuple_, summary)
+        return True
 
     def _quarantine_broken_pool(
         self,
@@ -2701,17 +2826,29 @@ class ParallelGridDriver:
                 action=record.action, subject=record.subject, payload=record.payload
             )
 
-    def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once + stream the fresh snapshot to ``on_progress`` (G3, fenced).
+    def _advance(
+        self, *, current: str, survived: bool, skipped: bool, publish: bool = True
+    ) -> None:
+        """Tick progress once + stream the fresh snapshot (parent-only mutation).
 
         Runs ONLY on the single-threaded writer-actor apply path
         (:meth:`_apply_ready_prefix` → :meth:`_apply`), mirroring the
         sequential driver's ``_advance`` — the hook observes ordered state and
-        can never reorder a result byte. The hook is FENCED
-        (publish_progress_safe, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a
-        failed progress write never aborts the sweep.
+        can never reorder a result byte (G3, DEC-SWEEP-UNKILLABLE-CORE-001).
+        The publish is FENCED (publish_progress_safe,
+        DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a failed progress write
+        never aborts the sweep.
+
+        ``publish=False`` (fix round 4) ticks the in-memory counters ONLY — the
+        parent-synchronous skip branches defer their fsync'd bridge write to
+        :meth:`_apply_ready_prefix`'s end-of-drain flush (see its docstring).
         """
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
+        if publish:
+            self._publish_progress()
+
+    def _publish_progress(self) -> None:
+        """Stream the current progress snapshot to ``on_progress`` (no-op when unwired)."""
         if self._on_progress is not None:
             publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
 
@@ -2825,6 +2962,7 @@ def run_parallel_grid(
     stall_seconds: float | None = None,
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     on_quarantine: Callable[[str, str], None] | None = None,
@@ -2851,6 +2989,31 @@ def run_parallel_grid(
     byte-identical to the pre-hook behaviour; the SAME seam as
     ``run_supervised_grid`` — DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
 
+    ``should_stop`` (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL
+    cooperative-cancel probe, consulted at the dispatch gate: on ``True`` the
+    driver STOPS DISPATCHING, DRAINS every in-flight future normally (a
+    running worker's durable tuple write is never cancelled; its parent-side
+    ``cache.record`` + ``checkpoint.record`` still apply in order — the
+    contiguous-clean-prefix law is preserved by construction), then returns a
+    ``cancelled=True`` summary with ONE ``SUPERVISOR_CANCELLED`` audit line.
+    ``None`` (every existing caller) is byte-identical. HONEST latency
+    (Golden Rule #10): the drain waits on up to ``workers - 1`` in-flight
+    tuples, still bounded by the stall watchdog (a wedged worker raises
+    :class:`SweepStallError`, never a silent hang).
+
+    ``on_progress`` is the sequential seam's parallel twin — the PARENT-side
+    snapshot stream ``cmd_sweep_all`` wires to
+    :func:`~brutex.engine.sweep_supervisor.publish_progress` so the
+    cross-process ``/api/v1/sweep-progress`` file bridge is live on the
+    PRODUCTION parallel path (fired on every non-skip apply — a contiguous
+    resume/cache/quarantined-prior skip run batches into ONE publish per
+    drain, fix round 4 — plus the in-driver ``cancelled`` / ``fail``
+    terminals; a CLEAN run ticks EXACTLY once per applied slot — the #1445 G3
+    exact-count law, no start/finish ticks; the Stop button's ``running``
+    baseline comes from the run-core's G4 reset-at-launch and the ``done``
+    terminal is published by ``cmd_sweep_all`` after this driver returns;
+    ``None`` = no publish, byte-identical).
+
     Raises
     ------
     SweepParallelUsageError
@@ -2869,6 +3032,7 @@ def run_parallel_grid(
         stall_seconds=stall_seconds,
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
+        should_stop=should_stop,
         on_progress=on_progress,
         on_tuple=on_tuple,
         on_quarantine=on_quarantine,
@@ -2888,6 +3052,7 @@ __all__ = [
     "STALL_MASK_BARS_PER_SEC_ENV",
     "STALL_MIN_MASK_BARS_PER_SEC",
     "STALL_SECONDS_ENV",
+    "SUPERVISOR_ACTION_CANCELLED",
     "SUPERVISOR_ACTION_TUPLE_POOL_BROKEN",
     "SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR",
     "SWEEP_WORKERS_ENV",

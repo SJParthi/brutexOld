@@ -2230,6 +2230,99 @@ class TestStrictGateSequencer:
 
 
 # --------------------------------------------------------------------------- #
+# Cooperative cancel between phases (DEC-JOB-COOPERATIVE-CANCEL-001)
+# --------------------------------------------------------------------------- #
+
+
+def _stop_on_call(n: int) -> Callable[[], bool]:
+    """A ``should_stop`` probe that reads ``True`` on its *n*-th consultation.
+
+    ``run_full_pipeline`` probes exactly once per phase boundary (spot=1,
+    metadata=2, historical=3), so ``_stop_on_call(k)`` cancels AFTER phase k.
+    """
+    calls: list[int] = []
+
+    def _probe() -> bool:
+        calls.append(1)
+        return len(calls) >= n
+
+    return _probe
+
+
+def test_pipeline_cancel_after_spot_via_probe() -> None:
+    """A cancel observed at the spot boundary stops the chain honestly (amber partial)."""
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=meta,
+        run_historical=hist,
+        should_stop=_stop_on_call(1),
+    )
+    assert report.stopped_after == f"{PHASE_SPOT} (cancelled)"
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert "cancelled by operator" in report.note
+    # The later phases never ran (no doomed vendor calls after the cancel).
+    assert meta.called is False
+    assert hist.called is False
+
+
+def test_pipeline_cancel_via_spot_cancelled_report() -> None:
+    """The spot phase itself observed the cancel at a window boundary (report.cancelled)."""
+    from dataclasses import replace
+
+    spot_cancelled = replace(_spot(), cancelled=True)
+    meta = _Spy(_metadata())
+    report = run_full_pipeline(
+        run_spot=_Spy(spot_cancelled),
+        run_metadata=meta,
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        should_stop=None,  # the signal is carried by the report, not the probe
+    )
+    assert report.stopped_after == f"{PHASE_SPOT} (cancelled)"
+    assert report.ok is False
+    assert meta.called is False
+
+
+def test_pipeline_cancel_after_metadata() -> None:
+    """A cancel observed at the metadata boundary stops before the historical phase."""
+    hist = _Spy(_composite(historical=_historical_inner()))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=hist,
+        should_stop=_stop_on_call(2),
+    )
+    assert report.stopped_after == f"{PHASE_METADATA} (cancelled)"
+    assert report.metadata is not None
+    assert report.historical is None
+    assert report.ok is False
+    assert hist.called is False
+
+
+def test_pipeline_cancel_after_historical_skips_post_steps() -> None:
+    """A cancel observed after the historical phase skips prebuild + movers warm."""
+    prebuild = _PrebuildSpy(_outcome())
+    warm = _Spy(_warm(1))
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=prebuild,
+        warm_spot_movers=warm,
+        should_stop=_stop_on_call(3),
+    )
+    assert report.stopped_after == "historical (cancelled)"
+    assert report.historical is not None
+    assert report.ok is False
+    assert "cancelled by operator" in report.note
+    # Post-steps were skipped — nothing lost, the next clean pull derives.
+    assert prebuild.called is False
+    assert warm.called is False
+
+
 # DEC-LEDGER-LOAD-SPACE-V1-001 — one ledger load per pipeline run
 # --------------------------------------------------------------------------- #
 

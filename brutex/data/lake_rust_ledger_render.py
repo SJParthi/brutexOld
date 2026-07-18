@@ -6,7 +6,7 @@ MIGRATION.md #1918 — evidence predecessor: the #1917 spike,
 ``BRUTEX_LAKE_RUST_LEDGER_RENDER`` is set truthy, the window-ledger store's
 ONE shared parquet render (``window_ledger_store._ledger_parquet_bytes`` —
 the body both ``append_ledger_delta`` and ``save_window_ledger`` write
-through) routes its 16-column row table through the ``brutex_lake`` crate's
+through) routes its 17-column row table through the ``brutex_lake`` crate's
 ``render_ledger_parquet_from_ipc`` (the rev-pinned polars streaming-sink
 write path), with the verbatim pyarrow render retained as the LIVE oracle
 (``window_ledger_store._render_ledger_parquet_python``).
@@ -26,7 +26,7 @@ off-box backup sha256s the DESTINATION copy self-consistently;
 ``lake_revision`` / ``lake_manifest`` read only ``(mtime_ns:size)`` stat
 tokens — a rewrite moving them is EXPECTED), so the sound + sufficient
 contract is the store module's OWN documented row-level fixed point
-(``window_ledger_store.py:16``): identical ordered 16-column rows through
+(``window_ledger_store.py:16``): identical ordered 17-column rows through
 every production reader (pyarrow · polars · DuckDB — the reader-parity
 gates, ``tests/integration/test_window_ledger_rust_reader_parity.py``).
 The burn-in below therefore compares ROW EQUIVALENCE, never bytes — the
@@ -90,7 +90,7 @@ change the DuckDB ``last_attempt_at >= ?`` VARCHAR-compare surface,
 ``db_view._window_counts_since``) still mismatches → autorevert.
 
 There is NO schema-shape gate (the PR-1 layer-3 extension): the ledger
-writer has exactly ONE 16-column schema by construction
+writer has exactly ONE 17-column schema by construction
 (``window_ledger_store._rows_to_table`` builds every file), unlike the
 option heal path whose stored-schema space is open-ended.
 
@@ -158,7 +158,7 @@ LAKE_RUST_LEDGER_RENDER_ENV: Final[str] = "BRUTEX_LAKE_RUST_LEDGER_RENDER"
 #: 16 mirrors every sibling facade).
 BURN_IN_SAMPLES: Final[int] = 16
 
-#: The 9 STRING columns of the ledger schema, in :data:`LEDGER_COLUMNS`
+#: The 10 STRING columns of the ledger schema, in :data:`LEDGER_COLUMNS`
 #: order positions — ``pa.string()`` cells in the oracle table
 #: (``window_ledger_store._rows_to_table``), ``pl.String`` in the engaged
 #: frame. ``first_seen_at`` / ``last_attempt_at`` are DELIBERATELY strings
@@ -175,10 +175,11 @@ _LEDGER_STRING_COLUMNS: Final[frozenset[str]] = frozenset(
         "last_error",
         "first_seen_at",
         "last_attempt_at",
+        "streak_provenance",
     }
 )
 
-#: The full 16-column on-disk order — MUST equal
+#: The full 17-column on-disk order — MUST equal
 #: ``window_ledger_store._COLUMNS`` (pinned by test, not imported: this leaf
 #: must stay importable by the store without a cycle, the
 #: ``db_view._LEDGER_ROW_COLUMNS`` precedent).
@@ -199,6 +200,7 @@ LEDGER_COLUMNS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live (the
@@ -345,7 +347,7 @@ def _crate_pinned_version(crate: ModuleType) -> object:
 
 
 def _ledger_frame(rows: Sequence[tuple[Any, ...]], pl: ModuleType) -> Any:
-    """Build the 16-column polars frame from the store's row tuples.
+    """Build the 17-column polars frame from the store's row tuples.
 
     The engaged-path twin of ``window_ledger_store._rows_to_table``: the
     SAME :data:`LEDGER_COLUMNS` order (test-pinned against the store), the
@@ -353,7 +355,7 @@ def _ledger_frame(rows: Sequence[tuple[Any, ...]], pl: ModuleType) -> Any:
     ``pa.string()``, ``pl.Int64`` where it says ``pa.int64()``), built
     ``strict=True`` so a mis-typed cell raises (→ the caller's degrade set)
     instead of coercing silently. A 0-row input builds a valid EMPTY
-    16-column frame (the empty-ledger save shape).
+    17-column frame (the empty-ledger save shape).
     """
     schema = {
         name: (pl.String if name in _LEDGER_STRING_COLUMNS else pl.Int64) for name in LEDGER_COLUMNS
@@ -423,7 +425,7 @@ def render_ledger_parquet_bytes(
     Parameters
     ----------
     rows
-        The serialised 16-field ledger row tuples
+        The serialised 17-field ledger row tuples
         (:meth:`WindowLedger.to_rows` shape) — the SAME sequence the oracle
         table is built from; the engaged path builds the polars frame from
         them (:func:`_ledger_frame`).

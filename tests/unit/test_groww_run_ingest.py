@@ -687,6 +687,13 @@ def test_audit_chain_records_run_and_pairs(monkeypatch: pytest.MonkeyPatch, tmp_
     start_entry = entries[0]
     assert start_entry.subject == "pull:pull-xyz"
     assert start_entry.payload["jobs"] == 2
+    # Round-6 review fix (Golden Rules #1/#8): the forensic date-range payload
+    # is VALUE-pinned — the #1183 re-execution replay was the only consumer of
+    # these fields and its capture-mode upgrade (correctly) stopped reading
+    # them, so a start/end SWAP mutant in run_ingest's INGEST_RUN_START block
+    # survived the whole suite. These two asserts kill it deterministically.
+    assert start_entry.payload["start"] == _START.isoformat()
+    assert start_entry.payload["end"] == _END.isoformat()
     failed = next(e for e in entries if e.action == "INGEST_PAIR_FAILED")
     assert failed.payload["auth_failure"] is False
     complete = entries[-1]
@@ -1268,3 +1275,340 @@ class TestEmptyBreakerRunner:
             empty_breaker=injected,
         )
         assert seen == [injected]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Replay-capture drain seams (DEC-AUDIT-LAKE-REPLAY-ORACLE-001)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeCapture:
+    """Duck-typed :class:`AuditCaptureSink` drain surface for the seam tests.
+
+    Only the two methods the spine consumes exist (``drain_pair`` /
+    ``drain_remaining``); records are canned per ``(symbol, interval)`` and a
+    drained pair's records are removed (mirroring the real sink's contract).
+    """
+
+    def __init__(
+        self,
+        per_pair: dict[tuple[str, str], tuple[object, ...]] | None = None,
+        remaining: tuple[object, ...] = (),
+    ) -> None:
+        self._per_pair = dict(per_pair or {})
+        self._remaining = remaining
+        self.pair_calls: list[tuple[str, str]] = []
+        self.remaining_calls = 0
+
+    def drain_pair(self, symbol: str, interval: str) -> tuple[object, ...]:
+        self.pair_calls.append((symbol, interval))
+        return self._per_pair.pop((symbol, interval), ())
+
+    def drain_remaining(self) -> tuple[object, ...]:
+        self.remaining_calls += 1
+        return self._remaining
+
+
+def _capture_record(subject: str, *, seq: int) -> object:
+    """One buffered LAKE_APPEND_WRITTEN record (plain data, un-hashed)."""
+    from brutex.orchestrator.audit import BufferedAuditRecord
+
+    return BufferedAuditRecord(
+        action="LAKE_APPEND_WRITTEN",
+        subject=subject,
+        payload={"v": 1, "capture_seq": seq},
+    )
+
+
+class TestReplayCaptureDrainSeams:
+    """The three controller-thread `capture=` drain seams."""
+
+    def test_pair_done_drain_lands_records_on_the_chain(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Seam 1 + 3: per-pair drain after INGEST_PAIR_DONE, final drain
+        before INGEST_RUN_COMPLETE — all on the SAME hash-chained writer."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        capture = _FakeCapture(
+            per_pair={
+                ("NIFTY", "1minute"): (
+                    _capture_record("NSE:INDEX:NIFTY:1minute", seq=0),
+                    _capture_record("NSE:INDEX:NIFTY:1minute", seq=1),
+                ),
+                ("BANKNIFTY", "1minute"): (_capture_record("NSE:INDEX:BANKNIFTY:1minute", seq=2),),
+            },
+            remaining=(_capture_record("NSE:INDEX:NIFTY:1day", seq=3),),
+        )
+        path = tmp_path / "ingest-audit.jsonl"
+        with AuditWriter.open(path) as audit:
+            report = run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("NIFTY"), _index("BANKNIFTY", token=2)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+                audit=audit,
+                capture=capture,  # type: ignore[arg-type]
+            )
+        assert report.failed_pairs == 0
+        assert capture.pair_calls == [("NIFTY", "1minute"), ("BANKNIFTY", "1minute")]
+        assert capture.remaining_calls == 1
+        assert verify_chain(path) == 8  # 4 standard + 4 captured
+        entries = read_entries(path)
+        actions = [e.action for e in entries]
+        # Each pair's records land immediately AFTER its INGEST_PAIR_DONE line;
+        # the remaining drain lands BEFORE INGEST_RUN_COMPLETE.
+        assert actions == [
+            "INGEST_RUN_START",
+            "INGEST_PAIR_DONE",
+            "LAKE_APPEND_WRITTEN",
+            "LAKE_APPEND_WRITTEN",
+            "INGEST_PAIR_DONE",
+            "LAKE_APPEND_WRITTEN",
+            "LAKE_APPEND_WRITTEN",
+            "INGEST_RUN_COMPLETE",
+        ]
+        captured = [e for e in entries if e.action == "LAKE_APPEND_WRITTEN"]
+        assert [e.payload["capture_seq"] for e in captured] == [0, 1, 2, 3]
+        assert captured[0].subject == "NSE:INDEX:NIFTY:1minute"
+        assert captured[3].subject == "NSE:INDEX:NIFTY:1day"
+
+    def test_failed_pair_drain_keeps_durable_windows_audited(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Seam 2: a quarantined pair's already-durable windows are STILL
+        drained onto the chain right after INGEST_PAIR_FAILED (replay must
+        never be structurally incomplete)."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            if instrument.symbol_name == "FAIL":
+                raise GrowwBadRequestError("boom")
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        capture = _FakeCapture(
+            per_pair={
+                ("FAIL", "1minute"): (_capture_record("NSE:INDEX:FAIL:1minute", seq=0),),
+            },
+        )
+        path = tmp_path / "ingest-audit.jsonl"
+        with AuditWriter.open(path) as audit:
+            report = run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("OK"), _index("FAIL", token=2)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+                audit=audit,
+                capture=capture,  # type: ignore[arg-type]
+            )
+        assert report.failed_pairs == 1
+        assert ("FAIL", "1minute") in capture.pair_calls
+        assert verify_chain(path) == 5
+        entries = read_entries(path)
+        actions = [e.action for e in entries]
+        failed_at = actions.index("INGEST_PAIR_FAILED")
+        assert actions[failed_at + 1] == "LAKE_APPEND_WRITTEN"
+        assert entries[failed_at + 1].subject == "NSE:INDEX:FAIL:1minute"
+
+    def test_no_chain_discards_and_warns_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """capture wired with audit=None: records discarded + ONE loud
+        ``audit_capture.no_chain`` WARN per run (never silent, never twice)."""
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        capture = _FakeCapture(
+            per_pair={
+                ("A", "1minute"): (_capture_record("NSE:INDEX:A:1minute", seq=0),),
+                ("B", "1minute"): (
+                    _capture_record("NSE:INDEX:B:1minute", seq=1),
+                    _capture_record("NSE:INDEX:B:1minute", seq=2),
+                ),
+            },
+        )
+        with capture_logs() as logs, pull_id_scope("pull-nochain"):
+            run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("A"), _index("B", token=2)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+                capture=capture,  # type: ignore[arg-type]
+            )
+        warns = _events(logs, "audit_capture.no_chain")
+        assert len(warns) == 1  # warned once, not per drain
+        assert warns[0]["pull_id"] == "pull-nochain"
+        assert warns[0]["discarded"] == 1  # the FIRST non-empty drain's count
+        assert capture.remaining_calls == 1
+
+    def test_empty_drains_are_noops(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        """A drain returning zero records appends nothing and never warns."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        capture = _FakeCapture()  # every drain returns ()
+        path = tmp_path / "ingest-audit.jsonl"
+        with capture_logs() as logs, AuditWriter.open(path) as audit:
+            run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("NIFTY")],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+                audit=audit,
+                capture=capture,  # type: ignore[arg-type]
+            )
+        assert _events(logs, "audit_capture.no_chain") == []
+        assert verify_chain(path) == 3
+        assert [e.action for e in read_entries(path)] == [
+            "INGEST_RUN_START",
+            "INGEST_PAIR_DONE",
+            "INGEST_RUN_COMPLETE",
+        ]
+
+    def test_capture_none_default_chain_is_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """capture=None (the default): no capture action appears and the chain
+        shape is the pre-existing 4-action trail (regression pin)."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            if instrument.symbol_name == "FAIL":
+                raise GrowwBadRequestError("boom")
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        path = tmp_path / "ingest-audit.jsonl"
+        with AuditWriter.open(path) as audit:
+            run_groww_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("OK"), _index("FAIL", token=2)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+                audit=audit,
+            )
+        assert verify_chain(path) == 4
+        assert [e.action for e in read_entries(path)] == [
+            "INGEST_RUN_START",
+            "INGEST_PAIR_DONE",
+            "INGEST_PAIR_FAILED",
+            "INGEST_RUN_COMPLETE",
+        ]
+
+    def test_with_retry_forwards_one_capture_across_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_with_retry` forwards the SAME capture sink verbatim into every
+        pass — one sink (and one journal) spans all retry rounds."""
+        injected = _FakeCapture()
+        seen: list[object] = []
+        reports = iter(
+            [
+                _report(still_failed=1),
+                _report(still_failed=0),
+            ]
+        )
+
+        def _fake_run(*_args: object, **kw: object) -> GrowwIngestReport:
+            seen.append(kw["capture"])
+            return next(reports)
+
+        monkeypatch.setattr(mod, "run_groww_spot_ingest", _fake_run)
+        run_groww_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("NIFTY")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            capture=injected,  # type: ignore[arg-type]
+        )
+        assert len(seen) == 2
+        assert seen[0] is injected
+        assert seen[1] is injected
+
+
+class TestFlushCaptureToAudit:
+    """The FOURTH capture drain seam (round-1 review fix, BLOCKER).
+
+    Under the default-ON async fetch pipeline a window's ``sink.append`` runs
+    on a background consumer thread AFTER the run's own final drain, so the
+    pull owner flushes once more — after the pipeline/pool drains, while the
+    chain is still open — via :func:`flush_capture_to_audit`.
+    """
+
+    def test_none_capture_is_a_noop(self) -> None:
+        """The default OFF mode: nothing to flush, nothing touched."""
+        assert mod.flush_capture_to_audit(None, None) == 0
+
+    def test_empty_buffer_is_a_noop(self, tmp_path) -> None:
+        """Zero remaining records: no chain append, no WARN, returns 0."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries
+
+        capture = _FakeCapture()  # drain_remaining() returns ()
+        path = tmp_path / "ingest-audit.jsonl"
+        with capture_logs() as logs, AuditWriter.open(path) as audit:
+            flushed = mod.flush_capture_to_audit(capture, audit)  # type: ignore[arg-type]
+        assert flushed == 0
+        assert capture.remaining_calls == 1
+        assert _events(logs, "audit_capture.no_chain") == []
+        assert read_entries(path) == []
+
+    def test_remaining_records_land_on_the_open_chain(self, tmp_path) -> None:
+        """Records the async pipeline deferred past the run's final drain are
+        appended to the STILL-OPEN chain — the stranded-records regression."""
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        capture = _FakeCapture(
+            remaining=(
+                _capture_record("NSE:INDEX:NIFTY:1minute", seq=0),
+                _capture_record("NSE:INDEX:BANKNIFTY:1minute", seq=1),
+            ),
+        )
+        path = tmp_path / "ingest-audit.jsonl"
+        with (
+            capture_logs() as logs,
+            pull_id_scope("pull-flush"),
+            AuditWriter.open(path) as audit,
+        ):
+            flushed = mod.flush_capture_to_audit(capture, audit)  # type: ignore[arg-type]
+        assert flushed == 2
+        assert verify_chain(path) == 2
+        entries = read_entries(path)
+        assert [e.action for e in entries] == ["LAKE_APPEND_WRITTEN", "LAKE_APPEND_WRITTEN"]
+        assert [e.payload["capture_seq"] for e in entries] == [0, 1]
+        (info,) = _events(logs, "audit_capture.post_drain_flush")
+        assert info["pull_id"] == "pull-flush"
+        assert info["records"] == 2
+
+    def test_without_chain_warns_and_discards(self) -> None:
+        """capture wired with audit=None: the loud no_chain WARN, never silent."""
+        capture = _FakeCapture(
+            remaining=(_capture_record("NSE:INDEX:NIFTY:1minute", seq=0),),
+        )
+        with capture_logs() as logs, pull_id_scope("pull-flush-nochain"):
+            flushed = mod.flush_capture_to_audit(capture, None)  # type: ignore[arg-type]
+        assert flushed == 0
+        (warn,) = _events(logs, "audit_capture.no_chain")
+        assert warn["pull_id"] == "pull-flush-nochain"
+        assert warn["discarded"] == 1
