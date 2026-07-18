@@ -25,6 +25,7 @@ cleanly otherwise — the window_ledger_rust precedent); the dedicated
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib
 import importlib.util
 import itertools
@@ -401,6 +402,91 @@ class TestMirrorPins:
         assert crate.PanicException in belt
         assert issubclass(crate.PanicException, BaseException)
         assert not issubclass(crate.PanicException, Exception)
+
+
+class TestCycleFreeTypeSurface:
+    """The CodeQL py/cyclic-import fix: consumer types are structural stand-ins.
+
+    The facade must carry NO import of its consumer modules — not even a
+    type-only ``if TYPE_CHECKING:`` import (still a module-level import
+    statement to a cyclic-import scan) — and the TypeVar surface that
+    replaced those imports is pinned at runtime: ``TypeVar(...)`` calls are
+    runtime expressions (unlike PEP 563 annotations), so their name strings
+    and variance booleans mint mutmut mutants that are ONLY visible via the
+    TypeVar objects' ``__name__``/``__bound__``/``__covariant__``/
+    ``__contravariant__`` attributes.
+    """
+
+    def test_facade_source_carries_no_brutex_import(self) -> None:
+        # The module docstring's law made mechanical: EVERY import statement
+        # in the facade source (TYPE_CHECKING blocks included) is stdlib or
+        # structlog — never a `brutex.*` module (absolute or relative), so
+        # the consumer→facade edge can never become a cycle again.
+        source = Path(obs.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders.extend(
+                    alias.name
+                    for alias in node.names
+                    if alias.name == "brutex" or alias.name.startswith("brutex.")
+                )
+            elif isinstance(node, ast.ImportFrom):
+                if node.level != 0:  # any relative import is a brutex edge
+                    offenders.append(f"level-{node.level} relative import")
+                elif node.module == "brutex" or (node.module or "").startswith("brutex."):
+                    offenders.append(str(node.module))
+        assert offenders == []
+
+    def test_typevar_names_bounds_variance_exact(self) -> None:
+        # (bound, covariant, contravariant) per TypeVar — exact pins.
+        expected: dict[str, tuple[type, bool, bool]] = {
+            "_StateT_contra": (obs.WatchdogStateLike, False, True),
+            "_StateT_co": (obs.WatchdogStateLike, True, False),
+            "_VerdictT_co": (obs.WatchdogVerdictLike, True, False),
+            "_PredicateT_contra": (str, False, True),
+            "_StateT": (obs.WatchdogStateLike, False, False),
+            "_VerdictT": (obs.WatchdogVerdictLike, False, False),
+            "_PredicateT": (str, False, False),
+        }
+        for name, (bound, covariant, contravariant) in expected.items():
+            tv = getattr(obs, name)
+            assert tv.__name__ == name
+            assert tv.__bound__ is bound
+            assert tv.__covariant__ is covariant
+            assert tv.__contravariant__ is contravariant
+
+    def test_production_types_satisfy_the_structural_standins(self) -> None:
+        # Drift pins BOTH directions: the consumer dataclasses' field sets
+        # are exactly the stand-ins' member sets (a rename/addition on
+        # either side fails here before the burn-in ever could), and the
+        # runtime_checkable isinstance probes prove attribute presence.
+        state_fields = {f.name for f in dataclasses.fields(WatchdogState)}
+        assert state_fields == {
+            "tier",
+            "stall_started_beat",
+            "last_logged_at",
+            "last_alerted_at",
+            "episodes",
+        }
+        verdict_fields = {f.name for f in dataclasses.fields(WatchdogVerdict)}
+        assert verdict_fields == {
+            "state",
+            "lag_s",
+            "warn_edge",
+            "critical_edge",
+            "relog",
+            "realert",
+            "recovered",
+            "stall_total_s",
+        }
+        assert isinstance(WatchdogState(), obs.WatchdogStateLike)
+        assert isinstance(
+            WatchdogVerdict(state=WatchdogState(), lag_s=0.0), obs.WatchdogVerdictLike
+        )
+        # Law C's stand-in is `bound=str`: the StrEnum IS a str subclass.
+        assert issubclass(SLAPredicate, str)
 
 
 def _block_belt_homes(monkeypatch: pytest.MonkeyPatch, *homes: str) -> None:

@@ -98,6 +98,23 @@ structlog ONLY (loop_watchdog's leaf weight); the crate import is LAZY, so
 this module imports clean with no wheel present (the repo-wide doctest
 walker depends on that).
 
+The same edge law covers the CONSUMER direction (the CodeQL
+py/cyclic-import fix): the four consumer modules import THIS facade at
+module level, so the facade must never import them back — not even
+type-only (an ``if TYPE_CHECKING:`` import is still a module-level import
+statement to a cyclic-import scan, and a consumer-first import order would
+enter a partially-initialized facade). The consumer types are therefore
+mirrored as facade-local STRUCTURAL stand-ins —
+:class:`WatchdogStateLike` / :class:`WatchdogVerdictLike` for law A's
+``loop_watchdog.WatchdogState``/``WatchdogVerdict`` and a ``bound=str``
+predicate TypeVar for law C's ``sla.SLAPredicate`` (a ``StrEnum``) — and
+the routed signatures are GENERIC over them, so the concrete consumer
+types flow through the consumers' own call sites unchanged (the routers'
+declared return types stay exact). Runtime-inert by construction: every
+stand-in reference is an annotation under ``from __future__ import
+annotations``, and the runtime decompose/recompose was ALREADY duck-typed
+through the caller-passed factories (no-consumer-import AST-pinned).
+
 ## Log-event vocabulary (literal, greppable)
 
 ``observability_rust.fallback`` (WARN, once per reason) ·
@@ -126,15 +143,12 @@ from __future__ import annotations
 import importlib
 import os
 import struct
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar, runtime_checkable
 
 import structlog
 
 if TYPE_CHECKING:
     from types import ModuleType
-
-    from brutex.observability.loop_watchdog import WatchdogState, WatchdogVerdict
-    from brutex.observability.sla import SLAPredicate
 
 _LOG = structlog.get_logger(__name__)
 
@@ -240,25 +254,131 @@ _LOOP_TIERS: Final[frozenset[str]] = frozenset({"ok", "warned", "critical"})
 _STAMP_VERDICT_TOKENS: Final[frozenset[str]] = frozenset({"ok", "hash_mismatch"})
 
 
-class LoopCheckOnceLaw(Protocol):
+@runtime_checkable
+class WatchdogStateLike(Protocol):
+    """Structural stand-in for ``loop_watchdog.WatchdogState`` (read-only).
+
+    The facade must never import its consumer modules — not even type-only
+    (module docstring's import-edge decision; the CodeQL cyclic-import
+    fix) — so the law-A state is typed by SHAPE: exactly the five scalar
+    fields the routed decomposition reads. The production ``WatchdogState``
+    satisfies this protocol structurally (drift-pinned by test); the
+    generic routed signature carries the CONCRETE consumer type through
+    unchanged. Read-only ``@property`` members so the frozen dataclass
+    matches (a plain protocol variable would demand a settable attribute).
+    """
+
+    @property
+    def tier(self) -> str:
+        """The stall tier token (``ok`` / ``warned`` / ``critical``)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def stall_started_beat(self) -> float:
+        """The last-beat value observed when the stall episode began."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def last_logged_at(self) -> float:
+        """The sample instant of the last stall log line."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def last_alerted_at(self) -> float:
+        """The sample instant of the last critical alert."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def episodes(self) -> int:
+        """The WARN-edge episode counter."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+@runtime_checkable
+class WatchdogVerdictLike(Protocol):
+    """Structural stand-in for ``loop_watchdog.WatchdogVerdict`` (read-only).
+
+    Exactly the members :func:`_loop_verdict_tuple` decomposes (the
+    crate's 12-scalar order = the 5 state fields + these 7 scalars).
+    Same cycle-free rationale as :class:`WatchdogStateLike`.
+    """
+
+    @property
+    def state(self) -> WatchdogStateLike:
+        """The new persistent state carried by the verdict."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def lag_s(self) -> float:
+        """The sampled heartbeat lag (clamped ≥ 0.0)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def warn_edge(self) -> bool:
+        """Episode-start edge (WARN log + episode counter)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def critical_edge(self) -> bool:
+        """Critical-tier edge (ERROR log + Telegram)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def relog(self) -> bool:
+        """Periodic re-log while stalled."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def realert(self) -> bool:
+        """Periodic re-alert while critical."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def recovered(self) -> bool:
+        """Recovery edge (INFO with ``stall_total_s``)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def stall_total_s(self) -> float:
+        """The total stall span reported on recovery."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+# Variance-correct TypeVars for the generic law protocols + routers — the
+# cycle-free replacement for importing the consumer types (module
+# docstring's import-edge decision). TypeVar calls are RUNTIME expressions
+# (unlike PEP 563 annotations), so their name strings + variance booleans
+# are mutable by mutmut — every one is runtime-visible via the TypeVar's
+# __name__/__bound__/__covariant__/__contravariant__ attributes and
+# exact-pinned by test (the zero-survivor law).
+_StateT_contra = TypeVar("_StateT_contra", bound=WatchdogStateLike, contravariant=True)
+_StateT_co = TypeVar("_StateT_co", bound=WatchdogStateLike, covariant=True)
+_VerdictT_co = TypeVar("_VerdictT_co", bound=WatchdogVerdictLike, covariant=True)
+_PredicateT_contra = TypeVar("_PredicateT_contra", bound=str, contravariant=True)
+_StateT = TypeVar("_StateT", bound=WatchdogStateLike)
+_VerdictT = TypeVar("_VerdictT", bound=WatchdogVerdictLike)
+_PredicateT = TypeVar("_PredicateT", bound=str)
+
+
+class LoopCheckOnceLaw(Protocol[_StateT_contra, _VerdictT_co]):
     """The Python law-A oracle's call shape (``loop_watchdog._check_once_python``)."""
 
     def __call__(
         self,
         now: float,
         last_beat: float,
-        state: WatchdogState,
+        state: _StateT_contra,
         *,
         warn_after_s: float,
         critical_after_s: float,
         relog_every_s: float,
         realert_every_s: float,
-    ) -> WatchdogVerdict:
+    ) -> _VerdictT_co:
         """Run one pure loop-watchdog decision."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
-class LoopStateFactory(Protocol):
+class LoopStateFactory(Protocol[_StateT_co]):
     """The law-A state recomposer (production: the ``WatchdogState`` class)."""
 
     def __call__(
@@ -269,18 +389,18 @@ class LoopStateFactory(Protocol):
         last_logged_at: float,
         last_alerted_at: float,
         episodes: int,
-    ) -> WatchdogState:
+    ) -> _StateT_co:
         """Recompose a state dataclass from the crate's scalars."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
-class LoopVerdictFactory(Protocol):
+class LoopVerdictFactory(Protocol[_StateT_contra, _VerdictT_co]):
     """The law-A verdict recomposer (production: the ``WatchdogVerdict`` class)."""
 
     def __call__(
         self,
         *,
-        state: WatchdogState,
+        state: _StateT_contra,
         lag_s: float,
         warn_edge: bool,
         critical_edge: bool,
@@ -288,7 +408,7 @@ class LoopVerdictFactory(Protocol):
         realert: bool,
         recovered: bool,
         stall_total_s: float,
-    ) -> WatchdogVerdict:
+    ) -> _VerdictT_co:
         """Recompose a verdict dataclass from the crate's scalars."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
@@ -303,11 +423,11 @@ class WatchdogDecideLaw(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
-class SlaDecideLaw(Protocol):
+class SlaDecideLaw(Protocol[_PredicateT_contra]):
     """The Python law-C oracle's call shape (``sla._sla_decide_python``)."""
 
     def __call__(
-        self, predicate: SLAPredicate, value: float, threshold: float, prev_breach: bool
+        self, predicate: _PredicateT_contra, value: float, threshold: float, prev_breach: bool
     ) -> tuple[bool, bool]:
         """Return ``(breached, edge)`` for one rule observation."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -550,7 +670,7 @@ def _pack_loop(v: tuple[Any, ...]) -> tuple[Any, ...]:
     )
 
 
-def _loop_verdict_tuple(verdict: WatchdogVerdict) -> tuple[Any, ...]:
+def _loop_verdict_tuple(verdict: WatchdogVerdictLike) -> tuple[Any, ...]:
     """Decompose an oracle ``WatchdogVerdict`` into the crate's 12-scalar order."""
     state = verdict.state
     return (
@@ -619,19 +739,19 @@ def _loop_result_ok(value: object) -> bool:
     )
 
 
-def routed_loop_check_once(
+def routed_loop_check_once(  # noqa: UP047 — PEP 695 unsupported by the mutmut-2.5.1/parso-0.8 gate
     now: float,
     last_beat: float,
-    state: WatchdogState,
+    state: _StateT,
     *,
     warn_after_s: float,
     critical_after_s: float,
     relog_every_s: float,
     realert_every_s: float,
-    python_law: LoopCheckOnceLaw,
-    state_factory: LoopStateFactory,
-    verdict_factory: LoopVerdictFactory,
-) -> WatchdogVerdict:
+    python_law: LoopCheckOnceLaw[_StateT, _VerdictT],
+    state_factory: LoopStateFactory[_StateT],
+    verdict_factory: LoopVerdictFactory[_StateT, _VerdictT],
+) -> _VerdictT:
     """The routed law A — flag-gated Rust with the live Python oracle.
 
     EVERY path returns a valid ``WatchdogVerdict``: flag-OFF / latched /
@@ -646,7 +766,7 @@ def routed_loop_check_once(
     imports its consumer modules (cycle-free by construction).
     """
 
-    def _oracle() -> WatchdogVerdict:
+    def _oracle() -> _VerdictT:
         return python_law(
             now,
             last_beat,
@@ -803,13 +923,13 @@ def routed_watchdog_decide(
     return (elapsed, hung, edge)
 
 
-def routed_sla_decide(
-    predicate: SLAPredicate,
+def routed_sla_decide(  # noqa: UP047 — PEP 695 unsupported by the mutmut-2.5.1/parso-0.8 gate
+    predicate: _PredicateT,
     value: float,
     threshold: float,
     prev_breach: bool,
     *,
-    python_law: SlaDecideLaw,
+    python_law: SlaDecideLaw[_PredicateT],
 ) -> tuple[bool, bool]:
     """The routed law C — ``(breached, edge)`` for one rule observation.
 
@@ -1009,6 +1129,8 @@ __all__ = [
     "StampShapeIndexLaw",
     "StampVerdictLaw",
     "WatchdogDecideLaw",
+    "WatchdogStateLike",
+    "WatchdogVerdictLike",
     "observability_rust_enabled",
     "reset_observability_rust_for_tests",
     "routed_loop_check_once",
