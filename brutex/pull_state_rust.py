@@ -42,6 +42,7 @@ the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent), never this one.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import datetime
 from typing import Final, Protocol, cast
 
@@ -197,13 +198,137 @@ def rust_pull_allowed(ist_dt: datetime, is_trading_day_flag: bool) -> bool | Non
     return verdict
 
 
+# --- pull_stall (Wave 1C) ---------------------------------------------------
+# The wedge/alive decision plane of ``brutex/dashboard/pull_stall.py``
+# (DEC-PULL-WEDGE-ESCALATE-001 + DEC-PULL-TELEMETRY-TRIAD-001). Same seam
+# discipline as the market-hours consult above: the caller computes every
+# input (ONE monotonic-clock read → ages; timers/locks stay Python), the
+# accessor packs nothing but plain bools/floats/tokens, the defensive belt
+# catches ANY kernel raise (``kernel_error`` — ERROR, warn-once, with the
+# ``fn=`` field naming the symbol) and the refuse-poison gate rejects any
+# out-of-vocabulary result (``kernel_invalid``) — ``None`` always means "use
+# the byte-identical Python oracle".
+
+#: The wedge-decision arm-token vocabulary (mirrors
+#: ``rust/brutex-pull-state/src/stall.rs`` — index == token value).
+WEDGE_TOKEN_NO_PROBE: Final[int] = 0
+WEDGE_TOKEN_ABSTAIN_PROBE_NONE: Final[int] = 1
+WEDGE_TOKEN_ADOPT_BASELINE: Final[int] = 2
+WEDGE_TOKEN_REBASELINE: Final[int] = 3
+WEDGE_TOKEN_DEFER: Final[int] = 4
+WEDGE_TOKEN_ESCALATE: Final[int] = 5
+
+#: Every legal ``wedge_decision`` result — the refuse-poison vocabulary gate.
+_WEDGE_TOKENS: Final[frozenset[int]] = frozenset(range(WEDGE_TOKEN_ESCALATE + 1))
+
+
+def _resolve_kernel_symbol(name: str) -> Callable[..., object] | None:
+    """Return the named ``brutex_pull_state`` callable, or ``None`` (warn-once).
+
+    The Wave-1C sibling of :func:`resolve_pull_state_kernel` for the
+    pull-stall symbols: a missing wheel (ImportError, incl. the shim's own
+    stale-wheel handshake refusal, or a partially-initialised module's
+    AttributeError) degrades as ``wheel_missing``; an importable wheel
+    missing *name* degrades as ``wheel_stale`` — a stale phase-1 wheel can
+    only ever mean "use the Python oracle", never a failure.
+    """
+    try:
+        import brutex_pull_state
+    except (ImportError, AttributeError):
+        warn_degrade_once("wheel_missing")
+        return None
+    kernel = getattr(brutex_pull_state, name, None)
+    if kernel is None:
+        warn_degrade_once("wheel_stale", missing=name)
+        return None
+    return cast("Callable[..., object]", kernel)
+
+
+def rust_wedge_decision(
+    *,
+    hung: bool,
+    already_fired: bool,
+    hook_bound: bool,
+    baseline_captured: bool,
+    last_beat_age_s: float,
+    wedge_window_s: float,
+    restart_age_s: float | None,
+    baseline: str | None,
+    current: str | None,
+) -> int | None:
+    """Consult the Rust wedge-escalation kernel; ``None`` = use the oracle.
+
+    Returns the arm token (:data:`WEDGE_TOKEN_NO_PROBE` ..
+    :data:`WEDGE_TOKEN_ESCALATE`) the Python oracle would take — the caller
+    (``PullWatchdog``) maps it to the arm's ACTIONS verbatim in Python so
+    every log line / event payload stays byte-identical. The defensive belt
+    (``kernel_error``) and the refuse-poison vocabulary gate
+    (``kernel_invalid`` — a non-int / bool pun / out-of-range token can only
+    mean a stale/corrupt wheel) both degrade to ``None``.
+    """
+    kernel = _resolve_kernel_symbol("wedge_decision")
+    if kernel is None:
+        return None
+    try:
+        token = kernel(
+            hung,
+            already_fired,
+            hook_bound,
+            baseline_captured,
+            last_beat_age_s,
+            wedge_window_s,
+            restart_age_s,
+            baseline,
+            current,
+        )
+    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
+        warn_degrade_once("kernel_error", fn="wedge_decision", error=repr(exc))
+        return None
+    # Refuse-poison gate: an int EXACTLY (bool is an int subclass — a bool
+    # pun degrades) inside the token vocabulary, else the oracle serves.
+    if isinstance(token, bool) or not isinstance(token, int) or token not in _WEDGE_TOKENS:
+        warn_degrade_once("kernel_invalid", fn="wedge_decision", detail=type(token).__name__)
+        return None
+    return token
+
+
+def rust_alive_log_due(since_last_s: float, interval_s: float) -> bool | None:
+    """Consult the Rust alive-throttle kernel; ``None`` = use the oracle.
+
+    The emit-now? half of ``_alive_payload_locked``'s throttle law (the
+    payload build + the ``_last_alive_log`` stamp stay Python). Belt +
+    bool-exact refuse-poison gate as everywhere on this facade.
+    """
+    kernel = _resolve_kernel_symbol("alive_log_due")
+    if kernel is None:
+        return None
+    try:
+        verdict = kernel(since_last_s, interval_s)
+    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
+        warn_degrade_once("kernel_error", fn="alive_log_due", error=repr(exc))
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once("kernel_invalid", fn="alive_log_due", detail=type(verdict).__name__)
+        return None
+    return verdict
+
+
 __all__ = [
     "PULL_STATE_RUST_ENV",
     "PULL_STATE_RUST_FALLBACK_EVENT",
     "PULL_STATE_RUST_FLAG_EVENT",
+    # --- pull_stall (Wave 1C) ---
+    "WEDGE_TOKEN_ABSTAIN_PROBE_NONE",
+    "WEDGE_TOKEN_ADOPT_BASELINE",
+    "WEDGE_TOKEN_DEFER",
+    "WEDGE_TOKEN_ESCALATE",
+    "WEDGE_TOKEN_NO_PROBE",
+    "WEDGE_TOKEN_REBASELINE",
     "pull_state_rust_enabled",
     "reset_for_tests",
     "resolve_pull_state_kernel",
+    "rust_alive_log_due",
     "rust_pull_allowed",
+    "rust_wedge_decision",
     "warn_degrade_once",
 ]
