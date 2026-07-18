@@ -272,7 +272,8 @@ class WheelSpec:
 
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
-#: target's build list (Makefile:90-105: fno-math, trading-core, brutex-feed;
+#: target's build list (Makefile run-raw: fno-math, trading-core, brutex-feed,
+#: brutex-pull-state — the pull-state decision plane is Rust-only + fail-closed;
 #: brutex-lake ABSENT — coordinator policy, excluded pending
 #: DEC-BRUTEX-LAKE-BOX-WHEEL-001), drift-pinned by a test that PARSES the
 #: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
@@ -282,6 +283,7 @@ WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
+    WheelSpec("brutex_pull_state", "rust/brutex-pull-state", required=True),
 )
 
 

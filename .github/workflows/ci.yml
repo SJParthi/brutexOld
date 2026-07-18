@@ -2605,7 +2605,7 @@ jobs:
           # the curated 4-file suite; the discovery gate excludes the facade
           # for the same structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
           if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
-            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py tests/unit/test_pull_census_rust_seam.py tests/unit/test_dashboard_auto_pull_rust_seam.py tests/unit/test_rate_bridge_rust_seam.py tests/unit/test_rate_bridge_cache_rust_seam.py
+            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_state_fail_closed.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py tests/unit/test_auto_pull_gate_rust_seam.py tests/unit/test_pull_intent_rust_seam.py tests/unit/test_pull_progress_rust_seam.py tests/unit/test_dashboard_auto_pull_scheduler_rust_seam.py tests/unit/test_pull_census_rust_seam.py tests/unit/test_dashboard_auto_pull_rust_seam.py tests/unit/test_rate_bridge_rust_seam.py tests/unit/test_rate_bridge_cache_rust_seam.py
           else
             echo "(brutex.pull_state_rust test file not present yet — gate inactive)"
           fi
