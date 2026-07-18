@@ -116,6 +116,47 @@ class TestServeLastKnown:
         assert cache.size() == 1  # the seed evicted the LRU entry — bounded
 
 
+class TestSeedByteAccounting:
+    """The fresh-seed arm's byte accounting (the #1721 x #1386 merge-compose)."""
+
+    def test_fresh_seed_is_byte_accounted_and_eviction_retires_bytes(self) -> None:
+        """A watermarked outage seed tracks its bytes; capacity eviction retires them."""
+        cache: MoversSnapshotCache = MoversSnapshotCache(capacity=1, max_bytes=1 << 30)
+        _value, served = cache.serve_last_known("p1", compute=lambda: {"k": "v" * 64})
+        assert served is False
+        first_bytes = cache.total_bytes()
+        assert first_bytes > 0  # the seeded entry was sized, not stored at 0
+        # A second seed under a DIFFERENT prefix evicts the first (capacity 1)
+        # and must retire its bytes — never leak them into the tracked total.
+        cache.serve_last_known("p2", compute=lambda: {"k": "w" * 64})
+        assert cache.size() == 1
+        assert cache.total_bytes() <= first_bytes + 8192  # no unbounded leak
+        assert cache.total_bytes() > 0
+
+    def test_fresh_seed_replacing_a_raced_in_entry_retires_prior_bytes(self) -> None:
+        """The defensive prior-retire arm: a compute that itself lands the SAME
+        prefix key (the outside-the-lock race shape, simulated deterministically
+        via a re-entrant compute) must have its bytes RETIRED when the seed
+        replaces it — the tracked total counts one entry, never both."""
+        cache: MoversSnapshotCache = MoversSnapshotCache(max_bytes=1 << 30)
+
+        def _racing_compute() -> dict[str, str]:
+            # Simulate a peer landing the same key while this seed computes
+            # outside the lock (serve_last_known stores under key == prefix).
+            cache.get_or_compute("p1", generation=0, compute=lambda: {"peer": "x" * 256})
+            return {"seed": "y" * 64}
+
+        value, served = cache.serve_last_known("p1", compute=_racing_compute)
+        assert served is False
+        assert value == {"seed": "y" * 64}
+        assert cache.size() == 1
+        # The tracked total reflects ONLY the winning (seeded) entry — the
+        # raced-in peer entry's bytes were retired at the replace.
+        solo: MoversSnapshotCache = MoversSnapshotCache(max_bytes=1 << 30)
+        solo.serve_last_known("p1", compute=lambda: {"seed": "y" * 64})
+        assert cache.total_bytes() == solo.total_bytes()
+
+
 class TestBoundedBookkeeping:
     """The new dicts never grow past capacity (no-growth law)."""
 

@@ -275,7 +275,10 @@ def capture_combo(
     tf_minutes, sl_paisa, tp_paisa
         The tuple's trade-sim knobs — must match the sweep's so the oracle
         reproduces the stored trades exactly (the
-        ``ranked_combo_to_result_row`` contract).
+        ``ranked_combo_to_result_row`` contract). The fill law is NOT a knob:
+        worst-case is the only fill model (DEC-FILL-WORST-CASE-ONLY-001), so
+        the parity re-capture prices under the same hardcoded adverse-max law
+        the sweep did by construction.
     minute_index
         The instrument's 1-minute :class:`~brutex.engine.minute_path.MinuteIndex`
         for the window, or ``None`` when no 1m data exists — every trade then

@@ -1,6 +1,6 @@
 """Report writers: frozen JSON schema, human render, audit chain, deltas, streaks.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). The artifact of record
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). The artifact of record
 is ``<lake_root>/acceptance/<run_id>/report.json`` (schema
 :data:`~brutex.acceptance.model.SCHEMA_VERSION`, self-validated BEFORE writing —
 a malformed report ⇒ the run goes SUSPECT, never ships), beside the human

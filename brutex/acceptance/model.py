@@ -1,6 +1,6 @@
 """Acceptance-verifier data model — verdicts, evidence invariants, roll-up + exit law.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). The three laws of the
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). The three laws of the
 design live HERE, structurally:
 
 1. **One verdict = one evidence block** — :class:`SubCheckResult` REFUSES an

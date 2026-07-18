@@ -1678,6 +1678,38 @@ fn stage1a_bar_bits_batch(
     check_stage1a_batch_values(&inputs).map_err(PyValueError::new_err)?;
     crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs).map_err(PyValueError::new_err)
 }
+// ── DEC-GREEKS-RUST-BATCH-001 additive block (greeks_batch) ──────────────
+/// Columnar batch face of [`py_greeks`]: N already-screened tuples through
+/// ONE call. Per-element outcomes are DATA — `(values, error)` with exactly
+/// one `Some`, the error string carrying the kernel's `invalid_input:` /
+/// `no_solution:` prefix VERBATIM — so one unsolvable strike never aborts
+/// its siblings; the ONLY whole-call error is a column-length mismatch →
+/// ValueError with the `invalid_input:` prefix. Deliberately NO GIL release:
+/// `Python::detach` does not link under the extension-module `cargo test`
+/// build (the fno-math precedent, `rust/fno-math/src/python.rs`), and the
+/// enrich workers are spawn PROCESSES, so releasing the GIL buys nothing.
+#[pyfunction]
+#[pyo3(
+    name = "greeks_batch",
+    signature = (price, sigma, forward, strike, t_years, rate, is_call)
+)]
+fn py_greeks_batch(
+    price: Vec<Option<f64>>,
+    sigma: Vec<Option<f64>>,
+    forward: Vec<f64>,
+    strike: Vec<f64>,
+    t_years: Vec<f64>,
+    rate: Vec<f64>,
+    is_call: Vec<bool>,
+) -> PyResult<Vec<crate::greeks::batch::GreeksBatchElem>> {
+    crate::greeks::batch::greeks_batch_impl(
+        &price, &sigma, &forward, &strike, &t_years, &rate, &is_call,
+    )
+    .map_err(PyValueError::new_err)
+}
+// registration: ONE `m.add_function(wrap_pyfunction!(py_greeks_batch, m)?)?;`
+// line inside `_trading_core` below, directly after the `py_greeks` line.
+// ── end DEC-GREEKS-RUST-BATCH-001 block ──────────────────────────────────
 
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
@@ -1717,6 +1749,8 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
     m.add_function(wrap_pyfunction!(py_greeks, m)?)?;
     m.add_function(wrap_pyfunction!(stage1a_bar_bits_batch, m)?)?;
+    // DEC-GREEKS-RUST-BATCH-001 additive registration (fenced block above).
+    m.add_function(wrap_pyfunction!(py_greeks_batch, m)?)?;
     m.add_class::<PyVwapState>()?;
     m.add_class::<PyMarketStructureState>()?;
     Ok(())

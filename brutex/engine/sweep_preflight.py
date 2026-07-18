@@ -167,12 +167,31 @@ class FreshnessReport:
         return not self.stale
 
     def remediation(self) -> str:
-        """The exact operator remedy: re-run the pipeline's prebuild stage."""
+        """The exact operator remedy: re-run the pipeline's prebuild stage.
+
+        Ghost-bucket escape clause (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001;
+        the prune itself is the named follow-up
+        DEC-DERIVED-GHOST-BUCKET-PRUNE-001): with the freshness re-derivation
+        now bad-tick-screen-parity with the prebuild's read, the ONE stale
+        shape a prebuild re-run can NEVER clear is a stored derived bucket
+        whose SOLE 1-minute source is screened away — the latest-wins derived
+        writers never delete, so the ghost survives even a forced full
+        re-prebuild. This gate has NO escape flag by design, so the printed
+        remedy must name the working manual escape or the refusal is a
+        permanent wedge (executed-proven: deleting the symbol's derived TF
+        partition dirs makes the next prebuild regenerate everything from the
+        screened 1-minute, and the gate then reads fresh).
+        """
         return (
             "stale derived TFs (stored table drifted from a fresh 1-minute "
             "re-derivation): run the dashboard's ▶ Pull · full pipeline — its "
             "automatic final prebuild stage re-derives every derived timeframe "
-            "(DEC-PIPELINE-AUTOPREBUILD-001)"
+            "(DEC-PIPELINE-AUTOPREBUILD-001); if a pair stays stale AFTER that "
+            "prebuild, its stored table holds ghost bucket(s) with no surviving "
+            "screened 1-minute source (the latest-wins derived writer never "
+            "deletes — DEC-DERIVED-GHOST-BUCKET-PRUNE-001): delete the symbol's "
+            "derived TF partition dirs, then re-run the prebuild (it regenerates "
+            "every derived timeframe from the screened 1-minute)"
         )
 
 

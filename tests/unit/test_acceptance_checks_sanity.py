@@ -1,6 +1,6 @@
 """Sanity-check pins: every poison class FAILs; disclosed escapes stay named.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations

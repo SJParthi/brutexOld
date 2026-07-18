@@ -1,6 +1,6 @@
 """Shared per-run context: lake root, clock, pull-activity probe, fingerprints.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). ONE shared window-ledger
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). ONE shared window-ledger
 load (RSS disclosed by the pull check), ONE shared in-process dashboard client,
 the pull-activity probe (journal heartbeat + pull lease — observed, never
 fought; the pull lock is NEVER taken), and the per-check input-fingerprint /

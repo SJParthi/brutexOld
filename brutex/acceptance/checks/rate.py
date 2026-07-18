@@ -1,6 +1,6 @@
 """Check 4 — rate-limiter conformance from PERSISTED evidence only.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Ground truth: NO
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Ground truth: NO
 per-call timestamped record persists — the per-second AIMD + rolling-60s
 governor state is in-memory only. This check proves what disk CAN prove and
 ABSTAINS loudly on what it cannot; there is deliberately NO blanket "rate

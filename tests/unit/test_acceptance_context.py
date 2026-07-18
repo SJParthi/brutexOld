@@ -1,6 +1,6 @@
 """Context pins: pull-activity probe arms, TOCTOU retry-once law, shared loads.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations

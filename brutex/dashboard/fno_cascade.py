@@ -34,12 +34,11 @@ dropped (Golden Rule #1).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 
 __all__ = [
-    "FnoCascadeCache",
     "FnoCascadeIndex",
     "FnoContract",
     "build_expiry_counts",
@@ -277,32 +276,3 @@ def contract_to_json(contract: FnoContract) -> dict[str, Any]:
         "instrument_type": contract.instrument_type,
         "intervals": list(contract.intervals),
     }
-
-
-@dataclass(slots=True)
-class FnoCascadeCache:
-    """A generation-stamped memo of the :class:`FnoCascadeIndex` — O(1) repeat reads.
-
-    The cascade index is an ``O(datasets)`` build over a lake dir-walk; this memoises
-    it behind the SAME write-generation signal the other dashboard caches use
-    (DEC-MOVERS-O1-LATENCY-001 / DEC-DB-CANDLE-COUNT-CACHE-001) — a pull/materialize
-    bumps the generation, so the next cascade read rebuilds; otherwise every
-    underlying/expiry/contract click is an O(1) handoff of the cached index, never a
-    re-scan. No lock: two concurrent threadpool requests on the SAME stale generation
-    could each run *build*, but the build is pure + deterministic, so the result is
-    identical whichever write wins — the only cost is one wasted rebuild (the frontend
-    fires the levels sequentially anyway). The int+ref swap is atomic under the GIL, so a
-    reader never observes a torn state.
-    """
-
-    _generation: int = -1
-    _index: FnoCascadeIndex | None = field(default=None, repr=False)
-
-    def get(self, *, generation: int, build: Callable[[], FnoCascadeIndex]) -> FnoCascadeIndex:
-        """Return the cached index for *generation*, running *build* on a miss/stale gen."""
-        cached = self._index
-        if cached is None or self._generation != generation:
-            cached = build()
-            self._index = cached
-            self._generation = generation
-        return cached

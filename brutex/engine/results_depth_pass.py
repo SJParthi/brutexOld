@@ -395,7 +395,16 @@ def _build_tuple_sidecars(
     NO extra disk read.
     """
     bar_bits = build_bar_bits(
-        bars, proximity=tuple_.proximity, prior_n=grid.prior_n, fib_anchor=tuple_.fib_anchor
+        bars,
+        proximity=tuple_.proximity,
+        prior_n=grid.prior_n,
+        fib_anchor=tuple_.fib_anchor,
+        # The swept price-source axis is bar_bits-affecting (bits 52-53 / 0-5,
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001): re-simulate a non-default cell's
+        # finalists against ITS OWN source so the parity tooth matches the stored
+        # rows (a default cell is byte-identical — the sources default to baseline).
+        vwap_source=tuple_.price_source.vwap_source,
+        ema_source=tuple_.price_source.ema_source,
     )
     captures: list[ComboCapture] = []
     aggs: list[ComboAggregate] = []

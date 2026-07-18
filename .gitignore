@@ -134,6 +134,19 @@ Cargo.lock
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
 # Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).
 !rust/fno-math/Cargo.lock
+# Same law for the brutex-feed decision kernel + its fuzz harness
+# (DEC-FEED-RUST-CORE-001 — the trading-core lockfiles predate the glob and
+# stay tracked; a NEW crate needs its own negation to be addable).
+!rust/brutex-feed/Cargo.lock
+!rust/brutex-feed/fuzz/Cargo.lock
+# Same law for the brutex-strategies combo byte-law kernel
+# (DEC-STRATEGIES-RUST-COMBO-001 — a NEW crate needs its own negation to be
+# addable; the FRESH lock is committed, never a copy of a sibling's).
+!rust/brutex-strategies/Cargo.lock
+# brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
+# application BINARY crate: its lockfile is tracked for reproducible builds
+# (Golden Rule #4) + the security-audit Cargo.lock trigger.
+!rust/brutexd/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

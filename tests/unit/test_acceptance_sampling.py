@@ -1,6 +1,6 @@
 """Sampling-law pins: seed determinism, rotation, engine force-include, ledger.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations

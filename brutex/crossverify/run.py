@@ -56,6 +56,7 @@ from brutex.crossverify.journal import (
     staging_path,
     write_last_run,
 )
+from brutex.crossverify.owed import clear_owed, scan_owed_days
 from brutex.crossverify.prebuild_leg import DeriveOutcome, run_prebuild_leg
 from brutex.crossverify.pull_leg import (
     PullLegReport,
@@ -131,6 +132,22 @@ _SUMMARY_VERDICTS: frozenset[str] = frozenset(
 #: writes win; documented in the runbook §3).
 _LAST_RUN_VERDICTS: frozenset[str] = _SUMMARY_VERDICTS | frozenset({"refused"})
 
+#: Verdicts that CLEAR the day's owed marker
+#: (DEC-CROSSVERIFY-OWED-SENTINEL-001) — the completed-material set: the
+#: day's cross-verify genuinely finished (published / rendered+staged /
+#: honest nothing) or the day is honestly not-a-session (non-trading /
+#: Muhurat — a marker must never wedge forever on a holiday). Deferrals,
+#: refusals and every failure verdict KEEP the marker: the next run's
+#: step-D3 owed catchup re-completes the day (crash-convergent — the marker
+#: only clears once a run reached a completed material terminal verdict).
+#: ``staged_only`` clears only on the REAL publish-disabled arm (the dry-run
+#: arm never touches the store — the ``config.dry_run`` guard at both clear
+#: sites): the day's render+stage completed and the journal's pending keys
+#: are the recovery scan's territory from there.
+_OWED_CLEAR_VERDICTS: frozenset[str] = frozenset(
+    {"published", "staged_only", "nothing_to_do", "skipped_non_trading", "skipped_muhurat"}
+)
+
 
 def _store_read_errors() -> tuple[type[Exception], ...]:
     """The CONFIRMED error classes escaping the store-backed target
@@ -197,6 +214,13 @@ class CrossverifySeams:
     market_hours_blocked: Callable[[], bool]
     now_ist: Callable[[], datetime]
     sleeper: Callable[[float], None]
+    #: The step-D3 owed-day rerun seam (DEC-CROSSVERIFY-OWED-SENTINEL-001):
+    #: complete ONE never-started owed prior day with the manual ``--day``
+    #: machinery (production: a day-scoped ``run_crossverify`` over fresh
+    #: day-bound default seams — ``skip_pull`` + ``catchup_days=0``). Default
+    #: ``None`` (back-compat for injected test seams) DEGRADES honestly: owed
+    #: days are surfaced with ONE WARN, never silently dropped.
+    run_day: Callable[[date], CrossverifyReport] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +372,12 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         a ``refused`` run stays summary-free (``crossverify_refused`` is its
         alert) and a true no-op skip stays silent.
         """
+        if not config.dry_run and report.verdict in _OWED_CLEAR_VERDICTS:
+            # DEC-CROSSVERIFY-OWED-SENTINEL-001: the day reached a completed
+            # material terminal verdict — its owed marker (if any launcher
+            # wrote one) is settled. Best-effort: a failed clear WARNs and
+            # the day honestly re-reads OWED (idempotent re-completion).
+            clear_owed(config.lake_root, config.day)
         material_skip = report.verdict not in _LAST_RUN_VERDICTS and (
             report.regated > 0 or report.recovered_prior > 0
         )
@@ -687,6 +717,109 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                 continue
         return None
 
+    def _owed_catchup_scan() -> CrossverifyReport | None:
+        """Step D3 — NEVER-STARTED owed-day catchup (DEC-CROSSVERIFY-OWED-SENTINEL-001).
+
+        Steps D/D2 iterate days that HAVE a journal — a day whose pull chain
+        died BEFORE the crossverify tail ever started (the one-click pull
+        writes today's data then dies mid-prebuild) has NO journal and was
+        invisible to every catchup. The pull launchers now write a durable
+        owed marker at pull-tail-commit ENTRY; this scan COMPLETES each owed
+        prior day inside the catchup window with the manual ``--day``
+        machinery verbatim (the ``seams.run_day`` rerun — a day-scoped
+        ``run_crossverify``: full export → gate → stage → publish), which
+        itself clears the day's marker on a completed material verdict. Laws:
+
+        * idempotent vs a day that DID start (the tail-started-then-died
+          shape): the rerun re-renders deterministically, ``mark_staged``'s
+          sha idempotency keeps already-published entries published and
+          :func:`publish_staged` puts only pending keys — ZERO double-puts;
+        * folded failures: the rerun's ``publish_failed`` count folds into
+          this run's state (the final verdict stays loud); a rerun
+          ``suspect`` is the step-D/K whole-run halt class; a rerun
+          ``publish_failed`` / ``refused`` ABORTS the scan (the step-D/D2
+          abort law — later days would fail identically; markers kept);
+        * a rerun ``withheld_partial`` / ``blocked`` continues the scan —
+          the day's journal now carries the honest record (step D2 re-gates
+          it next run once the lake heals) and the marker stays until the
+          day completes;
+        * ``seams.run_day`` unbound (injected test seams) degrades honestly:
+          the owed days are surfaced with ONE WARN, never silently dropped.
+
+        HONEST envelope: each rerun is a full day pass (O(universe) exports +
+        one lock-trio acquire); a day owed BEFORE its bars landed reruns to
+        ``withheld_partial`` first and converges the run AFTER today's pull
+        heals it (the D2 twin's heal-within-catchup shape); a permanently
+        incompletable day retries once per run until it ages past
+        ``catchup_days``, then stays surfaced via the beyond-window WARN +
+        the panel (remediation: manual ``--day``).
+        """
+        if config.catchup_days <= 0:
+            # The recursive rerun's structural bound (catchup_days=0) — and
+            # an operator zero-catchup config: no owed scan at all here (the
+            # panel's names-only surface still shows every marker), so a
+            # multi-day catchup's inner reruns never emit misleading
+            # beyond-window WARNs about the sibling markers the OUTER scan
+            # is about to complete.
+            return None
+        owed_days = scan_owed_days(
+            config.lake_root, today=config.day, lookback_days=config.catchup_days
+        )
+        if not owed_days:
+            return None
+        if seams.run_day is None:
+            _LOG.warning(
+                "crossverify.owed_rerun_unavailable",
+                run_id=run_id,
+                days=[day.isoformat() for day in owed_days],
+                note="owed prior day(s) found but no day-rerun seam is bound — "
+                "surfaced only; the markers stay for the next run",
+            )
+            return None
+        for prior_day in owed_days:
+            day_report = seams.run_day(prior_day)
+            _LOG.info(
+                "crossverify.owed_day_rerun",
+                run_id=run_id,
+                prior_day=prior_day.isoformat(),
+                verdict=day_report.verdict,
+                published=day_report.published,
+                skipped_already=day_report.skipped_already,
+                withheld=day_report.withheld,
+                exit_code=day_report.exit_code,
+            )
+            state.publish_failed += day_report.publish_failed
+            if day_report.verdict == "suspect":
+                # The step-D/K halt law, mirrored: a halt inside the owed
+                # day's rerun is a whole-run failure class.
+                return _suspect(
+                    f"owed-day catchup suspect for {prior_day.isoformat()}: {day_report.detail}"
+                )
+            if day_report.verdict == "publish_failed":
+                # The step-D/D2 abort law: a broken grant/bucket fails every
+                # later day identically — stop the scan (the folded count
+                # keeps this run's final verdict loud); the untouched owed
+                # markers stay for the next run.
+                _LOG.error(
+                    "crossverify.owed_catchup_aborted",
+                    run_id=run_id,
+                    prior_day=prior_day.isoformat(),
+                    note="owed-day publish failed — later owed days left for the next run",
+                )
+                return None
+            if day_report.verdict == "refused":
+                # Lock/gate refusal inside the rerun — every later day would
+                # refuse identically; the outer run's own step F takes its
+                # honest turn next (markers kept for the next run).
+                _LOG.warning(
+                    "crossverify.owed_day_contended",
+                    run_id=run_id,
+                    prior_day=prior_day.isoformat(),
+                    note="owed-day rerun refused (locks/gate) — markers kept for the next run",
+                )
+                return None
+        return None
+
     # ── D: recovery scan — re-publish prior pending STAGED bytes (no re-gate).
     # Deliberately BEFORE the session gate (round-1 hostile review): a
     # weekend/holiday run must still republish a PRIOR trading day's pending
@@ -795,6 +928,15 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             terminal = _regate_withheld_scan()
             if terminal is not None:
                 return terminal
+            # ── D3: NEVER-STARTED owed-day catchup — the durable owed
+            # markers the pull launchers write at pull-tail-commit ENTRY
+            # (DEC-CROSSVERIFY-OWED-SENTINEL-001). After D2 (a day both
+            # owed AND withheld-journaled converges either way — both
+            # passes are idempotent); skipped after a nonretryable
+            # recovery abort exactly like the D2/orphan scans.
+            terminal = _owed_catchup_scan()
+            if terminal is not None:
+                return terminal
 
     def _early_ok(
         verdict: Verdict, *, detail: str = "", log_event: str | None = None
@@ -819,6 +961,12 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             # published real S3 objects) — ride _finish so the summary +
             # last-run record fire; a true no-op skip stays silent below.
             return _finish(report)
+        if not config.dry_run and report.verdict in _OWED_CLEAR_VERDICTS:
+            # The non-material honest-skip arm (non-trading / Muhurat) still
+            # settles the day's owed marker (DEC-CROSSVERIFY-OWED-SENTINEL-001
+            # — a holiday marker must never wedge forever); the material arm
+            # above cleared inside _finish.
+            clear_owed(config.lake_root, config.day)
         return report
 
     # ── B: day + session gate (never fabricates a session) ────────────────
@@ -1381,6 +1529,40 @@ def default_seams(
             write_daily_factory=write_daily_factory,
         )
 
+    def _run_day(prior_day: date) -> CrossverifyReport:
+        """The step-D3 owed-day rerun (DEC-CROSSVERIFY-OWED-SENTINEL-001):
+        the manual ``--day`` machinery VERBATIM — the SAME ``run_crossverify``
+        step machine over a day-scoped config (``skip_pull=True``: vendor-free
+        — today's run's pull leg owns the vendor window, the lake is read
+        as-is; ``catchup_days=0``: the rerun scans nothing — the structural
+        recursion bound) over fresh day-bound default seams carrying the SAME
+        injections (so the day-scoped prebuild/holder-note/pull closures bind
+        the PRIOR day, never today). The rerun acquires the lock trio itself
+        in its own step F — legal because step D3 runs BEFORE the outer run's
+        step F (nothing is held; the day-journal-flock leaf law is per day).
+        """
+        from dataclasses import replace as _replace
+
+        day_config = _replace(config, day=prior_day, skip_pull=True, catchup_days=0)
+        return run_crossverify(
+            day_config,
+            default_seams(
+                day_config,
+                env=env,
+                store_opener=store_opener,
+                account_key_resolver=account_key_resolver,
+                lease_factory=lease_factory,
+                spot_puller=spot_puller,
+                materialize=materialize,
+                derive_daily=derive_daily,
+                read_window_factory=read_window_factory,
+                write_daily_factory=write_daily_factory,
+                s3_client_factory=s3_client_factory,
+                alerter=alerter,
+                session_rate=session_rate,
+            ),
+        )
+
     return CrossverifySeams(
         acquire_locks=_acquire_locks,
         session_for=get_session_checked,
@@ -1400,6 +1582,7 @@ def default_seams(
         market_hours_blocked=lambda: guard_active_default(env=env),
         now_ist=lambda: datetime.now(tz=IST),
         sleeper=time.sleep,
+        run_day=_run_day,
     )
 
 

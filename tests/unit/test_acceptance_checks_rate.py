@@ -1,6 +1,6 @@
 """Rate-check pins: disk-provable claims only; the permanent structural abstains.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ class TestLogWindow:
         # CASE (1): the rotating structlog sink is ABSENT ENTIRELY (headless /
         # nightly-cron box — the dashboard never ran). A perfectly healthy lake
         # must NOT go permanently amber over this: the abstain is STRUCTURAL,
-        # budget/streak-EXEMPT (round-8, MIGRATION #1797).
+        # budget/streak-EXEMPT (round-8, MIGRATION #1958).
         monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
         monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path / "no-such-logs"))
         lake = make_twin(tmp_path)

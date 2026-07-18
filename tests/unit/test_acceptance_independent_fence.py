@@ -1,6 +1,6 @@
 """The AST fence: ``independent.py`` may share DATA, never COMPUTE.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797), design §4.5. Breaking
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958), design §4.5. Breaking
 the fence is a red BUILD, not a review comment: no ``brutex.*`` import except
 ``^[A-Z_0-9]+$`` names from the calendar DATA modules (each asserted
 non-callable at runtime); no ``tests.*`` import; third-party = stdlib +

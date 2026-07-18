@@ -107,12 +107,22 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
 
 
 def _trending_bars(n_days: int = 4, per_day: int = 60) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win via the TP leg."""
+    """A mostly-up drift with every-5th-day DOWN sessions (the sweep_run twin).
+
+    Under the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) the
+    ranked fixtures ride EOD-only exits (``sl/tp = None``): up days win via
+    the #1743 session_gap close despite the entry-at-HIGH haircut, DOWN days
+    keep ``profit_factor`` finite, and 45 days clears MIN_TRADES=30.
+    """
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
@@ -122,7 +132,7 @@ _BARS = _trending_bars()
 
 #: The persisted-sweep fixture: big enough that BUY combos clear the hard rank
 #: gates (mirrors tests/unit/test_engine_sweep_run.py's fixture sizing).
-_BARS_BIG = _trending_bars(n_days=15, per_day=120)
+_BARS_BIG = _trending_bars(n_days=45, per_day=120)
 
 
 def _vix_stamper(bars: Sequence[CandleBar]) -> TradeReferenceStamper:
@@ -660,8 +670,8 @@ def _run_cfg(**overrides: object) -> SweepRunConfig:
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
         "tf_minutes": 1,
-        "sl_paisa": 80,
-        "tp_paisa": 50,
+        "sl_paisa": None,
+        "tp_paisa": None,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]
@@ -826,8 +836,8 @@ def _grid(**overrides: object) -> orch_mod.SweepGridConfig:
         "directions": [Side.BUY],
         "k_values": [1],
         "condition_bits": [0, 1, 2],
-        "stop_losses": [80],
-        "take_profits": [50],
+        "stop_losses": [None],
+        "take_profits": [None],
         "proximities": [None],
         "mode": "A",
         "data_snapshot_hash": "snap0001",
@@ -1214,7 +1224,14 @@ class TestStage3WireSeam:
 
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             report = stage3_mod.run_stage3_pass(
-                _grid(stage3_enable=True, stage3_max_fevals=4, stage3_max_restarts=1),
+                # stage3 requires Mode-A grid sl/tp ints (ADR-0007 condition 3).
+                _grid(
+                    stage3_enable=True,
+                    stage3_max_fevals=4,
+                    stage3_max_restarts=1,
+                    stop_losses=[30],
+                    take_profits=[50],
+                ),
                 results_root=tmp_path / "empty",  # no persisted stores → zero survivors
                 bars_for=_bars_for,
                 audit=audit,
@@ -1238,6 +1255,7 @@ class TestStage3WireSeam:
                 tf_minutes=1,
                 start_equity_paisa=10_000_000,
                 reference_stamper=_STAMPER,
+                # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-ONLY-001): the stamper wiring
             )
             evaluate(80, 50)
         assert captured == [_STAMPER]

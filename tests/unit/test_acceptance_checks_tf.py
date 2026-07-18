@@ -1,6 +1,6 @@
 """TF-check pins: fresh PASS, tampered FAILs, 1day law arms, standing OI abstain.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations

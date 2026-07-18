@@ -880,9 +880,6 @@ class ParquetWriter:
         stored_unique = len(merged)
         stored_physical = self._stored_physical_rows(dest, existing_bytes)
         heal_dropped = 0 if stored_physical is None else stored_physical - stored_unique
-        added = 0
-        rewrite = False
-        conflicts: list[BarConflict] = []
         # Wrap the in-Python merge-dict build + the final ``sorted()`` in ``lake_write_guard``
         # (DEC-LAKE-MERGE-OOM-HALT-001): a deep month partition merged with a large incoming
         # chunk grows ``merged`` (and materialises a sorted copy) in memory, so a ``MemoryError``
@@ -893,36 +890,34 @@ class ParquetWriter:
         # unguarded OOM site in the merge path; every other allocation here is already guarded
         # (DEC-LAKE-WRITE-HALT-001 — "every allocation/failure site is guarded").
         with lake_write_guard():
-            for bar in new_bars:
-                prev = merged.get(bar.timestamp)
-                if prev is None:
-                    merged[bar.timestamp] = bar
-                    added += 1
-                elif not self._bar_values_equal(prev, bar):
-                    if merge_mode == "latest-wins":
-                        # Overwrite the stored bar with the corrected re-derivation;
-                        # no conflict recorded (an intentional latest-wins restate).
-                        merged[bar.timestamp] = bar
-                        rewrite = True
-                    else:
-                        # Keep the STORED bar (keep-first — prev stays in `merged`).
-                        # Record the discrepancy; do NOT increment `added`.
-                        conflicts.append(
-                            BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar)
-                        )
-                elif not _overlay_equal(prev, bar):
-                    # Identical OHLCV+OI but a DIFFERENT Greeks overlay
-                    # (DEC-GREEKS-GENERATION-TIME-001, plan §15.3): in
-                    # latest-wins mode the incoming overlay WINS (the enrich
-                    # pass stamping / correcting Greeks onto stored bars); in
-                    # keep-first mode the STORED overlay is kept SILENTLY —
-                    # never a BarConflict (a vendor re-pull's plain bar must
-                    # not strip a stored Greek; Greeks are a re-derivable
-                    # overlay, not vendor source truth — `_bar_values_equal`
-                    # stays OHLCV+OI-only by design).
-                    if merge_mode == "latest-wins":
-                        merged[bar.timestamp] = bar
-                        rewrite = True
+            # ADR-0020 PR-3 (DEC-LAKE-RUST-MERGE-DEDUP-001): the OPTIONAL
+            # Rust merge/dedup DECISION seam — default OFF; when
+            # BRUTEX_LAKE_RUST_MERGE is truthy the stored + batch bars cross
+            # to the brutex_lake crate as 17-column decision frames
+            # (`_decision_frame` → `_ipc_bytes`) and the returned per-row
+            # action codes are materialized back into `merged` PYTHON-side,
+            # guarded by the facade's fail-closed layers (import/version
+            # guards, refuse-poison gate, burn-in bit-compare + autorevert).
+            # EVERY guarded/degraded path runs the verbatim `_merge_fold`
+            # below on this same dict, and the routing stays INSIDE
+            # lake_write_guard so a MemoryError anywhere maps to
+            # LakeWriteHalt exactly as before (DEC-LAKE-MERGE-OOM-HALT-001).
+            # Import is lazy: flag-OFF pays one dict probe and stays
+            # byte-identical (never-routes spy-pinned).
+            from brutex.data import lake_rust_merge
+
+            if lake_rust_merge.lake_rust_merge_enabled():
+                merged, added, rewrite, conflicts = lake_rust_merge.merge_fold(
+                    merged,
+                    new_bars,
+                    merge_mode=merge_mode,
+                    python_fold=self._merge_fold,
+                    decision_ipc=lambda bars: _ipc_bytes(_decision_frame(bars)),
+                )
+            else:
+                added, rewrite, conflicts = self._merge_fold(
+                    merged, new_bars, merge_mode=merge_mode
+                )
             merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
         if added == 0 and not rewrite and heal_dropped == 0:
             # Every incoming bar is already stored identically or is a conflict
@@ -967,6 +962,55 @@ class ParquetWriter:
             # and the dedup self-heal rewrite (DEC-LAKE-STATS-MANIFEST-001).
             file_rewritten=True,
         )
+
+    def _merge_fold(
+        self,
+        merged: dict[datetime, CandleBar],
+        new_bars: list[CandleBar],
+        *,
+        merge_mode: str,
+    ) -> tuple[int, bool, list[BarConflict]]:
+        """The verbatim timestamp-keyed merge fold — mutates *merged* IN PLACE.
+
+        Extracted token-for-token from the :meth:`_merge_write` loop body
+        (ADR-0020 PR-3, DEC-LAKE-RUST-MERGE-DEDUP-001) so the flag-OFF
+        branch runs it directly (byte-identical to the pre-extraction
+        in-line loop) and the ``lake_rust_merge`` facade can run it as the
+        live oracle on every degrade path and the burn-in compare. Returns
+        ``(added, rewrite, conflicts)``; the caller sorts + renders.
+        """
+        added = 0
+        rewrite = False
+        conflicts: list[BarConflict] = []
+        for bar in new_bars:
+            prev = merged.get(bar.timestamp)
+            if prev is None:
+                merged[bar.timestamp] = bar
+                added += 1
+            elif not self._bar_values_equal(prev, bar):
+                if merge_mode == "latest-wins":
+                    # Overwrite the stored bar with the corrected re-derivation;
+                    # no conflict recorded (an intentional latest-wins restate).
+                    merged[bar.timestamp] = bar
+                    rewrite = True
+                else:
+                    # Keep the STORED bar (keep-first — prev stays in `merged`).
+                    # Record the discrepancy; do NOT increment `added`.
+                    conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
+            elif not _overlay_equal(prev, bar):
+                # Identical OHLCV+OI but a DIFFERENT Greeks overlay
+                # (DEC-GREEKS-GENERATION-TIME-001, plan §15.3): in
+                # latest-wins mode the incoming overlay WINS (the enrich
+                # pass stamping / correcting Greeks onto stored bars); in
+                # keep-first mode the STORED overlay is kept SILENTLY —
+                # never a BarConflict (a vendor re-pull's plain bar must
+                # not strip a stored Greek; Greeks are a re-derivable
+                # overlay, not vendor source truth — `_bar_values_equal`
+                # stays OHLCV+OI-only by design).
+                if merge_mode == "latest-wins":
+                    merged[bar.timestamp] = bar
+                    rewrite = True
+        return added, rewrite, conflicts
 
     def _dedup_batch(
         self, sorted_bars: list[CandleBar], *, merge_mode: str
@@ -1854,21 +1898,45 @@ class ParquetWriter:
                         schema[name] = pl.Float64
             df = pl.DataFrame(rows, schema=schema)
 
-            buffer: list[bytes] = []
+            def _python_render() -> bytes:
+                # polars write_parquet → file-like. Use an in-memory BytesIO
+                # so we can compute the hash before touching the filesystem.
+                bio = io.BytesIO()
+                df.write_parquet(
+                    bio,
+                    compression="zstd",
+                    compression_level=ZSTD_LEVEL,
+                    row_group_size=ROW_GROUP_SIZE,
+                    use_pyarrow=False,
+                    statistics=False,  # stats are non-deterministic; skip for reproducibility
+                )
+                return bio.getvalue()
 
-            # polars write_parquet → file-like. Use an in-memory BytesIO so
-            # we can compute the hash before touching the filesystem.
-            bio = io.BytesIO()
-            df.write_parquet(
-                bio,
-                compression="zstd",
-                compression_level=ZSTD_LEVEL,
-                row_group_size=ROW_GROUP_SIZE,
-                use_pyarrow=False,
-                statistics=False,  # stats are non-deterministic; skip for reproducibility
-            )
-            buffer.append(bio.getvalue())
-            return b"".join(buffer)
+            # ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
+            # Rust render seam — default OFF; when BRUTEX_LAKE_RUST_RENDER is
+            # truthy the frame crosses to the version-lockstepped brutex_lake
+            # crate as uncompressed Arrow IPC, guarded by the facade's three
+            # fail-closed layers (import guard / version guard / burn-in +
+            # autorevert). EVERY guarded/degraded path returns the verbatim
+            # _python_render() bytes, and the routing stays INSIDE
+            # lake_write_guard so a MemoryError anywhere maps to LakeWriteHalt
+            # exactly as before. Import is lazy: flag-OFF pays one dict probe
+            # and stays byte-identical.
+            from brutex.data import lake_rust_render
+
+            if lake_rust_render.lake_rust_render_enabled():
+                return lake_rust_render.render_parquet_bytes(
+                    ipc_bytes_factory=lambda: _ipc_bytes(df),
+                    python_render=_python_render,
+                    polars_version=pl.__version__,
+                    # The burn-in SHAPE gate's key (review-round fold): every
+                    # distinct frame schema (7-col spot / 17-col Greeks
+                    # overlay) is byte-compared at least once before crate
+                    # bytes ship for it — the count budget alone would let a
+                    # spot-only burn-in license a first-ever Greeks shape.
+                    schema_token=str(df.schema),
+                )
+            return _python_render()
 
     @staticmethod
     def _atomic_write(dest: Path, content: bytes) -> None:
@@ -1881,3 +1949,71 @@ class ParquetWriter:
         Prevents a half-written parquet file being left on disk on a kill/error.
         """
         atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
+
+
+def _ipc_bytes(df: pl.DataFrame) -> bytes:
+    """Serialise *df* to UNCOMPRESSED Arrow IPC bytes — the Rust-render handoff.
+
+    DEC-RUST-DATALAKE-IO-ROADMAP-001: a THIN delegating alias of the COMMON
+    :func:`brutex.data.lake_rust_render.ipc_handoff_bytes` (the body was
+    HOISTED there in PR-2 when ``option_parquet_writer`` became the second
+    caller — §11 COMMON; this alias preserves the PR-1 module's documented
+    shape and its test surface). All the byte-surface + memory-honesty
+    documentation lives on the common helper. Reached ONLY from the flag-ON
+    path inside :meth:`ParquetWriter._render_bytes`'s ``lake_write_guard``
+    block, so an allocation failure maps to ``LakeWriteHalt`` like every
+    other render allocation.
+    """
+    from brutex.data import lake_rust_render
+
+    return lake_rust_render.ipc_handoff_bytes(df)
+
+
+def _decision_frame(bars: list[CandleBar]) -> pl.DataFrame:
+    """Build the ALWAYS-17-column merge-DECISION frame (ADR-0020 PR-3).
+
+    The ``brutex_lake`` merge/dedup decision kernel
+    (DEC-LAKE-RUST-MERGE-DEDUP-001) compares rows by column NAME across this
+    FIXED schema, so the render frame's 7-col/17-col branching is
+    deliberately NOT mirrored here — this frame is a decision handoff,
+    never rendered, and the all-null overlay columns a plain spot batch
+    carries cost nothing byte-parity-wise. A plain :class:`CandleBar` reads
+    its overlay as ``None`` via ``getattr`` — the SAME schema-tolerant
+    identity :func:`_overlay_values` uses — so the kernel's overlay compare
+    is the ``_overlay_equal`` law over frames. Prices cross as the SAME
+    ``float(Decimal)`` conversion the render frame applies (values are
+    already 2dp-snapped at the top of ``write()``; the kernel NEVER
+    re-rounds); ``greeks_provenance_id`` crosses as Int64 (comparison-only
+    — the render schema's Int32 range law is untouched).
+    """
+    import polars as pl
+
+    rows: dict[str, list[object]] = {
+        "timestamp": [b.timestamp for b in bars],
+        "open": [float(b.open) for b in bars],
+        "high": [float(b.high) for b in bars],
+        "low": [float(b.low) for b in bars],
+        "close": [float(b.close) for b in bars],
+        "volume": [b.volume for b in bars],
+        "open_interest": [b.open_interest for b in bars],
+    }
+    schema: dict[str, pl.DataType | type[pl.DataType]] = {
+        "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+        "open": pl.Float64,
+        "high": pl.Float64,
+        "low": pl.Float64,
+        "close": pl.Float64,
+        "volume": pl.Int64,
+        "open_interest": pl.Int64,
+    }
+    for name in GREEKS_OVERLAY_FIELDS:
+        if name == "greeks_provenance_id":
+            rows[name] = [getattr(b, name, None) for b in bars]
+            schema[name] = pl.Int64
+        elif name == "spot_at_bar":
+            rows[name] = [None if (v := getattr(b, name, None)) is None else float(v) for b in bars]
+            schema[name] = pl.Float64
+        else:
+            rows[name] = [getattr(b, name, None) for b in bars]
+            schema[name] = pl.Float64
+    return pl.DataFrame(rows, schema=schema)

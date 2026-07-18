@@ -322,17 +322,29 @@ class TestEngineWriterThroughRoutes:
             assert row["arm"] == "SL ₹0.80 · TP ₹0.50"
             assert row["arm_raw"] == {"sl_paisa": 80, "tp_paisa": 50}
         # /strategy consumes exactly this payload: stArm is fed from row.arm
-        # of the top100 fetch — no second, unbridged arm source exists.
-        template = (
+        # of the top100 fetch — no second, unbridged arm source exists. The
+        # wiring lives in the ONE shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved verbatim).
+        panel = (
             Path(__file__).resolve().parents[2]
             / "brutex"
             / "dashboard"
-            / "templates"
-            / "strategy.html"
+            / "static"
+            / "bx-strategy-panel.js"
         ).read_text(encoding="utf-8")
-        assert "byId('stArm').textContent = String(row.arm);" in template
-        assert "/api/v1/oneclick/top100?run_id=" in template
-        assert template.count("arm") >= 1
+        assert "byId('stArm').textContent = String(row.arm);" in panel
+        # The row source is the memo'd getTop100 promise — which fetches the
+        # ONE /api/v1/oneclick/top100 route (pinned in bx-oneclick.js).
+        assert "getTop100(state.runId)" in panel
+        oneclick_js = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-oneclick.js"
+        ).read_text(encoding="utf-8")
+        assert '"/api/v1/oneclick/top100"' in oneclick_js
+        assert panel.count("arm") >= 1
         assert client.get("/strategy").status_code == 200
 
     def test_instrument_is_on_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
@@ -351,9 +363,12 @@ class TestEngineWriterThroughRoutes:
         root = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
         strategy = (root / "templates" / "strategy.html").read_text(encoding="utf-8")
         assert 'id="stInstr"' in strategy
+        # The fill line lives VERBATIM in the shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved out of the template).
+        strategy_panel = (root / "static" / "bx-strategy-panel.js").read_text(encoding="utf-8")
         assert (
             "byId('stInstr').textContent = window.BXOneclick.instrumentText(row.instrument);"
-            in strategy
+            in strategy_panel
         )
         oneclick_js = (root / "static" / "bx-oneclick.js").read_text(encoding="utf-8")
         assert 'setOc("r1_instrument", bxInstrumentText(row.instrument));' in oneclick_js
@@ -412,18 +427,20 @@ class TestEngineWriterThroughRoutes:
         assert payload["total"] == 2
         assert [row["equity_close_paisa"] for row in payload["rows"]] == [1_000, 1_500]
         assert payload["rows"][1]["equity_intraday_low_paisa"] is None  # honest None low
-        # The strategy page consumes exactly this route + the shared series
-        # builder (minute-path label; per-trade cumsum stays the fallback).
-        template = (
+        # The strategy panel module consumes exactly this route + the shared
+        # series builder (minute-path label; per-trade cumsum stays the
+        # fallback) — the page wiring moved verbatim into the module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+        panel = (
             Path(__file__).resolve().parents[2]
             / "brutex"
             / "dashboard"
-            / "templates"
-            / "strategy.html"
+            / "static"
+            / "bx-strategy-panel.js"
         ).read_text(encoding="utf-8")
-        assert "/api/v1/oneclick/equity" in template
-        assert "window.BXChart.minutePathSeries(state.equity)" in template
-        assert "per-trade close equity (minute-path unavailable for this run)" in template
+        assert "/api/v1/oneclick/equity" in panel
+        assert "window.BXChart.minutePathSeries(state.equity)" in panel
+        assert "per-trade close equity (minute-path unavailable for this run)" in panel
 
     def test_strategy_link_contract_run_id_rank_params(self, tmp_path: Path) -> None:
         """Item 5 (BLOCKER-3, our half): the STABLE deep-link contract
@@ -441,6 +458,22 @@ class TestEngineWriterThroughRoutes:
         payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
         ranks = [row["rank"] for row in payload["rows"]]
         assert 3 in ranks  # the addressed rank exists on the wire
+        static = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
+        codec = (static / "bx-portal-state.js").read_text(encoding="utf-8")
+        panel = (static / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        # The client-side contract, pinned (no browser harness — honest
+        # envelope). The R2 documented split (DEC-OPERATOR-PAGE-CONSOLIDATE-
+        # 001): the two PARSE expressions live in the pure BXPortalState
+        # codec (executed for real by node goldens); the row-match loop, the
+        # honest rank-miss message and the latest-run fallback live in the
+        # strategy panel module — each string asserted verbatim in exactly
+        # one file, never weakened.
+        assert "state.runId = params.get('run_id');" in codec
+        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in codec
+        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in panel
+        assert "is not in the stored top-100 (" in panel  # honest rank-miss
+        assert "runs.latest_run_id" in panel  # no-run_id fallback
+        # The strategy page loads both modules + self-mounts the panel.
         template = (
             Path(__file__).resolve().parents[2]
             / "brutex"
@@ -448,12 +481,18 @@ class TestEngineWriterThroughRoutes:
             / "templates"
             / "strategy.html"
         ).read_text(encoding="utf-8")
-        # The client-side contract, pinned (no browser harness — honest envelope):
-        assert "state.runId = params.get('run_id');" in template
-        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in template
-        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in template
-        assert "is not in the stored top-100 (" in template  # honest rank-miss
-        assert "runs.latest_run_id" in template  # no-run_id fallback
+        assert "/static/bx-portal-state.js" in template
+        assert "/static/bx-strategy-panel.js" in template
+        assert 'data-bx-autopanel="strategy"' in template
+        # Contract consumer #3: the v29 drawer's open-full link is built by
+        # the SAME BXPortalState.strategyHref (DEC-OPERATOR-PAGE-
+        # CONSOLIDATE-001 — one href law, three consumers).
+        v29 = (
+            Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "v29.html"
+        ).read_text(encoding="utf-8")
+        assert 'id="ocDrawerOpenFull"' in v29
+        portal = (static / "bx-operator-portal.js").read_text(encoding="utf-8")
+        assert "window.BXPortalState.strategyHref(state.runId, rank)" in portal
 
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the
@@ -603,9 +642,9 @@ class TestCascadeJoinWriterToWire:
     _client = staticmethod(TestEngineWriterThroughRoutes._client)
 
     def test_frozen_pre_change_fixture_reads_corrupt_on_the_wire(self, tmp_path: Path) -> None:
-        """The back-compat oracle end-to-end UNDER the merged #1795 schema-v2 law.
+        """The back-compat oracle end-to-end UNDER the merged #1956 schema-v2 law.
 
-        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1795) bumped
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1956) bumped
         ``TOP100_SCHEMA_VERSION`` 1→2 (per-entry ``resilience`` block —
         bump-on-any-shape-change) with the documented reader law: an artifact
         at an UNKNOWN version degrades to a NAMED ``corrupt`` through the route
@@ -614,7 +653,7 @@ class TestCascadeJoinWriterToWire:
         ``schema_version`` mismatch — the wire twin of the unit reconcile's
         ``test_frozen_pre_change_artifact_reads_absent_never_crashes``. The
         pre-club version of this test asserted a successful ``ok``-with-dashes
-        serve; superseded by the #1795 bump.
+        serve; superseded by the #1956 bump.
         """
         import shutil
 

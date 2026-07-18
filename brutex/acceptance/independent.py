@@ -1,6 +1,6 @@
 """The FENCED independent movers recompute — NO production compute imports.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797) — the ONE sanctioned
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958) — the ONE sanctioned
 independent-recompute surface (the DEC-SURFACE-TRIAL-001 precedent). Every
 compared ``/movers`` cell is re-derived here from the RAW month parquet files
 with hand-rolled math, so a regression in the production compute is CAUGHT,

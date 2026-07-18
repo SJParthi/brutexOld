@@ -1,6 +1,6 @@
 """Run-orchestration pins: fencing, exit matrix, teeth withhold, streak carry.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958).
 """
 
 from __future__ import annotations

@@ -4198,3 +4198,35 @@ class TestBulkSpotCompletenessDemotionE2E:
         )
         assert report.dry_run is True
         assert not ledger_path(tmp_path).is_file()  # record-inert — no ledger written
+
+
+class TestBulkSpotReportOkProperty:
+    """``BulkSpotReport.ok`` — the StageOutcome home of the spot-gate predicate
+    (DEC-STAGED-SEQUENCER-SEAMS-001; ``pipeline_pull.spot_phase_ok`` delegates)."""
+
+    @staticmethod
+    def _report(
+        *,
+        auth_aborted: bool = False,
+        quota_exhausted: bool = False,
+        still_failed_windows: int = 0,
+        mass_empty_cause: str | None = None,
+    ) -> pull_controller.BulkSpotReport:
+        return pull_controller.BulkSpotReport(
+            dry_run=False,
+            start_date="2020-01-01",
+            end_date="2026-06-20",
+            auth_aborted=auth_aborted,
+            quota_exhausted=quota_exhausted,
+            still_failed_windows=still_failed_windows,
+            mass_empty_cause=mass_empty_cause,
+        )
+
+    def test_clean_report_ok_true(self) -> None:
+        assert self._report().ok is True
+
+    def test_each_failure_arm_flips_ok_false(self) -> None:
+        assert self._report(auth_aborted=True).ok is False
+        assert self._report(quota_exhausted=True).ok is False
+        assert self._report(still_failed_windows=1).ok is False
+        assert self._report(mass_empty_cause="halted").ok is False
