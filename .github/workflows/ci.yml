@@ -242,6 +242,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
         # The default-OFF feed decision kernel: this job drives the flag-ON
         # parity/degrade/golden suites, so the wheel must be importable
@@ -449,6 +466,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
@@ -2697,6 +2731,14 @@ jobs:
           else
             echo "(brutex.engine.cascade_join test file not present yet — gate inactive)"
           fi
+          # DEC-RUST-CASCADE-RESULTS-001: the brutex-cascade wheel resolver +
+          # flag law (the ONE facade the Rust-hosted cascade/results-depth
+          # shims resolve through).
+          if compgen -G "tests/unit/test_engine_cascade_rust.py" > /dev/null; then
+            pytest --cov=brutex.engine.cascade_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_rust.py
+          else
+            echo "(brutex.engine.cascade_rust test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dashboard_composite_join.py" > /dev/null; then
             pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
           else
@@ -2810,6 +2852,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -2902,6 +2961,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
@@ -3033,6 +3109,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
         # The default-OFF feed decision kernel: this job drives the flag-ON
         # parity/degrade/golden suites, so the wheel must be importable
@@ -3132,6 +3225,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
@@ -3411,6 +3521,38 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
 
+  rust-brutex-cascade:
+    name: Rust (brutex-cascade build + clippy + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-cascade
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-cascade -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # DEC-RUST-CASCADE-RESULTS-001: the pure law cores' unit matrix (IST
+      # calendar / half-up decimal / CPython-JSON encoder / minute-path /
+      # combo-aggregate / cascade-join laws). The Python-side byte-identity
+      # proof (the FROZEN pre-conversion parity corpus) lives in the golden
+      # job, which installs the wheel via `pip install ./rust/brutex-cascade`.
+      - name: cargo test
+        run: cargo test --release --locked
+
   rust-brutexd:
     name: Rust (brutexd build + clippy + test)
     # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
@@ -3605,6 +3747,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -3693,6 +3852,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Run the full-chain rehearsal + byte-identity proof
@@ -4182,6 +4358,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -4591,6 +4784,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_cascade Rust extension (DEC-RUST-CASCADE-RESULTS-001)
+        # The cascade / results-depth compute laws are Rust-hosted and the
+        # engine shims HARD-REQUIRE the wheel at CALL time (the converted
+        # Python implementations are deleted — the compressed greenfield
+        # cycle), so every job that runs / typechecks the engine installs
+        # it. Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-cascade; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-cascade failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-cascade failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -4801,6 +5011,9 @@ jobs:
       - rust-trading-core
       # DEC-FEED-RUST-CORE-001: the feed decision-kernel crate gate.
       - rust-brutex-feed
+      # DEC-RUST-CASCADE-RESULTS-001: the cascade/results-depth laws crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-cascade
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
