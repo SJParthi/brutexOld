@@ -466,17 +466,24 @@ class TestSessionAwareForcedExitParity:
                 tf_minutes=1,
                 stop_loss_paisa=100_000,
                 take_profit_paisa=100_000,
-                policy=FillPolicy(),
             )
             for m in masks
         ]
         assert got == expected
         # Anti-vacuity: the fire-every-bar mask opens AND force-exits at the
         # 16:50 extended boundary (NOT 15:20, NOT the 200-print next bar).
+        # Worst-case fill hand-derivation (DEC-FILL-WORST-CASE-ONLY-001 — the
+        # member authored this pin pre-#1825's open-anchored law): BUY entry
+        # fills at bar[1]'s adverse HIGH 100.00; the forced exit fills at the
+        # decided bar[3]'s adverse LOW 100.00 → pnl 0. The 16:50 bar's prices
+        # still provably fold: mfe 60 paisa = its 100.60 open over the 100.00
+        # entry. A 15:20-forced exit or a bar[4] leak (200-print → pnl
+        # 10_000 paisa) would fail BOTH the exit_ts and the pnl pins.
         fire_trades = got[0]
         assert len(fire_trades) == 1
         assert fire_trades[0].exit_ts == bars[3].timestamp
-        assert fire_trades[0].pnl_paisa == 60  # forced at OPEN 100.60, never 200
+        assert fire_trades[0].pnl_paisa == 0  # adverse LOW 100.00, never 200
+        assert fire_trades[0].mfe_paisa == 60  # the 100.60 open registered
 
     def test_rust_and_fallback_agree_on_extended_outage_day(self) -> None:
         # The Rust path and the forced pure-Python fallback agree on the

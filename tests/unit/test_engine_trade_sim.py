@@ -617,7 +617,11 @@ class TestSessionAwareForcedExit:
         trades = _trade_with_signal_then_ride(bars)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(16, 50, day=_EXTENDED_OUTAGE)  # NOT 15:20
-        assert trades[0].pnl_paisa == 60  # forced at the 16:50 bar OPEN 100.60
+        # Worst-case fill (DEC-FILL-WORST-CASE-ONLY-001): the forced exit fills
+        # at the decided bar's adverse LOW 100.00 → pnl 0; the 16:50 bar's
+        # 100.60 open still provably folds as mfe.
+        assert trades[0].pnl_paisa == 0  # forced-bar adverse LOW 100.00
+        assert trades[0].mfe_paisa == 60  # the 16:50 bar's 100.60 open registered
         assert trades[0].holding_bars == 3  # 15:25, 16:49, 16:50
 
     def test_truncated_lake_extended_day_session_gap_close_no_overnight_carry(self) -> None:
@@ -684,7 +688,10 @@ class TestSessionAwareForcedExit:
         trades = _trade_with_signal_then_ride(bars)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(15, 20, day=eve)
-        assert trades[0].pnl_paisa == 30
+        # Worst-case fill (DEC-FILL-WORST-CASE-ONLY-001): forced-bar adverse
+        # LOW 100.00 → pnl 0; the 15:20 bar's 100.30 open folds as mfe.
+        assert trades[0].pnl_paisa == 0
+        assert trades[0].mfe_paisa == 30
 
     def test_circuit_halt_day_keeps_regular_1520_exit(self) -> None:
         # DEC-HALT-DAY-TREATMENT-001: the annotated 2020-03-23 halt day stays a
@@ -699,7 +706,10 @@ class TestSessionAwareForcedExit:
         trades = _trade_with_signal_then_ride(bars)
         assert len(trades) == 1
         assert trades[0].exit_ts == _ts(15, 20, day=halt_day)
-        assert trades[0].pnl_paisa == 20
+        # Worst-case fill (DEC-FILL-WORST-CASE-ONLY-001): forced-bar adverse
+        # LOW 100.00 → pnl 0; the 15:20 bar's 100.20 open folds as mfe.
+        assert trades[0].pnl_paisa == 0
+        assert trades[0].mfe_paisa == 20
 
     def test_position_open_exactly_at_forced_minute_exits_that_bar(self) -> None:
         # A position still open exactly AT the forced-exit boundary bar exits on

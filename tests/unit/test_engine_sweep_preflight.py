@@ -177,7 +177,6 @@ class TestFreshnessPreflight:
         assert "delete the symbol's derived TF partition dirs" in remedy
         assert "re-run the prebuild" in remedy
 
-
     def test_daily_pair_folds_like_any_other(self) -> None:
         """DEC-MOVERS-STORED-FRESHNESS-001 fold-in (the BND-5b closure): a
         ``(symbol, '1day')`` verdict rides the SAME pure fold — a stale derived
