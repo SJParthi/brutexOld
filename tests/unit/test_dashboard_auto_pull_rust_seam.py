@@ -1,52 +1,41 @@
-"""Wave-3G Rust seam — ``brutex/dashboard/auto_pull.py`` (DEC-RUST-PULL-STATE-001).
+"""Wave-3G Rust kernel path — ``brutex/dashboard/auto_pull.py`` (DEC-RUST-PULL-STATE-001).
 
-The reload-predicate seam behind the default-OFF ``BRUTEX_PULL_STATE_RUST``:
-flag OFF byte-identical + bomb-spied; flag ON serves the kernel bool
-(deliberately-wrong fakes prove the serving); degrades (raise / poison /
-out-of-i64 counts / wheel missing) fall back to the byte-identical oracle;
-the REAL wheel (capability-probed) replays the frozen golden lattice.
+Flip phase: the reload predicate IS the kernel — no flag, no oracle.
+
+* the kernel bool is SERVED (a deliberately-wrong fake proves the serving)
+  and the five facts cross the FFI in order;
+* every wheel fault (missing / stale / raising / poison / out-of-i64 counts)
+  RAISES the typed :class:`PullStateKernelError` — fail-closed, no fallback;
+* a still-SET removed ``BRUTEX_PULL_STATE_RUST`` knob raises
+  :class:`PullStateFlagRemovedError`;
+* the REAL wheel replays the frozen golden lattice bit-for-bit.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import brutex_pull_state
 import pytest
 from brutex import pull_state_rust
 from brutex.dashboard.auto_pull import should_reload_instrument_master
 
-_FLAG = pull_state_rust.PULL_STATE_RUST_ENV
 _JSON_FIXTURE = (
     Path(__file__).resolve().parents[1] / "golden" / "fixtures" / "auto_pull_reload_verdicts.json"
 )
 
 
-@pytest.fixture(autouse=True)
-def _clean_warn_registry() -> Iterator[None]:
-    pull_state_rust.reset_for_tests()
-    yield
-    pull_state_rust.reset_for_tests()
-
-
-class _RecordingBomb:
-    def __init__(self) -> None:
-        self.touched: list[str] = []
-
-    def __getattr__(self, name: str) -> object:
-        object.__getattribute__(self, "touched").append(name)
-        raise AttributeError(name)
-
-
 def _fake_kernel(**functions: object) -> SimpleNamespace:
+    """A ``sys.modules`` plant standing in for the ``brutex_pull_state`` wheel."""
     return SimpleNamespace(**functions)
 
 
 def _call(index_count: int = 3, stock_count: int = 5, **flags: bool) -> bool:
+    """Drive the live predicate with defaulted healthy counts."""
     return should_reload_instrument_master(
         index_count=index_count,
         stock_count=stock_count,
@@ -56,34 +45,12 @@ def _call(index_count: int = 3, stock_count: int = 5, **flags: bool) -> bool:
     )
 
 
-class TestFlagOffNeverTouchesKernel:
-    def test_flag_unset_and_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for flag in (None, "0"):
-            if flag is None:
-                monkeypatch.delenv(_FLAG, raising=False)
-            else:
-                monkeypatch.setenv(_FLAG, flag)
-            bomb = _RecordingBomb()
-            monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-            assert _call() is False
-            assert _call(index_count=0) is True
-            assert bomb.touched == []
+class TestKernelServes:
+    """The kernel decision is SERVED — never re-derived in Python."""
 
-
-class TestBombTeeth:
-    def test_flag_on_records_the_touch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
-        bomb = _RecordingBomb()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        assert _call() is False  # the oracle still serves
-        assert "should_reload_master" in bomb.touched
-
-
-class TestFlagOnServes:
     def test_kernel_bool_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A deliberately-WRONG kernel answer is SERVED — the decision comes
-        from the kernel, not the oracle."""
-        monkeypatch.setenv(_FLAG, "1")
+        from the kernel, not a Python re-derivation."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -92,7 +59,7 @@ class TestFlagOnServes:
         assert _call() is True
 
     def test_kernel_receives_the_five_facts(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """The five facts cross the FFI positionally, in the declared order."""
         seen: list[tuple[object, ...]] = []
 
         def kernel(*args: object) -> bool:
@@ -106,17 +73,23 @@ class TestFlagOnServes:
         assert seen == [(0, 7, False, True, False)]
 
 
-class TestFlagOnDegrades:
-    @pytest.mark.parametrize("poison", [lambda *a: 1, lambda *a: None, lambda *a: "yes"])
-    def test_poison_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch, poison: Any) -> None:
-        monkeypatch.setenv(_FLAG, "1")
-        monkeypatch.setitem(
-            sys.modules, "brutex_pull_state", _fake_kernel(should_reload_master=poison)
-        )
-        assert _call(index_count=0) is True
+class TestFailClosed:
+    """Every wheel fault raises the typed error — no oracle exists."""
 
-    def test_raising_kernel_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+    def test_missing_wheel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unimportable wheel refuses loudly (``wheel_missing``)."""
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
+        with pytest.raises(pull_state_rust.PullStateKernelError, match="wheel_missing"):
+            _call(index_count=0)
+
+    def test_stale_wheel_raises_naming_the_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wheel predating the symbol refuses naming it (``wheel_stale``)."""
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", _fake_kernel())
+        with pytest.raises(pull_state_rust.PullStateKernelError, match="should_reload_master"):
+            _call()
+
+    def test_raising_kernel_raises_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A raising kernel becomes the typed ``kernel_error`` raise."""
 
         def kernel(*_a: object) -> bool:
             raise RuntimeError("kernel bomb")
@@ -124,30 +97,54 @@ class TestFlagOnDegrades:
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(should_reload_master=kernel)
         )
-        assert _call(legs_present=True) is True
+        with pytest.raises(pull_state_rust.PullStateKernelError, match="kernel_error"):
+            _call(legs_present=True)
 
-    def test_out_of_i64_counts_stay_python_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The representability gate: no kernel call, no warn — the
-        documented Python arm."""
-        monkeypatch.setenv(_FLAG, "1")
-        bomb = _RecordingBomb()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        assert _call(index_count=2**70, stock_count=0) is False
-        assert _call(index_count=0, stock_count=-(2**70)) is True
-        assert bomb.touched == []
+    @pytest.mark.parametrize("poison", [1, None, "yes"])
+    def test_poison_results_raise_kernel_invalid(
+        self, monkeypatch: pytest.MonkeyPatch, poison: Any
+    ) -> None:
+        """A non-bool result is refused (``kernel_invalid``), never punned."""
+        monkeypatch.setitem(
+            sys.modules, "brutex_pull_state", _fake_kernel(should_reload_master=lambda *a: poison)
+        )
+        with pytest.raises(pull_state_rust.PullStateKernelError, match="kernel_invalid"):
+            _call(index_count=0)
+
+    def test_out_of_i64_counts_refuse_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The input-domain gate: an out-of-i64 count raises NAMING the
+        domain — the pre-flip silent Python arm was deleted with the oracle."""
+        monkeypatch.setitem(
+            sys.modules, "brutex_pull_state", _fake_kernel(should_reload_master=lambda *a: True)
+        )
+        with pytest.raises(
+            pull_state_rust.PullStateKernelError, match="outside the kernel i64 domain"
+        ):
+            _call(index_count=2**70, stock_count=0)
+        with pytest.raises(
+            pull_state_rust.PullStateKernelError, match="outside the kernel i64 domain"
+        ):
+            _call(index_count=0, stock_count=-(2**70))
+
+    def test_set_removed_flag_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A still-SET removed knob refuses loudly — truthy AND falsy alike."""
+        for value in ("1", "0"):
+            monkeypatch.setenv(pull_state_rust.PULL_STATE_RUST_ENV, value)
+            with pytest.raises(pull_state_rust.PullStateFlagRemovedError):
+                _call()
 
 
 class TestRealWheelGoldenReplay:
+    """The installed wheel replays the frozen lattice bit-for-bit."""
+
     def test_reload_lattice_replays_bit_for_bit(self) -> None:
-        wheel = pytest.importorskip("brutex_pull_state")
-        if not hasattr(wheel, "should_reload_master"):
-            pytest.skip("installed brutex_pull_state wheel predates the Wave-3G symbols")
+        """Every frozen kernel row through the RAW wheel symbol."""
         payload = json.loads(_JSON_FIXTURE.read_text(encoding="utf-8"))
         replayed = 0
         for row in payload["rows"]:
             if not row["kernel_row"]:
                 continue
-            got = wheel.should_reload_master(
+            got = brutex_pull_state.should_reload_master(
                 row["index_count"],
                 row["stock_count"],
                 row["legs_present"],
@@ -157,3 +154,18 @@ class TestRealWheelGoldenReplay:
             assert got is row["verdict"], row["name"]
             replayed += 1
         assert replayed == 40
+
+    def test_live_module_serves_the_frozen_kernel_rows(self) -> None:
+        """The LIVE predicate (kernel-only) equals every frozen kernel row."""
+        payload = json.loads(_JSON_FIXTURE.read_text(encoding="utf-8"))
+        for row in payload["rows"]:
+            if not row["kernel_row"]:
+                continue
+            got = should_reload_instrument_master(
+                index_count=row["index_count"],
+                stock_count=row["stock_count"],
+                legs_present=row["legs_present"],
+                stale_economics=row["stale_economics"],
+                stale_eligibility=row["stale_eligibility"],
+            )
+            assert got is row["verdict"], row["name"]

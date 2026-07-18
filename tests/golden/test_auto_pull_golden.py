@@ -3,11 +3,18 @@
 The committed fixtures (``auto_pull_reload_verdicts.json`` + the serde-free
 ``auto_pull_reload_verdicts.tsv`` projection) were captured by
 ``generate_auto_pull_golden.py`` on the PRE-conversion tree — they are the
-oracle the Rust port of ``brutex/dashboard/auto_pull.py``'s
+oracle the Rust kernel of ``brutex/dashboard/auto_pull.py``'s
 ``should_reload_instrument_master`` predicate must satisfy bit-for-bit
-(Golden Rule #1).  This test recomputes the SAME table from the LIVE module
-via the shared ``_auto_pull_harness`` and asserts structural equality, plus
-anti-vacuous pins on the load-bearing rows.
+(Golden Rule #1).  This test recomputes the kernel-domain table from the
+LIVE (now kernel-only) module via the shared ``_auto_pull_harness`` and
+asserts structural equality, plus anti-vacuous pins on the load-bearing
+rows.
+
+Flip phase (DEC-RUST-PULL-STATE-001): the fixture stays BYTE-FROZEN, so its
+``kernel_row=False`` out-of-i64 rows still document the DELETED pre-flip
+silent Python arm; the live module now REFUSES those counts loudly
+(``PullStateKernelError``, the facade's input-domain gate), pinned here in
+place of a verdict comparison.
 """
 
 from __future__ import annotations
@@ -17,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex import pull_state_rust
+from brutex.dashboard.auto_pull import should_reload_instrument_master
 
-from tests.golden._auto_pull_harness import compute_payload, compute_tsv
+from tests.golden._auto_pull_harness import HUGE_COUNT, compute_payload, compute_tsv
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JSON_FIXTURE = FIXTURES / "auto_pull_reload_verdicts.json"
@@ -44,8 +53,15 @@ def _by_name(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 class TestFrozenGolden:
-    def test_rows_match_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
-        assert live["rows"] == frozen["rows"]
+    def test_kernel_rows_match_frozen(self, frozen: dict[str, Any], live: dict[str, Any]) -> None:
+        """The live (kernel-only) recompute equals every frozen KERNEL row.
+
+        The frozen ``kernel_row=False`` rows document the deleted pre-flip
+        Python arm — the live module refuses their counts loudly instead
+        (pinned by ``test_huge_counts_refuse_loudly``), so they are excluded
+        from the row-for-row equality.
+        """
+        assert live["rows"] == [row for row in frozen["rows"] if row["kernel_row"]]
 
     def test_tsv_is_the_json_projection(self, frozen: dict[str, Any]) -> None:
         assert TSV_FIXTURE.read_text(encoding="utf-8") == compute_tsv(frozen)
@@ -75,7 +91,22 @@ class TestAntiVacuous:
         assert rows["populated_l0e1g0"]["verdict"] is True
         assert rows["populated_l0e0g1"]["verdict"] is True
 
-    def test_huge_counts_stay_on_the_python_arm(self, frozen: dict[str, Any]) -> None:
+    def test_huge_counts_documented_in_the_frozen_fixture(self, frozen: dict[str, Any]) -> None:
+        """The fixture (byte-frozen) still records the pre-flip Python arm."""
         row = _by_name(frozen)["huge_counts_l0e0g0"]
         assert row["kernel_row"] is False
         assert row["verdict"] is False
+
+    def test_huge_counts_refuse_loudly(self) -> None:
+        """Flip phase: an out-of-i64 count RAISES the typed input-domain
+        refusal naming the domain — the pre-flip silent Python arm the
+        frozen row above documents was deleted with the oracle
+        (DEC-RUST-PULL-STATE-001)."""
+        with pytest.raises(
+            pull_state_rust.PullStateKernelError, match="outside the kernel i64 domain"
+        ):
+            should_reload_instrument_master(index_count=HUGE_COUNT, stock_count=HUGE_COUNT)
+        with pytest.raises(
+            pull_state_rust.PullStateKernelError, match="outside the kernel i64 domain"
+        ):
+            should_reload_instrument_master(index_count=0, stock_count=-HUGE_COUNT)

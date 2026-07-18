@@ -19,15 +19,16 @@ error + the :mod:`brutex.pull_state_rust` LEAF (stdlib+structlog only) —
 never ``app``/``pipeline_pull`` (no cycle; the sequencer stays
 byte-untouched).
 
-DEC-RUST-PULL-STATE-001 (lane Wave 1B): behind the default-OFF
-``BRUTEX_PULL_STATE_RUST`` flag the PURE surface here — the scope-token
-verdict + the market-hours rewrite + both note surgeries — is served by the
-``brutex_pull_state`` Rust kernel (byte-exact string laws, golden- +
-differential-pinned); the Python arms below are RETAINED VERBATIM as the
-live parity oracle and serve every flag-OFF call byte-identically, and
-every flag-ON degrade (wheel missing/stale, kernel raise, poisoned result —
-each a named warn-once in :mod:`brutex.pull_state_rust`). The
-``note_surgery_miss`` WARN, the step-3 appends, the no-op report builders
+DEC-RUST-PULL-STATE-001 (flip phase): the PURE decision surface here — the
+scope-token verdict + the market-hours rewrite + both note surgeries — is
+served by the ``brutex_pull_state`` Rust kernel as THE ONLY decision path
+(byte-exact string laws, golden-pinned; the anchor constants below remain
+the frozen cross-language drift-pin surface).  The Python oracle arms were
+DELETED with the flip: a kernel fault (wheel absent/stale, a raise, a
+poisoned result) raises the typed
+:class:`brutex.pull_state_rust.PullStateKernelError` — fail-closed, never a
+silent degrade.  The ``note_surgery_miss`` WARN, the unknown-token
+``ValueError`` composition, the step-3 appends, the no-op report builders
 and the crossverify tail fence stay Python permanently.
 """
 
@@ -121,25 +122,17 @@ def normalize_pull_scope(token: str | None) -> str:
     :class:`ValueError` (the route maps it to a clean 400, the CLI to exit 1).
     A typo'd scope must never silently widen OR narrow a vendor pull (B H9).
 
-    DEC-RUST-PULL-STATE-001 (Wave 1B): flag-ON, the KNOWN-token verdict is
-    served by the Rust kernel (CPython-``str.strip``-parity trim, golden- +
-    differential-pinned); an UNKNOWN verdict falls through to the oracle
-    below, which composes the ``{token!r}`` refusal itself (CPython repr is
-    never re-minted in Rust) — so the raise path is oracle-served on BOTH
-    arms, and a kernel degrade can never change a verdict.
+    DEC-RUST-PULL-STATE-001 (flip phase): the verdict is the Rust kernel's
+    (CPython-``str.strip``-parity trim, golden-pinned) — the ONLY decision
+    path.  :data:`~brutex.pull_state_rust.SCOPE_CODE_UNKNOWN` is the kernel's
+    HONEST unknown-token answer (a real vocabulary verdict, never a degrade):
+    Python composes the ``{token!r}`` refusal for it here (CPython repr is
+    never re-minted in Rust).  A kernel fault raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — fail-closed.
     """
-    if _pull_state_rust.pull_state_rust_enabled():
-        verdict = _pull_state_rust.rust_scope_token(token)
-        if verdict is not None and verdict != _pull_state_rust.SCOPE_CODE_UNKNOWN:
-            return _SCOPE_BY_CODE[verdict]
-    # The Python oracle — the byte-identical retained arm: flag OFF takes it
-    # untouched; a flag-ON kernel degrade OR unknown-token verdict falls
-    # through to it (never a raise from the seam itself).
-    stripped = (token or "").strip()
-    if not stripped:
-        return SCOPE_FULL
-    if stripped in KNOWN_PULL_SCOPES:
-        return stripped
+    verdict = _pull_state_rust.rust_scope_token(token)
+    if verdict != _pull_state_rust.SCOPE_CODE_UNKNOWN:
+        return _SCOPE_BY_CODE[verdict]
     known = ", ".join(sorted(KNOWN_PULL_SCOPES))
     raise ValueError(f"unknown pull scope {token!r}; expected one of: {known}")
 
@@ -355,17 +348,12 @@ def rewrite_market_hours_note(
     WARN (the ``_STOP_FNO_CLAUSE`` posture). Pure; idempotent on an
     already-rewritten note (the replacement strings contain no anchor).
 
-    DEC-RUST-PULL-STATE-001 (Wave 1B): flag-ON the rewrite is served by the
-    Rust kernel (byte-exact, golden-pinned); the Python arm below is the
-    retained oracle serving every flag-OFF call + every kernel degrade.
+    DEC-RUST-PULL-STATE-001 (flip phase): the rewrite is served by the Rust
+    kernel (byte-exact, golden-pinned) — the ONLY path; the anchor constants
+    above remain the frozen drift-pin surface.  A kernel fault raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — fail-closed.
     """
-    if _pull_state_rust.pull_state_rust_enabled():
-        rewritten = _pull_state_rust.rust_market_hours_note_rewrite(note, phases_replacement)
-        if rewritten is not None:
-            return rewritten
-    note = note.replace(_MARKET_HOURS_WINDOW_CLAUSE, _MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE, 1)
-    note = note.replace(_MARKET_HOURS_PHASES_CLAUSE, phases_replacement, 1)
-    return note.replace(_MARKET_HOURS_RESUME_CLAUSE, _MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE, 1)
+    return _pull_state_rust.rust_market_hours_note_rewrite(note, phases_replacement)
 
 
 # ── crossverify tail seam (production default = REAL; fail-soft fence) ───────
@@ -490,34 +478,16 @@ def build_spot_only_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
     e2e negative pin (``test_e2e_no_zero_expiries_wording…``) fails loudly on
     a full drift, forcing a conscious re-pin.
 
-    DEC-RUST-PULL-STATE-001 (Wave 1B): flag-ON, steps 1-2 (+ the market-hours
-    and stop-clause rewrites) are served by the Rust kernel as
-    ``(note, prefix_present, clause_present)``; the ``note_surgery_miss``
-    WARN and the step-3 append stay HERE on both arms (Python composes the
-    tail outcome). The Python arm below is the retained byte-identical
-    oracle — every flag-OFF call and every kernel degrade.
+    DEC-RUST-PULL-STATE-001 (flip phase): steps 1-2 (+ the market-hours and
+    stop-clause rewrites) are served by the Rust kernel as
+    ``(note, prefix_present, clause_present)`` — the ONLY path; the
+    ``note_surgery_miss`` WARN and the step-3 append stay HERE (Python
+    composes the tail outcome).  A kernel fault raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — fail-closed.
     """
-    if _pull_state_rust.pull_state_rust_enabled():
-        surgery = _pull_state_rust.rust_spot_only_note_surgery(base_note)
-        if surgery is not None:
-            rust_note, prefix_present, clause_present = surgery
-            if prefix_present != clause_present:
-                _LOG.warning(
-                    "pull_scope.note_surgery_miss",
-                    prefix_present=prefix_present,
-                    fno_clause_present=clause_present,
-                    base_note=base_note[:200],
-                )
-            return f"{rust_note}, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(tail)}"
-    note = rewrite_market_hours_note(base_note)
-    if _STOP_FNO_CLAUSE in note:
-        note = note.replace(_STOP_FNO_CLAUSE, _STOP_FNO_SPOT_ONLY_CLAUSE, 1)
-    prefix_present = _FULL_PREFIX in note
-    clause_present = _NOOP_FNO_CLAUSE in note
-    if clause_present:
-        note = note.replace(_NOOP_FNO_CLAUSE, FNO_SKIPPED_CLAUSE, 1)
-    if prefix_present:
-        note = note.replace(_FULL_PREFIX, _SPOT_ONLY_PREFIX, 1)
+    rust_note, prefix_present, clause_present = _pull_state_rust.rust_spot_only_note_surgery(
+        base_note
+    )
     if prefix_present != clause_present:
         _LOG.warning(
             "pull_scope.note_surgery_miss",
@@ -525,7 +495,7 @@ def build_spot_only_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
             fno_clause_present=clause_present,
             base_note=base_note[:200],
         )
-    return f"{note}, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(tail)}"
+    return f"{rust_note}, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(tail)}"
 
 
 def build_fno_only_note(base_note: str) -> str:
@@ -555,32 +525,15 @@ def build_fno_only_note(base_note: str) -> str:
     fails loudly on a full drift, forcing a conscious re-pin). Pure beyond
     the WARN.
 
-    DEC-RUST-PULL-STATE-001 (Wave 1B): flag-ON the surgery is served by the
-    Rust kernel (the spot-axis mirror seam of :func:`build_spot_only_note` —
-    the WARN stays HERE on both arms); the Python arm below is the retained
-    byte-identical oracle.
+    DEC-RUST-PULL-STATE-001 (flip phase): the surgery is served by the Rust
+    kernel (the spot-axis mirror of :func:`build_spot_only_note` — the
+    fno-only phases wording is baked into the kernel; the WARN stays HERE) —
+    the ONLY path.  A kernel fault raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — fail-closed.
     """
-    if _pull_state_rust.pull_state_rust_enabled():
-        surgery = _pull_state_rust.rust_fno_only_note_surgery(base_note)
-        if surgery is not None:
-            rust_note, prefix_present, clause_present = surgery
-            if prefix_present != clause_present:
-                _LOG.warning(
-                    "pull_scope.note_surgery_miss",
-                    prefix_present=prefix_present,
-                    spot_clause_present=clause_present,
-                    base_note=base_note[:200],
-                )
-            return rust_note
-    note = rewrite_market_hours_note(
-        base_note, phases_replacement=_MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE
+    rust_note, prefix_present, clause_present = _pull_state_rust.rust_fno_only_note_surgery(
+        base_note
     )
-    prefix_present = _FULL_PREFIX in note
-    clause_present = _NOOP_SPOT_CLAUSE in note
-    if clause_present:
-        note = note.replace(_NOOP_SPOT_CLAUSE, SPOT_SKIPPED_CLAUSE, 1)
-    if prefix_present:
-        note = note.replace(_FULL_PREFIX, _FNO_ONLY_PREFIX, 1)
     if prefix_present != clause_present:
         _LOG.warning(
             "pull_scope.note_surgery_miss",
@@ -588,4 +541,4 @@ def build_fno_only_note(base_note: str) -> str:
             spot_clause_present=clause_present,
             base_note=base_note[:200],
         )
-    return note
+    return rust_note

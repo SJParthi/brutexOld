@@ -7,10 +7,15 @@ Imported by BOTH ``generate_auto_pull_golden.py`` (the one-shot freeze) and
 ONE table is computed from the LIVE ``brutex.dashboard.auto_pull``: the
 :func:`should_reload_instrument_master` five-input predicate over count
 classes (empty lake · indices-missing · stocks-missing · populated · a
-defensive negative · an out-of-i64 CPython int) × the exhaustive ``2**3``
-flag lattice.  Out-of-i64 counts are ``kernel_row=False`` — the seam keeps
-them on the DOCUMENTED Python arm (a representability fact, not a kernel
-fault; the intent ``_U64_MAX`` precedent).
+defensive negative) × the exhaustive ``2**3`` flag lattice.
+
+Flip phase (DEC-RUST-PULL-STATE-001): the frozen fixture ALSO carries the
+pre-flip ``kernel_row=False`` out-of-i64 rows (their recorded verdicts
+document the DELETED silent Python arm — the fixture is byte-frozen, never
+rewritten), but the LIVE recompute no longer enumerates them: an out-of-i64
+count now RAISES the typed ``PullStateKernelError`` (the facade's
+input-domain refusal — no oracle exists), pinned by the consuming test
+instead of a verdict row.
 
 The kernel TSV projects the SAME rows onto the dependency-free line format
 the crate's own ``cargo test`` replays (the cross-language pin).
@@ -23,9 +28,6 @@ from typing import Any
 
 from brutex.dashboard.auto_pull import should_reload_instrument_master
 
-_I64_MIN = -(2**63)
-_I64_MAX = 2**63 - 1
-
 #: (name-stem, index_count, stock_count) — the count classes.
 _COUNT_CLASSES: tuple[tuple[str, int, int], ...] = (
     ("empty", 0, 0),
@@ -33,8 +35,12 @@ _COUNT_CLASSES: tuple[tuple[str, int, int], ...] = (
     ("stocks_missing", 3, 0),
     ("populated", 3, 5),
     ("negative_defensive", -2, 7),
-    ("huge_counts", 2**70, 2**70),
 )
+
+#: The out-of-i64 count class (the frozen fixture's ``kernel_row=False``
+#: rows) — LIVE calls now refuse it loudly (see the module docstring); the
+#: consuming test drives it through ``pytest.raises``.
+HUGE_COUNT: int = 2**70
 
 
 def compute_payload() -> dict[str, Any]:
@@ -58,8 +64,7 @@ def compute_payload() -> dict[str, Any]:
                 "legs_present": legs,
                 "stale_economics": econ,
                 "stale_eligibility": elig,
-                "kernel_row": _I64_MIN <= index_count <= _I64_MAX
-                and _I64_MIN <= stock_count <= _I64_MAX,
+                "kernel_row": True,
                 "verdict": verdict,
             }
         )

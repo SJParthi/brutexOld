@@ -10,11 +10,14 @@ module gate).
 
 from __future__ import annotations
 
+import sys
 from datetime import date, datetime, time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from brutex import pull_state_rust
 from brutex.calendars import auto_pull_gate
 from brutex.calendars.auto_pull_gate import (
     DEFAULT_PULL_ALL_SETTLE_IST,
@@ -243,18 +246,19 @@ def test_gate_in_coverage_trading_day_no_coverage_warn() -> None:
 
 def test_gate_market_hours_belt_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     """The step-4 BELT is structurally unreachable while the settle floor holds
-    (every in-window minute is already before_settle) — monkeypatch the guard
-    predicate to prove a future settle-law change cannot open a hole.
-
-    ORACLE-ARM by construction (the DEC-LAKE-RUST-LOCKS-ATOMIC-001
-    Python-arm-only monkeypatch-seam class): the Rust kernel computes this
-    belt INTERNALLY from the crate's ONE market-hours core, so a patched
-    Python ``pull_allowed_default`` can never reach it — the flag is pinned
-    OFF here and the kernel-arm belt twins live at the right seams (cargo
-    ``market_hours_belt_stays_reachable`` + the seam suite's served-code and
-    builder-detail pins in ``test_auto_pull_gate_rust_seam.py``)."""
-    monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
-    monkeypatch.setattr(auto_pull_gate, "pull_allowed_default", lambda *, now: False)
+    (every in-window minute is already before_settle) — post-flip
+    (DEC-RUST-PULL-STATE-001) the kernel computes the belt INTERNALLY from
+    the crate's ONE market-hours core (cargo
+    ``market_hours_belt_stays_reachable`` pins its reachability), so this pin
+    plants a kernel VERDICT to prove the consumer's code → verdict-builder
+    mapping cannot open a hole: the served arm + its single-source detail."""
+    monkeypatch.setitem(
+        sys.modules,
+        "brutex_pull_state",
+        SimpleNamespace(
+            auto_gate_decision=lambda *a: (pull_state_rust.GATE_CODE_MARKET_HOURS_BLOCKED, False)
+        ),
+    )
     v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=_NO_EVID)
     assert (v.allowed, v.reason) == (False, "market_hours_blocked")
     assert v.detail == "inside the NSE market-hours pull window — deferred"

@@ -59,6 +59,7 @@ from brutex.dashboard.pull_intent import (
     restore_intent_after_refused_start,
     run_auto_resume,
 )
+from brutex.pull_state_rust import PullStateKernelError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -357,7 +358,15 @@ RESUME_CAPS: tuple[int, ...] = (0, 1, 2, 3)
 
 
 def compute_resume_table(base_dir: Path) -> list[dict[str, Any]]:
-    """Drive the resume lattice through the REAL ``run_auto_resume``."""
+    """Drive the resume lattice through the REAL ``run_auto_resume``.
+
+    DEC-RUST-PULL-STATE-001 (flip phase): a ``restarts`` counter beyond the
+    kernel's u64 domain now RAISES the typed fail-closed
+    ``PullStateKernelError`` (the silent Python arm the frozen fixture's
+    ``kernel_row=False`` rows recorded went with the deleted oracle) — such
+    a case is recorded as ``action="kernel_refused"`` / ``arm=None`` so the
+    golden test can pin the refusal against the byte-untouched fixture.
+    """
     rows: list[dict[str, Any]] = []
     case_n = 0
     for has_intent in (False, True):
@@ -387,13 +396,22 @@ def compute_resume_table(base_dir: Path) -> list[dict[str, Any]]:
                         calls.append(probe_ok)
                         return probe_ok
 
-                    action = run_auto_resume(
-                        store,
-                        launch=launched.append,
-                        probe_singleflight=_probe,
-                        alert=lambda intent: None,
-                        max_restarts=cap,
-                    )
+                    arm: int | None
+                    try:
+                        action_token = run_auto_resume(
+                            store,
+                            launch=launched.append,
+                            probe_singleflight=_probe,
+                            alert=lambda intent: None,
+                            max_restarts=cap,
+                        )
+                        action_value = action_token.value
+                        arm = _ACTION_TO_ARM[action_token]
+                    except PullStateKernelError:
+                        # The flip-phase fail-closed law for a beyond-u64
+                        # counter (see the function docstring).
+                        action_value = "kernel_refused"
+                        arm = None
                     rows.append(
                         {
                             "id": f"resume_{case_n}",
@@ -401,8 +419,8 @@ def compute_resume_table(base_dir: Path) -> list[dict[str, Any]]:
                             "probe": probe_ok,
                             "restarts": restarts,
                             "max_restarts": cap,
-                            "action": action.value,
-                            "arm": _ACTION_TO_ARM[action],
+                            "action": action_value,
+                            "arm": arm,
                             # the ORDER law: no probe without an intent
                             "probe_called": bool(probe_calls),
                             # the bump-BEFORE-launch law

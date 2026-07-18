@@ -18,6 +18,17 @@ State machine (one pull job): ``idle → running → done`` (clean) or
 ``idle → running → error`` (terminal failure). ``start`` resets to ``running``
 so the **same** tracker instance is reusable across re-clicks (idempotent —
 CLAUDE.md §2 Rule 7).
+
+DEC-RUST-PULL-STATE-001 (flip phase): the DERIVED-metrics math — the
+:class:`ProgressSnapshot` ``percent`` / ``elapsed_seconds`` /
+``units_per_sec`` / ``eta_seconds`` properties, the banker's-rounding
+percent twin included — is the ``brutex_pull_state`` Rust kernel's ONLY
+(``progress_derived``; the duplicated Python decision bodies were DELETED).
+The counter state machine, the lock/threads, every string and ``to_dict``
+stay Python. A kernel fault — or a snapshot outside the kernel's modeled
+domain (counts beyond ``2**53`` / non-float instants, unreachable from this
+tracker's clamped counters) — raises the typed
+:class:`~brutex.pull_state_rust.PullStateKernelError`, FAIL-CLOSED.
 """
 
 from __future__ import annotations
@@ -131,21 +142,21 @@ class ProgressSnapshot:
     phase_base_completed: int = 0
     open_ended: bool = False
 
-    # --- pull_progress (Wave 2F) — the `DEC-RUST-PULL-STATE-001` derived-metrics
-    # seam. ONE kernel consult serves all four derived properties; ``None``
-    # (flag OFF / out-of-domain snapshot / wheel degrade) means the retained
-    # byte-identical Python oracle below serves. The counter state machine,
-    # ``to_dict``, ``running`` and every string stay Python.
-    def _rust_derived(self) -> tuple[float, float, float, float | None] | None:
-        """Consult the Rust derived-metrics kernel; ``None`` = use the oracle.
+    # --- pull_progress (flip phase) — the `DEC-RUST-PULL-STATE-001`
+    # derived-metrics plane. ONE kernel consult serves all four derived
+    # properties (the deleted Python oracle bodies' laws live in
+    # rust/brutex-pull-state — bit-identical, golden-pinned). The counter
+    # state machine, ``to_dict``, ``running`` and every string stay Python.
+    def _rust_derived(self) -> tuple[float, float, float, float | None]:
+        """One fail-closed kernel consult for all four derived metrics.
 
         Returns ``(percent, elapsed_seconds, units_per_sec, eta_seconds)``
-        bit-identical to the oracle properties (``eta_seconds`` already
-        folded to ``float | None``). The string comparison stays Python —
-        the kernel receives the PRE-COMPUTED running verdict.
+        bit-identical to the pre-flip oracle properties (``eta_seconds``
+        already folded to ``float | None``). The string comparison stays
+        Python — the kernel receives the PRE-COMPUTED running verdict. A
+        kernel fault or an out-of-domain snapshot raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError`.
         """
-        if not _pull_state_rust.pull_state_rust_enabled():
-            return None
         return _pull_state_rust.rust_progress_derived(
             state_running=self.state == STATE_RUNNING,
             open_ended=self.open_ended,
@@ -159,22 +170,17 @@ class ProgressSnapshot:
 
     @property
     def percent(self) -> float:
-        """Completion percentage in ``[0, 100]`` — ``0.0`` when *total* is 0."""
-        derived = self._rust_derived()
-        if derived is not None:
-            return derived[0]
-        if self.total <= 0:
-            return 0.0
-        return min(100.0, round(self.completed / self.total * 100.0, 1))
+        """Completion percentage in ``[0, 100]`` — ``0.0`` when *total* is 0.
+
+        Kernel-served (one-decimal banker's rounding + the min-100 clamp —
+        the laws of the deleted oracle, bit-identical by the frozen golden).
+        """
+        return self._rust_derived()[0]
 
     @property
     def elapsed_seconds(self) -> float:
         """Seconds between :meth:`PullProgress.start` and the last mutation (clamped ≥ 0)."""
-        derived = self._rust_derived()
-        if derived is not None:
-            return derived[1]
-        elapsed = self.updated_at - self.started_at
-        return elapsed if elapsed > 0.0 else 0.0
+        return self._rust_derived()[1]
 
     @property
     def units_per_sec(self) -> float:
@@ -187,14 +193,7 @@ class ProgressSnapshot:
         completed past the baseline over a positive elapsed span (avoids a
         divide-by-zero and never fabricates a rate from a cross-run count jump).
         """
-        derived = self._rust_derived()
-        if derived is not None:
-            return derived[2]
-        progressed = self.completed - self.phase_base_completed
-        span = self.updated_at - self.phase_started_at
-        if span <= 0.0 or progressed <= 0:
-            return 0.0
-        return progressed / span
+        return self._rust_derived()[2]
 
     @property
     def eta_seconds(self) -> float | None:
@@ -208,18 +207,7 @@ class ProgressSnapshot:
         illusion, so none is shown. Honest envelope: an extrapolation from the
         CURRENT phase rate, not a guarantee.
         """
-        derived = self._rust_derived()
-        if derived is not None:
-            return derived[3]
-        if self.state != STATE_RUNNING or self.open_ended or self.total <= 0:
-            return None
-        rate = self.units_per_sec
-        if rate <= 0.0:
-            return None
-        remaining = self.total - self.completed
-        if remaining <= 0:
-            return 0.0
-        return remaining / rate
+        return self._rust_derived()[3]
 
     @property
     def running(self) -> bool:

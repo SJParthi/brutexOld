@@ -1,12 +1,22 @@
-"""The pull_scope ↔ ``brutex_pull_state`` Rust seam (DEC-RUST-PULL-STATE-001, Wave 1B).
+"""The pull_scope ↔ ``brutex_pull_state`` Rust kernel (DEC-RUST-PULL-STATE-001, flip phase).
 
-Covers all four seam arcs on every consult site (flag off · flag on + served
-· flag on + degrade · real-wheel parity), the facade accessors' refuse-poison
-gates, and the CROSS-LANGUAGE ANCHOR DRIFT PIN: the Rust crate's anchor
+The kernel is THE ONLY decision path for the scope-token verdict, the
+market-hours rewrite and both note surgeries — the Python oracle arms were
+deleted with the flip.  This suite pins: the removed-flag refusal, kernel
+AUTHORITY on every consult site (a deliberately-wrong fake verdict is
+SERVED), the fail-closed ``PullStateKernelError`` raise on every wheel
+fault, the CROSS-LANGUAGE ANCHOR DRIFT PIN (the Rust crate's anchor
 literals must equal the Python module's must equal what the real
-``pipeline_pull`` producers emit — a `_complete_note` wording refactor must
-force a conscious re-pin on BOTH languages, never a silent desync.
+``pipeline_pull`` producers emit — a ``_complete_note`` wording refactor
+must force a conscious re-pin on BOTH languages, never a silent desync),
+and the real-wheel golden replay + hypothesis differentials against IN-TEST
+reimplementations of the frozen string laws (test code may reimplement the
+law; production may not).
 """
+
+# Whitebox reads of module-private anchor constants (sanctioned — the frozen
+# drift-pin surface).
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -15,16 +25,16 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
 import pytest
-from brutex import pull_state_rust
 from brutex.dashboard import pull_scope as ps
 from brutex.dashboard.pull_scope import (
+    FNO_SKIPPED_CLAUSE,
     GREEKS_NOT_RUN_NOTE,
     SCOPE_FNO_ONLY,
     SCOPE_FULL,
     SCOPE_SPOT_ONLY,
+    SPOT_SKIPPED_CLAUSE,
     CrossverifyTailOutcome,
     build_fno_only_note,
     build_spot_only_note,
@@ -32,12 +42,10 @@ from brutex.dashboard.pull_scope import (
     normalize_pull_scope,
     rewrite_market_hours_note,
 )
+from brutex.pull_state_rust import PullStateFlagRemovedError, PullStateKernelError
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RUST_SRC = _REPO_ROOT / "rust" / "brutex-pull-state" / "src" / "pull_scope.rs"
@@ -52,13 +60,13 @@ _FLAG = "BRUTEX_PULL_STATE_RUST"
 _NOTE_FRAGMENT_LISTS = st.lists(
     st.sampled_from(
         [
-            ps._MARKET_HOURS_WINDOW_CLAUSE,  # pyright: ignore[reportPrivateUsage]
-            ps._MARKET_HOURS_PHASES_CLAUSE,  # pyright: ignore[reportPrivateUsage]
-            ps._MARKET_HOURS_RESUME_CLAUSE,  # pyright: ignore[reportPrivateUsage]
-            ps._FULL_PREFIX,  # pyright: ignore[reportPrivateUsage]
-            ps._NOOP_FNO_CLAUSE,  # pyright: ignore[reportPrivateUsage]
-            ps._NOOP_SPOT_CLAUSE,  # pyright: ignore[reportPrivateUsage]
-            ps._STOP_FNO_CLAUSE,  # pyright: ignore[reportPrivateUsage]
+            ps._MARKET_HOURS_WINDOW_CLAUSE,
+            ps._MARKET_HOURS_PHASES_CLAUSE,
+            ps._MARKET_HOURS_RESUME_CLAUSE,
+            ps._FULL_PREFIX,
+            ps._NOOP_FNO_CLAUSE,
+            ps._NOOP_SPOT_CLAUSE,
+            ps._STOP_FNO_CLAUSE,
             "spot clean (1 pair(s))",
             " — ",
             "x",
@@ -70,22 +78,14 @@ _NOTE_FRAGMENT_LISTS = st.lists(
 ).map("".join)
 
 
-@pytest.fixture(autouse=True)
-def _clean_warn_registry() -> Iterator[None]:
-    pull_state_rust.reset_for_tests()
-    yield
-    pull_state_rust.reset_for_tests()
-
-
 class _RecordingBomb:
     """A ``sys.modules`` plant that RECORDS every attribute touch.
 
     ``__getattr__`` raises :class:`AttributeError` (the special-method-
     appropriate type — CodeQL ``py/unexpected-raise-in-special-method``
-    forbids an AssertionError here), so the TEETH are the recorded
-    ``touched`` list: the flag-OFF pins assert it stays EMPTY, and
-    :class:`TestBombTeeth` proves a flag-ON consult genuinely records
-    (the spy cannot go silently blind).
+    forbids an AssertionError here) — the shape the facade's resolver reads
+    as a wheel LACKING the symbol (``reason=wheel_stale``).  The teeth are
+    BOTH the typed raise and the recorded ``touched`` list.
     """
 
     def __init__(self) -> None:
@@ -96,66 +96,42 @@ class _RecordingBomb:
         raise AttributeError(name)
 
 
-# ── flag OFF: byte-identical + never imports (the bomb spy) ──────────────────
-
-
-class TestFlagOffNeverTouchesKernel:
-    def test_all_four_sites_flag_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(_FLAG, raising=False)
-        bomb = _RecordingBomb()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        assert normalize_pull_scope("  spot-only  ") == SCOPE_SPOT_ONLY
-        with pytest.raises(ValueError, match="unknown pull scope"):
-            normalize_pull_scope("junk")
-        drifted = "deferred — no anchors here"
-        assert rewrite_market_hours_note(drifted) == drifted
-        note = build_spot_only_note(
-            "pipeline complete — spot clean (1 pair(s))"
-            ", metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)",
-            _TAIL,
-        )
-        assert note.startswith("spot-only pipeline complete — ")
-        fno = build_fno_only_note("pipeline complete — spot clean (0 pair(s)), metadata 4")
-        assert fno.startswith("F&O-only pipeline complete — ")
-        assert bomb.touched == []
-
-    def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "0")
-        bomb = _RecordingBomb()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        assert normalize_pull_scope(None) == SCOPE_FULL
-        assert rewrite_market_hours_note("x") == "x"
-        assert build_fno_only_note("y") == "y"
-        assert bomb.touched == []
-
-
-class TestBombTeeth:
-    def test_flag_on_consult_records_the_touch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The spy has TEETH: a flag-ON consult genuinely records (so the
-        flag-OFF empty-list assertions above can never pass vacuously)."""
-        monkeypatch.setenv(_FLAG, "1")
-        bomb = _RecordingBomb()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        # The AttributeError-raising bomb reads as a stale wheel → the
-        # oracle still serves (never a crash) — AND the touch is recorded.
-        assert normalize_pull_scope("spot-only") == SCOPE_SPOT_ONLY
-        assert "scope_token" in bomb.touched
-
-
-# ── flag ON: the kernel verdict is SERVED (deliberately-wrong fakes) ─────────
-
-
 def _fake_kernel(**functions: object) -> SimpleNamespace:
+    """A fake ``brutex_pull_state`` module carrying the given kernels."""
     return SimpleNamespace(**functions)
 
 
-class TestFlagOnServesKernel:
+# ── the removed opt-in knob refuses LOUDLY (any spelling) ────────────────────
+
+
+class TestRemovedFlagRefusal:
+    """A SET ``BRUTEX_PULL_STATE_RUST`` is the typed refusal at every site."""
+
+    @pytest.mark.parametrize("value", ["1", "0", "yes", "off"])
+    def test_every_site_refuses_a_set_flag(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Truthy AND falsy spellings — the knob itself is removed."""
+        monkeypatch.setenv(_FLAG, value)
+        with pytest.raises(PullStateFlagRemovedError, match=_FLAG):
+            normalize_pull_scope("spot-only")
+        with pytest.raises(PullStateFlagRemovedError, match=_FLAG):
+            rewrite_market_hours_note("x")
+        with pytest.raises(PullStateFlagRemovedError, match=_FLAG):
+            build_spot_only_note("y", _TAIL)
+        with pytest.raises(PullStateFlagRemovedError, match=_FLAG):
+            build_fno_only_note("z")
+
+
+# ── kernel AUTHORITY: the verdict is SERVED (deliberately-wrong fakes) ───────
+
+
+class TestKernelVerdictServed:
     def test_scope_token_verdict_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """A deliberately-WRONG verdict is served — proving the consult."""
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(scope_token=lambda token: 2)
         )
-        # A deliberately-WRONG verdict is served — proving the kernel arm.
         assert normalize_pull_scope("full") == SCOPE_FNO_ONLY
 
     @pytest.mark.parametrize(
@@ -164,29 +140,31 @@ class TestFlagOnServesKernel:
     def test_scope_every_code_maps(
         self, monkeypatch: pytest.MonkeyPatch, code: int, expected: str
     ) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """Every vocabulary code maps through the ONE Python code→token table."""
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(scope_token=lambda token: code)
         )
         assert normalize_pull_scope("anything") == expected
 
-    def test_scope_unknown_code_falls_to_oracle_raise(
+    def test_scope_unknown_code_composes_the_python_refusal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A 255 verdict falls through to the ORACLE — the {token!r} refusal
-        is composed Python-side, and a drifted kernel can never turn a KNOWN
-        token into a raise (the oracle re-parses it)."""
-        monkeypatch.setenv(_FLAG, "1")
+        """255 is the kernel's HONEST unknown-token verdict — a real
+        vocabulary answer, never a degrade: Python composes the ``{token!r}``
+        refusal for it (CPython repr is never re-minted in Rust).  The
+        kernel is the AUTHORITY, so even a known token mis-verdicted 255 by
+        a fake refuses (the pre-flip oracle-re-parse rescue died with the
+        oracle — the real kernel is drift-pinned by the golden corpus)."""
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(scope_token=lambda token: 255)
         )
         with pytest.raises(ValueError, match=r"unknown pull scope 'junk—token'"):
             normalize_pull_scope("junk—token")
-        # The drift-safe law: a known token mis-verdicted 255 still serves.
-        assert normalize_pull_scope("spot-only") == SCOPE_SPOT_ONLY
+        with pytest.raises(ValueError, match=r"unknown pull scope 'spot-only'"):
+            normalize_pull_scope("spot-only")
 
     def test_market_hours_rewrite_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """The rewrite output is the kernel's, verbatim."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -196,7 +174,7 @@ class TestFlagOnServesKernel:
         assert out == "KERNEL[n|p]"
 
     def test_spot_surgery_served_with_python_appends(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """Step 3 (Greeks + crossverify) stays Python-side composition."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -204,14 +182,13 @@ class TestFlagOnServesKernel:
         )
         with capture_logs() as logs:
             note = build_spot_only_note("whatever", _TAIL)
-        # Step 3 (Greeks + crossverify) stays Python-side on the kernel arm.
         assert note == f"SURGERY, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(_TAIL)}"
         assert [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"] == []
 
     def test_spot_surgery_kernel_booleans_fire_the_warn(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """The ``note_surgery_miss`` WARN stays Python, fed by the kernel booleans."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -226,7 +203,6 @@ class TestFlagOnServesKernel:
         assert miss[0]["base_note"] == "half-drifted base"
 
     def test_fno_surgery_served_clean_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -237,7 +213,7 @@ class TestFlagOnServesKernel:
         assert [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"] == []
 
     def test_fno_surgery_served_and_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """No appends on the fno axis, ever — and the WARN keys spot_clause."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
@@ -245,77 +221,71 @@ class TestFlagOnServesKernel:
         )
         with capture_logs() as logs:
             note = build_fno_only_note("x")
-        assert note == "FNO-SURGERY"  # no appends on the fno axis, ever
+        assert note == "FNO-SURGERY"
         miss = [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
         assert len(miss) == 1
         assert miss[0]["prefix_present"] is False
         assert miss[0]["spot_clause_present"] is True
 
 
-# ── flag ON: every degrade arm falls to the byte-identical oracle ────────────
+# ── kernel faults are FAIL-CLOSED typed raises (no oracle exists) ────────────
 
 
-class TestFlagOnDegrades:
-    def test_missing_symbol_degrades_wheel_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+class TestKernelFaultsFailClosed:
+    def test_missing_wheel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # import → ImportError
+        with pytest.raises(PullStateKernelError, match="wheel_missing"):
+            normalize_pull_scope("full")
+        with pytest.raises(PullStateKernelError, match="wheel_missing"):
+            build_fno_only_note("x")
+
+    def test_stale_wheel_missing_symbol_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "brutex_pull_state", _fake_kernel())
-        with capture_logs() as logs:
-            assert normalize_pull_scope("fno-only") == SCOPE_FNO_ONLY
-        events = [e for e in logs if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT]
-        assert [e["reason"] for e in events] == ["wheel_stale"]
-        assert events[0]["symbol"] == "scope_token"
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            normalize_pull_scope("fno-only")
 
-    def test_kernel_raise_degrades_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+    def test_bomb_module_is_touched_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The recording bomb proves the consult AND the typed refusal."""
+        bomb = _RecordingBomb()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            normalize_pull_scope("spot-only")
+        assert "scope_token" in bomb.touched
 
+    def test_kernel_raise_raises_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(note: str, repl: str) -> str:
             raise RuntimeError("kernel exploded")
 
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(market_hours_note_rewrite=_boom)
         )
-        with capture_logs() as logs:
-            assert rewrite_market_hours_note("no anchors") == "no anchors"
-        events = [e for e in logs if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT]
-        assert [e["reason"] for e in events] == ["kernel_error"]
-        assert events[0]["log_level"] == "error"
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            rewrite_market_hours_note("no anchors")
 
     @pytest.mark.parametrize(
         "poison",
         ["spot-only", True, 7, -1, None, 2.0],
         ids=["str-pun", "bool-pun", "out-of-vocab", "negative", "none", "float"],
     )
-    def test_scope_poisoned_verdict_degrades(
+    def test_scope_poisoned_verdict_raises(
         self, monkeypatch: pytest.MonkeyPatch, poison: object
     ) -> None:
         """The refuse-poison gate: EXACT int + the exact 4-code vocabulary —
         notably ``True`` (an ``int`` subclass) must never pun as spot-only."""
-        monkeypatch.setenv(_FLAG, "1")
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", _fake_kernel(scope_token=lambda token: poison)
         )
-        with capture_logs() as logs:
-            assert normalize_pull_scope("full") == SCOPE_FULL  # the oracle serves
-        assert [
-            e["reason"]
-            for e in logs
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["kernel_invalid"]
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            normalize_pull_scope("full")
 
-    def test_rewrite_poisoned_result_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+    def test_rewrite_poisoned_result_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
             _fake_kernel(market_hours_note_rewrite=lambda note, repl: 5),
         )
-        with capture_logs() as logs:
-            assert rewrite_market_hours_note("pass-through") == "pass-through"
-        assert [
-            e["reason"]
-            for e in logs
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["kernel_invalid"]
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            rewrite_market_hours_note("pass-through")
 
     @pytest.mark.parametrize(
         "poison",
@@ -340,82 +310,32 @@ class TestFlagOnDegrades:
             "bare-str",
         ],
     )
-    def test_surgery_poisoned_triple_degrades(
+    def test_surgery_poisoned_triple_raises(
         self, monkeypatch: pytest.MonkeyPatch, poison: object
     ) -> None:
-        monkeypatch.setenv(_FLAG, "1")
+        """The shared surgery-triple gate refuses every malformed shape."""
         monkeypatch.setitem(
             sys.modules,
             "brutex_pull_state",
             _fake_kernel(
                 spot_only_note_surgery=lambda note: poison,
                 fno_only_note_surgery=lambda note: poison,
-                # The degraded builder's ORACLE arm re-consults the rewrite
-                # seam; identity == the oracle for these anchor-free inputs
-                # (keeps the captured degrade reasons to the one under test).
-                market_hours_note_rewrite=lambda note, repl: note,
             ),
         )
-        base = (
-            "pipeline complete — spot clean (1 pair(s))"
-            ", metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)"
-        )
-        with capture_logs() as logs:
-            note = build_spot_only_note(base, _TAIL)
-        assert note.startswith("spot-only pipeline complete — ")  # the oracle served
-        assert [
-            e["reason"]
-            for e in logs
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["kernel_invalid"]
-        pull_state_rust.reset_for_tests()
-        with capture_logs() as logs2:
-            fno = build_fno_only_note("pipeline complete — spot clean (0 pair(s)), m")
-        assert fno.startswith("F&O-only pipeline complete — ")
-        assert [
-            e["reason"]
-            for e in logs2
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["kernel_invalid"]
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            build_spot_only_note("base", _TAIL)
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            build_fno_only_note("base")
 
-    def test_spot_surgery_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
-
+    def test_spot_surgery_kernel_raise_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(note: str) -> tuple[str, bool, bool]:
             raise ValueError("surgery kernel exploded")
 
         monkeypatch.setitem(
-            sys.modules,
-            "brutex_pull_state",
-            _fake_kernel(
-                spot_only_note_surgery=_boom,
-                market_hours_note_rewrite=lambda note, repl: note,
-            ),
+            sys.modules, "brutex_pull_state", _fake_kernel(spot_only_note_surgery=_boom)
         )
-        base = (
-            "pipeline complete — spot clean (1 pair(s))"
-            ", metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)"
-        )
-        with capture_logs() as logs:
-            note = build_spot_only_note(base, _TAIL)
-        assert note.startswith("spot-only pipeline complete — ")  # the oracle served
-        assert [
-            e["reason"]
-            for e in logs
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["kernel_error"]
-
-    def test_wheel_missing_degrades_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_FLAG, "1")
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # import → ImportError
-        with capture_logs() as logs:
-            assert normalize_pull_scope("full") == SCOPE_FULL
-            assert build_fno_only_note("x") == "x"
-        assert [
-            e["reason"]
-            for e in logs
-            if e["event"] == pull_state_rust.PULL_STATE_RUST_FALLBACK_EVENT
-        ] == ["wheel_missing"]  # warn-ONCE across consecutive consults
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            build_spot_only_note("base", _TAIL)
 
 
 # ── the cross-language anchor drift pin ──────────────────────────────────────
@@ -462,30 +382,56 @@ class TestCrossLanguageAnchorDriftPin:
         assert ps._NOOP_SPOT_CLAUSE in fno_note
 
     def test_scope_vocabulary_pinned_in_rust(self) -> None:
+        """Every scope token appears verbatim in the Rust source."""
         rust = _rust_source_logical()
         for token in sorted(ps.KNOWN_PULL_SCOPES):
             assert f'"{token}"' in rust
 
 
-# ── real-wheel parity (skips until the integrator's merged wheel) ────────────
+# ── the REAL wheel: golden replay + kernel-vs-inline-law differentials ───────
 
 
-def _require_wave1b_wheel() -> object:
-    wheel = pytest.importorskip("brutex_pull_state", reason="brutex_pull_state wheel not installed")
-    if not hasattr(wheel, "scope_token"):
-        pytest.skip("installed brutex_pull_state wheel predates Wave 1B (no scope_token)")
-    return wheel
+def _inline_rewrite(note: str, phases_replacement: str) -> str:
+    """The frozen market-hours rewrite LAW, reimplemented in test code
+    (test-only — the production copy lives in the Rust kernel)."""
+    note = note.replace(ps._MARKET_HOURS_WINDOW_CLAUSE, ps._MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE, 1)
+    note = note.replace(ps._MARKET_HOURS_PHASES_CLAUSE, phases_replacement, 1)
+    return note.replace(ps._MARKET_HOURS_RESUME_CLAUSE, ps._MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE, 1)
 
 
-class TestRealWheelParity:
-    """Flag-ON vs flag-OFF byte-equality over the frozen golden corpus +
-    a hypothesis differential — importorskip'd + capability-probed, so these
-    SKIP until the integrator ships the merged Wave-1B wheel."""
+def _inline_spot_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
+    """The frozen spot-only note-surgery LAW, reimplemented in test code."""
+    note = _inline_rewrite(base_note, ps._MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE)
+    if ps._STOP_FNO_CLAUSE in note:
+        note = note.replace(ps._STOP_FNO_CLAUSE, ps._STOP_FNO_SPOT_ONLY_CLAUSE, 1)
+    prefix_present = ps._FULL_PREFIX in note
+    clause_present = ps._NOOP_FNO_CLAUSE in note
+    if clause_present:
+        note = note.replace(ps._NOOP_FNO_CLAUSE, FNO_SKIPPED_CLAUSE, 1)
+    if prefix_present:
+        note = note.replace(ps._FULL_PREFIX, ps._SPOT_ONLY_PREFIX, 1)
+    return f"{note}, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(tail)}"
 
-    def test_golden_corpus_parity_flag_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _require_wave1b_wheel()
+
+def _inline_fno_note(base_note: str) -> str:
+    """The frozen fno-only note-surgery LAW, reimplemented in test code."""
+    note = _inline_rewrite(base_note, ps._MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE)
+    prefix_present = ps._FULL_PREFIX in note
+    clause_present = ps._NOOP_SPOT_CLAUSE in note
+    if clause_present:
+        note = note.replace(ps._NOOP_SPOT_CLAUSE, SPOT_SKIPPED_CLAUSE, 1)
+    if prefix_present:
+        note = note.replace(ps._FULL_PREFIX, ps._FNO_ONLY_PREFIX, 1)
+    return note
+
+
+class TestRealWheelLaw:
+    """Kernel-backed output ≡ the frozen golden + the inline law (the wheel
+    is REQUIRED — a missing wheel fails loudly, never skips green)."""
+
+    def test_golden_corpus_replay(self) -> None:
+        """Every frozen corpus row replays byte-identically through the kernel."""
         table = json.loads(_JSON_FIXTURE.read_text(encoding="utf-8"))
-        monkeypatch.setenv(_FLAG, "1")
         for row in table["scope"]:
             token = row["token"]
             if "error" in row:
@@ -523,32 +469,18 @@ class TestRealWheelParity:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(note=_NOTE_FRAGMENT_LISTS, text=st.text(max_size=40))
-    def test_hypothesis_differential_flag_on_vs_oracle(
-        self, monkeypatch: pytest.MonkeyPatch, note: str, text: str
-    ) -> None:
-        """Arbitrary anchor-fragment notes: flag-ON == flag-OFF byte-equal.
-
-        Each example toggles the flag ITSELF (0 → oracle, 1 → kernel), so the
-        function-scoped monkeypatch surviving across examples is harmless —
-        the house suppression precedent (test_dashboard_empty_state)."""
-        _require_wave1b_wheel()
+    def test_hypothesis_surgeries_match_the_inline_law(self, note: str, text: str) -> None:
+        """Arbitrary anchor-fragment notes: kernel output ≡ the inline law
+        on all three string-surgery surfaces."""
         base = note + text
-        monkeypatch.setenv(_FLAG, "0")
         with capture_logs():
-            oracle_spot = build_spot_only_note(base, _TAIL)
-            oracle_fno = build_fno_only_note(base)
-            oracle_mh = rewrite_market_hours_note(base)
-        monkeypatch.setenv(_FLAG, "1")
-        with capture_logs():
-            assert build_spot_only_note(base, _TAIL) == oracle_spot
-            assert build_fno_only_note(base) == oracle_fno
-            assert rewrite_market_hours_note(base) == oracle_mh
+            assert build_spot_only_note(base, _TAIL) == _inline_spot_note(base, _TAIL)
+            assert build_fno_only_note(base) == _inline_fno_note(base)
+            assert rewrite_market_hours_note(base) == _inline_rewrite(
+                base, ps._MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE
+            )
 
-    @settings(
-        max_examples=300,
-        deadline=None,
-        suppress_health_check=[HealthCheck.function_scoped_fixture],
-    )
+    @settings(max_examples=300, deadline=None)
     @given(
         token=st.one_of(
             st.none(),
@@ -558,17 +490,20 @@ class TestRealWheelParity:
             ),
         )
     )
-    def test_scope_token_differential_flag_on(
-        self, monkeypatch: pytest.MonkeyPatch, token: str | None
-    ) -> None:
-        _require_wave1b_wheel()
-        monkeypatch.setenv(_FLAG, "0")
-        try:
-            oracle: str | None = normalize_pull_scope(token)
-        except ValueError:
-            monkeypatch.setenv(_FLAG, "1")
-            with pytest.raises(ValueError):
-                normalize_pull_scope(token)
+    def test_scope_token_matches_the_inline_law(self, token: str | None) -> None:
+        """Kernel scope verdict ≡ the strip/default/membership law."""
+        stripped = (token or "").strip()
+        if not stripped:
+            assert normalize_pull_scope(token) == SCOPE_FULL
+        elif stripped in ps.KNOWN_PULL_SCOPES:
+            assert normalize_pull_scope(token) == stripped
         else:
-            monkeypatch.setenv(_FLAG, "1")
-            assert normalize_pull_scope(token) == oracle
+            with pytest.raises(ValueError, match="unknown pull scope"):
+                normalize_pull_scope(token)
+
+    def test_kernel_strip_parity_serves_the_canonical_constant(self) -> None:
+        """A padded known token serves its canonical constant (the kernel's
+        CPython-``str.strip``-parity trim)."""
+        assert normalize_pull_scope("  spot-only  ") == SCOPE_SPOT_ONLY
+        assert normalize_pull_scope("\tfno-only\n") == SCOPE_FNO_ONLY
+        assert normalize_pull_scope(None) == SCOPE_FULL

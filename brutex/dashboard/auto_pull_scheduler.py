@@ -56,6 +56,19 @@ auto-incremental ledger makes the catch-up complete (missed windows are
 pulled by the next successful run); never a same-day retry storm.
 
 NO new vendor-call surface: the scheduler only invokes the existing launcher.
+
+DEC-RUST-PULL-STATE-001 (flip phase): the tick-decision LADDER and the
+durable-state validation LATTICE are the ``brutex_pull_state`` Rust kernel
+(:func:`brutex.pull_state_rust.rust_auto_tick_decision` /
+:func:`brutex.pull_state_rust.rust_auto_state_verdict`); the former
+byte-identical Python decision bodies are DELETED. The daemon ticker thread,
+the durable-state file I/O + corruption-tolerant loader plumbing, every human
+string + structlog emission and the fail-loud env resolvers STAY PYTHON. A
+missing/stale/raising wheel — or the removed ``BRUTEX_PULL_STATE_RUST`` knob
+still set — raises the typed error, FAIL-CLOSED: a tick fault folds into the
+run loop's deduped ``auto_pull.tick_error`` WARN (the never-crash-loop law),
+and a state parse on a PRESENT decodable sidecar raises out of
+:meth:`AutoPullStateStore.load` (an ABSENT sidecar never consults the kernel).
 """
 
 from __future__ import annotations
@@ -155,31 +168,36 @@ class AutoPullState:
     last_success_date: str | None = None
 
 
-def _optional_str(payload: Mapping[str, Any], key: str) -> str | None:
-    """Read an optional string field; a non-str non-None value is corrupt."""
-    value = payload.get(key)
-    if value is None or isinstance(value, str):
-        return value
-    raise ValueError(f"{key} is not a string")
-
-
 #: The i64 FFI band for the classified ``schema`` value (outside it only
 #: the representability FACT crosses — it can never equal 1 anyway).
 _I64_MIN: Final[int] = -(2**63)
 _I64_MAX: Final[int] = 2**63 - 1
 
 
-def _classify_state_for_kernel(payload: dict[str, Any]) -> dict[str, int | bool]:
+def _classify_state_for_kernel(payload: object) -> dict[str, int | bool]:
     """MECHANICAL kernel-input classification of a decoded state payload.
 
     The Wave-3G seam projection (DEC-RUST-PULL-STATE-001): type tags +
     representability facts only — the value law (CPython's NUMERIC
     ``schema == 1`` across bool/int/float) and the refusal lattice live in
     the kernel; the JSON decode (and its whole failure taxonomy) happened
-    BEFORE this call.
+    BEFORE this call.  TOTAL over any decoded root: a non-mapping payload
+    classifies as the zeroed ``root_mapping=False`` codes (the kernel
+    refuses on the root code before reading the others).
     """
     import struct
 
+    if not isinstance(payload, dict):
+        return {
+            "root_mapping": False,
+            "schema_kind": _pull_state_rust.SCHEMA_KIND_MISSING,
+            "schema_i64": 0,
+            "schema_f64_bits": 0,
+            "armed_is_bool": False,
+            "armed_at_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+            "last_attempt_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+            "last_success_kind": _pull_state_rust.STATE_FIELD_ABSENT,
+        }
     schema = payload.get("schema")
     schema_kind = _pull_state_rust.SCHEMA_KIND_OTHER
     schema_i64 = 0
@@ -221,7 +239,7 @@ def _classify_state_for_kernel(payload: dict[str, Any]) -> dict[str, int | bool]
     }
 
 
-#: Kernel refusal code → the field the oracle's message names (composed
+#: Kernel refusal code → the field the refusal message names (composed
 #: HERE, Python-side — byte-identical ``ValueError`` text per code).
 _STATE_FIELD_BY_CODE: Final[dict[int, str]] = {
     _pull_state_rust.STATE_CODE_BAD_ARMED_AT: "armed_at",
@@ -230,31 +248,54 @@ _STATE_FIELD_BY_CODE: Final[dict[int, str]] = {
 }
 
 
-def _rust_state_refusal(payload: object) -> str | None:
-    """Kernel-served refusal MESSAGE for ``_state_from_payload``; ``None`` = oracle.
+def _state_refusal_text(verdict: int, payload: object) -> str:
+    """Compose the ``ValueError`` text for a NON-valid state verdict — TOTAL.
 
-    The Wave-2E serve-the-refusal law: only a NON-valid verdict is served (as
-    the byte-identical ``ValueError`` text the caller raises); a VALID
-    verdict deliberately falls THROUGH to the oracle body, so the state is
-    only ever constructed on the ONE Python path (a kernel-vs-oracle
-    disagreement on the valid arm is decided by the oracle — fail-safe).
-    A verdict inconsistent with the locally-known payload shape (a poisoned
-    in-vocabulary code that would need a mapping's field to compose its
-    message) degrades to the oracle too — this helper is TOTAL.
+    The message per code is the byte-identical pre-flip refusal text (the
+    frozen golden corpus pins every one). A field-shaped verdict for a
+    NON-mapping payload (a poisoned wheel — the classifier sent
+    ``root_mapping=False``) folds to the ``not a JSON object`` text, which
+    is TRUE of the payload; the facade's vocabulary gate makes the final
+    :data:`_STATE_FIELD_BY_CODE` lookup total (codes 4..6 are the only
+    remainder).
     """
-    if isinstance(payload, dict):
-        codes = _classify_state_for_kernel(payload)
-    else:
-        codes = {
-            "root_mapping": False,
-            "schema_kind": _pull_state_rust.SCHEMA_KIND_MISSING,
-            "schema_i64": 0,
-            "schema_f64_bits": 0,
-            "armed_is_bool": False,
-            "armed_at_kind": _pull_state_rust.STATE_FIELD_ABSENT,
-            "last_attempt_kind": _pull_state_rust.STATE_FIELD_ABSENT,
-            "last_success_kind": _pull_state_rust.STATE_FIELD_ABSENT,
-        }
+    if verdict == _pull_state_rust.STATE_CODE_NOT_OBJECT or not isinstance(payload, dict):
+        return "not a JSON object"
+    if verdict == _pull_state_rust.STATE_CODE_BAD_SCHEMA:
+        schema = payload.get("schema")
+        return f"unknown schema {schema!r} (expected {AUTO_PULL_STATE_SCHEMA})"
+    if verdict == _pull_state_rust.STATE_CODE_ARMED_NOT_BOOL:
+        return "armed is not a bool"
+    return f"{_STATE_FIELD_BY_CODE[verdict]} is not a string"
+
+
+def _state_from_payload(payload: object) -> AutoPullState:
+    """Decode the on-disk JSON into a state; :class:`ValueError` on any junk.
+
+    Flip phase (DEC-RUST-PULL-STATE-001): the validation LATTICE IS the Rust
+    kernel (:func:`brutex.pull_state_rust.rust_auto_state_verdict`),
+    consulted over the mechanically-classified payload codes; the former
+    byte-identical Python lattice body is DELETED. A NON-valid verdict
+    raises the byte-identical pre-flip ``ValueError`` message (composed by
+    :func:`_state_refusal_text`); the VALID verdict extracts the state
+    mechanically — the kernel has already guaranteed the shape (``armed`` a
+    genuine bool; the three optional fields absent/null/str), so the
+    extraction re-checks nothing beyond the two consistency gates below.
+
+    Raises
+    ------
+    ValueError
+        A corrupt payload (the kernel's refusal, message per code).
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, a poisoned verdict — or a VALID
+        verdict inconsistent with the payload's own classified shape (a
+        non-mapping root / a non-bool ``armed``): only a poisoned wheel
+        produces those, and serving them would construct junk state —
+        fail-closed instead.
+    brutex.pull_state_rust.PullStateFlagRemovedError
+        The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
+    """
+    codes = _classify_state_for_kernel(payload)
     verdict = _pull_state_rust.rust_auto_state_verdict(
         root_mapping=bool(codes["root_mapping"]),
         schema_kind=int(codes["schema_kind"]),
@@ -265,47 +306,22 @@ def _rust_state_refusal(payload: object) -> str | None:
         last_attempt_kind=int(codes["last_attempt_kind"]),
         last_success_kind=int(codes["last_success_kind"]),
     )
-    if verdict is None or verdict == _pull_state_rust.STATE_CODE_VALID:
-        return None
-    if verdict == _pull_state_rust.STATE_CODE_NOT_OBJECT:
-        return None if isinstance(payload, dict) else "not a JSON object"
-    if not isinstance(payload, dict):
-        return None  # a mapping-shaped refusal for a non-mapping — poison
-    if verdict == _pull_state_rust.STATE_CODE_BAD_SCHEMA:
-        schema = payload.get("schema")
-        return f"unknown schema {schema!r} (expected {AUTO_PULL_STATE_SCHEMA})"
-    if verdict == _pull_state_rust.STATE_CODE_ARMED_NOT_BOOL:
-        return "armed is not a bool"
-    field = _STATE_FIELD_BY_CODE.get(verdict)
-    if field is None:  # pragma: no cover - unreachable past the facade gate
-        return None
-    return f"{field} is not a string"
-
-
-def _state_from_payload(payload: object) -> AutoPullState:
-    """Decode the on-disk JSON into a state; :class:`ValueError` on any junk."""
-    # --- auto_pull_scheduler (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001):
-    # the validation LATTICE consulted in Rust over the mechanically-
-    # classified payload codes; a kernel refusal raises the byte-identical
-    # message composed above, a VALID verdict (and any degrade) falls
-    # through to the byte-identical oracle body below.
-    if _pull_state_rust.pull_state_rust_enabled():
-        refusal = _rust_state_refusal(payload)
-        if refusal is not None:
-            raise ValueError(refusal)
-    if not isinstance(payload, dict):
-        raise ValueError("not a JSON object")
-    schema = payload.get("schema")
-    if schema != AUTO_PULL_STATE_SCHEMA:
-        raise ValueError(f"unknown schema {schema!r} (expected {AUTO_PULL_STATE_SCHEMA})")
-    armed = payload.get("armed")
-    if not isinstance(armed, bool):
-        raise ValueError("armed is not a bool")
+    if verdict != _pull_state_rust.STATE_CODE_VALID:
+        raise ValueError(_state_refusal_text(verdict, payload))
+    armed = payload.get("armed") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or not isinstance(armed, bool):
+        raise _pull_state_rust.PullStateKernelError(
+            f"pull-state kernel result for 'auto_state_verdict' refused "
+            f"(reason=kernel_invalid, detail=valid verdict inconsistent with "
+            f"the classified payload shape: {type(payload).__name__}) — "
+            f"fail-closed: the Python oracle was deleted "
+            f"(DEC-RUST-PULL-STATE-001)"
+        )
     return AutoPullState(
         armed=armed,
-        armed_at=_optional_str(payload, "armed_at"),
-        last_attempt_date=_optional_str(payload, "last_attempt_date"),
-        last_success_date=_optional_str(payload, "last_success_date"),
+        armed_at=payload.get("armed_at"),
+        last_attempt_date=payload.get("last_attempt_date"),
+        last_success_date=payload.get("last_success_date"),
     )
 
 
@@ -330,7 +346,18 @@ class AutoPullStateStore:
         return self._path
 
     def load(self) -> AutoPullState:
-        """Read the persisted state; corrupt/unreadable ⇒ DISARMED — never raises.
+        """Read the persisted state; corrupt/unreadable ⇒ DISARMED.
+
+        Never raises for any FILE shape. Flip-phase exception
+        (DEC-RUST-PULL-STATE-001, fail-closed): the state-parse lattice is
+        the Rust kernel, so on a PRESENT decodable file a missing/stale/
+        raising wheel raises the typed
+        :class:`~brutex.pull_state_rust.PullStateKernelError` and a still-SET
+        removed ``BRUTEX_PULL_STATE_RUST`` knob raises
+        :class:`~brutex.pull_state_rust.PullStateFlagRemovedError`
+        (explicitly re-raised past the corrupt fold — it subclasses
+        ``ValueError``, and folding it to DISARMED would silently bless the
+        stale config). An ABSENT file never consults the kernel.
 
         The read rides the shared regular-file-only loader
         :func:`~brutex.dashboard.pull_intent.read_sidecar_bytes` (the #1614
@@ -365,6 +392,12 @@ class AutoPullStateStore:
             return AutoPullState()
         try:
             state = _state_from_payload(json.loads(result.raw.decode("utf-8")))
+        except _pull_state_rust.PullStateFlagRemovedError:
+            # The removed BRUTEX_PULL_STATE_RUST knob is still SET — a
+            # ValueError subclass by design, but folding it into the corrupt
+            # ⇒ DISARMED arm would silently bless the stale config the guard
+            # exists to refuse (DEC-RUST-PULL-STATE-001): re-raise LOUD.
+            raise
         except (ValueError, RecursionError, OverflowError) as exc:
             # ValueError covers junk JSON, the wrong-shape refusals of
             # _state_from_payload AND UnicodeDecodeError (its subclass).
@@ -639,77 +672,80 @@ class AutoPullScheduler:
         Tokens: ``"disarmed"`` · ``"already_succeeded"`` ·
         ``"already_attempted"`` · ``"deferred:<reason>"`` · ``"fired"`` ·
         ``"refused_retry"``.
+
+        Raises
+        ------
+        brutex.pull_state_rust.PullStateKernelError
+            Wheel absent/stale, kernel raise, a poisoned verdict — or a
+            stage-inconsistent in-vocabulary answer (see the seam comment
+            below): fail-closed, no oracle exists (DEC-RUST-PULL-STATE-001).
+            The daemon loop's tick guard folds the raise into ONE deduped
+            ``auto_pull.tick_error`` WARN per (day, error type).
+        brutex.pull_state_rust.PullStateFlagRemovedError
+            The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
         """
         instant = self._clock() if now is None else now
         today = instant.date()
         state = self._state_now()
         iso = today.isoformat()
-        # --- auto_pull_scheduler (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001):
-        # the tick LADDER consulted in Rust, two-staged to preserve the
-        # oracle's LAZY side-effect order.  Stage 1 (pre-gate) passes
-        # ``gate_allowed=False, launcher_bound=False`` placeholders — the
-        # ladder's arm ORDER means they cannot affect the state arms (pinned
-        # by the crate's placeholder-leak test + the exhaustive lattice
-        # golden), so a disarmed/succeeded/attempted tick is served WITHOUT
-        # ever consulting the injected gate.  A DEFERRED answer means "past
-        # the state checks" — the gate consult and everything after run on
-        # the SHARED Python path below (stage 2 re-consults with the real
-        # facts; the launcher call, state writes, logs and ``_last_outcome``
-        # strings always stay Python).  Any degrade serves the oracle.
-        pre: int | None = None
-        if _pull_state_rust.pull_state_rust_enabled():
-            pre = _pull_state_rust.rust_auto_tick_decision(
-                armed=state.armed,
-                succeeded_today=state.last_success_date == iso,
-                attempted_today=state.last_attempt_date == iso,
-                gate_allowed=False,
-                launcher_bound=False,
+        # --- auto_pull_scheduler (Wave 3G, flip phase —
+        # DEC-RUST-PULL-STATE-001): the tick LADDER IS the Rust kernel,
+        # two-staged to preserve the pre-flip LAZY side-effect order; the
+        # former byte-identical Python ladder is DELETED.  Stage 1
+        # (pre-gate) passes ``gate_allowed=False, launcher_bound=False``
+        # placeholders — the ladder's arm ORDER means they cannot affect the
+        # state arms (pinned by the crate's placeholder-leak test + the
+        # exhaustive lattice golden), so a disarmed/succeeded/attempted tick
+        # is served WITHOUT ever consulting the injected gate.  A DEFERRED
+        # answer means "past the state checks"; ANY other stage-1 answer
+        # (FIRE / LAUNCHER_UNBOUND under placeholder falses) is
+        # stage-IMPOSSIBLE — only a poisoned wheel produces it, and serving
+        # it would fire without consulting the gate: REFUSED loudly.
+        pre = _pull_state_rust.rust_auto_tick_decision(
+            armed=state.armed,
+            succeeded_today=state.last_success_date == iso,
+            attempted_today=state.last_attempt_date == iso,
+            gate_allowed=False,
+            launcher_bound=False,
+        )
+        if pre == _pull_state_rust.TICK_CODE_DISARMED:
+            return "disarmed"
+        if pre == _pull_state_rust.TICK_CODE_ALREADY_SUCCEEDED:
+            return "already_succeeded"
+        if pre == _pull_state_rust.TICK_CODE_ALREADY_ATTEMPTED:
+            return "already_attempted"
+        if pre != _pull_state_rust.TICK_CODE_DEFERRED:
+            raise _pull_state_rust.PullStateKernelError(
+                f"pull-state kernel result for 'auto_tick_decision' refused "
+                f"(reason=kernel_invalid, detail=pre-gate placeholder stage "
+                f"answered {pre}) — fail-closed: the Python oracle was "
+                f"deleted (DEC-RUST-PULL-STATE-001)"
             )
-            if pre == _pull_state_rust.TICK_CODE_DISARMED:
-                return "disarmed"
-            if pre == _pull_state_rust.TICK_CODE_ALREADY_SUCCEEDED:
-                return "already_succeeded"
-            if pre == _pull_state_rust.TICK_CODE_ALREADY_ATTEMPTED:
-                return "already_attempted"
-            if pre != _pull_state_rust.TICK_CODE_DEFERRED:
-                pre = None  # degrade / out-of-stage poison → the oracle
-        if pre is None:
-            # The oracle pre-gate ladder (byte-identical to the pre-seam body).
-            if not state.armed:
-                return "disarmed"
-            if state.last_success_date == iso:
-                return "already_succeeded"
-            if state.last_attempt_date == iso:
-                # ONE started attempt per day, whatever its outcome — the
-                # incremental ledger makes the next day's run the catch-up.
-                return "already_attempted"
         verdict = self._gate(instant)
         launcher = self._launcher
-        post: int | None = None
-        if pre is not None:
-            # Stage 2: the SAME kernel over the real post-gate facts.  A
-            # state-arm answer here, or a FIRE with no launcher to call, is
-            # inconsistent with stage 1 / the local wiring — degrade.
-            post = _pull_state_rust.rust_auto_tick_decision(
-                armed=state.armed,
-                succeeded_today=state.last_success_date == iso,
-                attempted_today=state.last_attempt_date == iso,
-                gate_allowed=verdict.allowed,
-                launcher_bound=launcher is not None,
+        # Stage 2: the SAME kernel over the real post-gate facts (the
+        # launcher call, state writes, logs and ``_last_outcome`` strings
+        # always stay Python).  A state-arm answer here contradicts stage 1
+        # (same state facts), and a FIRE with no launcher to call
+        # contradicts the wiring fact the kernel was handed — both are
+        # poisoned-wheel shapes: REFUSED loudly.
+        post = _pull_state_rust.rust_auto_tick_decision(
+            armed=state.armed,
+            succeeded_today=state.last_success_date == iso,
+            attempted_today=state.last_attempt_date == iso,
+            gate_allowed=verdict.allowed,
+            launcher_bound=launcher is not None,
+        )
+        if post < _pull_state_rust.TICK_CODE_DEFERRED or (
+            post == _pull_state_rust.TICK_CODE_FIRE and launcher is None
+        ):
+            raise _pull_state_rust.PullStateKernelError(
+                f"pull-state kernel result for 'auto_tick_decision' refused "
+                f"(reason=kernel_invalid, detail=post-gate stage answered "
+                f"{post} against launcher_bound={launcher is not None}) — "
+                f"fail-closed: the Python oracle was deleted "
+                f"(DEC-RUST-PULL-STATE-001)"
             )
-            if post is not None and (
-                post < _pull_state_rust.TICK_CODE_DEFERRED
-                or (post == _pull_state_rust.TICK_CODE_FIRE and launcher is None)
-            ):
-                post = None
-        if post is None:
-            # The oracle post-gate decision (byte-identical conditions).
-            if not verdict.allowed:
-                post = _pull_state_rust.TICK_CODE_DEFERRED
-            elif launcher is None:
-                post = _pull_state_rust.TICK_CODE_LAUNCHER_UNBOUND
-            else:
-                post = _pull_state_rust.TICK_CODE_FIRE
         if post == _pull_state_rust.TICK_CODE_DEFERRED:
             self._log_once(today, "auto_pull.deferred", verdict.reason, verdict.detail)
             self._last_outcome = f"deferred: {verdict.detail}"

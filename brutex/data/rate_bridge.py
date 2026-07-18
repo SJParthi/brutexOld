@@ -42,6 +42,17 @@ degrades to ``None`` so a damaged bridge file can NEVER break the dashboard. The
 runs inside :func:`~brutex.data.atomic_io.lake_write_guard`, so a full-disk ENOSPC at the
 bridge write maps to a :class:`~brutex.data.errors.LakeWriteHalt` consistent with every
 other lake-write site (DEC-LAKE-WRITE-HALT-001).
+
+DEC-RUST-PULL-STATE-001 (flip phase): the payload-verdict LATTICE (root-mapping →
+schema equality → all-ten-fields-coerce → the ``pull_active`` bool-or-None law) IS the
+``brutex_pull_state`` Rust kernel
+(:func:`brutex.pull_state_rust.rust_bridge_payload_verdict`); the former byte-identical
+Python lattice/constructor-guard arms are DELETED. The file read, the JSON decode
+(CPython's WHOLE failure taxonomy) and the ``float()``/``int()`` coercion PROBES stay
+Python — input translation, never the law. A missing/stale/raising wheel — or the
+removed ``BRUTEX_PULL_STATE_RUST`` knob still set — raises the typed error out of
+:func:`read_rate_snapshot`, FAIL-CLOSED (the widget read stops loudly, never silently
+fabricates an idle/flowing verdict).
 """
 
 from __future__ import annotations
@@ -310,13 +321,13 @@ _I64_MIN: Final[int] = -(2**63)
 _I64_MAX: Final[int] = 2**63 - 1
 
 
-def _bridge_field_kind(payload: Mapping[str, Any], key: str, kind: str) -> int | None:
+def _bridge_field_kind(payload: Mapping[str, Any], key: str, kind: str) -> int:
     """One field's coercibility FACT — CPython's own taxonomy, probed.
 
-    ``None`` = the coercion raises ``OverflowError`` (a class the oracle's
-    ``except (KeyError, TypeError, ValueError)`` does NOT catch — the
-    documented pre-existing raises envelope): the whole payload stays on
-    the Python arm so flag-ON behaviour is identical by construction.
+    An ``OverflowError``-raising coercion (a 400-digit int in a float field,
+    ``Infinity`` in an int field) PROPAGATES — it has no kernel code, and the
+    classifier loop (:func:`_classify_bridge_payload_for_kernel`) owns its
+    disposition (the documented pre-existing raises envelope).
     """
     if key not in payload:
         return _pull_state_rust.BRIDGE_FIELD_ABSENT
@@ -328,8 +339,6 @@ def _bridge_field_kind(payload: Mapping[str, Any], key: str, kind: str) -> int |
             int(value)
     except (TypeError, ValueError):
         return _pull_state_rust.BRIDGE_FIELD_BAD
-    except OverflowError:
-        return None
     return _pull_state_rust.BRIDGE_FIELD_OK
 
 
@@ -344,11 +353,26 @@ def _classify_bridge_payload_for_kernel(
     ``== 3`` equality, the all-ten-fields-coerce lattice and the
     ``pull_active`` bool-or-None law all live in the Rust kernel).  A
     non-Mapping root zeroes the field slots; the kernel refuses on the root
-    code before reading them.  ``None`` = the Python arm (an
-    ``OverflowError``-raising coercion probe — see
-    :func:`_bridge_field_kind`).  Mirrored 1:1 by the golden harness
-    (``tests/golden/_rate_bridge_harness.py``) and drift-pinned by the
-    frozen fixture + the seam suite.
+    code before reading them.
+
+    The ``OverflowError`` coercion envelope (flip phase — the classifier's
+    own arm, the kernel is NEVER consulted): the probes run in the pre-flip
+    oracle's CONSTRUCTOR order, so when a probe raises ``OverflowError``
+    the disposition is decided by whether an EARLIER slot already failed —
+    every prior slot ``OK`` means the overflow would have been the
+    constructor's FIRST failure, so the raise propagates VERBATIM (the
+    documented pre-existing raises envelope, preserved byte-for-byte); a
+    prior ``ABSENT``/``BAD`` slot means the constructor's first failure was
+    a caught ``KeyError``/``TypeError``/``ValueError``, so the whole
+    payload reads ``None`` (returned as the ``None`` sentinel the caller
+    serves directly).  HONEST delta (Golden Rule #10): a payload whose
+    SCHEMA is also invalid used to read ``None`` before the deleted oracle
+    ever probed a field — post-flip a first-failure overflow raises
+    regardless of the schema slot (the schema law lives in the kernel and
+    an overflow slot can never reach it); a doubly-corrupt hand-edited
+    shape, not producible by any publisher.  Mirrored 1:1 by the golden
+    harness (``tests/golden/_rate_bridge_harness.py``) and drift-pinned by
+    the frozen fixture + the seam suite.
     """
     if not isinstance(data, Mapping):
         zero = [_pull_state_rust.BRIDGE_FIELD_ABSENT] * len(_REQUIRED_BRIDGE_FIELDS)
@@ -374,9 +398,12 @@ def _classify_bridge_payload_for_kernel(
         schema_kind = _pull_state_rust.BRIDGE_SCHEMA_OTHER
     field_kinds: list[int] = []
     for key, kind in _REQUIRED_BRIDGE_FIELDS:
-        code = _bridge_field_kind(data, key, kind)
-        if code is None:
-            return None
+        try:
+            code = _bridge_field_kind(data, key, kind)
+        except OverflowError:
+            if all(prior == _pull_state_rust.BRIDGE_FIELD_OK for prior in field_kinds):
+                raise  # the constructor's FIRST failure — the raise propagates
+            return None  # an earlier caught failure wins — the payload reads None
         field_kinds.append(code)
     raw_pa = data.get("pull_active")
     if isinstance(raw_pa, bool):
@@ -387,13 +414,15 @@ def _classify_bridge_payload_for_kernel(
 
 
 def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
-    """Best-effort read the lake-root bridge snapshot, or ``None`` (never raises).
+    """Best-effort read the lake-root bridge snapshot, or ``None``.
 
-    Returns ``None`` for EVERY non-happy case — the file is absent (no CLI pull has run),
-    unreadable (a permission / IO error), not valid JSON (a partial / corrupt write), not
-    a JSON object, carries an unrecognised :data:`_SCHEMA_VERSION`, or is missing / has the
-    wrong type for any required field. A damaged bridge file can therefore NEVER break the
-    dashboard read (Golden Rule #1 — degrade honestly, never crash, never fabricate).
+    Returns ``None`` for EVERY corrupt-file case — the file is absent (no CLI pull has
+    run), unreadable (a permission / IO error), not valid JSON (a partial / corrupt
+    write), not a JSON object, carries an unrecognised :data:`_SCHEMA_VERSION`, or is
+    missing / has the wrong type for any required field. A damaged bridge file can
+    therefore never crash the dashboard read into a wrong value (Golden Rule #1 —
+    degrade honestly, never fabricate). The verdict lattice is served by the Rust
+    kernel, FAIL-CLOSED (DEC-RUST-PULL-STATE-001).
 
     Parameters
     ----------
@@ -404,6 +433,19 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     -------
     RateBridgeSnapshot | None
         The decoded snapshot, or ``None`` when nothing valid is present.
+
+    Raises
+    ------
+    OverflowError
+        The documented PRE-EXISTING raises envelope (recorded in the frozen
+        golden, never "fixed"): a payload field whose ``float()``/``int()``
+        coercion overflows as the constructor-order FIRST failure (a
+        400-digit int in a float field, ``Infinity`` in an int field).
+    brutex.pull_state_rust.PullStateKernelError
+        Wheel absent/stale, kernel raise, or a poisoned verdict —
+        fail-closed, no oracle exists (DEC-RUST-PULL-STATE-001).
+    brutex.pull_state_rust.PullStateFlagRemovedError
+        The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
     """
     path = rate_bridge_path(lake_root)
     try:
@@ -416,51 +458,55 @@ def read_rate_snapshot(lake_root: Path) -> RateBridgeSnapshot | None:
     except (json.JSONDecodeError, ValueError):
         # A partial / corrupt write (a torn file, or non-UTF-8 bytes). Ignore it.
         return None
-    # --- rate_bridge (Wave 3H) Rust seam (DEC-RUST-PULL-STATE-001): the
-    # payload-verdict LATTICE consulted in Rust over the mechanically-
-    # classified codes (the file read + JSON decode — CPython's whole
-    # failure taxonomy — happened ABOVE; the coercion PROBES run in the
-    # classifier).  An INVALID kernel verdict is SERVED (the ``None``
-    # answer); a VALID one deliberately falls THROUGH to the byte-identical
-    # oracle body below, so the snapshot is only ever constructed on the
-    # ONE Python path (zero construction duplication; a kernel-vs-oracle
-    # disagreement on the valid arm is decided by the oracle — fail-safe).
-    # Any degrade (wheel missing/stale, kernel raise, out-of-vocabulary
-    # code) falls through too, and an OverflowError-probing payload never
-    # consults the kernel at all (classifier ``None`` — the documented
-    # Python arm whose oracle RAISE is preserved byte-for-byte).
-    if _pull_state_rust.pull_state_rust_enabled():
-        classified = _classify_bridge_payload_for_kernel(data)
-        if classified is not None:
-            verdict = _pull_state_rust.rust_bridge_payload_verdict(*classified)
-            if verdict is not None and verdict[0] != _pull_state_rust.BRIDGE_VERDICT_VALID:
-                return None
-    if not isinstance(data, dict):
+    # --- rate_bridge (Wave 3H, flip phase — DEC-RUST-PULL-STATE-001): the
+    # payload-verdict LATTICE (root-mapping → schema equality → all-ten-
+    # fields-coerce → the pull_active bool-or-None law) IS the Rust kernel,
+    # consulted over the mechanically-classified codes (the file read + the
+    # JSON decode — CPython's whole failure taxonomy — happened ABOVE; the
+    # coercion PROBES run in the classifier); the former byte-identical
+    # Python lattice/constructor arms are DELETED.  A NON-valid verdict is
+    # the honest ``None`` answer; the VALID verdict constructs the snapshot
+    # — every coercion below was already PROBED OK by the classifier, so
+    # the construction cannot raise (the consistency gate refuses a
+    # poisoned VALID whose classified codes say otherwise — a crash-shaped
+    # wheel fault, never served).  An OverflowError-probing payload never
+    # consults the kernel (the classifier's own arm — a first-failure
+    # overflow propagates verbatim; classifier ``None`` = an earlier caught
+    # failure won, the payload reads ``None``).
+    classified = _classify_bridge_payload_for_kernel(data)
+    if classified is None:
         return None
-    if data.get("schema") != _SCHEMA_VERSION:
-        # Unrecognised version (incl. a stale pre-#3 v2 file) — forward/backward-safe:
-        # never mis-decode another shape; the publisher re-writes within one window tick.
+    verdict, pa_arm = _pull_state_rust.rust_bridge_payload_verdict(*classified)
+    if verdict != _pull_state_rust.BRIDGE_VERDICT_VALID:
         return None
-    # Graceful old-reader default (DEC-CLI-BRIDGE-PULL-ACTIVE-001): a missing / non-bool
-    # ``pull_active`` (JSON ``null``, a hand-edited file) reads ``None`` — the honest
-    # tick-freshness fallback — never a KeyError, never a fabricated run signal.
-    raw_pull_active = data.get("pull_active")
-    pull_active = raw_pull_active if isinstance(raw_pull_active, bool) else None
-    try:
-        return RateBridgeSnapshot(
-            schema=_SCHEMA_VERSION,
-            effective_rps=float(data["effective_rps"]),
-            current_rps=float(data["current_rps"]),
-            recent_minute=int(data["recent_minute"]),
-            recent_429=int(data["recent_429"]),
-            ceiling_per_min=int(data["ceiling_per_min"]),
-            recent_1s=int(data["recent_1s"]),
-            recent_600s=int(data["recent_600s"]),
-            recent_3600s=int(data["recent_3600s"]),
-            wall_time=float(data["wall_time"]),
-            monotonic=float(data["monotonic"]),
-            pull_active=pull_active,
+    root_mapping, _, _, _, field_kinds, _ = classified
+    if not root_mapping or any(code != _pull_state_rust.BRIDGE_FIELD_OK for code in field_kinds):
+        raise _pull_state_rust.PullStateKernelError(
+            f"pull-state kernel result for 'bridge_payload_verdict' refused "
+            f"(reason=kernel_invalid, detail=valid verdict inconsistent with "
+            f"the classified payload shape: root={root_mapping} "
+            f"field_kinds={field_kinds}) — fail-closed: the Python oracle "
+            f"was deleted (DEC-RUST-PULL-STATE-001)"
         )
-    except (KeyError, TypeError, ValueError):
-        # A missing or wrong-typed field (a hand-edited / truncated / alien file).
-        return None
+    # The kernel's echoed pull_active arm (DEC-CLI-BRIDGE-PULL-ACTIVE-001:
+    # a missing / non-bool value reads None — the honest tick-freshness
+    # fallback — never a KeyError, never a fabricated run signal).
+    pull_active = (
+        None
+        if pa_arm == _pull_state_rust.BRIDGE_PA_NONE
+        else (pa_arm == _pull_state_rust.BRIDGE_PA_TRUE)
+    )
+    return RateBridgeSnapshot(
+        schema=_SCHEMA_VERSION,
+        effective_rps=float(data["effective_rps"]),
+        current_rps=float(data["current_rps"]),
+        recent_minute=int(data["recent_minute"]),
+        recent_429=int(data["recent_429"]),
+        ceiling_per_min=int(data["ceiling_per_min"]),
+        recent_1s=int(data["recent_1s"]),
+        recent_600s=int(data["recent_600s"]),
+        recent_3600s=int(data["recent_3600s"]),
+        wall_time=float(data["wall_time"]),
+        monotonic=float(data["monotonic"]),
+        pull_active=pull_active,
+    )

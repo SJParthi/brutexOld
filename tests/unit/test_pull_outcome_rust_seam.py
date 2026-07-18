@@ -1,23 +1,25 @@
-"""The pull-outcome Rust seam (DEC-RUST-PULL-STATE-001, Wave 1A).
+"""The pull-outcome Rust decision kernel (DEC-RUST-PULL-STATE-001, flip phase).
 
-Covers all four seam arcs of the ``BRUTEX_PULL_STATE_RUST`` flag on
-``brutex.dashboard.pull_outcome`` + the Wave-1A facade accessors appended to
-``brutex.pull_state_rust``:
+The ``brutex_pull_state`` kernel is THE ONLY decision path for
+``brutex.dashboard.pull_outcome`` — the Python classify-ladder oracle was
+deleted with the flip.  This suite pins:
 
-* flag OFF — byte-identical oracle, NEVER imports the wheel (the bomb-module
-  spy: it raises ``AttributeError`` — the shape ``getattr``/``hasattr`` would
-  SWALLOW — so the teeth are the recorded-touch assertion, not the raise);
-* flag ON + a fake kernel — the served-codes tooth (a deliberately-WRONG
-  kernel answer is composed and served, proving the kernel is consulted) +
-  every composition arm (verdict markers, halt-table headline keys, the
-  failed-count compose, every detail code);
-* flag ON + degrade — wheel missing/stale, a raising kernel, and every
-  refuse-poison gate falls through to the byte-identical oracle;
-* flag ON + the REAL wheel — the frozen-golden parity replay + a hypothesis
-  differential (``importorskip`` + a symbol capability probe: SKIPPED until
-  the integrator's merged wheel carries the Wave-1A symbols; the crate's own
-  fixture-driven ``cargo test`` carries kernel parity meanwhile).
+* the removed ``BRUTEX_PULL_STATE_RUST`` knob refusing LOUDLY when still set
+  (ANY spelling — the ``PullStateFlagRemovedError`` law);
+* kernel AUTHORITY — a deliberately-WRONG fake kernel's codes are composed
+  and SERVED (proving the consult) + every composition arm (verdict markers,
+  halt-table headline keys, the failed-count compose, every detail code);
+* FAIL-CLOSED faults — wheel missing/stale, a raising kernel, every facade
+  refuse-poison shape and every module-side out-of-vocabulary code is the
+  typed ``PullStateKernelError`` raise, never a fabricated wire token;
+* the REAL wheel — the frozen-golden replay + a hypothesis differential
+  against an IN-TEST reimplementation of the frozen classification law
+  (test code may reimplement the law; production may not).
 """
+
+# Whitebox imports of module-private composition tables (sanctioned — the
+# unit-suite precedent).
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -32,11 +34,14 @@ from brutex import pull_state_rust
 from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.pull_outcome import (
     _HALT_NAME_OUTCOMES,
+    MARKET_HOURS_DEFERRAL_PREFIX,
     LastPullOutcome,
+    _from_verdict,
     classify_last_pull_outcome,
     classify_retained_pull_outcome,
 )
 from brutex.dashboard.pull_progress import ProgressSnapshot
+from brutex.pull_state_rust import PullStateFlagRemovedError, PullStateKernelError
 
 FLAG_ENV = "BRUTEX_PULL_STATE_RUST"
 FIXTURES = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
@@ -48,11 +53,10 @@ class _BombKernelModule:
     raises ``AttributeError``.
 
     CodeQL posture: the bomb raises ``AttributeError`` (never
-    ``AssertionError``) — exactly the shape ``getattr(mod, name, default)``
-    and ``hasattr`` SWALLOW, and the shape the facade's own
-    ``except (ImportError, AttributeError)`` degrade arm folds.  The teeth
-    therefore live in ``touches``: the flag-OFF pins assert it stays EMPTY,
-    so a swallowed raise can never turn the pin vacuous.
+    ``AssertionError``) — the shape ``getattr(mod, name, default)`` swallows,
+    so the facade's resolver reads the plant as a wheel LACKING the symbol
+    and refuses ``reason=wheel_stale``.  The teeth are BOTH the typed raise
+    and the recorded ``touches`` (proof the kernel module was consulted).
     """
 
     def __init__(self) -> None:
@@ -72,6 +76,7 @@ def _classify(
     wedged: bool = False,
     verdict: dict[str, Any] | None = None,
 ) -> LastPullOutcome:
+    """Call the classifier with defaults (each test overrides its own axis)."""
     return classify_last_pull_outcome(
         state=state,
         detail=detail,
@@ -83,6 +88,7 @@ def _classify(
 
 
 def _verdict(kind: str, *, action: str = "do the thing") -> dict[str, Any]:
+    """A minimal :meth:`PullVerdict.to_dict`-shaped mapping."""
     return {
         "kind": kind,
         "headline": f"headline for {kind}",
@@ -98,8 +104,7 @@ def _fake_wheel(
     classify: object = None,
     correlates: object = None,
 ) -> None:
-    """Install a fake ``brutex_pull_state`` wheel + turn the flag ON."""
-    monkeypatch.setenv(FLAG_ENV, "1")
+    """Install a fake ``brutex_pull_state`` wheel carrying the given kernels."""
     ns = SimpleNamespace()
     if classify is not None:
         ns.classify_pull_outcome = classify
@@ -108,62 +113,32 @@ def _fake_wheel(
     monkeypatch.setitem(sys.modules, "brutex_pull_state", ns)
 
 
-@pytest.fixture(autouse=True)
-def _clean_warn_registry() -> Any:
-    pull_state_rust.reset_for_tests()
-    yield
-    pull_state_rust.reset_for_tests()
+class TestRemovedFlagRefusal:
+    """The retired opt-in knob refuses LOUDLY when still set (ANY spelling)."""
 
+    @pytest.mark.parametrize("value", ["1", "0", "true", "off"])
+    def test_classify_refuses_a_set_flag(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        """Truthy AND falsy spellings alike — the knob itself is removed."""
+        monkeypatch.setenv(FLAG_ENV, value)
+        with pytest.raises(PullStateFlagRemovedError, match=FLAG_ENV):
+            _classify(state="running")
 
-class TestFlagOffNeverImports:
-    """Flag OFF: the oracle serves and the wheel is NEVER touched."""
-
-    def test_flag_off_classify_is_oracle_and_never_touches_the_wheel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv(FLAG_ENV, raising=False)
-        bomb = _BombKernelModule()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
-        out = _classify(state="error", detail="DailyQuotaExceeded: boom")
-        assert (out.outcome, out.tone) == ("halted_quota", "bad")
-        out = _classify(state="done", detail="", verdict=_verdict("clean"))
-        assert (out.outcome, out.tone) == ("clean", "ok")
-        # The teeth: AttributeError would be swallowed by getattr/hasattr —
-        # the recorded-touch list is the assertion that cannot be swallowed.
-        assert bomb.touches == []
-
-    def test_flag_off_retained_correlation_never_touches_the_wheel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(FLAG_ENV, "0")
-        bomb = _BombKernelModule()
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+    def test_retained_correlation_refuses_a_set_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The correlation consult checks the refusal guard too."""
+        monkeypatch.setenv(FLAG_ENV, "1")
         retained = RetainedPullState(snapshot=_snap(), pull_id="p1")
-        out = classify_retained_pull_outcome(
-            retained, verdict=_verdict("clean"), verdict_pull_id="p1"
-        )
-        assert out.outcome == "clean"
-        assert bomb.touches == []
-
-    def test_bomb_raises_attribute_error_not_assertion_error(self) -> None:
-        """The bomb's own contract (CodeQL: never an ``assert``-shaped raise)."""
-        bomb = _BombKernelModule()
-        with pytest.raises(AttributeError):
-            _ = bomb.classify_pull_outcome
-        # …and the swallowing shapes genuinely swallow it, leaving the trace:
-        assert getattr(bomb, "verdict_correlates", None) is None
-        assert not hasattr(bomb, "pull_allowed_us")
-        assert bomb.touches == ["classify_pull_outcome", "verdict_correlates", "pull_allowed_us"]
+        with pytest.raises(PullStateFlagRemovedError, match=FLAG_ENV):
+            classify_retained_pull_outcome(
+                retained, verdict=_verdict("clean"), verdict_pull_id="p1"
+            )
 
 
-class TestFlagOnServedCodes:
-    """Flag ON: the kernel's codes are composed and SERVED (the seam tooth)."""
+class TestKernelCodesCompose:
+    """The kernel's codes are composed and SERVED (the authority tooth)."""
 
-    def test_wrong_kernel_answer_is_served_not_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The oracle says "running"; the fake kernel says wedged — and the
-        # seam serves the kernel's decision, proving it is consulted.
+    def test_wrong_kernel_answer_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The frozen law says "running"; the fake kernel says wedged — and
+        # the module serves the kernel's decision, proving it is consulted.
         _fake_wheel(monkeypatch, classify=lambda *a: ("wedged", "bad", "wedged", "input"))
         out = _classify(state="running", detail="beat")
         assert (out.outcome, out.tone) == ("wedged", "bad")
@@ -173,6 +148,7 @@ class TestFlagOnServedCodes:
     def test_halt_table_headline_code_composes_from_the_python_table(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``halt:<Name>`` headline codes key the retained Python table."""
         _fake_wheel(
             monkeypatch,
             classify=lambda *a: (
@@ -189,6 +165,7 @@ class TestFlagOnServedCodes:
     def test_completed_failures_headline_composes_the_count(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The failed-count wording is composed Python-side off the input."""
         _fake_wheel(
             monkeypatch,
             classify=lambda *a: (
@@ -204,6 +181,7 @@ class TestFlagOnServedCodes:
     def test_verdict_marker_folds_via_the_retained_python_banner_authority(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``@verdict`` hands the fold to ``_from_verdict`` → ``banner_for``."""
         _fake_wheel(monkeypatch, classify=lambda *a: ("@verdict", "", "", ""))
         out = _classify(state="done", verdict=_verdict("quota_exhausted"))
         assert (out.outcome, out.tone) == ("verdict_quota_exhausted", "warn")
@@ -211,6 +189,7 @@ class TestFlagOnServedCodes:
     def test_prepull_marker_carries_the_provenance_detail(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``@verdict_prepull`` folds with the stamped-before-start note."""
         _fake_wheel(monkeypatch, classify=lambda *a: ("@verdict_prepull", "", "", ""))
         out = _classify(state="idle", verdict=_verdict("credentials_missing"))
         assert out.outcome == "verdict_credentials_missing"
@@ -231,11 +210,13 @@ class TestFlagOnServedCodes:
         detail: str,
         expected: str,
     ) -> None:
+        """Each detail code renders its pinned Python-side composition."""
         _fake_wheel(monkeypatch, classify=lambda *a: ("completed", "ok", "completed", detail_code))
         out = _classify(state="done", detail=detail)
         assert out.detail == expected
 
     def test_kernel_sees_the_packed_inputs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The consult packs (state, detail, failed, stalled, wedged, has_verdict)."""
         seen: list[tuple[Any, ...]] = []
 
         def spy(*args: Any) -> tuple[str, str, str, str]:
@@ -247,31 +228,37 @@ class TestFlagOnServedCodes:
         assert seen == [("running", "d", 2, True, False, True)]
 
 
-class TestFlagOnDegrades:
-    """Every degrade arm falls through to the byte-identical oracle."""
+class TestKernelFaultsFailClosed:
+    """Every wheel fault is the typed raise — no oracle exists to degrade to."""
 
-    def test_missing_wheel_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_missing_wheel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # ImportError
-        out = _classify(state="error", detail="LakeWriteHalt: lake write halted: disk_full")
-        assert out.outcome == "halted_disk_full"
+        with pytest.raises(PullStateKernelError, match="wheel_missing"):
+            _classify(state="error", detail="LakeWriteHalt: lake write halted: disk_full")
 
-    def test_stale_wheel_missing_symbol_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A Phase-1-only wheel: pull_allowed_us present, Wave-1A symbols absent.
-        monkeypatch.setenv(FLAG_ENV, "1")
+    def test_stale_wheel_missing_symbol_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A Phase-1-only wheel: pull_allowed_us present, the outcome symbols absent.
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", SimpleNamespace(pull_allowed_us=lambda *a: True)
         )
-        out = _classify(state="running")
-        assert out.outcome == "running"
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            _classify(state="running")
 
-    def test_raising_kernel_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_bomb_module_is_touched_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The recording bomb proves the consult AND the typed refusal."""
+        bomb = _BombKernelModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            _classify(state="running")
+        assert "classify_pull_outcome" in bomb.touches
+
+    def test_raising_kernel_raises_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*a: Any) -> tuple[str, str, str, str]:
             raise RuntimeError("kernel exploded")
 
         _fake_wheel(monkeypatch, classify=boom)
-        out = _classify(state="done", detail="note")
-        assert (out.outcome, out.headline) == ("completed", "pull finished")
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            _classify(state="done", detail="note")
 
     @pytest.mark.parametrize(
         "poison",
@@ -282,12 +269,13 @@ class TestFlagOnDegrades:
             ["completed", "ok", "completed", "completed"],
         ],
     )
-    def test_poisoned_result_shape_degrades(
+    def test_poisoned_result_shape_raises(
         self, monkeypatch: pytest.MonkeyPatch, poison: object
     ) -> None:
+        """The facade's shape gate (a non-4-tuple-of-str) refuses loudly."""
         _fake_wheel(monkeypatch, classify=lambda *a: poison)
-        out = _classify(state="running")
-        assert out.outcome == "running"
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            _classify(state="running")
 
     @pytest.mark.parametrize(
         "codes",
@@ -299,57 +287,66 @@ class TestFlagOnDegrades:
             ("running", "ok", "running", "no_such_detail_code"),
         ],
     )
-    def test_unrecognised_codes_degrade_to_oracle(
+    def test_unrecognised_codes_raise(
         self, monkeypatch: pytest.MonkeyPatch, codes: tuple[str, str, str, str]
     ) -> None:
+        """The module-side vocabulary gate refuses out-of-contract codes —
+        never an unvalidated token on the wire."""
         _fake_wheel(monkeypatch, classify=lambda *a: codes)
-        out = _classify(state="running", detail="beat")
-        assert (out.outcome, out.tone, out.headline) == ("running", "ok", "pull running")
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            _classify(state="running", detail="beat")
 
-    def test_verdict_marker_without_a_verdict_degrades(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_verdict_marker_without_a_verdict_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A verdict marker with no verdict to fold is structurally
+        impossible from the real kernel — refused, never guessed."""
         _fake_wheel(monkeypatch, classify=lambda *a: ("@verdict", "", "", ""))
-        out = _classify(state="done", detail="note", verdict=None)
-        assert out.outcome == "completed"
+        with pytest.raises(PullStateKernelError, match="verdict marker without a verdict"):
+            _classify(state="done", detail="note", verdict=None)
 
 
-class TestRetainedCorrelationSeam:
-    """The correlation-law seam on ``classify_retained_pull_outcome``."""
+class TestRetainedCorrelationKernel:
+    """The correlation law on ``classify_retained_pull_outcome`` is kernel-fed."""
 
-    def test_kernel_true_consults_the_verdict_even_on_oracle_mismatch(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _fake_wheel(monkeypatch, correlates=lambda *a: True)
+    def test_kernel_true_consults_the_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A (deliberately-wrong) True correlation is SERVED — authority."""
+        _fake_wheel(
+            monkeypatch,
+            classify=lambda *a: ("@verdict", "", "", ""),
+            correlates=lambda *a: True,
+        )
         retained = RetainedPullState(snapshot=_snap(), pull_id="p1")
         out = classify_retained_pull_outcome(
             retained, verdict=_verdict("clean"), verdict_pull_id="OTHER"
         )
         assert out.outcome == "clean"  # the kernel's (wrong) law is served
 
-    def test_kernel_false_drops_the_verdict_even_on_oracle_match(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _fake_wheel(monkeypatch, correlates=lambda *a: False)
+    def test_kernel_false_drops_the_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A False correlation drops the verdict even on an id match."""
+        _fake_wheel(
+            monkeypatch,
+            classify=lambda *a: ("completed", "ok", "completed", "completed"),
+            correlates=lambda *a: False,
+        )
         retained = RetainedPullState(snapshot=_snap(), pull_id="p1")
         out = classify_retained_pull_outcome(
             retained, verdict=_verdict("clean"), verdict_pull_id="p1"
         )
         assert out.outcome == "completed"
 
-    def test_kernel_degrade_keeps_the_oracle_correlation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_bool_correlation_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A truthy int pun from a stale wheel is refused, never served."""
         _fake_wheel(monkeypatch, correlates=lambda *a: 1)  # non-bool → poison
         retained = RetainedPullState(snapshot=_snap(), pull_id="p1")
-        out = classify_retained_pull_outcome(
-            retained, verdict=_verdict("clean"), verdict_pull_id="p1"
-        )
-        assert out.outcome == "clean"
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            classify_retained_pull_outcome(
+                retained, verdict=_verdict("clean"), verdict_pull_id="p1"
+            )
 
     def test_never_ran_slot_takes_no_correlation_kernel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``retained=None`` never consults the correlation kernel."""
+
         def boom(*a: Any) -> bool:
             raise AssertionError("the never-ran arm must not consult the correlation kernel")
 
@@ -360,20 +357,19 @@ class TestRetainedCorrelationSeam:
 
 
 class TestFacadeAccessors:
-    """The Wave-1A accessors on ``brutex.pull_state_rust`` directly."""
+    """The pull-outcome accessors on ``brutex.pull_state_rust`` directly."""
 
-    def test_classify_missing_wheel_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_classify_missing_wheel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)
-        assert (
-            pull_state_rust.rust_classify_pull_outcome("idle", "", 0, False, False, False) is None
-        )
+        with pytest.raises(PullStateKernelError, match="wheel_missing"):
+            pull_state_rust.rust_classify_pull_outcome("idle", "", 0, False, False, False)
 
-    def test_classify_stale_wheel_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_classify_stale_wheel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "brutex_pull_state", SimpleNamespace())
-        assert (
-            pull_state_rust.rust_classify_pull_outcome("idle", "", 0, False, False, False) is None
-        )
-        assert pull_state_rust.rust_verdict_correlates("a", "b") is None
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            pull_state_rust.rust_classify_pull_outcome("idle", "", 0, False, False, False)
+        with pytest.raises(PullStateKernelError, match="wheel_stale"):
+            pull_state_rust.rust_verdict_correlates("a", "b")
 
     def test_classify_happy_path_returns_the_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(
@@ -400,19 +396,22 @@ class TestFacadeAccessors:
             "brutex_pull_state",
             SimpleNamespace(verdict_correlates=lambda *a: "yes"),
         )
-        assert pull_state_rust.rust_verdict_correlates("p", "p") is None
+        with pytest.raises(PullStateKernelError, match="kernel_invalid"):
+            pull_state_rust.rust_verdict_correlates("p", "p")
 
-    def test_correlates_raising_kernel_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_correlates_raising_kernel_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*a: Any) -> bool:
             raise ValueError("nope")
 
         monkeypatch.setitem(
             sys.modules, "brutex_pull_state", SimpleNamespace(verdict_correlates=boom)
         )
-        assert pull_state_rust.rust_verdict_correlates("p", "p") is None
+        with pytest.raises(PullStateKernelError, match="kernel_error"):
+            pull_state_rust.rust_verdict_correlates("p", "p")
 
 
 def _snap(**overrides: Any) -> ProgressSnapshot:
+    """A minimal :class:`ProgressSnapshot` for retained-state drives."""
     kwargs: dict[str, Any] = {
         "state": "done",
         "total": 1,
@@ -430,26 +429,16 @@ def _snap(**overrides: Any) -> ProgressSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# Flag ON + the REAL wheel — skipped until the integrator's merged wheel
-# carries the Wave-1A symbols (the crate's fixture-driven `cargo test`
-# carries kernel parity meanwhile).
+# The REAL wheel — the frozen golden replay + the kernel-vs-inline-law
+# differential.  The wheel is REQUIRED (fail-closed facade posture — a
+# missing wheel fails these loudly, never skips them green).
 # ---------------------------------------------------------------------------
 
 
-def _require_wave1a_wheel() -> None:
-    wheel = pytest.importorskip("brutex_pull_state")
-    if not hasattr(wheel, "classify_pull_outcome") or not hasattr(wheel, "verdict_correlates"):
-        pytest.skip("brutex_pull_state wheel predates the Wave-1A pull_outcome symbols")
-
-
-def test_real_wheel_replays_the_frozen_golden_flag_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Flag-ON output ≡ the frozen pre-conversion oracle, case for case."""
-    _require_wave1a_wheel()
+def test_real_wheel_replays_the_frozen_golden() -> None:
+    """Kernel-backed output ≡ the frozen pre-conversion capture, case for case."""
     from tests.golden._pull_outcome_harness import verdict_from_token
 
-    monkeypatch.setenv(FLAG_ENV, "1")
     frozen = json.loads(MODULE_FIXTURE.read_text(encoding="utf-8"))
     for row in frozen["classify"]:
         case = row["case"]
@@ -461,7 +450,7 @@ def test_real_wheel_replays_the_frozen_golden_flag_on(
             wedged=case["wedged"],
             verdict=verdict_from_token(case["verdict"]),
         )
-        assert out.to_dict() == row["out"], f"flag-ON drift on {case}"
+        assert out.to_dict() == row["out"], f"kernel drift on {case}"
     for row in frozen["retained"]:
         case = row["case"]
         retained = (
@@ -476,13 +465,90 @@ def test_real_wheel_replays_the_frozen_golden_flag_on(
             verdict=verdict_from_token(case["verdict"]),
             verdict_pull_id=case["verdict_pull_id"],
         )
-        assert out.to_dict() == row["out"], f"flag-ON drift on {case}"
+        assert out.to_dict() == row["out"], f"kernel drift on {case}"
 
 
-def test_real_wheel_hypothesis_differential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Flag-ON ≡ flag-OFF over arbitrary inputs (the 4-string bit-equality)."""
-    _require_wave1a_wheel()
-    from brutex.dashboard.pull_outcome import MARKET_HOURS_DEFERRAL_PREFIX
+def _inline_classify(
+    state: str,
+    detail: str,
+    failed: int,
+    stalled: bool,
+    wedged: bool,
+    verdict: dict[str, Any] | None,
+) -> LastPullOutcome:
+    """The frozen classification LAW, reimplemented in test code.
+
+    A faithful transcription of the pre-flip Python oracle ladder (test-only
+    — the production copy lives in the Rust kernel): the running arms, the
+    error-detail classification (the market-hours prefix, the
+    ``LakeWriteHalt`` reason split, the halt-name table, the generic-error
+    arm), the done-arm precedence (deferral BEFORE the verdict; ``failed >
+    0`` outranks a clean verdict) and the idle fall-through.  The verdict
+    fold rides the module's RETAINED ``_from_verdict`` composition (the
+    kernel only ever emits the ``@verdict`` markers for it).
+    """
+    if state == "running":
+        if wedged:
+            return LastPullOutcome("wedged", "bad", "pull WEDGED — restart required", detail)
+        if stalled:
+            return LastPullOutcome(
+                "running_stalled_suspect",
+                "warn",
+                "pull running — STALLED-SUSPECT (no progress beats)",
+                detail,
+            )
+        return LastPullOutcome("running", "ok", "pull running", detail)
+    if state == "error":
+        if detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX):
+            return LastPullOutcome(
+                "deferred_market_hours",
+                "warn",
+                "pull deferred — NSE market hours (08:45-15:35 IST)",
+                detail,
+            )
+        name = detail.split(":", 1)[0]
+        if name == "LakeWriteHalt":
+            if "disk_full" in detail:
+                return LastPullOutcome("halted_disk_full", "bad", "pull HALTED — disk full", detail)
+            if "out_of_memory" in detail:
+                return LastPullOutcome("halted_oom", "bad", "pull HALTED — out of memory", detail)
+            return LastPullOutcome(
+                "halted_lake_write", "bad", "pull HALTED — lake write halted", detail
+            )
+        mapped = _HALT_NAME_OUTCOMES.get(name)
+        if mapped is not None:
+            return LastPullOutcome(mapped[0], mapped[1], mapped[2], detail)
+        return LastPullOutcome("error", "bad", "pull FAILED", detail)
+    if state == "done":
+        if detail.startswith(MARKET_HOURS_DEFERRAL_PREFIX):
+            return LastPullOutcome(
+                "deferred_market_hours",
+                "warn",
+                "pull deferred — NSE market hours (08:45-15:35 IST)",
+                detail,
+            )
+        if failed > 0:
+            return LastPullOutcome(
+                "completed_with_failures",
+                "warn",
+                f"pull finished — {failed} unit(s) failed/quarantined (will re-pull)",
+                detail,
+            )
+        if verdict is not None:
+            return _from_verdict(verdict)
+        return LastPullOutcome(
+            "completed",
+            "ok",
+            "pull finished",
+            detail if detail else "completed — no classified verdict recorded for this run",
+        )
+    if verdict is not None:
+        return _from_verdict(verdict, provenance="stamped before any pull started")
+    return LastPullOutcome("never_run", "idle", "no pull has run in this dashboard process", "")
+
+
+def test_real_wheel_hypothesis_vs_inline_law() -> None:
+    """Kernel-backed classification ≡ the inline law over arbitrary inputs."""
     from hypothesis import given, settings
     from hypothesis import strategies as st
 
@@ -506,8 +572,7 @@ def test_real_wheel_hypothesis_differential(monkeypatch: pytest.MonkeyPatch) -> 
         state: str, detail: str, failed: int, stalled: bool, wedged: bool, has_verdict: bool
     ) -> None:
         verdict = _verdict("clean") if has_verdict else None
-        monkeypatch.setenv(FLAG_ENV, "1")
-        on = _classify(
+        got = _classify(
             state=state,
             detail=detail,
             failed=failed,
@@ -515,15 +580,6 @@ def test_real_wheel_hypothesis_differential(monkeypatch: pytest.MonkeyPatch) -> 
             wedged=wedged,
             verdict=verdict,
         )
-        monkeypatch.setenv(FLAG_ENV, "0")
-        off = _classify(
-            state=state,
-            detail=detail,
-            failed=failed,
-            stalled=stalled,
-            wedged=wedged,
-            verdict=verdict,
-        )
-        assert on == off
+        assert got == _inline_classify(state, detail, failed, stalled, wedged, verdict)
 
     check()  # pyright: ignore[reportCallIssue] — hypothesis @given rebinds the signature

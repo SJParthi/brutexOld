@@ -14,7 +14,11 @@ byte-level oracle every Rust-seam phase must preserve:
   not-a-Mapping classification; design risk #3 has no serde/hand-rolled
   parser to drift);
 * the ``run_auto_resume`` arm lattice (probe-BEFORE-cap order, the
-  bump-before-launch counter, the probe-never-called-without-intent law);
+  bump-before-launch counter, the probe-never-called-without-intent law) —
+  post-flip (DEC-RUST-PULL-STATE-001) the fixture's ``kernel_row=False``
+  rows record the DELETED beyond-u64 silent-Python-arm history: the live
+  law for them is the typed fail-closed ``PullStateKernelError`` refusal,
+  pinned here with the fixture bytes untouched;
 * the refused-start restore lattice (DEC-PULL-SCOPED-ALL-ONECLICK-001 r3
   F-1) — leave-absent / clear-orphan / restore-prior-verbatim;
 * the resume-env token law over hostile unicode (the CPython
@@ -52,12 +56,33 @@ class TestPullIntentGolden:
         assert _TSV_PATH.is_file(), "run tests/golden/generate_pull_intent_golden.py once"
 
     def test_module_tables_match_frozen_fixture(self, tmp_path: Path) -> None:
+        """Live tables ≡ the frozen capture — modulo the ONE flip-phase carve-out.
+
+        Every parse/restore/env row and every kernel-domain resume row must
+        match the frozen fixture byte-for-byte. The resume rows frozen with
+        ``kernel_row=False`` (a ``restarts`` counter beyond u64) recorded the
+        DELETED silent-Python-arm behavior; the live law is the typed
+        fail-closed refusal (DEC-RUST-PULL-STATE-001, flip phase) — recorded
+        by the harness as ``action="kernel_refused"`` and pinned here, with
+        the fixture bytes untouched.
+        """
         frozen = json.loads(_JSON_PATH.read_text(encoding="utf-8"))
         live = compute_all_tables(tmp_path)
-        # Per-table compare first (a readable diff), then the whole capture.
-        for table in ("parse", "resume", "restore", "env"):
+        assert set(live) == set(frozen)
+        # Per-table compare (a readable diff) — resume gets the carve-out.
+        for table in ("parse", "restore", "env"):
             assert live[table] == frozen[table], f"pull_intent {table} table drifted"
-        assert live == frozen
+        frozen_resume = {row["id"]: row for row in frozen["resume"]}
+        assert [row["id"] for row in live["resume"]] == list(frozen_resume)
+        for row in live["resume"]:
+            ref = frozen_resume[row["id"]]
+            if ref["kernel_row"]:
+                assert row == ref, f"pull_intent resume row {row['id']} drifted"
+            else:
+                assert row["action"] == "kernel_refused", row["id"]
+                # The frozen record IS the deleted arm's history — the pin
+                # keeps the supersession legible (never silently rewritten).
+                assert ref["action"] in {"peer_active", "over_cap"}, row["id"]
 
     def test_kernel_tsv_matches_frozen_fixture(self, tmp_path: Path) -> None:
         frozen = _TSV_PATH.read_text(encoding="utf-8")

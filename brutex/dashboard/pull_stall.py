@@ -42,21 +42,23 @@ can never crash the timer or the pull. ``beat`` / ``check_once`` are O(1) (one w
 
 ## Decision: DEC-PULL-STALL-DETECTION-001 (MIGRATION.md entry #945).
 
-## Rust decision seam (DEC-RUST-PULL-STATE-001, Wave 1C)
+## The Rust decision kernel (DEC-RUST-PULL-STATE-001, flip phase)
 
-Behind the default-OFF ``BRUTEX_PULL_STATE_RUST`` flag the PURE decision plane
-— the DUAL-signal wedge-escalation arm (``_escalation_wants_probe_locked`` +
-``_maybe_escalate_locked``) and the alive-log throttle's emit-now? verdict —
-is served by the ``brutex_pull_state`` kernel (clockless: ONE monotonic read →
-ages across the FFI; timers, locks, probes, logging and every ACTION stay
-Python, so log lines + event payloads are byte-identical by construction).
-The Python arms are RETAINED VERBATIM as the live parity oracle: flag OFF is
-byte-identical, and every flag-ON degrade (wheel missing/stale, kernel raise,
-poisoned token) falls through to them with a named warn-once
-(:mod:`brutex.pull_state_rust`). The two FAIL-SAFE env resolvers above are
-deliberately NOT routed through the kernel — their ``float()`` parse quirks
-are Python-defined (frozen in the pull-stall golden), and the fail-safe
-posture (junk → silent audited default) is preserved exactly on both arms.
+The PURE decision plane — the DUAL-signal wedge-escalation arm
+(``_escalation_wants_probe_locked`` + ``_maybe_escalate_locked``) and the
+alive-log throttle's emit-now? verdict — is served by the
+``brutex_pull_state`` kernel as THE ONLY decision path (clockless: ONE
+monotonic read → ages across the FFI; timers, locks, probes, logging and
+every ACTION stay Python, so log lines + event payloads are byte-identical
+by construction — the kernel only picks the ARM, the shared action bodies
+run it).  The Python oracle arms were DELETED with the flip: a kernel fault
+(wheel absent/stale, a raise, a poisoned token) raises the typed
+:class:`brutex.pull_state_rust.PullStateKernelError` out of
+:meth:`PullWatchdog.check_once` — fail-closed, never a silent degrade.  The
+two FAIL-SAFE env resolvers are deliberately NOT routed through the kernel —
+their ``float()`` parse quirks are Python-defined (frozen in the pull-stall
+golden), and the fail-safe posture (junk → silent audited default) is
+preserved exactly.
 """
 
 from __future__ import annotations
@@ -323,27 +325,27 @@ class PullWatchdog:
         self._wedge_window_restart_at = None
         self._user_on_hung(event)
 
-    def _rust_wedge_token(self, current: str | None) -> int | None:
-        """Consult the Rust wedge kernel (DEC-RUST-PULL-STATE-001, Wave 1C) — lock held.
+    def _rust_wedge_token(self, current: str | None) -> int:
+        """Consult the Rust wedge kernel (DEC-RUST-PULL-STATE-001) — lock held.
 
-        Computes the kernel's clockless inputs in the ORACLE's expression
-        order (the ``wedged_fired``/hook short-circuit runs before the
-        ``state_of`` read, exactly like :meth:`_escalation_wants_probe_locked`,
-        so the unregistered-worker shape raises identically on either arm)
-        from ONE monotonic-clock read, then calls the facade's guarded
-        consult. ``None`` = fall through to the byte-identical Python oracle
-        (flag off is never in here; a flag-ON degrade — wheel missing/stale,
-        kernel raise, poisoned token — is a named warn-once in
-        :mod:`brutex.pull_state_rust`). The oracle's dead ``last_beat_at is
-        None`` narrowing arm degrades here too (``start()`` always seeds it).
+        Computes the kernel's clockless inputs in the pinned expression order
+        (the ``wedged_fired``/hook short-circuit runs before the ``state_of``
+        read, so the unregistered-worker shape raises identically to the
+        pre-flip law) from ONE monotonic-clock read, then calls the facade's
+        guarded consult — the ONLY decision path (a kernel fault raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed).
+        The ``last_beat_at is None`` arm is a Python-side INPUT PRECONDITION,
+        not a kernel law: with no beat instant there is no age to model, so
+        the escalation definitionally abstains (``start()`` always seeds the
+        instant — the arm is production-dead).
         """
         if self._wedged_fired or self.on_wedged is None:
-            hung = False  # the kernel refuses on the flags — state never read (oracle order)
+            hung = False  # the kernel refuses on the flags — state never read (pinned order)
         else:
             hung = self._wd.state_of(PULL_WORKER_NAME) is WorkerState.HUNG
         last_beat = self._last_beat_at
-        if last_beat is None:  # pragma: no cover — start() always seeds it (oracle's dead arm)
-            return None
+        if last_beat is None:  # pragma: no cover — start() always seeds it (dead precondition)
+            return _pull_state_rust.WEDGE_TOKEN_NO_PROBE
         now = self._clock_fn()
         restart_at = self._wedge_window_restart_at
         return _pull_state_rust.rust_wedge_decision(
@@ -359,15 +361,15 @@ class PullWatchdog:
         )
 
     def _apply_wedge_token(self, token: int, current: str | None) -> None:
-        """Map a kernel arm token to the ORACLE's actions — lock held.
+        """Map a kernel arm token to its Python ACTIONS — lock held.
 
         The kernel only DECIDES (which arm); every action — baseline
         mutation, wedge-window restart stamp, the CRITICAL log + best-effort
-        ``on_wedged`` hook — runs the verbatim Python expressions shared with
-        the oracle (:meth:`_restart_wedge_window_locked` /
-        :meth:`_fire_wedged_locked`), so log lines + event payloads are
-        byte-identical on both arms. Tokens 0/1/4 (refused / probe abstained
-        / window not yet spanned) are deliberate no-ops.
+        ``on_wedged`` hook — runs the retained Python expressions
+        (:meth:`_restart_wedge_window_locked` / :meth:`_fire_wedged_locked`),
+        so log lines + event payloads are byte-identical to the pre-flip
+        module. Tokens 0/1/4 (refused / probe abstained / window not yet
+        spanned) are deliberate no-ops.
         """
         if token in (
             _pull_state_rust.WEDGE_TOKEN_ADOPT_BASELINE,
@@ -381,7 +383,7 @@ class PullWatchdog:
         """Adopt/re-baseline *current* + restart the wedge window — lock held.
 
         The shared action body of the adopt-baseline and re-baseline arms
-        (both oracle arms and the kernel tokens 2/3 run EXACTLY this).
+        (the kernel tokens 2/3 both run EXACTLY this).
         """
         self._hung_baseline_token = current
         self._wedge_window_restart_at = self._clock_fn()
@@ -396,27 +398,12 @@ class PullWatchdog:
         lock, reads the token, and re-takes the lock to evaluate — the probe cost
         (an ``os.stat`` on a possibly-wedged volume) is paid OUTSIDE the lock.
 
-        DEC-RUST-PULL-STATE-001 (Wave 1C): behind the default-OFF
-        ``BRUTEX_PULL_STATE_RUST`` flag the verdict is the kernel's arm token
-        consulted with ``current=None`` (token 0 ⇔ no probe needed); the
-        Python arm below is RETAINED VERBATIM as the live parity oracle and
-        serves every flag-OFF call byte-identically, and every flag-ON
-        degrade.
+        DEC-RUST-PULL-STATE-001 (flip phase): the verdict IS the kernel's arm
+        token consulted with ``current=None`` (token 0 ⇔ no probe needed) —
+        the only decision path; a kernel fault raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError` (fail-closed).
         """
-        if _pull_state_rust.pull_state_rust_enabled():
-            token = self._rust_wedge_token(None)
-            if token is not None:
-                return token != _pull_state_rust.WEDGE_TOKEN_NO_PROBE
-        # The Python oracle — the byte-identical retained arm.
-        if self._wedged_fired or self.on_wedged is None:
-            return False
-        if self._wd.state_of(PULL_WORKER_NAME) is not WorkerState.HUNG:
-            return False
-        if self._last_beat_at is None:  # pragma: no cover — start() always seeds it
-            return False
-        if self._clock_fn() - self._last_beat_at < self._wedge_multiplier * self._timeout:
-            return False
-        return self._hung_baseline_captured
+        return self._rust_wedge_token(None) != _pull_state_rust.WEDGE_TOKEN_NO_PROBE
 
     def _maybe_escalate_locked(self, current: str | None) -> None:
         """Fire ``on_wedged`` ONCE when the DUAL wedge signal holds — caller holds the lock.
@@ -441,63 +428,27 @@ class PullWatchdog:
         O(1) per poll. The hook is best-effort (swallow + log), mirroring
         :meth:`_recovery`.
 
-        DEC-RUST-PULL-STATE-001 (Wave 1C): behind the default-OFF
-        ``BRUTEX_PULL_STATE_RUST`` flag the ARM is decided by the kernel and
-        mapped to the shared action bodies (:meth:`_apply_wedge_token`); the
-        Python arm below is RETAINED VERBATIM as the live parity oracle and
-        serves every flag-OFF call byte-identically, and every flag-ON
-        degrade.
+        DEC-RUST-PULL-STATE-001 (flip phase): the ARM is decided by the
+        kernel — the only decision path (the guards are inherently
+        re-evaluated under THIS lock hold, so a beat landing while the probe
+        ran outside the lock still defers the verdict) — and mapped to the
+        shared action bodies (:meth:`_apply_wedge_token`); a kernel fault
+        raises :class:`~brutex.pull_state_rust.PullStateKernelError`
+        (fail-closed).
         """
-        if _pull_state_rust.pull_state_rust_enabled():
-            token = self._rust_wedge_token(current)
-            if token is not None:
-                self._apply_wedge_token(token, current)
-                return
-        # The Python oracle — the byte-identical retained arm.
-        if not self._escalation_wants_probe_locked():
-            # Guards re-checked under THIS lock hold: a beat may have landed while the
-            # probe ran outside the lock — any sign of life defers the verdict.
-            return
-        if current is None:
-            # The probe abstained on this poll: the DUAL signal cannot be confirmed —
-            # never escalate on heartbeat silence alone (honest envelope: a probe-less
-            # deployment never reaches WEDGED).
-            return
-        if self._hung_baseline_token is None:
-            # The HUNG-edge probe abstained (baseline None — e.g. the wedged volume also
-            # wedged the edge's os.stat). Adopt the FIRST later real token as the fresh
-            # baseline and restart the wedge window from this observation — the verdict
-            # is re-armed once the probe recovers, never fired against a blind baseline.
-            self._restart_wedge_window_locked(current)
-            return
-        if current != self._hung_baseline_token:
-            # The lake moved — the worker IS making durable progress despite the silent
-            # heartbeat. Re-baseline so a LATER freeze is measured from this observation,
-            # and restart the wedge window from the movement (both DUAL halves must cover
-            # the FULL window before a verdict).
-            self._restart_wedge_window_locked(current)
-            return
-        if self._wedge_window_restart_at is not None and (
-            self._clock_fn() - self._wedge_window_restart_at
-            < self._wedge_multiplier * self._timeout
-        ):
-            # The window restarted (observed movement / adopted baseline) and the freeze
-            # since then has not yet spanned the full wedge window — defer the verdict.
-            return
-        self._fire_wedged_locked()
+        self._apply_wedge_token(self._rust_wedge_token(current), current)
 
     def _fire_wedged_locked(self) -> None:
         """The escalate arm's ACTION body (latch + CRITICAL log + hook) — lock held.
 
-        Shared VERBATIM by the Python oracle's tail and the kernel's
-        escalate token (:meth:`_apply_wedge_token`), so the terminal latch,
-        the byte-pinned ``pull_stall.wedged`` printf line and the
-        best-effort hook fire identically on both arms.
+        Run for the kernel's escalate token (:meth:`_apply_wedge_token`) —
+        the terminal latch, the byte-pinned ``pull_stall.wedged`` printf
+        line and the best-effort hook are the pre-flip bytes verbatim.
         """
         hook = self.on_wedged
         last_beat = self._last_beat_at
-        if hook is None or last_beat is None:  # pragma: no cover — guarded above
-            return  # narrowing only — _escalation_wants_probe_locked() already refused
+        if hook is None or last_beat is None:  # pragma: no cover — guarded upstream
+            return  # narrowing only — the kernel escalates only with a bound hook + a beat
         age = self._clock_fn() - last_beat
         self._wedged_fired = True
         event = WorkerEvent(
@@ -632,26 +583,18 @@ class PullWatchdog:
         wrapper (a bare ``check_once`` in a test) reads ``state="unregistered"`` honestly
         instead of raising off :meth:`Watchdog.state_of`'s KeyError.
 
-        DEC-RUST-PULL-STATE-001 (Wave 1C): behind the default-OFF
-        ``BRUTEX_PULL_STATE_RUST`` flag the emit-now? throttle verdict is the
-        kernel's (the ``-inf`` first-check seed and a NaN age behave
+        DEC-RUST-PULL-STATE-001 (flip phase): the emit-now? throttle verdict
+        IS the kernel's (the ``-inf`` first-check seed and a NaN age behave
         IEEE-identically — the kernel is the negated strict ``<``, never a
-        ``>=`` respelling); the payload build + the throttle stamp stay
-        Python (:meth:`_stamp_alive_payload_locked` — shared verbatim), and
-        the Python arm below serves every flag-OFF call byte-identically,
-        and every flag-ON degrade.
+        ``>=`` respelling) — the only decision path; the payload build + the
+        throttle stamp stay Python (:meth:`_stamp_alive_payload_locked`).  A
+        kernel fault raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError` (fail-closed).
         """
         now = self._alive_clock()
-        if _pull_state_rust.pull_state_rust_enabled():
-            due = _pull_state_rust.rust_alive_log_due(
-                now - self._last_alive_log, self._alive_interval
-            )
-            if due is not None:
-                if not due:
-                    return None
-                return self._stamp_alive_payload_locked(now)
-        # The Python oracle — the byte-identical retained arm.
-        if now - self._last_alive_log < self._alive_interval:
+        if not _pull_state_rust.rust_alive_log_due(
+            now - self._last_alive_log, self._alive_interval
+        ):
             return None
         return self._stamp_alive_payload_locked(now)
 

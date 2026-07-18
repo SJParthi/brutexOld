@@ -42,6 +42,22 @@ path decides from the ledger exactly as before. The intent resume defaults ON
 REAL pull was launched and never finished) — with
 :data:`PULL_INTENT_RESUME_ENV` (``=0``) as the escape hatch.
 
+DEC-RUST-PULL-STATE-001 (flip phase): the ``brutex_pull_state`` Rust kernel
+IS this module's decision plane — the intent shape lattice
+(``intent_shape_verdict`` over the mechanically classified payload codes),
+the resume arm lattice (``intent_resume_decision``), the refused-start
+restore lattice (``intent_refused_restore_decision``) and the resume-env
+token law (``intent_resume_enabled``) are kernel-only; the Python oracle
+bodies were DELETED. The JSON decode, every warn/banner string, the store
+I/O and the frozen :class:`PullIntent` dataclass stay Python. A kernel
+fault raises the typed
+:class:`~brutex.pull_state_rust.PullStateKernelError` — FAIL-CLOSED (the
+boot-resume helpers' historical never-raises envelope is now scoped to
+everything BELOW the kernel: a wheel fault stops the decision loudly
+instead of deciding blind). An intent counter beyond the kernel's u64
+domain (a forged sidecar's arbitrary-precision int) is likewise refused
+loudly by the facade — the pre-flip silent Python arm went with the oracle.
+
 HONEST envelope (Golden Rule #10): the resume re-fires the FULL pipeline (spot
 → metadata → historical → prebuild → movers warm), so its success criteria are
 the pipeline's own — derived-TF partitions written + movers warmed — never a
@@ -70,7 +86,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import structlog
 
@@ -132,11 +148,6 @@ MAX_AUTO_RESTARTS: Final[int] = 2
 #: DEC-PULL-INTENT-RESUME-001); an explicit falsy value disables.
 PULL_INTENT_RESUME_ENV: Final[str] = "BRUTEX_PULL_INTENT_RESUME"
 
-#: The falsy set (case-insensitive) that DISABLES the resume — the complement
-#: convention of the sibling default-OFF toggles' truthy set, so the operator
-#: writes the same tokens either way (CLAUDE.md §11 COMMON).
-_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
-
 #: The intent payload's schema version (forward-compat marker; unknown extra
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
@@ -160,21 +171,16 @@ def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
     file is operator-click evidence — a REAL pull was launched and died — so
     completing it needs no extra opt-in (DEC-PULL-INTENT-RESUME-001). *env*
     defaults to :data:`os.environ`; a test injects its own mapping. O(1).
+
+    DEC-RUST-PULL-STATE-001 (flip phase): the strip+lower+falsy-set law is
+    the ``intent_resume_enabled`` Rust kernel's — the RAW token (or ``None``
+    for unset) crosses the FFI unprocessed. A kernel fault — including a
+    lone-surrogate env value failing the pyo3 ``&str`` edge — raises
+    :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed.
     """
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(PULL_INTENT_RESUME_ENV)
-    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the
-    # strip+lower+falsy-set law consulted in Rust when the flag is ON; ANY
-    # degrade (wheel missing/stale, kernel raise, non-bool pun, a
-    # lone-surrogate env value failing the pyo3 &str edge) falls through to
-    # the byte-identical Python oracle below — never a raise from the seam.
-    if _pull_state_rust.pull_state_rust_enabled():
-        verdict = _pull_state_rust.rust_intent_resume_enabled(raw)
-        if verdict is not None:
-            return verdict
-    if raw is None:
-        return True
-    return raw.strip().lower() not in _FALSY
+    return _pull_state_rust.rust_intent_resume_enabled(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,57 +237,46 @@ class PullIntent:
 
     @classmethod
     def from_payload(cls, payload: object) -> PullIntent | None:
-        """Parse a loaded JSON payload; ``None`` on ANY shape violation — pure.
+        """Parse a loaded JSON payload; ``None`` on ANY shape violation.
 
         Strict: the four request fields must each be a string or ``None``,
         ``restarts`` a non-negative real ``int`` (a JSON ``true`` is NOT a
         count), ``created_at`` a string. Unknown extra keys are ignored
         (forward-compat); a violation means a corrupt / foreign file, which the
         caller treats as absent (never a fabricated pull — Golden Rule #1).
+
+        DEC-RUST-PULL-STATE-001 (flip phase): the shape LATTICE is the
+        ``intent_shape_verdict`` Rust kernel's, consulted over the
+        mechanically classified payload codes (the JSON decode — and
+        CPython's whole failure taxonomy — happened BEFORE this method; a
+        failed decode arrives as the ``None`` payload the not-a-Mapping code
+        covers). The dataclass CONSTRUCTION stays Python: a VALID verdict
+        certifies the shape (root Mapping · request fields str/absent/null ·
+        ``restarts`` a genuine non-negative int — huge positives included,
+        the sign law is the kernel's · ``created_at`` a str or absent), so
+        the extraction below is mechanical, never a second decision. A
+        kernel fault raises
+        :class:`~brutex.pull_state_rust.PullStateKernelError`, fail-closed.
         """
-        # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001):
-        # the shape LATTICE consulted in Rust over the mechanically-classified
-        # payload codes (the JSON decode — and CPython's whole failure
-        # taxonomy — happened BEFORE this method; a failed decode arrives as
-        # the ``None`` payload the not-a-Mapping code covers).  An INVALID
-        # kernel verdict is SERVED (the corrupt/absent answer); a VALID one
-        # deliberately falls THROUGH to the byte-identical oracle body below,
-        # so the dataclass is only ever constructed on the ONE Python path
-        # (zero construction duplication; a kernel-vs-oracle disagreement on
-        # the valid arm is decided by the oracle — fail-safe).  Any degrade
-        # (wheel missing/stale, kernel raise, out-of-vocabulary code) falls
-        # through too.
-        if _pull_state_rust.pull_state_rust_enabled():
-            verdict = _pull_state_rust.rust_intent_shape_verdict(
-                *_classify_payload_for_kernel(payload)
-            )
-            if verdict is not None and verdict != _pull_state_rust.INTENT_SHAPE_VALID:
-                return None
-        if not isinstance(payload, Mapping):
+        verdict = _pull_state_rust.rust_intent_shape_verdict(*_classify_payload_for_kernel(payload))
+        if verdict != _pull_state_rust.INTENT_SHAPE_VALID:
             return None
-        fields: dict[str, str | None] = {}
+        # The VALID verdict implies the root is a Mapping (the classifier's
+        # code 1) — the cast is type-narrowing only, never a re-decision.
+        mapping = cast("Mapping[str, Any]", payload)
         # ``scope`` is the OPTIONAL fifth request field (DEC-PULL-SCOPED-ALL-
-        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒ the
-        # full chain (back-compat); a non-string value is corrupt like the rest.
-        for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
-            raw = payload.get(key)
-            if raw is not None and not isinstance(raw, str):
-                return None
-            fields[key] = raw
-        restarts = payload.get("restarts")
-        if isinstance(restarts, bool) or not isinstance(restarts, int) or restarts < 0:
-            return None
-        created_at = payload.get("created_at", "")
-        if not isinstance(created_at, str):
-            return None
+        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒
+        # the full chain (back-compat); ``created_at`` absent defaults empty.
         return cls(
-            symbols=fields["symbols"],
-            symbol=fields["symbol"],
-            from_date=fields["from_date"],
-            to_date=fields["to_date"],
-            restarts=restarts,
-            created_at=created_at,
-            scope=fields["scope"],
+            symbols=mapping.get("symbols"),
+            symbol=mapping.get("symbol"),
+            from_date=mapping.get("from_date"),
+            to_date=mapping.get("to_date"),
+            # Present by the VALID verdict (an absent ``restarts`` is refused
+            # as corrupt by the kernel lattice) — indexed, never defaulted.
+            restarts=mapping["restarts"],
+            created_at=mapping.get("created_at", ""),
+            scope=mapping.get("scope"),
         )
 
 
@@ -675,7 +670,13 @@ def restore_intent_after_refused_start(
     dry_run: bool,
     started: bool,
 ) -> bool:
-    """Undo the pre-start intent persist when the start was REFUSED — never raises.
+    """Undo the pre-start intent persist when the start was REFUSED.
+
+    Never raises below the decision plane (store I/O stays best-effort); the
+    restore LATTICE itself is the fail-closed Rust kernel
+    (DEC-RUST-PULL-STATE-001, flip phase), so a wheel fault raises the typed
+    :class:`~brutex.pull_state_rust.PullStateKernelError` — the launcher's
+    click fails loudly rather than the restore deciding blind.
 
     Refuter round 3 F-1 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779):
     :func:`persist_intent_for_launch` deliberately runs BEFORE
@@ -738,36 +739,27 @@ def restore_intent_after_refused_start(
     if dry_run or started:
         return False
     current_present = store.load() is not None
-    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the
-    # restore LATTICE consulted in Rust when the flag is ON.  The dry-run /
-    # started short-circuit above deliberately runs FIRST (its arm is a
-    # constant ``False`` and the ``store.load()`` side effects — corrupt
-    # delete + warns — must not fire on it), exactly as the kernel's
-    # ``NO_ACTION`` arm models; the facade's consistency gate degrades a
-    # wheel that breaks that totality.  Every effect (the load above, the
-    # clear/write below, the logs) stays on this Python body.
-    arm: int | None = None
-    if _pull_state_rust.pull_state_rust_enabled():
-        arm = _pull_state_rust.rust_intent_refused_restore_decision(
-            dry_run=False,
-            started=False,
-            current_present=current_present,
-            prior_present=prior is not None,
-        )
-    if arm is None:
-        if not current_present:
-            arm = _pull_state_rust.RESTORE_ARM_LEAVE_ABSENT
-        elif prior is None:
-            arm = _pull_state_rust.RESTORE_ARM_CLEAR_ORPHAN
-        else:
-            arm = _pull_state_rust.RESTORE_ARM_RESTORE_PRIOR
+    # --- pull_intent (flip phase, DEC-RUST-PULL-STATE-001): the restore
+    # LATTICE is the kernel's ONLY.  The dry-run / started short-circuit
+    # above deliberately runs FIRST (its arm is a constant ``False`` and the
+    # ``store.load()`` side effects — corrupt delete + warns — must not fire
+    # on it), exactly as the kernel's ``NO_ACTION`` arm models; the facade's
+    # consistency gate REFUSES a wheel that breaks that totality.  Every
+    # effect (the load above, the clear/write below, the logs) stays on
+    # this Python body.
+    arm = _pull_state_rust.rust_intent_refused_restore_decision(
+        dry_run=False,
+        started=False,
+        current_present=current_present,
+        prior_present=prior is not None,
+    )
     if arm == _pull_state_rust.RESTORE_ARM_LEAVE_ABSENT:
         return False
     if arm == _pull_state_rust.RESTORE_ARM_CLEAR_ORPHAN or prior is None:
         # ``prior is None`` is the STRUCTURAL belt: a drifted wheel voting
-        # RESTORE_PRIOR with no snapshot to restore must clear the orphan
-        # (the oracle's own arm for that input), never raise out of this
-        # never-raises boundary.
+        # RESTORE_PRIOR with no snapshot to restore (a shape the facade's
+        # vocabulary gate cannot see) must clear the orphan — the lattice's
+        # own arm for that input — never write ``None`` or raise from here.
         store.clear()
         _LOG.info(
             "pull_intent.refused_start_restored",
@@ -893,7 +885,15 @@ def run_auto_resume(
     alert: Callable[[PullIntent], None] | None = None,
     max_restarts: int = MAX_AUTO_RESTARTS,
 ) -> ResumeAction:
-    """The whole boot-time intent-resume decision + dispatch — **never raises**.
+    """The whole boot-time intent-resume decision + dispatch.
+
+    Never raises for anything BELOW the kernel (launch faults, store I/O,
+    alert faults are all folded into the returned action) — the ONE
+    exception is the fail-closed decision plane itself
+    (DEC-RUST-PULL-STATE-001, flip phase): a pull-state kernel fault, or a
+    loaded ``restarts`` counter beyond the kernel's u64 domain, raises the
+    typed :class:`~brutex.pull_state_rust.PullStateKernelError` (the deleted
+    Python oracle is not there to decide blind).
 
     The 100 %-tested core the dashboard's thin ``app.state.brutex_resume_pipeline``
     seam delegates to (every load-bearing decision lives HERE, not in the
@@ -944,29 +944,20 @@ def run_auto_resume(
         else (lambda: probe_pull_singleflight(store.lake_root))
     )
     probe_ok = bool(probe())
-    # --- pull_intent (Wave 2E) Rust seam (DEC-RUST-PULL-STATE-001): the arm
-    # LATTICE (peer-probe BEFORE cap BEFORE bump — the load-bearing order)
-    # consulted in Rust when the flag is ON; every EFFECT (the probe call
-    # itself, logs, banner, alert, bump, launch) stays on this Python body.
-    # ``has_intent=True`` structurally — the no-intent arm returned above,
-    # exactly as the kernel lattice models it.  Any degrade (wheel
-    # missing/stale, kernel raise, out-of-vocabulary or site-inconsistent
-    # arm, a beyond-u64 counter) falls to the byte-identical oracle arms.
-    arm: int | None = None
-    if _pull_state_rust.pull_state_rust_enabled():
-        arm = _pull_state_rust.rust_intent_resume_decision(
-            has_intent=True,
-            probe_acquirable=probe_ok,
-            restarts=intent.restarts,
-            max_restarts=max_restarts,
-        )
-    if arm is None:
-        if not probe_ok:
-            arm = _pull_state_rust.RESUME_ARM_PEER_ACTIVE
-        elif intent.restarts >= max_restarts:
-            arm = _pull_state_rust.RESUME_ARM_OVER_CAP
-        else:
-            arm = _pull_state_rust.RESUME_ARM_PROCEED
+    # --- pull_intent (flip phase, DEC-RUST-PULL-STATE-001): the arm LATTICE
+    # (peer-probe BEFORE cap BEFORE bump — the load-bearing order) is the
+    # kernel's ONLY; every EFFECT (the probe call itself, logs, banner,
+    # alert, bump, launch) stays on this Python body.  ``has_intent=True``
+    # structurally — the no-intent arm returned above, exactly as the kernel
+    # lattice models it.  A kernel fault — or a loaded counter beyond the
+    # kernel's u64 domain (a forged sidecar) — raises the typed
+    # ``PullStateKernelError`` out of this boot helper, fail-closed.
+    arm = _pull_state_rust.rust_intent_resume_decision(
+        has_intent=True,
+        probe_acquirable=probe_ok,
+        restarts=intent.restarts,
+        max_restarts=max_restarts,
+    )
     if arm == _pull_state_rust.RESUME_ARM_PEER_ACTIVE:
         _LOG.info(
             "pull_intent.peer_active",

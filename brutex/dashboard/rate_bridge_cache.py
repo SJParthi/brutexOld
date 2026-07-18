@@ -42,6 +42,21 @@ state machine — the #1522 spawn-failure MAJOR had to be fixed twice):
   under thread/memory exhaustion) is caught by the OWNER, which releases the
   flag itself and serves ``unverified`` — a spawn failure can never wedge the
   single-flight nor raise out of :meth:`RateBridgeCache.get`.
+* **The Rust decision kernel (DEC-RUST-PULL-STATE-001, flip phase)** — the
+  two clockless LAWS (the three-arm serve decision + the token-revalidation
+  compare) are served by the ``brutex_pull_state`` kernel
+  (:func:`brutex.pull_state_rust.rust_memo_serve_arm` /
+  :func:`brutex.pull_state_rust.rust_token_revalidates`); the former
+  byte-identical Python condition bodies are DELETED. The THREAD CORE — the
+  lock, the deadline-guard daemon, the ``_inflight`` clearing law, the
+  degrade latch — is PERMANENT-PYTHON (the design §2.3 ruling; its Rust
+  port is DEFERRED to ``DEC-RUST-PULL-GLUE-002``). A kernel fault on the
+  SERVE path raises the typed fail-closed error out of
+  :meth:`RateBridgeCache.get`; on the refresh DAEMON it folds into the
+  base's ``refresh_failed`` WARN (memo kept, TTL-cadence retry — a daemon
+  raise has nowhere louder to go). The single-flight fail-safe belt stays:
+  a poisoned OWNER arm while a refresh is in flight is FORCED to the
+  follower serve, never a second daemon.
 
 No stale illusion, by construction (Golden Rule #1)
 ---------------------------------------------------
@@ -384,33 +399,34 @@ class NonBlockingFileMemoBase[MemoValueT]:
             ``(value, source, probe_age_s)`` — source ∈
             {:data:`MEMO_SOURCE_LIVE`, :data:`MEMO_SOURCE_CACHED`,
             :data:`MEMO_SOURCE_UNVERIFIED`}; never raises except
-            ``KeyboardInterrupt`` / ``SystemExit`` (flag released first).
+            ``KeyboardInterrupt`` / ``SystemExit`` (flag released first) and
+            the fail-closed pull-state kernel errors below.
+
+        Raises
+        ------
+        brutex.pull_state_rust.PullStateKernelError
+            Wheel absent/stale, kernel raise, or a poisoned serve arm —
+            fail-closed (DEC-RUST-PULL-STATE-001); raised BEFORE
+            ``_inflight`` is taken, so the single-flight state never leaks.
+        brutex.pull_state_rust.PullStateFlagRemovedError
+            The removed ``BRUTEX_PULL_STATE_RUST`` knob is still set.
         """
         with self._lock:
             now = self._clock()
             age = None if self._probed_at is None else max(0.0, now - self._probed_at)
-            # --- rate_bridge_cache (Wave 3H) Rust seam
-            # (DEC-RUST-PULL-STATE-001): the three-arm serve DECISION
-            # consulted in Rust over the PRE-COMPUTED age (the clock read +
-            # the lock stay Python — the design §2.3 "decision-kernel-only,
-            # thread core PERMANENT-PYTHON" ruling).  ``None`` (flag off /
-            # any degrade) falls back to the byte-identical oracle
-            # conditions below; the single-flight law is BELT-guarded — the
-            # follower return keeps its own ``or self._inflight`` arm, so a
-            # poisoned kernel answering OWNER while a refresh is in flight
-            # is FORCED to the follower serve and can never spawn a second
-            # refresh daemon.
-            arm = None
-            if _pull_state_rust.pull_state_rust_enabled():
-                arm = _pull_state_rust.rust_memo_serve_arm(age, self._ttl_s, self._inflight)
-            if arm is None:
-                # The oracle conditions (byte-identical — the pre-seam law).
-                if age is not None and self._ttl_s > 0 and age < self._ttl_s:
-                    arm = _pull_state_rust.MEMO_ARM_CACHED_HIT
-                elif self._inflight:
-                    arm = _pull_state_rust.MEMO_ARM_FOLLOWER
-                else:
-                    arm = _pull_state_rust.MEMO_ARM_OWNER
+            # --- rate_bridge_cache (Wave 3H, flip phase —
+            # DEC-RUST-PULL-STATE-001): the three-arm serve DECISION IS the
+            # Rust kernel, consulted over the PRE-COMPUTED age (the clock
+            # read + the lock stay Python — the design §2.3
+            # "decision-kernel-only, thread core PERMANENT-PYTHON" ruling);
+            # the former byte-identical Python conditions are DELETED.  A
+            # kernel fault raises the typed error out of this serve (the
+            # lock unwinds cleanly; ``_inflight`` is untouched) — the
+            # single-flight law stays BELT-guarded: the follower return
+            # keeps its own ``or self._inflight`` arm, so a poisoned kernel
+            # answering OWNER while a refresh is in flight is FORCED to the
+            # follower serve and can never spawn a second refresh daemon.
+            arm = _pull_state_rust.rust_memo_serve_arm(age, self._ttl_s, self._inflight)
             if arm == _pull_state_rust.MEMO_ARM_CACHED_HIT:
                 # The zero-syscall O(1) hot path between refreshes.
                 return (self._memo_value(), MEMO_SOURCE_CACHED, age)
@@ -593,7 +609,7 @@ class RateBridgeCache(NonBlockingFileMemoBase[rate_bridge.RateBridgeSnapshot]):
         self._token: str | None = None
 
     def get(self, lake_root: Path) -> BridgeReadResult:
-        """Return the bridge snapshot + provenance for *lake_root*, bounded, never raising.
+        """Return the bridge snapshot + provenance for *lake_root*, bounded.
 
         Three arms: an O(1) zero-syscall TTL hit; an IMMEDIATE last-known
         answer while a refresh is in flight (the non-blocking single-flight);
@@ -602,8 +618,10 @@ class RateBridgeCache(NonBlockingFileMemoBase[rate_bridge.RateBridgeSnapshot]):
         A guard that FAILS to spawn its refresh daemon (``Thread.start()``
         under thread/memory exhaustion) degrades to the SAME labelled
         ``unverified`` serve with the single-flight flag released — never a
-        raise, never a wedge; only ``KeyboardInterrupt`` / ``SystemExit``
-        propagate (with the flag released first).
+        wedge; ``KeyboardInterrupt`` / ``SystemExit`` propagate (with the
+        flag released first), and a pull-state kernel fault raises the typed
+        fail-closed error (see :meth:`NonBlockingFileMemoBase._serve_bounded`
+        — the serve DECISION is the Rust kernel, DEC-RUST-PULL-STATE-001).
 
         Parameters
         ----------
@@ -628,28 +646,32 @@ class RateBridgeCache(NonBlockingFileMemoBase[rate_bridge.RateBridgeSnapshot]):
 
         The guard discards the return value, so the commit is by side effect
         under the lock (last-write-wins — a LATE-returning wedged refresh still
-        repairs the cache when the volume recovers). Token decision: an
-        unchanged non-``None`` token revalidates without re-reading; a changed
-        / first / ``None`` ("unknown — if uncertain, fetch") token re-reads. A
-        ``None`` token is stored as ``None`` so an erroring stat is never
-        trusted — the next post-TTL owner re-probes AND re-reads. The
-        catch/finally discipline (raising injected seam WARNed + memo kept +
+        repairs the cache when the volume recovers). Token decision — the Rust
+        kernel's :func:`~brutex.pull_state_rust.rust_token_revalidates` law
+        (DEC-RUST-PULL-STATE-001, flip phase): an unchanged non-``None`` token
+        revalidates without re-reading; a changed / first / ``None`` ("unknown
+        — if uncertain, fetch") token re-reads. A ``None`` token is stored as
+        ``None`` so an erroring stat is never trusted — the next post-TTL
+        owner re-probes AND re-reads. The catch/finally discipline (raising
+        injected seam — a kernel fault included — WARNed + memo kept +
         ``_probed_at`` advanced; ``_inflight`` cleared) lives ONCE in the base
         (:meth:`NonBlockingFileMemoBase._refresh`).
         """
         token = self._probe(target)
         with self._lock:
             prior_token = self._token
-        # --- rate_bridge_cache (Wave 3H) Rust seam (DEC-RUST-PULL-STATE-001):
-        # the token-revalidation law consulted in Rust; ``None`` (flag off /
-        # any degrade, incl. a lone-surrogate token failing the pyo3 ``&str``
-        # edge inside the belt) falls back to the byte-identical oracle
-        # compare.  The read itself + the LATE-BOUND reader seam stay Python.
-        revalidates = None
-        if _pull_state_rust.pull_state_rust_enabled():
-            revalidates = _pull_state_rust.rust_token_revalidates(token, prior_token)
-        if revalidates is None:
-            revalidates = token is not None and token == prior_token
+        # --- rate_bridge_cache (Wave 3H, flip phase —
+        # DEC-RUST-PULL-STATE-001): the token-revalidation law IS the Rust
+        # kernel; the former byte-identical Python compare is DELETED.  A
+        # kernel fault (incl. a lone-surrogate token failing the pyo3
+        # ``&str`` edge) raises the typed error, which the PERMANENT-PYTHON
+        # base catch law (:meth:`NonBlockingFileMemoBase._refresh`) folds
+        # into its ``refresh_failed`` WARN — the memo is kept and
+        # ``_probed_at`` advances, so the fault retries at TTL cadence (a
+        # daemon-thread raise has nowhere louder to go; the SERVE path's own
+        # kernel consult raises out of ``get()`` loudly).  The read itself +
+        # the LATE-BOUND reader seam stay Python.
+        revalidates = _pull_state_rust.rust_token_revalidates(token, prior_token)
         if revalidates:
             # Revalidated: the file is byte-unchanged (atomic-replace
             # publisher ⇒ same mtime_ns:size:ino = same content) — keep the

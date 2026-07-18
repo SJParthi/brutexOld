@@ -87,9 +87,10 @@ KIND_STR = 2
 KIND_OTHER = 3
 
 #: State-verdict codes (the kernel output vocabulary).  4/5/6 follow the
-#: oracle's FIRST-failing-field order (``armed_at`` → ``last_attempt_date``
-#: → ``last_success_date`` — CPython evaluates the constructor args in
-#: order, so the first ``_optional_str`` refusal wins).
+#: pre-flip oracle's FIRST-failing-field order (``armed_at`` →
+#: ``last_attempt_date`` → ``last_success_date`` — CPython evaluated the
+#: constructor args in order, so the first optional-string refusal won; the
+#: kernel lattice froze that probe order).
 STATE_VALID = 0
 STATE_NOT_OBJECT = 1
 STATE_BAD_SCHEMA = 2
