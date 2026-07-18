@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -1018,3 +1019,24 @@ class TestCascadeJoinAtWriter:
         assert loaded is not None
         assert loaded.cascade_join == artifact.cascade_join
         assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]
+
+    def test_to_payload_elides_cascade_join_when_none(self) -> None:
+        """A ``cascade_join=None`` artifact ELIDES the root key (EMIT-ON-PRESENT).
+
+        ``build_top100`` has stamped a cascade_join meta unconditionally since
+        #1749, so the ``None`` arm is reachable only on a directly-constructed
+        (legacy-shaped) artifact object — e.g. one whose stored payload lacked
+        the key at load. Regression pin: the club-O #1956 schema-v2 reader law
+        turned the frozen-v1 fixture load into an ABSENT read, which silently
+        dropped the suite's only exercise of this arm (the CI 100%-branch
+        coverage gate caught the hole — ``to_payload`` 368->370).
+        """
+        base = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert base.cascade_join is not None  # the writer-stamped default
+        legacy = replace(base, cascade_join=None)
+        payload = legacy.to_payload()
+        assert "cascade_join" not in payload
+        with_key = dict(base.to_payload())
+        with_key.pop("cascade_join")
+        assert payload == with_key  # the ONLY delta is the elided root key
+        assert legacy.rendered_bytes().endswith(b"\n")
