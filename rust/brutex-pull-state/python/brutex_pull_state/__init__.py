@@ -67,6 +67,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
     "settle_token_verdict",  # auto_pull_gate (Wave 2D)
+    "should_reload_master",  # auto_pull (Wave 3G)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
     "verdict_correlates",  # pull_outcome (Wave 1A)
     "wedge_decision",  # pull_stall (Wave 1C)
@@ -122,6 +123,7 @@ from ._brutex_pull_state import (  # noqa: E402
     pull_allowed_us,
     scope_token,
     settle_token_verdict,
+    should_reload_master,
     spot_only_note_surgery,
     verdict_correlates,
     wedge_decision,
@@ -158,6 +160,7 @@ __all__ = [
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",
+    "should_reload_master",
     "spot_only_note_surgery",
     "verdict_correlates",
     "wedge_decision",

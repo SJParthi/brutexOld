@@ -22,6 +22,8 @@ populated. Both conditions are required.
 
 from __future__ import annotations
 
+from brutex import pull_state_rust as _pull_state_rust
+
 
 def should_reload_instrument_master(
     *,
@@ -90,6 +92,20 @@ def should_reload_instrument_master(
         stale (un-enriched) stock economics, OR carries stale OPT/REF
         eligibility flags.
     """
+    # --- auto_pull (Wave 3G) Rust seam (DEC-RUST-PULL-STATE-001): the ONE
+    # predicate consulted in Rust (five facts in, one bool out); any degrade
+    # — wheel missing/stale, kernel raise, non-bool poison, an out-of-i64
+    # count — falls through to the byte-identical oracle below.
+    if _pull_state_rust.pull_state_rust_enabled():
+        served = _pull_state_rust.rust_should_reload_master(
+            index_count=index_count,
+            stock_count=stock_count,
+            legs_present=legs_present,
+            stale_economics=stale_economics,
+            stale_eligibility=stale_eligibility,
+        )
+        if served is not None:
+            return served
     lake_is_empty = index_count == 0 and stock_count == 0
     indices_missing = index_count == 0
     return lake_is_empty or indices_missing or legs_present or stale_economics or stale_eligibility

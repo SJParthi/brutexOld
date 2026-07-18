@@ -169,3 +169,15 @@ def census_fold(
     rows: list[tuple[str, str, bool]],
     written_pairs: list[tuple[str, str]],
 ) -> tuple[int, int, list[tuple[int, str, str]]]: ...
+
+# --- auto_pull (Wave 3G) ---
+# The instrument-master reload predicate of brutex/dashboard/auto_pull.py:
+# five caller-resolved facts in, one bool out (the store probes stay Python).
+
+def should_reload_master(
+    index_count: int,
+    stock_count: int,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool: ...

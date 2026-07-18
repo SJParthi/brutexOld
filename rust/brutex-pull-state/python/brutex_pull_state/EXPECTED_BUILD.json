@@ -21,6 +21,7 @@
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",
+    "should_reload_master",
     "spot_only_note_surgery",
     "verdict_correlates",
     "wedge_decision"

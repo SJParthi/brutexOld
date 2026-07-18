@@ -1387,3 +1387,54 @@ __all__ += [
     "SAMPLE_KIND_WRITTEN_UNSETTLED",
     "rust_census_fold",
 ]
+
+
+# --- auto_pull (Wave 3G) -----------------------------------------------------
+# DEC-RUST-PULL-STATE-001 Wave 3G: the ``brutex/dashboard/auto_pull``
+# reload-predicate accessor — the SAME guarded-consult discipline
+# (``_call_kernel`` defensive belt → bool-exact refuse-poison gate →
+# ``None`` = the byte-identical Python oracle).  Append-only section.
+
+#: The i64 FFI band for the two counts — an out-of-band CPython int stays
+#: on the DOCUMENTED Python arm (a representability fact, not a kernel
+#: fault — no warn; the intent ``_U64_MAX`` precedent).
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
+
+
+def rust_should_reload_master(
+    *,
+    index_count: int,
+    stock_count: int,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool | None:
+    """Consult the kernel's reload predicate; ``None`` = use the oracle.
+
+    The representability gate keeps an out-of-i64 count on the Python arm
+    SILENTLY; the refuse-poison gate is bool-exact.
+    """
+    if not (_I64_MIN <= index_count <= _I64_MAX and _I64_MIN <= stock_count <= _I64_MAX):
+        return None
+    verdict = _call_kernel(
+        "should_reload_master",
+        index_count,
+        stock_count,
+        legs_present,
+        stale_economics,
+        stale_eligibility,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once(
+            "kernel_invalid", symbol="should_reload_master", detail=type(verdict).__name__
+        )
+        return None
+    return verdict
+
+
+__all__ += [
+    "rust_should_reload_master",
+]
