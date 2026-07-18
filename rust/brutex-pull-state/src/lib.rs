@@ -35,6 +35,10 @@ pub mod auto_pull_gate;
 // ladder + durable-state-parse verdict kernels — codes only; the ticker
 // thread, store I/O, log-dedup memo and every human string stay Python.
 pub mod auto_pull_scheduler;
+// Wave 3G (DEC-RUST-PULL-STATE-001): the instrument-master reload predicate
+// — five caller-resolved facts in, one bool out; the store probes stay
+// Python.
+pub mod auto_pull;
 // Wave 2E (DEC-RUST-PULL-STATE-001): the pull-intent parse-shape +
 // resume-decision core (DEC-PULL-INTENT-RESUME-001 re-hosted) — codes only;
 // the JSON decode (CPython's whole failure taxonomy), every warn string and
@@ -59,6 +63,7 @@ pub mod pull_scope;
 pub mod progress;
 pub mod stall;
 
+pub use auto_pull::should_reload_master;
 pub use auto_pull_gate::{
     GATE_BEFORE_SETTLE, GATE_MARKET_HOURS_BLOCKED, GATE_MUHURAT_DEFERRAL, GATE_NON_TRADING_DAY,
     GATE_OK, SETTLE_BAD_SHAPE, SETTLE_BELOW_FLOOR, SETTLE_NO_VALUE, SETTLE_NOT_WALL_CLOCK,

@@ -353,6 +353,30 @@ fn auto_state_verdict(
     )
 }
 
+// --- auto_pull (Wave 3G) -----------------------------------------------------
+
+/// The instrument-master reload predicate — see
+/// `crate::auto_pull::should_reload_master`. An out-of-i64 count raises
+/// `OverflowError` at the pyo3 edge (the seam's representability gate never
+/// sends one; the belt is insurance).
+#[pyfunction]
+#[pyo3(signature = (index_count, stock_count, legs_present, stale_economics, stale_eligibility))]
+fn should_reload_master(
+    index_count: i64,
+    stock_count: i64,
+    legs_present: bool,
+    stale_economics: bool,
+    stale_eligibility: bool,
+) -> bool {
+    crate::auto_pull::should_reload_master(
+        index_count,
+        stock_count,
+        legs_present,
+        stale_economics,
+        stale_eligibility,
+    )
+}
+
 // --- pull_census (Wave 3G) ---------------------------------------------------
 // The written-vs-settled census fold of `brutex/dashboard/pull_census.py`
 // (observe-only). The seam pre-extracts + scope-filters the rows/pairs
@@ -444,6 +468,8 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- auto_pull_scheduler (Wave 3G) ---
     m.add_function(wrap_pyfunction!(auto_tick_decision, m)?)?;
     m.add_function(wrap_pyfunction!(auto_state_verdict, m)?)?;
+    // --- auto_pull (Wave 3G) ---
+    m.add_function(wrap_pyfunction!(should_reload_master, m)?)?;
     // --- pull_census (Wave 3G) ---
     m.add_function(wrap_pyfunction!(census_fold, m)?)?;
     // --- pull_progress (Wave 2F) ---
