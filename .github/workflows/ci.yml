@@ -1992,6 +1992,7 @@ jobs:
             pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
           else
             echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
+          fi
           # DEC-SESSION-DENSITY-CENSUS-001: the WARN-only per-session bar-density
           # census (pure classifier + guarded emitter, stdlib+structlog+calendars
           # only). 100% line+branch standalone from the start.
