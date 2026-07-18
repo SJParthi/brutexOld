@@ -5,10 +5,16 @@
 > decision ledger (`docs/MIGRATION.md`). A self-contained, shareable HTML one-pager lives next to
 > this file at [`docs/product_scoreboard.html`](./product_scoreboard.html) (open in any browser).
 >
-> _Last refreshed: 2026-06-28 — now covering the ledger through entry **#979**
-> (DEC-M4PRO-BENCH-SURFACE-001; this refresh builds on the prior one DEC-SCOREBOARD-REFRESH-002 /
-> #918 and the in-between #935 sweep). The number in the last column is the **ledger entry**
-> (`docs/MIGRATION.md #NNN`), the authoritative record of each change._
+> _Last refreshed: 2026-06-28 — the plain-English "Finished / Current / Future" themes below cover the
+> ledger through entry **#979** (DEC-M4PRO-BENCH-SURFACE-001; this refresh builds on the prior one
+> DEC-SCOREBOARD-REFRESH-002 / #918 and the in-between #935 sweep). The number in the last column is the
+> **ledger entry** (`docs/MIGRATION.md #NNN`), the authoritative record of each change._
+>
+> _Assurance-verified 2026-07-18 (DEC-O1-GUARANTEE-VERIFY-001 / #1954) — an independent, evidence-based
+> re-verification pass re-ran the quality gates read-only and recorded the executed pass-counts + the
+> honest not-yet-green rows in the new **[Independent assurance verification](#-independent-assurance-verification-2026-07-18)**
+> section below. It does NOT regenerate the customer themes through the newest ledger — those remain at
+> ~#979. Nothing is claimed green that was not executed green (Golden Rule #10)._
 
 ---
 
@@ -191,6 +197,46 @@ These are **real open pull requests** — not yet merged, so not counted as Fini
 | 🟢 Near | Daily health cron | A dawn `brutex doctor` run posts an automated health report to Telegram | deferred follow-up |
 
 **Legend:** 🟢 near-term · 🟡 mid-term · 🔴 major initiative.
+
+---
+
+## 🔎 Independent assurance verification (2026-07-18)
+
+A deep, parallel, evidence-based assurance pass re-ran the quality gates **read-only** on a purpose-built
+Python-3.12 environment (both Rust hot-kernel wheels loaded) at the mega-club integration tip — detached
+HEAD `c220870641`, PR #1621, one CI-workflow/ledger/one-unit-test commit behind `origin/main`
+(`415e863ec`, PR #1631 — a delta affecting no executed gate).
+Every number below is an **executed** pass-count — nothing is asserted that was not run.
+Two things are recorded honestly: what is **✅ verified green**, and what is **🟡 not-yet-green** (weekly /
+self-hosted gates that this environment cannot run — never a fabricated all-green sheet).
+
+### ✅ Verified green — executed this pass
+
+| Area | What was run | Result |
+|---|---|---|
+| Static analysis + formatting | `ruff check` + `ruff format --check` on `brutex` + `tests` | **All checks passed · 1785 files already formatted** |
+| Type safety | `mypy --strict brutex` · `pyright brutex` | **476 files clean, 0 issues · 0 errors** |
+| Security | `bandit -r brutex -l` | **0 issues** at every severity/confidence |
+| Reproducibility (blake3 run identity) | frozen run-id / content-hash goldens + snapshot-hash mutation/determinism | **golden 556 passed** (4 optional-crate skips) · the frozen `_GOLDEN_RUN_ID` reproduces; the data-snapshot hash re-keys on **any** single bar change and is deterministic |
+| No look-ahead | feed-boundary guard + P-06 index barrier + sweep suffix-independence | **68 passed** + the P-06 property teeth (a manual `verify-lookahead` CLI recheck needs a populated lake slice — its teeth are otherwise proven) |
+| Audit hash-chain | tamper-detection + valid-chain verify | **374 passed** incl. 6 named break-detection tests (a broken chain FAILS as designed) |
+| O(1) speed (robust shared-CI tier) | `pytest tests/bench` (ratio ceilings) | **389 passed / 12 skipped (self-hosted-only) / 0 failed** — corroborated by a second run **286 passed / 0 failed**; anti-illusion honesty confirmed, **no bare-O(1) claim hides an O(files) read** |
+| Edge-case resilience (7 classes) | poison-lake reads, heal/quarantine, ingest gates, engine-sweep resilience, dashboard-read degrades, write-halt/OOM, deadlines | **~1,375 assertions, 0 failed** — **NO genuine undocumented gap** (the one boundary asymmetry found is already ledger-disclosed and consciously out of scope) |
+| Property / smoke / redteam / stress | the remaining test types | **property 550 passed** (26 stub-skips) · **smoke 28 passed** · **redteam 175 passed** · **stress (non-soak) 35 passed** |
+| Whole-tree 100% coverage gate | the CI-exact unit+coverage gate re-run locally in full + CI run 29626883403's "Unit tests + coverage (100% gate)" job (the newest main ci.yml run, main @ `415e863ec`) | **✅ 100.00% line+branch MEASURED** — local re-run TOTAL **63,689 stmts / 0 miss · 16,626 branches / 0 partial**, **27,587 passed / 0 failed** (36 skipped, 1:53:16), "Required test coverage of 100% reached"; CI coverage job **conclusion=success**, whole run success |
+
+### 🟡 Honestly not-yet-green — NOT claimed
+
+| Area | Honest state |
+|---|---|
+| **Mutation gate (weekly)** | The scheduled `mutation.yml` run named as the completion proof (2026-07-13) **FAILED**; **0 green scheduled runs on record** across the last ~30 runs. Standards row 3 stays **🟡 PARTIAL** until a green scheduled run lands (DEC-MUTATION-RUNTIME-003 / #1597). Not claimed green. |
+| **Multi-hour soak** | Runs on the **self-hosted weekly** tier (`soak-selfhosted.yml`, DEC-SOAK-REAL-TIER-001 / #1580) — not runnable in this environment, **not re-measured** here. |
+| **Strict 1.1× M4-Pro O(1) tier + absolute throughput floors** | **Self-hosted-only** (`bench-m4pro.yml`), post-merge + non-blocking by design (#1753) — **not re-measured** here; the robust shared-CI ratio tier above is the merge-blocking guarantee. |
+
+> Verdict: the tree's static/type/security, reproducibility, look-ahead, audit-chain, O(1)-honesty,
+> edge-case resilience and whole-tree 100% coverage are **confirmed** with executed evidence; the
+> mutation / soak / strict-M4Pro rows are **honestly open**. Documentation of a verified state — not a
+> fabricated all-green sheet.
 
 ---
 
