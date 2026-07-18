@@ -1,0 +1,81 @@
+# brutex-meta — the decision-precision layer's O(1)/trade inference kernels (Rust).
+#
+# DEC-META-LABEL-ANNOTATE-001 + DEC-ABSTAIN-GATE-STREAM-001 (the BORN-RUST
+# rule, operator 2026-07-18: new decision-precision code is implemented in
+# Rust with O(1) hot paths FROM DAY ONE — never Python-first-then-port).
+# Two pure kernels:
+#
+# * `score_logistic` — the meta-label P(win) batch scorer: a fixed-length
+#   feature dot product + numerically-stable sigmoid per trade. O(features)
+#   per trade = O(1)/trade for the FIXED documented feature vector
+#   (`brutex/meta/features.py::FEATURE_NAMES` — a small compile-independent
+#   constant). Training stays offline Python (the sanctioned
+#   offline-statistics allowance); ONLY inference is this hot path.
+# * `abstain_masks` — the abstention-first gate stream: per-element reason
+#   bitmasks over regime/vix/event/confidence snapshots, bit order =
+#   `brutex/meta/abstain.py::ABSTAIN_REASON_ORDER`. O(1)/element,
+#   branch-simple.
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed shape.
+
+[package]
+name = "brutex-meta"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Meta-labeling P(win) scorer + abstention gate kernels for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors brutex-feed / fno-math / trading-core).
+publish = false
+
+[lib]
+name = "brutex_meta"
+path = "src/lib.rs"
+# cdylib so `import brutex_meta` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into the
+# artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Build-script-only: it does NOT enter the shipped rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — invariants + determinism over the pure core.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+# DEC-RUST-SOURCE-DIGEST-TWIN-001: tests/source_digest_parity.rs re-includes
+# the shared framing core to pin the golden parity vector. Test-only.
+blake3 = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true
