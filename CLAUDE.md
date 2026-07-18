@@ -32,7 +32,10 @@ template; flag OFF = the verbatim oracle, byte-identical + crate-untouched,
 bomb-spy-pinned) with the 3-arm LIVE-ORACLE literal golden (64 literals
 captured from the EXECUTED Python oracle — the oracle is the ARBITER,
 never an assumed rounding mode; the arbiter arm never skips; the crate arm
-64/64 vs the real wheel; the observed-tie divergence from money's HALF_UP
+runs all 64 through the PUBLIC path flag-ON against the real wheel and
+matches — the ELIGIBLE subset genuinely engages the crate,
+ineligibility-gated cells route to the oracle BY DESIGN; the observed-tie
+divergence from money's HALF_UP
 recorded as observation). "Expected payoff ≈ 0 — conversion is for
 uniformity, not speed" (the ADR-0020 banner verbatim); ships INERT — a
 default flip needs its own DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
@@ -3446,8 +3449,11 @@ hostile-review pass._
   live-oracle literal golden (`tests/golden/test_models_tick_size_golden.py`,
   193 tests) — 64 literals captured from the EXECUTED Python oracle (the
   oracle is the ARBITER, never an assumed rounding mode; the arbiter arm
-  never skips; the crate arm 64/64 vs the real wheel; the observed-tie
-  divergence from money's HALF_UP recorded as observation; the 2
+  never skips; the crate arm runs all 64 through the PUBLIC path flag-ON
+  against the real wheel and matches — the ELIGIBLE subset genuinely
+  engages the crate, ineligibility-gated cells route to the oracle BY
+  DESIGN; the observed-tie
+  divergence from money's HALF_UP recorded as observation; the 3
   raw-`decimal.InvalidOperation` escapes type-pinned). CI:
   core-rust-parity.yml models legs (flag-OFF coverage leg + the family
   re-run VERBATIM under the flag) + the mutation.yml models_rust
@@ -3461,7 +3467,11 @@ hostile-review pass._
   `normalise_tick_size` has ZERO production consumers outside models.py —
   the seam buys ADR-0020 uniformity for literally no runtime ("expected
   payoff ≈ 0 — conversion is for uniformity, not speed", the banner
-  verbatim); ships INERT — a default flip needs its own DEC. ENGINE
+  verbatim); ships INERT — a default flip needs its own DEC; the fail-safe
+  seam masks a value-arm-degrading wheel on the flag-ON legs (a degrade
+  serves the correct oracle value without latching) — the refuse-prefix
+  direct-call pin + the 10 cargo unit tests + the in-lane wheel probe are
+  the crate-value teeth. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
   change; no new routes; ONE new env var, default OFF. The full record
   lives in MIGRATION.md #1944.)
@@ -10553,7 +10563,10 @@ hostile-review pass._
   template; flag OFF = the verbatim oracle, byte-identical +
   crate-untouched, bomb-spy-pinned) with the 3-arm live-oracle literal
   golden (64 literals from the EXECUTED Python oracle — the oracle is the
-  arbiter; the crate arm 64/64 vs the real wheel; the observed-tie
+  arbiter; the crate arm runs all 64 through the PUBLIC path flag-ON
+  against the real wheel and matches — the ELIGIBLE subset genuinely
+  engages the crate, ineligibility-gated cells route to the oracle BY
+  DESIGN; the observed-tie
   divergence from money's HALF_UP recorded as observation);
   core-rust-parity.yml + mutation.yml wired; expected payoff ≈ 0 —
   uniformity, not speed; ships INERT — a default flip needs its own DEC;

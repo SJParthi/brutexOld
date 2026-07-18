@@ -332,6 +332,12 @@ def _context_hazard() -> bool:
 def _encode_tick_input(raw: float | int | Decimal | str) -> tuple[str, str] | None:
     """The eligibility gate + kind/payload encoder (module docstring gate
     law). ``None`` = route to the oracle without touching the crate.
+
+    Safety invariant: the gate need NOT exclude every oracle-raise input —
+    the load-bearing law is "crate-accepts-a-member ⟹ the value is small
+    ⟹ the oracle produces the same member without raising"; for everything
+    else the crate can only REFUSE, and the refuse→serve-oracle path
+    reproduces the oracle's behavior (including its raw raises).
     """
     if _context_hazard():
         return None

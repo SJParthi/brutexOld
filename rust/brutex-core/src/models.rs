@@ -134,6 +134,12 @@ fn increment(digits: &mut Vec<u8>) {
 
 /// Strip leading zeros from an ASCII-digit magnitude, keeping at least one.
 fn strip_leading_zeros(digits: &[u8]) -> &[u8] {
+    // Non-empty precondition: every call site guarantees >= 1 digit; the
+    // all-zero arm below indexes `len() - 1` and would underflow on `&[]`.
+    debug_assert!(
+        !digits.is_empty(),
+        "strip_leading_zeros requires a non-empty magnitude"
+    );
     let first_nonzero = digits.iter().take_while(|&&b| b == b'0').count();
     if first_nonzero == digits.len() {
         &digits[digits.len() - 1..]
