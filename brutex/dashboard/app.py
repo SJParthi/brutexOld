@@ -6626,7 +6626,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 return _request(root, source="route-bridge", target="bridge")
             return {"cancelling": False}
 
-        return JSONResponse(await run_in_threadpool(_cancel))
+        return JSONResponse(await _run_lake(_cancel))
 
     @app.get("/api/v1/universe/pull-verdict")
     async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
@@ -7045,7 +7045,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 today=now_ist().date(),
             )
 
-        return JSONResponse(await run_in_threadpool(_work))
+        return JSONResponse(await _run_lake(_work))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
