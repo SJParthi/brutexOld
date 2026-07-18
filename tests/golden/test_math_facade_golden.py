@@ -51,6 +51,12 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
+        # LANE W1 (DEC-RANK-PARETO-PERSIST-001 family) — the multi-key
+        # selection kernels (a deliberate, reviewed surface addition; fenced
+        # additive entries).
+        "rank_axis_topm",
+        "rank_dd_band_indices",
+        "rank_pareto_frontier",
         "stats_cpcv_pass_count",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)

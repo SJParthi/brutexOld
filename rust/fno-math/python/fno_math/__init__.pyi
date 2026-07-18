@@ -35,6 +35,9 @@ __all__ = [
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
     "popcount_bytes",
+    "rank_axis_topm",
+    "rank_dd_band_indices",
+    "rank_pareto_frontier",
     "stats_cpcv_pass_count",
 ]
 
@@ -135,6 +138,55 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def rank_pareto_frontier(
+    net_pnl_paisa: list[int],
+    win_rate: list[float],
+    max_dd_pct: list[float],
+    losing_trades: list[int],
+    eps_net_pnl_paisa: int,
+    eps_win_rate: float,
+    eps_max_dd_pct: float,
+    eps_losing_trades: int,
+) -> list[int]:
+    """Additive-ε Pareto frontier over the four W1 axes (LANE W1).
+
+    Returns the ASCENDING indices of every row NOT ε-dominated by any other
+    row under `{net_pnl MAX, win_rate MAX, max_dd_pct MIN, losing_trades MIN}`.
+    O(n²) worst case (disclosed — never O(1)). Raises `ValueError` on a
+    length mismatch, a non-finite float, or a negative/non-finite ε; the
+    `brutex.engine.rust_rank_select` seam routes any error to the oracle.
+    """
+    ...
+
+def rank_axis_topm(
+    m: int,
+    composite: list[float],
+    mask_lo: list[int],
+    mask_hi: list[int],
+    max_dd_pct: list[float],
+    losing_trades: list[int],
+    win_rate: list[float],
+    expectancy_paisa: list[int],
+) -> tuple[list[int], list[int], list[int], list[int], list[int]]:
+    """Per-axis bounded top-M select over the five quota axes (LANE W1).
+
+    Returns five best-first index lists in `(composite DESC, max_dd_pct ASC,
+    losing_trades ASC, win_rate DESC, expectancy_paisa DESC)` order, each
+    tie-broken `(axis, −composite, mask)`. O(A·n·log M) time, O(A·M) space.
+    Raises `ValueError` on a length mismatch, a non-finite float, or an int
+    axis value outside the f64-exact `|v| <= 2**53` envelope.
+    """
+    ...
+
+def rank_dd_band_indices(max_dd_pct: list[float], band_pct: float) -> list[int]:
+    """Batch DD ε-band quantizer: `floor(dd / band_pct)` per element (LANE W1).
+
+    Bit-identical to Python's `math.floor(dd / band)` on finite inputs (same
+    IEEE division + floor). Raises `ValueError` on a non-positive/non-finite
+    band, a non-finite dd, or a quotient outside the f64-exact int envelope.
+    """
     ...
 
 def stats_cpcv_pass_count(
