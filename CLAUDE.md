@@ -18,7 +18,25 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
+_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
+three lake_keys candidate-ladder builders (stock_drift_fold ·
+spot_key_candidates · spot_recovery_candidates core) join the PR-1
+`rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST`
+flag via the NEW sibling facade `brutex/data/lake_keys_rust.py` (own
+3-symbol handshake + per-law burn-in + ship-oracle autorevert — a
+lake_keys fault never degrades fno_symbol_rust, pinned both directions);
+verbatim Python bodies retained as the LIVE oracles; the
+HEAL-FINDINGS-PARITY integration pin is the tier gate (OFF-vs-ON
+LegacyKeyDrift scan equality + twin-lake heal sha-identical trees); flag
+unset/falsy byte-identical (bomb-spy-pinned); the data-rust-parity.yml
+lane EXTENDED (paths + flag-ON verbatim lake_keys/lake_invariants legs —
+no new lane); expected payoff ≈ 0 — uniformity, not speed; ships INERT.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1952.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
 branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
 NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
 `BRUTEX_DATA_RUST` facade `brutex/data/fno_symbol_rust.py` routing
@@ -3318,7 +3336,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-data-purelaw` (**DEC-DATA-RUST-PURELAW-001,
+- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+  MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
+  (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
+  `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
+  sibling facade `brutex/data/lake_keys_rust.py` (own 3-symbol handshake + facade-wide latch +
+  per-law fold/candidates/recovery burn-in keys — a lake_keys fault never degrades
+  fno_symbol_rust, pinned both directions); verbatim Python bodies retained as live oracles
+  (the env alias read + stock-drift dict probe hoisted ONCE Python-side feeding BOTH arms);
+  the ASCII pre-gate DEGRADES to the oracle (ß→SS length-changing upper — probed) and the crate
+  hand-rolls CPython's 10-byte strip set {0x09–0x0D, 0x1C–0x1F, 0x20} (Rust trim() excludes
+  0x1C–0x1F — trailing-0x1F golden + 0x1B/0x0E reject twins); the %26 no-recovery pledge
+  structurally preserved; the HEAL-FINDINGS-PARITY pin proves OFF-vs-ON LegacyKeyDrift scan
+  equality + twin-lake heal_findings HealReport + sha-identical trees, ON arm
+  crate-engaged-asserted (spot_key_candidates feeds the drift
+  dir-MERGE writes — the tier gate); flag unset/falsy byte-identical (bomb-spy-pinned);
+  data-rust-parity.yml extended (paths + verbatim flag-ON lake_keys/lake_invariants legs — no
+  new lane); expected payoff ≈ 0 — uniformity, not speed; ships INERT. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the per-item record lives in
+  the §1 blurb + MIGRATION.md #1952 — this header carries the pointer, never the story.)
+  Earlier: `claude/rust-slice-t10-data-purelaw`
+  (**DEC-DATA-RUST-PURELAW-001,
   MIGRATION.md #1940** — slice T10 PR-1: NEW stdlib-pure OPTIONAL crate `rust/brutex-data` +
   the default-OFF `BRUTEX_DATA_RUST` facade `brutex/data/fno_symbol_rust.py` routing
   `parse_fno_symbol` (integers-only FFI — spans + expiry y/m/d; strike stays Python; non-ASCII
@@ -10110,7 +10148,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-data-purelaw`
+- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+  (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
+  the three lake_keys candidate-ladder builders (stock_drift_fold ·
+  spot_key_candidates · spot_recovery_candidates core) join the PR-1
+  `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST`
+  flag via the NEW sibling facade `brutex/data/lake_keys_rust.py` (own
+  handshake + per-law burn-in — a lake_keys fault never degrades
+  fno_symbol_rust); verbatim Python bodies retained as the LIVE oracles;
+  the heal-findings-parity integration pin is the tier gate; flag
+  unset/falsy byte-identical (bomb-spy-pinned); the data-rust-parity.yml
+  lane extended (no new lane); expected payoff ≈ 0 — uniformity, not
+  speed; ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1952 for the full blurb)
+  Earlier: `claude/rust-slice-t10-data-purelaw`
   (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940 — ADR-0020 slice T10 PR-1:
   the NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
   `BRUTEX_DATA_RUST` facade routing `parse_fno_symbol` (integers-only FFI —

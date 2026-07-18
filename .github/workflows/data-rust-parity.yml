@@ -20,6 +20,12 @@
 #   4. The flag-ON verbatim leg: the UNMODIFIED tests/unit/test_fno_symbol.py
 #      suite re-run byte-identically under BRUTEX_DATA_RUST=1 with the real
 #      wheel (the lake-parity heal-twin precedent).
+#   5. The lake_keys 3-law parity + the heal-findings-parity integration
+#      pin (PR-2, DEC-DATA-RUST-PURELAW-002) — the wheel-gated golden /
+#      differential / heal-parity files plus the flag-ON verbatim
+#      lake_keys + lake_invariants legs. (tests/unit/test_lake_keys.py is
+#      deliberately NOT a path trigger — the PR-1 test_fno_symbol.py
+#      choice.)
 #
 # NOT a required gate: it gates the FUTURE default-ON flip, which must cite
 # a fresh green run of this lane as a stated precondition — a red run here
@@ -46,6 +52,12 @@ on:
       - "tests/unit/test_fno_symbol_rust.py"
       - "tests/golden/test_fno_symbol_rust_parity.py"
       - "tests/property/test_fno_symbol_rust_differential.py"
+      - "brutex/data/lake_keys.py"
+      - "brutex/data/lake_keys_rust.py"
+      - "tests/unit/test_lake_keys_rust.py"
+      - "tests/golden/test_lake_keys_rust_parity.py"
+      - "tests/property/test_lake_keys_rust_differential.py"
+      - "tests/integration/test_lake_keys_rust_heal_parity.py"
       - ".github/workflows/data-rust-parity.yml"
   pull_request:
     paths:
@@ -55,6 +67,12 @@ on:
       - "tests/unit/test_fno_symbol_rust.py"
       - "tests/golden/test_fno_symbol_rust_parity.py"
       - "tests/property/test_fno_symbol_rust_differential.py"
+      - "brutex/data/lake_keys.py"
+      - "brutex/data/lake_keys_rust.py"
+      - "tests/unit/test_lake_keys_rust.py"
+      - "tests/golden/test_lake_keys_rust_parity.py"
+      - "tests/property/test_lake_keys_rust_differential.py"
+      - "tests/integration/test_lake_keys_rust_heal_parity.py"
       - ".github/workflows/data-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -131,7 +149,14 @@ jobs:
           pytest -rs -q \
             tests/unit/test_fno_symbol_rust.py \
             tests/golden/test_fno_symbol_rust_parity.py \
-            tests/property/test_fno_symbol_rust_differential.py
+            tests/property/test_fno_symbol_rust_differential.py \
+            tests/unit/test_lake_keys_rust.py \
+            tests/golden/test_lake_keys_rust_parity.py \
+            tests/property/test_lake_keys_rust_differential.py \
+            tests/integration/test_lake_keys_rust_heal_parity.py
 
       - name: Flag-ON verbatim leg (the UNMODIFIED fno_symbol suite)
         run: BRUTEX_DATA_RUST=1 pytest -rs -q tests/unit/test_fno_symbol.py
+
+      - name: Flag-ON verbatim leg (the UNMODIFIED lake_keys + lake_invariants suites)
+        run: BRUTEX_DATA_RUST=1 pytest -rs -q tests/unit/test_lake_keys.py tests/unit/test_lake_invariants.py

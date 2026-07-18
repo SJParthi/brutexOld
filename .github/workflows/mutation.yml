@@ -521,6 +521,7 @@ jobs:
             "brutex/config/paths_rust.py:tests/unit/test_config_paths_rust.py:" \
             "brutex/config/dotenv_rust.py:tests/unit/test_config_dotenv_rust.py:" \
             "brutex/config/backup_env_rust.py:tests/unit/test_backup_env_rust.py:" \
+            "brutex/data/lake_keys_rust.py:tests/unit/test_lake_keys_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \

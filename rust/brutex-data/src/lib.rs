@@ -2,15 +2,20 @@
 //!
 //! DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940). PR-1: the fno_symbol
 //! structural grammar ([`fno_symbol::parse_fno_symbol_coords`] — integers
-//! only cross the FFI; Python materializes every object). Room reserved:
-//! lake_keys (annex A, HELD pending a fleet ruling).
+//! only cross the FFI; Python materializes every object). PR-2
+//! (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952): the lake_keys
+//! candidate-ladder builders ([`lake_keys`] — ASCII-only by facade
+//! contract; computed-ASCII strings cross OUT, the window_ledger
+//! allowance, a conscious deviation from PR-1's integers-only law).
 //!
 //! The crate is stdlib-pure (no polars/chrono/regex) and OPTIONAL-class:
-//! consumed only through the import-guarded default-OFF facade
-//! `brutex/data/fno_symbol_rust.py`; built only by its own CI lane
+//! consumed only through the import-guarded default-OFF facades
+//! `brutex/data/fno_symbol_rust.py` + `brutex/data/lake_keys_rust.py`;
+//! built only by its own CI lane
 //! (`.github/workflows/data-rust-parity.yml`).
 
 pub mod fno_symbol; // pure core — cargo-testable, no Python
+pub mod lake_keys; // pure core — the spot-key candidate-ladder builders (PR-2)
 
 /// Crate version baked at compile time (`CARGO_PKG_VERSION`) — surfaced as
 /// `__version__` (the facade's engaged INFO reads it; no source digest
@@ -57,6 +62,53 @@ mod python {
         )
     }
 
+    /// Law A — `stock_drift_fold` (ASCII-only by facade contract). See
+    /// `crate::lake_keys::stock_drift_fold`.
+    #[pyfunction]
+    fn stock_drift_fold(symbol: &str) -> PyResult<String> {
+        std::panic::catch_unwind(|| crate::lake_keys::stock_drift_fold(symbol)).map_err(|_| {
+            PyRuntimeError::new_err(
+                "brutex-data stock_drift_fold panicked (caught at the FFI boundary)",
+            )
+        })
+    }
+
+    /// Law B — `spot_key_candidates` (ASCII-only by facade contract). See
+    /// `crate::lake_keys::spot_key_candidates`.
+    #[pyfunction]
+    fn spot_key_candidates(symbol: &str, exchange: &str) -> PyResult<Vec<String>> {
+        std::panic::catch_unwind(|| crate::lake_keys::spot_key_candidates(symbol, exchange))
+            .map_err(|_| {
+                PyRuntimeError::new_err(
+                    "brutex-data spot_key_candidates panicked (caught at the FFI boundary)",
+                )
+            })
+    }
+
+    /// Law C — the `spot_recovery_candidates` CORE with the alias pairs +
+    /// stock-drift bucket INJECTED (pyo3 converts the sequences BEFORE the
+    /// closure runs, so a conversion `TypeError` surfaces as an ordinary
+    /// FFI-argument error the facade's degrade set catches). See
+    /// `crate::lake_keys::spot_recovery_candidates`.
+    #[pyfunction]
+    fn spot_recovery_candidates(
+        underlying: &str,
+        exchange: &str,
+        alias_pairs: Vec<(String, String)>,
+        drift_bucket: Vec<String>,
+    ) -> PyResult<Vec<String>> {
+        let pairs = alias_pairs.as_slice();
+        let bucket = drift_bucket.as_slice();
+        std::panic::catch_unwind(|| {
+            crate::lake_keys::spot_recovery_candidates(underlying, exchange, pairs, bucket)
+        })
+        .map_err(|_| {
+            PyRuntimeError::new_err(
+                "brutex-data spot_recovery_candidates panicked (caught at the FFI boundary)",
+            )
+        })
+    }
+
     // `#[pymodule]` registers the `_brutex_data` Python submodule. Maturin
     // produces a cdylib whose extern "C" `PyInit__brutex_data` symbol
     // matches this function name; under the mixed layout it installs at
@@ -67,6 +119,9 @@ mod python {
     fn _brutex_data(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__version__", crate::VERSION)?;
         m.add_function(wrap_pyfunction!(parse_fno_symbol_coords, m)?)?;
+        m.add_function(wrap_pyfunction!(stock_drift_fold, m)?)?;
+        m.add_function(wrap_pyfunction!(spot_key_candidates, m)?)?;
+        m.add_function(wrap_pyfunction!(spot_recovery_candidates, m)?)?;
         Ok(())
     }
 }

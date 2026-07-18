@@ -11,7 +11,8 @@ pattern, cf. ``cli._emit_pull_halt_alert`` → ``sweep_alerts.emit_pull_halt_ale
 
 This module is **intentionally pure** (stdlib only — no file I/O, no clock, no
 polars/duckdb imports; :func:`fno_index_alias_pairs` reads ONE env var,
-defensively), mirroring the :mod:`brutex.data.fno_symbol` precedent, so it is
+defensively) + the default-OFF Rust seam facade (structlog transitively),
+mirroring the :mod:`brutex.data.fno_symbol` precedent, so it is
 importable from anywhere in the data layer without extras.
 
 DEC-DB-MONEYNESS-KEY-RECOVER-001: the FULL F&O→spot drift-recovery ladder
@@ -45,8 +46,10 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Final
+
+from brutex.data import lake_keys_rust
 
 #: The evidence-grounded stock drift map (DEC-GREEKS-SPOTJOIN-STOCK-001):
 #: ``(exchange, fold)`` → the ORDERED on-disk spot dir names that fold to that
@@ -82,7 +85,16 @@ def stock_drift_fold(symbol: str) -> str:
     disk-side prefix strip in :mod:`brutex.data.spot_drift` is likewise
     ASCII-space-only, ``strip(" ")``, so it cannot launder a tab-/
     newline-wrapped dir past this pledge).
+
+    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    seam (DEC-DATA-RUST-LAKE-KEYS-001); :func:`_stock_drift_fold_python`
+    is the verbatim body — the live parity oracle every degrade path ships.
     """
+    return lake_keys_rust.routed_stock_drift_fold(symbol, python_law=_stock_drift_fold_python)
+
+
+def _stock_drift_fold_python(symbol: str) -> str:
+    """The verbatim :func:`stock_drift_fold` body — the law-A parity oracle."""
     return symbol.upper().replace(" ", "").replace("-", "")
 
 
@@ -111,7 +123,18 @@ def spot_key_candidates(symbol: str, exchange: str) -> tuple[str, ...]:
     -------
     tuple[str, ...]
         The drift candidates in recovery-ladder order, identity excluded.
+
+    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    seam (DEC-DATA-RUST-LAKE-KEYS-001); :func:`_spot_key_candidates_python`
+    is the verbatim body — the live parity oracle every degrade path ships.
     """
+    return lake_keys_rust.routed_spot_key_candidates(
+        symbol, exchange, python_law=_spot_key_candidates_python
+    )
+
+
+def _spot_key_candidates_python(symbol: str, exchange: str) -> tuple[str, ...]:
+    """The verbatim :func:`spot_key_candidates` body — the law-B parity oracle."""
     candidates: list[str] = []
     stripped = symbol.strip()
     if stripped != symbol and stripped:
@@ -248,6 +271,47 @@ def spot_recovery_candidates(
     only APPEND: ``spot_recovery_candidates(u, e, stock_drift=m)`` always
     startswith ``spot_recovery_candidates(u, e)`` (the pinned prefix
     invariant).
+
+    Delegates through the default-OFF :mod:`brutex.data.lake_keys_rust`
+    seam (DEC-DATA-RUST-LAKE-KEYS-001): the alias pairs (env read) + the
+    ``stock_drift`` dict PROBE run ONCE here and feed BOTH arms, so
+    burn-in compares LAWS, not I/O; the fold for the probe rides the
+    routed :func:`stock_drift_fold` (internally consistent).
+    :func:`_spot_recovery_candidates_python` is the parity oracle.
+    """
+    pairs = fno_index_alias_pairs()
+    bucket: tuple[str, ...] = ()
+    if stock_drift:
+        fold = stock_drift_fold(underlying)
+        if fold:
+            bucket = tuple(stock_drift.get((exchange, fold), ()))
+    return lake_keys_rust.routed_spot_recovery_candidates(
+        underlying,
+        exchange,
+        alias_pairs=pairs,
+        drift_bucket=bucket,
+        python_law=_spot_recovery_candidates_python,
+    )
+
+
+def _spot_recovery_candidates_python(
+    underlying: str,
+    exchange: str,
+    *,
+    alias_pairs: Sequence[tuple[str, str]],
+    drift_bucket: Sequence[str],
+) -> tuple[str, ...]:
+    """The verbatim :func:`spot_recovery_candidates` body — the law-C oracle.
+
+    Signature surgery (DEC-DATA-RUST-LAKE-KEYS-001, documented + pinned):
+    (a) the inline ``fno_index_alias_pairs()`` call becomes the
+    *alias_pairs* param and (b) the ``if stock_drift:`` fold+dict-probe
+    block becomes the *drift_bucket* param — both computed ONCE in the
+    public wrapper and fed to BOTH arms, so a mid-call env write can never
+    diverge a burn-in compare; (c) the #911 ladder rung calls
+    :func:`_spot_key_candidates_python` directly — the oracle arm stays
+    oracle-PURE (a routed call inside the oracle would let Rust
+    contaminate the burn-in reference).
     """
     candidates: list[str] = []
 
@@ -256,19 +320,16 @@ def spot_recovery_candidates(
             candidates.append(key)
 
     upper = underlying.strip().upper()
-    for spot_key, fno_key in fno_index_alias_pairs():
+    for spot_key, fno_key in alias_pairs:
         if fno_key.upper() == upper:
             _add(spot_key)
         if spot_key == upper:
             _add(fno_key)
     _add(f"{exchange}-{underlying}")
-    for drifted in spot_key_candidates(underlying, exchange):
+    for drifted in _spot_key_candidates_python(underlying, exchange):
         _add(drifted)
-    if stock_drift:
-        fold = stock_drift_fold(underlying)
-        if fold:
-            for recovered in stock_drift.get((exchange, fold), ()):
-                _add(recovered)
+    for recovered in drift_bucket:
+        _add(recovered)
     return tuple(candidates)
 
 

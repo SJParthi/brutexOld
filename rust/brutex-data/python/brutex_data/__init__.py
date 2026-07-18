@@ -20,6 +20,14 @@ into the original Python string + the resolved expiry y/m/d + a type code
 (or ``None``); Python materializes every object (string slices, ``date``,
 the ``Decimal`` strike via the injected oracle helper, ``FnoSymbolParts``)
 — the DEC-FEED-RUST-CORE-001 discipline.
+
+PR-2 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952) adds the three
+lake_keys candidate-ladder builders (``stock_drift_fold`` /
+``spot_key_candidates`` / ``spot_recovery_candidates``), consumed only
+through the second facade ``brutex/data/lake_keys_rust.py`` — ASCII-only
+by facade contract; computed-ASCII candidate strings cross OUT (the
+window_ledger allowance, a conscious deviation from PR-1's integers-only
+discipline).
 """
 
 from __future__ import annotations
@@ -27,9 +35,15 @@ from __future__ import annotations
 from brutex_data._brutex_data import (
     __version__,
     parse_fno_symbol_coords,
+    spot_key_candidates,
+    spot_recovery_candidates,
+    stock_drift_fold,
 )
 
 __all__ = [
     "__version__",
     "parse_fno_symbol_coords",
+    "spot_key_candidates",
+    "spot_recovery_candidates",
+    "stock_drift_fold",
 ]
