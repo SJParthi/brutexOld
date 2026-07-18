@@ -134,18 +134,18 @@ def test_all_outside_window_trailing_is_none(
 @pytest.mark.parametrize("flag", ["0", "1"])
 @given(pnls=_pnls, data=st.data())
 @settings(max_examples=80, deadline=None)
-def test_infinite_half_life_is_exactly_the_plain_net(
+def test_infinite_half_life_is_refused_on_both_arms(
     flag: str, pnls: list[int], data: st.DataObject
 ) -> None:
-    # half_life → ∞ ⇒ every weight is exactly 0.5**0.0 == 1.0 and the
-    # bounded-int bucket sums add exactly in float (|Σ| far below 2**53), so
-    # the limit is EXACT equality — no tolerance needed at ∞ itself (the
-    # documented tolerance story applies to large FINITE half-lives, covered
-    # below).
+    # CONSCIOUSLY FLIPPED (refuter round 1): ``inf`` was formerly the exact
+    # plain-net limit through the public entry; validation symmetry now
+    # refuses every non-finite half-life on BOTH fold arms (NaN was already
+    # refused via the > 0 check — the silently-degenerate inf was the gap).
+    # The near-plain-net semantics live in the huge-FINITE-half-life
+    # property below, unchanged.
     ages = data.draw(st.lists(st.integers(0, 2000), min_size=len(pnls), max_size=len(pnls)))
-    with _rust_fold_arm(flag):
-        m = _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR, decay_half_life_months=math.inf)
-    assert m.decay_weighted_net_paisa == float(sum(pnls))
+    with _rust_fold_arm(flag), pytest.raises(ValueError, match="finite and > 0"):
+        _metrics(_trades(pnls, ages), trailing_anchor=_ANCHOR, decay_half_life_months=math.inf)
 
 
 @pytest.mark.parametrize("flag", ["0", "1"])

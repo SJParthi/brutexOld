@@ -318,13 +318,14 @@ class TestOracleEqualsBatchStructural:
     ) -> None:
         bar_bits = build_bar_bits(_BARS)
         sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
-        # The batch spine is `simulate_masks_with_exit_indices` since the
-        # ADR-0017 exit-idx-native rewrite (`simulate_masks` is a thin
-        # delegate over it) — the chunk loop calls the PAIR method, so the
-        # failure injection targets it directly.
+        # The batch spine is `simulate_masks_with_exit_counts` since the
+        # DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage-B counter rewire (the
+        # earlier `simulate_masks_with_exit_indices` + `simulate_masks` are
+        # thin delegates over it) — the chunk loop calls the TRIPLE method,
+        # so the failure injection targets it directly.
         monkeypatch.setattr(
             ResidentTradeSim,
-            "simulate_masks_with_exit_indices",
+            "simulate_masks_with_exit_counts",
             lambda self, *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
         )
         captured: list[object] = []
@@ -384,21 +385,21 @@ class TestSweepDriverSeam:
 
     def test_metrics_for_mask_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             self._metrics(reference_stamper=_STAMPER)
         assert captured == [_STAMPER]
 
     def test_metrics_for_mask_default_is_unstamped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             self._metrics()
         assert captured == [None]
 
     def test_evaluate_combo_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             driver_mod.evaluate_combo(
                 _BARS,
@@ -412,7 +413,7 @@ class TestSweepDriverSeam:
 
     def test_sweep_masks_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             driver_mod.sweep_masks(
                 _BARS,
@@ -426,7 +427,7 @@ class TestSweepDriverSeam:
 
     def test_rank_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             driver_mod.rank_sweep(
                 _BARS,
@@ -455,7 +456,7 @@ class TestSweepDriverSeam:
     def test_walk_forward_paths_thread_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _trending_bars(n_days=6, per_day=40)
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             driver_mod.evaluate_combo_walk_forward(
                 bars,
@@ -473,7 +474,7 @@ class TestSweepDriverSeam:
     def test_walk_forward_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _trending_bars(n_days=6, per_day=40)
         with _capture_kwarg(
-            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+            monkeypatch, driver_mod, "simulate_trades_with_exit_counts"
         ) as captured:
             driver_mod.walk_forward_sweep(
                 bars,

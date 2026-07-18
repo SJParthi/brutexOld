@@ -1486,18 +1486,24 @@ def combine_recency_from_folds(
     The decay composite applies the exponential weights libm-side (here —
     the fold stays integer-exact): ``Σ pnl · 0.5^(bucket / half_life)``
     over the SORTED buckets, whose fixed ascending-key order makes the IEEE
-    float summation deterministic. ``decay_half_life_months = math.inf`` is
-    legal and yields weight 1.0 everywhere (the plain-net limit).
+    float summation deterministic.
 
     Raises
     ------
     ValueError
-        If ``decay_half_life_months`` is not ``> 0`` (NaN/zero/negative
-        refused — a non-positive half-life has no decay semantics).
+        If ``decay_half_life_months`` is not a FINITE positive float
+        (NaN/±inf/zero/negative refused). ``math.inf`` — formerly accepted
+        as the weight-1.0 plain-net limit — is REFUSED since the round-1
+        refuter (DEC-METRICS-TRAILING-WINDOW-001): validation symmetry —
+        ``NaN`` was already refused via the ``> 0`` check, so a silently
+        accepted ``inf`` that degenerates decay to the plain net was the
+        asymmetric gap. A caller wanting the plain net reads
+        ``net_pnl_paisa``; a near-plain-net decay uses a large FINITE
+        half-life (the documented tolerance story).
     """
-    if not decay_half_life_months > 0.0:
+    if not (math.isfinite(decay_half_life_months) and decay_half_life_months > 0.0):
         raise ValueError(
-            f"combine_recency_from_folds: decay_half_life_months must be > 0, "
+            f"combine_recency_from_folds: decay_half_life_months must be finite and > 0, "
             f"got {decay_half_life_months}"
         )
     trailing = folds.trailing

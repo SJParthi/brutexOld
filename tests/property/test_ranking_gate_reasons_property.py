@@ -58,8 +58,12 @@ def _metrics(draw: st.DrawFn) -> ResultMetrics:
         # loss_rate joined the gate inputs with the derived Door 5
         # (DEC-METRICS-KELLY-GROWTH-001) — drawn over the SAME hostile
         # envelope (incl. NaN/±inf for the fail-closed guard and 1.0 for the
-        # all-loss degenerate arm).
-        loss_rate=draw(_rate),
+        # all-loss degenerate arm) PLUS the type-illegal ``None`` (refuter
+        # round 1: ``ResultMetrics.loss_rate`` is NON-nullable, so ``None``
+        # is junk — the twins must fail CLOSED on it, never TypeError out of
+        # the derived streak threshold; the fixture's ``Any`` overrides are
+        # the deliberate type-illegal escape hatch).
+        loss_rate=draw(st.one_of(st.none(), _rate)),
         win_loss_ratio=draw(_maybe_ratio),
         max_consecutive_losses=draw(st.integers(min_value=0, max_value=50)),
         # sl_hit_rate joined the (knob-active) gate inputs with Door 6

@@ -234,9 +234,11 @@ def _fails_consecutive_losses_door(m: ResultMetrics) -> bool:
     apply (``win_loss_ratio >= STREAK_DOOR_WLR_EXEMPT`` — a ``None`` ratio
     never exempts, consistent with Door 4's ``None`` → ``0.0`` projection).
     The door∧exemption UNION is a recorded lane choice
-    (DEC-METRICS-KELLY-GROWTH-001). Callers own the fail-closed non-finite
-    guard (``loss_rate`` / ``win_loss_ratio`` are judged there BEFORE any
-    door), so this body sees finite-or-``None`` inputs in gate context.
+    (DEC-METRICS-KELLY-GROWTH-001). Callers own the fail-closed junk guard
+    (``win_loss_ratio`` is non-finite-screened and ``loss_rate`` rides
+    :func:`_junk_loss_rate` — ``None`` OR non-finite — there BEFORE any
+    door), so this body sees a finite ``loss_rate`` and a
+    finite-or-``None`` ``win_loss_ratio`` in gate context.
     """
     wlr = m.win_loss_ratio
     if wlr is not None and wlr >= STREAK_DOOR_WLR_EXEMPT:
@@ -279,6 +281,24 @@ def _non_finite_gate_input(value: float | None) -> bool:
     return value is not None and not math.isfinite(value)
 
 
+def _junk_loss_rate(value: float | None) -> bool:
+    """Fail-closed Door-5 ``loss_rate`` guard: type-illegal ``None`` OR non-finite.
+
+    ``ResultMetrics.loss_rate`` is NON-nullable (``float``), so a ``None`` here
+    is MALFORMED data, not the "mathematically undefined" a legitimately
+    nullable metric carries — unlike the other guarded inputs (whose ``None``
+    keeps its per-gate handling), a ``None`` loss rate takes the SAME
+    fail-closed exit as ``NaN``/±``inf``. Without this arm a type-illegal
+    ``None`` would crash :func:`streak_door_threshold` with a ``TypeError``
+    (``None >= 1.0``) instead of failing the gate — unreachable from the
+    production constructors, but the twin-law totality promise (gate FAILS,
+    reasons non-empty, never a crash) covers it (refuter round 1,
+    DEC-METRICS-KELLY-GROWTH-001). The widened parameter type is exactly what
+    lets the ``None`` arm typecheck under ``warn_unreachable``.
+    """
+    return value is None or not math.isfinite(value)
+
+
 def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> bool:
     """Apply the hard rejection gates to one result (lockbox gate deferred).
 
@@ -292,10 +312,14 @@ def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> b
     since DEC-METRICS-KELLY-GROWTH-001: a ``NaN`` loss rate would silently
     corrupt the derived streak threshold) would slip through a ``<`` / ``>``
     comparison as a PASS (``NaN < x`` and ``NaN > x`` are both ``False``), a silent
-    wrong-ACCEPT on malformed data. Such a result is REJECTED up front. The
+    wrong-ACCEPT on malformed data. Such a result is REJECTED up front.
+    ``loss_rate`` rides the widened :func:`_junk_loss_rate` arm — being
+    NON-nullable, a type-illegal ``None`` there is junk (never "undefined")
+    and takes the SAME fail-closed exit instead of crashing Door 5's derived
+    threshold (totality — this predicate never raises on a junk metric). The
     integer-valued gates (``total_trades``, ``max_consecutive_losses``) cannot be
-    non-finite. Behaviour for every FINITE value and for ``None`` is byte-identical
-    to before this guard.
+    non-finite. Behaviour for every FINITE value and for a ``None`` in the
+    legitimately nullable inputs is byte-identical to before this guard.
 
     **Door 5 is the derived binomial-null streak door**
     (DEC-METRICS-KELLY-GROWTH-001, superseding the fixed
@@ -319,11 +343,10 @@ def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> b
         m.max_drawdown_pct,
         m.win_rate,
         m.win_loss_ratio,
-        m.loss_rate,
     )
     if max_sl_hit_rate is not None:
         guarded = (*guarded, m.sl_hit_rate)
-    if any(_non_finite_gate_input(value) for value in guarded):
+    if _junk_loss_rate(m.loss_rate) or any(_non_finite_gate_input(value) for value in guarded):
         return False
     if m.total_trades < MIN_TRADES:
         return False
@@ -352,8 +375,12 @@ def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> b
 # the run manifest (``per_door_kills``); the tokens are a wire vocabulary, so
 # renaming one is a breaking contract change (pinned by test). ──
 #: The fail-closed guard tripped: a float-valued gate input was present but
-#: non-finite (``NaN``/±``inf``) — the metrics are malformed, so NO other door
-#: is judged (judging garbage would fabricate door verdicts, Golden Rule #1).
+#: non-finite (``NaN``/±``inf``) — or the NON-nullable ``loss_rate`` carried a
+#: type-illegal ``None`` (:func:`_junk_loss_rate`; junk, not "undefined") —
+#: the metrics are malformed, so NO other door is judged (judging garbage
+#: would fabricate door verdicts, Golden Rule #1). The wire TOKEN is
+#: unchanged — the ``None``-loss-rate arm is a new trip CAUSE, not a new
+#: reason token (the Ruling-12 append-only vocabulary holds).
 GATE_NON_FINITE_INPUT: Final[str] = "non_finite_input"
 #: Door 1 — ``total_trades < MIN_TRADES`` (statistical noise).
 GATE_MIN_TRADES: Final[str] = "min_trades"
@@ -413,7 +440,10 @@ def gate_reasons(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> t
 
     * **Fail-closed short-circuit** — a present-but-non-finite float gate input
       (``NaN``/±``inf`` in ``profit_factor`` / ``max_drawdown_pct`` /
-      ``win_rate`` / ``win_loss_ratio`` / ``loss_rate``) returns
+      ``win_rate`` / ``win_loss_ratio`` / ``loss_rate``) — or a type-illegal
+      ``None`` in the NON-nullable ``loss_rate`` (the widened
+      :func:`_junk_loss_rate` arm; junk, never "undefined" — totality: this
+      twin never raises on a junk metric) — returns
       ``(``:data:`GATE_NON_FINITE_INPUT```,)`` ALONE: the metrics are
       malformed, and judging the remaining doors on garbage would fabricate
       per-door verdicts (a ``NaN`` silently passes any ``<``/``>``), so no
@@ -445,11 +475,10 @@ def gate_reasons(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> t
         m.max_drawdown_pct,
         m.win_rate,
         m.win_loss_ratio,
-        m.loss_rate,
     )
     if max_sl_hit_rate is not None:
         guarded = (*guarded, m.sl_hit_rate)
-    if any(_non_finite_gate_input(value) for value in guarded):
+    if _junk_loss_rate(m.loss_rate) or any(_non_finite_gate_input(value) for value in guarded):
         return (GATE_NON_FINITE_INPUT,)
     reasons: list[str] = []
     if m.total_trades < MIN_TRADES:

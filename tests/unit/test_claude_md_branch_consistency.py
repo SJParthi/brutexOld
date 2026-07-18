@@ -202,7 +202,11 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
     # the 3-file discovery-set field) cites THAT decision's entry, not this
     # one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797}),
+    # 1975 = DEC-METRICS-KELLY-GROWTH-001 (2026-07-18, W2 refuter round 1):
+    # the ranking-pass rationale comment recording brutex/ranking/streaks.py
+    # + tests/unit/test_ranking_streaks.py joining the pair (the #1750
+    # pledge extension) cites THAT decision's entry, not this one.
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1975}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

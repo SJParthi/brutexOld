@@ -1293,6 +1293,12 @@ def _iter_mask_metrics(
     re-raises BARE at every level (OOM = GLOBAL stop, DEC-LAKE-WRITE-HALT-001).
     """
     chunk_size = _trade_sim_chunk_masks(len(bars))
+    # The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001) — hoisted +
+    # empty-guarded (refuter round 1): an EMPTY bars sequence must keep the
+    # PRE-recency failure shape (the metrics tail's own empty-bars
+    # ValueError, ridden into _combo_error), never a new ``bars[-1]``
+    # IndexError from the anchor read.
+    trailing_anchor = bars[-1].timestamp if bars else None
     for chunk_start in range(0, len(masks), chunk_size):
         chunk = masks[chunk_start : chunk_start + chunk_size]
         try:
@@ -1344,11 +1350,10 @@ def _iter_mask_metrics(
                     tf_minutes=cfg.tf_minutes,
                     exit_indices=exit_indices,
                     exit_reason_counts=exit_counts,
-                    # The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001):
-                    # the loaded bar range's END instant — one value per launch
+                    # The loaded bar range's END instant — one value per launch
                     # (every mask shares the tuple's full bars), NEVER a
-                    # per-combo max exit_ts.
-                    trailing_anchor=bars[-1].timestamp,
+                    # per-combo max exit_ts. Hoisted above the loop.
+                    trailing_anchor=trailing_anchor,
                 )
             except MemoryError:
                 raise

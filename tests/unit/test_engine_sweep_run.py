@@ -3506,6 +3506,50 @@ class TestRecencyConcretePersist:
             assert row.trailing_sharpe_ratio is not None
 
 
+class TestIterMaskMetricsEmptyBarsShape:
+    """The empty-bars failure SHAPE of the eval spine (refuter round 1).
+
+    The GLOBAL recency anchor read is hoisted + empty-guarded
+    (``bars[-1].timestamp if bars else None``) so a degenerate empty bar
+    sequence keeps the PRE-recency failure shape: the metrics tail's own
+    ``ValueError`` (``build_equity_curve: bars must be non-empty``), wrapped
+    by ``_combo_error`` into the ``SweepComboError`` tuple-skip ladder —
+    never a NEW ``IndexError`` cause out of the anchor read. Production
+    refuses empty bars upstream (``ResidentTradeSim`` raises at
+    construction), so the spine is driven with a minimal duck-typed sim.
+    """
+
+    def test_empty_bars_keeps_the_pre_recency_value_error_shape(self) -> None:
+        from brutex.engine.sweep_run import _iter_mask_metrics
+        from brutex.engine.trade_sim import EXIT_REASONS
+
+        class _EmptyBarsSim:
+            reference_stamper = None
+
+            def simulate_masks_with_exit_counts(
+                self, masks: Sequence[int], **_kw: object
+            ) -> list[tuple[tuple[()], tuple[()], tuple[int, ...]]]:
+                return [((), (), (0,) * len(EXIT_REASONS)) for _ in masks]
+
+        with pytest.raises(SweepComboError) as excinfo:
+            list(
+                _iter_mask_metrics(
+                    _EmptyBarsSim(),  # type: ignore[arg-type]  # duck-typed degenerate sim
+                    [0],
+                    [],
+                    [],
+                    _make_config(),
+                    "bull",
+                    lambda mask: "0" * 64,
+                )
+            )
+        cause = excinfo.value.__cause__
+        # The OLD shape: the metrics tail's own empty-bars ValueError —
+        # explicitly NOT an IndexError from an unguarded ``bars[-1]`` read.
+        assert isinstance(cause, ValueError)
+        assert "bars must be non-empty" in str(cause)
+
+
 class TestMaxSlHitRateEnforcement:
     """Door-6 enforcement end-to-end (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
     Stage B): an active ``SweepRunConfig.max_sl_hit_rate`` ceiling gates the

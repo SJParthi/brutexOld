@@ -139,6 +139,14 @@ class TestAnchorArms:
         with pytest.raises(ValueError, match="decay_half_life_months"):
             _metrics([], trailing_anchor=_ANCHOR, decay_half_life_months=0.0)
 
+    def test_zero_trades_infinite_half_life_refused_on_both_arms(self) -> None:
+        """The non-finite refusal (refuter round 1) holds on the EMPTY arm too —
+        the one validator home covers both arms via the zero-trade
+        validator invocation, so ``inf`` cannot slip through the empty
+        return."""
+        with pytest.raises(ValueError, match="finite and > 0"):
+            _metrics([], trailing_anchor=_ANCHOR, decay_half_life_months=math.inf)
+
     def test_curve_entry_threads_the_anchor_identically(self) -> None:
         trades = [_trade(_ANCHOR - timedelta(days=d), p) for d, p in ((5, 200), (800, -70))]
         equity = EquityCurve(
@@ -273,13 +281,19 @@ class TestDecayCombine:
         assert slow.decay_weighted_net_paisa == 1000 * 0.5**0.25
         assert fast.decay_weighted_net_paisa < slow.decay_weighted_net_paisa
 
-    def test_infinite_half_life_is_the_plain_net_limit(self) -> None:
+    def test_infinite_half_life_is_refused(self) -> None:
+        """CONSCIOUSLY FLIPPED (refuter round 1): ``inf`` was formerly accepted
+        as the weight-1.0 plain-net limit; validation symmetry now refuses
+        every non-finite half-life (``NaN`` was already refused via ``> 0``,
+        so the silently-degenerate ``inf`` was the asymmetric gap). The
+        near-plain-net semantics live in the huge-FINITE-half-life property
+        (``test_huge_finite_half_life_approaches_the_plain_net``)."""
         folds = RecencyFolds(trailing=None, decay_buckets=((0, 300), (55, 500), (7, -100)))
-        rm = combine_recency_from_folds(folds, decay_half_life_months=math.inf)
-        assert rm.decay_weighted_net_paisa == 700.0
+        with pytest.raises(ValueError, match="finite and > 0"):
+            combine_recency_from_folds(folds, decay_half_life_months=math.inf)
 
-    @pytest.mark.parametrize("bad", [0.0, -1.0, math.nan])
-    def test_non_positive_or_nan_half_life_is_refused(self, bad: float) -> None:
+    @pytest.mark.parametrize("bad", [0.0, -1.0, math.nan, math.inf, -math.inf])
+    def test_non_positive_or_non_finite_half_life_is_refused(self, bad: float) -> None:
         folds = RecencyFolds(trailing=None, decay_buckets=((0, 1),))
         with pytest.raises(ValueError, match="decay_half_life_months"):
             combine_recency_from_folds(folds, decay_half_life_months=bad)

@@ -226,6 +226,25 @@ class TestNonFiniteFailClosed:
         assert GATE_NON_FINITE_INPUT not in gate_reasons(m)
         _assert_twin_parity(m)
 
+    def test_type_illegal_none_loss_rate_fails_closed_no_crash(self) -> None:
+        """Refuter round 1 (totality): ``ResultMetrics.loss_rate`` is
+        NON-nullable, so a ``None`` there is JUNK — unlike the legitimately
+        nullable inputs above it takes the fail-closed guard exit. Pre-fix
+        both twins crashed with a ``TypeError`` inside the derived Door-5
+        threshold (``None >= 1.0``); now the gate FAILS with the guard token
+        alone (reasons non-empty, no crash) on BOTH twins."""
+        m = make_result_metrics(loss_rate=None)
+        assert gate_reasons(m) == (GATE_NON_FINITE_INPUT,)
+        assert passes_gates(m) is False
+        _assert_twin_parity(m)
+
+    def test_none_loss_rate_fails_closed_under_an_active_door6_knob_too(self) -> None:
+        """The junk-loss-rate guard is knob-independent — an active Door-6
+        ceiling changes the guard SCAN, never the loss-rate arm."""
+        m = make_result_metrics(loss_rate=None, sl_hit_rate=0.1)
+        assert gate_reasons(m, max_sl_hit_rate=0.5) == (GATE_NON_FINITE_INPUT,)
+        assert passes_gates(m, max_sl_hit_rate=0.5) is False
+
 
 class TestTwinWlrProjectionStructuralParity:
     """Structural twin-parity pins for the door-4 ``None`` → 0.0 projection.

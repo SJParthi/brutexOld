@@ -236,14 +236,23 @@ class TestStreakDoorDerived:
         assert GATE_CONSECUTIVE_LOSSES not in gate_reasons(m10)
 
     def test_nan_loss_rate_fails_closed(self) -> None:
-        # loss_rate joined the non-finite guard tuple: a NaN would silently
-        # corrupt the derived threshold, so the guard rejects up front.
+        # loss_rate rides the widened _junk_loss_rate guard arm: a NaN would
+        # silently corrupt the derived threshold, so the guard rejects up
+        # front.
         m = _m(loss_rate=math.nan)
         assert passes_gates(m) is False
         assert gate_reasons(m) == ("non_finite_input",)
 
     def test_inf_loss_rate_fails_closed(self) -> None:
         m = _m(loss_rate=math.inf)
+        assert passes_gates(m) is False
+        assert gate_reasons(m) == ("non_finite_input",)
+
+    def test_type_illegal_none_loss_rate_fails_closed(self) -> None:
+        # Refuter round 1 (totality): loss_rate is NON-nullable, so None is
+        # junk — pre-fix both twins crashed with TypeError inside the derived
+        # Door-5 threshold; now the SAME fail-closed guard exit as NaN/inf.
+        m = _m(loss_rate=None)
         assert passes_gates(m) is False
         assert gate_reasons(m) == ("non_finite_input",)
 
