@@ -15,7 +15,13 @@ the input, and re-sorting is idempotent.
 # this file only; `reportCallIssue` stays a hard error everywhere else.
 from __future__ import annotations
 
-from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord
+from brutex.ranking.presets import (
+    PRESET_NAMES,
+    PRESETS,
+    RankRecord,
+    dd_band_index,
+    min_dd_first_key,
+)
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -66,7 +72,25 @@ def test_output_is_a_permutation_and_resort_is_idempotent(records: list[RankReco
 
 @given(records=_records())
 @settings(max_examples=60, deadline=None)
-def test_min_dd_first_orders_drawdown_monotonically(records: list[RankRecord]) -> None:
+def test_min_dd_first_orders_drawdown_band_monotonically(records: list[RankRecord]) -> None:
+    """The DD ε-BAND law (DEC-RANK-DD-BAND-ORDER-001, MIGRATION.md LANE W1 item 5).
+
+    The OLD strict raw-DD monotonicity invariant was deliberately RETIRED by
+    the ε-band ruling: within one :data:`DD_BAND_PCT`-wide band the composite
+    (DESC, ``None`` after every scored value) then the retained tiebreaks
+    decide, so raw DD is only BAND-monotonic over the output — a 2bp-DD edge
+    no longer outranks a 58x-P&L edge inside the same band.
+    """
     ordered = PRESETS["min_dd_first"].sort_records(records)
-    drawdowns = [record.max_drawdown_pct for record in ordered]
-    assert drawdowns == sorted(drawdowns)
+    # (a) Band indices (floor(dd / DD_BAND_PCT) via the REAL quantizer —
+    # imported from brutex.ranking.presets, never re-minted) are
+    # non-decreasing over the whole output.
+    bands = [dd_band_index(record.max_drawdown_pct) for record in ordered]
+    assert bands == sorted(bands)
+    # (b) The within-band key law holds — asserted via the module's own
+    # exported key function: the full 4-part key (band, composite-presence,
+    # -composite, max_consecutive_losses) is non-decreasing, which subsumes
+    # "composite DESC with the None-after-scored arm, then the retained
+    # tiebreaks" inside every band.
+    keys = [min_dd_first_key(record) for record in ordered]
+    assert keys == sorted(keys)
