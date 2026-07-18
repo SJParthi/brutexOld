@@ -142,6 +142,10 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.sharpe", label: "Sharpe", type: "num", explain: "sharpe" },
   { key: "metrics.dsr", label: "DSR", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
+  /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — additive artifact
+     metric; a pre-alpha artifact lacks the key entirely -> "—" (absent-
+     excluded-but-counted under a filter, the #1631 law — never a 0). */
+  { key: "metrics.alpha_pct", label: "Alpha %", type: "num", explain: "alpha_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
   /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —

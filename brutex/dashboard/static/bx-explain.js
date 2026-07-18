@@ -70,6 +70,7 @@ var BX_EXPLAIN = {
   trades: "How many trades this strategy took across the whole test window.",
   dsr: "Deflated Sharpe — the odds the edge is real after counting how many combos were tried.",
   cpcv_pass_pct: "% of CPCV combinatorial train/test folds with positive out-of-sample Sharpe — measured at cascade filter #3 (gate: at least 50%). '—' means the cascade never measured this strategy.",
+  alpha_pct: "Alpha vs buy-&-hold — the strategy's % return on the sweep notional minus simply holding the instrument over the same window (DEC-ALPHA-BUYHOLD-METRIC-001). Positive = the strategy beat holding. '—' means no baseline covered this instrument's window.",
   cascade_status: "Stage-4 statistical-cascade verdict (nine filters: gates, DSR, CPCV, SPA, PBO, Romano-Wolf, walk-forward, lockbox, Monte-Carlo). 'PASS (provisional)' = DSR deflated against the pool-N fallback; '—'/'not validated' = not judged by the latest cascade.",
   vix_band: "The market-fear range (India VIX) where this strategy historically made its money.",
   family_id: "Strategies that traded almost identically are grouped — this names that family.",

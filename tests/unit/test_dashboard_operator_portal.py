@@ -736,6 +736,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "stSharpe",
             "stDsr",
             "stCpcv",
+            "stAlpha",
             "stWinRate",
             "stPf",
             "stTrades",
@@ -761,6 +762,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "sharpe",
             "dsr",
             "cpcv_pass_pct",
+            "alpha_pct",
             "win_rate",
             "profit_factor",
             "trades",
@@ -1606,7 +1608,7 @@ function makeEl(tag) {
 var IDS = [
   "stPrev", "stNext", "stRunId", "stRank", "stName", "stInstr", "stTf",
   "stDir", "stArm", "stMask", "stFamily", "stNet", "stMaxDd", "stSharpe",
-  "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
+  "stDsr", "stCpcv", "stAlpha", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
   "stCascade", "stCascadeDeep",
@@ -1931,7 +1933,7 @@ function makeEl(tag) {
 var IDS = [
   "stPrev", "stNext", "stRunId", "stRank", "stName", "stInstr", "stTf",
   "stDir", "stArm", "stMask", "stFamily", "stNet", "stMaxDd", "stSharpe",
-  "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
+  "stDsr", "stCpcv", "stAlpha", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
   "stCascade", "stCascadeDeep",

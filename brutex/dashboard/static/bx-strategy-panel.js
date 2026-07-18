@@ -522,6 +522,8 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         byId('stSharpe').textContent = m.sharpe === undefined ? '—' : String(m.sharpe);
         byId('stDsr').textContent = m.dsr === undefined ? '—' : String(m.dsr);
         byId('stCpcv').textContent = m.cpcv_pass_pct === undefined ? '—' : String(m.cpcv_pass_pct);
+        /* DEC-ALPHA-BUYHOLD-METRIC-001: absent key -> '—', never 0. */
+        byId('stAlpha').textContent = m.alpha_pct === undefined ? '—' : String(m.alpha_pct);
         byId('stWinRate').textContent = m.win_rate === undefined ? '—' : String(m.win_rate);
         byId('stPf').textContent = m.profit_factor === undefined ? '—' : String(m.profit_factor);
         byId('stTrades').textContent = m.trades === undefined ? '—' : String(m.trades);
@@ -573,7 +575,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         // Motion covenant #1/#2: values landed via textContent above; the
         // one-shot pop rides ONLY nodes that show a real value.
         popRealValues([
-          'stNet', 'stMaxDd', 'stSharpe', 'stDsr', 'stCpcv', 'stWinRate',
+          'stNet', 'stMaxDd', 'stSharpe', 'stDsr', 'stCpcv', 'stAlpha', 'stWinRate',
           'stPf', 'stTrades', 'stExpectancy', 'stRecovery', 'stLossStreak',
           'stMae', 'stMfe', 'stMinuteDd', 'stExitMix', 'stWorst5'
         ]);
@@ -672,7 +674,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
   function resetPanelDom() {
     var dashIds = [
       'stRank', 'stName', 'stInstr', 'stTf', 'stDir', 'stArm', 'stMask',
-      'stFamily', 'stNet', 'stMaxDd', 'stSharpe', 'stDsr', 'stCpcv',
+      'stFamily', 'stNet', 'stMaxDd', 'stSharpe', 'stDsr', 'stCpcv', 'stAlpha',
       'stWinRate', 'stPf', 'stTrades', 'stVixBand', 'stArith',
       'stExpectancy', 'stRecovery', 'stLossStreak', 'stMae', 'stMfe',
       'stMinuteDd', 'stExitMix', 'stWorst5', 'stTrendSplit', 'stRegimeWonder',

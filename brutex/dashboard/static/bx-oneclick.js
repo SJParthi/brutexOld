@@ -1015,6 +1015,9 @@ function bxFunnelProvenance(source, runId) {
     setOc("r1_sharpe", metricText(m.sharpe));
     setOc("r1_dsr", metricText(m.dsr));
     setOc("r1_cpcv", metricText(m.cpcv_pass_pct));
+    /* DEC-ALPHA-BUYHOLD-METRIC-001: alpha vs buy-&-hold — absent on a
+       pre-alpha artifact -> the honest "—", never a fabricated 0. */
+    setOc("r1_alpha", metricText(m.alpha_pct));
     /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
        status_text is SERVER-built (oneclick_view.cascade_status_text via the
        artifact bridge; no verdict prose is ever composed here — a missing/
