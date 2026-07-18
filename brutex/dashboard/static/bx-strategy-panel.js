@@ -604,18 +604,24 @@ function bxEquityLabelText(hasSeries, okEmpty) {
   function fillResilience(row) {
     state.resilienceRow = row;
     var c = window.BXOneclick.resilienceCells(row, money);
-    byId('stResWorstStreak').textContent = c.worstStreak;
-    byId('stResWorstStreakSub').textContent = c.worstStreakSub;
-    byId('stResCost').textContent = c.cost;
-    byId('stResCostSub').textContent = c.costSub;
-    byId('stResUnderwater').textContent = c.underwater;
+    var set = function (id, text) {
+      var n = byId(id);
+      if (n) { n.textContent = text; }
+    };
+    set('stResWorstStreak', c.worstStreak);
+    set('stResWorstStreakSub', c.worstStreakSub);
+    set('stResCost', c.cost);
+    set('stResCostSub', c.costSub);
+    set('stResUnderwater', c.underwater);
     var badge = byId('stResUnderwaterBadge');
-    badge.textContent = c.underwaterBadge;
-    badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
-    byId('stResWorstMonth').textContent = c.worstMonth;
-    byId('stResWorstMonthSub').textContent = c.worstMonthSub;
-    byId('stResWinSpread').textContent = c.winSpread;
-    byId('stResGuide').textContent = c.guide;
+    if (badge) {
+      badge.textContent = c.underwaterBadge;
+      badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
+    }
+    set('stResWorstMonth', c.worstMonth);
+    set('stResWorstMonthSub', c.worstMonthSub);
+    set('stResWinSpread', c.winSpread);
+    set('stResGuide', c.guide);
     updateSelfLocate();
   }
 
@@ -623,7 +629,9 @@ function bxEquityLabelText(hasSeries, okEmpty) {
      the shipped numbers (P95 + max). Colour tracks the verdict level. */
   function updateSelfLocate() {
     var out = byId('stResLocate');
-    var raw = byId('stResLossesIn').value;
+    var input = byId('stResLossesIn');
+    if (!out || !input) { return; } // host page without the section
+    var raw = input.value;
     if (!state.resilienceRow || raw === '') {
       out.textContent = 'enter a number';
       out.className = 'resilience-verdict na';
@@ -695,7 +703,10 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       state.tradeIdx = null;
       loadTrades();
     });
-    byId('stResLossesIn').addEventListener('input', updateSelfLocate);
+    /* Presence-guarded (the resetPanelDom `if (n)` idiom): a host page
+       without the resilience section mounts cleanly. */
+    var resIn = byId('stResLossesIn');
+    if (resIn) { resIn.addEventListener('input', updateSelfLocate); }
   }
 
   /* The story-card / trades / chart / equity hosts painted for the PREVIOUS

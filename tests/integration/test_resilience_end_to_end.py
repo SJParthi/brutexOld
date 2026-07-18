@@ -45,28 +45,57 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _bars() -> list[CandleBar]:
+    """Worst-case-rankable continuous gap-up drift (club-O re-derivation).
+
+    Hand-derivation (2026-07-18 club-O merge-forward): the old ±0.5-range
+    zigzag was measured DEAD under the DEC-FILL-WORST-CASE-ONLY-001 (#1825)
+    fill law — the worst-case BUY entry (fill-bar HIGH) stopped out inside
+    the wide bar on every combo, zero finalists persisted, ``records == {}``.
+    This is the rehearsal fixture's PROVEN geometry
+    (test_sweep_full_chain_rehearsal._bars — see its in-file derivation)
+    scaled to 12 days x 120 minutes: +3.0 gap-up bars whose 0.36 range
+    (h=o+0.34, lo=o-0.02) cannot same-bar-stop an SL-80 worst-case entry;
+    the next gap-up's low clears the TP-50 level -> clean +50 wins; a
+    shallow bearish bar each 7-bar cycle + a deep loss carrier every 16th
+    cycle (lo=o-0.72, barely past the SL level) keep profit_factor finite;
+    bearish bars are suppressed for the first 40 cycles (the EMA warm-up) so
+    the bearish-bit combos (1/3) never mint degenerate trades; a 7-slot
+    deterministic jitter de-degenerates every return series.
+    """
     out: list[CandleBar] = []
+    cycle = 0
+    price = 100.0
     for d in range(12):
-        price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3 and cycle > 40:  # shallow bearish bar (post warm-up)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 16 == 0 and cycle > 40:  # deep loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.72
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.34, o - 0.02
+            j = (0.0, 0.02, 0.05, -0.03, 0.04, -0.02, 0.03)[(cycle + m) % 7]
+            o, c, h, lo = o + j, c + j, h + j, lo + j
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 

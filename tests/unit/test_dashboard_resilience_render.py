@@ -3,9 +3,13 @@
 The sibling ``bxResilienceCells`` / screener ``cellText`` builders are already
 execution-tested (``test_dashboard_resilience_panel.py`` /
 ``test_dashboard_screener_math.py``); the ONE remaining unexecuted link was the
-template ``textContent`` render law itself. These tests close it HONESTLY: the
-REAL inline template ``<script>`` is loaded under node against a minimal DOM
-shim (no jsdom in the toolchain) and the actual render functions run —
+panel ``textContent`` render law itself. These tests close it HONESTLY: since
+DEC-OPERATOR-PORTAL-REFOLD-001 (MIGRATION.md #1796) the former template inline
+``<script>`` renderers live in the EXTRACTED shared panels
+(``bx-strategy-panel.js`` / ``bx-screener-panel.js`` — the club-O merge-forward
+re-pointed this suite from the dead inline sites onto them), so the REAL panel
+module source is loaded under node against a minimal DOM shim (no jsdom in the
+toolchain) and the actual render functions run —
 
 * ``/strategy``: the panel's ``fillResilience(row)`` fills the real
   ``id="stRes*"`` cells; a NULL/absent record renders every cell "—", a LIVE
@@ -41,8 +45,8 @@ _TEMPLATES = _ROOT / "brutex" / "dashboard" / "templates"
 _ONECLICK_JS = _STATIC / "bx-oneclick.js"
 _EXPLAIN_JS = _STATIC / "bx-explain.js"
 _SCREENER_JS = _STATIC / "bx-screener.js"
-_STRATEGY_HTML = _TEMPLATES / "strategy.html"
-_SCREENER_HTML = _TEMPLATES / "screener.html"
+_STRATEGY_PANEL_JS = _STATIC / "bx-strategy-panel.js"
+_SCREENER_PANEL_JS = _STATIC / "bx-screener-panel.js"
 
 _NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
@@ -123,7 +127,18 @@ const ROW = ARGS.row;
 function mkNode(tag) {
   const node = {
     tagName: tag, children: [], attrs: {}, className: '', hidden: false, value: '',
-    style: {}, _text: '',
+    // The refolded panels (DEC-OPERATOR-PORTAL-REFOLD-001) touch
+    // style.setProperty (cascade stagger index) + classList (animate-only
+    // cascade class) — minimal no-op-adequate shims, matching the browser
+    // surface the extracted modules consume.
+    style: { setProperty: function () {} },
+    _cls: {}, _text: '',
+  };
+  node.classList = {
+    add: function (c) { node._cls[c] = true; },
+    remove: function (c) { delete node._cls[c]; },
+    contains: function (c) { return node._cls[c] === true; },
+    toggle: function (c, on) { if (on) { node._cls[c] = true; } else { delete node._cls[c]; } },
   };
   Object.defineProperty(node, 'firstChild', {
     get() { return this.children.length ? this.children[0] : null; },
@@ -172,23 +187,29 @@ const BXOneclick = {
   VIX_BAND_NOT_STAMPED: OC.BX_VIX_BAND_NOT_STAMPED,
 };
 
-function loadInline(file, marker, exportsExpr) {
-  const html = fs.readFileSync(file, 'utf8');
-  const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-  const body0 = blocks.find((b) => b.indexOf(marker) !== -1);
-  if (!body0) { throw new Error('inline <script> not found for marker ' + marker); }
+function loadPanel(file, marker, exportsExpr) {
+  // DEC-OPERATOR-PORTAL-REFOLD-001: the render wiring lives in the extracted
+  // shared panel MODULES now — load the module source, keep its top-level
+  // pure helpers, and unwrap the browser IIFE so the internal render
+  // functions are reachable (the same string-surgery idiom the old inline
+  // loader used; the module.exports tail is sliced off with the wrapper).
+  const src = fs.readFileSync(file, 'utf8');
+  if (src.indexOf(marker) === -1) { throw new Error('marker not found: ' + marker); }
   const head = '(function () {';
-  let body = body0.slice(body0.indexOf(head) + head.length);
-  body = body.slice(0, body.lastIndexOf('})();'));
+  const headAt = src.indexOf(head);
+  const tailAt = src.lastIndexOf('})();');
+  const body = src.slice(0, headAt) + src.slice(headAt + head.length, tailAt);
   const dom = makeDom();
-  const win = { BXOneclick, BXExplain: EX, BXScreener: SC, location: { search: '' } };
-  const factory = new Function('document', 'window', body + '\n;return (' + exportsExpr + ');');
-  return { api: factory(dom.document, win), dom };
+  const win = { BXOneclick, BXExplain: EX, BXScreener: SC, BXPortalState: {},
+                location: { search: '' } };
+  const factory = new Function('document', 'window', 'module',
+    body + '\n;return (' + exportsExpr + ');');
+  return { api: factory(dom.document, win, undefined), dom };
 }
 
 let OUT;
 if (KIND === 'strategy') {
-  const { api, dom } = loadInline(
+  const { api, dom } = loadPanel(
     %(strategy)s, 'function fillResilience', '{ fillResilience: fillResilience }'
   );
   api.fillResilience(ROW);
@@ -208,8 +229,8 @@ if (KIND === 'strategy') {
     guide: g('stResGuide'),
   };
 } else {
-  const { api, dom } = loadInline(
-    %(screener_html)s, 'function cellText', '{ render: render, state: state }'
+  const { api, dom } = loadPanel(
+    %(screener_js)s, 'function cellText', '{ render: render, state: state }'
   );
   api.state.rows = [ROW];
   api.state.rowCount = 1;
@@ -240,8 +261,8 @@ def _render(kind: str, row: dict[str, Any], tmp_path: Path) -> dict[str, Any]:
         "oneclick": json.dumps(str(_ONECLICK_JS)),
         "explain": json.dumps(str(_EXPLAIN_JS)),
         "screener": json.dumps(str(_SCREENER_JS)),
-        "strategy": json.dumps(str(_STRATEGY_HTML)),
-        "screener_html": json.dumps(str(_SCREENER_HTML)),
+        "strategy": json.dumps(str(_STRATEGY_PANEL_JS)),
+        "screener_js": json.dumps(str(_SCREENER_PANEL_JS)),
         "argfile": json.dumps(str(argfile)),
     }
     proc = subprocess.run(  # nosec B603 — fixed argv, test-only

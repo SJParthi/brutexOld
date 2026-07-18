@@ -127,11 +127,16 @@ def test_run_identity_goldens_are_unmoved() -> None:
         _GOLDEN_RUN_ID,
     )
 
-    assert _GOLDEN_RUN_ID == "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
-    # Mirror literal refreshed at the 2026-07-15 club-O integration merge: main
-    # re-locked _GOLDEN_CONTENT_HASH (its own reviewed re-lock) between this
-    # DEC's base and the fold; the pin's LAW is unchanged — the resilience
-    # annotation pass must mirror whatever the canonical frozen value is.
+    # Mirror literals refreshed at the 2026-07-18 club-O merge-forward onto
+    # main 3ee742b3: DEC-FILL-WORST-CASE-ONLY-001 (MIGRATION.md #1825, its own
+    # reviewed repo-wide golden re-lock) moved the CANONICAL frozen pair —
+    # _GOLDEN_RUN_ID f588194f… (the negative-pinned precise-era id, see
+    # _PRECISE_ERA_RUN_ID in the canonical suite) → 715212420d2c…, and
+    # _GOLDEN_CONTENT_HASH 18129707c1bf… → ee874356dcf6… . This pin's LAW is
+    # unchanged — the resilience annotation pass must mirror whatever the
+    # canonical frozen value is (the canonical suite itself is byte-untouched
+    # by this branch; these literals are copies OF it, never a re-lock of it).
+    assert _GOLDEN_RUN_ID == "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
     assert (
-        _GOLDEN_CONTENT_HASH == "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
+        _GOLDEN_CONTENT_HASH == "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
     )

@@ -135,6 +135,25 @@ _CI_K_SAMPLES = 8
 #: (67.25 s — ≈ the WITH-COVERAGE unit job's context). The MC leg is BOUNDED
 #: because the pinned seed's candidate is signal-LIGHT and the
 #: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered.
+#:
+#: RE-MEASURED at the 2026-07-18 club-O merge-forward onto main 3ee742b3
+#: (DEC-FILL-WORST-CASE-ONLY-001 #1825 landed between the club's base and the
+#: fold — the fill law itself changed, not merely a seed re-key): under
+#: worst-case fills the OLD fixture's DSR pool was unpassable for EVERY
+#: measured sha (28 candidates, all deflated_sharpe=0 — leaderboard Sharpe
+#: variance 2.5-39.9 vs candidate Sharpes <= 3.3), so the FIXTURE was
+#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: this SAME
+#: constant (``"feedface"*5``) now draws TWO candidates through the DSR gate
+#: over the re-derived 9-candidate pool (variance 0.788 measured) and
+#: exercises the ENTIRE statistical cascade — walk-forward, CPCV, PBO,
+#: SPA/reality-check, Romano-Wolf, the LOCKBOX (which filters one — a real
+#: filter event) and the 1000-permutation Monte-Carlo leg (which runs on the
+#: survivor and passes it). Measured ~20 s per uninstrumented pass on the
+#: 4-vCPU sandbox (~15x margin to the 300 s strict budget); alternates
+#: measured DSR-killed on the OLD fixture this session: deadbeef/abad1dea/
+#: cafebabe/deadc0de/baddcafe/feedc0de/d15ea5e0/ba5eba11/5ca1ab1e/ca11ab1e/
+#: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
+#: constants (transcript in the club-O PR body).
 _PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
 
 
@@ -150,31 +169,60 @@ def _trading_days(start: date, n: int) -> list[date]:
 
 
 def _bars() -> list[CandleBar]:
-    """The worst-case-rankable gap-up drift: BUY masks pass the 5 hard gates.
+    """The worst-case-rankable CONTINUOUS gap-up drift (club-O re-derivation).
 
-    DEC-FILL-WORST-CASE-ONLY-001 re-craft (the old wide-range zigzag SL'd
-    every worst-case entry on its own bar): narrow gap-up bars (range 0.50 <
-    the SL 0.80; the next gap-up's low clears the TP level → +50 wins), a
-    shallow bearish bar each 7-bar cycle, and a DEEP bearish bar (range
-    0.85) every 4th cycle whose stop-out keeps profit_factor finite.
+    Hand-derivation (2026-07-18 club-O merge-forward — the #1825 worst-case
+    law is now the REAL engine law, and under it the old per-day-resetting
+    zigzag produced a DSR-unpassable pool; every term below was chosen
+    against the measured DSR arithmetic, transcript in the club-O PR body):
+
+    * CONTINUOUS trend (no per-day price reset): the two bearish-bit combos
+      (close_below_ema20/ema200 — bits 1/3) then never fire outside warm-up,
+      so they min-hits-drop out of the store instead of contributing
+      degenerate near-zero-trade Sharpes to the DSR trial population.
+    * Bearish bars SUPPRESSED for the first 40 cycles (~23 trading days —
+      the EMA200 warm-up): during warm-up the lagging EMAs sit close enough
+      to price that a bearish close could dip below them and hand bits 1/3 a
+      handful of terrible-Sharpe trades (measured: trial variance 5.2 with
+      warm-up bears vs 3.2 without, before the other terms landed).
+    * Narrow gap-up win bars (o=+3.0 gap, h=o+0.34, lo=o-0.02, c=o+0.3):
+      the worst-case BUY entry is the fill bar's HIGH; a fill-bar range of
+      0.36 keeps every stage-3-explorable SL (CMA samples around the 80
+      seed) from stopping out ON the fill bar — the old 0.50-range bar let
+      small refined SLs stop same-bar at the bar LOW uniformly, minting
+      identical-loss series with Sharpe -11.4 that blew the trial variance
+      to ~40 (measured).
+    * The next gap-up's low (o+3.0-0.02) clears every explorable TP level →
+      clean +TP wins at the with-the-level clamp.
+    * A shallow bearish bar each 7-bar cycle (c=o-0.3, lo=o-0.4: never
+      reaches the SL-80 level) + a DEEP bearish loss carrier every 16th
+      cycle whose low (o-0.72) barely crosses the SL level — the stop-out
+      keeps profit_factor finite without the old every-4th-cycle loss rate
+      that held the top candidate's Sharpe at 0.54 (measured; rare + barely
+      overshooting losses lift it to ~1.6-3.3 across the pool).
+    * A deterministic 7-slot price jitter de-degenerates every return
+      series (identical-value runs otherwise produce near-zero-variance
+      Sharpe outliers — measured trial variance 17.6 without jitter).
     """
     out: list[CandleBar] = []
     cycle = 0
+    price = 100.0
     for day in _trading_days(date(2024, 1, 1), _N_DAYS):
-        price = 100.0
         for m in range(_PER_DAY):
             k = m % 7
             if k == 0:
                 cycle += 1
-            if k == 3:  # shallow bearish bar
+            if k == 3 and cycle > 40:  # shallow bearish bar (post EMA warm-up)
                 o = price
                 c, h, lo = o - 0.3, o + 0.1, o - 0.4
-            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+            elif k == 4 and cycle % 16 == 0 and cycle > 40:  # deep bearish loss carrier
                 o = price
-                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+                c, h, lo = o - 0.65, o + 0.1, o - 0.72
             else:  # narrow gap-up win bar
                 o = price + 3.0
-                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+                c, h, lo = o + 0.3, o + 0.34, o - 0.02
+            j = (0.0, 0.02, 0.05, -0.03, 0.04, -0.02, 0.03)[(cycle + m) % 7]
+            o, c, h, lo = o + j, c + j, h + j, lo + j
             ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
             out.append(
                 CandleBar(
@@ -223,6 +271,13 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
     kwarg would be an engine-side change outside this fix's ruled test-only
     scope). One frozen sha ⇒ one frozen run identity ⇒ frozen Stage-3/cascade
     seeds ⇒ the wall-time gate measures the SAME work on every commit.
+
+    stage3_top_k=1 / stage3_fevals=4 (club-O re-derivation, 2026-07-18): the
+    old 2/8 breadth minted ~22 unique refined (sl, tp) cells whose Sharpe
+    dispersion alone held the DSR trial variance >= 2.5 over N=27 — the
+    deflation benchmark sqrt(V)*E[max-z] sat above every candidate. 1/4
+    yields a 9-candidate pool (variance 0.788 measured) while stage-3 still
+    genuinely refines (cells_written > 0 — the sibling test's teeth).
     """
     from brutex import cli
 
@@ -250,8 +305,8 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
             data_snapshot_hash=None,
             options_sim=False,
             stage3_enable=True,
-            stage3_top_k=2,
-            stage3_fevals=8,
+            stage3_top_k=1,
+            stage3_fevals=4,
             stage3_restarts=1,
         )
 
@@ -441,7 +496,9 @@ def test_r38_stage3_cells_genuinely_written(rehearsal: _Rehearsal) -> None:
     lines = [json.loads(line) for line in raw.splitlines() if line]
     complete = [e for e in lines if e["action"] == "STAGE_3_PASS_COMPLETE"]
     assert len(complete) >= 1
-    assert complete[0]["payload"]["masks_refined"] == 2
+    # 1 mask refined since the club-O re-derivation set stage3_top_k=1 (the
+    # DSR-pool-breadth fix — see _sweep_all's re-derivation note).
+    assert complete[0]["payload"]["masks_refined"] == 1
     assert complete[0]["payload"]["cells_written"] > 0
     assert complete[0]["payload"]["skipped_empty_train"] == 0
 
@@ -466,16 +523,35 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # ONE (instrument, tf) group in the rehearsal grid — its per-group report
     # carries the stage_survivors funnel (cascade_wire.wire_report_to_dict).
     assert len(report["groups"]) == 1
+    # RE-LOCK AUDIT (2026-07-18, club-O merge-forward onto main 3ee742b3 —
+    # DEC-FILL-WORST-CASE-ONLY-001 #1825 landed BETWEEN the club's base
+    # (1ad31acd, precise-era) and this fold, changing every fill price and so
+    # the whole pool): under the worst-case law the OLD fixture produced a
+    # 10-20-candidate hard-gate pool whose leaderboard Sharpe variance
+    # (measured 2.5-39.9 across 28 candidate shas) put the DSR deflation
+    # benchmark ~sqrt(V)*2 far above every candidate's Sharpe — DSR killed the
+    # WHOLE pool for EVERY measured sha (28/28), i.e. the statistical legs
+    # never ran and no seed could fix it. The fixture + stage-3 breadth were
+    # re-derived (see _bars + _sweep_all notes) and the shape re-measured
+    # under the re-measured pin: 5 enumerated combos; the 2 bearish-bit combos
+    # (close_below_ema20/ema200) never fire on the continuous uptrend so only
+    # 3 survive min-hits into the store; + 6 unique stage-3 refined cells = a
+    # 9-candidate pool (N=9, leaderboard Sharpe variance 0.788 measured);
+    # DSR passes 2, walk-forward/CPCV/PBO/SPA/Romano-Wolf keep both, the
+    # LOCKBOX filters one (a real filter event the old shape never had), and
+    # the 1000-permutation Monte-Carlo leg runs on the survivor and PASSES it
+    # — every statistical leg genuinely EXECUTES (the R38 law; the old
+    # "MC kills it" tail was a property of the old fixture, not of the law).
     assert report["groups"][0]["report"]["stage_survivors"] == {
-        "hard_gates": 5,
-        "deflated_sharpe": 1,
-        "cpcv": 1,
-        "reality_check_spa": 1,
-        "pbo": 1,
-        "romano_wolf": 1,
-        "walk_forward": 1,
+        "hard_gates": 9,
+        "deflated_sharpe": 2,
+        "cpcv": 2,
+        "reality_check_spa": 2,
+        "pbo": 2,
+        "romano_wolf": 2,
+        "walk_forward": 2,
         "lockbox": 1,
-        "monte_carlo": 0,
+        "monte_carlo": 1,
     }, "the pinned seed's full-cascade shape drifted — re-pin consciously (#1798)"
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
@@ -502,7 +578,12 @@ def test_r28_manifest_contract_shape_and_funnel(rehearsal: _Rehearsal) -> None:
     assert set(doc["per_stage_timings"]) == {"preflight", "sweep", "stage3", "cascade", "artifacts"}
     doors = {row["door"]: row["killed"] for row in doc["per_door_kills"]}
     # Sourceable doors populated (D-8); the cascade's dsr door genuinely judged.
-    assert doors["min_hits"] == 0
+    # min_hits kills EXACTLY the two bearish-bit combos (close_below_ema20 /
+    # close_below_ema200) — on the club-O re-derived continuous-uptrend bars
+    # they never fire, so they die at the min-hits door (the trials sidecar's
+    # n_minhits_dropped=2 twin) instead of polluting the DSR pool with
+    # degenerate near-zero-trade Sharpes (the re-derivation's whole point).
+    assert doors["min_hits"] == 2
     assert doors["dsr"] > 0
     assert doc["dedup_skips"] == 0
     assert doc["selection"]["symbols"] == [_SYMBOL]
