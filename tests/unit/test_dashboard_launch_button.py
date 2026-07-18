@@ -12,7 +12,8 @@ real sweep. Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import shutil
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -130,13 +131,15 @@ class TestLaunchStateRoute:
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
         assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
-        # On this branch the PR #1264 alias layer IS merged — the request-time
-        # probe (the REAL scope classifier; zero code change in launch_button,
-        # exactly as its docstring promises) honestly reads available and the
-        # futures card goes live.
-        assert payload["futures"]["available"] is True
-        assert payload["cards"]["futures"]["enabled"] is True
-        assert "PR #1264" not in payload["cards"]["futures"]["reason"]
+        # DEC-ENGINE-SPOT-ONLY-001: the request-time probe (the REAL scope
+        # classifier; zero code change in launch_button, exactly as its
+        # docstring promises) honestly reads UNAVAILABLE — the futures track
+        # is retired from engine scope, so the card is disabled with the
+        # DEC-citing reason (the pre-flip PR-#1264-merged available arm is
+        # pinned via the monkeypatched probe tests).
+        assert payload["futures"]["available"] is False
+        assert payload["cards"]["futures"]["enabled"] is False
+        assert "DEC-ENGINE-SPOT-ONLY-001" in payload["cards"]["futures"]["reason"]
 
     def test_futures_card_disabled_when_alias_unavailable(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -157,7 +160,7 @@ class TestLaunchStateRoute:
         card = payload["cards"]["futures"]
         assert card["enabled"] is False
         assert card["reason"] == lb.FUTURES_DEPENDENCY_NOTE
-        assert "PR #1264" in card["reason"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in card["reason"]
         # The spot card is untouched by the futures probe.
         assert payload["cards"]["spot"]["enabled"] is True
 
@@ -191,8 +194,9 @@ class TestLaunchSweepRoute:
     def test_futures_unavailable_400_when_alias_absent(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The alias layer IS merged on this branch, so the honest-refusal arm
-        # (the pre-#1264 posture) is pinned via a monkeypatched probe.
+        # The honest-refusal arm, pinned via a monkeypatched probe (the REAL
+        # probe also refuses under DEC-ENGINE-SPOT-ONLY-001 — see the
+        # real-probe 400 test below).
         monkeypatch.setattr(
             lb,
             "probe_futures_alias",
@@ -200,7 +204,18 @@ class TestLaunchSweepRoute:
         )
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
-        assert "PR #1264" in resp.json()["detail"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
+
+    def test_futures_card_400_under_the_real_spot_only_probe(self, client: TestClient) -> None:
+        """DEC-ENGINE-SPOT-ONLY-001: the REAL probe refuses a futures launch.
+
+        No monkeypatch — the request-time probe consults the real scope
+        classifier, so a POST on the futures card is a loud 400 citing the
+        DEC, never a spawned NSE-NIFTY-FUT sweep.
+        """
+        resp = client.post("/api/v1/launch/sweep?card=futures")
+        assert resp.status_code == 400
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
 
     def test_missing_partitions_412_nothing_spawned(
         self, tmp_path: Path, fake_spawner: dict[str, Any]
@@ -382,3 +397,76 @@ class TestRealPidLifecycle:
         assert second.status_code == 200
         second_pid = second.json()["active"]["pid"]
         assert second_pid != pid or not os.path.exists(f"/proc/{pid}")
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the run_lake= injection seam (#1757) ──
+
+
+def _recording_run_lake(calls: list[str]) -> Callable[..., Awaitable[Any]]:
+    """A run_lake fake with the LakeOffload/run_in_threadpool call contract."""
+
+    async def run_lake(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    return run_lake
+
+
+class TestLaunchOffloadDispatch:
+    """DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the ``run_lake=`` injection seam.
+
+    Every /api/v1/launch/* closure stats/reads/writes under the lake root, so
+    ``build_app`` passes its 32-token ``_run_lake`` — these pins prove all
+    THREE offload sites dispatch through the seam (order-exact), and that a
+    direct caller WITHOUT the kwarg keeps today's default-pool behavior
+    byte-identically (the None-arm back-compat branch).
+    """
+
+    def _register(self, lake: Path, calls: list[str] | None) -> TestClient:
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        if calls is None:
+            lb.register_launch_routes(app, lake_root_resolver=lambda: lake)
+        else:
+            lb.register_launch_routes(
+                app,
+                lake_root_resolver=lambda: lake,
+                run_lake=_recording_run_lake(calls),
+            )
+        return TestClient(app)
+
+    def test_state_route_dispatches_build_launch_state_through_run_lake(self, lake: Path) -> None:
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        assert client.get("/api/v1/launch/state").status_code == 200
+        assert calls == ["build_launch_state"]
+
+    def test_sweep_route_dispatches_both_call_sites_through_run_lake(
+        self, lake: Path, fake_spawner: dict[str, Any]
+    ) -> None:
+        """Order-exact list: converting only ONE of the two _offload call
+        sites (the run_preconditions one or the launch_sweep one) FAILS."""
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        resp = client.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 200
+        assert calls == ["run_preconditions", "launch_sweep"]
+
+    def test_sweep_refusal_arm_dispatches_only_preconditions_through_run_lake(
+        self, lake: Path
+    ) -> None:
+        calls: list[str] = []
+        shutil.rmtree(lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute")
+        client = self._register(lake, calls)
+        assert client.post("/api/v1/launch/sweep?card=spot").status_code == 412
+        assert calls == ["run_preconditions"]
+
+    def test_register_without_run_lake_defaults_to_the_default_pool(self, lake: Path) -> None:
+        """The None-arm back-compat branch (discovery-gate coverage): behavior
+        byte-identical for direct callers — passes on the reverted tree too,
+        by design; the teeth live in the realserver + dispatch pins."""
+        client = self._register(lake, None)
+        resp = client.get("/api/v1/launch/state")
+        assert resp.status_code == 200
+        assert "cards" in resp.json()  # today's payload shape, unchanged

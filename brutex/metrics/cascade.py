@@ -81,7 +81,7 @@ import itertools
 import math
 import statistics
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
@@ -309,6 +309,23 @@ class CandidateVerdict:
     #: keep their own skip states (e.g. ``pool_pbo=None``), so
     #: ``provisional=False`` is not a blanket "fully proven" claim.
     provisional: bool = False
+    #: The candidate's MEASURED CPCV pass rate — the raw full-precision
+    #: fraction of purged combinatorial train/test folds with positive OOS
+    #: Sharpe, captured at filter #3 the moment :func:`cpcv_pass_rate`
+    #: returns and BEFORE the threshold compare
+    #: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — the value was previously
+    #: computed and DISCARDED, surviving only as 4-dp prose in ``detail`` on
+    #: a threshold fail). Semantics: ``None`` for a candidate that never
+    #: reached filter #3 (hard-gate / DSR rejection) and for the CPCV
+    #: ``ValueError`` arm (the rate was never produced); the FAILING rate
+    #: for a CPCV threshold rejection; the stage-3 rate for every
+    #: later-stage rejection and every pass. RECORDING-ONLY: no ordering /
+    #: RNG / threshold / statistic changes — the field is stamped by ONE
+    #: final :func:`dataclasses.replace` pass over the already-decided
+    #: verdicts. Appended + defaulted (the ``provisional`` precedent), so
+    #: every existing construction is unaffected. NEVER rounded (CLAUDE.md
+    #: §4 — display projections mint their own ``rate * 100.0`` alias).
+    cpcv_pass_rate: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,6 +648,11 @@ def run_stage4_cascade(
     stage_survivors[FilterStage.DEFLATED_SHARPE.value] = len(survivors)
 
     # ── #3 CPCV (per-candidate) ──
+    # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: record every successfully-computed
+    # rate BEFORE the threshold compare, so a pass AND a threshold fail both
+    # carry the real number (the ValueError arm never produced one → absent).
+    # Pure recording — the decision logic below is byte-untouched.
+    cpcv_rate_by_id: dict[str, float] = {}
     kept = []
     for c in survivors:
         try:
@@ -642,6 +664,7 @@ def run_stage4_cascade(
         except ValueError as exc:
             reject(c, FilterStage.CPCV, f"CPCV could not be evaluated: {exc}")
             continue
+        cpcv_rate_by_id[c.candidate_id] = rate
         if rate < config.cpcv_min_pass_rate:
             reject(c, FilterStage.CPCV, f"CPCV pass-rate {rate:.4f} < {config.cpcv_min_pass_rate}")
         else:
@@ -831,7 +854,14 @@ def run_stage4_cascade(
             provisional=dsr_n_source == "pool",
         )
 
-    ordered_verdicts = tuple(verdicts[cid] for cid in ids)
+    # ONE final recording-only stamp (DEC-RESULTS-CASCADE-VERDICT-JOIN-001):
+    # every verdict — pass, later-stage reject, CPCV reject — gains its
+    # measured stage-3 rate; a candidate that never reached #3 (or hit the
+    # ValueError arm) stamps the honest ``None``. ``replace`` preserves every
+    # other field bit-for-bit; ordering/decisions were finalised above.
+    ordered_verdicts = tuple(
+        replace(verdicts[cid], cpcv_pass_rate=cpcv_rate_by_id.get(cid)) for cid in ids
+    )
     return CascadeReport(
         verdicts=ordered_verdicts,
         survivor_ids=tuple(c.candidate_id for c in ranked),

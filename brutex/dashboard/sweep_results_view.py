@@ -68,21 +68,33 @@ era markers (O(1) memory — :func:`brutex.orchestrator.audit.iter_entries`).
 Since DEC-LEDGER-DELTA-O-PAGE-001 that generation-invariant work is split into
 :func:`load_sweep_scan` (a :class:`SweepScan`), which the route caches behind
 the ``sweep_results_revision`` content token — so a filter/rank/top_n click
-within one revision re-pays ONLY the O(N log N) rank + O(top_n) projection,
+within one revision re-pays ONLY the bounded O(N log top_n) rank (fix 5,
+DEC-MEMORY-FOOTPRINT-HARDENING-001; the preset arm stays the engine-shared
+full-sort law) + O(top_n) projection,
 zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 """
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Sequence
+import heapq
+import json
+import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 import structlog
 
+from brutex.dashboard.composite_join import COMPOSITE_STATE_ABSENT, CompositeIndex
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
+from brutex.dashboard.oneclick_view import cascade_status_text
+from brutex.engine.cascade_join import (
+    CascadeJoin,
+    CascadeJoinError,
+    build_cascade_join,
+    cascade_report_path,
+)
 from brutex.engine.results_store import (
     VIX_FIELDS,
     ResultRow,
@@ -90,19 +102,12 @@ from brutex.engine.results_store import (
     ResultsStoreError,
 )
 from brutex.money import format_inr, paisa_to_rupees
-
-# LogGate comes from the COMMON stdlib-only LEAF — NEVER from
-# brutex.engine.results_rollup: the rollup module's import-time
-# K ⊇ MAX_TOP_N assertion imports THIS module, so any module-level import of
-# it here (even TYPE_CHECKING) is the CodeQL bidirectional cycle fixed on
-# PR #1436; every runtime results_rollup import in this module stays
-# FUNCTION-LOCAL (DEC-RESULTS-TOPK-ROLLUP-001).
-from brutex.observability.log_gate import LogGate
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
 
 __all__ = [
+    "CASCADE_REPORT_MAX_BYTES",
     "DEFAULT_RANK_BY",
     "DEFAULT_TOP_N",
     "MAX_TOP_N",
@@ -112,15 +117,12 @@ __all__ = [
     "SNAPSHOT_ERA_UNKNOWN",
     "STORE_ERROR_PUBLIC_DETAIL",
     "SWEEPS_DIRNAME",
-    "RollupServe",
+    "CascadeJoinLoad",
     "SweepLeaderboard",
     "SweepScan",
     "build_sweep_leaderboard",
+    "load_cascade_join_file",
     "load_sweep_scan",
-    "load_sweep_scan_tree",
-    "load_sweep_scan_via_rollup",
-    "preset_rank_record_source",
-    "rank_value_source",
     "resolve_preset_param",
     "store_error_payload",
 ]
@@ -169,6 +171,131 @@ SNAPSHOT_ERA_AMBIGUOUS: Final[str] = "ambiguous"
 #: row's ``mask_bits`` popcount — the sweep enumerates exactly-k-of-bits masks).
 _EraKey = tuple[str, str, str, str, int]
 
+#: Hard byte cap on one cascade-report read (DEC-RESULTS-CASCADE-VERDICT-
+#: JOIN-001): a real report is a few KiB–MiB; an out-of-band multi-GB file
+#: fails closed as ``oversized`` WITHOUT being read whole (the
+#: ``lake_stats_manifest`` bounded-shard-read precedent).
+CASCADE_REPORT_MAX_BYTES: Final[int] = 16 * 1024 * 1024
+
+#: ``CascadeJoinLoad.state`` tokens (the /results-side degrade vocabulary).
+_CASCADE_LOAD_JOINED: Final[str] = "joined"
+_CASCADE_LOAD_ABSENT: Final[str] = "absent"
+_CASCADE_LOAD_UNREADABLE: Final[str] = "unreadable"
+_CASCADE_LOAD_MALFORMED: Final[str] = "malformed"
+_CASCADE_LOAD_OVERSIZED: Final[str] = "oversized"
+
+
+@dataclass(frozen=True, slots=True)
+class CascadeJoinLoad:
+    """One cascade-report file-load verdict for the ``/results`` join.
+
+    ``state`` ∈ ``joined | absent | unreadable | malformed | oversized``;
+    ``join`` is non-``None`` ONLY for ``joined``; ``token`` echoes the stat
+    token the load was memoised under (``None`` = uncached read).
+    ``absent`` is the byte-identity state: the caller emits ZERO new payload
+    keys (a no-report lake's ``/results`` payload is byte-identical to
+    pre-change — pinned).
+    """
+
+    join: CascadeJoin | None
+    state: str
+    token: str | None
+
+
+#: Single-entry cascade-join memo keyed by the report's stat token (the
+#: #1665 equity-memo precedent): ONE parse + ONE failed-load WARN per
+#: revision, never per poll. Guarded by ``_JOIN_MEMO_LOCK`` (poll threads).
+_JOIN_MEMO: CascadeJoinLoad | None = None
+_JOIN_MEMO_LOCK = threading.Lock()
+
+
+def _memo_get(token: str) -> CascadeJoinLoad | None:
+    """The memoised load for *token*, or ``None`` on a memo miss."""
+    with _JOIN_MEMO_LOCK:
+        memo = _JOIN_MEMO
+    if memo is not None and memo.token == token:
+        return memo
+    return None
+
+
+def _memo_put(load: CascadeJoinLoad) -> None:
+    """Store *load* as the single memo entry (token non-``None`` only)."""
+    global _JOIN_MEMO  # noqa: PLW0603 — the documented single-entry memo
+    with _JOIN_MEMO_LOCK:
+        _JOIN_MEMO = load
+
+
+def load_cascade_join_file(results_root: Path, *, token: str | None = None) -> CascadeJoinLoad:
+    """Load + flatten ``<results_root>/cascade/cascade-report.json`` for /results.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — the READ-time consumer of the ONE
+    :func:`brutex.engine.cascade_join.build_cascade_join` law (the top-100
+    writer consumes the same law in-memory). Guard map (each a NAMED state,
+    never a raise/500): missing file → ``absent`` (NO log — the ordinary
+    pre-cascade lake); any other :class:`OSError` → ``unreadable``;
+    ``size > CASCADE_REPORT_MAX_BYTES`` → ``oversized`` (the file is never
+    read whole); JSON/encoding/nesting damage or a structural
+    :class:`~brutex.engine.cascade_join.CascadeJoinError` → ``malformed``.
+
+    *token* is the report's ``cascade_report_revision`` stat token: a
+    non-``None`` token memoises the parsed load in the module's single-entry
+    memo, so a repeat poll pays ZERO parses and a failed load WARNs ONCE per
+    revision (never per poll); ``None`` (a probe outage / an unwired caller)
+    reads fresh and caches NOTHING (the ``lake_revision`` doctrine).
+    """
+    if token is not None:
+        memoised = _memo_get(token)
+        if memoised is not None:
+            return memoised
+    path = cascade_report_path(results_root)
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        load = CascadeJoinLoad(join=None, state=_CASCADE_LOAD_ABSENT, token=token)
+        if token is not None:
+            _memo_put(load)
+        return load
+    except OSError as exc:
+        return _failed_load(_CASCADE_LOAD_UNREADABLE, path, token, exc)
+    if size > CASCADE_REPORT_MAX_BYTES:
+        return _failed_load(
+            _CASCADE_LOAD_OVERSIZED,
+            path,
+            token,
+            ValueError(f"{size} bytes > the {CASCADE_REPORT_MAX_BYTES}-byte cap"),
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return _failed_load(_CASCADE_LOAD_UNREADABLE, path, token, exc)
+    try:
+        join = build_cascade_join(json.loads(raw))
+    except (ValueError, UnicodeDecodeError, RecursionError, CascadeJoinError) as exc:
+        # json.JSONDecodeError is a ValueError; a nesting bomb raises
+        # RecursionError; a structural report defect raises CascadeJoinError
+        # — every arm is the SAME honest "malformed" degrade.
+        return _failed_load(_CASCADE_LOAD_MALFORMED, path, token, exc)
+    load = CascadeJoinLoad(join=join, state=_CASCADE_LOAD_JOINED, token=token)
+    if token is not None:
+        _memo_put(load)
+    return load
+
+
+def _failed_load(state: str, path: Path, token: str | None, exc: BaseException) -> CascadeJoinLoad:
+    """One WARN + the memoised failed load (once per revision, never per poll)."""
+    _LOG.warning(
+        "sweep_results.cascade_report_load_failed",
+        state=state,
+        path=str(path),
+        error_type=type(exc).__name__,
+        error=str(exc),
+    )
+    load = CascadeJoinLoad(join=None, state=state, token=token)
+    if token is not None:
+        _memo_put(load)
+    return load
+
+
 #: The columns a caller may rank the leaderboard by. A strict allow-list (NOT
 #: free-form) so an unknown ``rank_by`` is a clean honest fall-back to the default,
 #: never an engine error reaching the page. These mirror
@@ -191,6 +318,28 @@ RANKABLE_COLUMNS: Final[tuple[str, ...]] = (
     "winning_trades",
     "losing_trades",
 )
+
+
+# ── R30 ranking-preset inert-axes disclosure ────────────────────────────────
+
+#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
+#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
+#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
+#: through to the next preset key, ultimately ``run_id`` ASC), surfaced on the
+#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
+#: axes discriminated (Golden Rule #10). Since
+#: DEC-RESULTS-CASCADE-VERDICT-JOIN-001 this is the STATIC WORST-CASE set: the
+#: ``composite_score`` axis ACTIVATES dynamically when the read-time composite
+#: index (:mod:`brutex.dashboard.composite_join` over the newest run's aggs
+#: sidecars) joined non-empty — the build then discloses the EFFECTIVE axes via
+#: ``SweepLeaderboard.inert_axes`` (``composite_score`` removed), closing the
+#: /results read-time half of HIGH #40; ``max_consecutive_losses`` stays inert
+#: (still not persisted anywhere readable per-row — the persist half is the
+#: named follow-up DEC-CASCADE-ROW-PERSIST-002).
+PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+
+#: The effective inert axes once the composite index joined non-empty.
+_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +394,18 @@ class SweepLeaderboard:
         DEC-SWEEP-RESULTS-DEPTH-001, gap-register ruling 10). When set, the
         ordering came ENTIRELY from the preset; ``rank_by`` is echoed unchanged
         for the page's dropdown state but did NOT order the rows.
+    inert_axes
+        The EFFECTIVE preset-inert axes for THIS build
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``composite_score`` leaves
+        the set IFF the composite index joined non-empty, so the
+        ``?preset=composite`` axis is disclosed honestly ACTIVE for scored
+        rows); defaults to the full :data:`PRESET_INERT_AXES`.
+    cascade_join_meta, composite_join_meta, cascade_flagged
+        The ADDITIVE payload meta (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) —
+        each ``None`` when its loader did not run OR read the honest
+        ``absent`` state, keeping a no-report lake's payload BYTE-IDENTICAL
+        to pre-change (pinned). ``cascade_flagged`` counts the cascade-FAIL
+        rows on the RANKED page (the header chip — flagged, never excluded).
     """
 
     rows: tuple[dict[str, Any], ...]
@@ -260,17 +421,24 @@ class SweepLeaderboard:
     mixed_snapshot_eras: bool
     run_id_conflicts: int
     preset: str | None = None
+    inert_axes: tuple[str, ...] = PRESET_INERT_AXES
+    cascade_join_meta: dict[str, Any] | None = None
+    composite_join_meta: dict[str, Any] | None = None
+    cascade_flagged: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
 
-        With no preset applied the payload is BYTE-IDENTICAL to the pre-preset
-        shape (no new keys — the absent/blank arm of gap-register ruling 10 is
+        With no preset applied AND no cascade/composite join meta the payload
+        is BYTE-IDENTICAL to the pre-preset shape (no new keys — the
+        absent/blank arm of gap-register ruling 10 + the
+        DEC-RESULTS-CASCADE-VERDICT-JOIN-001 no-report byte-identity are BOTH
         pinned by test). A preset-ranked payload gains exactly TWO additive
         keys: ``preset`` (the applied token) and ``preset_inert_axes`` (the
-        honest names of the :class:`~brutex.ranking.presets.RankRecord` axes
-        that are NOT persisted on :class:`~brutex.engine.results_store.ResultRow`
-        and were therefore constant-filled — see :func:`_preset_rank_record`).
+        EFFECTIVE inert axes of THIS build — see :attr:`inert_axes`). The
+        cascade/composite joins add their EMIT-ON-PRESENT meta keys
+        (``cascade_join`` / ``composite_join`` / ``cascade_flagged``) only
+        when the respective loader ran AND found something to report.
         """
         payload: dict[str, Any] = {
             "available": self.available,
@@ -288,7 +456,13 @@ class SweepLeaderboard:
         }
         if self.preset is not None:
             payload["preset"] = self.preset
-            payload["preset_inert_axes"] = list(PRESET_INERT_AXES)
+            payload["preset_inert_axes"] = list(self.inert_axes)
+        if self.cascade_join_meta is not None:
+            payload["cascade_join"] = dict(self.cascade_join_meta)
+        if self.composite_join_meta is not None:
+            payload["composite_join"] = dict(self.composite_join_meta)
+        if self.cascade_flagged is not None:
+            payload["cascade_flagged"] = self.cascade_flagged
         return payload
 
 
@@ -321,18 +495,6 @@ class SweepScan:
     snapshot_hashes
         The sorted distinct eras recorded for the coordinates the discovered
         rows cover (empty = honest "no signal").
-    total_rows_override
-        ADDITIVE (DEC-RESULTS-TOPK-ROLLUP-001): a rollup-served scan carries
-        the STAMPED global distinct-run_id count here (its ``rows`` are only
-        the K-union superset, so ``len(filtered)`` would under-report);
-        ``None`` (the default, every legacy construction) keeps the
-        byte-identical ``len(filtered)`` law.
-    superset_only
-        ADDITIVE (DEC-RESULTS-TOPK-ROLLUP-001): ``True`` marks a scan whose
-        ``rows`` are the rollup's top-K UNION superset — valid ONLY for the
-        UNFILTERED leaderboard (the union under a filter is NOT the filtered
-        top-N); :func:`build_sweep_leaderboard` structurally REFUSES to
-        filter such a scan.
     """
 
     rows: tuple[ResultRow, ...]
@@ -344,8 +506,6 @@ class SweepScan:
     timeframes: tuple[str, ...]
     directions: tuple[str, ...]
     snapshot_hashes: tuple[str, ...]
-    total_rows_override: int | None = None
-    superset_only: bool = False
 
 
 def load_sweep_scan(lake_root: Path) -> SweepScan:
@@ -357,30 +517,15 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
     → the dropdown option sets → the era map (:func:`_snapshot_eras`, only when
     rows exist) → the covered ``snapshot_hashes``. Pure function of the sweeps
     tree — the route caches the result under the ``sweep_results_revision``
-    content token. Since DEC-RESULTS-TOPK-ROLLUP-001 a thin delegator over
-    :func:`load_sweep_scan_tree` (``<lake_root>/sweeps`` — byte-identical for
-    every existing caller); the engine rollup's Hook-B full fold calls the
-    tree variant directly so a custom-named results root folds correctly.
+    content token.
 
     Honest envelope (Golden Rule #10): cold cost is O(stores) glob +
     O(stores × rows) load + ONE O(audit lines) STREAMING era pass (O(1) memory
     via :func:`brutex.orchestrator.audit.iter_entries`) — paid once per
-    revision, NOT per poll. The per-era byte-offset ``AuditCursor`` resume now
-    exists for the ROLLUP writers (:mod:`brutex.engine.results_rollup`,
-    DEC-RESULTS-TOPK-ROLLUP-001); THIS legacy scan deliberately keeps the full
-    streaming pass (it is the fallback + parity oracle).
+    revision, NOT per poll; the per-era byte-offset ``AuditCursor`` resume is
+    NAMED future work, not claimed.
     """
-    return load_sweep_scan_tree(lake_root / SWEEPS_DIRNAME)
-
-
-def load_sweep_scan_tree(sweeps_root: Path) -> SweepScan:
-    """The :func:`load_sweep_scan` body over an EXPLICIT sweeps root.
-
-    Byte-identical to the pre-split ``load_sweep_scan`` (which now delegates
-    here) — exposed so the rollup's Hook-B run-end reconcile can fold a
-    custom-named results root (``cmd_sweep_all --out``) through the ONE legacy
-    loader instead of re-deriving ``<lake>/sweeps`` (CLAUDE.md §11 COMMON).
-    """
+    sweeps_root = lake_root / SWEEPS_DIRNAME
     paths = _iter_store_paths(sweeps_root)
     all_rows, store_count, skipped, run_id_conflicts = _load_rows_resilient(paths)
 
@@ -438,17 +583,7 @@ def _clamp_top_n(top_n: int) -> int:
 # THIN by design: every ordering law lives in brutex.ranking.presets (the ONE
 # preset home, CLAUDE.md §11 COMMON); this surface only VALIDATES the query
 # token and PROJECTS a persisted ResultRow onto the preset's RankRecord.
-
-#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
-#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
-#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
-#: through to the next preset key, ultimately ``run_id`` ASC). Surfaced on the
-#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
-#: axes discriminated (Golden Rule #10): notably the ``composite`` preset
-#: currently orders by ``run_id`` alone — the recomputed composite lives in the
-#: (row ⋈ aggregate) top-100 artifact build, and joining the aggregate sidecars
-#: here is merge-integration work, NOT silently faked per-row values.
-PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+# (PRESET_INERT_AXES itself is declared above SweepLeaderboard — its default.)
 
 
 def resolve_preset_param(preset: str | None) -> str | None:
@@ -474,53 +609,33 @@ def resolve_preset_param(preset: str | None) -> str | None:
     raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
 
 
-def _preset_rank_record(row: ResultRow) -> RankRecord:
+def _preset_rank_record(
+    row: ResultRow, composite_of: Mapping[str, float] | None = None
+) -> RankRecord:
     """Project one persisted :class:`ResultRow` onto the preset rank inputs.
 
     The persisted full-precision metrics map 1:1 (NEVER rounded — CLAUDE.md §4;
-    raw floats, no coercion). The two :data:`PRESET_INERT_AXES` fields are NOT
-    persisted on ``ResultRow``: they are filled with the CONSTANT no-signal
-    values (``None`` composite — the presets module's honest "unscored" state —
-    and ``0`` consecutive losses), IDENTICAL for every row, so they can never
-    reorder anything; ties fall through to the store's ``run_id``-ASC law
-    inside :func:`~brutex.ranking.presets.sort_by_preset`. Constants are not
+    raw floats, no coercion). ``max_consecutive_losses`` is NOT persisted on
+    ``ResultRow``: it is filled with the CONSTANT no-signal ``0``, IDENTICAL
+    for every row, so it can never reorder anything; ties fall through to the
+    store's ``run_id``-ASC law inside
+    :func:`~brutex.ranking.presets.sort_by_preset`. ``composite_score``
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) reads the JOINED ranking composite
+    from *composite_of* (the newest run's aggs-sidecar index) when supplied —
+    an unscored row (or ``composite_of=None``, every pre-change caller) keeps
+    the presets module's honest ``None`` "unscored" state (the existing
+    None-after-scored ordering law — never a fabricated 0). Constants are not
     fabricated per-row data — they are never displayed, only ordering-inert.
     """
     return RankRecord(
         run_id=row.run_id,
         max_drawdown_pct=row.max_drawdown_pct,
-        composite_score=None,
+        composite_score=None if composite_of is None else composite_of.get(row.run_id),
         max_consecutive_losses=0,
         profit_factor=row.profit_factor,
         win_rate=row.win_rate,
         calmar_ratio=row.calmar_ratio,
     )
-
-
-def preset_rank_record_source() -> str:
-    """The exact source text of :func:`_preset_rank_record` — a code-token input.
-
-    DEC-RESULTS-TOPK-ROLLUP-001 (MAJOR-3): the rollup's ``code_token`` hashes
-    this projection's SOURCE separately from the hashed ``presets.py`` module
-    (it lives HERE, outside that file) because it is the function that makes
-    the inert-axes assumption true — an edit to it MUST move the token and
-    force a rollup rebuild (invalidation-teeth-pinned).
-    """
-    return inspect.getsource(_preset_rank_record)
-
-
-def rank_value_source() -> str:
-    """The exact source text of :func:`_rank_value` — a code-token input.
-
-    DEC-RESULTS-TOPK-ROLLUP-001 (hostile-review LOW-1, PR #1436): the
-    ``rank_by`` projection plays the IDENTICAL inert-assumption role for the
-    14 ``RANKABLE_COLUMNS`` union axes that ``_preset_rank_record`` plays for
-    the preset axes — a future semantic edit here (a coercion, a derived
-    value) would change the served ordering without moving the rollup's
-    ``code_token``, so its SOURCE is folded into the token exactly like the
-    preset projection's (invalidation-teeth-pinned).
-    """
-    return inspect.getsource(_rank_value)
 
 
 #: The externally-served ``error`` marker of :func:`store_error_payload` — a
@@ -717,19 +832,41 @@ def _snapshot_eras(sweeps_root: Path) -> dict[_EraKey, frozenset[str]]:
     coordinate re-swept under two eras honestly maps to BOTH (→ ``ambiguous``
     rows); the per-file authority is dup-train PR-3's at-rest census, NOT
     claimed here (per-tuple filename digests fold the hash one-way).
-
-    Since DEC-RESULTS-TOPK-ROLLUP-001 a THIN delegator: the scan body moved
-    VERBATIM to :func:`brutex.engine.results_rollup.snapshot_eras` (the
-    COMMON home the rollup writers share — CLAUDE.md §11) — name, signature,
-    events and behavior byte-identical; the scan-split test battery stays
-    green unmodified (delegation-pinned).
     """
     # Function-local import mirroring results_report._recorded_snapshot_hash:
     # this module's read+render surface stays lean; the audit reader is only
     # paid when a leaderboard scan is actually built.
-    from brutex.engine.results_rollup import snapshot_eras
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
-    return snapshot_eras(sweeps_root)
+    audit_path = sweeps_root.joinpath(*_AUDIT_RELPATH)
+    if not audit_path.exists():
+        # iter_entries raises AuditError at CALL time on a missing file; the
+        # absent chain is the ordinary "no signal yet" state, not a failure.
+        return {}
+    collected: dict[_EraKey, set[str]] = {}
+    try:
+        for entry in iter_entries(audit_path):
+            if entry.action != _SWEEP_START_ACTION:
+                continue
+            payload = entry.payload
+            try:
+                key: _EraKey = (
+                    str(payload["instrument"]),
+                    str(payload["tf"]),
+                    str(payload["direction"]),
+                    str(payload["mode"]),
+                    int(payload["k"]),
+                )
+                snapshot = str(payload["data_snapshot_hash"])
+            except (KeyError, TypeError, ValueError):
+                # A malformed SWEEP_START payload contributes no signal — skipped,
+                # never a 500 (the doctor's verify path is where malformation raises).
+                continue
+            collected.setdefault(key, set()).add(snapshot)
+    except AuditError as exc:
+        _LOG.warning("sweep_results.era_scan_failed", audit_path=str(audit_path), error=str(exc))
+        return {}
+    return {key: frozenset(hashes) for key, hashes in collected.items()}
 
 
 def _row_era_key(row: ResultRow) -> _EraKey:
@@ -818,133 +955,68 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     }
 
 
-# ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ─────────────────────
-
-
-@dataclass(frozen=True, slots=True)
-class RollupServe:
-    """The rollup serve result for one ``/results`` revision.
-
-    ``scan`` is the rollup-backed superset :class:`SweepScan` on the FRESH and
-    the conflict-suspect STALE arms, or ``None`` on the fallback arm
-    (``fallback_reason`` names why — the route then serves the byte-identical
-    legacy scan and fires the Hook-C rebuild; the behind / revision_drift
-    verdicts deliberately take this arm too, see
-    :func:`load_sweep_scan_via_rollup`). ``behind_stores`` /
-    ``conflict_suspect`` are the honest additive staleness notes
-    (EMIT-ON-nonzero/true on the wire, so a fresh serve's payload shape is
-    unchanged).
-    """
-
-    scan: SweepScan | None
-    behind_stores: int
-    conflict_suspect: bool
-    fallback_reason: str | None
-
-
-def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) -> RollupServe:
-    """Serve the ``/results`` scan from the persisted rollup, if valid.
-
-    Runs the V1-V5 validation ladder
-    (:func:`brutex.engine.results_rollup.classify_rollup`) for the UNFILTERED
-    leaderboard ONLY (the route's serve predicate) and maps the verdict onto
-    the serve doctrine:
-
-    * **fresh** — the rollup-backed superset scan, byte-identical payloads
-      (parity-golden-pinned against the legacy recompute).
-    * **stale · conflict_suspect** — the LAST-VALID rollup + the honest
-      additive notes (MAJOR-1: a latched Hook-A fence must never cost a
-      per-poll O(stores × rows) re-scan for the rest of a 2-4 day launch;
-      the conflict is said on the wire, exact accounting restored by the
-      next Hook B/C full fold).
-    * **stale · behind / revision_drift** — treated as FALLBACK (the folded
-      land-pass ruling, ledgered in MIGRATION.md #1732): an additions-only /
-      audit-append drift reconciles through ONE legacy scan for that
-      revision + the Hook-C rebuild, preserving the incumbent #1533
-      next-poll-freshness contract (`test_dashboard_results_revision_key`
-      passes UNMODIFIED) AND closing the convergence hole a pure stale-serve
-      would have for out-of-band writers (with no hook to advance the stamp,
-      "N behind" would be permanent). With Hook A healthy the merge stamps
-      the post-flush revision, so mid-grid polls classify FRESH — only a
-      poll racing the flush→merge window (or an out-of-band write) pays the
-      one legacy scan, never worse than the incumbent per-revision cost.
-    * **rebuild** — ``scan=None`` + the named reason; the caller falls back
-      to the byte-identical legacy scan and rebuilds the rollup from it
-      (Hook C).
-
-    The ``sweep_results.rollup_fallback`` / ``rollup_stale_served`` WARNs are
-    deduped per (revision, reason) through the injected LRU-bounded
-    *log_gate* (MINOR-2 — the #1711 ``OutageGate`` precedent: a poll loop
-    against one bad state logs ONCE, never per poll); a fresh serve after a
-    degraded stretch logs one ``rollup_recovered`` INFO.
-
-    Honest envelope (Golden Rule #10): the classification pays an O(stores)
-    stat-level glob per call (the same walk legacy discovery pays) plus an
-    O(|stamped stores|) re-stat on the non-fresh arms, and a serve pays ONE
-    bounded O(K-union) Parquet load — flat vs total finalist rows and store
-    count in the load term; "O(1) repeat poll" is scoped to AFTER grid settle
-    (the route's level-1/level-2 caches).
-    """
-    from brutex.engine import results_rollup
-
-    sweeps_root = lake_root / SWEEPS_DIRNAME
-    verdict = results_rollup.classify_rollup(sweeps_root, current_rev=rev)
-    serveable = verdict.rows is not None and verdict.stamp is not None
-    if serveable and verdict.outcome == "stale" and verdict.reason != "conflict_suspect":
-        # The behind / revision_drift reconcile arm (the folded land-pass
-        # ruling above): route through the legacy fallback + Hook C so the
-        # served payload is FRESH for this revision and the rollup converges.
-        serveable = False
-    if not serveable or verdict.rows is None or verdict.stamp is None:
-        if log_gate.should_emit(("fallback", rev, verdict.reason)):
-            _LOG.warning("sweep_results.rollup_fallback", rev=rev, reason=verdict.reason)
-        return RollupServe(
-            scan=None, behind_stores=0, conflict_suspect=False, fallback_reason=verdict.reason
-        )
-    stamp = verdict.stamp
-    scan = SweepScan(
-        rows=verdict.rows,
-        store_count=stamp.store_count,
-        skipped=stamp.skipped,
-        run_id_conflicts=stamp.run_id_conflicts,
-        eras=dict(stamp.eras),
-        instruments=stamp.instruments,
-        timeframes=stamp.timeframes,
-        directions=stamp.directions,
-        snapshot_hashes=stamp.snapshot_hashes,
-        total_rows_override=stamp.total_rows,
-        superset_only=True,
-    )
-    if verdict.outcome == "stale":
-        if log_gate.should_emit(("stale", rev, verdict.reason)):
-            _LOG.warning(
-                "sweep_results.rollup_stale_served",
-                rev=rev,
-                reason=verdict.reason,
-                behind_stores=verdict.behind_stores,
-                conflict_suspect=stamp.conflict_suspect,
-            )
-    elif log_gate.clear_degraded():
-        _LOG.info("sweep_results.rollup_recovered", rev=rev)
-    return RollupServe(
-        scan=scan,
-        behind_stores=verdict.behind_stores,
-        conflict_suspect=stamp.conflict_suspect,
-        fallback_reason=None,
-    )
-
-
-# ═══ P2 VERDICT-JOIN SEAM (gap-register ruling 10 — documented, NOT built) ═══
-# P2 (run-core) delivers gap G8 as a PURE verdict-marker function in a
-# P2-owned module: it marks stage3-ungated / cascade-rejected rows so /results
-# can never co-rank them silently as institutional winners. At
-# merge-integration, P3 IMPORTS that function HERE and folds its marker into
-# `_project_row` as an additive per-row key — exactly the `snapshot_era`
-# pattern (marker, never exclusion). Until that lands, rows carry NO verdict
-# field: absence means "not yet joined", never a fabricated verdict (Golden
-# Rule #1). P4 consumes the JSON only. DO NOT implement the verdict logic in
-# this module — it is P2's zone; only the import + per-row fold belong here.
+# ═══ CASCADE VERDICT JOIN (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — BUILT) ═══
+# The former P2 verdict-join seam is now implemented: the Stage-4 cascade's
+# per-candidate verdicts join onto /results rows by EXACT run_id equality
+# (the Rule-4 identity — a verdict can only attach to the byte-identical run
+# it was judged for; the pool-relative context is disclosed via the payload's
+# cascade_join.sweep_id meta + the provisional/pool honesty stamps), folded
+# into the row projection as ADDITIVE EMIT-ON-PRESENT keys — exactly the
+# `snapshot_era` pattern (marker, never exclusion: a cascade-FAILED row stays
+# RANKED and is red-flagged client-side). Absence still means "not judged by
+# the latest cascade", never a fabricated verdict (Golden Rule #1).
 # ═════════════════════════════════════════════════════════════════════════════
+
+
+def _cascade_row_keys(run_id: str, load: CascadeJoinLoad | None) -> dict[str, Any]:
+    """One row's ADDITIVE cascade keys (EMIT-ON-PRESENT — {} when unjoined).
+
+    A matched verdict emits ``cascade_status`` (``pass | provisional_pass |
+    fail``) + the server-built ``cascade_status_text`` (the ONE
+    :func:`~brutex.dashboard.oneclick_view.cascade_status_text` builder — no
+    status prose in JS) + ``cascade_provisional``, plus ``cascade_composite``
+    (pass only — the CASCADE composite, labelled "Cascade score" client-side,
+    never conflated with the ranking ``composite_score``),
+    ``cascade_rejected_at``/``cascade_detail`` (fail only, verbatim) and
+    ``cpcv_pass_pct`` (``rate * 100.0``, exact float — only when measured).
+    A DUPLICATE candidate_id emits ONLY the status text ("not validated ·
+    duplicate verdict" — ambiguous evidence, nothing else displayed); an
+    unmatched row emits NOTHING (the client renders "not validated" from the
+    payload meta's ``joined`` state).
+    """
+    if load is None or load.join is None or load.state != _CASCADE_LOAD_JOINED:
+        return {}
+    join = load.join
+    if run_id in join.ambiguous_ids:
+        return {
+            "cascade_status_text": cascade_status_text(
+                "not_validated", reason="duplicate_candidate_id"
+            )
+        }
+    verdict = join.by_candidate.get(run_id)
+    if verdict is None:
+        return {}
+    status = ("provisional_pass" if verdict.provisional else "pass") if verdict.passed else "fail"
+    keys: dict[str, Any] = {
+        "cascade_status": status,
+        "cascade_status_text": cascade_status_text(
+            status, rejected_at=verdict.rejected_at, provisional=verdict.provisional
+        ),
+        "cascade_provisional": verdict.provisional,
+    }
+    if verdict.passed:
+        if verdict.cascade_composite is not None:
+            keys["cascade_composite"] = verdict.cascade_composite
+    else:
+        if verdict.rejected_at is not None:
+            keys["cascade_rejected_at"] = verdict.rejected_at
+        if verdict.detail:
+            keys["cascade_detail"] = verdict.detail
+    if verdict.cpcv_pass_rate is not None:
+        # The display alias — an EXACT float unit projection (rate * 100.0),
+        # never a rounding (CLAUDE.md §4); absent when unmeasured ⇒ "—".
+        keys["cpcv_pass_pct"] = verdict.cpcv_pass_rate * 100.0
+    return keys
 
 
 def build_sweep_leaderboard(
@@ -957,6 +1029,8 @@ def build_sweep_leaderboard(
     top_n: int = DEFAULT_TOP_N,
     scan: SweepScan | None = None,
     preset: str | None = None,
+    cascade: CascadeJoinLoad | None = None,
+    composite: CompositeIndex | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
@@ -968,7 +1042,8 @@ def build_sweep_leaderboard(
     inline via :func:`load_sweep_scan` — byte-identical to the pre-split
     behaviour for every existing caller; passing a cached *scan* skips the
     O(stores × rows) load + the audit era pass entirely
-    (DEC-LEDGER-DELTA-O-PAGE-001) and pays ONLY the O(N log N) rank +
+    (DEC-LEDGER-DELTA-O-PAGE-001) and pays ONLY the bounded O(N log top_n)
+    rank (full-sort on the preset arm — the engine-shared law) +
     O(top_n) projection.
 
     Parameters
@@ -997,6 +1072,21 @@ def build_sweep_leaderboard(
         ``run_id``-ASC deterministic ties, the exact ``ResultsStore.top_k``
         two-pass idiom); an unknown token raises ``ValueError`` naming the
         valid values (the route maps it to a clean 400).
+    cascade
+        The cascade-report load (:func:`load_cascade_join_file`) or ``None``
+        (every pre-change caller — byte-identical payload). A ``joined``
+        load annotates matched rows (EMIT-ON-PRESENT keys, see
+        :func:`_cascade_row_keys`) + emits the payload meta; an ``absent``
+        load emits NOTHING (byte-identity); a failed load emits ONLY the
+        meta naming its state (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 —
+        annotation, never exclusion/rerank).
+    composite
+        The newest run's ranking-composite index
+        (:func:`brutex.dashboard.composite_join.load_composite_index`) or
+        ``None``. A non-empty ``joined`` index feeds every scored row's
+        ``composite_score`` (display) AND activates the preset composite
+        axis honestly (:attr:`SweepLeaderboard.inert_axes`); ``absent``
+        emits nothing.
 
     Returns
     -------
@@ -1014,17 +1104,14 @@ def build_sweep_leaderboard(
     depth = _clamp_top_n(top_n)
     if scan is None:
         scan = load_sweep_scan(lake_root)
-    if scan.superset_only and (instrument is not None or tf is not None or direction is not None):
-        # STRUCTURAL refusal (DEC-RESULTS-TOPK-ROLLUP-001): the rollup's rows
-        # are the top-K UNION superset — the union under a FILTER is NOT the
-        # filtered top-N (a filtered leader may have been trimmed out on the
-        # global axes). The route's serve predicate already keeps filtered
-        # requests on the legacy path; this guard makes the invariant
-        # impossible to bypass, never a silently-wrong filtered leaderboard.
-        raise ValueError(
-            "a superset-only (rollup-served) SweepScan cannot be filtered — "
-            "filtered leaderboards must use the legacy full scan"
-        )
+
+    # The joined ranking-composite map (DEC-RESULTS-CASCADE-VERDICT-JOIN-001)
+    # — non-None ONLY when the index joined non-empty: it then feeds BOTH the
+    # per-row display key and the preset composite axis (the honest dynamic
+    # inert-axes disclosure).
+    composite_of: Mapping[str, float] | None = None
+    if composite is not None and composite.state == "joined" and composite.by_run_id:
+        composite_of = composite.by_run_id
 
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
@@ -1032,29 +1119,90 @@ def build_sweep_leaderboard(
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
         # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
-        # the leaderboard is identical for any discovery order.
-        ordered = sorted(filtered, key=lambda r: r.run_id)
-        ordered.sort(key=lambda r: _rank_value(r, resolved_rank), reverse=True)
+        # the leaderboard is identical for any discovery order. Fix 5
+        # (DEC-MEMORY-FOOTPRINT-HARDENING-001): only the top-`depth` rows are ever
+        # projected, so the former whole-list two-pass sort (O(rows·log rows) per
+        # request) becomes ONE bounded `heapq.nsmallest` (O(rows·log depth)) over the
+        # composite key `(-value, run_id)` — order PROVEN byte-identical to the
+        # two-pass law: negation is exact for int (arbitrary precision) AND float
+        # (sign-bit flip; `-0.0 == 0.0` so a zero tie still falls to run_id), int↔float
+        # comparisons are exact-value in Python, and `nsmallest` is stable in
+        # iteration order for fully-equal keys — exactly the stable two-pass residue
+        # (duplicate (value, run_id) pairs keep scan order). Parity is property-pinned
+        # (test_sweep_results_topk_order_parity.py) incl. ties, ±0.0, >2**53 paisa
+        # ints and duplicate run_ids. HONEST limit: a NaN metric has no total order
+        # under EITHER path (the store writers persist finite metrics — the gates'
+        # fail-closed non_finite_input law), so NaN is outside the parity claim.
+        ordered: Sequence[ResultRow] = heapq.nsmallest(
+            depth, filtered, key=lambda r: (-_rank_value(r, resolved_rank), r.run_id)
+        )
     else:
         # THIN preset adapter (ruling 10): the ENTIRE ordering law — key,
         # direction, run_id-ASC tie pre-sort — lives in brutex.ranking.presets;
         # this call site only projects the persisted rows (raw full-precision
-        # values, see _preset_rank_record) and never re-derives a ranking rule.
+        # values, see _preset_rank_record — the composite axis reads the
+        # joined index when one exists) and never re-derives a ranking rule.
+        # DELIBERATELY still the full sort (fix 5 honesty): the preset law is
+        # a stable multi-pass composite (None-after-scored, the top_k two-pass
+        # idiom) shared verbatim with the engine's top100 writer — bounding it
+        # here would re-derive the rule this adapter is pinned never to.
         ordered = list(
-            sort_by_preset(filtered, preset=PRESETS[resolved_preset], record_of=_preset_rank_record)
+            sort_by_preset(
+                filtered,
+                preset=PRESETS[resolved_preset],
+                record_of=lambda r: _preset_rank_record(r, composite_of),
+            )
         )
-    rows = tuple(
-        _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
-        for rank, r in enumerate(ordered[:depth], start=1)
-    )
+    rows_list: list[dict[str, Any]] = []
+    matched_rows = 0
+    flagged = 0
+    for rank, r in enumerate(ordered[:depth], start=1):
+        projected = _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
+        cascade_keys = _cascade_row_keys(r.run_id, cascade)
+        if cascade_keys:
+            projected.update(cascade_keys)
+        if "cascade_status" in cascade_keys:
+            matched_rows += 1
+            if cascade_keys["cascade_status"] == "fail":
+                flagged += 1
+        if composite_of is not None:
+            score = composite_of.get(r.run_id)
+            if score is not None:
+                # The RANKING composite (label "Composite") — distinct from
+                # the cascade's own composite (label "Cascade score").
+                projected["composite_score"] = score
+        rows_list.append(projected)
+    rows = tuple(rows_list)
+
+    # EMIT-ON-PRESENT meta (byte-identity law): an ``absent`` load/index —
+    # or an un-run loader — contributes NOTHING; every other state is named.
+    cascade_meta: dict[str, Any] | None = None
+    flagged_out: int | None = None
+    if cascade is not None and cascade.state != _CASCADE_LOAD_ABSENT:
+        join = cascade.join
+        cascade_meta = {
+            "state": cascade.state,
+            "sweep_id": None if join is None else join.sweep_id,
+            "n_input": None if join is None else join.n_input,
+            "n_survived": None if join is None else join.n_survived,
+            "matched_rows": matched_rows,
+            "skipped_groups": 0 if join is None else join.skipped_groups,
+            "skipped_verdicts": 0 if join is None else join.skipped_verdicts,
+            "duplicate_ids": 0 if join is None else len(join.ambiguous_ids),
+        }
+        flagged_out = flagged
+    composite_meta: dict[str, Any] | None = None
+    if composite is not None and composite.state != COMPOSITE_STATE_ABSENT:
+        composite_meta = {
+            "state": composite.state,
+            "run_id": composite.run_id,
+            "scored_rows": composite.scored_rows,
+        }
 
     return SweepLeaderboard(
         rows=rows,
         available=scan.store_count > 0,
-        # A rollup-served scan reports the STAMPED global count (its rows are
-        # only the K-union superset); every legacy scan keeps len(filtered)
-        # byte-identically (DEC-RESULTS-TOPK-ROLLUP-001).
-        total_rows=len(filtered) if scan.total_rows_override is None else scan.total_rows_override,
+        total_rows=len(filtered),
         store_count=scan.store_count,
         skipped=scan.skipped,
         rank_by=resolved_rank,
@@ -1065,4 +1213,10 @@ def build_sweep_leaderboard(
         mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
         run_id_conflicts=scan.run_id_conflicts,
         preset=resolved_preset,
+        inert_axes=(
+            _INERT_AXES_COMPOSITE_ACTIVE if composite_of is not None else PRESET_INERT_AXES
+        ),
+        cascade_join_meta=cascade_meta,
+        composite_join_meta=composite_meta,
+        cascade_flagged=flagged_out,
     )

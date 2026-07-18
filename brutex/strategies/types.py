@@ -51,6 +51,162 @@ class FibAnchorKind(Enum):
     WEEKLY_STATIC = "weekly_static"
 
 
+class PriceSource(Enum):
+    """The per-bar price scalar feeding VWAP / EMA (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+
+    A SWEPT STRATEGY PARAMETER (like :class:`FibAnchorKind`), never a vocabulary
+    bit: the Stage-1A ``bar_bits`` for the VWAP-position bits (52-53) and the
+    EMA-vs-close bits (0-5) depend on WHICH price scalar the running VWAP /
+    EMA accumulators are fed each bar, so two sources are two computations and
+    MUST get two run-identities via the params axis (the exact ``fib_anchor``
+    precedent, no ``indicator_version`` bump — the shared-Rust accumulator math
+    is byte-unchanged, only the pre-FFI scalar selection moves). It lives HERE
+    (the pure leaf ``strategies.types`` module) so the engine can thread it as a
+    grid axis without pulling any heavy import into the engine runtime graph.
+
+    ``hl2`` / ``ohlc4`` are DELIBERATELY absent: on liquid 1-minute index /
+    futures bars they are near-clones of ``HLC3`` (correlated Sharpe draws that
+    worsen DSR effective-N), AND their ``/2`` / ``/4`` reductions can land on a
+    ½-paisa rounding tie that the ``/3`` path provably never hits (the
+    ``(H+L+C)`` paisa-sum remainder is ``{0,1,2}`` so ``r/3 ∈ {0, ⅓, ⅔}`` never
+    equals ½). Re-adding either needs a clones + rounding-tie review + a golden.
+    """
+
+    #: Bar open (``bar.open``).
+    OPEN = "open"
+    #: Bar high (``bar.high``) — a DEFERRED variant (fixed-``close``-comparison
+    #: bias risk); shipped in the enum for completeness, not in the OFAT lattice.
+    HIGH = "high"
+    #: Bar low (``bar.low``) — a DEFERRED variant (see ``HIGH``).
+    LOW = "low"
+    #: Bar close (``bar.close``) — today's hardcoded EMA source.
+    CLOSE = "close"
+    #: Typical price ``(H+L+C)/3`` — today's hardcoded VWAP source.
+    HLC3 = "hlc3"
+
+
+@dataclass(frozen=True, slots=True)
+class PriceSourceCell:
+    """One cell of the VWAP/EMA price-source grid axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+
+    A ``(vwap_source, ema_source)`` pair, decomposed into two run-identity params
+    keys downstream. The default ``(HLC3, CLOSE)`` reproduces today's hardcoded
+    behaviour bit-for-bit, and — per the default-omit convention (Override 1) —
+    serialises ABSENT from every canonical params / store-address / cache key so
+    existing run-identities stay byte-identical. Frozen + slotted so it is
+    hashable (an ``itertools.product`` grid axis + a ``dict.fromkeys`` de-dup key).
+    """
+
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
+
+    @property
+    def is_default(self) -> bool:
+        """Whether this cell is the baseline ``(HLC3, CLOSE)`` (the default-omit gate).
+
+        The ONE predicate (CLAUDE.md §11 COMMON) every canonicaliser / identity /
+        cache / manifest site consults to decide the default-omit (Override 1): a
+        default cell serialises ABSENT so pre-axis run-identities stay byte-identical.
+        """
+        return self.vwap_source is PriceSource.HLC3 and self.ema_source is PriceSource.CLOSE
+
+
+def price_source_params_fragment(
+    vwap_source: PriceSource, ema_source: PriceSource
+) -> dict[str, str]:
+    """Return the default-OMITTED params fragment for one ``(vwap, ema)`` pair.
+
+    The ONE source of the price-source default-omit rule (CLAUDE.md §11 COMMON,
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override 1): the ``vwap_source`` key is emitted
+    only when it is NOT the default :attr:`PriceSource.HLC3`, and ``ema_source``
+    only when it is NOT :attr:`PriceSource.CLOSE` — each key INDEPENDENTLY. Both
+    default ⇒ an empty dict, so an existing run's canonical params / store address /
+    cache key / manifest entry is byte-identical to the pre-axis form. Every
+    canonicaliser (:func:`~brutex.engine.sweep_run.canonical_trade_params`,
+    :func:`~brutex.strategies.spec.canonical_spec_params`, the orchestrator store
+    digest, the supervisor cache key, the cascade spec dict, the Stage-3 manifest)
+    merges this fragment instead of re-inlining the predicate.
+
+    Parameters
+    ----------
+    vwap_source, ema_source
+        The cell's VWAP / EMA price scalars.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{}`` when both are default, else the non-default key(s) mapped to their
+        :class:`PriceSource` string values.
+    """
+    fragment: dict[str, str] = {}
+    if vwap_source is not PriceSource.HLC3:
+        fragment["vwap_source"] = vwap_source.value
+    if ema_source is not PriceSource.CLOSE:
+        fragment["ema_source"] = ema_source.value
+    return fragment
+
+
+#: The one baseline cell — today's hardcoded ``(HLC3, CLOSE)`` behaviour. The
+#: default price-source axis for every grid; a grid carrying only this cell is
+#: cardinality-1 and byte-identical to the pre-axis sweep (dormant axis).
+DEFAULT_PRICE_SOURCE_CELL: PriceSourceCell = PriceSourceCell()
+
+#: The exact number of ``:``-separated parts in one ``<vwap>:<ema>`` cell token.
+_CELL_TOKEN_PARTS: int = 2
+
+
+def parse_price_source_cells(spec: str) -> list[PriceSourceCell]:
+    """Parse a CSV of ``vwap:ema`` cell tokens into :class:`PriceSourceCell`\\ s.
+
+    Grammar: comma-separated cells, each ``"<vwap_source>:<ema_source>"`` using
+    the :class:`PriceSource` string values (e.g. ``"hlc3:close,open:close"``).
+    Whitespace around tokens is ignored; blank tokens are skipped. Duplicate
+    cells are collapsed (first-seen order preserved) so a repeated cell never
+    yields a duplicate grid point. An empty / all-blank spec yields the single
+    baseline cell ``(HLC3, CLOSE)`` so an unset flag is byte-identical to today.
+
+    The 5-cell OFAT (one-factor-at-a-time) lattice is
+    ``"hlc3:close,open:close,close:close,hlc3:open,hlc3:hlc3"`` — the baseline
+    plus 2 VWAP-perturb + 2 EMA-perturb cells (cardinality 5, linear).
+
+    Parameters
+    ----------
+    spec
+        The CSV cell spec.
+
+    Returns
+    -------
+    list[PriceSourceCell]
+        The de-duplicated cells, in first-seen order (never empty).
+
+    Raises
+    ------
+    ValueError
+        On a malformed cell (missing / extra ``:`` separator) or an unknown
+        ``PriceSource`` token.
+    """
+    cells: list[PriceSourceCell] = []
+    for raw in spec.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        parts = token.split(":")
+        if len(parts) != _CELL_TOKEN_PARTS:
+            raise ValueError(
+                f"price-source cell {token!r} must be '<vwap>:<ema>' (exactly one ':' separator)"
+            )
+        vwap_tok, ema_tok = parts[0].strip(), parts[1].strip()
+        cell = PriceSourceCell(
+            vwap_source=PriceSource(vwap_tok),
+            ema_source=PriceSource(ema_tok),
+        )
+        if cell not in cells:
+            cells.append(cell)
+    if not cells:
+        cells.append(DEFAULT_PRICE_SOURCE_CELL)
+    return cells
+
+
 @dataclass(frozen=True, slots=True)
 class Signal:
     """One trade signal emitted by a :class:`~brutex.strategies.Strategy`.

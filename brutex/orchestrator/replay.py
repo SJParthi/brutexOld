@@ -54,10 +54,11 @@ trusted as a correctness proof.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from brutex.orchestrator.audit import AuditEntry, AuditError, read_entries
+from brutex.orchestrator.audit import AuditEntry, AuditError, iter_entries
 
 logger = logging.getLogger(__name__)
 
@@ -111,19 +112,23 @@ class ReplayDiff:
 
 
 def project_subjects(
-    entries: list[AuditEntry],
+    entries: Iterable[AuditEntry],
     *,
     action_filter: str = "add",
 ) -> frozenset[str]:
-    """Project a list of :class:`AuditEntry` to the set of subjects whose
-    action matches *action_filter*.
+    """Project an iterable of :class:`AuditEntry` to the set of subjects
+    whose action matches *action_filter*.
 
     Parameters
     ----------
     entries
-        Output of :func:`brutex.orchestrator.audit.read_entries`. The
-        replay oracle does NOT re-read the file — callers can chain
-        verify_chain → read_entries → project_subjects in any
+        Any iterable of entries — the streaming
+        :func:`brutex.orchestrator.audit.iter_entries` (one entry resident
+        at a time; DEC-AUDIT-READERS-STREAM-001) or the materialised
+        :func:`brutex.orchestrator.audit.read_entries` output (a list IS an
+        Iterable — every pre-widening caller is unchanged). The replay
+        oracle does NOT re-read the file — callers can chain
+        verify_chain → iter_entries/read_entries → project_subjects in any
         combination they need.
     action_filter
         Action name to retain. Defaults to ``"add"`` since that's the
@@ -182,19 +187,25 @@ def replay_audit_to_diff(
     live_subjects: frozenset[str],
     action_filter: str = "add",
 ) -> ReplayDiff:
-    """End-to-end replay: read audit JSONL → project subjects → diff
+    """End-to-end replay: stream audit JSONL → project subjects → diff
     against live snapshot.
 
     Convenience wrapper for the common case. Tests + advanced callers
     may prefer to chain the individual helpers
-    (:func:`read_entries`, :func:`project_subjects`,
-    :func:`compute_replay_diff`).
+    (:func:`brutex.orchestrator.audit.iter_entries` /
+    :func:`brutex.orchestrator.audit.read_entries`,
+    :func:`project_subjects`, :func:`compute_replay_diff`).
+
+    Peak memory is O(distinct matching subjects) — the frozenset IS the
+    output — never O(chain): entries stream one at a time through
+    :func:`brutex.orchestrator.audit.iter_entries` instead of the old
+    whole-chain ``read_entries`` list (DEC-AUDIT-READERS-STREAM-001).
 
     Parameters
     ----------
     audit_path
         Path to the audit JSONL file. Passed straight through to
-        :func:`brutex.orchestrator.audit.read_entries`.
+        :func:`brutex.orchestrator.audit.iter_entries`.
     live_subjects
         Set of subjects currently present in the live dedup tier.
     action_filter
@@ -203,11 +214,12 @@ def replay_audit_to_diff(
     Raises
     ------
     AuditError
-        If the audit file is malformed at the JSONL line layer.
-        Propagates verbatim from `read_entries`.
+        If the audit file is missing (raised at the ``iter_entries`` call)
+        or malformed at the JSONL line layer (raised lazily mid-projection,
+        at the malformed committed line). Propagates verbatim — the same
+        error contract the materialised reader had.
     """
-    entries = read_entries(audit_path)
-    audit_subjects = project_subjects(entries, action_filter=action_filter)
+    audit_subjects = project_subjects(iter_entries(audit_path), action_filter=action_filter)
     return compute_replay_diff(
         audit_subjects=audit_subjects,
         live_subjects=live_subjects,

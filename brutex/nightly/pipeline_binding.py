@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     from brutex.dashboard.pipeline_pull import PipelinePullReport, PriorStepsVerdict
     from brutex.dashboard.pull_controller import BulkSpotReport, SessionRateController
     from brutex.data.instrument_store import InstrumentStore
+    from brutex.data.write_domain import WriteDomain
+    from brutex.feeds.vendor_profile import VendorProfileRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -116,6 +118,18 @@ class HeadlessPipeline:
     #: the sequencer inside the NSE market-hours window skips the whole vendor chain.
     #: ``None`` (a dry-run build, or a directly-constructed test double) never gates.
     market_closed: Callable[[], bool] | None = None
+    #: The resolved feed-vendor token (DEC-FEED-REGISTRY-COMMON-001,
+    #: MIGRATION.md #1903): ``build_headless_pipeline`` resolves the
+    #: registry's PRIMARY profile and carries its token here; the sequencer
+    #: receives it verbatim. The default equals ``run_full_pipeline``'s own
+    #: default, so a directly-constructed test double stays byte-identical.
+    vendor: str = "groww"
+    #: The resolved profile's typed write domain — CARRIED for inspection
+    #: only; NO writer consults it in this pass (the writer-side
+    #: ``assert_write_domain`` binding stays GATED on direct user approval —
+    #: PR #1570's permission-refusal record). ``None`` = a directly-built
+    #: test double (nothing reads it).
+    write_domain: WriteDomain | None = None
 
 
 def build_headless_pipeline(
@@ -128,12 +142,32 @@ def build_headless_pipeline(
     store_opener: Callable[[Path], InstrumentStore] | None = None,
     session_rate: SessionRateController | None = None,
     now: Callable[[], datetime] = _utcnow,
+    scope: str = "full",
+    registry: VendorProfileRegistry | None = None,
 ) -> HeadlessPipeline:
     """Bind the four pipeline phases headlessly (each item mirrors app.py).
 
     Parameters mirror the dashboard route's load-bearing inputs; every heavy
     dependency is injected or imported call-time (the cli.py house pattern).
     ``store_opener`` defaults to :meth:`InstrumentStore.open`.
+
+    *scope* (DEC-PULL-SCOPED-ALL-ONECLICK-001): the SAME token vocabulary the
+    ``/pull-pipeline`` launcher accepts (``brutex.dashboard.pull_scope``).
+    ``"full"`` (the default) is byte-identical to the pre-scope binding;
+    ``"spot-only"`` swaps the two F&O phase closures for the no-op report
+    builders (the sequencer gates pass vacuously — the sequencer itself is
+    untouched), feeds the prebuild an EMPTY F&O cascade, and composes the
+    Muhurat mid-run belt over the resolved market-hours predicate
+    (``compose_market_closed`` — the guard module is untouched; a dry-run's
+    ``None`` composes to ``None``; the belt honors the SAME
+    ``BRUTEX_MARKET_HOURS_GUARD`` kill switch — guard off ⇒ belt off).
+
+    *registry* (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903): the
+    feed-vendor registry this chain resolves its PRIMARY profile from;
+    ``None`` builds the default (Groww-only) registry over THIS chain's one
+    rate holder. The resolved vendor token + write domain are carried on the
+    returned :class:`HeadlessPipeline`; with only Groww registered the
+    behavior is byte-identical to the pre-registry binding (parity-pinned).
 
     Raises
     ------
@@ -143,9 +177,13 @@ def build_headless_pipeline(
         instruments once, then re-run").
     ValueError
         A junk ``BRUTEX_PIPELINE_STRICT_GATE`` value (fail-loud, resolved ONCE
-        at build — the pre-chain refusal), or junk ISO dates.
+        at build — the pre-chain refusal), junk ISO dates, an unknown *scope*
+        token, or the dashboard-only ``"fno-only"`` token (round-6 two-button
+        split: no headless binding shipped — refused loudly, never a silent
+        full-chain widening).
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+    from brutex.calendars.auto_pull_gate import compose_market_closed
     from brutex.calendars.market_hours import resolve_market_closed
     from brutex.dashboard.composite_pull import pull_historical_for_underlyings
     from brutex.dashboard.fno_cascade import build_fno_cascade
@@ -160,6 +198,13 @@ def build_headless_pipeline(
         pull_all_spot,
         resolve_fetch_intervals,
     )
+    from brutex.dashboard.pull_scope import (
+        SCOPE_FNO_ONLY,
+        SCOPE_SPOT_ONLY,
+        normalize_pull_scope,
+        spot_only_historical_report,
+        spot_only_metadata_report,
+    )
     from brutex.dashboard.universe_pull import select_pull_instruments
     from brutex.data.instrument_store import DEFAULT_DB_NAME, InstrumentStore
     from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -167,6 +212,18 @@ def build_headless_pipeline(
     from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 
     strict_gate = strict_gate_enabled(env)  # fail-loud, once at build
+    scope_token = normalize_pull_scope(scope)  # fail-loud, once
+    if scope_token == SCOPE_FNO_ONLY:
+        # Round-6 two-button split: fno-only is DASHBOARD-ONLY by ruling (the
+        # manual ▶ Pull F&O button; no CLI/nightly twin shipped) — refuse
+        # loudly HERE so a caller passing the registry-valid token can never
+        # silently run the FULL chain (the B H9 never-widen law). The
+        # ``pull-fno`` CLI twin is a one-line follow-up if wanted (#1779).
+        raise ValueError(
+            "scope='fno-only' has no headless binding (dashboard-only — use the "
+            "▶ Pull F&O button); the headless surface accepts 'full' or 'spot-only'"
+        )
+    spot_only = scope_token == SCOPE_SPOT_ONLY
 
     db_path = lake_root / DEFAULT_DB_NAME
     if not db_path.exists():
@@ -200,6 +257,22 @@ def build_headless_pipeline(
     registry_path = lake_root / "registry.duckdb"
     rate = SessionRateController() if session_rate is None else session_rate
 
+    # Feed-vendor registry (DEC-FEED-REGISTRY-COMMON-001, MIGRATION.md #1903):
+    # the chain resolves its vendor from the registry's PRIMARY profile —
+    # with only Groww registered (the default build) this is byte-identical
+    # to today (vendor="groww" == the sequencer default; the write domain is
+    # carried but consulted by NOTHING — parity-pinned). The default build
+    # threads THIS chain's one rate holder (ADR-0021 §12 invariant 2 — one
+    # rate stack per chain, never a second controller).
+    from brutex.feeds.registry_build import build_default_registry
+
+    vendor_registry = (
+        registry
+        if registry is not None
+        else build_default_registry(lake_root, rate_factory=lambda: rate)
+    )
+    profile = vendor_registry.primary()
+
     # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the nightly 01:30 IST
     # headless pull is the MOTIVATING case — it must STOP gracefully at 08:45 if it runs
     # long. The env kill switch is parsed ONCE here at build (fail-loud on junk); the
@@ -207,6 +280,17 @@ def build_headless_pipeline(
     # env set mid-pull can never crash the long nightly run). A dry-run threads ``None``
     # (no vendor calls to gate), so nightly dry-run tests are byte-identical.
     _market_closed = None if dry_run else resolve_market_closed(env=env)
+
+    # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): the launcher-level Muhurat
+    # mid-run belt composed OVER the resolved predicate — the trading-day-keyed
+    # guard is structurally blind to a holiday-listed Muhurat session. A
+    # dry-run's ``None`` composes to ``None`` (byte-identical), and the belt
+    # honors the SAME BRUTEX_MARKET_HOURS_GUARD kill switch as the guard it
+    # composes over (guard off ⇒ belt off — hostile-review r1 ruling; the SAME
+    # injected env the resolve above parsed). The full-scope arm keeps the
+    # bare resolve (DEC-PIPELINE-MUHURAT-BELT-001 follow-up).
+    if spot_only:
+        _market_closed = compose_market_closed(_market_closed, env=env)
 
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to
@@ -239,10 +323,10 @@ def build_headless_pipeline(
 
     def _run_metadata() -> MetadataPullReport:
         # app.py:3299-3314 minus on_progress.
-        with RegistryStore.open(registry_path) as registry:
+        with RegistryStore.open(registry_path) as fno_registry:
             return pull_expiries_contracts(
                 tradable,
-                registry=registry,
+                registry=fno_registry,
                 coverage_store=store,
                 years=years,
                 dry_run=dry_run,
@@ -257,11 +341,11 @@ def build_headless_pipeline(
         # optional UI-tally hooks); prior_steps threading preserved so the
         # strict gate's Greeks-withhold seam works headlessly unchanged;
         # heal-before-enrich lives INSIDE this spine.
-        with RegistryStore.open(registry_path) as registry:
+        with RegistryStore.open(registry_path) as fno_registry:
             return pull_historical_for_underlyings(
                 targets,
                 reference_only_ids=reference_only_ids,
-                registry=registry,
+                registry=fno_registry,
                 coverage_store=store,
                 lake_root=lake_root,
                 dry_run=dry_run,
@@ -278,6 +362,8 @@ def build_headless_pipeline(
         # The app.py:3662-3718 closure mirrored: the per-target _materialize
         # closure (NEVER materialize_lake_timeframes passed raw), one cutoff
         # resolved per run so a midnight-IST straddle derives one 1day set.
+        # SPOT-ONLY rides an EMPTY F&O cascade (a lake already holding F&O
+        # candles is NOT re-derived by a spot-only run).
         from brutex.calendars.nse import IST
         from brutex.dashboard.db_view import list_fno_candle_datasets
 
@@ -297,7 +383,9 @@ def build_headless_pipeline(
 
         outcome = run_pipeline_prebuild_guarded(
             instruments=targets,
-            cascade_or_error=lambda: build_fno_cascade(list_fno_candle_datasets(lake_root)),
+            cascade_or_error=lambda: build_fno_cascade(
+                () if spot_only else list_fno_candle_datasets(lake_root)
+            ),
             materialize=_materialize,
             source="nightly",
             exclude_symbols=exclude_symbols,
@@ -318,16 +406,31 @@ def build_headless_pipeline(
         years=years,
         dry_run=dry_run,
         strict_gate=strict_gate,
+        scope="spot-only" if spot_only else "full",
     )
     return HeadlessPipeline(
         run_spot=_run_spot,
-        run_metadata=_run_metadata,
-        run_historical=_run_historical,
+        # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): EXACTLY the two F&O
+        # phase closures swap for the pull_scope no-op builders — the spot
+        # closure + prebuild binding are shared verbatim between the arms.
+        # The no-op builders echo the BUILD's dry_run flag (refuter round 1,
+        # r2 NIT-6 — a dry-run report's nested sub-reports must never read
+        # ``dry_run: false``).
+        run_metadata=(
+            (lambda: spot_only_metadata_report(dry_run=dry_run)) if spot_only else _run_metadata
+        ),
+        run_historical=(
+            (lambda _prior: spot_only_historical_report(dry_run=dry_run))
+            if spot_only
+            else _run_historical
+        ),
         run_prebuild=_run_prebuild,
         strict_gate=strict_gate,
         targets=len(targets),
         close=store.close,
         market_closed=_market_closed,
+        vendor=profile.vendor,
+        write_domain=profile.write_domain,
     )
 
 
@@ -342,6 +445,7 @@ def execute_headless_pipeline(hp: HeadlessPipeline) -> PipelinePullReport:
         run_prebuild=hp.run_prebuild,
         strict_gate=hp.strict_gate,
         market_closed=hp.market_closed,
+        vendor=hp.vendor,
     )
 
 

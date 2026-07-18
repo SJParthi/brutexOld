@@ -120,6 +120,7 @@ from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.errors import MarketHoursHalt
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -779,6 +780,29 @@ class BulkSpotReport:
     """MAX absolute keep-first close delta across the pull's conflicts — exact
     Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
     conflict was recorded."""
+
+    @property
+    def ok(self) -> bool:
+        """The spot stage verdict — the ONE home of the spot phase-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): this report
+        SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol, and the
+        sequencer's :func:`~brutex.dashboard.pipeline_pull.spot_phase_ok` gate
+        DELEGATES here (the predicate cannot live on the sequencer side — this
+        module sits BELOW it in the import graph, so housing it there while the
+        protocol needs it here would be either a copy or a cycle; CLAUDE.md
+        §11 COMMON — expression MOVED verbatim, semantics byte-identical).
+        ``True`` iff the pull neither died on auth, paused on the daily quota,
+        left any window still failing, nor halted on the mass-empty breaker —
+        the full law + rationale lives on the gate's docstring.
+        """
+        return (
+            not self.auth_aborted
+            and not self.quota_exhausted
+            and self.still_failed_windows == 0
+            and self.mass_empty_cause is None
+        )
 
     @property
     def total_symbols(self) -> int:
@@ -1610,6 +1634,7 @@ def pull_all_spot(
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
     step_monitor: StepOrderMonitor | None = None,
+    ledger: WindowLedger | None = None,
     market_closed: Callable[[], bool] | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
@@ -1717,6 +1742,17 @@ def pull_all_spot(
         builds a fresh observe-only monitor — ordering violations are logged +
         counted, never raised; tests inject ``raise_on_violation=True`` as the
         hard ordering oracle.
+    ledger
+        Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
+        to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
+        pipeline-instance seam: skips this phase's own
+        :func:`~brutex.data.window_ledger_store.begin_pull_ledger` full-ledger
+        load; the end-of-phase SAVE still runs unchanged). ``None`` (every
+        existing caller) loads exactly as before — and the load itself then
+        honours an active
+        :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, the
+        production full-pipeline sharing path. IGNORED under ``dry_run`` (a
+        dry-run never records/persists — it keeps its ``None`` ledger).
 
     Returns
     -------
@@ -1782,6 +1818,27 @@ def pull_all_spot(
         # as "the overnight pull died mid-run". Never raises (an unwritable journal
         # must never break a pull — the swallow lives inside the journal module).
         record_pull_start(lake_root, pull_id=pid, dry_run=dry_run)
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): the env kill switch is resolved ONCE per pull, fail-loud on
+        # junk at pull start (the ``resolve_market_closed`` posture, never
+        # mid-run) and BEFORE any thread-owning resource is built — a junk env
+        # must fail CLEAN, never orphan the fetch pipeline / write consumer /
+        # volume keepalive their draining ``finally`` has not yet armed (the
+        # round-1 R3-MAJOR-1 leak repro). A dry-run short-circuits to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` gating
+        # pattern — the synthetic adapter's first-day-only bars would false-red
+        # a today-covering window). The bulk spot phase ALSO arms
+        # ``detect_completeness_gaps`` on a LIVE pull (``not dry_run`` — the
+        # cli.py ``cmd_fetch`` idiom), CLOSING the named follow-up
+        # DEC-BULK-SPOT-COMPLETENESS-FLAG-001: the #1031 interior-gap /
+        # trailing-truncation demotions now run on every production bulk path
+        # (nightly, ▶ Pull Spot + auto-pull, /pull-all, retry-failed, the
+        # crossverify pull legs); the spine's ``is_index`` gate keeps the ~750
+        # illiquid CASH names observe-only. A dry-run stays double-protected:
+        # the flag is False AND ``begin_pull_ledger(dry_run=True)`` returns
+        # ``None`` (record-inert).
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
+        _detect_gaps = not dry_run
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
@@ -1812,7 +1869,11 @@ def pull_all_spot(
         # 1-minute alike — DEC-SPOT-INTERVAL-DECOUPLE-001); the planned keys equal
         # the fetched keys (no bounding, no phantom rows). Persisted to
         # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
-        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        # An injected `ledger=` (DEC-LEDGER-LOAD-SPACE-V1-001) skips the load and
+        # reuses the caller's instance — LIVE pulls only: a dry-run always
+        # resolves through begin_pull_ledger, which returns None (never records).
+        if ledger is None or dry_run:
+            ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger
         # existed but could not be read — the store already WARNed
         # (window_ledger.load_failed); surface it on the PULL report too so the
@@ -2110,6 +2171,13 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    # #1031 interior-gap / trailing-truncation demotions — armed
+                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001) —
+                    # resolved once above.
+                    detect_completeness_gaps=_detect_gaps,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
@@ -2978,6 +3046,15 @@ def pull_candles(
         inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE per pull, fail-loud on junk at pull start (the
+        # ``resolve_market_closed`` posture, never mid-run) and BEFORE any
+        # thread-owning resource is built — a junk env must fail CLEAN, never
+        # orphan the fetch pipeline / write consumer their draining ``finally``
+        # has not yet armed (the round-1 R3-MAJOR-1 leak repro). A dry-run
+        # short-circuits to ``False`` WITHOUT touching the env (the
+        # ``detect_completeness_gaps`` gating pattern).
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the
@@ -3169,6 +3246,9 @@ def pull_candles(
                     # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,

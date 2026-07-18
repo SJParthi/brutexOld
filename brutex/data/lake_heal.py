@@ -70,6 +70,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -81,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
-from brutex.calendars.nse import daily_derive_cutoff
+from brutex.calendars.nse import IST_FIXED_OFFSET, daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -92,6 +93,7 @@ from brutex.data.errors import (
     datetime_out_of_range_escape_errors,
     parquet_read_skip_errors,
 )
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.lake_invariants import (
@@ -104,6 +106,7 @@ from brutex.data.lake_invariants import (
     OptionForeignMonthRows,
     OptionIntraFileDup,
     PriceSanityRows,
+    SchemaAlienFile,
     is_foreign_timestamp,
     option_key_dtype_error,
     option_unclassifiable_message,
@@ -143,8 +146,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _LOG = structlog.get_logger("brutex.data.lake_heal")
 
-#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: IST is a fixed +05:30 offset (no DST) — the forming-session cutoff timezone;
+#: the ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 # ── mode + throttle env ──────────────────────────────────────────────────────
 
@@ -174,6 +179,35 @@ QUARANTINE_DIRNAME: Final[str] = ".quarantine"
 
 #: The L3 one-time-sweep sentinel, relative to the lake root.
 SENTINEL_RELPATH: Final[str] = ".lake_heal/last_sweep.json"
+
+#: The L3 sweep ATTEMPT record, relative to the lake root — a SIBLING of the
+#: clean sentinel (DEC-LAKE-INVARIANTS-PREINDEX-001). Written when a sweep ran
+#: but did NOT stamp the sentinel (:func:`_sentinel_skip_reason` non-``None``),
+#: so the next boot can distinguish "this exact lake content was already
+#: attempted and deterministically cannot complete" (observe mode / mass-heal
+#: refusal — honest skip with a loud WARNING) from "it failed, retry after a
+#: bounded backoff" (heal errors / unhealed findings). The sentinel's meaning
+#: ("this token was swept AND left clean") is untouched.
+ATTEMPT_RELPATH: Final[str] = ".lake_heal/last_attempt.json"
+
+#: The transient-failure re-attempt backoff env var (float seconds, ≥ 0).
+LAKE_HEAL_RETRY_ENV: Final[str] = "BRUTEX_LAKE_HEAL_RETRY_S"
+
+#: Default re-attempt backoff after a transient non-stamp (heal errors /
+#: unhealed findings): retried DAILY instead of on every boot — the full
+#: O(files) scan is a pure re-cost while the lake content is unchanged.
+DEFAULT_LAKE_HEAL_RETRY_S: Final[float] = 86_400.0
+
+#: Attempt reasons that are DETERMINISTIC functions of (lake token, heal
+#: mode): re-running the scan on an unchanged token + unchanged mode provably
+#: reproduces the same non-stamp — the boot skips it with a loud WARNING.
+_DETERMINISTIC_ATTEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {"observe_mode", "mass_heal_refused"}
+)
+
+#: Attempt reasons that may be TRANSIENT (I/O): re-attempted after the
+#: :data:`LAKE_HEAL_RETRY_ENV` backoff (or immediately on any token move).
+_TRANSIENT_ATTEMPT_REASONS: Final[frozenset[str]] = frozenset({"heal_errors", "unhealed_findings"})
 
 #: The cumulative heal stats sidecar, relative to the lake root.
 STATS_RELPATH: Final[str] = ".lake_heal/stats.json"
@@ -245,6 +279,35 @@ def resolve_sweep_throttle_s() -> float:
         value = float(raw)
     except ValueError:
         return DEFAULT_SWEEP_THROTTLE_S
+    return max(0.0, value)
+
+
+def resolve_heal_retry_s() -> float:
+    """Resolve the transient-non-stamp re-attempt backoff (seconds), tolerantly.
+
+    Unset / blank / unparsable / NON-FINITE → :data:`DEFAULT_LAKE_HEAL_RETRY_S`;
+    a negative value clamps to ``0.0`` (= re-attempt on every boot, the pre-fix
+    cadence). The :func:`resolve_sweep_throttle_s` parse contract, applied to
+    :data:`LAKE_HEAL_RETRY_ENV` (DEC-LAKE-INVARIANTS-PREINDEX-001). The
+    non-finite arm is the review fold: ``inf`` parses as a valid float yet
+    means "skip forever within one token" — violating the "any ambiguity →
+    re-run" law — and ``nan`` poisons the elapsed compare; both take the
+    junk-value treatment (the default), never a silent forever-skip.
+
+    Returns
+    -------
+    float
+        The backoff in seconds (≥ 0, finite).
+    """
+    raw = os.environ.get(LAKE_HEAL_RETRY_ENV, "").strip()
+    if not raw:
+        return DEFAULT_LAKE_HEAL_RETRY_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LAKE_HEAL_RETRY_S
+    if not math.isfinite(value):
+        return DEFAULT_LAKE_HEAL_RETRY_S
     return max(0.0, value)
 
 
@@ -330,12 +393,20 @@ class RecallReport:
         Intraday-TF interval dirs whose rebuild FAILED — their affected month
         files stay deleted (honest: rebuilt lazily by the derive route /
         gated pre-build; never a silently poisoned bucket).
+    option_daily_skipped
+        Healed CE/PE OPTION contracts whose ``1day`` recall was SKIPPED by
+        the 1-minute-native law (DEC-OPTIONS-PREBUILD-RETIRE-001 — the
+        operator ruling of 2026-07-15 as relayed via the coordinator,
+        ADR-0021 RULING B, draft PR #1555): the derived option ``1day`` is
+        retired, so a healed option partition gets NO daily re-derive —
+        counted here + logged ONCE per batch, never silently dropped.
     """
 
     daily_targets: int
     daily_bars: int
     tf_rebuilt: int
     tf_failed: int
+    option_daily_skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +479,10 @@ _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
 #: the sweep daemon thread (the "boot never crashes" contract). The scan gate
 #: + ``_PER_FINDING_HEAL_ERRORS`` stop it upstream; this is the last-line rail
 #: (OverflowError is already an ``Exception`` — the fold only ADDS the panic).
+#: ALSO consumed by ``_rebuild_tf_months``'s per-symbol isolation
+#: (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the recall's months-bounded
+#: re-materialise converts bars Python-side, so the SAME panic class escaped
+#: its former bare ``except Exception`` and aborted the whole recall batch.
 #: A named constant because mypy --strict rejects a starred-unpack tuple
 #: DISPLAY in an ``except`` clause while accepting a tuple-typed expression.
 _SWEEP_GUARD_ERRORS: Final[tuple[type[BaseException], ...]] = (
@@ -459,13 +534,21 @@ def _audit_append(
 #: The finding kinds the healer can ACT on. PriceSanityRows is deliberately
 #: absent (observe-only, DEC-STORED-DATA-VALIDATION-001) — the type system
 #: makes routing it into a healer impossible, not merely untested.
+#: SchemaAlienFile IS healable (DEC-ALIEN-SCHEMA-READ-HEAL-001): its heal is a
+#: whole-file quarantine MOVE — strictly file-quarantining, never
+#: value-editing (a machine "repair" of an alien schema would fabricate data).
 type _HealableFinding = (
-    LegacyKeyDrift | ForeignMonthRows | IntraFileDup | OptionForeignMonthRows | OptionIntraFileDup
+    LegacyKeyDrift
+    | ForeignMonthRows
+    | IntraFileDup
+    | OptionForeignMonthRows
+    | OptionIntraFileDup
+    | SchemaAlienFile
 )
 
 
 def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFinding, ...]:
-    """Deterministic heal order: drift → foreign → dup → option-foreign → option-dup, by path.
+    """Heal order: drift → foreign → dup → option-foreign → option-dup → alien, by path.
 
     A drift merge changes which files exist, so it heals FIRST; the later
     per-partition healers find consumed paths gone and skip them (counted
@@ -475,7 +558,11 @@ def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFind
     remove-rewrite also collapses the source file's dups, so a same-file
     ``OptionIntraFileDup`` afterwards reads ``changed=False`` → counted
     ``skipped``, never a double-heal and never a second quarantine copy
-    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001). The alien whole-file quarantine
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001) runs LAST — it removes a file the other
+    healers never read (they read canonical-schema columns the alien file
+    lacks), and it still lands BEFORE the post-batch derived-data recall, so
+    a 1-minute alien file is gone before any re-derive reads the tree.
     """
 
     def key(finding: _HealableFinding) -> tuple[int, str]:
@@ -487,7 +574,9 @@ def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFind
             return (2, str(finding.path))
         if isinstance(finding, OptionForeignMonthRows):
             return (3, str(finding.path))
-        return (4, str(finding.path))
+        if isinstance(finding, OptionIntraFileDup):
+            return (4, str(finding.path))
+        return (5, str(finding.path))
 
     return tuple(sorted(findings, key=key))
 
@@ -1006,6 +1095,74 @@ def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
     return True  # no catalog (the options tree is not catalogued), no recall
 
 
+def _heal_schema_alien(finding: SchemaAlienFile, state: _BatchState) -> bool:
+    """Quarantine-MOVE one schema-alien file whole; ``True`` iff it moved.
+
+    DEC-ALIEN-SCHEMA-READ-HEAL-001 — the heal for the finding the scanner now
+    emits where it previously only WARN-skipped: a file whose SCHEMA is alien
+    to its tree (missing canonical column / non-temporal timestamp /
+    non-numeric OHLC). The file's rows are UNREADABLE under the canonical
+    schema, so the heal is the whole-file quarantine move through the ONE
+    :func:`_quarantine_move` chokepoint (copy → fsync-rename → unlink; the
+    dataset + stats manifests invalidated; audited
+    ``LAKE_HEAL_QUARANTINE_FILE``) — strictly file-quarantining, NEVER
+    value-editing (rewriting an alien schema would fabricate data, Golden
+    Rule #1; the bytes stay recoverable under ``.quarantine/``). A bars-tree
+    alien additionally drops its catalog partition row (Golden Rule #4) and,
+    on the ``1minute`` interval, marks its month for the derived-data recall
+    (the derived TFs may embed whatever a permissive earlier reader made of
+    it). The :class:`~brutex.data.lake_heal.HealAction` row carries honest
+    ZERO row counts — an alien file's row count is unknowable without
+    trusting the alien schema.
+    """
+    path = finding.path
+    if not path.exists():
+        return False  # consumed by an earlier heal / already moved — skip, re-found next scan
+    dest = _quarantine_move(state, path)
+    coords = finding.coords
+    if coords is not None:
+        if state.catalog is not None:
+            state.catalog.delete_partition(
+                exchange=coords.exchange,
+                segment=coords.segment,
+                symbol=coords.symbol,
+                interval=coords.interval,
+                year=coords.year,
+                month=coords.month,
+            )
+        if coords.interval == "1minute":
+            state.touch(
+                coords.exchange, coords.segment, coords.symbol, {(coords.year, coords.month)}
+            )
+        partition = coords.relpath()
+    else:
+        partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{path.name}"
+    # The LOG copy of an options-arm partition rides repr() — it embeds the
+    # RAW vendor-influenceable series dir name (the round-8/17 log-injection
+    # folds; the HealAction/audit copies stay raw, JSON-encoded machine
+    # surfaces — the _heal_option_foreign convention). Bars partitions stay
+    # raw everywhere (catalogued coordinates).
+    _LOG.warning(
+        "lake_heal.alien_file_quarantined",
+        partition=partition if coords is not None else repr(partition),
+        reason=finding.reason,
+    )
+    state.actions.append(
+        HealAction(
+            action=AUDIT_HEAL_QUARANTINE_FILE,
+            partition=partition,
+            kept=0,
+            dropped=0,
+            moved=0,
+            conflicts=0,
+            raw_hash_before=None,
+            raw_hash_after=None,
+            quarantine_path=str(dest),
+        )
+    )
+    return True
+
+
 def _option_foreign_frame(home: tuple[int, int], frame: pl.DataFrame) -> pl.DataFrame:
     """The keep-first-unique foreign-month rows of one raw options frame (all columns).
 
@@ -1187,7 +1344,9 @@ def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
         return _heal_dup(finding, state)
     if isinstance(finding, OptionForeignMonthRows):
         return _heal_option_foreign(finding, state)
-    return _heal_option_dup(finding, state)
+    if isinstance(finding, OptionIntraFileDup):
+        return _heal_option_dup(finding, state)
+    return _heal_schema_alien(finding, state)
 
 
 def _prune_empty_dirs(root: Path) -> None:
@@ -1206,6 +1365,13 @@ def _prune_empty_dirs(root: Path) -> None:
 
 # ── derived-data recall ──────────────────────────────────────────────────────
 
+#: Cap on the SYMBOL names carried by the ONE per-batch
+#: ``lake_heal.recall_option_daily_skipped`` log (DEC-OPTIONS-PREBUILD-RETIRE-001
+#: — a healed option chain can be hundreds of CE/PE contracts; the log names a
+#: bounded sample, the TRUE total stays in its ``count`` field + in
+#: :attr:`RecallReport.option_daily_skipped` — the MAX_REPORTED cap idiom).
+RECALL_OPTION_SKIP_LOG_CAP: Final[int] = 10
+
 
 def _first_day_after(year: int, month: int) -> date:
     """The first day of the month AFTER ``(year, month)``."""
@@ -1218,10 +1384,18 @@ def _prebuild_kind_from_coords(segment: str, symbol: str) -> PrebuildKind | None
     """The TF-rebuild kind for one lake coordinate, or ``None`` = never rebuild.
 
     ``INDEX``/``CASH`` → SPOT; ``FNO`` + a ``groww_symbol`` decoding to a
-    ``FUT`` contract → FUTURES; a CE/PE contract or an undecodable FNO symbol →
-    ``None`` (options intraday is never materialised —
+    ``FUT`` contract → FUTURES; a CE/PE contract or an undecodable FNO
+    symbol → ``None``. For CE/PE the ``None`` is the 1-minute-native law
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555: the
+    pipeline's derived option TFs are RETIRED; a stored legacy option TF dir
+    stays INERT, never quarantine-rebuilt here). For an undecodable FNO
+    symbol the ``None`` is conservatism — the kind cannot be classified, so
+    nothing is rebuilt. NOTE the pre-retirement docstring's claim that
     :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`
-    raises for OPTIONS by design).
+    "raises for OPTIONS by design" was STALE — it has materialised
+    ``PrebuildKind.OPTIONS`` since DEC-PIPELINE-AUTOPREBUILD-001; this gate
+    is the real (and now law-aligned) reason options are never rebuilt.
     """
     if segment != "FNO":
         return PrebuildKind.SPOT
@@ -1270,7 +1444,7 @@ def _rebuild_tf_months(
         return 0, 0  # TF partitions exist only when the operator materialised
     kind = _prebuild_kind_from_coords(segment, symbol)
     if kind is None:
-        return 0, 0  # options intraday is never materialised (defensive)
+        return 0, 0  # CE/PE (1-minute-native law) / undecodable FNO — never rebuilt
     try:
         for label in tf_labels:
             interval = INTRADAY_TF_INTERVALS[label]
@@ -1303,7 +1477,15 @@ def _rebuild_tf_months(
         )
     except LakeWriteHalt:
         raise
-    except Exception as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
+    # _SWEEP_GUARD_ERRORS = Exception + the out-of-range-timestamp conversion
+    # panics (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the round-18 idiom): a
+    # planted 2**62-us stored stamp panics the rebuild's Rust→Python conversion
+    # as a BaseException that sailed PAST the former bare `except Exception`
+    # and aborted the WHOLE recall batch; the read-boundary gate refuses it
+    # FIRST as ResampleInputError — this is the defense-in-depth rail so any
+    # residual panic stays per-symbol isolation. KeyboardInterrupt/SystemExit
+    # still propagate (the guard is never a blanket BaseException).
+    except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
         _LOG.warning(
             "lake_heal.tf_rebuild_failed", symbol=symbol, tfs=sorted(tf_labels), error=str(exc)
         )
@@ -1326,17 +1508,34 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
     MIGRATION #1145). The F&O branch reads OI + resamples through the OI-carry
     positional resampler. Then the symbol's materialised intraday TFs are
     delete-and-rebuilt (:func:`_rebuild_tf_months`).
+
+    A healed CE/PE OPTION contract is EXEMPT from the whole recall
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555): the
+    derived option ``1day`` is retired (options are 1-minute-native), so
+    this recall must not stay its second producer. The skip is COUNTED
+    (:attr:`RecallReport.option_daily_skipped`) and logged ONCE per batch
+    (capped symbol list — never per-contract spam); a stored legacy option
+    ``1day``/TF stays INERT (never rebuilt, never deleted). FUT + spot keep
+    their recall byte-identically.
     """
     daily_targets = 0
     daily_bars = 0
     tf_rebuilt = 0
     tf_failed = 0
+    option_daily_skipped: list[str] = []
     for (exchange, segment, symbol), months in sorted(state.touched_minute.items()):
         # DEC-PREBUILD-INCREMENTAL-001: the heal rewrote this symbol's 1-minute
         # source, so its derive stamp is stale by definition — remove it OUTRIGHT
         # (belt-and-braces: the rewrite already moved the source token) so the
         # next pipeline prebuild can never skip a healed symbol.
         remove_derive_stamp(state.lake_root, exchange, segment, symbol)
+        if is_option_contract_coords(segment, symbol):
+            # DEC-OPTIONS-PREBUILD-RETIRE-001: no derived 1day (and no TF
+            # rebuild — the healed option stays 1-minute-native); counted +
+            # batch-logged below, never a silent drop.
+            option_daily_skipped.append(symbol)
+            continue
         y_min, m_min = min(months)
         y_max, m_max = max(months)
         target = DailyDeriveTarget(
@@ -1378,11 +1577,25 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
         )
         tf_rebuilt += rebuilt
         tf_failed += failed
+    if option_daily_skipped:
+        # ONE bounded log per recall BATCH (the MAX_REPORTED cap idiom —
+        # never per-contract spam): a healed option chain can be hundreds of
+        # contracts; the TRUE total rides ``count`` + the report field.
+        _LOG.info(
+            "lake_heal.recall_option_daily_skipped",
+            count=len(option_daily_skipped),
+            symbols=option_daily_skipped[:RECALL_OPTION_SKIP_LOG_CAP],
+            law=(
+                "DEC-OPTIONS-PREBUILD-RETIRE-001 — options are 1-minute-native; "
+                "no derived 1day/TF recall for CE/PE"
+            ),
+        )
     return RecallReport(
         daily_targets=daily_targets,
         daily_bars=daily_bars,
         tf_rebuilt=tf_rebuilt,
         tf_failed=tf_failed,
+        option_daily_skipped=len(option_daily_skipped),
     )
 
 
@@ -1454,6 +1667,23 @@ def load_last_sweep(lake_root: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def load_last_attempt(lake_root: Path) -> dict[str, Any] | None:
+    """Read the L3 sweep ATTEMPT record; ``None`` when absent/corrupt (fail-open).
+
+    The :func:`load_last_sweep` tolerance contract on
+    :data:`ATTEMPT_RELPATH`: a missing / unreadable / non-object record means
+    "no recorded attempt" — the next :func:`run_startup_sweep` runs
+    (fail-open to CHECKING, never to skipping —
+    DEC-LAKE-INVARIANTS-PREINDEX-001).
+    """
+    path = lake_root / ATTEMPT_RELPATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 # ── the batch healer ─────────────────────────────────────────────────────────
 
 
@@ -1474,8 +1704,9 @@ def heal_findings(
 
     Order: LegacyKeyDrift first (dir merges change which files exist), then
     ForeignMonthRows (reassignment), then IntraFileDup, then
-    OptionForeignMonthRows (options reassignment), then OptionIntraFileDup
-    — sorted by path within each class. A
+    OptionForeignMonthRows (options reassignment), then OptionIntraFileDup,
+    then SchemaAlienFile (whole-file quarantine —
+    DEC-ALIEN-SCHEMA-READ-HEAL-001) — sorted by path within each class. A
     :class:`~brutex.data.lake_invariants.PriceSanityRows` finding is FILTERED
     OUT up-front (observe-only — never healed, never counted in ``findings``;
     one ``lake_heal.price_findings_observe_only`` WARNING names the count —
@@ -1924,9 +2155,29 @@ def heal_after_reconcile(
 def lake_content_token(lake_root: Path) -> str:
     """A sha256 content token over every ``*.parquet`` under ``bars/`` + ``options/``.
 
-    Hashes the sorted ``relpath|size|mtime_ns`` lines — an O(files) stat walk
-    with NO file reads. Any add / remove / rewrite (a pull, a derive, a heal, a
-    manual copy) moves the token, so the sentinel comparison re-arms the sweep.
+    Feeds one ``relpath|size|mtime_ns\\n`` line per entry into an INCREMENTAL
+    hasher over a deterministic sorted-at-each-level directory walk — an
+    O(files) stat WALL cost with NO file reads (inherent to content-change
+    detection without a write-time manifest), but O(largest single directory
+    + tree depth) RESIDENT (DEC-LAKE-INVARIANTS-PREINDEX-001: the previous
+    list + ``sorted()`` copy + ``"\\n".join`` materialised ~256 B/file —
+    a ~575-760 MiB transient at the operator-measured 2.36M-file lake, paid
+    on EVERY boot before the sentinel compare). Any add / remove / rewrite
+    (a pull, a derive, a heal, a manual copy) moves the token, so the
+    sentinel comparison re-arms the sweep.
+
+    TOKEN FORMAT CHANGE (sanctioned, ledgered): lines are hashed in walk
+    order (each level sorted; a directory's file lines before its subtrees')
+    with a per-line ``\\n`` terminator, not the old whole-string-sorted join
+    — so the token VALUE differs from the pre-streaming format for the same
+    lake content. First post-deploy boot per lake: one sentinel mismatch →
+    ONE full L3 sweep, after which the new-format token is stamped (the same
+    cost as any pull-triggered re-arm). The walk mirrors the old
+    ``rglob("*.parquet")`` selection exactly (empirically pinned on the
+    pinned 3.12 pathlib): symlinked DIRECTORIES are not descended, hidden
+    entries ARE matched, and any directory entry whose NAME matches — a
+    plain file, a dangling/file symlink, even a dir named ``x.parquet``
+    (also descended) — contributes a line.
 
     Each entry is ``lstat``-ed under a per-entry guard (hostile-review
     round-11 fold, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): pre-fix ``path.stat()``
@@ -1941,32 +2192,60 @@ def lake_content_token(lake_root: Path) -> str:
     LOUDLY (``lake_heal.token_stat_skipped``, path repr()'d — an options
     entry embeds the vendor-influenceable series dir name, the rounds-8/9
     convention), keeping the token deterministic for identical lake content.
+    A directory raced away mid-walk is likewise skipped loudly
+    (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
+    same race silently), deterministically hashing the surviving entries.
     """
-    lines: list[str] = []
+    hasher = hashlib.sha256()
     for tree in (BAR_DIR_NAME, OPTIONS_DIR_NAME):
         base = lake_root / tree
         if not base.is_dir():
             continue
-        for path in base.rglob("*.parquet"):
+        stack: list[Path] = [base]
+        while stack:
+            directory = stack.pop()
             try:
-                stat = path.lstat()
+                children = sorted(directory.iterdir())
             except OSError as exc:
-                # Deleted between glob and stat — the same lake content minus
-                # the vanished entry hashes identically (deterministic skip).
-                # error= repr()'d for the rounds-8/9/16/17 escaped-payload
-                # convention — belt-and-braces here: CPython's OSError.__str__
-                # already repr()s its filename (refuter-verified, so THIS site
-                # was not a demonstrated forge channel), but the message is
-                # vendor-path-derived like the options scan_skip siblings
-                # round-17 escaped, so it joins the convention.
                 _LOG.warning(
-                    "lake_heal.token_stat_skipped", path=repr(str(path)), error=repr(str(exc))
+                    "lake_heal.token_walk_skipped",
+                    path=repr(str(directory)),
+                    error=repr(str(exc)),
                 )
                 continue
-            lines.append(
-                f"{path.relative_to(lake_root).as_posix()}|{stat.st_size}|{stat.st_mtime_ns}"
-            )
-    return hashlib.sha256("\n".join(sorted(lines)).encode("utf-8")).hexdigest()
+            subdirs: list[Path] = []
+            for path in children:
+                if path.name.endswith(".parquet"):
+                    try:
+                        stat = path.lstat()
+                    except OSError as exc:
+                        # Deleted between listing and stat — the same lake
+                        # content minus the vanished entry hashes identically
+                        # (deterministic skip). error= repr()'d for the
+                        # rounds-8/9/16/17 escaped-payload convention —
+                        # belt-and-braces here: CPython's OSError.__str__
+                        # already repr()s its filename (refuter-verified, so
+                        # THIS site was not a demonstrated forge channel), but
+                        # the message is vendor-path-derived like the options
+                        # scan_skip siblings round-17 escaped, so it joins the
+                        # convention.
+                        _LOG.warning(
+                            "lake_heal.token_stat_skipped",
+                            path=repr(str(path)),
+                            error=repr(str(exc)),
+                        )
+                        continue
+                    line = (
+                        f"{path.relative_to(lake_root).as_posix()}"
+                        f"|{stat.st_size}|{stat.st_mtime_ns}\n"
+                    )
+                    hasher.update(line.encode("utf-8"))
+                if path.is_dir() and not path.is_symlink():
+                    subdirs.append(path)
+            # LIFO stack + reversed sorted subdirs = depth-first in sorted
+            # order — deterministic for identical lake content.
+            stack.extend(reversed(subdirs))
+    return hasher.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2010,6 +2289,152 @@ def _sentinel_skip_reason(report: HealReport) -> str | None:
     return None
 
 
+def _write_attempt_record(
+    lake_root: Path,
+    *,
+    token: str,
+    reason: str,
+    mode: str,
+    findings: int,
+    files_scanned: int,
+    now: datetime,
+) -> None:
+    """Stamp :data:`ATTEMPT_RELPATH` after a sweep that did NOT stamp the sentinel.
+
+    Records the POST-heal token the next boot will observe over unchanged
+    content, the :func:`_sentinel_skip_reason` verdict, the heal mode the
+    attempt ran under (a mode flip must re-run ANY skip), the REAL batch
+    ``findings`` + scan ``files_scanned`` tallies (the persisted values the
+    :func:`_realert_mass_heal_refused` re-alert reads — never a fabricated
+    report), and the attempt wall time (the transient backoff anchor).
+
+    BEST-EFFORT (review fold, MINOR-2): an :class:`OSError` (a read-only /
+    wedged lake mount) logs ONE targeted ``lake_heal.attempt_record_failed``
+    WARNING and returns — the sweep genuinely ran, so its real
+    :class:`StartupSweepResult` must still reach the caller instead of being
+    discarded by the :class:`StartupSweeper` blanket guard as a scary
+    every-boot ``lake_heal.sweep_failed`` (with the skip machinery then —
+    ironically — never engaging, so the O(files) scan re-ran every boot too).
+    The cost of a failed write is honestly the pre-record cadence: the next
+    boot re-scans. :class:`MemoryError` is NOT caught (house law) — it
+    propagates to the pull-wide/boot guards untouched.
+    """
+    path = lake_root / ATTEMPT_RELPATH
+    payload = json.dumps(
+        {
+            "version": 1,
+            "lake_token": token,
+            "reason": reason,
+            "mode": mode,
+            "findings": findings,
+            "files_scanned": files_scanned,
+            "attempt_utc": now.astimezone(UTC).isoformat(),
+        },
+        sort_keys=True,
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    except OSError as exc:
+        _LOG.warning("lake_heal.attempt_record_failed", path=str(path), error=str(exc))
+
+
+def _attempt_skip_verdict(
+    attempt: Mapping[str, Any] | None, *, token: str, mode: LakeHealMode, now: datetime
+) -> str | None:
+    """Why THIS boot may skip re-scanning an already-attempted token, or ``None``.
+
+    The scan+heal verdict is a pure function of (lake content token, heal
+    mode) — re-running a full O(files) scan after a DETERMINISTIC non-stamp
+    (observe mode, mass-heal refusal) on an unchanged token + unchanged mode
+    provably reproduces the same outcome: pure waste
+    (DEC-LAKE-INVARIANTS-PREINDEX-001; pre-fix such a lake full-rescanned on
+    EVERY boot — ≥32.8 h per sweep at the operator-measured 2.36M-file lake).
+    A TRANSIENT non-stamp (heal errors / unhealed findings — I/O may heal
+    itself) is re-attempted once the :func:`resolve_heal_retry_s` backoff
+    elapses, or immediately when the token moves (any pull/heal/manual copy).
+    A MODE FLIP re-runs for ALL reasons (review fold, MAJOR): the mode gate
+    is hoisted ABOVE the reason dispatch — pre-fix only the deterministic arm
+    honoured it, so an operator flipping ``auto`` → ``observe`` to DIAGNOSE a
+    ``heal_errors`` lake was backoff-skipped for up to 24 h; the operator
+    changed the sweep's inputs, so the recorded outcome no longer predicts
+    this boot's. Every ambiguity — no record, foreign token, unknown reason,
+    unparsable or future-skewed timestamp — biases to ``None`` = re-run
+    (fail-open to CHECKING, the sentinel loaders' contract).
+    ``"deterministic"`` / ``"backoff"`` name the skip class for the caller's
+    WARNING.
+    """
+    if attempt is None or attempt.get("lake_token") != token:
+        return None
+    if attempt.get("mode") != mode:
+        return None  # mode flipped since the attempt — re-run under the new mode
+    reason = attempt.get("reason")
+    if reason in _DETERMINISTIC_ATTEMPT_REASONS:
+        return "deterministic"
+    if reason in _TRANSIENT_ATTEMPT_REASONS:
+        raw = attempt.get("attempt_utc")
+        if not isinstance(raw, str):
+            return None  # absent / non-string stamp — fail-open to checking
+        try:
+            attempted = datetime.fromisoformat(raw)
+            elapsed = (now.astimezone(UTC) - attempted).total_seconds()
+        except (TypeError, ValueError):
+            return None  # unparsable / naive timestamp — fail-open to checking
+        if 0.0 <= elapsed < resolve_heal_retry_s():
+            return "backoff"
+        # Elapsed backoff — or a FUTURE-skewed stamp (elapsed < 0): re-run.
+        return None
+    return None  # unknown reason (forward compat / hand-edited) — re-run
+
+
+def _realert_mass_heal_refused(attempt: Mapping[str, Any]) -> None:
+    """Re-fire the standing mass-heal-refusal CRITICAL alert on a skipped boot.
+
+    Review fold (judgment ruling): the deterministic skip dropped the
+    per-boot Telegram re-alert — sharpest for ``mass_heal_refused``, a
+    CRITICAL human-required state the pre-change every-boot re-sweep re-fired
+    on each boot. The re-alert reads ONLY the PERSISTED REAL scalars the
+    refused sweep itself recorded in the attempt sidecar (``findings`` /
+    ``files_scanned`` / ``attempt_utc`` — :func:`_write_attempt_record`) and
+    routes them through
+    :func:`~brutex.notifications.sweep_alerts.emit_lake_heal_still_refused_alert`,
+    whose wording is explicitly a re-alert of the PRIOR sweep ("still refused
+    since <ts>") — NEVER a fabricated per-boot :class:`HealReport` for a
+    sweep that did not run. A pre-fix-shaped record missing any of the three
+    fields (or carrying junk types — a ``bool`` masquerading as an int, or a
+    negative tally, both only reachable via a hand-edited sidecar) ABSTAINS
+    silently — honesty over noise (refuter NIT-1: ``type(x) is int`` +
+    ``x >= 0``, never bare ``isinstance`` which admits ``bool``).
+    Best-effort end to end: the notifications import is function-local (the
+    :func:`_startup_sweep_alert` precedent), the emit helper is itself
+    blanket-guarded, and this wrapper's own guard means an alert-path fault
+    is ONE ``lake_heal.still_refused_alert_failed`` WARNING — alerts never
+    crash boot.
+    """
+    findings = attempt.get("findings")
+    files_scanned = attempt.get("files_scanned")
+    attempt_utc = attempt.get("attempt_utc")
+    if (
+        type(findings) is not int
+        or findings < 0
+        or type(files_scanned) is not int
+        or files_scanned < 0
+        or not isinstance(attempt_utc, str)
+    ):
+        return  # pre-fix / hand-edited record shape — abstain, never fabricate
+    try:
+        from brutex.notifications.sweep_alerts import emit_lake_heal_still_refused_alert
+
+        emit_lake_heal_still_refused_alert(
+            findings=findings,
+            files_scanned=files_scanned,
+            attempt_utc=attempt_utc,
+            scope="startup-sweep",
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort alert seam
+        _LOG.warning("lake_heal.still_refused_alert_failed", error=str(exc))
+
+
 def run_startup_sweep(
     lake_root: Path,
     *,
@@ -2034,10 +2459,30 @@ def run_startup_sweep(
     completed its job — ``mode == "auto"``, not mass-heal-refused, zero
     ``errors``, and ``healed == findings`` (a zero-finding clean sweep also
     stamps). A refused / observe-mode / errored / partially-healed sweep SKIPS
-    the stamp (``lake_heal.sweep_sentinel_skipped`` with the reason) so the
-    next boot re-attempts instead of token-matching past live poison. Cost
-    honesty (Golden Rule #10): O(files) total with a per-file key-column read
-    that scales with row count — NOT O(1); paid once per lake content token.
+    the stamp (``lake_heal.sweep_sentinel_skipped`` with the reason) so a
+    later boot re-attempts instead of token-matching past live poison — and
+    additionally stamps the :data:`ATTEMPT_RELPATH` sibling record
+    (DEC-LAKE-INVARIANTS-PREINDEX-001; BEST-EFFORT — an unwritable record
+    logs ``lake_heal.attempt_record_failed`` and the real result still
+    returns, degrading to the pre-record every-boot cadence): on the next
+    boot with an UNCHANGED token AND UNCHANGED mode (a
+    :data:`LAKE_HEAL_ENV` flip re-runs for ALL reasons — the operator
+    changed the sweep's inputs), a DETERMINISTIC non-stamp (observe mode /
+    mass-heal refusal) skips the provably-identical re-scan with a loud
+    ``lake_heal.sweep_skip_attempt`` WARNING naming the standing poison +
+    verdict-specific remediation — a skipped standing MASS-HEAL REFUSAL
+    additionally re-fires the CRITICAL Telegram alert from the record's
+    persisted real tallies (:func:`_realert_mass_heal_refused`, "still
+    refused since <ts>") — and a TRANSIENT non-stamp (heal errors / unhealed
+    findings) re-attempts only after the :func:`resolve_heal_retry_s`
+    backoff (default 24 h, env :data:`LAKE_HEAL_RETRY_ENV`) — every skipped
+    boot still WARNs, any token move (a pull/heal/manual copy) re-arms
+    immediately, and *force* bypasses both records. This never weakens the
+    clean-sentinel meaning: the silent fast path still requires a
+    genuinely-clean stamp.
+    Cost honesty (Golden Rule #10): O(files) total with a per-file key-column
+    read that scales with row count — NOT O(1); paid once per lake content
+    token; the per-boot token walk itself stays an O(files) stat cost.
 
     Parameters
     ----------
@@ -2062,6 +2507,45 @@ def run_startup_sweep(
     if not force and sentinel is not None and sentinel.get("lake_token") == token:
         _LOG.info("lake_heal.sweep_skip_token_match", token=token)
         return StartupSweepResult(ran=False, token=token, scan=None, report=None)
+    attempt = load_last_attempt(lake_root) if not force else None
+    if attempt is not None:
+        mode = resolve_lake_heal_mode()
+        verdict = _attempt_skip_verdict(attempt, token=token, mode=mode, now=now_fn())
+        if verdict is not None:
+            # LOUD by design — the lake still carries whatever kept the
+            # sentinel unstamped; the skip only avoids re-paying the O(files)
+            # scan for a provably-identical (or backoff-bounded) outcome.
+            # Remediation is VERDICT-specific (review fold): a deterministic
+            # skip names its lever (the mode flip), a backoff skip names ITS
+            # lever (the retry env — =0 + a reboot re-runs now); pre-fix both
+            # verdicts read the deterministic wording.
+            if verdict == "deterministic":
+                remediation = (
+                    "fix the recorded cause then re-arm: any lake content change "
+                    f"re-runs immediately; a {LAKE_HEAL_ENV} mode flip re-runs; "
+                    "force=True bypasses"
+                )
+            else:
+                remediation = (
+                    "fix the recorded cause then re-arm: any lake content change "
+                    f"re-runs immediately; {LAKE_HEAL_RETRY_ENV}=0 + a reboot "
+                    "re-runs now; force=True bypasses"
+                )
+            _LOG.warning(
+                "lake_heal.sweep_skip_attempt",
+                verdict=verdict,
+                reason=attempt.get("reason"),
+                mode=attempt.get("mode"),
+                attempt_utc=attempt.get("attempt_utc"),
+                retry_s=resolve_heal_retry_s() if verdict == "backoff" else None,
+                remediation=remediation,
+            )
+            if verdict == "deterministic" and attempt.get("reason") == "mass_heal_refused":
+                # The standing CRITICAL human-required state keeps its
+                # per-boot Telegram cadence — from the PERSISTED real tallies
+                # (review fold; see _realert_mass_heal_refused).
+                _realert_mass_heal_refused(attempt)
+            return StartupSweepResult(ran=False, token=token, scan=None, report=None)
     pause = per_file_pause
     if pause is None:
         throttle = resolve_sweep_throttle_s()
@@ -2102,7 +2586,10 @@ def run_startup_sweep(
         atomic_write_simple(sentinel_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
     else:
         # The sweep did NOT complete its job — leave the old sentinel (or none)
-        # in place so the next boot's token check re-attempts the sweep.
+        # in place, and stamp the ATTEMPT record so the next boot re-attempts
+        # per the deterministic-skip / bounded-backoff law instead of
+        # re-paying the full O(files) scan unconditionally
+        # (DEC-LAKE-INVARIANTS-PREINDEX-001).
         _LOG.warning(
             "lake_heal.sweep_sentinel_skipped",
             reason=skip_reason,
@@ -2110,6 +2597,15 @@ def run_startup_sweep(
             findings=report.findings,
             healed=report.healed,
             errors=report.errors,
+        )
+        _write_attempt_record(
+            lake_root,
+            token=post_token,
+            reason=skip_reason,
+            mode=report.mode,
+            findings=report.findings,
+            files_scanned=files_scanned,
+            now=now_fn(),
         )
     _LOG.info(
         "lake_heal.sweep_complete",
@@ -2272,18 +2768,22 @@ def _startup_sweep_alert(report: HealReport) -> None:
 
 
 __all__ = [
+    "ATTEMPT_RELPATH",
     "AUDIT_HEAL_BATCH",
     "AUDIT_HEAL_DEDUP",
     "AUDIT_HEAL_DRIFT_MERGE",
     "AUDIT_HEAL_QUARANTINE_FILE",
     "AUDIT_HEAL_REASSIGN",
     "DEFAULT_LAKE_HEAL_MODE",
+    "DEFAULT_LAKE_HEAL_RETRY_S",
     "DEFAULT_SWEEP_THROTTLE_S",
     "LAKE_HEAL_ENV",
+    "LAKE_HEAL_RETRY_ENV",
     "LAKE_HEAL_THROTTLE_ENV",
     "MASS_HEAL_FRACTION",
     "MASS_HEAL_MIN_FILES",
     "QUARANTINE_DIRNAME",
+    "RECALL_OPTION_SKIP_LOG_CAP",
     "SENTINEL_RELPATH",
     "STATS_RELPATH",
     "HealAction",
@@ -2298,9 +2798,11 @@ __all__ = [
     "lake_content_token",
     "lake_heal_audit",
     "load_heal_stats",
+    "load_last_attempt",
     "load_last_sweep",
     "open_lake_catalog",
     "open_lake_heal_audit",
+    "resolve_heal_retry_s",
     "resolve_lake_heal_mode",
     "resolve_sweep_throttle_s",
     "run_startup_sweep",

@@ -144,7 +144,9 @@ _ERROR_NEEDLES: dict[str, tuple[str, ...]] = {
         "bx-state-retry",
     ),
     # Per-card amber "… retrying" chips (the hub keeps last-good values).
-    "coverage.html": ("function statError(", '"error " + r.status + " · retrying"'),
+    # (`res.status` since DEC-O1-GUARANTEE-HARDEN-001 — the tick rides the
+    # bounded {ok, status, text} shape; the honest copy is unchanged.)
+    "coverage.html": ("function statError(", '"error " + res.status + " · retrying"'),
     # Error card on a dead first load; stale ribbon keeps the last table after.
     "spot_coverage.html": ("BXUI.errorCard(", "stalebar"),
     # Error card + the pull-active gradient ribbon.
@@ -167,8 +169,42 @@ def test_template_ships_honest_error_state(name: str) -> None:
 
 @pytest.mark.parametrize("name", ADOPTING)
 def test_template_wires_fetch_with_timeout(name: str) -> None:
-    """Every adopting template routes polls through BXUI.fetchWithTimeout."""
-    assert "fetchWithTimeout" in _template(name), f"{name}: fetchWithTimeout is not wired"
+    """Every adopting template's polls are deadline-bounded (a hung endpoint
+    always resolves).
+
+    v29.html carries the bound through the shared BXPoll core since
+    DEC-FRONTEND-LATENCY-HARDENING-001 (MIGRATION.md #1720): its state poller
+    rides ``BXPoll.createPoller`` (10 s abort armed through the BODY read) and
+    its heartbeat slots SUBSCRIBE to the bx-oneclick / bx-rate-monitor /
+    bx-liveproof pollers, each of which owns its own abort bound — the page's
+    former inline ``BXUI.fetchWithTimeout`` polls are gone WITH their pollers.
+
+    The three POLLER templates (coverage / spot_coverage / expired_options)
+    carry the bound through the shared ``BXUI.fetchTextBounded`` since
+    DEC-O1-GUARANTEE-HARDEN-001 — a strictly STRONGER deadline (the abort
+    timer stays armed through the BODY read, so a headers-then-stalled-body
+    response aborts too; ``fetchWithTimeout`` cleared its timer at the
+    headers). The one-shot surfaces (results.html / db.html) still route
+    through fetchWithTimeout / their own bounded readers.
+    """
+    html = _template(name)
+    if name == "v29.html":
+        assert "window.BXPoll.createPoller({" in html, (
+            "v29.html: the BXPoll-bounded state poller is missing"
+        )
+        assert "window.__bxPullRateSubs" in html and "window.__bxLiveproofSubs" in html, (
+            "v29.html: the heartbeat slots must subscribe to the bounded widget polls"
+        )
+    elif name in ("coverage.html", "spot_coverage.html", "expired_options.html"):
+        assert "BXUI.fetchTextBounded(url, timeoutMs)" in html, (
+            f"{name}: the shared body-armed fetchTextBounded bound is not wired"
+        )
+        assert "fetchWithTimeout" not in html, (
+            f"{name}: the headers-only fetchWithTimeout bound must not survive "
+            "beside the body-armed fetchTextBounded migration"
+        )
+    else:
+        assert "fetchWithTimeout" in html, f"{name}: fetchWithTimeout is not wired"
 
 
 # ---------------------------------------------------------------------------

@@ -23,33 +23,54 @@ DEC-EXECUTION-TRIO-DELETE-001, and the authoritative options cost model is
 the per-unit directional price move in paisa (no position sizing — spot is
 research, not execution).
 
-## Fill conventions (configurable — :class:`FillPolicy`)
+## Fill conventions (HARDCODED — worst-case is the only fill law)
 
-The spec leaves two fill questions open (scoping doc §5 Q1/Q2); this module
-**decides** them as a configurable :class:`FillPolicy` whose default is the
-conservative choice (DEC-TRADESIM-001):
+DEC-FILL-WORST-CASE-ONLY-001: the configurable ``FillPolicy`` (and its
+``LevelFill`` / ``SameBarTie`` knobs, plus the absorbed #1522 design's
+two-member ``FillMode``) is DELETED — every fill PRICE follows the
+**adverse-max law**, unconditionally:
 
-* **Entry** — *locked* to the next bar's OPEN (signal on bar ``N`` → enter at
-  ``N+1`` OPEN; ``TRACK1_BACKTEST_SPEC.md`` line 240). Not a knob.
-* **Stop-loss / take-profit fill** — :data:`LevelFill.AT_LEVEL` (default:
-  fill exactly at the trigger price) or :data:`LevelFill.NEXT_OPEN` (fill at
-  the next bar's OPEN — the spot "no order book, no fiction" stance of spec
-  lines 640-654).
-* **Same-bar SL+TP** — when one bar's range spans BOTH levels,
-  :data:`SameBarTie.SL_FIRST` (default, *pessimistic* — assume the loss) or
-  :data:`SameBarTie.TP_FIRST` (*optimistic*).
-* **Forced session-close exit** — *locked*: fills at the OPEN of the first bar
-  whose window reaches the SESSION's forced-exit instant and **overrides every
-  other exit** (spec line 658). The boundary is the bar session's own close −
-  10min — 15:20 IST for a regular day, the early close − 10min for a half-day /
-  Muhurat session — resolved per bar via
+* **Entry** — *locked* timing: signal on bar ``N`` → fill on bar ``N+1``
+  (``TRACK1_BACKTEST_SPEC.md`` line 240); the fill PRICE is the entry bar's
+  ADVERSE extreme — BUY at HIGH, SELL at LOW. SL/TP levels anchor on this
+  ACTUAL worst entry fill.
+* **Stop-loss / take-profit fill** — the adverse-max law WITH the level: a
+  triggered BUY exit (sell) fills at ``min(level, bar low)``, a SELL exit
+  (cover) at ``max(level, bar high)`` — a gap-through bar fills at the
+  extreme, while a bar entirely past the level in the trade's favour stays
+  clamped AT the level (never an overstated favourable gap). The retired
+  ``LevelFill.NEXT_OPEN`` optimism knob is gone.
+* **Same-bar SL+TP** — when one bar's range spans BOTH levels, the STOP fills
+  first, always (the pessimistic tie — the retired ``SameBarTie.TP_FIRST``
+  optimism knob is gone).
+* **Forced session-close exit** — *locked* timing: the first bar whose window
+  reaches the SESSION's forced-exit instant **overrides every other exit**
+  (spec line 658); the fill PRICE is that bar's adverse extreme (BUY exits at
+  LOW, SELL covers at HIGH). The boundary is the bar session's own close −
+  10min — 15:20 IST for a regular day, the early close − 10min for a
+  half-day / Muhurat session — resolved per bar via
   :func:`brutex.calendars.nse.forced_exit_seconds_for_session` and applied with
   the timeframe-aware :func:`brutex.calendars.nse.is_forced_exit_bar`
   (DEC-SESSION-FORCED-EXIT-001; timeframe-awareness from DEC-TRADESIM-001).
-* **Mode-B signal exit** — *locked* to the next bar's OPEN (symmetry with
-  entry; spec line 641). Supplied via the optional ``exit_signal`` stream.
-* **End of data** — a position still open when the feed ends closes at the last
-  bar's CLOSE (no 15:20 reached, no next open to fill against).
+* **Mode-B signal exit** — *locked* timing: fills on the next bar (symmetry
+  with entry; spec line 641), at that bar's adverse extreme. Supplied via the
+  optional ``exit_signal`` stream.
+* **End of data** — a position still open when the feed ends closes at the
+  last bar's adverse extreme (BUY at LOW, SELL at HIGH).
+* **Session boundary** — *locked*: an open position never survives an IST
+  session-date change (DEC-TRADESIM-OPEN-SESSION-GUARD-001). When a session's
+  stored bars end BEFORE any forced-exit-window bar (a session-tail data hole,
+  or a stitched-series roll gap), the first bar of the NEXT session closes the
+  position retroactively at the PRIOR session's last stored bar's adverse
+  extreme — the same pricing as end of data — under the ``session_gap``
+  reason; a pending next-open exit scheduled on the dead session is subsumed,
+  and the boundary bar itself never arms a new entry.
+
+INTERIM HONESTY (DEC-FILL-WORST-CASE-ONLY-001, until the PR-B 1-minute
+execution grid lands): the adverse extreme is the DECISION-TF bar's — a
+5-minute worst-case fill takes the whole 5-minute range's adverse depth,
+strictly MORE pessimistic than the operator's next-1-minute-bar law. A
+conservative-side interim, never optimistic.
 
 ## No look-ahead (CLAUDE.md §4, Golden Rule #5)
 
@@ -117,61 +138,6 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 _LOG = structlog.get_logger(__name__)
 
 
-class LevelFill(Enum):
-    """How a stop-loss / take-profit trigger is priced once a bar touches it."""
-
-    #: Fill exactly at the trigger (SL / TP) price — the conservative default.
-    AT_LEVEL = "at_level"
-    #: Fill at the NEXT bar's OPEN — the spot "no order book, no fiction" mode
-    #: (``TRACK1_BACKTEST_SPEC.md`` lines 640-654). Falls back to the trigger
-    #: bar's CLOSE when there is no next bar (end of data).
-    NEXT_OPEN = "next_open"
-
-
-class SameBarTie(Enum):
-    """Which leg fills first when ONE bar's range spans BOTH the stop and target."""
-
-    #: Pessimistic — assume the stop filled first (worst case). The default.
-    SL_FIRST = "sl_first"
-    #: Optimistic — assume the target filled first.
-    TP_FIRST = "tp_first"
-
-
-@dataclass(frozen=True, slots=True)
-class FillPolicy:
-    """The configurable spot-fill conventions (DEC-TRADESIM-001).
-
-    Only the two questions the spec leaves genuinely open (scoping doc §5
-    Q1/Q2) are knobs; the rest are locked by the spec and documented on the
-    module:
-
-    * entry is ALWAYS the next bar's OPEN (spec line 240),
-    * the 15:20 IST forced exit ALWAYS fills at the forced bar's OPEN and
-      overrides everything (spec line 658),
-    * a Mode-B signal exit ALWAYS fills at the next bar's OPEN (spec line 641).
-
-    Parameters
-    ----------
-    stop_loss
-        Fill rule for a stop-loss trigger. Defaults to
-        :data:`LevelFill.AT_LEVEL`.
-    take_profit
-        Fill rule for a take-profit trigger. Defaults to
-        :data:`LevelFill.AT_LEVEL`.
-    same_bar
-        Tie-break when a single bar touches both the stop and the target.
-        Defaults to :data:`SameBarTie.SL_FIRST` (pessimistic).
-    """
-
-    stop_loss: LevelFill = LevelFill.AT_LEVEL
-    take_profit: LevelFill = LevelFill.AT_LEVEL
-    same_bar: SameBarTie = SameBarTie.SL_FIRST
-
-
-#: The conservative default fill policy (AT_LEVEL SL/TP + pessimistic same-bar).
-DEFAULT_FILL_POLICY: Final[FillPolicy] = FillPolicy()
-
-
 class _ExitReason(Enum):
     """Why a position closed (structlog + the optional :class:`TradeDetail` sink).
 
@@ -187,12 +153,21 @@ class _ExitReason(Enum):
     FORCED = "forced_1520"
     SIGNAL = "signal"
     END_OF_DATA = "end_of_data"
+    # A session-tail data GAP: the position's session ended in the stored feed
+    # BEFORE any forced-exit-window bar, so the first bar of the NEXT session
+    # closed it retroactively at the prior session's last stored bar
+    # (DEC-TRADESIM-OPEN-SESSION-GUARD-001). Appended LAST — the vocabulary is
+    # append-only (wire-visible via the P3→P4 trade-row contract).
+    SESSION_GAP = "session_gap"
 
 
 #: The public exit-reason string vocabulary, in enum-definition order
 #: (DEC-SWEEP-RESULTS-DEPTH-001): ``("stop_loss", "take_profit", "forced_1520",
-#: "signal", "end_of_data")``. Downstream persistence (``brutex.engine.trade_store``)
-#: validates against THIS tuple — imported, never copied (CLAUDE.md §11 COMMON).
+#: "signal", "end_of_data", "session_gap")``. APPEND-ONLY — every member is
+#: wire-visible (trade rows, per-reason aggregate counters, the top100 exits
+#: dict, the display exit-mix line). Downstream persistence
+#: (``brutex.engine.trade_store``) validates against THIS tuple — imported,
+#: never copied (CLAUDE.md §11 COMMON).
 EXIT_REASONS: Final[tuple[str, ...]] = tuple(reason.value for reason in _ExitReason)
 
 
@@ -218,11 +193,15 @@ class TradeDetail:
     exit_reason
         Why the position closed — one of :data:`EXIT_REASONS`.
     entry_fill_paisa
-        The exact entry fill price (int64 paisa) — the entry bar's OPEN.
+        The exact entry fill price (int64 paisa) — the entry bar's adverse
+        extreme (HIGH for BUY, LOW for SELL — the DEC-FILL-WORST-CASE-ONLY-001
+        adverse-max law).
     exit_fill_paisa
-        The exact exit fill price (int64 paisa) — the level / open / close the
-        trade actually filled at. Invariant (by :meth:`TradeSimWalker._close`'s
-        P&L arithmetic): ``pnl_paisa == exit − entry`` for BUY and
+        The exact exit fill price (int64 paisa) — the adverse-max fill the
+        event's locked rule names (level-clamped extreme for SL/TP; the bar's
+        adverse extreme for open-anchored / end-of-data / session-gap
+        closes). Invariant (by :meth:`TradeSimWalker._close`'s P&L
+        arithmetic): ``pnl_paisa == exit − entry`` for BUY and
         ``entry − exit`` for SELL.
     """
 
@@ -239,14 +218,22 @@ class _OpenPosition:
     entry_idx: int
     entry_price_paisa: int
     entry_ts: datetime
+    # The IST session date the position OPENED on — the open-position session
+    # guard closes the position retroactively at the prior session's last
+    # stored bar the moment a pushed bar's IST date differs
+    # (DEC-TRADESIM-OPEN-SESSION-GUARD-001). Stamped from the SAME
+    # ``bar_day_ist`` the (A) fill site already resolved — one session notion.
+    entry_day_ist: date
     sl_level_paisa: int | None
     tp_level_paisa: int | None
     mfe_paisa: int  # running max favourable excursion (>= 0)
     mae_paisa: int  # running max adverse excursion magnitude (>= 0)
-    # Most-recent in-position bar — the end-of-data fallback closes against it.
+    # Most-recent in-position bar — the end-of-data fallback AND the (A2)
+    # session-boundary close both price against it (the finish() idiom).
     # Held as the bar itself (not pre-converted paisa) so the hot per-bar path
     # avoids a Decimal→paisa conversion of every CLOSE; the conversion happens
-    # once, only if the position survives to end of data (DEC-TRADESIM-001).
+    # once, only if the position survives to end of data / a session boundary
+    # (DEC-TRADESIM-001).
     last_idx: int
     last_bar: CandleBar
 
@@ -275,7 +262,14 @@ class TradeSimWalker:
     forced exit (15:20 IST on a regular day, close − 10min on a half-day /
     Muhurat session) additionally drops an entry signal armed on the session's
     last usable bar (its next bar is a forced-exit bar), so no entry can open
-    at or after the forced-exit instant.
+    at or after the forced-exit instant. The OPEN-position twin of the entry
+    gate (DEC-TRADESIM-OPEN-SESSION-GUARD-001): a position never survives an
+    IST session-date change either — when the feed's next bar lands on a later
+    session date (the session's stored tail never reached a forced-exit bar),
+    the position closes retroactively at the prior session's last stored bar's
+    adverse extreme (the ``finish()`` pricing) under the ``session_gap`` reason, any
+    pending next-open exit is subsumed, and the boundary bar never arms a new
+    entry (earliest re-arm: the boundary bar's successor).
 
     Parameters
     ----------
@@ -292,8 +286,6 @@ class TradeSimWalker:
     take_profit_paisa
         Take-profit distance from entry in paisa (``> 0``), or ``None`` to
         disable the target leg (Mode B).
-    policy
-        The :class:`FillPolicy`. Defaults to :data:`DEFAULT_FILL_POLICY`.
     reference_stamper
         Optional :class:`~brutex.engine.reference_series.TradeReferenceStamper`.
         When supplied, every emitted :class:`ClosedTrade` is stamped with the
@@ -327,7 +319,6 @@ class TradeSimWalker:
         tf_minutes: int,
         stop_loss_paisa: int | None = None,
         take_profit_paisa: int | None = None,
-        policy: FillPolicy = DEFAULT_FILL_POLICY,
         reference_stamper: TradeReferenceStamper | None = None,
         detail_sink: list[TradeDetail] | None = None,
     ) -> None:
@@ -347,7 +338,6 @@ class TradeSimWalker:
         self._tf_minutes = tf_minutes
         self._sl_paisa = stop_loss_paisa
         self._tp_paisa = take_profit_paisa
-        self._policy = policy
         self._reference_stamper = reference_stamper
         self._detail_sink = detail_sink
         self._position: _OpenPosition | None = None
@@ -523,44 +513,81 @@ class TradeSimWalker:
         Returns
         -------
         ClosedTrade | None
-            The trade that closed on this bar, or ``None``.
+            The trade that closed on this bar, or ``None``. A ``session_gap``
+            close is EMITTED on this bar (the first bar of a new session) but
+            PRICED at the prior session's last stored bar — the finish() idiom
+            (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
         """
         self._index += 1
         i = self._index
         # The forced-exit check (UTC→IST + tf-aware compare) is only consulted
         # when opening a pending entry or managing an open position, so skip it
-        # entirely on a flat, no-pending bar (keeps the idle path cheap).
-        need_forced = self._position is not None or self._pending_entry
-        if need_forced:
+        # entirely on a flat, no-pending bar (keeps the idle path cheap). The
+        # whole (A)/(A2)/(B) ladder lives INSIDE this arm — each of its guards
+        # requires a position or a pending entry, so a flat, no-pending bar
+        # never reaches it, and the arm's non-Optional ``day_ist`` local is the
+        # (A)/(A2) session key (the Optional ``bar_day_ist`` mirror survives
+        # solely for step (C)'s reuse-or-resolve fallback expression).
+        bar_day_ist: date | None = None
+        closed: ClosedTrade | None = None
+        if self._position is not None or self._pending_entry:
             ts_ist = bar.timestamp.astimezone(IST)
-            bar_day_ist: date | None = ts_ist.date()
+            day_ist = ts_ist.date()
+            bar_day_ist = day_ist
             forced = is_forced_exit_bar(
                 ts_ist.time(),
                 self._tf_minutes,
-                self._forced_exit_seconds(ts_ist.date()),
+                self._forced_exit_seconds(day_ist),
             )
-        else:
-            bar_day_ist = None
-            forced = False
 
-        # (A) Open a pending entry at THIS bar's open — only within the SAME IST
-        # session date the signal armed on (a fill bar on a LATER session date is
-        # an overnight-gap fill and is DROPPED, R2-OC-2) and never on a forced
-        # bar (cannot open at/after the session's forced-exit instant).
-        # ``bar_day_ist`` is always resolved here (``need_forced`` was True).
-        if self._position is None and self._pending_entry:
-            self._pending_entry = False
-            same_session = bar_day_ist == self._pending_entry_day
-            self._pending_entry_day = None
-            if not forced and same_session:
-                self._open_position(bar, i)
+            # (A) Open a pending entry at THIS bar's open — only within the
+            # SAME IST session date the signal armed on (a fill bar on a LATER
+            # session date is an overnight-gap fill and is DROPPED, R2-OC-2)
+            # and never on a forced bar (cannot open at/after the session's
+            # forced-exit instant). (A) and (A2) are mutually exclusive by
+            # state invariant: step (C) arms only while ``_position is None``
+            # and (A) clears the pending flag before opening, so
+            # ``_pending_entry`` is False whenever a position is open — one
+            # push runs (A) xor (A2), never both
+            # (DEC-TRADESIM-OPEN-SESSION-GUARD-001 §2.2).
+            if self._position is None and self._pending_entry:
+                self._pending_entry = False
+                same_session = day_ist == self._pending_entry_day
+                self._pending_entry_day = None
+                if not forced and same_session:
+                    self._open_position(bar, i, entry_day_ist=day_ist)
 
-        # (B) Manage an open position on this bar.
-        closed: ClosedTrade | None = None
-        if self._position is not None:
-            closed = self._manage_position(
-                self._position, bar, i, forced=forced, exit_signal=exit_signal
-            )
+            if self._position is not None:
+                pos = self._position
+                if day_ist != pos.entry_day_ist:
+                    # (A2) Session-boundary guard: an open position never
+                    # survives an IST session-date change (a session-tail data
+                    # hole / stitched-series roll gap —
+                    # DEC-TRADESIM-OPEN-SESSION-GUARD-001). Close retroactively
+                    # at the PRIOR session's last stored bar — the finish()
+                    # idiom (same fill price / ts / idx, no excursion fold from
+                    # THIS bar) — BEFORE this bar is managed, so neither a
+                    # pending next-open exit nor SL/TP/forced can ever fill
+                    # against the overnight/roll gap. A pending exit is
+                    # SUBSUMED (cleared — the flat walker never carries it into
+                    # the new session). A single-position walker holds at most
+                    # one position, and the inequality compare fires exactly
+                    # once even across a multi-session hole. A just-opened
+                    # position (same push, step (A)) carries THIS bar's date,
+                    # so it can never trip the guard.
+                    self._pending_exit = None
+                    closed = self._close(
+                        pos,
+                        exit_price_paisa=self._last_bar_exit_paisa(pos),
+                        exit_ts=pos.last_bar.timestamp,
+                        exit_idx=pos.last_idx,
+                        reason=_ExitReason.SESSION_GAP,
+                    )
+                else:
+                    # (B) Manage an open position on this bar — unchanged.
+                    closed = self._manage_position(
+                        pos, bar, i, forced=forced, exit_signal=exit_signal
+                    )
 
         # (C) While flat (and not on a bar a trade just closed), arm the next
         # entry, recording THIS bar's IST session date — the fill gate for (A).
@@ -577,19 +604,21 @@ class TradeSimWalker:
         return closed
 
     def finish(self) -> ClosedTrade | None:
-        """Close any still-open position at the last bar's CLOSE (end of data).
+        """Close any still-open position at the last bar (end of data).
 
         Call once after the final :meth:`push`. A position can still be open at
         end of data when the feed stops before 15:20 IST and no stop / target /
         signal fired (or a next-open exit was pending with no next bar). Returns
-        ``None`` when the walker is already flat.
+        ``None`` when the walker is already flat. Priced at the last bar's
+        adverse extreme (DEC-FILL-WORST-CASE-ONLY-001 — see
+        :meth:`_last_bar_exit_paisa`).
         """
         pos = self._position
         if pos is None:
             return None
         return self._close(
             pos,
-            exit_price_paisa=_price_to_paisa(pos.last_bar.close),
+            exit_price_paisa=self._last_bar_exit_paisa(pos),
             exit_ts=pos.last_bar.timestamp,
             exit_idx=pos.last_idx,
             reason=_ExitReason.END_OF_DATA,
@@ -597,14 +626,27 @@ class TradeSimWalker:
 
     # ── Internals ─────────────────────────────────────────────────────────
 
-    def _open_position(self, bar: CandleBar, idx: int) -> None:
-        """Open a position at ``bar``'s OPEN (the next-bar-open entry fill)."""
-        entry_price = _price_to_paisa(bar.open)
+    def _open_position(self, bar: CandleBar, idx: int, *, entry_day_ist: date) -> None:
+        """Open a position on ``bar`` (the next-bar entry fill).
+
+        The fill PRICE is the entry bar's ADVERSE extreme — BUY at HIGH,
+        SELL at LOW (the open-anchored arm of the adverse-max law,
+        DEC-FILL-WORST-CASE-ONLY-001). The SL/TP levels anchor on this
+        ACTUAL worst entry fill (:meth:`_levels`), and MFE/MAE measure from
+        it — both by construction, no extra wiring.
+
+        ``entry_day_ist`` is the fill bar's IST session date, threaded from the
+        (A) fill site — which already resolved it for the forced check — so the
+        (A2) open-position session guard costs no extra UTC→IST conversion
+        (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
+        """
+        entry_price = _price_to_paisa(bar.high if self._direction is Side.BUY else bar.low)
         sl_level, tp_level = self._levels(entry_price)
         self._position = _OpenPosition(
             entry_idx=idx,
             entry_price_paisa=entry_price,
             entry_ts=bar.timestamp,
+            entry_day_ist=entry_day_ist,
             sl_level_paisa=sl_level,
             tp_level_paisa=tp_level,
             mfe_paisa=0,
@@ -640,23 +682,32 @@ class TradeSimWalker:
         pos.last_idx = idx
         pos.last_bar = bar
 
-        # (1) A next-open exit scheduled on a prior bar fills at THIS bar's open.
+        # (1) A next-open exit scheduled on a prior bar fills on THIS bar —
+        # at its adverse extreme (the open-anchored adverse-max arm,
+        # DEC-FILL-WORST-CASE-ONLY-001). The excursion fold stays the legacy
+        # (open, open) — the fold logic is deliberately untouched, only the
+        # fill PRICE is the worst-case one.
         if self._pending_exit is not None:
             reason = self._pending_exit
             self._pending_exit = None
             open_paisa = _price_to_paisa(bar.open)
             self._update_excursion(pos, open_paisa, open_paisa)
             return self._close(
-                pos, exit_price_paisa=open_paisa, exit_ts=bar.timestamp, exit_idx=idx, reason=reason
+                pos,
+                exit_price_paisa=self._open_anchored_exit_paisa(bar),
+                exit_ts=bar.timestamp,
+                exit_idx=idx,
+                reason=reason,
             )
 
-        # (2) Forced 15:20 IST exit overrides everything — fill at the open.
+        # (2) Forced 15:20 IST exit overrides everything — fill at the
+        # adverse extreme; fold unchanged (open, open).
         if forced:
             open_paisa = _price_to_paisa(bar.open)
             self._update_excursion(pos, open_paisa, open_paisa)
             return self._close(
                 pos,
-                exit_price_paisa=open_paisa,
+                exit_price_paisa=self._open_anchored_exit_paisa(bar),
                 exit_ts=bar.timestamp,
                 exit_idx=idx,
                 reason=_ExitReason.FORCED,
@@ -669,26 +720,31 @@ class TradeSimWalker:
 
         # (4) Stop-loss / take-profit. ``_resolve_level_hit`` returns the chosen
         # leg AND its exact level price (never None), so the fill site needs no
-        # re-check (keeps branch coverage tight).
+        # re-check (keeps branch coverage tight). The fill is the adverse-max
+        # law WITH the level (DEC-FILL-WORST-CASE-ONLY-001): a BUY exits
+        # (sells) at min(level, bar low) — a gap-through bar fills at the
+        # extreme, while a gap PAST the level in the trade's favour (e.g. a
+        # long-TP bar entirely ABOVE the target, low > tp) stays clamped AT
+        # the level so the worst-case fill can never overstate vs an at-level
+        # fill (the proven counterexample); a SELL exits (covers) at
+        # max(level, bar high), the exact mirror. (The retired
+        # ``LevelFill.NEXT_OPEN`` optimism knob is deleted — no level fill is
+        # ever deferred to a later bar.)
         hit = self._resolve_level_hit(pos, high_paisa, low_paisa)
         if hit is not None:
             reason, level_paisa = hit
-            fill = (
-                self._policy.stop_loss
-                if reason is _ExitReason.STOP_LOSS
-                else self._policy.take_profit
+            exit_paisa = (
+                min(level_paisa, low_paisa)
+                if self._direction is Side.BUY
+                else max(level_paisa, high_paisa)
             )
-            if fill is LevelFill.AT_LEVEL:
-                return self._close(
-                    pos,
-                    exit_price_paisa=level_paisa,
-                    exit_ts=bar.timestamp,
-                    exit_idx=idx,
-                    reason=reason,
-                )
-            # LevelFill.NEXT_OPEN — fill on the next bar's open.
-            self._pending_exit = reason
-            return None
+            return self._close(
+                pos,
+                exit_price_paisa=exit_paisa,
+                exit_ts=bar.timestamp,
+                exit_idx=idx,
+                reason=reason,
+            )
 
         # (5) Mode-B signal exit — fill on the next bar's open.
         if exit_signal:
@@ -701,13 +757,16 @@ class TradeSimWalker:
     def _resolve_level_hit(
         self, pos: _OpenPosition, high_paisa: int, low_paisa: int
     ) -> tuple[_ExitReason, int] | None:
-        """Decide which of SL/TP a bar's ``[low, high]`` touched (same-bar tie applied).
+        """Decide which of SL/TP a bar's ``[low, high]`` touched (SL-first tie).
 
-        Returns ``(reason, level_paisa)`` — the chosen leg and the exact price it
-        fills at under :data:`LevelFill.AT_LEVEL` — or ``None`` if neither level
-        was touched. Each leg's tuple is built inside its own ``is not None``
-        guard, so ``level_paisa`` is always a live (non-``None``) level and the
-        fill site never re-checks.
+        Returns ``(reason, level_paisa)`` — the chosen leg and its exact
+        trigger level — or ``None`` if neither level was touched. Each leg's
+        tuple is built inside its own ``is not None`` guard, so
+        ``level_paisa`` is always a live (non-``None``) level and the fill
+        site never re-checks. A bar spanning BOTH levels always fills the
+        STOP first — the pessimistic tie, hardcoded
+        (DEC-FILL-WORST-CASE-ONLY-001; the retired ``SameBarTie.TP_FIRST``
+        optimism knob is deleted).
         """
         sl = pos.sl_level_paisa
         tp = pos.tp_level_paisa
@@ -718,10 +777,31 @@ class TradeSimWalker:
             stop = (_ExitReason.STOP_LOSS, sl)
         if tp is not None and (high_paisa >= tp if buy else low_paisa <= tp):
             target = (_ExitReason.TAKE_PROFIT, tp)
-        if stop is not None and target is not None:
-            # Same bar spans both levels — break the tie by policy.
-            return stop if self._policy.same_bar is SameBarTie.SL_FIRST else target
+        # Same bar spans both levels — the stop fills first, always.
         return stop if stop is not None else target
+
+    def _open_anchored_exit_paisa(self, bar: CandleBar) -> int:
+        """The exit fill for an OPEN-anchored event on *bar* (pending / forced).
+
+        The bar's ADVERSE extreme — a BUY position exits (sells) at the LOW,
+        a SELL position exits (covers) at the HIGH (the open-anchored arm of
+        the adverse-max law, no level exists for these events —
+        DEC-FILL-WORST-CASE-ONLY-001). O(1): one Decimal→paisa conversion
+        per exit bar.
+        """
+        return _price_to_paisa(bar.low if self._direction is Side.BUY else bar.high)
+
+    def _last_bar_exit_paisa(self, pos: _OpenPosition) -> int:
+        """The end-of-data / session-gap exit fill — the last stored bar's price.
+
+        ``pos.last_bar``'s ADVERSE extreme — BUY at LOW, SELL at HIGH
+        (DEC-FILL-WORST-CASE-ONLY-001). A REAL stored price at a REAL stored
+        instant (never fabricated, Golden Rule #1); the honest stale-price
+        envelope of the ``session_gap`` close
+        (DEC-TRADESIM-OPEN-SESSION-GUARD-001) carries over unchanged.
+        """
+        bar = pos.last_bar
+        return _price_to_paisa(bar.low if self._direction is Side.BUY else bar.high)
 
     def _update_excursion(self, pos: _OpenPosition, high_paisa: int, low_paisa: int) -> None:
         """Fold a ``(high, low)`` pair into the running MFE/MAE (both ``>= 0``)."""
@@ -806,7 +886,6 @@ def simulate_trades(
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     exit_signals: Sequence[bool] | None = None,
-    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
     detail_sink: list[TradeDetail] | None = None,
 ) -> list[ClosedTrade]:
@@ -827,10 +906,8 @@ def simulate_trades(
         Stop / target distances from entry in paisa (``> 0``), or ``None`` to
         disable that leg.
     exit_signals
-        Optional Mode-B exit stream (exit at the next bar's open). Same length
-        as ``bars`` when supplied.
-    policy
-        The :class:`FillPolicy` (defaults to :data:`DEFAULT_FILL_POLICY`).
+        Optional Mode-B exit stream (exit on the next bar, at its adverse
+        extreme). Same length as ``bars`` when supplied.
     reference_stamper
         Optional India VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper` — stamps
@@ -852,7 +929,6 @@ def simulate_trades(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
         reference_stamper=reference_stamper,
         detail_sink=detail_sink,
     )
@@ -868,7 +944,6 @@ def simulate_trades_with_exit_indices(
     stop_loss_paisa: int | None = None,
     take_profit_paisa: int | None = None,
     exit_signals: Sequence[bool] | None = None,
-    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
     detail_sink: list[TradeDetail] | None = None,
 ) -> tuple[list[ClosedTrade], list[int] | None]:
@@ -901,7 +976,6 @@ def simulate_trades_with_exit_indices(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
         reference_stamper=reference_stamper,
         detail_sink=detail_sink,
     )
@@ -910,11 +984,7 @@ def simulate_trades_with_exit_indices(
 
 
 __all__ = [
-    "DEFAULT_FILL_POLICY",
     "EXIT_REASONS",
-    "FillPolicy",
-    "LevelFill",
-    "SameBarTie",
     "TradeDetail",
     "TradeSimWalker",
     "simulate_trades",

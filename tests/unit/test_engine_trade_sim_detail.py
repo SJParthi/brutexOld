@@ -50,15 +50,24 @@ _A_BARS = [
     _bar(9, 19, "100.00", "100.05", "99.90", "99.95"),
     _bar(9, 20, "100.00", "100.10", "99.60", "99.70"),
     _bar(15, 17, "100", "100", "100", "100"),
-    _bar(15, 18, "100.00", "100.20", "99.80", "100.10"),
-    _bar(15, 19, "100.00", "100.30", "99.90", "100.20"),
+    _bar(15, 18, "100.00", "100.20", "99.95", "100.10"),  # low ABOVE SL 99.90
+    _bar(15, 19, "100.00", "100.30", "99.95", "100.20"),  # low ABOVE SL 99.90
     _bar(15, 20, "100.15", "101.00", "100.00", "100.50"),
 ]
 _A_SIGNALS = [True, False, False, True, False, False, True, False, False, False]
 
 
 def test_exit_reasons_vocabulary_is_the_contract_set() -> None:
-    assert EXIT_REASONS == ("stop_loss", "take_profit", "forced_1520", "signal", "end_of_data")
+    # APPEND-ONLY: session_gap joined LAST (DEC-TRADESIM-OPEN-SESSION-GUARD-001);
+    # the first five members are byte-frozen in this order (P3→P4 wire contract).
+    assert EXIT_REASONS == (
+        "stop_loss",
+        "take_profit",
+        "forced_1520",
+        "signal",
+        "end_of_data",
+        "session_gap",
+    )
 
 
 def test_sink_captures_tp_sl_forced_reasons_and_fills() -> None:
@@ -76,10 +85,12 @@ def test_sink_captures_tp_sl_forced_reasons_and_fills() -> None:
     # Positional alignment: detail i annotates trade i (the SAME object).
     assert [d.trade for d in sink] == trades
     assert all(d.trade is t for d, t in zip(sink, trades, strict=True))
-    # Exact fills: every entry at 100.00; TP at level 100.50; SL at level
-    # 99.70; forced at the 15:20 bar's OPEN 100.15.
-    assert [d.entry_fill_paisa for d in sink] == [10_000, 10_000, 10_000]
-    assert [d.exit_fill_paisa for d in sink] == [10_050, 9_970, 10_015]
+    # Exact fills under the one worst-case law (DEC-FILL-WORST-CASE-ONLY-001):
+    # every BUY entry at its bar HIGH; the TP touch fills at the trigger bar's
+    # LOW 99.90; the SL breach at the LOW 99.60; the forced 15:20 exit at that
+    # bar's adverse LOW 100.00.
+    assert [d.entry_fill_paisa for d in sink] == [10_010, 10_005, 10_020]
+    assert [d.exit_fill_paisa for d in sink] == [9_990, 9_960, 10_000]
 
 
 def test_sink_captures_signal_exit() -> None:
@@ -99,9 +110,9 @@ def test_sink_captures_signal_exit() -> None:
         detail_sink=sink,
     )
     assert [d.exit_reason for d in sink] == ["signal"]
-    assert sink[0].entry_fill_paisa == 10_000
-    assert sink[0].exit_fill_paisa == 9_970  # next bar's OPEN
-    assert sink[0].trade.pnl_paisa == 30  # short profits as price falls
+    assert sink[0].entry_fill_paisa == 9_950  # SELL entry at the bar LOW
+    assert sink[0].exit_fill_paisa == 10_000  # exit-fill bar's adverse HIGH
+    assert sink[0].trade.pnl_paisa == -50  # worst-case: sold low, covered high
 
 
 def test_sink_captures_end_of_data_exit() -> None:
@@ -113,7 +124,45 @@ def test_sink_captures_end_of_data_exit() -> None:
     sink: list[TradeDetail] = []
     simulate_trades(bars, [True, False, False], direction=Side.BUY, tf_minutes=1, detail_sink=sink)
     assert [d.exit_reason for d in sink] == ["end_of_data"]
-    assert sink[0].exit_fill_paisa == 9_995  # last bar's CLOSE
+    assert sink[0].exit_fill_paisa == 9_990  # last bar's adverse LOW (BUY)
+
+
+def test_sink_captures_session_gap_exit() -> None:
+    """DEC-TRADESIM-OPEN-SESSION-GUARD-001: the boundary close is a named detail.
+
+    A position still open when the feed steps to the NEXT IST session date
+    (day-1's stored tail never reached a forced-exit bar) closes retroactively
+    at day-1's last stored bar's ADVERSE extreme (the one worst-case law) —
+    ``exit_reason == "session_gap"``, ``exit_fill_paisa`` = the PRIOR
+    session's adverse LOW for a BUY, never a next-session fill.
+    """
+    next_day = date(2024, 1, 3)
+    gap_ts = datetime(next_day.year, next_day.month, next_day.day, 9, 15, tzinfo=IST).astimezone(
+        UTC
+    )
+    bars = [
+        _bar(11, 10, "100", "100", "100", "100"),
+        _bar(11, 11, "100.00", "100.20", "99.80", "100.05"),
+        _bar(11, 12, "100.00", "100.10", "99.90", "99.95"),  # day-1's LAST stored bar
+        CandleBar(
+            timestamp=gap_ts,
+            open=Decimal("600"),
+            high=Decimal("601"),
+            low=Decimal("599"),
+            close=Decimal("600"),
+            volume=0,
+            open_interest=None,
+        ),
+    ]
+    sink: list[TradeDetail] = []
+    trades = simulate_trades(
+        bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1, detail_sink=sink
+    )
+    assert [d.exit_reason for d in sink] == ["session_gap"]
+    assert sink[0].exit_fill_paisa == 9_990  # day-1's last stored adverse LOW
+    assert sink[0].trade is trades[0]
+    assert trades[0].pnl_paisa == 9_990 - 10_020  # entry @HIGH 100.20
+    assert trades[0].exit_ts == bars[2].timestamp
 
 
 def test_output_identical_with_and_without_sink() -> None:

@@ -171,6 +171,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
@@ -276,8 +277,10 @@ CHECKPOINT_FILE_NAME: Final[str] = "checkpoint.json"
 #: TFs never carry the overlay and are deliberately never scanned.
 _MINUTE_INTERVAL: Final[str] = "1minute"
 
-#: Fixed +05:30 IST (no DST) — the expiry-comparison calendar.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: Fixed +05:30 IST (no DST) — the expiry-comparison calendar; the ONE
+#: canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 #: December — the year-wrap month for the contract-window derivation and the
 #: upper bound of the valid month-file range (one COMMON constant, ruff PLR2004).
@@ -825,7 +828,10 @@ def _read_driver_frames(
             return None
         has_timestamp = "timestamp" in schema
         columns = ["timestamp", *needed] if has_timestamp else needed
-        frame = pl.read_parquet(path, columns=columns)
+        # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
+        # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
+        # contract dir must never glob-read a sibling's rows into this probe.
+        frame = pl.read_parquet(path, columns=columns, glob=False)
         view = _driver_row_view(frame, path) if has_timestamp else frame
     except (pl.exceptions.PolarsError, OSError):
         return None
@@ -1131,7 +1137,12 @@ def _probe_contract_staleness(
         emit_progress_beat()
         files_probed += 1
         try:
-            series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
+            # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001) — the #1594 round-15 metachar law; see
+            # _read_driver_frames' twin comment.
+            series = pl.read_parquet(path, columns=["greeks_provenance_id"], glob=False)[
+                "greeks_provenance_id"
+            ]
         except pl.exceptions.ColumnNotFoundError:
             # A legacy 7-column partition — every bar is unstamped; the
             # driver-actionability gate decides (fix round 7).

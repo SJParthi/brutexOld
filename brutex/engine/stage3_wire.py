@@ -74,6 +74,7 @@ from brutex.engine.cascade_wire import (
 )
 from brutex.engine.combo_mask import popcount
 from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
+from brutex.engine.snapshot_hash import data_snapshot_hash
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.stage3_refine import (
     Evaluator,
@@ -106,7 +107,7 @@ from brutex.engine.trial_stats import (
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
 from brutex.ranking import RankedCombo
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -167,72 +168,6 @@ def ensure_stage3_runtime() -> tuple[str, str]:
             "install with: pip install -e '.[optimize]' "
             f"(import failed: {exc})"
         ) from exc
-
-
-def data_snapshot_hash(
-    *,
-    exchange: str,
-    segment: str,
-    start: str,
-    end: str,
-    slices: Mapping[tuple[str, str], Sequence[CandleBar]],
-) -> str:
-    """Return a real BLAKE3 content fingerprint of a loaded data window.
-
-    The SHARED snapshot-identity derivation (CLAUDE.md §11 COMMON): the
-    ``brutex sweep-all`` launcher hashes its full-window slices through this
-    helper, and :func:`run_stage3_pass` hashes the lockbox-excluded TRAIN
-    slices through the SAME derivation (ADR-0007 Amendment A1) — so a refined
-    row's ``data_snapshot_hash`` honestly encodes the data it was evaluated on.
-
-    FULL-CONTENT since DEC-SNAPSHOT-HASH-FULL-001 (preimage version
-    ``bxsnap2``): every bar folds ALL SEVEN :class:`~brutex.data.models.CandleBar`
-    fields (timestamp / open / high / low / close / volume / open_interest)
-    into a STREAMED BLAKE3 (O(1) extra memory), so **any single-bar difference
-    in any slice produces a different hash**. The v1 derivation (bar count +
-    first/last timestamp+close per slice — a SAMPLED fingerprint) let an
-    interior-bar re-pull edit alias the identity, so Bloom/LMDB dedup + the
-    tuple cache served STALE results as fresh (Golden Rules #4/#7); it is
-    retained ONLY as the private recount diagnostic
-    :func:`_data_snapshot_hash_v1`, never exported to any identity path. The
-    ``bxsnap2|`` domain tag makes a v1/v2 preimage collision structurally
-    impossible (including the degenerate all-empty-slices grid) and keeps the
-    format provenance auditable.
-
-    Honest complexity envelope (Golden Rule #10): NOT O(1) — O(total loaded
-    bars), paid ONCE per launch / Stage-3 pass / recount over bars already
-    resident in RAM; strictly smaller than the pre-existing unconditional
-    per-launch ``catalog_reconcile`` full-byte rescan. Zero cost in any
-    per-combo hot path (Rule 5 untouched). ``Decimal.__str__`` renders prices
-    exactly (2dp-snapped at the lake-write boundary, DEC-SPOT-PRICE-2DP-001);
-    a ``None`` open_interest renders ``"None"`` deterministically.
-
-    Parameters
-    ----------
-    exchange, segment, start, end
-        The data scope labels (the lake partition + the requested ISO window).
-    slices
-        Every loaded ``(symbol, interval) -> bars`` slice (empty slices
-        participate as explicit zero-count entries).
-
-    Returns
-    -------
-    str
-        The 64-char lowercase BLAKE3 hex digest.
-    """
-    hasher = blake3.blake3()
-    hasher.update(f"bxsnap2|{exchange}|{segment}|{start}|{end}".encode())
-    for (symbol, interval), bars in sorted(slices.items()):
-        hasher.update(f"\n{symbol}|{interval}|{len(bars)}".encode())
-        for bar in bars:
-            hasher.update(
-                f"\n{bar.timestamp.isoformat()}|{bar.open}|{bar.high}|{bar.low}|"
-                f"{bar.close}|{bar.volume}|{bar.open_interest}".encode()
-            )
-    # str(...) keeps this typed `str` even where the blake3 wheel (and its
-    # stubs) is absent and the import degrades to Any — e.g. the isolated
-    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
-    return str(hasher.hexdigest())
 
 
 def _data_snapshot_hash_v1(
@@ -327,20 +262,22 @@ def recover_survivor_cell(
     grid: SweepGridConfig,
     *,
     roll_schedule: tuple[int, ...] | None = None,
-) -> tuple[int, int, ProximityParams | None, FibAnchorKind]:
-    """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` by identity match.
+) -> tuple[int, int, ProximityParams | None, FibAnchorKind, PriceSourceCell]:
+    """Recover *row*'s grid cell ``(sl, tp, proximity, fib_anchor, price_source)`` by identity match.
 
     A persisted row folds its trade-sim params into the BLAKE3 ``run_id`` but
     does not store them as columns, so the survivor's refinement start cell is
     re-derived (review F4): for each point of the grid's ``stop_losses ×
-    take_profits × proximities × fib_anchors`` product, the 9-field
-    :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the row's
-    own labels + the grid's shared context and compared to ``row.run_id``. The
-    first (cryptographically unique) match is the cell — never guessed. The Fib
-    anchor is part of the product (DEC-NIFTY-FIB-AXIS-001) because it now enters
+    take_profits × proximities × fib_anchors × price_source_cells`` product, the
+    9-field :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the
+    row's own labels + the grid's shared context and compared to ``row.run_id``.
+    The first (cryptographically unique) match is the cell — never guessed. The
+    Fib anchor AND the price-source cell are part of the product
+    (DEC-NIFTY-FIB-AXIS-001 / DEC-NIFTY-PRICE-SOURCE-AXIS-001) because both enter
     the run-identity via ``canonical_trade_params``, so the row's ``run_id`` only
-    reproduces at the ORIGINATING anchor — and Stage-3 must refine that survivor
-    against ITS OWN anchor's Fib levels (never a stale prev-day one).
+    reproduces at the ORIGINATING anchor + source — and Stage-3 must refine that
+    survivor against ITS OWN anchor's Fib levels + ITS OWN VWAP/EMA source bits
+    (never a stale prev-day / (HLC3, CLOSE) one).
 
     Parameters
     ----------
@@ -358,8 +295,9 @@ def recover_survivor_cell(
 
     Returns
     -------
-    tuple[int, int, ProximityParams | None, FibAnchorKind]
-        The survivor's ``(sl_paisa, tp_paisa, proximity, fib_anchor)`` start cell.
+    tuple[int, int, ProximityParams | None, FibAnchorKind, PriceSourceCell]
+        The survivor's ``(sl_paisa, tp_paisa, proximity, fib_anchor, price_source)``
+        start cell.
 
     Raises
     ------
@@ -369,8 +307,12 @@ def recover_survivor_cell(
         Stage-3 refinement needs an on-grid numeric start point (the enabled
         config forbids ``None`` axes up front; this guards direct callers).
     """
-    for sl, tp, proximity, fib_anchor in itertools.product(
-        grid.stop_losses, grid.take_profits, grid.proximities, grid.fib_anchors
+    for sl, tp, proximity, fib_anchor, price_source in itertools.product(
+        grid.stop_losses,
+        grid.take_profits,
+        grid.proximities,
+        grid.fib_anchors,
+        grid.price_source_cells,
     ):
         params = canonical_trade_params(
             sl_paisa=sl,
@@ -379,6 +321,8 @@ def recover_survivor_cell(
             proximity=proximity,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
             roll_schedule=roll_schedule,
         )
         candidate = mask_run_id(
@@ -398,11 +342,11 @@ def recover_survivor_cell(
                     f"recover_survivor_cell: run {row.run_id[:16]} matched a cell with a "
                     f"disabled leg (sl={sl}, tp={tp}) — Stage-3 needs numeric on-grid legs"
                 )
-            return sl, tp, proximity, fib_anchor
+            return sl, tp, proximity, fib_anchor, price_source
     raise Stage3WireError(
-        f"recover_survivor_cell: no (sl × tp × proximity × fib_anchor) cell of this grid "
-        f"reproduces run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row does not "
-        f"belong to this grid's identity context"
+        f"recover_survivor_cell: no (sl × tp × proximity × fib_anchor × price_source) cell of "
+        f"this grid reproduces run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row "
+        f"does not belong to this grid's identity context"
     )
 
 
@@ -744,7 +688,14 @@ def run_stage3_pass(
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
     cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
     bits_memo: dict[
-        tuple[str, str, ProximityParams | None, FibAnchorKind, tuple[int, ...] | None],
+        tuple[
+            str,
+            str,
+            ProximityParams | None,
+            FibAnchorKind,
+            PriceSourceCell,
+            tuple[int, ...] | None,
+        ],
         Sequence[int],
     ] = {}
     for key, survivors in leaderboards.items():
@@ -760,14 +711,16 @@ def run_stage3_pass(
         )
         for row in survivors:
             side = _side_for_direction(row.direction)
-            start_sl, start_tp, proximity, fib_anchor = recover_survivor_cell(
+            start_sl, start_tp, proximity, fib_anchor, price_source = recover_survivor_cell(
                 row, grid, roll_schedule=roll_schedule
             )
-            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001)
-            # AND roll-schedule-specific (DEC-STAGE1A-ROLL-RESET-001), so the memo
-            # key + the build carry both — a survivor is refined against ITS OWN
-            # anchor's Group-4 Fib levels + ITS OWN roll boundaries, never stale ones.
-            memo_key = (key.instrument, key.tf, proximity, fib_anchor, roll_schedule)
+            # The ``bar_bits`` matrix is Fib-anchor-specific (DEC-NIFTY-FIB-AXIS-001),
+            # price-source-specific (DEC-NIFTY-PRICE-SOURCE-AXIS-001: the swept
+            # VWAP/EMA source moves bits 52-53 / 0-5) AND roll-schedule-specific
+            # (DEC-STAGE1A-ROLL-RESET-001), so the memo key + the build carry ALL
+            # THREE — a survivor is refined against ITS OWN Fib levels + ITS OWN
+            # source bits + ITS OWN roll boundaries, never stale ones.
+            memo_key = (key.instrument, key.tf, proximity, fib_anchor, price_source, roll_schedule)
             bar_bits = bits_memo.get(memo_key)
             if bar_bits is None:
                 bar_bits = build_bar_bits(
@@ -775,6 +728,8 @@ def run_stage3_pass(
                     proximity=proximity,
                     prior_n=grid.prior_n,
                     fib_anchor=fib_anchor,
+                    vwap_source=price_source.vwap_source,
+                    ema_source=price_source.ema_source,
                     roll_schedule=roll_schedule,
                     apply_1day_mask=apply_1day_mask_for(key.instrument, key.tf),
                 )
@@ -812,6 +767,8 @@ def run_stage3_pass(
                         proximity=proximity,
                         start_equity_paisa=grid.start_equity_paisa,
                         fib_anchor=fib_anchor,
+                        vwap_source=price_source.vwap_source,
+                        ema_source=price_source.ema_source,
                         roll_schedule=roll_schedule,
                     ),
                     data_snapshot_hash=train_hash,
@@ -851,6 +808,7 @@ def run_stage3_pass(
                     tp_paisa=refined_eval.tp_paisa,
                     proximity=proximity,
                     fib_anchor=fib_anchor,
+                    price_source=price_source,
                 )
                 cell_rows.setdefault(cell, []).append(refined_row)
                 # Raw float|None Sharpe keyed by refined_id — the V-moment
@@ -1025,6 +983,8 @@ def cascade_specs_for_refined_cells(
             rows=ResultsStore.load(cell.path).rows(),
             top_k=None,
             fib_anchor=tuple_.fib_anchor,
+            vwap_source=tuple_.price_source.vwap_source,
+            ema_source=tuple_.price_source.ema_source,
         )
         if spec is not None:
             specs.append(spec)
@@ -1103,6 +1063,8 @@ def stage3_manifest_record(
                 ),
                 rel_path=rel_path,
                 fib_anchor=tuple_.fib_anchor,
+                vwap_source=tuple_.price_source.vwap_source,
+                ema_source=tuple_.price_source.ema_source,
             )
         )
     return Stage3ManifestRecord(

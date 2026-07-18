@@ -133,6 +133,53 @@ def _bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
     return _BARS
 
 
+def _rankable_bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+    """The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001).
+
+    The log-volume spawn tests need PERSISTED finalists — the per-trade
+    ``trade_sim.entry``/``trade_sim.exit`` DEBUG events fire in the WORKER's
+    finalist projection (the Python walker), and under the one worst-case
+    law the plain ``_BARS`` drift ranks nothing (a tight SL/TP over its
+    wide-range bars always fills at the adverse extreme and loses).
+    """
+    bars: list[CandleBar] = []
+    cycle = 0
+    for d in range(12):
+        price = 100.0
+        for m in range(60):
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c = o - 0.3
+                h, lo = o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c = o - 0.65
+                h, lo = o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c = o + 0.3
+                h, lo = o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = c
+    return bars
+
+
 def _grid(**overrides: object) -> SweepGridConfig:
     base: dict[str, object] = {
         "instruments": ["NIFTY"],
@@ -209,7 +256,12 @@ def _run_sequential(tmp: Path, grid: SweepGridConfig) -> tuple[Path, Path, int]:
     return out, tmp / "ingest.jsonl", ckpt
 
 
-def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[Path, Path, int]:
+def _run_parallel(
+    tmp: Path,
+    grid: SweepGridConfig,
+    workers: int = 4,
+    bars_for: Callable[[str, str], list[CandleBar]] = _bars_for,
+) -> tuple[Path, Path, int]:
     """Run the parallel grid; return (results_root, ingest_audit, ckpt)."""
     out = tmp / "out"
     with (
@@ -218,7 +270,7 @@ def _run_parallel(tmp: Path, grid: SweepGridConfig, workers: int = 4) -> tuple[P
     ):
         mod.run_parallel_grid(
             grid,
-            bars_for=_bars_for,
+            bars_for=bars_for,
             root=out,
             ingest_audit=ingest,
             guards=guards,
@@ -628,10 +680,17 @@ class TestWorkerLogVolumeGuardSpawn:
         capfd: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
-        _run_parallel(tmp_path, _grid(), workers=2)
+        _run_parallel(tmp_path, _grid(), workers=2, bars_for=_rankable_bars_for)
         captured = capfd.readouterr()
-        assert "trade_sim." not in captured.err
-        assert "trade_sim." not in captured.out
+        # The guarded class is the PER-TRADE DEBUG storm (entry/exit — the
+        # #1630 disk-fill events); the mask-independent capped WARN
+        # ``trade_sim.session_tail_hole`` (DEC-TRADESIM-OPEN-SESSION-GUARD-001)
+        # legitimately SURVIVES the INFO default — a data-quality warning must
+        # never be silenced by the volume guard, so the pin names the two
+        # per-trade events instead of the whole ``trade_sim.`` namespace.
+        for stream in (captured.err, captured.out):
+            assert "trade_sim.entry" not in stream
+            assert "trade_sim.exit" not in stream
 
     def test_spawn_worker_per_trade_debug_restored_with_debug_env(
         self,
@@ -640,7 +699,7 @@ class TestWorkerLogVolumeGuardSpawn:
         capfd: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv(LOG_LEVEL_ENV, "DEBUG")
-        _run_parallel(tmp_path, _grid(), workers=2)
+        _run_parallel(tmp_path, _grid(), workers=2, bars_for=_rankable_bars_for)
         captured = capfd.readouterr()
         combined = captured.err + captured.out
         assert "trade_sim.entry" in combined
@@ -690,6 +749,31 @@ class TestRunTupleInWorker:
         assert "combo blew up" in result.failed_error
         # Even on failure the collected pre-failure audit lines are returned.
         assert result.audit_records[0].action == "SWEEP_START"
+
+    def test_corrupt_store_quarantined_in_worker(self, tmp_path: Path) -> None:
+        """G1 (round 2): a corrupt store is quarantined + retried IN-WORKER.
+
+        A pre-corrupt tuple store raises ResultsStoreSchemaError (a
+        ResultsStoreError) from the worker's
+        persist. The worker-side quarantine moves the trio + retries once
+        (byte-identical regeneration), so the worker returns a SUCCESS summary +
+        the quarantine event as data — never a non-SweepComboError propagating
+        out to abort the whole grid.
+        """
+        grid = _grid()
+        root = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=root))
+        tuple_ = next(iter_sweep_tuples(grid))
+        store = tuple_store_path(root, tuple_, grid)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"garbage - not parquet")
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is not None  # retry regenerated the store cleanly
+        assert result.failed_error is None
+        assert len(result.quarantine_events) == 1
+        dest_rel, reason = result.quarantine_events[0]
+        assert dest_rel.startswith(".quarantine/runtime/")
+        assert "ResultsStoreSchemaError" in reason
 
 
 class TestOutcomeAndResultMapping:
@@ -847,7 +931,15 @@ class TestParallelSkipPaths:
         # 0..total-1 is recorded, so next_index == total.
         assert guards.checkpoint.next_index == count_sweep_tuples(grid)
 
-    def test_cache_skip_short_circuits_a_completed_tuple(self, tmp_path: Path) -> None:
+    def test_cache_skip_short_circuits_a_completed_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the cache TIER mechanics are what this test pins; guard-ON
+        # behaviour is pinned in test_engine_sweep_parallel_store_guard.py.
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         # First run populates the cache + results.
         _run_parallel(tmp_path / "first", grid, workers=3)
@@ -877,7 +969,13 @@ class TestParallelSkipPaths:
         assert summary.skipped_cache == count_sweep_tuples(grid)
         assert summary.tuples_run == 0
 
-    def test_resume_skips_already_checkpointed_tuples(self, tmp_path: Path) -> None:
+    def test_resume_skips_already_checkpointed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: the pre-seeded checkpoint has NO on-disk
+        # artifacts under the probed root (see the cache twin above's
+        # rationale — DEC-SWEEP-RESUME-STORE-GUARD-001).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         total = count_sweep_tuples(grid)
         out = tmp_path / "out"

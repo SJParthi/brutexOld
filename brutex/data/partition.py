@@ -32,7 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from brutex.data.errors import PartitionError
-from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+from brutex.data.timeframes import ALL_LAKE_INTERVAL_LABELS
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants
@@ -62,11 +62,12 @@ MONTHS_PER_YEAR: Final[int] = 12
 PARTITION_PATH_COMPONENTS: Final[int] = 7
 
 #: The 23 canonical candle intervals accepted in partition paths: the 21
-#: Track 1 timeframe labels (DEC-TF-VOCAB-21-001 — derived from the canonical
-#: ``brutex.data.timeframes.LAKE_INTERVAL_LABELS`` map, the single source of
-#: truth) plus the two calendar-aware labels (``1week``/``1month``, P3
-#: ADR-0014) that pre-date the 21-TF ladder.
-VALID_INTERVALS: Final[frozenset[str]] = frozenset(LAKE_INTERVAL_LABELS.values()) | frozenset(
+#: Track 1 timeframe lake labels (DEC-TF-REGISTRY-DYNAMIC-001 — derived from
+#: the canonical ``brutex.data.timeframes.ALL_TFS`` registry via
+#: ``ALL_LAKE_INTERVAL_LABELS``, so a newly registered TfSpec's lake_label is
+#: automatically a valid partition interval) plus the two calendar-aware
+#: labels (``1week``/``1month``, P3 ADR-0014) that pre-date the 21-TF ladder.
+VALID_INTERVALS: Final[frozenset[str]] = frozenset(ALL_LAKE_INTERVAL_LABELS) | frozenset(
     {
         "1week",
         "1month",
@@ -97,9 +98,17 @@ SPOT_PROBE_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH")
 
 
 #: Characters that would break filesystem paths on Linux / macOS /
-#: Windows. A symbol containing any of these is rejected.
+#: Windows, PLUS the glob metachars `[`/`]` (DEC-SPOT-DERIVE-TS-RANGE-
+#: HARDENING-001, completing the #1594 round-15 metachar law write-side): a
+#: symbol dir named ``NSE-X[12]`` beside real ``NSE-X1``/``NSE-X2`` siblings
+#: makes any glob-interpreting read pull the SIBLINGS' bars into the wrong
+#: symbol (executed-repro'd on the engine feed mouth ``Catalog.get_bars``).
+#: `*`/`?` were already members; no legitimate vendor symbol carries a
+#: bracket (NSE trading symbols are alphanumeric plus ``&``/``-``/``.`` —
+#: verified against the real instrument-master fixtures). A symbol containing
+#: any of these is rejected.
 _FORBIDDEN_SYMBOL_CHARS: Final[frozenset[str]] = frozenset(
-    {"/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0"}
+    {"/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0", "[", "]"}
 )
 
 

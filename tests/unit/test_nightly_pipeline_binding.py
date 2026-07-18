@@ -100,6 +100,8 @@ class _Spies:
     materialize_calls: list[dict[str, Any]] = field(default_factory=list)
     footprint_calls: list[tuple[Path, Any]] = field(default_factory=list)
     registries: list[object] = field(default_factory=list)
+    cascade_args: list[tuple[Any, ...]] = field(default_factory=list)
+    fno_walks: list[str] = field(default_factory=list)
 
 
 _FIXED_NOW = datetime(2026, 7, 7, 21, 0, tzinfo=UTC)
@@ -112,6 +114,8 @@ def _wire(
     prebuild_outcome: PrebuildOutcome | None = None,
     env: dict[str, str] | None = None,
     dry_run: bool = False,
+    scope: str = "full",
+    registry_builder: Any = None,
 ) -> tuple[HeadlessPipeline, _Spies, _FakeStore]:
     """Build a fully spy-wired headless pipeline over a fake store."""
     spies = _Spies()
@@ -187,8 +191,16 @@ def _wire(
         "brutex.dashboard.prebuild_parallel.resolve_prebuild_workers",
         lambda *a, **k: 3,
     )
-    monkeypatch.setattr("brutex.dashboard.db_view.list_fno_candle_datasets", lambda _lake: [])
-    monkeypatch.setattr("brutex.dashboard.fno_cascade.build_fno_cascade", lambda _ds: "CASCADE")
+    monkeypatch.setattr(
+        "brutex.dashboard.db_view.list_fno_candle_datasets",
+        lambda _lake: spies.fno_walks.append("walk") or [],
+    )
+
+    def spy_cascade(datasets: Any) -> str:
+        spies.cascade_args.append(tuple(datasets))
+        return "CASCADE"
+
+    monkeypatch.setattr("brutex.dashboard.fno_cascade.build_fno_cascade", spy_cascade)
 
     hp = build_headless_pipeline(
         lake_root=lake,
@@ -198,6 +210,10 @@ def _wire(
         env=env or {},
         store_opener=lambda _path: cast(Any, store),
         now=lambda: _FIXED_NOW,
+        scope=scope,
+        # DEC-FEED-REGISTRY-COMMON-001: None keeps the default (Groww-only)
+        # registry build; a builder is called with THIS lake root.
+        registry=registry_builder(lake) if registry_builder is not None else None,
     )
     return hp, spies, store
 
@@ -697,4 +713,299 @@ def test_execute_threads_the_four_phases(monkeypatch: pytest.MonkeyPatch) -> Non
         # DEC-GROWW-MARKET-HOURS-GUARD-001: the guard is threaded through
         # (None here — the test double is built without one).
         "market_closed": None,
+        # DEC-FEED-REGISTRY-COMMON-001 (MIGRATION.md #1903): the resolved
+        # vendor token is threaded verbatim — a directly-built double carries
+        # the "groww" default, which equals the sequencer's own default.
+        "vendor": "groww",
     }
+
+
+# ── scope=spot-only (DEC-PULL-SCOPED-ALL-ONECLICK-001) ───────────────────
+
+
+def test_scope_full_default_parity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The explicit ``scope="full"`` binds the SAME real F&O closures as the
+    scope-less default (the default-parity pin — B §5)."""
+    hp, spies, _store = _wire(monkeypatch, tmp_path, scope="full")
+    assert hp.run_metadata() == "META-REPORT"
+    assert spies.metadata["kwargs"]["dry_run"] is False
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    prior = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False)
+    assert hp.run_historical(prior) == "HIST-REPORT"
+    assert spies.historical["kwargs"]["prior_steps"] is prior
+    hp.run_prebuild(frozenset())
+    spies.prebuild["cascade_or_error"]()  # force the captured cascade factory
+    assert spies.fno_walks == ["walk"]  # the full arm enumerates the F&O lake
+    assert spies.cascade_args == [()]  # empty because the walk spy returns []
+
+
+def test_scope_spot_only_swaps_fno_closures_for_noops(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """spot-only: the two F&O closures ARE the pull_scope no-op builders —
+    the real spines + the registry are NEVER touched; the prebuild rides an
+    EMPTY cascade (no F&O dataset walk)."""
+    from brutex.dashboard.pull_scope import (
+        SPOT_ONLY_HISTORICAL_NOTE,
+        SPOT_ONLY_METADATA_NOTE,
+    )
+
+    hp, spies, _store = _wire(monkeypatch, tmp_path, scope="spot-only")
+    meta = hp.run_metadata()
+    assert meta.note == SPOT_ONLY_METADATA_NOTE
+    assert meta.expiries_persisted == 0
+    assert spies.metadata == {}  # the real metadata spine never ran
+    assert spies.registries == []  # the registry store was never opened
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    hist = hp.run_historical(PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False))
+    assert hist.note == SPOT_ONLY_HISTORICAL_NOTE
+    assert hist.historical is None
+    assert spies.historical == {}  # the real composite spine never ran
+    hp.run_prebuild(frozenset())
+    spies.prebuild["cascade_or_error"]()  # force the captured cascade factory
+    assert spies.cascade_args == [()]  # EMPTY cascade — spot-only never re-derives F&O
+    assert spies.fno_walks == []  # the F&O dataset walk never ran
+
+
+def test_scope_spot_only_spot_closure_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The SPOT closure's kwargs are IDENTICAL between the two scope arms
+    (kwarg-for-kwarg — until_clean / floor_store / market_closed all shared)."""
+    hp_full, spies_full, _s1 = _wire(monkeypatch, tmp_path, scope="full")
+    hp_full.run_spot()
+    hp_spot, spies_spot, _s2 = _wire(monkeypatch, tmp_path, scope="spot-only")
+    hp_spot.run_spot()
+    assert set(spies_full.spot["kwargs"]) == set(spies_spot.spot["kwargs"])
+    assert spies_spot.spot["kwargs"]["until_clean"] is True
+    assert spies_spot.spot["kwargs"]["auto_retry"] is True
+
+
+def test_scope_spot_only_composes_muhurat_belt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The spot-only REAL build's market_closed is the COMPOSED predicate
+    (guard verdict OR muhurat_session_active) — a live Muhurat session blocks
+    even though the trading-day-keyed guard reads the holiday as non-trading;
+    a dry-run build stays None (compose passes None through)."""
+    from datetime import datetime as _dt
+
+    hp, _spies, _store = _wire(monkeypatch, tmp_path, scope="spot-only")
+    assert hp.market_closed is not None
+    # Freeze the belt's clock INSIDE a listed Muhurat session (2024-11-01
+    # evening) and the guard's own clock OUTSIDE the market-hours window: the
+    # bare guard says open (holiday => non-trading), the composed belt blocks.
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: _dt(2024, 11, 1, 18, 30))
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _dt(2024, 11, 1, 18, 30))
+    assert hp.market_closed() is True  # the Muhurat arm fired
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: _dt(2024, 11, 1, 20, 0))
+    assert hp.market_closed() is False  # past close+5min — open again
+    hp_dry, _sp, _st = _wire(monkeypatch, tmp_path, dry_run=True, scope="spot-only")
+    assert hp_dry.market_closed is None  # dry-run parity (None passthrough)
+
+
+def test_scope_spot_only_guard_off_market_closed_is_bare_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 MINOR-B — kills the M-I hardcoded-env mutant, nightly arm]
+    With the guard kill switch OFF in the BUILD env, the spot-only binding's
+    ``market_closed`` IS the guard's own never-blocked base (the compose
+    returned it UNCHANGED) and reads False even at a frozen Muhurat instant —
+    the operator's ``BRUTEX_MARKET_HOURS_GUARD=0`` genuinely disarms the belt
+    at the WIRING level. A compose call site hardcoding ``env={"…": "1"}``
+    would wrap the base and read True here."""
+    from datetime import datetime as _dt
+
+    from brutex.calendars.market_hours import _market_never_blocked
+
+    hp, _spies, _store = _wire(
+        monkeypatch, tmp_path, scope="spot-only", env={"BRUTEX_MARKET_HOURS_GUARD": "0"}
+    )
+    assert hp.market_closed is not None
+    assert hp.market_closed is _market_never_blocked  # base returned UNCHANGED
+    frozen = _dt(2024, 11, 1, 18, 30)  # inside the listed evening session
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    assert hp.market_closed() is False  # guard off ⇒ belt off — never a block
+
+
+def test_scope_spot_only_dry_run_threads_into_noop_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 r2 NIT-6, nightly arm] the binding threads its dry_run
+    flag into the bound no-op builders — a dry-run report's nested F&O
+    sub-reports never read ``dry_run: false``. The wet build stays False."""
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    hp_dry, _sp, _st = _wire(monkeypatch, tmp_path, dry_run=True, scope="spot-only")
+    assert hp_dry.run_metadata().dry_run is True
+    prior = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False)
+    assert hp_dry.run_historical(prior).dry_run is True
+    hp_wet, _sp2, _st2 = _wire(monkeypatch, tmp_path, scope="spot-only")
+    assert hp_wet.run_metadata().dry_run is False
+    assert hp_wet.run_historical(prior).dry_run is False
+
+
+def test_scope_fno_only_refused_no_headless_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[round-6 two-button split] the registry-valid ``fno-only`` token has NO
+    headless binding (dashboard-only by ruling — the manual ▶ Pull F&O
+    button): the build REFUSES loudly instead of silently running the FULL
+    chain (the B H9 never-widen law). The ``pull-fno`` CLI twin is a named
+    one-line follow-up (#1779)."""
+    with pytest.raises(ValueError, match="no headless binding"):
+        _wire(monkeypatch, tmp_path, scope="fno-only")
+
+
+def test_scope_unknown_token_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown pull scope"):
+        _wire(monkeypatch, tmp_path, scope="spotonly")
+
+
+# ── the feed-vendor registry consumer (DEC-FEED-REGISTRY-COMMON-001) ─────
+#
+# MIGRATION.md #1903: build_headless_pipeline resolves its vendor from the
+# registry's PRIMARY profile. With only Groww registered (the default build)
+# the behavior is BYTE-IDENTICAL to the pre-registry binding — the parity pin
+# below proves it over the REAL run_full_pipeline sequencer.
+
+
+class TestVendorRegistryConsumer:
+    """The nightly/CLI chain is the FIRST production registry consumer."""
+
+    def test_default_build_resolves_groww_primary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """registry=None → the default (Groww-only) build; vendor + domain carried."""
+        from brutex.data.write_domain import PRIMARY_DOMAIN_NAME, primary_write_domain
+
+        hp, _spies, _store = _wire(monkeypatch, tmp_path)
+        assert hp.vendor == "groww"
+        assert hp.write_domain is not None
+        assert hp.write_domain.primary is True
+        assert hp.write_domain.name == PRIMARY_DOMAIN_NAME
+        assert (
+            hp.write_domain.resolved_root == primary_write_domain(tmp_path / "lake").resolved_root
+        )
+
+    def test_injected_registry_with_extra_feed_keeps_primary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A testfeed extra in the injected registry leaves the PRIMARY resolution unchanged."""
+        from brutex.feeds.registry_build import build_default_registry
+
+        from tests.fakes.vendor_profiles import synthetic_feed_profile
+
+        hp, _spies, _store = _wire(
+            monkeypatch,
+            tmp_path,
+            registry_builder=lambda lake: build_default_registry(
+                lake, extra_profiles=[synthetic_feed_profile]
+            ),
+        )
+        assert hp.vendor == "groww"
+        assert hp.write_domain is not None and hp.write_domain.primary is True
+
+    def test_primaryless_injected_registry_is_typed_refusal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A feed-only registry (no primary) refuses the build LOUDLY (typed)."""
+        from brutex.feeds.vendor_profile import VendorProfileError, VendorProfileRegistry
+
+        from tests.fakes.vendor_profiles import synthetic_feed_profile
+
+        def _feed_only(lake: Path) -> VendorProfileRegistry:
+            registry = VendorProfileRegistry()
+            registry.register(synthetic_feed_profile(lake))
+            return registry
+
+        with pytest.raises(VendorProfileError, match="no PRIMARY profile registered"):
+            _wire(monkeypatch, tmp_path, registry_builder=_feed_only)
+
+    def test_default_registry_threads_the_chain_rate_holder(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """ADR-0021 §12 invariant 2: ONE rate stack per chain — the injected
+        session_rate holder IS the profile's rate-factory product (identity)."""
+        captured: dict[str, Any] = {}
+        real_build: Any = None
+
+        def _spy_build(lake_root: Path, **kwargs: Any) -> Any:
+            registry = real_build(lake_root, **kwargs)
+            captured["product"] = registry.primary().rate_factory()
+            return registry
+
+        from brutex.feeds import registry_build as rb
+
+        real_build = rb.build_default_registry
+        monkeypatch.setattr("brutex.feeds.registry_build.build_default_registry", _spy_build)
+        # _wire builds with session_rate=None → the function mints ONE holder;
+        # rebuild here with an explicit holder to pin identity end-to-end.
+        rate = SessionRateController()
+        lake = tmp_path / "lake"
+        lake.mkdir(exist_ok=True)
+        (lake / "instruments.duckdb").write_bytes(b"placeholder")
+        store = _FakeStore(
+            [_instrument("NIFTY", idx=True, security_id=1)], reference_only=frozenset()
+        )
+        hp = build_headless_pipeline(
+            lake_root=lake,
+            dry_run=True,
+            env={},
+            store_opener=lambda _p: cast(Any, store),
+            now=lambda: _FIXED_NOW,
+            session_rate=rate,
+        )
+        assert hp.vendor == "groww"
+        assert captured["product"] is rate
+
+    def test_default_inert_report_parity_over_real_sequencer(self, tmp_path: Path) -> None:
+        """THE DEFAULT-INERT PARITY PIN (the WS-B frozen-parity pattern).
+
+        The SAME real-shaped phase fakes are run (a) through the PRE-change
+        call shape — ``run_full_pipeline`` with NO ``vendor`` kwarg — and
+        (b) through the post-change consumer path — ``execute_headless_pipeline``
+        over a :class:`HeadlessPipeline` whose vendor was resolved from the
+        default (Groww-only) registry. The two ``PipelinePullReport`` dicts
+        must be EQUAL: with only Groww registered the registry wiring is
+        byte-inert (vendor="groww" == the sequencer's own default).
+        """
+        from dataclasses import asdict
+
+        from brutex.dashboard.pipeline_pull import run_full_pipeline
+        from brutex.feeds.registry_build import build_default_registry
+
+        def _phases() -> dict[str, Any]:
+            from tests.unit.test_pipeline_pull import (
+                _composite,
+                _historical_inner,
+                _metadata,
+                _outcome,
+                _spot,
+            )
+
+            return {
+                "run_spot": lambda: _spot(),  # noqa: PLW0108 — a FRESH report per call
+                "run_metadata": lambda: _metadata(),  # noqa: PLW0108 — a FRESH report per call
+                "run_historical": lambda _prior: _composite(historical=_historical_inner()),
+                "run_prebuild": lambda _exclude: _outcome(),
+            }
+
+        pre_change = run_full_pipeline(**_phases(), strict_gate=False, market_closed=None)
+
+        profile = build_default_registry(tmp_path).primary()
+        hp = HeadlessPipeline(
+            **_phases(),
+            strict_gate=False,
+            targets=1,
+            close=lambda: None,
+            market_closed=None,
+            vendor=profile.vendor,
+            write_domain=profile.write_domain,
+        )
+        post_change = execute_headless_pipeline(hp)
+
+        assert asdict(post_change) == asdict(pre_change)

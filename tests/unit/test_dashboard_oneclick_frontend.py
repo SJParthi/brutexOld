@@ -19,8 +19,10 @@ node.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,33 @@ _ONECLICK = _STATIC / "bx-oneclick.js"
 
 _ALL_FIVE = (_POLL, _CHART, _SCREENER, _EXPLAIN, _ONECLICK)
 _IDS = ("bx-poll", "bx-chart", "bx-screener", "bx-explain", "bx-oneclick")
+
+#: DEC-OPERATOR-PAGE-CONSOLIDATE-001 modules — the screener/strategy page
+#: wiring extracted into shared mountable files + the pure portal URL codec.
+#: Same file discipline as the five originals, their OWN decision id in the
+#: header; createElement presence is ROLE-AWARE (bx-portal-state builds no
+#: DOM and must NOT be forced to carry dead code).
+_PORTAL_STATE = _STATIC / "bx-portal-state.js"
+_SCREENER_PANEL = _STATIC / "bx-screener-panel.js"
+_STRATEGY_PANEL = _STATIC / "bx-strategy-panel.js"
+_OPERATOR_PORTAL = _STATIC / "bx-operator-portal.js"
+_CONSOLIDATE_FILES = (_PORTAL_STATE, _SCREENER_PANEL, _STRATEGY_PANEL, _OPERATOR_PORTAL)
+_CONSOLIDATE_IDS = (
+    "bx-portal-state",
+    "bx-screener-panel",
+    "bx-strategy-panel",
+    "bx-operator-portal",
+)
+
+#: Per-file DOM-builder expectation (the role-aware createElement law):
+#: the panels BUILD nodes; the pure codec and the class-flipping portal
+#: glue must never grow node-building code.
+_CONSOLIDATE_BUILDS_DOM = {
+    _PORTAL_STATE: False,
+    _SCREENER_PANEL: True,
+    _STRATEGY_PANEL: True,
+    _OPERATOR_PORTAL: False,
+}
 
 
 def _js(path: Path) -> str:
@@ -78,6 +107,53 @@ class TestFileDiscipline:
         assert "textContent" in oneclick
         # bx-oneclick builds its own nodes through BXUI.el (createElement+textContent).
         assert "BXUI.el(" in oneclick
+
+
+class TestConsolidateFileDiscipline:
+    """The DEC-OPERATOR-PAGE-CONSOLIDATE-001 modules ride the SAME file
+    discipline as the five originals (strict mode, decision id, honest
+    envelope, CommonJS guard, zero raw string-to-DOM sink tokens), with the
+    createElement expectation asserted PER FILE (role-aware — the pure URL
+    codec builds no DOM)."""
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_file_exists_and_is_not_suspiciously_small(self, path: Path) -> None:
+        assert path.is_file()
+        assert len(path.read_bytes()) > 500
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_use_strict_and_decision_id_header(self, path: Path) -> None:
+        js = _js(path)
+        assert '"use strict";' in js
+        assert "DEC-OPERATOR-PAGE-CONSOLIDATE-001" in js
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_honest_envelope_comment_present(self, path: Path) -> None:
+        assert "Honest envelope (Golden Rule #10)" in _js(path)
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_commonjs_export_guard_for_the_node_golden_harness(self, path: Path) -> None:
+        assert 'typeof module !== "undefined" && module.exports' in _js(path)
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_zero_string_to_dom_sinks(self, path: Path) -> None:
+        """The F-M2 XSS law: createElement(NS)/textContent ONLY — a raw
+        SUBSTRING ban, so even a comment cannot carry a sink token."""
+        js = _js(path)
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in js, f"{path.name} must never contain {sink}"
+
+    @pytest.mark.parametrize("path", _CONSOLIDATE_FILES, ids=_CONSOLIDATE_IDS)
+    def test_role_aware_dom_builder_expectation(self, path: Path) -> None:
+        js = _js(path)
+        if _CONSOLIDATE_BUILDS_DOM[path]:
+            assert "document.createElement(" in js
+            assert "textContent" in js
+        else:
+            assert "createElement" not in js, (
+                f"{path.name} builds no DOM nodes by design (pure codec / "
+                "class-flipping glue) — it must never grow node-building code"
+            )
 
 
 class TestPollDiscipline:
@@ -135,6 +211,56 @@ class TestPollDiscipline:
         js = _js(_POLL)
         assert "return r.json(); // abort timer still armed through the body read" in js
 
+    def test_counted_failure_schedules_through_the_backoff_law(self) -> None:
+        """The createPoller catch arm reschedules via ``bxBackoffDelayMs`` —
+        the CORE pin the retired v29 in-place-poller pins map onto
+        (DEC-DASHBOARD-POLL-HYGIENE-002 → DEC-FRONTEND-LATENCY-HARDENING-001
+        supersession): every counted failure lands on the capped-backoff
+        schedule, never a bare fixed retry and never a give-up."""
+        js = _js(_POLL)
+        assert "schedule(bxBackoffDelayMs(pollFailures, o));" in js
+        # …and the success arm restores the normal cadence.
+        assert "schedule(pollMs);" in js
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_backoff_ladder_node_golden(self) -> None:
+        """Node-executed golden for the PURE backoff law (the shipped file).
+
+        The capped-failure-backoff defect class (DEC-DASHBOARD-POLL-HYGIENE-002's
+        v29 pins, retired at the #1720 supersession) stays covered HERE at the
+        shared core: 0 failures → the normal cadence, the 600 ms quick-retry
+        envelope (QUICK_RETRIES=2), then 3 s→30 s capped doubling, and a FINITE
+        delay far past the cap — NEVER a give-up.
+        """
+        script = (
+            f"const P = require({json.dumps(str(_POLL))});"
+            "const ladder = [0,1,2,3,4,5,6,7,8,20,1000].map("
+            "  (f) => P.backoffDelayMs(f));"
+            "console.log(JSON.stringify(ladder));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        ladder = json.loads(proc.stdout)
+        assert ladder == [
+            3000,  # 0 failures → the normal POLL_MS cadence
+            600,  # quick retry 1
+            600,  # quick retry 2 (QUICK_RETRIES = 2)
+            3000,  # BACKOFF_BASE_MS · 2^0
+            6000,
+            12000,
+            24000,
+            30000,  # capped at BACKOFF_MAX_MS…
+            30000,
+            30000,  # …and stays capped
+            30000,  # finite far past the cap — never a give-up
+        ]
+
 
 class TestOneclickWidgetLayer:
     """bx-oneclick.js — ring cap, payload rendering law, precedence, errorCard."""
@@ -153,7 +279,9 @@ class TestOneclickWidgetLayer:
         js = _js(_ONECLICK)
         assert "JSON.stringify(rec.payload)" in js
         # The line lands in the DOM via BXUI.el(..., text) => textContent.
-        assert 'window.BXUI.el("div", "oc-event-line", bxEventLineText(rows[i]))' in js
+        # (`visible[i]` since DEC-O1-GUARANTEE-HARDEN-001 — the render walks
+        # the newest-500 capped window; the ONE-text-node law is unchanged.)
+        assert 'window.BXUI.el("div", "oc-event-line", bxEventLineText(visible[i]))' in js
 
     def test_funnel_precedence_law_manifest_only_when_idle(self) -> None:
         """C-M2: the live poller wins while a sweep runs."""

@@ -51,7 +51,7 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -78,8 +78,9 @@ from brutex.engine.tuple_complete import (
     completion_sentinel_path,
     read_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -320,24 +321,49 @@ def _verified_entries_from_audit(audit_path: Path) -> list[AuditEntry]:
 def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
     """Read the tree's recorded context from its audit log, or ``None`` if absent.
 
-    Scans every ``SWEEP_START`` entry's payload for the three reproducibility
-    strings. Returns ``None`` when the audit file does not exist or carries no
-    ``SWEEP_START`` line (the caller falls back to explicit operator input).
+    Scans every context-carrying entry's payload (``SWEEP_LAUNCH`` +
+    ``SWEEP_START`` — :data:`_CONTEXT_ACTIONS`) for the three reproducibility
+    strings. Returns ``None`` when the audit file does not exist or carries
+    no context line (the caller falls back to explicit operator input).
+
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
+    one entry resident at a time, O(1) peak memory in chain length
+    (DEC-AUDIT-READERS-STREAM-001; the old ``list(read_entries(...))``
+    materialised the ENTIRE never-rotated chain, measured ~1,165 B/entry
+    logical). Fold semantics are byte-equivalent by construction —
+    ``read_entries`` is itself ``list(iter_entries(path))``; the fold body is
+    the SAME :func:`_context_from_entries` the verified list-based facts seam
+    (:func:`recorded_audit_facts`) rides.
 
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable/corrupt, a ``SWEEP_START`` payload is
-        missing a context key, or two entries disagree (an inconsistent tree
-        is not a verifiable tree — refuse rather than guess, Golden Rule #1).
+        If the audit log is unreadable/corrupt (an :class:`AuditError` at
+        the ``iter_entries`` call OR mid-iteration on a malformed committed
+        line — both map here), a context payload is missing a
+        context key, or two entries disagree (an inconsistent tree is not a
+        verifiable tree — refuse rather than guess, Golden Rule #1).
     """
     if not audit_path.exists():
         return None
-    return _context_from_entries(_entries_from_audit(audit_path), audit_path)
+    # Function-local import: the audit module pulls the orchestrator/bloom
+    # graph nowhere, but keeping the verifier's module surface minimal mirrors
+    # the trial_stats discipline.
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    try:
+        # The try spans the ITERATION (the fold call RUNS the generator): a
+        # streaming reader raises its AuditError lazily, at the malformed
+        # committed line, mid-loop (DEC-AUDIT-READERS-STREAM-001).
+        return _context_from_entries(iter_entries(audit_path), audit_path)
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
 
 
-def _context_from_entries(entries: list[AuditEntry], audit_path: Path) -> RecordedContext | None:
-    """Derive the recorded context from already-read *entries* (one shared parse)."""
+def _context_from_entries(
+    entries: Iterable[AuditEntry], audit_path: Path
+) -> RecordedContext | None:
+    """Derive the recorded context from *entries* (list or single-pass stream)."""
     context: RecordedContext | None = None
     for entry in entries:
         if entry.action not in _CONTEXT_ACTIONS:
@@ -375,6 +401,12 @@ def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int,
     Returns an empty mapping when the audit file is absent or no entry carries
     a schedule (every spot tree).
 
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` — one
+    entry resident at a time, O(1) peak memory in chain length, the
+    :func:`recorded_context_from_audit` discipline
+    (DEC-AUDIT-READERS-STREAM-001); the fold body is the SAME
+    :func:`_schedules_from_entries` the verified list-based consumers ride.
+
     Raises
     ------
     SweepVerifyError
@@ -384,13 +416,20 @@ def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int,
     """
     if not audit_path.exists():
         return {}
-    return _schedules_from_entries(_entries_from_audit(audit_path), audit_path)
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    try:
+        # The try spans the ITERATION (the fold call RUNS the generator) —
+        # a streaming AuditError raises lazily at the malformed line.
+        return _schedules_from_entries(iter_entries(audit_path), audit_path)
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
 
 
 def _schedules_from_entries(
-    entries: list[AuditEntry], audit_path: Path
+    entries: Iterable[AuditEntry], audit_path: Path
 ) -> dict[str, tuple[int, ...]]:
-    """Derive the recorded schedules from already-read *entries* (one shared parse)."""
+    """Derive the recorded schedules from *entries* (list or single-pass stream)."""
     from brutex.data.futures_series import is_futures_series_symbol
 
     schedules: dict[str, tuple[int, ...]] = {}
@@ -456,13 +495,54 @@ def _schedules_from_entries(
     return schedules
 
 
+def _require_worst_case_entries(entries: Sequence[AuditEntry], audit_path: Path) -> None:
+    """Refuse a scoped generation whose recorded fill mode is not worst-case.
+
+    DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is the
+    ONLY fill model and every post-DEC ``SWEEP_START``/``SWEEP_LAUNCH`` line's
+    ``params`` carries the UNCONDITIONAL ``"fill_mode": "worst_case"`` key
+    (``canonical_trade_params`` emits it always). A context entry with NO key
+    is a precise-era line (the retired elide law recorded PRECISE by key
+    absence), and a literal ``"precise"`` token is the retired mode spelled
+    out — either way the generation's stores hold fills the deleted mode
+    produced, and verifying them as worst-case would launder precise-priced
+    results. Refuse LOUDLY; the remediation is a fresh worst-case sweep.
+
+    GENERATION-SCOPED: *entries* are the ONE generation's context entries
+    :func:`recorded_audit_facts` already selects — never the whole audit file.
+
+    Raises
+    ------
+    SweepVerifyError
+        If any scoped entry lacks the key or records anything other than
+        ``"worst_case"`` (a junk token refuses identically — tampered or
+        legacy, the tree is not verifiable under the one fill law).
+    """
+    expected = FillMode.WORST_CASE.value
+    for entry in entries:
+        params = entry.payload.get("params")
+        raw = params.get("fill_mode") if isinstance(params, dict) else None
+        if raw is None or str(raw) != expected:
+            raise SweepVerifyError(
+                f"precise-era sweep tree refused (DEC-FILL-WORST-CASE-ONLY-001): "
+                f"{audit_path} (seq {entry.seq}) records fill_mode={raw!r} — "
+                f"worst_case is the only fill model; this generation's stores "
+                f"were priced under the deleted mode machinery and cannot be "
+                f"verified. Re-run the sweep to produce a worst-case tree"
+            )
+
+
 def recorded_audit_facts(
     audit_path: Path,
     *,
     snapshot: str | None = None,
     indicator_version: str | None = None,
     code_commit_sha: str | None = None,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
+) -> tuple[
+    RecordedContext | None,
+    dict[str, tuple[int, ...]],
+    tuple[str, ...],
+]:
     """Read the audit ONCE and derive ONE generation's context + schedules.
 
     The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
@@ -496,16 +576,24 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
+    The scoped generation is additionally REQUIRED to record the one fill
+    law (DEC-FILL-WORST-CASE-ONLY-001): every context entry's ``params`` must
+    carry ``"fill_mode": "worst_case"`` — a precise-era generation (absent
+    key, the retired elide law, or a literal ``"precise"`` token) REFUSES
+    loudly via :func:`_require_worst_case_entries` before any tier runs.
+
     Returns ``(None, {}, ())`` when the audit file is absent, and
     ``(None, {}, other_generations)`` when the explicit flags match no
-    recorded entry (the explicit-flags path — the caller supplies the full
-    context).
+    recorded entry (the explicit-flags path — the caller supplies the
+    context strings via flags).
 
     Raises
     ------
     SweepVerifyError
         If the audit log is unreadable/corrupt, a context-bearing payload is
-        malformed, or the SCOPED generation's schedules disagree.
+        malformed, the SCOPED generation's schedules disagree, or the scoped
+        generation is a refused precise-era tree
+        (DEC-FILL-WORST-CASE-ONLY-001).
     """
     if not audit_path.exists():
         return None, {}, ()
@@ -530,6 +618,7 @@ def recorded_audit_facts(
     target = candidates[-1]
     matching = [entry for entry, ctx in pairs if ctx == target]
     others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
+    _require_worst_case_entries(matching, audit_path)
     return (
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
@@ -1126,6 +1215,10 @@ def plan_expected_stores(
             # from the manifest so the reconstructed tuple's run_id re-derives at
             # its ORIGINATING anchor (a non-prev-day cell would otherwise mismatch).
             fib_anchor=cell.fib_anchor,
+            # The refined cell's VWAP/EMA price source (DEC-NIFTY-PRICE-SOURCE-AXIS-001)
+            # — round-tripped so the reconstructed tuple's run_id re-derives at its
+            # ORIGINATING source bits (a non-default cell would otherwise mismatch).
+            price_source=PriceSourceCell(vwap_source=cell.vwap_source, ema_source=cell.ema_source),
         )
         plan[tuple_store_path(root, cell_tuple, train_grid)] = (cell_tuple, train_grid, False)
     return plan
@@ -1180,6 +1273,11 @@ def _verify_store_rows(
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        # The swept price-source axis is part of the run-identity
+        # (DEC-NIFTY-PRICE-SOURCE-AXIS-001, DEFAULT-OMITTED): a non-default cell's
+        # store re-derives its run_id at ITS OWN source, never a stale (HLC3, CLOSE).
+        vwap_source=cfg.vwap_source,
+        ema_source=cfg.ema_source,
         roll_schedule=cfg.roll_schedule,
     )
     expected_label = _direction_label(tuple_.direction)
@@ -1274,7 +1372,6 @@ def verify_identity(
         params — :func:`recorded_roll_schedules_from_audit` — never the
         operator's memory). ``None`` (the default / every spot tree) is the
         byte-identical pre-launch derivation.
-
     Raises
     ------
     SweepVerifyError
@@ -1283,7 +1380,9 @@ def verify_identity(
     if not root.is_dir():
         raise SweepVerifyError(f"results root not found or not a directory: {root}")
     findings: list[VerifyFinding] = []
-    plan = plan_expected_stores(root, grid, stage3=stage3)
+    plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]] = dict(
+        plan_expected_stores(root, grid, stage3=stage3)
+    )
     found = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
 
     if plan and found and not any(path in plan for path in found):
@@ -1408,50 +1507,57 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
 
     Returns the no-history record when the file or the pass lines are absent.
 
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
+    O(1) peak memory in chain length, the ``recorded_context_from_audit``
+    discipline (DEC-AUDIT-READERS-STREAM-001).
+
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable or a pass payload is missing a knob key
-        (a malformed tree is not a verifiable tree).
+        If the audit log is unreadable (an :class:`AuditError` at the
+        ``iter_entries`` call or mid-iteration — both map here) or a pass
+        payload is missing a knob key (a malformed tree is not a verifiable
+        tree).
     """
     if not audit_path.exists():
         return RecordedStage3Audit(knobs=None, consistent=True, optimizer_versions=())
-    from brutex.orchestrator.audit import AuditError, read_entries
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
-    try:
-        entries: list[AuditEntry] = list(read_entries(audit_path))
-    except AuditError as exc:
-        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
     knobs: RecordedStage3Knobs | None = None
     consistent = True
     versions: set[tuple[str, str]] = set()
-    for entry in entries:
-        if entry.action == "STAGE_3_REFINE_START":
+    try:
+        # The try spans the ITERATION (streaming AuditError raises mid-loop).
+        for entry in iter_entries(audit_path):
+            if entry.action == "STAGE_3_REFINE_START":
+                payload = entry.payload
+                versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+                continue
+            if entry.action != "STAGE_3_PASS_START":
+                continue
             payload = entry.payload
-            versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
-            continue
-        if entry.action != "STAGE_3_PASS_START":
-            continue
-        payload = entry.payload
-        missing = [
-            key
-            for key in ("stage3_top_k", "max_fevals", "max_restarts", "train_snapshot_hash")
-            if key not in payload
-        ]
-        if missing:
-            raise SweepVerifyError(
-                f"STAGE_3_PASS_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+            missing = [
+                key
+                for key in ("stage3_top_k", "max_fevals", "max_restarts", "train_snapshot_hash")
+                if key not in payload
+            ]
+            if missing:
+                raise SweepVerifyError(
+                    f"STAGE_3_PASS_START payload at {audit_path} "
+                    f"(seq {entry.seq}) missing {missing}"
+                )
+            found = RecordedStage3Knobs(
+                stage3_top_k=int(payload["stage3_top_k"]),
+                max_fevals=int(payload["max_fevals"]),
+                max_restarts=int(payload["max_restarts"]),
+                train_snapshot_hash=str(payload["train_snapshot_hash"]),
             )
-        found = RecordedStage3Knobs(
-            stage3_top_k=int(payload["stage3_top_k"]),
-            max_fevals=int(payload["max_fevals"]),
-            max_restarts=int(payload["max_restarts"]),
-            train_snapshot_hash=str(payload["train_snapshot_hash"]),
-        )
-        if knobs is None:
-            knobs = found
-        elif knobs != found:
-            consistent = False
+            if knobs is None:
+                knobs = found
+            elif knobs != found:
+                consistent = False
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
     return RecordedStage3Audit(
         knobs=knobs, consistent=consistent, optimizer_versions=tuple(sorted(versions))
     )

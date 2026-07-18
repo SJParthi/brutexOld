@@ -29,8 +29,13 @@ _EXPECTED_ALL = [
     "BacktestResult",
     "EquityPoint",
     "ExecutionError",
+    # DEC-FILL-WORST-CASE-ONLY-001: the single-member fill vocabulary + the
+    # removed-knob refusal guard (the resolver/default machinery is DELETED).
+    "FILL_MODE_ENV",
     "Fill",
     "FillCosts",
+    "FillMode",
+    "FillModeRemovedError",
     "FreezeQuantityExceededError",
     "InstrumentMeta",
     "InsufficientFundsError",
@@ -38,6 +43,7 @@ _EXPECTED_ALL = [
     "InvalidPriceError",
     "NonMonotonicBarError",
     "Position",
+    "require_fill_mode_env_unset",
 ]
 
 

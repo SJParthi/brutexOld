@@ -3,19 +3,21 @@
 DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 (MIGRATION.md #1060). The operator-locked
 rule:
 
-* **COST-FREE (signal-only — zero brokerage, zero STT/taxes, zero slippage, zero
-  liquidity impact, zero best/average/worst-case fill modelling):** ONLY
-  **INDEX SPOT** (NIFTY / BANKNIFTY / SENSEX) and **INDEX FUTURES** (NIFTY
-  futures). An index has no order book position of its own — the spot brute-force
-  research engine trades a pure directional price move — and index futures are
-  admitted to the dynamic-strategy track as signal-only too (DEC-NIFTY-DYNAMIC-
-  STRATEGY-001 / ADR-0012).
-* **COST-BEARING (full brokerage + STT + slippage + liquidity + best/avg/worst-
-  case fills apply):** EVERYTHING ELSE — stock spot, stock futures, stock
-  options, AND **index options**. An index OPTION is a tradable premium
-  instrument with a real bid/ask, so it is priced through the Track-2 cost
-  calculator (:mod:`brutex.costs.calculator`); a STOCK in any segment is
-  likewise a tradable order-book instrument.
+* **COST-FREE (signal-only — zero brokerage, zero STT/taxes, zero tick
+  slippage; the ONE worst-case fill law still prices the trade off the fill
+  bar's adverse extreme, DEC-FILL-WORST-CASE-ONLY-001 — cost-free means no
+  CHARGE stack, never a different fill law):** ONLY **INDEX SPOT**
+  (NIFTY / BANKNIFTY / SENSEX) and **INDEX FUTURES** (NIFTY futures). An
+  index has no order book position of its own — the spot brute-force
+  research engine trades a pure directional price move — and index futures
+  are admitted to the dynamic-strategy track as signal-only too
+  (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012).
+* **COST-BEARING (full brokerage + STT + tick slippage + liquidity apply, on
+  top of the SAME worst-case fill anchors):** EVERYTHING ELSE — stock spot,
+  stock futures, stock options, AND **index options**. An index OPTION is a
+  tradable premium instrument with a real bid/ask, so it is priced through
+  the Track-2 cost calculator (:mod:`brutex.costs.calculator`); a STOCK in
+  any segment is likewise a tradable order-book instrument.
 
 The single-source-of-truth predicate::
 
@@ -106,7 +108,8 @@ def is_cost_bearing(instrument: Instrument) -> bool:
     """Return True iff *instrument* carries the full transaction-cost stack.
 
     The exact complement of :func:`is_cost_free`: every stock (spot / future /
-    option) and every index OPTION bears brokerage + STT + slippage + liquidity +
-    best/avg/worst-case fills. O(1).
+    option) and every index OPTION bears brokerage + STT + slippage + liquidity,
+    on top of the ONE worst-case fill law every instrument prices under
+    (DEC-FILL-WORST-CASE-ONLY-001). O(1).
     """
     return not is_cost_free(instrument)

@@ -35,13 +35,16 @@ from brutex.data import lake_heal
 from brutex.data.catalog import Catalog
 from brutex.data.errors import LakeWriteHalt, WriterError
 from brutex.data.lake_heal import (
+    ATTEMPT_RELPATH,
     AUDIT_HEAL_BATCH,
     AUDIT_HEAL_DEDUP,
     AUDIT_HEAL_DRIFT_MERGE,
     AUDIT_HEAL_QUARANTINE_FILE,
     AUDIT_HEAL_REASSIGN,
+    DEFAULT_LAKE_HEAL_RETRY_S,
     DEFAULT_SWEEP_THROTTLE_S,
     LAKE_HEAL_ENV,
+    LAKE_HEAL_RETRY_ENV,
     LAKE_HEAL_THROTTLE_ENV,
     HealReport,
     StartupSweeper,
@@ -50,8 +53,10 @@ from brutex.data.lake_heal import (
     heal_findings,
     lake_content_token,
     load_heal_stats,
+    load_last_attempt,
     load_last_sweep,
     open_lake_heal_audit,
+    resolve_heal_retry_s,
     resolve_lake_heal_mode,
     resolve_sweep_throttle_s,
     run_startup_sweep,
@@ -532,6 +537,101 @@ class TestHealBatchDedupEndToEnd:
         assert daily["high"].to_list() == [101.0]
         assert daily["close"].to_list() == [101.0]
         assert daily["volume"].to_list() == [22]
+
+    def test_recall_never_derives_option_daily(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: pre-retirement the recall re-derived ``1day`` for EVERY
+        healed symbol — a healed CE/PE 1-minute partition got a fresh option
+        1day. Under DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of
+        2026-07-15 as relayed via the coordinator — ADR-0021 RULING B, draft
+        PR #1555) options are 1-minute-native: the daily recall is gated for
+        CE/PE, counted + logged ONCE per batch (never per-contract spam)."""
+        lake = tmp_path / "lake"
+        ce_symbol = "NSE-NIFTY-27Jun24-20000-CE"
+        pe_symbol = "NSE-NIFTY-27Jun24-20000-PE"
+        for symbol in (ce_symbol, pe_symbol):
+            _poison(
+                _dest(lake, segment="FNO", symbol=symbol),
+                [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11), (_ts(1), 101.0, 12)],
+            )
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.healed == 2
+        # ABSENCE PIN (the fails-before core): NO derived 1day was written for
+        # either healed option contract — the partitions stay 1-minute-only.
+        for symbol in (ce_symbol, pe_symbol):
+            assert not (lake / "bars" / "NSE" / "FNO" / symbol / "1day").exists()
+        assert report.recall is not None
+        assert report.recall.daily_targets == 0
+        assert report.recall.daily_bars == 0
+        assert report.recall.option_daily_skipped == 2
+        # ONE capped batch-level log naming the law — never per-contract spam.
+        events = [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
+        assert len(events) == 1
+        assert events[0]["count"] == 2
+        assert events[0]["symbols"] == [ce_symbol, pe_symbol]
+        assert "DEC-OPTIONS-PREBUILD-RETIRE-001" in events[0]["law"]
+
+    def test_recall_option_skip_log_symbols_are_capped(self, tmp_path: Path) -> None:
+        """The batch log's ``symbols`` list is CAPPED (the MAX_REPORTED idiom);
+        the TRUE total stays in ``count`` + ``RecallReport.option_daily_skipped``."""
+        from brutex.data.lake_heal import RECALL_OPTION_SKIP_LOG_CAP
+
+        lake = tmp_path / "lake"
+        symbols = [f"NSE-NIFTY-27Jun24-{20000 + i * 100}-CE" for i in range(12)]
+        for symbol in symbols:
+            _poison(
+                _dest(lake, segment="FNO", symbol=symbol),
+                [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)],
+            )
+        scan = scan_lake_invariants(lake)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.option_daily_skipped == 12
+        (event,) = [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
+        assert event["count"] == 12
+        assert len(event["symbols"]) == RECALL_OPTION_SKIP_LOG_CAP
+
+    def test_recall_fut_daily_still_derived(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so a healed FUT 1-minute partition still gets its 1day
+        recall (and no option-skip log fires)."""
+        lake = tmp_path / "lake"
+        fut_symbol = "NSE-NIFTY-27Jun24-FUT"
+        _poison(
+            _dest(lake, segment="FNO", symbol=fut_symbol),
+            [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11), (_ts(1), 101.0, 12)],
+        )
+        scan = scan_lake_invariants(lake)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.recall is not None
+        assert report.recall.daily_targets == 1
+        assert report.recall.daily_bars == 1
+        assert report.recall.option_daily_skipped == 0
+        assert (lake / "bars" / "NSE" / "FNO" / fut_symbol / "1day").is_dir()
+        assert not [e for e in logs if e["event"] == "lake_heal.recall_option_daily_skipped"]
 
     def test_skipped_findings_vanished_and_already_clean(self, tmp_path: Path) -> None:
         """A vanished path and an already-clean file are SKIPPED (idempotent
@@ -3252,12 +3352,14 @@ class TestDerivedRecall:
 
     def test_recall_fno_daily_carries_oi_through_fno_resampler(self, tmp_path: Path) -> None:
         """The F&O branch reads OI + resamples through the OI-carry positional
-        resampler — the recalled 1day row carries last-of-day open_interest."""
+        resampler — the recalled 1day row carries last-of-day open_interest.
+        A FUT contract carries the pin (DEC-OPTIONS-PREBUILD-RETIRE-001: a
+        CE/PE never reaches the daily recall any more — futures keep it)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         lake = tmp_path / "lake"
-        symbol = "NSE-NIFTY-27Jun24-24000-CE"
+        symbol = "NSE-NIFTY-27Jun24-FUT"
         dest = _dest(lake, segment="FNO", symbol=symbol)
         dest.parent.mkdir(parents=True, exist_ok=True)
         rows = [(_ts(0), 100.0, 10, 500), (_ts(0), 100.0, 10, 500), (_ts(1), 101.0, 12, 600)]
@@ -3467,6 +3569,52 @@ class TestDerivedRecall:
                 recall=True,
                 now=_now,
             )
+
+    def test_recall_tf_rebuild_conversion_panic_is_per_symbol_isolation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — FAILS-BEFORE: a stored
+        out-of-datetime-range timestamp panicked the rebuild's Rust→Python
+        conversion as ``pyo3_runtime.PanicException`` (a BaseException), which
+        sailed PAST ``_rebuild_tf_months``' former bare ``except Exception``
+        and aborted the WHOLE recall batch. Now the guard is the round-18
+        ``_SWEEP_GUARD_ERRORS`` — counted ``tf_failed``, loudly logged, the
+        batch completes."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0)), _bar(_ts(1))])
+        materialize_lake_timeframes(
+            lake_root=lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=["5m"],
+        )
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+
+        def _panic(**_kwargs: Any) -> Any:
+            pl = pytest.importorskip("polars")
+            raise pl.exceptions.PanicException(
+                "called `Result::unwrap()` on an `Err` value: OverflowError"
+            )
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _panic)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.tf_rebuilt == 0
+        assert report.recall.tf_failed == 1
+        failures = _events(logs, "lake_heal.tf_rebuild_failed")
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
 
     def test_recall_tf_rebuild_is_month_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3933,6 +4081,67 @@ class TestLakeContentToken:
         june.unlink()
         assert lake_content_token(lake) == skipped_token
 
+    def test_racing_dir_deletion_mid_walk_skipped_deterministically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-LAKE-INVARIANTS-PREINDEX-001: a directory raced away between
+        its parent's listing and its own ``iterdir`` is skipped LOUDLY
+        (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
+        same race silently), and the token equals the one the dir's genuine
+        absence yields (deterministic)."""
+        import shutil
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        _write_spot(lake, [_bar(_ts(0))], symbol="BANKNIFTY")
+        victim = lake / "bars" / "NSE" / "INDEX" / "BANKNIFTY"
+        real_iterdir = Path.iterdir
+
+        def _racing_iterdir(self: Path) -> Any:
+            if self == victim:
+                raise FileNotFoundError(2, "raced away", str(self))
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _racing_iterdir)
+        with capture_logs() as logs:
+            skipped_token = lake_content_token(lake)
+        (skip,) = _events(logs, "lake_heal.token_walk_skipped")
+        assert skip["path"] == repr(str(victim))
+        assert skip["log_level"] == "warning"
+        monkeypatch.undo()
+        shutil.rmtree(victim)
+        assert lake_content_token(lake) == skipped_token
+
+    def test_walk_selection_mirrors_rglob(self, tmp_path: Path) -> None:
+        """The streaming walk keeps the old ``rglob("*.parquet")`` SELECTION
+        (empirically pinned on the pinned 3.12 pathlib): a symlinked DIR is
+        never descended (its target's files contribute nothing — exactly what
+        ``**`` did), hidden entries ARE matched, and a dir named
+        ``x.parquet`` contributes its own line AND is descended."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        t0 = lake_content_token(lake)
+        # A symlinked dir (with a parquet inside its target) adds NO line and
+        # is not descended — the token must NOT move.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.parquet").write_bytes(b"")
+        (lake / "bars" / "LINKED").symlink_to(outside)
+        assert lake_content_token(lake) == t0
+        # A hidden .parquet IS matched (pathlib wildcards match dot-names).
+        hidden = lake / "bars" / ".hidden.parquet"
+        hidden.write_bytes(b"")
+        t1 = lake_content_token(lake)
+        assert t1 != t0
+        # A DIR named *.parquet contributes a line AND is descended: a file
+        # created inside it moves the token again.
+        dir_pq = lake / "bars" / "dir.parquet"
+        dir_pq.mkdir()
+        t2 = lake_content_token(lake)
+        assert t2 != t1
+        (dir_pq / "inner.parquet").write_bytes(b"")
+        assert lake_content_token(lake) != t2
+
 
 class TestRunStartupSweep:
     def test_startup_sweep_runs_once_then_skips(
@@ -4071,7 +4280,13 @@ class TestRunStartupSweep:
         assert result.report is not None
         assert result.report.refused_mass_heal is True  # mutant: heals instead
         assert result.report.healed == 0
-        assert _tree_state(lake) == before  # not one byte moved
+        after = _tree_state(lake)
+        # DEC-LAKE-INVARIANTS-PREINDEX-001: the refused sweep stamps the ONE
+        # `.lake_heal/` ATTEMPT sidecar (metadata, a lake-data sibling); the
+        # DATA tree itself stays byte-identical — not one lake byte moved.
+        attempt_stamp = after.pop(ATTEMPT_RELPATH, None)
+        assert attempt_stamp is not None
+        assert after == before
         assert load_last_sweep(lake) is None  # a refused sweep never stamps
         (refusal,) = _events(logs, "lake_heal.mass_heal_refused")
         assert refusal["files_scanned"] == 21  # bars 0 + options 21
@@ -4101,18 +4316,26 @@ class TestSentinelStampGate:
     """The sentinel stamps ONLY a genuinely-completed auto sweep (fix-pass).
 
     A refused / observe / errored / partially-healed sweep must SKIP the stamp
-    (``lake_heal.sweep_sentinel_skipped``) so the next boot re-attempts —
+    (``lake_heal.sweep_sentinel_skipped``) so a later boot re-attempts —
     stamping would token-match past live poison and silently stop L3
-    self-healing + its one-shot alert. The stamp cases (zero-finding clean
-    sweep, healed-all sweep) are pinned by ``TestRunStartupSweep``.
+    self-healing + its one-shot alert. Since
+    DEC-LAKE-INVARIANTS-PREINDEX-001 the non-stamp additionally records the
+    ATTEMPT (:data:`ATTEMPT_RELPATH`), so an UNCHANGED-token next boot skips
+    a DETERMINISTIC non-stamp loudly (observe / mass-refusal, mode unchanged)
+    and backs off a TRANSIENT one (errors / unhealed) instead of full-
+    rescanning on every boot. The stamp cases (zero-finding clean sweep,
+    healed-all sweep) are pinned by ``TestRunStartupSweep``.
     """
 
     def _skip_events(self, logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
         return _events(logs, "lake_heal.sweep_sentinel_skipped")
 
-    def test_observe_sweep_skips_sentinel_and_reattempts(
+    def test_observe_sweep_skips_sentinel_then_deterministic_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Observe mode: no stamp (unchanged law) → the NEXT boot is a LOUD
+        deterministic skip — pre-fix it full-rescanned on EVERY boot — and a
+        ``BRUTEX_LAKE_HEAL`` mode flip re-runs immediately."""
         monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
         lake = tmp_path / "lake"
         _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
@@ -4123,12 +4346,40 @@ class TestSentinelStampGate:
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "observe_mode"
         assert skip["log_level"] == "warning"
-        # The next boot re-attempts (no sentinel → no token match).
-        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        attempt = load_last_attempt(lake)
+        assert attempt is not None
+        assert attempt["reason"] == "observe_mode"
+        assert attempt["mode"] == "observe"
+        assert attempt["lake_token"] == result.token
+        # The REAL batch tallies are persisted (the re-alert's source values).
+        assert attempt["findings"] == 1
+        assert attempt["files_scanned"] == 1
+        # Next boot, UNCHANGED token + mode: the scan verdict is a pure
+        # function of (token, mode) — skipped LOUDLY, never silently.
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert second.token == result.token
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        assert skip2["reason"] == "observe_mode"
+        assert skip2["log_level"] == "warning"
+        assert "mode flip re-runs" in str(skip2["remediation"])
+        # A mode flip (observe → auto) MUST re-run — and now heals + stamps.
+        monkeypatch.setenv(LAKE_HEAL_ENV, "auto")
+        third = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert third.ran is True
+        assert third.report is not None
+        assert third.report.healed == 1
+        assert load_last_sweep(lake) is not None
 
-    def test_refused_mass_heal_skips_sentinel_and_reattempts(
+    def test_refused_mass_heal_skips_sentinel_then_deterministic_skip(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Mass-heal refusal: no stamp (unchanged law) → deterministic skip on
+        an unchanged token; ANY token move re-arms the sweep immediately."""
+        import os
+
         monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
         monkeypatch.setattr(lake_heal, "MASS_HEAL_MIN_FILES", 1)
         lake = tmp_path / "lake"
@@ -4141,6 +4392,14 @@ class TestSentinelStampGate:
         assert load_last_sweep(lake) is None
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "mass_heal_refused"
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        assert skip2["reason"] == "mass_heal_refused"
+        # A token move (a pull / heal / manual copy) re-arms immediately.
+        os.utime(_dest(lake), ns=(1, 1))
         assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
 
     def test_errored_sweep_skips_sentinel(
@@ -4218,9 +4477,453 @@ class TestSentinelStampGate:
         assert load_last_sweep(lake) is None  # NOT stamped
         (skip,) = self._skip_events(logs)
         assert skip["reason"] == "heal_errors"
-        # The next boot re-attempts (no sentinel → no token match).
+        # Within the transient backoff (attempt + boot share the injected
+        # clock, elapsed 0 s < 24 h) the next boot skips LOUDLY…
+        with capture_logs() as logs2:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "backoff"
+        assert skip2["reason"] == "heal_errors"
+        assert skip2["retry_s"] == DEFAULT_LAKE_HEAL_RETRY_S
+        # …and re-attempts once the backoff elapses (env-tuned to 0 here).
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "0")
+        third = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert third.ran is True
+        assert third.report is not None
+        assert third.report.errors == 1  # still poisoned — genuinely re-tried
+
+
+class TestAttemptRecordBackoff:
+    """The L3 attempt record + skip verdict (DEC-LAKE-INVARIANTS-PREINDEX-001).
+
+    Every ambiguity — absent/corrupt record, foreign token, unknown reason,
+    unparsable/naive/future timestamp — fails OPEN to re-scanning (the
+    sentinel loaders' contract: fail-open to CHECKING, never to skipping);
+    ``force=True`` bypasses the record entirely; an elapsed backoff re-arms.
+    """
+
+    def _write_attempt(self, lake: Path, payload: object) -> None:
+        path = lake / ATTEMPT_RELPATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        path.write_text(text, encoding="utf-8")
+
+    def _attempt(self, lake: Path, **overrides: Any) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "version": 1,
+            "lake_token": lake_content_token(lake),
+            "reason": "heal_errors",
+            "mode": "auto",
+            "attempt_utc": _NOW.isoformat(),
+        }
+        record.update(overrides)
+        return record
+
+    def test_transient_backoff_elapsed_reattempts(self, tmp_path: Path) -> None:
+        """A recorded transient failure re-attempts once the 24 h default
+        backoff elapses (injected clock) — and a now-clean sweep stamps."""
+        from datetime import timedelta
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake))
+        later = _NOW + timedelta(seconds=DEFAULT_LAKE_HEAL_RETRY_S + 1)
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=lambda: later)
+        assert result.ran is True
+        assert load_last_sweep(lake) is not None  # clean sweep stamps
+
+    def test_transient_within_backoff_skips(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake))
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is False
+        (skip,) = _events(logs, "lake_heal.sweep_skip_attempt")
+        assert skip["verdict"] == "backoff"
+
+    def test_foreign_token_record_reruns(self, tmp_path: Path) -> None:
+        """A token move (any pull/heal) makes the record inert — re-run."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, lake_token="0" * 64))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_unknown_reason_reruns(self, tmp_path: Path) -> None:
+        """Forward-compat: an unrecognised reason fails open to checking."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, reason="mystery_reason"))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_corrupt_and_non_object_records_fail_open(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, "{corrupt")
+        assert load_last_attempt(lake) is None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()  # re-arm the sentinel
+        self._write_attempt(lake, '["not", "an", "object"]')
+        assert load_last_attempt(lake) is None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_absent_record_loads_none(self, tmp_path: Path) -> None:
+        assert load_last_attempt(tmp_path) is None
+
+    def test_unparsable_timestamp_reruns(self, tmp_path: Path) -> None:
+        """Junk / absent / NAIVE ``attempt_utc`` on a transient reason —
+        the elapsed computation faults (``ValueError`` / ``TypeError``) and
+        the verdict fails open to re-scanning."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        self._write_attempt(lake, self._attempt(lake, attempt_utc="not-a-time"))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=None))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        (lake / ".lake_heal" / "last_sweep.json").unlink()
+        naive = _NOW.replace(tzinfo=None).isoformat()  # aware-minus-naive raises
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=naive))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_future_skewed_timestamp_reruns(self, tmp_path: Path) -> None:
+        """A future-skewed stamp (elapsed < 0) biases to re-checking."""
+        from datetime import timedelta
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        future = (_NOW + timedelta(hours=1)).isoformat()
+        self._write_attempt(lake, self._attempt(lake, attempt_utc=future))
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+
+    def test_force_bypasses_standing_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``force=True`` never consults (nor is blocked by) the record."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is True  # observe over a clean lake — still no stamp
+        assert load_last_attempt(lake) is not None
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        forced = run_startup_sweep(lake, force=True, per_file_pause=lambda: None, now=_now)
+        assert forced.ran is True
+
+    def _flat_attempt(self, *, reason: str, mode: str) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "lake_token": "T",
+            "reason": reason,
+            "mode": mode,
+            "attempt_utc": _NOW.isoformat(),
+        }
+
+    def test_mode_mismatch_reruns_every_reason(self) -> None:
+        """MAJOR fold (reproduced): the mode gate covers ALL reasons — a
+        recorded-vs-current mode mismatch re-runs the sweep for BOTH the
+        deterministic AND the transient arms, both flip directions; an
+        unchanged mode still skips (deterministic / backoff)."""
+        from brutex.data.lake_heal import LakeHealMode, _attempt_skip_verdict
+
+        expected = {
+            "observe_mode": "deterministic",
+            "mass_heal_refused": "deterministic",
+            "heal_errors": "backoff",
+            "unhealed_findings": "backoff",
+        }
+        flips: tuple[tuple[LakeHealMode, LakeHealMode], ...] = (
+            ("auto", "observe"),
+            ("observe", "auto"),
+        )
+        for reason, verdict in expected.items():
+            for recorded, current in flips:
+                flipped = self._flat_attempt(reason=reason, mode=recorded)
+                assert _attempt_skip_verdict(flipped, token="T", mode=current, now=_NOW) is None, (
+                    reason,
+                    recorded,
+                    current,
+                )
+                same = self._flat_attempt(reason=reason, mode=current)
+                assert _attempt_skip_verdict(same, token="T", mode=current, now=_NOW) == verdict, (
+                    reason,
+                    current,
+                )
+
+    def test_mode_flip_during_transient_backoff_reruns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's repro end-to-end: an operator flipping auto →
+        observe to DIAGNOSE a ``heal_errors`` lake must get a real (observe)
+        re-run — pre-fix the transient arm ignored the flip and backoff-
+        skipped the diagnosis for up to 24 h. The flip BACK re-runs too."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _boom(self: ParquetWriter, dest: Path, **_kw: Any) -> Any:
+            raise WriterError("simulated per-finding heal failure")
+
+        monkeypatch.setattr(ParquetWriter, "heal_partition", _boom)
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.ran is True
+        assert first.report is not None
+        assert first.report.errors == 1
+        # Same mode, within the backoff: skipped (unchanged law).
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        # Flip auto → observe: the diagnosis run MUST happen.
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        diag = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert diag.ran is True
+        assert diag.report is not None
+        assert diag.report.mode == "observe"
+        assert diag.report.findings == 1  # the poison is now VISIBLE to the operator
+        # …and the flip BACK (observe → auto) re-runs as well (direction 2).
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        back = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert back.ran is True
+        assert back.report is not None
+        assert back.report.errors == 1  # genuinely re-attempted the heal
+
+    def test_remediation_wording_is_verdict_specific(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fold: the backoff skip names ITS lever
+        (``BRUTEX_LAKE_HEAL_RETRY_S=0`` + a reboot re-runs now), the
+        deterministic skip names the mode flip — pre-fix both verdicts read
+        the deterministic wording."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        # Backoff verdict (transient reason, unchanged auto mode).
+        self._write_attempt(lake, self._attempt(lake))
+        with capture_logs() as logs:
+            assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        (skip,) = _events(logs, "lake_heal.sweep_skip_attempt")
+        assert skip["verdict"] == "backoff"
+        backoff_remediation = str(skip["remediation"])
+        assert f"{LAKE_HEAL_RETRY_ENV}=0 + a reboot re-runs now" in backoff_remediation
+        assert "mode flip" not in backoff_remediation
+        # Deterministic verdict (observe record, unchanged observe mode).
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        self._write_attempt(lake, self._attempt(lake, reason="observe_mode", mode="observe"))
+        with capture_logs() as logs2:
+            assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        (skip2,) = _events(logs2, "lake_heal.sweep_skip_attempt")
+        assert skip2["verdict"] == "deterministic"
+        deterministic_remediation = str(skip2["remediation"])
+        assert f"{LAKE_HEAL_ENV} mode flip re-runs" in deterministic_remediation
+        assert LAKE_HEAL_RETRY_ENV not in deterministic_remediation
+
+
+class TestResolveHealRetry:
+    """``BRUTEX_LAKE_HEAL_RETRY_S`` — the ``resolve_sweep_throttle_s`` parse
+    contract (tolerant: junk → default, negative → 0.0)."""
+
+    def test_default_when_unset_or_blank(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LAKE_HEAL_RETRY_ENV, raising=False)
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "   ")
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+
+    def test_default_when_unparsable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "one-day")
+        assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S
+
+    def test_valid_and_negative_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "3600")
+        assert resolve_heal_retry_s() == 3600.0
+        monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, "-5")
+        assert resolve_heal_retry_s() == 0.0
+
+    def test_non_finite_takes_the_junk_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Review fold (NIT): ``inf`` parsed as a valid float = skip-forever
+        within one token, violating the "any ambiguity → re-run" law; ``nan``
+        poisons the elapsed compare. Both (and every spelling) take the
+        junk-value treatment — the default, never a silent forever-skip."""
+        for junk in ("inf", "+inf", "-inf", "Infinity", "nan", "NaN"):
+            monkeypatch.setenv(LAKE_HEAL_RETRY_ENV, junk)
+            assert resolve_heal_retry_s() == DEFAULT_LAKE_HEAL_RETRY_S, junk
+
+
+class TestAttemptRecordBestEffort:
+    """The attempt-record write is BEST-EFFORT (review fold, MINOR).
+
+    On a read-only / wedged lake mount an observe boot previously escalated
+    the record's OSError to the :class:`StartupSweeper` blanket guard — a
+    scary ``lake_heal.sweep_failed`` EVERY boot, the real result DISCARDED,
+    and (ironically) the skip never engaging so the O(files) scan re-ran
+    every boot too. Now: ONE targeted ``lake_heal.attempt_record_failed``
+    WARNING, the real :class:`StartupSweepResult` still returned.
+    ``MemoryError`` is NOT caught (house law).
+    """
+
+    def test_unwritable_record_warns_once_and_returns_the_real_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FILE planted at ``.lake_heal`` (the unwritable-metadata shape —
+        works under root, unlike a chmod) faults the record's ``mkdir``: the
+        sweep result survives, ONE targeted WARN fires, NO ``sweep_failed``."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        (lake / ".lake_heal").write_text("not a dir", encoding="utf-8")
+        with capture_logs() as logs:
+            result = StartupSweeper(lake).run_sync()
+        assert result is not None  # NOT discarded by the blanket guard
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.findings == 1
+        (warn,) = _events(logs, "lake_heal.attempt_record_failed")
+        assert warn["log_level"] == "warning"
+        assert warn["path"] == str(lake / ATTEMPT_RELPATH)
+        assert _events(logs, "lake_heal.sweep_failed") == []
+        assert load_last_attempt(lake) is None  # honestly unrecorded — next boot re-scans
+
+    def test_memory_error_from_the_record_write_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MemoryError is NOT swallowed by the best-effort arm (house law) —
+        it propagates raw out of :func:`run_startup_sweep`."""
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+
+        def _boom(dest: Path, render: Any) -> None:
+            raise MemoryError
+
+        monkeypatch.setattr(lake_heal, "atomic_write_simple", _boom)
+        with pytest.raises(MemoryError):
+            run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+
+
+class TestMassRefusalRealert:
+    """The standing mass-heal-refusal keeps its per-boot Telegram cadence
+    (review fold, judgment ruling): a deterministic skip of a
+    ``mass_heal_refused`` record re-fires the CRITICAL alert from the
+    record's PERSISTED REAL tallies — never a fabricated
+    :class:`HealReport`; any other reason / a pre-fix record shape abstains;
+    an alert fault is swallowed (alerts never crash boot).
+    """
+
+    def _refused_lake(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        monkeypatch.setattr(lake_heal, "MASS_HEAL_MIN_FILES", 1)
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        first = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert first.report is not None
+        assert first.report.refused_mass_heal is True
+        return lake
+
+    def test_deterministic_skip_realerts_from_persisted_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+
+        lake = self._refused_lake(tmp_path, monkeypatch)
+        attempt = load_last_attempt(lake)
+        assert attempt is not None
+        assert attempt["findings"] == 1
+        assert attempt["files_scanned"] == 1
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
         second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
-        assert second.ran is True
+        assert second.ran is False
+        (call,) = calls
+        assert call == {
+            "findings": 1,
+            "files_scanned": 1,
+            "attempt_utc": attempt["attempt_utc"],
+            "scope": "startup-sweep",
+        }
+
+    def test_observe_deterministic_skip_never_realerts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-alert is mass_heal_refused-ONLY — an observe-mode
+        deterministic skip stays a structlog WARNING (the sweep already
+        alerted once via ``on_report`` when it ran)."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+
+        monkeypatch.setenv(LAKE_HEAL_ENV, "observe")
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is True
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
+        assert run_startup_sweep(lake, per_file_pause=lambda: None, now=_now).ran is False
+        assert calls == []
+
+    def test_pre_fix_record_shape_abstains_never_fabricates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A record missing (or carrying junk-typed) tallies ABSTAINS —
+        honesty over noise; the persisted values are the ONLY alert source."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+        from brutex.data.lake_heal import _realert_mass_heal_refused
+
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            sweep_alerts_mod,
+            "emit_lake_heal_still_refused_alert",
+            lambda **kw: calls.append(dict(kw)),
+        )
+        base = {"findings": 1, "files_scanned": 2, "attempt_utc": "2024-07-01T00:00:00+00:00"}
+        _realert_mass_heal_refused({k: v for k, v in base.items() if k != "findings"})
+        _realert_mass_heal_refused({**base, "findings": "1"})
+        _realert_mass_heal_refused({**base, "files_scanned": None})
+        _realert_mass_heal_refused({**base, "attempt_utc": 5})
+        # Refuter NIT-1: a bool sails past bare ``isinstance(x, int)``; a
+        # negative tally is only reachable via a hand-edited sidecar — both
+        # ABSTAIN under the tightened ``type(x) is int and x >= 0`` gate.
+        _realert_mass_heal_refused({**base, "findings": True})
+        _realert_mass_heal_refused({**base, "files_scanned": False})
+        _realert_mass_heal_refused({**base, "findings": -1})
+        _realert_mass_heal_refused({**base, "files_scanned": -2})
+        assert calls == []
+        _realert_mass_heal_refused(base)  # the well-formed record DOES fire
+        (call,) = calls
+        assert call == {**base, "scope": "startup-sweep"}
+
+    def test_realert_fault_swallowed_with_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Alerts never crash boot: a raising emit is ONE warning."""
+        import brutex.notifications.sweep_alerts as sweep_alerts_mod
+        from brutex.data.lake_heal import _realert_mass_heal_refused
+
+        def _boom(**_kw: Any) -> None:
+            raise RuntimeError("simulated alert-path fault")
+
+        monkeypatch.setattr(sweep_alerts_mod, "emit_lake_heal_still_refused_alert", _boom)
+        with capture_logs() as logs:
+            _realert_mass_heal_refused(
+                {"findings": 1, "files_scanned": 2, "attempt_utc": "2024-07-01T00:00:00+00:00"}
+            )
+        (warn,) = _events(logs, "lake_heal.still_refused_alert_failed")
+        assert warn["log_level"] == "warning"
+
+    def test_realert_rides_the_real_emit_when_telegram_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No mock: the deterministic skip drives the REAL emit helper, which
+        is a silent no-op when Telegram is disabled (the default) — the skip
+        result is unchanged and nothing raises."""
+        lake = self._refused_lake(tmp_path, monkeypatch)
+        with capture_logs() as logs:
+            second = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert second.ran is False
+        assert _events(logs, "lake_heal.still_refused_alert_failed") == []
 
 
 class TestStartupSweeper:

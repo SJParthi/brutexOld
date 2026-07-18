@@ -96,6 +96,8 @@ from brutex.dashboard.movers_underlying_class import (
     fno_kind_from_underlying,
     normalize_underlying_class,
 )
+from brutex.data.bar_screen import screen_frame
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -814,6 +816,7 @@ def _read_future_session(
     symbol: str,
     day: date_cls,
     cutoff_min: int | None,
+    bad_tick: bool = True,
 ) -> tuple[Decimal, int, int, int | None, float | None, float | None] | None:
     """Read *day*'s raw 1-minute bars for one series, preserving open interest.
 
@@ -850,6 +853,15 @@ def _read_future_session(
         The IST trading day to snapshot.
     cutoff_min
         Intraday minute-of-day cutoff, or ``None`` for the whole day.
+    bad_tick
+        Whether the ×4 bad-tick (scaled-spike) arm APPLIES on top of the
+        always-on insane (positivity/ordering) screen. ``True`` (default) for
+        futures/spot (engine-screened) — DEFERS to the ``BRUTEX_BAD_TICK_SCREEN``
+        env kill switch (never a hard override), so switch-off shows the same
+        raw view as the engine + ``/db``; the options caller passes ``False`` —
+        the arm is forced OFF regardless of the switch, because option premia
+        legitimately move ≥4×/minute and the index-calibrated threshold does
+        not apply (DEC-DASHBOARD-READ-SCREEN-001).
 
     Returns
     -------
@@ -887,6 +899,30 @@ def _read_future_session(
         # (movers_snapshot.filter_to_ist_minute — DEC-HARDENING-LEFTOVERS-001,
         # CLAUDE.md §11 COMMON; byte-identical to the prior inline expression).
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="timestamp")
+    # Screen insane (positivity/ordering) bars ALWAYS + bad-tick bars only when
+    # *bad_tick* is True (DEC-DASHBOARD-READ-SCREEN-001). This ONE reader serves
+    # BOTH futures (engine-screened → bad_tick=True, the ×4 scaled-spike guard)
+    # AND options (the options caller passes bad_tick=False): option PREMIA
+    # legitimately move ≥4×/minute on leverage (a deep-OTM ₹0.10→₹0.50 = 5×), so
+    # the index-circuit-breaker-calibrated 4× bad-tick threshold is INVALID for
+    # premia and would drop legit option bars — and the engine never screens
+    # options (REFERENCE_ONLY), so there is no parity to honor. The insane arm is
+    # universal (a null/≤0/high<low bar is never legitimate on any instrument).
+    # The frame is ascending-sorted + as-of-cut; clean frames return the SAME
+    # object — but the screen itself is an O(rows) Python pass per read (honest
+    # cost, not free).
+    # KILL-SWITCH PARITY (round-2 refuter MAJOR): futures/spot (`bad_tick=True`)
+    # pass `None` — DEFER to the BRUTEX_BAD_TICK_SCREEN env read, exactly like
+    # the engine + the /db candle pager (a hard `True` would FORCE the ×4 arm on
+    # and break the switch-off consistent-raw view — a /movers-futures ↔
+    # /db-futures ↔ engine split-brain). Options (`bad_tick=False`) force the
+    # arm OFF regardless of the switch (premia are never ×4-screened).
+    day_df = screen_frame(
+        day_df,
+        ts_col="timestamp",
+        source=f"{exchange}/{segment}/{symbol}/1minute",
+        bad_tick_enabled=None if bad_tick else False,
+    )
     if day_df.is_empty():
         return None
     last = day_df.tail(1)
@@ -966,6 +1002,22 @@ def resolve_prev_oi(
     (movers_futures) so the DEC-LAKE-READ-UNIQUE-001 bypass-gate allowlist keeps
     its wired dedup entry for this module.
 
+    A CE/PE OPTION contract SKIPS the ``1day`` read entirely and goes straight
+    to the 1-minute walk-back (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator
+    ruling of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B,
+    draft PR #1555): the derived option ``1day`` is retired, so a stored one
+    is FROZEN at retirement eve — reading it first would serve a stale OI
+    baseline (a wrong OI %-move) for weeks. FUT keeps the 1day-first read
+    byte-identically (futures keep their daily prebuild under the ruling; the
+    gate is the COMMON
+    :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
+    HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): like ``resolve_prev_close``,
+    this baseline read is NOT screened, so a prior-session spike in the last 1-day
+    bar's OI would skew the OI %-move on the BASELINE side (the live OI side IS
+    read from the screened session frame). Disclosed, not fixed here — heal / re-pull
+    the poisoned prior session.
+
     Parameters
     ----------
     lake_root
@@ -985,7 +1037,9 @@ def resolve_prev_oi(
     from brutex.data.lake_read import dedup_bars_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
-    if base.is_dir() and any(base.rglob("*.parquet")):
+    if not is_option_contract_coords(segment, symbol) and (
+        base.is_dir() and any(base.rglob("*.parquet"))
+    ):
         # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): the `.tail(1)` below
         # would otherwise pick a poisoned-era duplicate re-statement over the
         # first stored bar — warned, never silent.

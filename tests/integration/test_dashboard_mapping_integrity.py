@@ -7,6 +7,8 @@ turns the verdict RED; a never-attempted spot (no coverage row, a selective pull
 GREEN as ``not_attempted``; a fully-covered spot stays green; an unwired store → 503.
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
@@ -139,3 +141,276 @@ def test_mapping_integrity_503_when_store_unwired() -> None:
     """No store wired → 503 (consistent with the other universe/coverage routes)."""
     client = TestClient(build_app(DashboardState(), instrument_store=None))
     assert client.get("/api/v1/universe/mapping-integrity").status_code == 503
+
+
+# ── DEC-MAPPING-INTEGRITY-FORM-KEY-001: the key_forms keyspace crossing ───────
+# The coverage WRITER keys every cell on the PRIMARY F&O underlying form
+# (metadata_pull._resolve_underlying_forms → primary_fno_underlying — "BAJAJ-AUTO"
+# rows land under "BAJAJAUTO"; writer-truth independently pinned by
+# tests/unit/test_metadata_pull.py::test_hyphenated_stock_resolves_to_fno_underlying),
+# while the eligible set is SPOT-spelled — the route must cross the two keyspaces.
+
+
+@pytest.fixture
+def bajaj_store(tmp_path: Path):
+    """A store whose ONE eligible spot is the hyphenated ``BAJAJ-AUTO``."""
+    s = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    s.upsert_many(
+        [_eq("BAJAJ-AUTO")],
+        snapshot_date=date(2024, 1, 2),
+        run_id="r1",
+        csv_source_sha256="0" * 64,
+    )
+    yield s
+    s.close()
+
+
+def test_hyphenated_underlying_covered_via_primary_form_reads_green(
+    bajaj_store: InstrumentStore,
+) -> None:
+    """Coverage keyed under the WRITER's ``BAJAJAUTO`` reads GREEN for spot ``BAJAJ-AUTO``.
+
+    Pre-fix the exact-key compare missed the primary-form rows entirely, so a fully
+    covered hyphenated name read ``not_attempted`` forever.
+    """
+    for year in _coverage_years():
+        bajaj_store.upsert_coverage(_cov("BAJAJAUTO", year))
+    client = TestClient(build_app(DashboardState(), instrument_store=bajaj_store))
+
+    body = client.get("/api/v1/universe/mapping-integrity").json()
+
+    assert body["is_green"] is True
+    assert body["total_eligible"] == 1 and body["fully_covered"] == 1
+    assert body["not_attempted"] == 0
+    assert body["under_pulled"] == []
+
+
+def test_hyphenated_underlying_attempted_zero_is_gating_red(
+    bajaj_store: InstrumentStore,
+) -> None:
+    """THE headline regression: a ``BAJAJAUTO`` attempted-and-ZERO row gates RED.
+
+    Pre-fix ``is_green`` stayed True — the silent-vanish alarm was structurally DEAD
+    for every hyphenated/aliased underlying because the zero-expiry row sat under the
+    writer's primary form while the compare probed the spot spelling.
+    """
+    bajaj_store.upsert_coverage(_cov("BAJAJAUTO", _coverage_years()[0], expiries=0))
+    client = TestClient(build_app(DashboardState(), instrument_store=bajaj_store))
+
+    body = client.get("/api/v1/universe/mapping-integrity").json()
+
+    assert body["is_green"] is False
+    assert body["gating_failures"] == 1
+    assert body["not_attempted"] == 0
+    [under] = body["under_pulled"]
+    assert under["symbol"] == "BAJAJ-AUTO"  # display stays the SPOT spelling
+    assert under["reason"] == "none"
+    # The CSV download serialises the SAME verdict (the shared builder) — RED.
+    csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
+    assert "VERDICT" in csv_text
+    assert "RED" in csv_text.split("VERDICT", 1)[1].splitlines()[1]
+
+
+def test_partial_years_union_across_key_eras(bajaj_store: InstrumentStore) -> None:
+    """Coverage split across the legacy RAW key era + the primary era unions into ONE partial row.
+
+    2021 under legacy raw ``BAJAJ-AUTO`` + 2024 under ``BAJAJAUTO`` — the reconciler
+    must union BOTH eras (DEC-PULL-FORENSIC-WAVE2-001: legacy raw-key coverage rows
+    stay visible), never a primary-only read of the 2024 era alone.
+    """
+    bajaj_store.upsert_coverage(_cov("BAJAJ-AUTO", 2021))
+    bajaj_store.upsert_coverage(_cov("BAJAJAUTO", 2024))
+    client = TestClient(build_app(DashboardState(), instrument_store=bajaj_store))
+
+    body = client.get("/api/v1/universe/mapping-integrity").json()
+
+    assert body["is_green"] is True  # partial never gates
+    [under] = body["under_pulled"]
+    assert under["symbol"] == "BAJAJ-AUTO"
+    assert under["reason"] == "partial"
+    assert under["covered_years"] == [2021, 2024]  # the cross-era union
+    assert 2021 not in under["missing_years"] and 2024 not in under["missing_years"]
+
+
+def test_hyphenated_writer_roundtrip_reads_green(
+    bajaj_store: InstrumentStore, tmp_path: Path
+) -> None:
+    """End-to-end: the REAL coverage writer → the route reads GREEN (the belt).
+
+    Drives the REAL ``pull_expiries_contracts`` (the SAME fake-SDK harness as the
+    writer pin ``tests/unit/test_metadata_pull.py::
+    test_hyphenated_stock_resolves_to_fno_underlying``) over a ``BAJAJ-AUTO``
+    instrument into the REAL route store, then asserts the route crosses the
+    keyspace — the #1631 fixture-blindspot closer for this panel.
+    """
+    from datetime import date as date_cls
+
+    from brutex.dashboard.metadata_pull import pull_expiries_contracts
+    from brutex.data.registry_store import RegistryStore
+
+    from tests.unit.test_metadata_pull import _factory, _FakeSDK, _sync_run_parallel
+
+    years = _coverage_years()
+    sdk = _FakeSDK(
+        expiries={("NSE", "BAJAJAUTO", y): [f"{y}-06-25"] for y in years},
+        contracts={
+            ("NSE", "BAJAJAUTO", f"{y}-06-25"): [f"NSE-BAJAJAUTO-25Jun{y % 100:02d}-FUT"]
+            for y in years
+        },
+    )
+    with RegistryStore.open(tmp_path / "registry.duckdb") as registry:
+        report = pull_expiries_contracts(
+            [_eq("BAJAJ-AUTO")],
+            registry=registry,
+            coverage_store=bajaj_store,
+            years=years,
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=datetime.now(UTC),
+            today=date_cls(years[-1], 1, 2),
+            run_id="rt-1",
+        )
+    # The writer keyed every coverage cell on the PRIMARY form (the unit writer pin).
+    assert report.underlyings == ("BAJAJAUTO",)
+    assert {r.underlying_symbol for r in bajaj_store.list_coverage()} == {"BAJAJAUTO"}
+
+    client = TestClient(build_app(DashboardState(), instrument_store=bajaj_store))
+    body = client.get("/api/v1/universe/mapping-integrity").json()
+    assert body["is_green"] is True
+    assert body["fully_covered"] == 1
+    assert body["under_pulled"] == []
+
+
+def test_colliding_sibling_cannot_mask_attempted_zero_route(tmp_path: Path) -> None:
+    """REFUTER ROUND 5 port of ``z_crosscontam_route.py`` — the cross-owner guard, route-executed.
+
+    Two normalize-colliding tradable F&O eligibles ``{AB, A-B}`` (EQ spot rows + FUT
+    legs, the refuter's executed store shape): AB pulled full, A-B carries its OWN
+    raw-keyed attempted-and-ZERO row — a genuine silent-vanish. Pre-guard the R2
+    forms-union donated AB's coverage into A-B's fold (``"AB"`` is A-B's primary
+    form) and the panel read GREEN / ``Status,GREEN`` while main read RED — the
+    masking-direction divergence Z5-1 reproduced. The guard restores main's verdict:
+    gating RED naming A-B, ``Status,RED`` on the CSV. The NON-colliding forms-union
+    (DEC-PULL-FORENSIC-WAVE2-001) is asserted UNCHANGED in the same store: the third
+    eligible ``BAJAJ-AUTO`` still resolves its writer-keyed ``BAJAJAUTO`` coverage.
+    """
+
+    def _fut(underlying: str, sec_id: int) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=sec_id,
+            symbol_name=f"{underlying}FUT",
+            display_name=f"{underlying} FUT",
+            instrument=InstrumentType.FUT,
+            segment=Segment.FNO,
+            series="FUT",
+            isin=None,
+            underlying_symbol=underlying,
+            underlying_security_id=None,
+            lot_size=1,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=date(2025, 1, 30),
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_eq("AB"), _eq("A-B"), _eq("BAJAJ-AUTO"), _fut("AB", 900_101), _fut("A-B", 900_102)],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-z5",
+            csv_source_sha256="0" * 64,
+        )
+        for year in _coverage_years():
+            store.upsert_coverage(_cov("AB", year))
+            store.upsert_coverage(_cov("BAJAJAUTO", year))  # the non-colliding union arm
+        # A-B's OWN attempted-and-zero row (raw-keyed — the legacy-key-era shape).
+        store.upsert_coverage(_cov("A-B", _coverage_years()[0], expiries=0))
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        body = client.get("/api/v1/universe/mapping-integrity").json()
+
+        # The colliding pair: A-B's silent-vanish gates RED + is NAMED.
+        assert body["is_green"] is False
+        assert body["gating_failures"] == 1
+        [under] = body["under_pulled"]
+        assert under["symbol"] == "A-B" and under["reason"] == "none"
+        # AB keeps its own coverage; the NON-colliding BAJAJ-AUTO union is unchanged.
+        assert body["total_eligible"] == 3 and body["fully_covered"] == 2
+        assert body["not_attempted"] == 0
+        # The CSV download serialises the SAME verdict — RED.
+        csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
+        assert any(line == "Status,RED" for line in csv_text.splitlines())
+
+
+def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
+    """REFUTER ROUND 1 port of ``attack1_metadata_blank.py`` — the panel stays honest.
+
+    Pre-fix, a blank-symbol EQ row surviving store admission + ONE real metadata pull
+    wrote durable ``failed`` coverage rows keyed ``('NSE','')`` (per-YEAR-cell
+    ``forms[0]`` IndexErrors captured by the pool), which the mapping-integrity panel
+    matched as an attempted-and-ZERO gating failure: ``is_green=False`` with an
+    unnameable empty-string symbol, ``Status,RED`` on the CSV, and ``expiry_failures``
+    re-failing every pull — falsifying the #1795a sub-(c) "inert key" disclosure
+    (and, per refuter-B OBS-1, failing ``metadata_phase_ok`` so the full pipeline
+    stopped after metadata). Post-fix the
+    metadata grid SKIPS the blank row (one aggregate WARN): no coverage rows keyed
+    ``''``, zero failures, and the panel verdict rides ONLY the real rows.
+    """
+    import structlog.testing
+    from brutex.dashboard.metadata_pull import (
+        METADATA_BLANK_SYMBOL_SKIPPED_EVENT,
+        pull_expiries_contracts,
+    )
+    from brutex.data.registry_store import RegistryStore
+
+    from tests.unit.test_metadata_pull import _factory, _FakeSDK, _sync_run_parallel
+
+    years = _coverage_years()
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_eq("RELIANCE"), _eq("")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-blank",
+            csv_source_sha256="0" * 64,
+        )
+        sdk = _FakeSDK(
+            expiries={("NSE", "RELIANCE", y): [f"{y}-06-25"] for y in years},
+            contracts={
+                ("NSE", "RELIANCE", f"{y}-06-25"): [f"NSE-RELIANCE-25Jun{y % 100:02d}-FUT"]
+                for y in years
+            },
+        )
+        with (
+            RegistryStore.open(tmp_path / "registry.duckdb") as registry,
+            structlog.testing.capture_logs() as logs,
+        ):
+            report = pull_expiries_contracts(
+                [_eq("RELIANCE"), _eq("")],
+                registry=registry,
+                coverage_store=store,
+                years=years,
+                dry_run=False,
+                run_parallel=_sync_run_parallel,
+                client_factory=_factory(sdk),
+                now=datetime.now(UTC),
+                today=date(years[-1], 1, 2),
+                run_id="rt-blank",
+            )
+        # The writer never minted a blank cell: zero failures, zero '' rows, one WARN.
+        assert report.expiry_failures == 0
+        assert [r for r in store.list_coverage() if r.underlying_symbol == ""] == []
+        assert len([e for e in logs if e["event"] == METADATA_BLANK_SYMBOL_SKIPPED_EVENT]) == 1
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/universe/mapping-integrity").json()
+        # The blank eligible row degrades to the NEUTRAL not_attempted (the R2
+        # `or (symbol,)` exact-key probe matches nothing) — never a gating "none".
+        assert body["is_green"] is True
+        assert body["gating_failures"] == 0
+        blank_rows = [u for u in body["under_pulled"] if u["symbol"].strip() == ""]
+        assert all(u["reason"] == "not_attempted" for u in blank_rows)
+        csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
+        assert "GREEN" in csv_text.split("VERDICT", 1)[1].splitlines()[1]

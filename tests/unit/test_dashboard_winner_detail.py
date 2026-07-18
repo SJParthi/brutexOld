@@ -69,7 +69,22 @@ def _node_call(expr: str, *argv: str) -> Any:
 class TestExitMixText:
     """bxExitMixText — the writer's metrics.exits object → one honest line."""
 
-    def test_writer_exits_object_renders_all_five_reasons(self) -> None:
+    def test_writer_exits_object_renders_all_six_reasons(self) -> None:
+        exits = {
+            "stop_loss": 12,
+            "take_profit": 30,
+            "signal": 5,
+            "forced_1520": 3,
+            "end_of_data": 0,
+            "session_gap": 2,
+        }
+        out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps(exits))
+        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap 2"
+
+    def test_old_artifact_missing_session_gap_reads_question_mark(self) -> None:
+        # Deploy-skew honesty (DEC-TRADESIM-OPEN-SESSION-GUARD-001): an OLD
+        # top100.json predating the session_gap counter renders the new slot
+        # as the honest "?" — counted-but-unreadable, never an invented 0.
         exits = {
             "stop_loss": 12,
             "take_profit": 30,
@@ -78,7 +93,7 @@ class TestExitMixText:
             "end_of_data": 0,
         }
         out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps(exits))
-        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0"
+        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap ?"
 
     @pytest.mark.parametrize("bad", ["null", "undefined", "[]", '"x"', "7"])
     def test_absent_or_malformed_reads_the_honest_dash(self, bad: str) -> None:
@@ -226,6 +241,13 @@ class TestWinnerDetailWiring:
         assert "signal-only — costs modeled in the options-translation track" in html
         assert 'id="stSignalOnly"' in html
         assert "Edge — net P&amp;L" not in html  # killed label
+        # The v29 drawer copy carries the SAME label + chip + killed
+        # negative (DEC-OPERATOR-PAGE-CONSOLIDATE-001 parity).
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "Edge — gross signal P&amp;L" in v29
+        assert "signal-only — costs modeled in the options-translation track" in v29
+        assert 'id="stSignalOnly"' in v29
+        assert "Edge — net P&amp;L" not in v29  # killed label
 
     def test_operator_hero_gross_signal_label(self) -> None:
         html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
@@ -249,6 +271,7 @@ class TestWinnerDetailWiring:
 
     def test_strategy_deep_stats_section_reads_the_builders(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
         for anchor in (
             'id="stExpectancy"',
             'id="stRecovery"',
@@ -260,22 +283,32 @@ class TestWinnerDetailWiring:
             'id="stWorst5"',
         ):
             assert anchor in html, anchor
-        assert "window.BXOneclick.exitMixText(m.exits)" in html
-        assert "window.BXOneclick.worst5DaysText(m.worst5_days, money)" in html
+            assert anchor in v29, anchor  # the drawer copy (portal parity)
+        # The builder calls live in the ONE shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — the wiring moved verbatim).
+        panel = (_STATIC / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        assert "window.BXOneclick.exitMixText(m.exits)" in panel
+        assert "window.BXOneclick.worst5DaysText(m.worst5_days, money)" in panel
         assert (
             "window.BXOneclick.avgExtremeText(m.mae_avg_paisa, m.mae_worst_paisa, 'worst', money)"
-            in html
+            in panel
         )
         assert (
             "window.BXOneclick.minutePathDdText(m.max_dd_minute_path_paisa, m.max_dd_minute_path_pct, money)"
-            in html
+            in panel
         )
 
     def test_deep_stats_beginner_summary_rides_the_block_toggle(self) -> None:
         html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
         assert 'class="plain-eng-block"' in html
         assert 'class="jargon-block"' in html
-        assert "body.share-mode .jargon-block { display:none; }" in html
+        v29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert 'class="plain-eng-block"' in v29  # the drawer copy
+        assert 'class="jargon-block"' in v29
+        # The block-toggle CSS rule moved VERBATIM into the ONE shared
+        # panels stylesheet (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+        css = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")
+        assert "body.share-mode .jargon-block { display:none; }" in css
 
     def test_operator_card_regime_hooks(self) -> None:
         html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")

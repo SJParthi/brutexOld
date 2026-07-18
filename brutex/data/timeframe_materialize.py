@@ -45,8 +45,11 @@ absent from a derivation — or absent from the derived dict — is reported as
 
 from __future__ import annotations
 
+import os
+import stat as stat_module
 from dataclasses import dataclass
 from enum import Enum
+from itertools import chain
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -848,16 +851,104 @@ def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
     return None if last is None else last.date().isoformat()
 
 
+class NoStored1mBarsError(ValueError):
+    """The symbol's WHOLE 1-minute partition holds ZERO stored parquet files.
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: subclasses :class:`ValueError` so
+    every existing catcher (``gated_prebuild._per_symbol_data_errors``, the
+    doctor/preflight callers, every ``pytest.raises(ValueError)`` pin) is
+    behavior-identical; the prebuild's SPOT phase catches it FIRST to classify
+    the vendor-empty / never-pulled shape as ``no_source`` instead of a
+    warm-withholding failure. Raised ONLY by the whole-partition arm of
+    :func:`make_lake_read_1m` — the months-bounded arm (the heal-recall path)
+    keeps plain ``ValueError``: a months-scoped absence is NOT vendor-empty.
+    """
+
+
+def spot_1m_partition_dir(lake_root: Path, exchange: str, segment: str, symbol: str) -> Path:
+    """The symbol's 1-minute lake partition dir — the ONE base-path law (§11 COMMON).
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: extracted from
+    :func:`make_lake_read_1m`'s inline expression so the reader and every
+    probe consumer share one spelling of ``bars/<exch>/<seg>/<sym>/1minute``.
+    """
+    return lake_root / "bars" / exchange / segment / symbol / "1minute"
+
+
+def _raise_partition_scan_error(error: OSError) -> None:
+    """Propagate a partition-enumeration fault out of :func:`has_stored_1m_bars`.
+
+    The ``os.walk(onerror=...)`` hook (refuter round 4): a fault while
+    LISTING the partition must never read as "the partition is empty" —
+    raise it so the reader classifies the symbol a per-symbol FAILURE
+    (``OSError`` is a :func:`~brutex.data.errors.parquet_read_skip_errors`
+    member), never the benign ``no_source``.
+    """
+    raise error
+
+
+def has_stored_1m_bars(lake_root: Path, exchange: str, segment: str, symbol: str) -> bool:
+    """``True`` iff the partition holds >=1 stored 1-minute parquet file — lake truth NOW.
+
+    The EXACT existence predicate :func:`make_lake_read_1m`'s whole-tree arm
+    gates on (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — ONE predicate for the
+    reader AND every future probe consumer; §11 COMMON). O(dir entries),
+    short-circuits at the first parquet-named entry (file OR directory —
+    ``rglob``-parity, so a dataset-style ``01.parquet/`` dir plant keeps its
+    pre-change verdict); ZERO Parquet opens. Deliberately blind to WHY the
+    partition is empty (vendor-empty vs never-pulled vs heal-emptied) and to
+    a 0-ROW parquet: a hand-planted schema-complete 0-row file passes here
+    and the prebuild then COMPLETES the symbol as a 0-bar SUCCESS (neither
+    no_source nor failed; warm unaffected) — EXECUTED, byte-identical to
+    main's pre-change behavior on the same plant (refuter round 3, pinned by
+    ``test_e2e_zero_row_parquet_completes_as_zero_bar_success``). The shape
+    is out-of-band — production writers never render 0-row files and the
+    #1594 heal quarantine-MOVES a wholly-removed partition — while a
+    schema-BROKEN plant still fails the prebuild loudly via the per-symbol
+    data-error quarantine (the round-1 R2 executed ComputeError pin).
+
+    Fail-LOUD on an UNENUMERABLE partition (refuter round 4): CPython
+    pathlib SUPPRESSES ``PermissionError`` during glob traversal (and
+    ``Path.is_dir()`` swallows ``OSError``), so the original ``is_dir() and
+    any(rglob("*.parquet"))`` spelling read a permission-broken POPULATED
+    partition (chmod/ownership mishap on one symbol's subtree) as *empty* —
+    reclassifying a real fault as the benign ``no_source`` whose
+    "vendor-empty or never pulled" wording named two FALSE causes, with
+    ``ok=True`` and the movers warm firing (executed A/B: the merge-base
+    classified the identical lake state a loud warm-withholding FAILURE).
+    The probe therefore enumerates with an OSError-PROPAGATING walk
+    (:func:`_raise_partition_scan_error`): an ``EACCES`` — base dir OR any
+    subtree level — propagates out of the reader as ``OSError``, a
+    :func:`~brutex.data.errors.parquet_read_skip_errors` member, restoring
+    the merge-base per-symbol-FAILURE classification (WARNING, ``ok=False``,
+    warm withheld). An ABSENT partition — or a non-directory at/inside the
+    path (an out-of-band hand-planted shape: nothing can be stored under a
+    file) — still reads ``False``, the benign shape.
+    """
+    base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
+    try:
+        if not stat_module.S_ISDIR(os.stat(base).st_mode):
+            return False
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    for _dirpath, dirnames, filenames in os.walk(base, onerror=_raise_partition_scan_error):
+        if any(name.endswith(".parquet") for name in chain(dirnames, filenames)):
+            return True
+    return False
+
+
 __all__ = [
     "DAILY_CUTOFF_GROUNDED_ENV",
     "DAILY_TF_LABEL",
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
+    "NoStored1mBarsError",
     "PrebuildKind",
     "daily_cutoff_grounding_enabled",
     "daily_resample_fn_for",
     "frame_to_candle_bars",
+    "has_stored_1m_bars",
     "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
@@ -865,6 +956,7 @@ __all__ = [
     "materialize_timeframes",
     "month_partition_files",
     "prebuild_kind_for",
+    "spot_1m_partition_dir",
 ]
 
 
@@ -898,44 +990,87 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
 
-    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001; finiteness added by
+    DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the collected frame is
     validated by the COMMON
-    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
-    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
-    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
-    self-consistent-looking derived buckets across all 19 TFs + ``1day``
-    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (finiteness
+    + positivity + OHLC ordering, one vectorized pass) BEFORE it reaches any
+    resampler — a corrupt 1m bar (e.g. ``high < low``, or a planted
+    ``high = inf``/``NaN`` the pre-fix mask was blind to) previously LAUNDERED
+    into self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``; the assurance session's
+    executed repro: a derived 5-minute bucket ``high = inf``). The raised
     :class:`~brutex.data.errors.ResampleInputError` is already in the
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
+
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): BEFORE the
+    price gate the collected frame's ``ts_utc`` is validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` — a
+    stored out-of-``datetime``-range timestamp (e.g. a planted ``2**62``-us
+    stamp) survives the vectorized resample and then PANICS the Rust→Python
+    conversion (``pyo3_runtime.PanicException``, a BaseException) at
+    ``frame_to_candle_bars``'s ``to_list()``, past every ``except Exception``
+    per-symbol quarantine (executed-repro'd: ONE poisoned symbol aborted the
+    WHOLE crossverify prebuild leg). The gate raises the SAME quarantining
+    :class:`~brutex.data.errors.ResampleInputError` deterministically at the
+    read boundary instead; clean frames pay one vectorized i64 min/max pass.
+
+    Bad-tick screen (DEC-READ-GUARD-PARITY-001): after the sanity gate the
+    frame is screened by :func:`~brutex.data.bad_tick.screen_frame_bad_ticks`
+    (the engine read boundary's screen, frame form — same 4.0x threshold, same
+    ``BRUTEX_BAD_TICK_SCREEN`` kill switch, one ``feed.bad_tick_skipped`` WARN
+    per session with a ``prebuild:``-prefixed source), so a self-consistent
+    scaled 1m spike is dropped-and-counted before it can poison the derived
+    bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
+    object-identical (zero-copy); clean lakes stay byte-identical.
     """
     import polars as pl
 
-    from brutex.data.price_sanity import validate_frame_price_sanity
+    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
+    from brutex.data.price_sanity import (
+        validate_frame_price_sanity,
+        validate_frame_ts_datetime_range,
+    )
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
         columns = (*columns, "open_interest")
 
     def _read() -> pl.DataFrame:
-        base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+        base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         if months is not None:
             # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
             # existing-file list replaces the whole-tree glob. Sound because an
             # NSE session never crosses a UTC month (see month_partition_files).
+            # Deliberately plain ValueError, NEVER NoStored1mBarsError
+            # (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a months-scoped
+            # absence (the heal-recall path) says nothing about the WHOLE
+            # partition — it must stay a quarantining prebuild failure.
             source: str | list[str] = month_partition_files(base, months)
             if not source:
                 raise ValueError(
                     f"no stored 1minute bars for {exchange}/{segment}/{symbol} in the "
                     "requested months — pull the 1-minute first, then derive timeframes"
                 )
-        elif base.is_dir() and any(base.rglob("*.parquet")):
+        elif has_stored_1m_bars(lake_root, exchange, segment, symbol):
             source = base.as_posix() + "/**/*.parquet"
         else:
-            raise ValueError(
+            # Shape-matched remediation (refuter round 1, r3 F-2 — the #1649a
+            # precedent): this reader cannot tell WHY the partition is empty,
+            # and "pull the spot first" is the WRONG advice for a symbol the
+            # vendor cleanly returned NO data for (settled EMPTY — there is
+            # nothing to pull), so BOTH candidate causes are named. The typed
+            # subclass (message bytes UNCHANGED) lets the prebuild's spot
+            # phase classify this shape as ``no_source`` instead of a
+            # warm-withholding failure (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001).
+            raise NoStored1mBarsError(
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
-                "pull the 1-minute spot first, then derive timeframes"
+                "nothing to derive: if the 1-minute spot was never pulled, "
+                "pull it first, then derive timeframes; if the vendor cleanly "
+                "returned no data for this symbol (windows settled EMPTY), "
+                "there is nothing to derive — no action needed"
             )
         # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
         # OPTION contract's month files may mix the raw 7-column and the
@@ -946,13 +1081,34 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             source,
             missing_columns="insert",
             extra_columns="ignore",
+            # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
+            # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
+            # siblings otherwise glob-reads the SIBLINGS' bars into this
+            # symbol. The whole-tree branch is deliberate `**` discovery and
+            # keeps glob; the writer additionally refuses to mint such dirs
+            # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
+            glob=isinstance(source, str),
         ).collect()
         frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        context = f"{exchange}/{segment}/{symbol}/1minute"
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
+        # range stored timestamp FIRST (a 2**62-us stamp panics the Rust→Python
+        # conversion downstream — a BaseException past every except Exception;
+        # the price gate's own first-offender message indexes ts too). Raises
+        # the quarantining ResampleInputError.
+        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
         # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
         # frame to the resamplers (raises the quarantining ResampleInputError).
-        validate_frame_price_sanity(
-            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
-        )
+        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
+        # DEC-READ-GUARD-PARITY-001: drop x10/÷10 scaled 1m spikes (the engine
+        # read boundary's BadTickScreen, frame form) BEFORE any resampler — a
+        # self-consistent scaled bar passes price sanity and otherwise poisons
+        # the derived bucket HIGH/LOW + the 1day anchor. Runs AFTER the sanity
+        # gate (is_bad_tick assumes positivity). Default ON; the ONE
+        # BRUTEX_BAD_TICK_SCREEN kill switch flips both boundaries together.
+        if bad_tick_screen_enabled():
+            frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
         return frame
 
     return _read
@@ -977,7 +1133,17 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
     the resampled frame when the OI-aware F&O futures resampler emitted it
     (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    have no OI column). A present-but-NULL OI bucket on an OI-carrying frame
+    is stored ``None`` (DEC-PREOPEN-DAY-FRESHNESS-001, the B-3 fold — ALIGNED
+    with the F&O DAILY derive, whose
+    :func:`~brutex.data.fno_daily_resample.resample_1m_to_fno_daily` stores
+    ``None`` for a null carry-last OI, and with the canonical resampler's own
+    "a null OI source bar yields a null bucket OI — preserved, NEVER
+    fabricated as 0" law; the former unconditional default fabricated a
+    stored ``0`` — an un-ledgered divergence, /db-display-visible,
+    FUT-reachable since DEC-OPTIONS-PREBUILD-RETIRE-001 retired the options
+    derived TFs. Already-stored ``0``s stay inert until the next latest-wins
+    re-materialise — derived partitions are recomputable caches). The sink
     snaps prices to the 2-decimal tick grid + merges idempotently by
     ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
     **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
@@ -1009,7 +1175,14 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=frame_to_candle_bars(frame),
+            # OI-carrying (F&O) frames keep a null bucket OI as stored None —
+            # the F&O daily derive's law (DEC-PREOPEN-DAY-FRESHNESS-001 B-3
+            # fold; see the docstring). Spot frames (no OI column) keep the
+            # legacy stored-0 convention byte-identically.
+            bars=frame_to_candle_bars(
+                frame,
+                absent_open_interest=None if "open_interest" in frame.columns else 0,
+            ),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh
