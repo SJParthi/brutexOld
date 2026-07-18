@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-18 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #1954,
+branch `claude/rust-runid-stores` — the run-identity + stores COMPUTATION
+PLANE re-hosted on the NEW `rust/brutex-identity` crate (pyo3 0.29
+abi3-py312, blake3 + parquet-rs only): `strategies/combo.py` (the 9-field
+BLAKE3 run identity) · `engine/snapshot_hash.py` (the bxsnap2
+`data_snapshot_hash`) · `engine/results_store.py` (the append/VIX-merge/
+conflict law + run-id validation + the u128 limb codec + top-k) ·
+`data/window_ledger_store.py` (the merge-on-save law + legacy derivations
++ the ledger Parquet codec) become THIN TYPED WRAPPERS — the Python
+computation BODIES are DELETED (the hard-import fno_math posture: no dev
+flag, no retained oracle). The run-identity hashes are proven UNCHANGED
+(the frozen pre-conversion oracle fixture reproduces BYTE-IDENTICALLY
+through the Rust-backed impls, 8 sections); the #1917 G10 window-ledger
+byte-parity escalation is resolved IN-LANE by its priced option (iii) —
+GREENFIELD golden re-baseline: canonical ledger bytes are now parquet-rs
+(zstd-3; the `snap` feature reads legacy pyarrow-snappy files
+row-identically) with the #1917 cross-encoder ROW FIXED POINT kept as the
+correctness law (production reader ≡ pyarrow ≡ DuckDB, probe-pinned).
+The wheel is a REQUIRED install everywhere (ci.yml ×10 jobs + the
+scheduled workflows + Makefile + bootstrap Step 6b). ENGINE semantics
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change. This header carries the pointer, never the story — the full
+record lives in the §1 Active-branch blurb + MIGRATION.md #1954.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
@@ -3243,7 +3266,75 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-day-freshness-guard`
+- **Active branch:** `claude/rust-runid-stores`
+  (**DEC-RUST-RUNID-STORES-001, MIGRATION.md #1954** — MISSION L14: the
+  run-identity + stores COMPUTATION PLANE re-hosted on the NEW
+  `rust/brutex-identity` crate (pyo3 0.29 abi3-py312, maturin mixed layout
+  on the brutex-lake/brutex-feed shape; deps blake3 + parquet-rs ONLY — no
+  polars/arrow/chrono). The four Python surfaces become THIN TYPED WRAPPERS
+  with their computation BODIES DELETED (the hard-import fno_math posture —
+  no dev flag, no retained Python oracle): `strategies/combo.py` (21 stmts —
+  `canonicalise_params`/`combo_hash`/`reject_unit_separator` delegate to the
+  kernel's CPython-twin canonical JSON + `repr(float)` shortest-round-trip +
+  the `\x1f` screen; `_canonicalise_value` DELETED), `engine/snapshot_hash.py`
+  (11 stmts — the bxsnap2 digest streams through
+  `brutex_identity.SnapshotHasher`; `sorted()` slice iteration +
+  `str(Decimal)` stay Python deliberately — the Decimal repr law is
+  CPython's), `engine/results_store.py` (243 stmts — append = the kernel
+  `classify_result_append` verdict (insert/noop/backfill/plain_conflict/
+  gate_conflict/vix_conflict incl. the #1645 directional VIX union trio +
+  the #1715 C5 gate-conflict law) with store mutation + logging + EXACT-BYTE
+  error contracts Python-side; two defensive-totality raises guard a
+  drifted-kernel verdict loudly (drifted-kernel unit tests pin both);
+  run-id validation re-renders repr-bearing kernel verdicts with CPython
+  `repr` — ONE disclosed narrowing: `bytes.fromhex` whitespace tolerance now
+  rejected; `top_k` = the kernel `rank_top_k` exact-int ranking; the u128
+  limb codec delegates to `mask_to_limbs`/`mask_from_limbs`;
+  `_merge_vix_backfill` + `_field_getter` DELETED; ResultRow +
+  `__post_init__` + the polars Parquet render/load stay Python, disclosed),
+  and `data/window_ledger_store.py` (372 stmts — `merge_ledger_rows` +
+  the legacy `empty_streak`/`in_pull_fetches` derivations + the ledger
+  Parquet codec delegate; the NEW public `render_ledger_parquet(rows) ->
+  bytes` is the ONE render both save + delta ride; reads via
+  `read_ledger_rows` + the `LedgerStringPool` per-load intern pool threaded
+  across base+deltas; `_rows_to_records`/`_intern_cells`/
+  `_STATUS_SETTLE_RANK`/`_row_preference`/`_row_key` DELETED; pyarrow
+  imports GONE). **G10 RESOLUTION:** the #1917 window-ledger byte-parity
+  escalation is resolved IN-LANE by its priced option (iii) — GREENFIELD
+  golden re-baseline: the canonical ledger bytes are now parquet-rs (ONE
+  row group, zstd-3; the `snap` feature reads legacy pyarrow-snappy files
+  row-identically), with the #1917 cross-encoder ROW FIXED POINT kept as
+  the correctness LAW (production reader ≡ pyarrow ≡ DuckDB `read_parquet`,
+  pinned by the rebaselined `tests/golden/test_window_ledger_bytes_probe.py`
+  incl. canonical byte-determinism + the created_by divergence pin).
+  **PROOF:** the FROZEN pre-conversion oracle fixture is reproduced
+  BYTE-IDENTICALLY by the refactored golden generator driven through the
+  Rust-backed impls (`tests/golden/test_runid_stores_oracle_golden.py`, 8
+  sections — canonical/combo/snapshot/append/top_k/merge/roundtrip/legacy
+  derivations); `tests/unit/test_brutex_identity_kernels.py` (21) holds
+  live-CPython differentials with VERBATIM retired-body oracles +
+  hypothesis planes (full float plane, hostile text, `st.timezones()`
+  datetimes, full-u128 limb codec, exact-int 2^60 vs 2^60+1 ranking).
+  GREENFIELD sanction: zero backtests have ever run — the ledger-bytes
+  re-baseline re-keys NO recorded run identity, and the run-identity HASHES
+  themselves are proven UNCHANGED by the oracle fixture. WIRED REQUIRED:
+  the brutex-identity maturin build+install joins every ci.yml job that
+  installs fno-math (10) + doctor-daily/mutation/soak-selfhosted/
+  stress-nightly + the Makefile + bootstrap Step 6b (REQUIRED, exit 1);
+  NOT facade-fronted through `brutex.math` (`version` symbol collision
+  with trading_core — the brutex_feed direct-import posture followed).
+  GATES: combo 100.00% (21/2) · snapshot_hash 100.00% (11/4) ·
+  results_store 100.00% (243/76) · window_ledger_store 100.00% (372/94)
+  line+branch; cargo fmt/clippy `-D warnings` clean both feature sets, 26
+  tests green under `--locked`; ruff/ruff-format clean; `mypy --strict`
+  clean (the one stage3_refine `cma` note is merge-base-identical,
+  env-only); pyright 0 errors on touched files; the lane battery 373
+  passed. HONEST gaps: the lane's Python modules are not in mutation.yml's
+  mutmut loop (the brutex-lake precedent — the differential/golden suites
+  carry the load). ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
+  routes, no new env vars.)
+  Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard + the B-3 derived-intraday null-OI
@@ -9841,7 +9932,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/rust-runid-stores`
+  (DEC-RUST-RUNID-STORES-001, MIGRATION.md #1954 — the run-identity + stores
+  COMPUTATION PLANE re-hosted on the NEW `rust/brutex-identity` crate
+  (pyo3 0.29 abi3-py312; blake3 + parquet-rs only): combo.py /
+  snapshot_hash.py / results_store.py / window_ledger_store.py become thin
+  typed wrappers with their computation bodies DELETED (hard-import
+  posture); run-identity hashes proven UNCHANGED via the frozen
+  pre-conversion oracle fixture reproduced byte-identically; the #1917 G10
+  window-ledger byte-parity escalation resolved in-lane by option (iii)
+  greenfield golden re-baseline (canonical bytes = parquet-rs zstd-3;
+  legacy pyarrow-snappy files read row-identically; the cross-encoder ROW
+  fixed point production ≡ pyarrow ≡ DuckDB stays the correctness law,
+  probe-pinned); the wheel wired REQUIRED across ci.yml/scheduled
+  workflows/Makefile/bootstrap; all four modules 100.00% line+branch;
+  ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1954 for the full blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample
