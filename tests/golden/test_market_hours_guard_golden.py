@@ -32,12 +32,14 @@ from typing import Any
 from tests.golden._market_hours_guard_harness import (
     GUARD_PROBE_TIMES,
     compute_auto_gate_table,
+    compute_auto_gate_tsv,
     compute_guard_table,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 GUARD_FIXTURE = FIXTURES / "market_hours_guard_verdicts.json"
 AUTO_GATE_FIXTURE = FIXTURES / "auto_pull_gate_verdicts.json"
+AUTO_GATE_TSV_FIXTURE = FIXTURES / "auto_pull_gate_verdicts.tsv"
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -146,3 +148,54 @@ def test_auto_gate_fixture_pins_known_verdicts() -> None:
     assert mu[("2024-11-01", "19:04:59")] is True
     assert mu[("2024-11-01", "19:05:00")] is False
     assert mu[("2026-11-08", "18:30:00")] is False
+
+
+def test_auto_gate_tsv_is_the_projection_of_the_json() -> None:
+    """One truth, two encodings — the cargo-side TSV can never drift.
+
+    The committed ``.tsv`` (consumed serde-free by
+    ``rust/brutex-pull-state/tests/auto_pull_gate_golden.rs``) must be
+    byte-equal to the harness projection of the committed ``.json`` — the
+    ``pull_stall_verdicts.tsv`` sync-pin pattern.
+    """
+    frozen = _load(AUTO_GATE_FIXTURE)
+    committed = AUTO_GATE_TSV_FIXTURE.read_text(encoding="utf-8")
+    assert committed == compute_auto_gate_tsv(frozen)
+
+
+def test_auto_gate_fixture_pins_wave2d_sections() -> None:
+    """Spot-check the Wave-2D extension sections (anti-vacuous teeth)."""
+    frozen = _load(AUTO_GATE_FIXTURE)
+    # Settle-token tiers: floor-exact 15:35 is ALLOWED; 15:34 is below the
+    # BLOCK_END floor; out-of-range + shape junk (incl. Unicode digits) refuse.
+    tok = {c["token"]: (c["verdict"], c["minute"]) for c in frozen["settle_tokens"]}
+    assert tok["17:30"] == ("ok", 17 * 60 + 30)
+    assert tok["15:35"] == ("ok", 15 * 60 + 35)
+    assert tok[" 17:30 "] == ("ok", 17 * 60 + 30)  # the str.strip law
+    assert tok["15:34"] == ("below_floor", None)
+    assert tok["00:00"] == ("below_floor", None)
+    assert tok["24:00"] == ("not_wall_clock", None)
+    assert tok["17:60"] == ("not_wall_clock", None)
+    assert tok["7:30"] == ("bad_shape", None)
+    assert tok["\u0661\u0667:\u0663\u0660"] == ("bad_shape", None)  # Unicode digits (re.ASCII)
+    assert "unclassified" not in {v for v, _ in tok.values()}
+    # The floor-exact settle grid: every in-window minute is before_settle
+    # (the market-hours belt stays structurally unreachable); 15:35:00 flips
+    # STRAIGHT to ok (settle passed AND the window just closed).
+    grid = {
+        (c["date"], c["time"]): (c["allowed"], c["reason"]) for c in frozen["cases_settle_1535"]
+    }
+    assert grid[("2024-01-02", "12:00:00")] == (False, "before_settle")
+    assert grid[("2024-01-02", "15:34:59")] == (False, "before_settle")
+    assert grid[("2024-01-02", "15:35:00")] == (True, "ok")
+    assert grid[("2024-01-02", "23:59:59")] == (True, "ok")
+    # Out-of-coverage weekday proceeds at/after the floor (ruling 10).
+    assert grid[("2027-01-04", "15:35:00")] == (True, "ok")
+    assert not any(reason == "market_hours_blocked" for _, reason in grid.values())
+    # Kill-switch coherence: the belt closes an in-window Muhurat instant
+    # ONLY while the guard switch is enabled (guard off => belt off).
+    belt = {(c["date"], c["time"], c["guard"]): c["closed"] for c in frozen["belt_coherence"]}
+    assert belt[("2024-11-01", "18:01:00", "unset")] is True
+    assert belt[("2024-11-01", "18:01:00", "1")] is True
+    assert belt[("2024-11-01", "18:01:00", "0")] is False
+    assert belt[("2024-11-01", "17:29:59", "unset")] is False

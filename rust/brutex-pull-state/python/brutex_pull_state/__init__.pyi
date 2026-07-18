@@ -56,3 +56,26 @@ def wedge_decision(
     current: str | None,
 ) -> int: ...
 def alive_log_due(since_last_s: float, interval_s: float) -> bool: ...
+
+# --- auto_pull_gate (Wave 2D) ---
+# The --auto gate decision plane of brutex/calendars/auto_pull_gate.py:
+# caller-resolved calendar flags + microsecond-of-day instants in; reason /
+# verdict codes out (Python composes every human string and keeps the
+# fail-loud env raise). Out-of-range inputs raise ValueError (the facade
+# degrades to the oracle).
+
+def auto_gate_decision(
+    trading_day: bool,
+    coverage_available: bool,
+    muhurat_listed: bool,
+    now_us_of_day: int,
+    settle_us_of_day: int,
+) -> tuple[int, bool]: ...
+def muhurat_window_active(
+    now_us_of_day: int,
+    open_us_of_day: int,
+    close_us_of_day: int,
+    pre_margin_us: int,
+    post_margin_us: int,
+) -> bool: ...
+def settle_token_verdict(token: str, block_end_us: int) -> tuple[int, int]: ...

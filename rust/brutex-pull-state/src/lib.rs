@@ -27,6 +27,10 @@
 //! small SLOWDOWN, acceptable because the seam runs a handful of times per
 //! pull start / per mid-run window check, never on a hot path.
 
+// Wave 2D (DEC-RUST-PULL-STATE-001): the --auto pull-gate ladder +
+// Muhurat margined-window + settle-token verdict kernels — codes only;
+// every human string + the fail-loud env raise stay Python.
+pub mod auto_pull_gate;
 pub mod market_hours;
 // Wave 1A (DEC-RUST-PULL-STATE-001): the last-pull OUTCOME decision core
 // (DEC-OPERATOR-HEALTH-TRUTH-001 re-hosted) — codes only; every human string
@@ -35,6 +39,11 @@ pub mod pull_outcome;
 pub mod pull_scope;
 pub mod stall;
 
+pub use auto_pull_gate::{
+    GATE_BEFORE_SETTLE, GATE_MARKET_HOURS_BLOCKED, GATE_MUHURAT_DEFERRAL, GATE_NON_TRADING_DAY,
+    GATE_OK, SETTLE_BAD_SHAPE, SETTLE_BELOW_FLOOR, SETTLE_NO_VALUE, SETTLE_NOT_WALL_CLOCK,
+    SETTLE_OK, auto_gate_decision, muhurat_window_active, settle_token_verdict,
+};
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
 pub use stall::{

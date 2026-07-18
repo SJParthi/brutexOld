@@ -51,11 +51,14 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "SOURCE_DIGEST",
     "__version__",
     "alive_log_due",  # pull_stall (Wave 1C)
+    "auto_gate_decision",  # auto_pull_gate (Wave 2D)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
+    "muhurat_window_active",  # auto_pull_gate (Wave 2D)
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
+    "settle_token_verdict",  # auto_pull_gate (Wave 2D)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
     "verdict_correlates",  # pull_outcome (Wave 1A)
     "wedge_decision",  # pull_stall (Wave 1C)
@@ -95,11 +98,14 @@ from ._brutex_pull_state import (  # noqa: E402
     SOURCE_DIGEST,
     __version__,
     alive_log_due,
+    auto_gate_decision,
     classify_pull_outcome,
     fno_only_note_surgery,
     market_hours_note_rewrite,
+    muhurat_window_active,
     pull_allowed_us,
     scope_token,
+    settle_token_verdict,
     spot_only_note_surgery,
     verdict_correlates,
     wedge_decision,
@@ -120,11 +126,14 @@ __all__ = [
     "SOURCE_DIGEST",
     "__version__",
     "alive_log_due",
+    "auto_gate_decision",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "market_hours_note_rewrite",
+    "muhurat_window_active",
     "pull_allowed_us",
     "scope_token",
+    "settle_token_verdict",
     "spot_only_note_surgery",
     "verdict_correlates",
     "wedge_decision",

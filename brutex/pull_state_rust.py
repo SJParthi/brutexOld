@@ -600,3 +600,157 @@ __all__ += [
     "rust_scope_token",
     "rust_spot_only_note_surgery",
 ]
+
+
+# --- auto_pull_gate (Wave 2D) -----------------------------------------------
+# The ``--auto`` gate decision plane of ``brutex/calendars/auto_pull_gate.py``
+# (DEC-PULL-SCOPED-ALL-ONECLICK-001 + DEC-SETTLE-EVIDENCE-ADOPTION-001). Same
+# seam discipline as every section above: the caller (the calendars module)
+# resolves the clock, the NSE calendar predicates and the settle tier ITSELF
+# (``resolve_settle_resolution`` — env reads + the fail-loud junk raise —
+# stays Python by design, the pull_stall env-resolver precedent), then packs
+# microsecond-of-day integers + plain flags; codes/bools come back, Python
+# composes every human string. ``None`` always means "use the byte-identical
+# Python oracle". Append-only section (the wave-worker convention) reusing
+# the ONE shared ``_resolve_kernel_symbol`` resolver + ``_call_kernel`` belt.
+
+#: The ``auto_gate_decision`` reason vocabulary (mirrors
+#: ``rust/brutex-pull-state/src/auto_pull_gate.rs`` — index == code value).
+GATE_CODE_OK: Final[int] = 0
+GATE_CODE_NON_TRADING_DAY: Final[int] = 1
+GATE_CODE_MUHURAT_DEFERRAL: Final[int] = 2
+GATE_CODE_BEFORE_SETTLE: Final[int] = 3
+GATE_CODE_MARKET_HOURS_BLOCKED: Final[int] = 4
+
+#: Every legal gate reason — the refuse-poison vocabulary gate.
+_GATE_CODES: Final[frozenset[int]] = frozenset(range(GATE_CODE_MARKET_HOURS_BLOCKED + 1))
+
+#: The ``settle_token_verdict`` OK code (the ONLY arm the seam consumes —
+#: every non-OK verdict routes back to the Python oracle, which composes +
+#: raises the byte-identical fail-loud ``ValueError`` itself).
+SETTLE_CODE_OK: Final[int] = 0
+
+#: The whole settle-verdict vocabulary (0=ok · 1=bad_shape ·
+#: 2=not_wall_clock · 3=below_floor) — anything else is a stale/corrupt wheel.
+_SETTLE_CODES: Final[frozenset[int]] = frozenset({0, 1, 2, 3})
+
+#: Microseconds per civil day / per minute — the FFI packing units (the
+#: kernel's ``DAY_US`` twin; a settle instant is minute-granular by the
+#: strict ``HH:MM`` law, which the OK-arm value gate below enforces).
+_US_PER_DAY: Final[int] = 86_400_000_000
+_US_PER_MINUTE: Final[int] = 60_000_000
+
+#: The gate/settle kernels' result arity — ``(code, payload)``.
+_GATE_PAIR_ARITY: Final[int] = 2
+
+
+def rust_auto_gate_decision(
+    *,
+    trading_day: bool,
+    coverage_available: bool,
+    muhurat_listed: bool,
+    now_us_of_day: int,
+    settle_us_of_day: int,
+) -> tuple[int, bool] | None:
+    """Consult the Rust ``--auto`` gate ladder; ``None`` = use the oracle.
+
+    Returns ``(reason_code, coverage_warn)`` — the caller maps the code to
+    its own verdict builders (every detail string stays single-sourced in
+    the calendars module) and fires the coverage WARN itself. Belt +
+    refuse-poison gates as everywhere on this facade: EXACTLY a 2-tuple of
+    (a non-bool ``int`` inside the reason vocabulary, an exact ``bool``).
+    """
+    result = _call_kernel(
+        "auto_gate_decision",
+        trading_day,
+        coverage_available,
+        muhurat_listed,
+        now_us_of_day,
+        settle_us_of_day,
+    )
+    if result is _KERNEL_FAULT:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == _GATE_PAIR_ARITY
+        and type(result[0]) is int
+        and result[0] in _GATE_CODES
+        and type(result[1]) is bool
+    ):
+        return (result[0], result[1])
+    warn_degrade_once("kernel_invalid", symbol="auto_gate_decision", detail=repr(result)[:80])
+    return None
+
+
+def rust_muhurat_window_active(
+    now_us_of_day: int,
+    open_us_of_day: int,
+    close_us_of_day: int,
+    pre_margin_us: int,
+    post_margin_us: int,
+) -> bool | None:
+    """Consult the Rust margined Muhurat-window law; ``None`` = the oracle.
+
+    The session LOOKUP (``MUHURAT_SESSIONS``) stays Python — only a LISTED
+    session's interval ever crosses. Bool-exact refuse-poison gate.
+    """
+    verdict = _call_kernel(
+        "muhurat_window_active",
+        now_us_of_day,
+        open_us_of_day,
+        close_us_of_day,
+        pre_margin_us,
+        post_margin_us,
+    )
+    if verdict is _KERNEL_FAULT:
+        return None
+    if not isinstance(verdict, bool):
+        warn_degrade_once(
+            "kernel_invalid", symbol="muhurat_window_active", detail=type(verdict).__name__
+        )
+        return None
+    return verdict
+
+
+def rust_settle_token_verdict(token: str, block_end_us: int) -> tuple[int, int] | None:
+    """Consult the Rust settle-token parse verdict; ``None`` = the oracle.
+
+    *token* must arrive PRE-STRIPPED (``str.strip`` stays Python — its
+    whitespace set is CPython's ``isspace`` law, not Unicode
+    ``White_Space``). Returns ``(verdict_code, us_of_day_or_-1)``; the seam
+    consumes the value ONLY on :data:`SETTLE_CODE_OK`, whose slot is gated
+    to a minute-granular in-range instant (the strict ``HH:MM`` law — a
+    poisoned off-grid value can only mean a stale/corrupt wheel); every
+    non-OK verdict routes the caller back to the Python oracle, which
+    composes + raises the byte-identical fail-loud ``ValueError``.
+    """
+    result = _call_kernel("settle_token_verdict", token, block_end_us)
+    if result is _KERNEL_FAULT:
+        return None
+    if (
+        isinstance(result, tuple)
+        and len(result) == _GATE_PAIR_ARITY
+        and type(result[0]) is int
+        and result[0] in _SETTLE_CODES
+        and type(result[1]) is int
+        and (
+            result[0] != SETTLE_CODE_OK
+            or (0 <= result[1] < _US_PER_DAY and result[1] % _US_PER_MINUTE == 0)
+        )
+    ):
+        return (result[0], result[1])
+    warn_degrade_once("kernel_invalid", symbol="settle_token_verdict", detail=repr(result)[:80])
+    return None
+
+
+__all__ += [
+    "GATE_CODE_BEFORE_SETTLE",
+    "GATE_CODE_MARKET_HOURS_BLOCKED",
+    "GATE_CODE_MUHURAT_DEFERRAL",
+    "GATE_CODE_NON_TRADING_DAY",
+    "GATE_CODE_OK",
+    "SETTLE_CODE_OK",
+    "rust_auto_gate_decision",
+    "rust_muhurat_window_active",
+    "rust_settle_token_verdict",
+]

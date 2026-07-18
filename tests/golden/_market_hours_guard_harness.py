@@ -34,6 +34,7 @@ forces a deliberate, ledger-worthy regeneration — never a silent drift.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -42,14 +43,23 @@ from brutex.calendars.auto_pull_gate import (
     MUHURAT_PRE_MARGIN,
     PULL_ALL_SETTLE_ENV,
     auto_pull_allowed,
+    compose_market_closed,
     muhurat_session_active,
+    resolve_settle_resolution,
 )
-from brutex.calendars.market_hours import BLOCK_END, BLOCK_START, pull_allowed_now
+from brutex.calendars.market_hours import (
+    BLOCK_END,
+    BLOCK_START,
+    MARKET_HOURS_GUARD_ENV,
+    pull_allowed_now,
+)
 from brutex.calendars.nse import (
     HOLIDAY_COVERAGE_FIRST_YEAR,
     HOLIDAY_COVERAGE_LAST_YEAR,
     IST,
     MUHURAT_SESSIONS,
+    has_muhurat_session,
+    is_holiday_data_available,
     is_trading_day,
 )
 
@@ -226,4 +236,231 @@ def compute_auto_gate_table() -> dict[str, Any]:
         "settle_env": dict(AUTO_GATE_ENV),
         "cases": cases,
         "muhurat_active": _muhurat_boundary_cases(),
+        # Wave-2D EXTENSIONS (append-only keys — every pre-existing key above
+        # stays byte-identical; captured on the UNMODIFIED Python module):
+        "belt_coherence": _belt_coherence_cases(),
+        "cases_settle_1535": _settle_1535_cases(),
+        "settle_tokens": [_settle_token_case(token) for token in SETTLE_TOKEN_MATRIX],
     }
+
+
+# ── Wave-2D extensions (settle-token tiers · floor-exact settle · belt) ──────
+
+#: The settle-token verdict matrix (tier-1 env values): the ok arm (incl. the
+#: floor-exact ``15:35`` boundary + the Python ``str.strip`` law), the
+#: below-floor refusals, the out-of-range wall-clock refusals, and the
+#: bad-shape refusals (single-digit / missing-colon / Unicode-digit — the
+#: ``re.ASCII`` law). NO whitespace-only token (blank never reaches tier 1)
+#: and no tab/newline (the TSV projection is line-oriented).
+SETTLE_TOKEN_MATRIX: tuple[str, ...] = (
+    "17:30",
+    "15:35",
+    "23:59",
+    " 17:30 ",
+    "15:34",
+    "08:45",
+    "00:00",
+    "24:00",
+    "17:60",
+    "99:99",
+    "7:30",
+    "17:3",
+    "1730",
+    "17-30",
+    "0x:30",
+    "+7:30",
+    "١٧:٣٠",  # "١٧:٣٠" — Unicode digits must be refused
+    "17:30 IST",
+)
+
+#: The message → machine-kind classification of the UNMODIFIED module's three
+#: fail-loud ``ValueError`` arms (the golden freezes the KIND, not the byte
+#: text — detail wording stays Python-owned, never crosses the FFI).
+_SETTLE_ERROR_KINDS: tuple[tuple[str, str], ...] = (
+    ("not a strict HH:MM", "bad_shape"),
+    ("not a real wall-clock time", "not_wall_clock"),
+    ("before the market-hours guard's", "below_floor"),
+)
+
+
+def _settle_token_case(token: str) -> dict[str, Any]:
+    """One frozen settle-token verdict row (tier-1 env → parse outcome)."""
+    try:
+        res = resolve_settle_resolution({PULL_ALL_SETTLE_ENV: token})
+    except ValueError as exc:
+        msg = str(exc)
+        kind = next((k for needle, k in _SETTLE_ERROR_KINDS if needle in msg), "unclassified")
+        return {"token": token, "verdict": kind, "minute": None}
+    if res.source != "env":  # pragma: no cover — matrix tokens are all tier-1
+        raise AssertionError(f"settle token {token!r} did not resolve at tier 1")
+    return {
+        "token": token,
+        "verdict": "ok",
+        "minute": res.value.hour * 60 + res.value.minute,
+    }
+
+
+#: The floor-exact settle env (``15:35`` == the guard's BLOCK_END — the
+#: boundary the market-hours belt's structural unreachability rests on).
+SETTLE_1535_ENV: dict[str, str] = {PULL_ALL_SETTLE_ENV: "15:35"}
+
+#: Probe times for the floor-exact grid: in-window minutes (every one is
+#: ``before_settle`` — the belt stays unreachable), the 15:34:59/15:35:00
+#: settle boundary, and post-settle instants.
+SETTLE_1535_TIMES: tuple[time, ...] = (
+    time(8, 44, 0),
+    time(8, 45, 0),
+    time(12, 0, 0),
+    time(15, 34, 59),
+    time(15, 35, 0),
+    time(15, 36, 0),
+    time(17, 30, 0),
+    time(23, 59, 59),
+)
+
+#: Floor-exact grid dates: a regular trading day + the out-of-coverage
+#: weekday (proceeds post-settle with the coverage WARN — ruling 10).
+SETTLE_1535_DATES: tuple[date, ...] = (
+    date(2024, 1, 2),  # Tuesday — regular trading day
+    date(2027, 1, 4),  # Monday, out-of-coverage weekday
+)
+
+
+def _settle_1535_cases() -> list[dict[str, Any]]:
+    """The gate grid under the FLOOR-EXACT ``15:35`` settle env."""
+    cases: list[dict[str, Any]] = []
+    for d in SETTLE_1535_DATES:
+        for t in SETTLE_1535_TIMES:
+            verdict = auto_pull_allowed(
+                now=datetime.combine(d, t, tzinfo=IST), env=dict(SETTLE_1535_ENV)
+            )
+            cases.append(
+                {
+                    "date": d.isoformat(),
+                    "time": t.isoformat(),
+                    "allowed": verdict.allowed,
+                    "reason": verdict.reason,
+                }
+            )
+    return cases
+
+
+def _belt_coherence_cases() -> list[dict[str, Any]]:
+    """``compose_market_closed`` kill-switch coherence (guard off ⇒ belt off).
+
+    Per listed Muhurat session: one instant INSIDE the margined window + one
+    just BEFORE it, composed over an always-False base under the guard switch
+    unset / explicitly-on / explicitly-off — the frozen law: the belt closes
+    the in-window instant ONLY while the guard switch is enabled.
+    """
+    rows: list[dict[str, Any]] = []
+    second = timedelta(seconds=1)
+
+    def _frozen_clock(instant: datetime) -> Callable[[], datetime]:
+        return lambda: instant
+
+    for d, (open_t, _close_t) in sorted(MUHURAT_SESSIONS.items()):
+        inside = datetime.combine(d, open_t, tzinfo=IST) + timedelta(minutes=1)
+        outside = datetime.combine(d, open_t, tzinfo=IST) - MUHURAT_PRE_MARGIN - second
+        for guard in ("unset", "1", "0"):
+            env: dict[str, str] = {} if guard == "unset" else {MARKET_HOURS_GUARD_ENV: guard}
+            for instant in (inside, outside):
+                composed = compose_market_closed(
+                    lambda: False, clock=_frozen_clock(instant), env=env
+                )
+                rows.append(
+                    {
+                        "date": d.isoformat(),
+                        "time": instant.time().isoformat(),
+                        "guard": guard,
+                        "closed": composed(),
+                    }
+                )
+    return rows
+
+
+# ── The serde-free TSV projection (cargo consumes this; sync-pinned) ─────────
+
+
+def _us_of_time(t: time) -> int:
+    """Microsecond-of-day of an IST wall-clock time (order-isomorphic)."""
+    return ((t.hour * 60 + t.minute) * 60 + t.second) * 1_000_000 + t.microsecond
+
+
+def _gate_tsv_row(row: dict[str, Any], settle: time) -> str:
+    """One ``gate`` TSV row: the RESOLVED predicate inputs + expected verdict.
+
+    The Rust kernel is clockless/calendar-free, so the projection carries the
+    Python-resolved predicates (trading-day / coverage / muhurat-listed) the
+    facade will pass at runtime — recomputed here from the one Python
+    calendar source of truth at projection-build time.
+    """
+    d = date.fromisoformat(row["date"])
+    t = time.fromisoformat(row["time"])
+    return "\t".join(
+        [
+            "gate",
+            row["date"],
+            row["time"],
+            str(int(is_trading_day(d))),
+            str(int(is_holiday_data_available(d))),
+            str(int(has_muhurat_session(d))),
+            str(_us_of_time(t)),
+            str(_us_of_time(settle)),
+            row["reason"],
+            str(int(row["allowed"])),
+        ]
+    )
+
+
+def _mwin_tsv_row(row: dict[str, Any]) -> str | None:
+    """One ``mwin`` TSV row, or ``None`` for a session-less date (the 2026
+    announced-but-timing-less probe — the session LOOKUP stays Python; the
+    kernel only ever sees a listed session's interval)."""
+    d = date.fromisoformat(row["date"])
+    session = MUHURAT_SESSIONS.get(d)
+    if session is None:
+        return None
+    open_t, close_t = session
+    return "\t".join(
+        [
+            "mwin",
+            row["date"],
+            str(_us_of_time(time.fromisoformat(row["time"]))),
+            str(_us_of_time(open_t)),
+            str(_us_of_time(close_t)),
+            str(MUHURAT_PRE_MARGIN // timedelta(microseconds=1)),
+            str(MUHURAT_POST_MARGIN // timedelta(microseconds=1)),
+            str(int(row["active"])),
+        ]
+    )
+
+
+def _settle_tsv_row(row: dict[str, Any]) -> str:
+    """One ``settle`` TSV row: the PRE-STRIPPED token + floor + verdict kind.
+
+    ``str.strip`` stays Python (its whitespace set is CPython's ``isspace``
+    law, not Unicode ``White_Space``) — the kernel receives the stripped
+    token exactly as the facade will pass it.
+    """
+    token = str(row["token"]).strip()
+    if "\t" in token or "\n" in token:  # pragma: no cover — matrix is line-safe
+        raise AssertionError(f"TSV-unsafe settle token {row['token']!r}")
+    minute = row["minute"]
+    minute_us = -1 if minute is None else minute * 60_000_000
+    return "\t".join(["settle", token, str(_us_of_time(BLOCK_END)), row["verdict"], str(minute_us)])
+
+
+def compute_auto_gate_tsv(payload: dict[str, Any]) -> str:
+    """The whole TSV projection of the auto-gate *payload* (one truth, two
+    encodings — the ``pull_stall_verdicts.tsv`` pattern): the consuming
+    Python golden test pins the committed ``.tsv`` byte-equal to this
+    projection of the committed ``.json``, and the cargo fixture test
+    replays it through the Rust kernels serde-free."""
+    settle_default = time(17, 30)
+    settle_floor = time(15, 35)
+    lines = [_gate_tsv_row(r, settle_default) for r in payload["cases"]]
+    lines.extend(_gate_tsv_row(r, settle_floor) for r in payload["cases_settle_1535"])
+    lines.extend(row for r in payload["muhurat_active"] if (row := _mwin_tsv_row(r)) is not None)
+    lines.extend(_settle_tsv_row(r) for r in payload["settle_tokens"])
+    return "\n".join(lines) + "\n"

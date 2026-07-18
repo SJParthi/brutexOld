@@ -17,6 +17,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+use crate::auto_pull_gate;
 use crate::market_hours;
 use crate::pull_outcome;
 
@@ -154,6 +155,68 @@ fn alive_log_due(since_last_s: f64, interval_s: f64) -> bool {
     crate::stall::alive_log_due(since_last_s, interval_s)
 }
 
+// --- auto_pull_gate (Wave 2D) -----------------------------------------------
+// The --auto gate ladder + Muhurat margined-window + settle-token verdict
+// kernels (DEC-PULL-SCOPED-ALL-ONECLICK-001 / DEC-SETTLE-EVIDENCE-ADOPTION-001
+// re-hosted). Codes/bools only cross Rust -> Python output; the calendar
+// predicates cross IN as caller-resolved flags (brutex/calendars/nse.py stays
+// the one calendar source of truth) and times as microsecond-of-day. Every
+// out-of-range input maps to ValueError -- the facade's defensive belt
+// degrades such a call to the Python oracle.
+
+/// The whole `auto_pull_allowed` decision ladder -> `(reason_code,
+/// coverage_warn)` -- see `crate::auto_pull_gate::auto_gate_decision`.
+#[pyfunction]
+#[pyo3(signature = (trading_day, coverage_available, muhurat_listed, now_us_of_day, settle_us_of_day))]
+fn auto_gate_decision(
+    trading_day: bool,
+    coverage_available: bool,
+    muhurat_listed: bool,
+    now_us_of_day: i64,
+    settle_us_of_day: i64,
+) -> PyResult<(u8, bool)> {
+    auto_pull_gate::auto_gate_decision(
+        trading_day,
+        coverage_available,
+        muhurat_listed,
+        now_us_of_day,
+        settle_us_of_day,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// The margined Muhurat session-window interval law -- see
+/// `crate::auto_pull_gate::muhurat_window_active` (the session LOOKUP stays
+/// Python; only a LISTED session's interval ever crosses).
+#[pyfunction]
+#[pyo3(signature = (now_us_of_day, open_us_of_day, close_us_of_day, pre_margin_us, post_margin_us))]
+fn muhurat_window_active(
+    now_us_of_day: i64,
+    open_us_of_day: i64,
+    close_us_of_day: i64,
+    pre_margin_us: i64,
+    post_margin_us: i64,
+) -> PyResult<bool> {
+    auto_pull_gate::muhurat_window_active(
+        now_us_of_day,
+        open_us_of_day,
+        close_us_of_day,
+        pre_margin_us,
+        post_margin_us,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// The strict `HH:MM` settle-token parse verdict -> `(verdict_code,
+/// us_of_day_or_-1)` -- see `crate::auto_pull_gate::settle_token_verdict`
+/// (the token arrives PRE-STRIPPED; Python composes + raises every refusal
+/// text itself -- the fail-loud env posture never moves).
+#[pyfunction]
+#[pyo3(signature = (token, block_end_us))]
+fn settle_token_verdict(token: &str, block_end_us: i64) -> PyResult<(u8, i64)> {
+    auto_pull_gate::settle_token_verdict(token, block_end_us).map_err(PyValueError::new_err)
+}
+
 #[pymodule]
 fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
@@ -176,5 +239,9 @@ fn _brutex_pull_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- pull_stall (Wave 1C) ---
     m.add_function(wrap_pyfunction!(wedge_decision, m)?)?;
     m.add_function(wrap_pyfunction!(alive_log_due, m)?)?;
+    // --- auto_pull_gate (Wave 2D) ---
+    m.add_function(wrap_pyfunction!(auto_gate_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(muhurat_window_active, m)?)?;
+    m.add_function(wrap_pyfunction!(settle_token_verdict, m)?)?;
     Ok(())
 }

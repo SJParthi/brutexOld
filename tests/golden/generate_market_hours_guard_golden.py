@@ -43,12 +43,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.golden._market_hours_guard_harness import (
     compute_auto_gate_table,
+    compute_auto_gate_tsv,
     compute_guard_table,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 GUARD_FIXTURE = FIXTURES / "market_hours_guard_verdicts.json"
 AUTO_GATE_FIXTURE = FIXTURES / "auto_pull_gate_verdicts.json"
+AUTO_GATE_TSV_FIXTURE = FIXTURES / "auto_pull_gate_verdicts.tsv"
 
 #: The explicit overwrite escape hatch — the ONLY way to regenerate an
 #: existing fixture (the pre-conversion capture is the oracle; Golden Rule #1).
@@ -64,7 +66,7 @@ def _dump(path: Path, payload: object) -> None:
 
 
 def main() -> None:
-    existing = [p for p in (GUARD_FIXTURE, AUTO_GATE_FIXTURE) if p.exists()]
+    existing = [p for p in (GUARD_FIXTURE, AUTO_GATE_FIXTURE, AUTO_GATE_TSV_FIXTURE) if p.exists()]
     if existing and os.environ.get(REGEN_ENV) != "1":
         names = ", ".join(str(p) for p in existing)
         raise SystemExit(
@@ -75,9 +77,14 @@ def main() -> None:
         )
     FIXTURES.mkdir(parents=True, exist_ok=True)
     _dump(GUARD_FIXTURE, compute_guard_table())
-    _dump(AUTO_GATE_FIXTURE, compute_auto_gate_table())
+    auto_gate = compute_auto_gate_table()
+    _dump(AUTO_GATE_FIXTURE, auto_gate)
+    # The serde-free TSV projection of the SAME payload (cargo consumes it;
+    # the Python golden test sync-pins the two encodings byte-equal).
+    AUTO_GATE_TSV_FIXTURE.write_text(compute_auto_gate_tsv(auto_gate), encoding="utf-8")
     print(f"wrote {GUARD_FIXTURE}")
     print(f"wrote {AUTO_GATE_FIXTURE}")
+    print(f"wrote {AUTO_GATE_TSV_FIXTURE}")
 
 
 if __name__ == "__main__":
