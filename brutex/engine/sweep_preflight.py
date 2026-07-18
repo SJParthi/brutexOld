@@ -20,11 +20,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.data.session_density import (
+    SESSION_DENSITY_ERROR_EVENT,
+    SESSION_DENSITY_WARN_CAP,
+    SessionDensityFlag,
+    classify_session_density,
+)
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
+    from datetime import date
+
+    from brutex.data.models import CandleBar
+
+_LOG = structlog.get_logger(__name__)
 
 #: The base interval the pull fetches directly from the vendor; anything else is a
 #: derived timeframe whose remedy is materialization, not a re-pull. ``1minute``
@@ -206,6 +220,121 @@ def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> Fres
     """
     stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
     return FreshnessReport(stale=stale, checked=len(verdicts))
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDensityNote:
+    """Outcome of the WARN-only sweep-slice session-density preflight.
+
+    DEC-SESSION-DENSITY-CENSUS-001 — the retro-lake arm of the bar-density
+    census: post-pull windows are censused at the ingest tail, but a hole
+    OLDER than the last pull only surfaces here, at the exact point the
+    2-4-day sweep is about to consume the bars. A NOTE, never a gate (the
+    ``one_day_trade_law_note`` posture): the sweep proceeds, there is NO
+    refusal and NO escape flag — the remediation is a re-pull, and refusing
+    a launch over an already-annotated deficit would be pure obstruction.
+
+    Attributes
+    ----------
+    flagged
+        Every ``(symbol, interval, flag)`` triple the census flagged across
+        the loaded ``1minute`` slices, symbol-major deterministic order
+        (known-irregular deficits are annotated facts, deliberately NOT in
+        this WARN list).
+    slices_checked
+        Non-empty ``1minute`` slices actually censused.
+    """
+
+    flagged: tuple[tuple[str, str, SessionDensityFlag], ...]
+    slices_checked: int
+
+    @property
+    def ok(self) -> bool:
+        """True iff no loaded slice carries a flagged low-density session."""
+        return not self.flagged
+
+    def lines(self, cap: int = SESSION_DENSITY_WARN_CAP) -> tuple[str, ...]:
+        """Printable per-flag lines, capped at *cap* + one honest overflow tail."""
+        out = [
+            (
+                f"{symbol}/{interval} {flag.session.isoformat()}: "
+                f"{flag.observed}/{flag.expected} bars ({flag.shape}, "
+                f"largest gap {flag.largest_gap_minutes}m)"
+            )
+            for symbol, interval, flag in self.flagged[:cap]
+        ]
+        if len(self.flagged) > cap:
+            out.append(f"... +{len(self.flagged) - cap} more low-density session(s)")
+        return tuple(out)
+
+
+def preflight_session_density(
+    slices: Mapping[tuple[str, str], Sequence[CandleBar]],
+    *,
+    today_ist: date | None = None,
+    observed: AbstractSet[date] = frozenset(),
+) -> SessionDensityNote:
+    """Census every loaded ``1minute`` slice's per-session bar density.
+
+    DELEGATES to the ONE COMMON classifier
+    (:func:`~brutex.data.session_density.classify_session_density` — CLAUDE.md
+    §11: no second copy of the deficiency law) over the bars ALREADY loaded
+    for the sweep, so this arm costs zero extra lake I/O — O(loaded slice
+    bars + days in each slice's covered span) total (the classifier's own
+    documented span-walk term; a sparse multi-year slice is walk-dominated —
+    review round-4 wording honesty). Only the fetched ``1minute`` slices are
+    judged (a derived
+    TF's density follows its 1-minute base by construction; judging it would
+    double-report every hole). Empty slices are skipped (the zero-bar
+    :func:`preflight_slices` refusal owns those). WARN-only by decree — the
+    caller prints, never refuses. Deliberately NOT kill-switch-gated HERE
+    (no KILL-SWITCH env read inside the classifier/note builder — its two
+    threshold tunables remain documented fail-soft internal reads when not
+    injected): the ONE census kill switch
+    (:data:`~brutex.data.session_density.SESSION_DENSITY_KILL_ENV`) is
+    honored by the consumer — ``cmd_sweep_all`` gates this call on
+    :func:`~brutex.data.session_density.session_density_census_enabled` — so
+    the switch kills ALL census output while the note builder carries no
+    kill-switch read of its own.
+
+    *observed* threads the observed-holiday overlay
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001) into the classifier exactly like
+    BOTH ingest wirings do (review round-3 — the asymmetry re-opened the
+    ``missing_session`` false-flag the classifier's ``observed`` param was
+    built to close): an overlaid interior date abstains ``non_trading``
+    instead of false-flagging at every sweep launch. ``cmd_sweep_all`` loads
+    it via the never-raising
+    :func:`~brutex.calendars.observed_sessions.load_observed_holidays`.
+
+    Pure modulo the BELT (review round-3, the ingest twin's
+    swallow-and-continue discipline): a slice whose classify raises logs ONE
+    :data:`~brutex.data.session_density.SESSION_DENSITY_ERROR_EVENT` WARNING
+    and is skipped — a WARN-only note must NEVER crash the launch it
+    decorates (the classifier is itself total; this is defense-in-depth).
+    """
+    flagged: list[tuple[str, str, SessionDensityFlag]] = []
+    checked = 0
+    for symbol, interval in sorted(slices):
+        if interval not in _FETCHED_INTERVALS:
+            continue
+        bars = slices[(symbol, interval)]
+        if not bars:
+            continue
+        try:
+            verdict = classify_session_density(
+                [bar.timestamp for bar in bars], today_ist=today_ist, observed=observed
+            )
+        except Exception as exc:  # belt: a WARN-only note never crashes the launch
+            _LOG.warning(
+                SESSION_DENSITY_ERROR_EVENT,
+                symbol=repr(symbol),
+                interval=interval,
+                error=str(exc),
+            )
+            continue
+        checked += 1
+        flagged.extend((symbol, interval, flag) for flag in verdict.flags)
+    return SessionDensityNote(flagged=tuple(flagged), slices_checked=checked)
 
 
 def one_day_trade_law_note(intervals: Sequence[str]) -> str | None:

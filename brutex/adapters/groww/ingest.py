@@ -115,6 +115,7 @@ from brutex.data.session import (
     is_session_exempt,
     observe_all_filtered,
 )
+from brutex.data.session_density import observe_session_density
 from brutex.data.sink import BarSink
 from brutex.data.today_completeness import (
     TODAY_INCOMPLETE,
@@ -149,6 +150,10 @@ WindowTick = Callable[[], None]
 
 #: Canonical daily interval — the only interval not session-filtered.
 _DAILY: str = "1day"
+
+#: The ONE vendor-fetched intraday interval (DEC-1MINUTE-ONLY-DERIVE-1DAY-001)
+#: — the session-density census's interval gate (DEC-SESSION-DENSITY-CENSUS-001).
+_MINUTE: str = "1minute"
 
 #: The data-source namespace stamped on every coverage :class:`WindowKey`. ``"groww"``
 #: keeps Groww windows from colliding with other vendors' on the shared lake ledger. Sourced
@@ -1448,6 +1453,32 @@ def _process_window_tail(
         pull_id=pull_id,
         observed=observed_holidays,
     )
+    # WARN-only per-session BAR-DENSITY census (DEC-SESSION-DENSITY-CENSUS-001):
+    # counts bars WITHIN each interior session against the session-aware
+    # expectation — the density blind spot the two detectors above (session-SET
+    # + trailing-edge granular) cannot see (a 45-min..4-hr intraday hole, a
+    # 1-5-session missing run under interior-gap's tolerance). Gated like the
+    # demotion predicate below (real-vendor opt-in + dense INDEX only) plus the
+    # fetched ``1minute`` interval (the expectation math is per-minute-bucket)
+    # and the session-exempt belt (an exempt ~21h symbol's density is not
+    # session-shaped; GIFTNIFTY is already outside ``is_index``). OBSERVE-ONLY
+    # by construction: O(kept bars), zero extra lake I/O, fully guarded inside,
+    # and it NEVER touches the ``ledger.record`` call below (no demotion —
+    # spy-pinned; the WARN is visibility, the re-pull stays the operator's).
+    if (
+        detect_completeness_gaps
+        and instrument.is_index
+        and interval == _MINUTE
+        and not is_session_exempt(instrument.symbol_name)
+    ):
+        observe_session_density(
+            _LOG,
+            bar_timestamps=[bar.timestamp for bar in bars],
+            symbol=instrument.symbol_name,
+            interval=interval,
+            pull_id=pull_id,
+            observed=observed_holidays,
+        )
     truncated = partial_verdict is not None and partial_verdict.is_suspected_partial()
     interior_gap = interior_verdict is not None and interior_verdict.is_interior_gap()
     # DEMOTE only a DENSE INDEX on the FETCHED ``1minute`` interval, and only when the caller

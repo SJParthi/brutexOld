@@ -141,6 +141,7 @@ from brutex.data.partial_window_detect import (
 )
 from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe_all_filtered
+from brutex.data.session_density import observe_session_density
 from brutex.data.sink import BarSink
 from brutex.data.today_completeness import (
     TODAY_INCOMPLETE,
@@ -1134,6 +1135,12 @@ def _process_option_window_tail(
     # classifier + skip rule would otherwise never revisit). Fully guarded inside — never
     # breaks the pull, changes no status/ledger/return.
     _observe_partial_window(raw, bars, pull_id=pull_id, fields=fields, observed=observed_holidays)
+    # WARN-only per-session BAR-DENSITY census (DEC-SESSION-DENSITY-CENSUS-001):
+    # the density twin of the truncation observe above, same FUT-only scope gate
+    # (options structurally excluded — sparsity is indistinguishable from a hole,
+    # partial_window_detect.py's BLOCKER-1 rationale). Observe-only, fully
+    # guarded inside, zero ledger effect.
+    _observe_session_density(raw, bars, pull_id=pull_id, fields=fields, observed=observed_holidays)
     if on_success is not None:
         on_success()
     return IngestReport(
@@ -1565,6 +1572,48 @@ def _observe_partial_window(
         window_end=raw.key.end,
         now=datetime.now(UTC),
         expiry=raw.contract.expiry,
+        symbol=raw.contract.symbol,
+        interval=fields.get("interval", raw.interval),
+        pull_id=pull_id,
+        observed=observed,
+    )
+
+
+#: The ONE vendor-fetched F&O interval (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) —
+#: the density census's interval belt (DEC-SESSION-DENSITY-CENSUS-001): the
+#: per-minute-bucket expectation math only makes sense on the 1-minute base.
+_DENSITY_INTERVAL: Final[str] = "1minute"
+
+
+def _observe_session_density(
+    raw: _OptionRawWindow,
+    session_bars: list[CandleBar],
+    *,
+    pull_id: str | None,
+    fields: dict[str, str],
+    observed: frozenset[date] = frozenset(),
+) -> None:
+    """Observe-only: WARN if a FUTURES window's sessions are bar-DENSITY deficient.
+
+    DEC-SESSION-DENSITY-CENSUS-001 — the density twin of
+    :func:`_observe_partial_window`, sharing its SCOPE GATE verbatim: only
+    FUTURES (``FUT``) contracts are watched
+    (:data:`_PARTIAL_WINDOW_WATCHED_CONTRACT_TYPES` — an option's intraday
+    sparsity is indistinguishable from a hole, the BLOCKER-1 rationale), and
+    only the fetched ``1minute`` interval is judged
+    (:data:`_DENSITY_INTERVAL`). Delegates to the COMMON guarded
+    :func:`~brutex.data.session_density.observe_session_density` over the
+    SESSION-FILTERED bars — capped WARNs + the known-irregular INFO arm,
+    never breaking the pull, changing no status/ledger/return. The F&O
+    dry-run client returns EMPTY candle payloads, so this is silent offline.
+    """
+    if raw.contract.contract_type not in _PARTIAL_WINDOW_WATCHED_CONTRACT_TYPES:
+        return
+    if fields.get("interval", raw.interval) != _DENSITY_INTERVAL:
+        return
+    observe_session_density(
+        _LOG,
+        bar_timestamps=[bar.timestamp for bar in session_bars],
         symbol=raw.contract.symbol,
         interval=fields.get("interval", raw.interval),
         pull_id=pull_id,

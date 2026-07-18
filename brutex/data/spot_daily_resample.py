@@ -76,6 +76,8 @@ provenance — a resample made zero vendor calls). The raw lake builders
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -84,7 +86,13 @@ from typing import TYPE_CHECKING, Final, Literal
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
-from brutex.calendars.nse import IST_FIXED_OFFSET, SESSION_OPEN_IST, has_muhurat_session
+from brutex.calendars.nse import (
+    IST_FIXED_OFFSET,
+    SESSION_OPEN_IST,
+    has_muhurat_session,
+    is_known_irregular_session,
+    known_irregular_reason,
+)
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.session import ist_offset_duration
@@ -112,7 +120,13 @@ _IST = IST_FIXED_OFFSET
 _LOG = structlog.get_logger("brutex.data.spot_daily_resample")
 
 __all__ = [
+    "DAILY_RANGE_ERROR_EVENT",
+    "DAILY_RANGE_EVENT",
+    "DAILY_RANGE_KNOWN_EVENT",
+    "DAILY_RANGE_SUPPRESSED_EVENT",
+    "DAILY_RANGE_WARN_RATIO",
     "MAX_OPEN_SUBSTITUTION_WARNS",
+    "MAX_RANGE_WARNS",
     "DailyDeriveReport",
     "DailyDeriveTarget",
     "DailyFillResult",
@@ -120,10 +134,13 @@ __all__ = [
     "DailyOpenVerdict",
     "DailyReconcileReport",
     "DailyResampleWindow",
+    "ExtremeRangeDay",
     "classify_daily_open",
     "derive_daily_for_targets",
     "detect_daily_open_substitutions",
+    "detect_extreme_daily_ranges",
     "emit_daily_open_substitutions",
+    "emit_extreme_daily_ranges",
     "fill_daily_from_minute",
     "frame_to_candle_bars",
     "ist_span_partition_files",
@@ -131,6 +148,7 @@ __all__ = [
     "make_lake_read_1m_window",
     "make_lake_write_1day",
     "observe_daily_open_substitutions",
+    "observe_extreme_daily_ranges",
     "plan_daily_resample_windows",
     "reconcile_daily_from_minute",
     "resample_1m_to_daily",
@@ -398,6 +416,226 @@ def observe_daily_open_substitutions(
         )
         return 0
     return scan.count
+
+
+#: Per-session intraday range ratio at/above which a session is flagged for
+#: review — ``(max(high) - min(low)) / min(low) >= 0.09``. The 9% margin is the
+#: doc-mandated review threshold sitting just UNDER the first market-wide
+#: circuit-breaker band (the SEBI 10/15/20% framework — SEBI Circular
+#: SMDRPD/Policy/Cir-37/2001 dated 2001-06-28 as modified by
+#: CIR/MRD/DP/25/2013 dated 2013-09-03; canonical exchange page
+#: nseindia.com/products-services/equity-market-circuit-breakers; verified
+#: 2026-07-11). Env-tunable via ``BRUTEX_DAILY_RANGE_WARN_RATIO`` (fail-soft:
+#: a missing / malformed / non-finite / non-positive value falls back to this
+#: default — the diagnostic never crashes a prebuild over a bad env var).
+DAILY_RANGE_WARN_RATIO: Final[float] = 0.09
+
+#: Cap on per-(symbol, date) ``prebuild.daily_range_extreme`` WARN lines per
+#: scan (the house cap-20 discipline); the suppressed summary ALWAYS carries
+#: the TRUE count (Golden Rule #1).
+MAX_RANGE_WARNS: Final[int] = 20
+
+#: One WARN per UN-annotated extreme-range session (capped) — manual review.
+DAILY_RANGE_EVENT: Final[str] = "prebuild.daily_range_extreme"
+#: One INFO per KNOWN annotated halt/extended session — expected, no action.
+DAILY_RANGE_KNOWN_EVENT: Final[str] = "prebuild.daily_range_known_halt"
+#: One summary when the WARN lines were capped (true count carried).
+DAILY_RANGE_SUPPRESSED_EVENT: Final[str] = "prebuild.daily_range_extreme_suppressed"
+#: Emitted if the observe-only scan itself raises — never breaks the prebuild.
+DAILY_RANGE_ERROR_EVENT: Final[str] = "prebuild.daily_range_log_error"
+
+
+def _tunable_ratio(env_var: str, default: float) -> float:
+    """Read a positive finite float ratio from *env_var*, else *default*.
+
+    Fail-soft (the ``interior_gap_detect._tunable_sessions`` law): a missing,
+    empty, non-float, non-finite, or non-positive value falls back to
+    *default* — the diagnostic must NEVER crash a prebuild over a malformed
+    env var. Pure modulo the one ``os.environ`` read.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0.0:
+        return default
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ExtremeRangeDay:
+    """One session whose intraday range crossed the review threshold — pure data.
+
+    Attributes
+    ----------
+    session_date
+        The IST session date.
+    range_ratio
+        ``(max(high) - min(low)) / min(low)`` over the session's 1-minute bars.
+    known_halt
+        ``True`` iff the date is annotated known-irregular
+        (:func:`~brutex.calendars.nse.is_known_irregular_session` — the 2020
+        circuit-halt days / the 2021-02-24 extended outage day) → the INFO
+        arm, never a WARN.
+    reason
+        :func:`~brutex.calendars.nse.known_irregular_reason`'s machine token
+        for a known day, else ``None``.
+    """
+
+    session_date: date
+    range_ratio: float
+    known_halt: bool
+    reason: str | None
+
+
+def detect_extreme_daily_ranges(
+    df_1m: pl.DataFrame, *, before: date, threshold: float | None = None
+) -> tuple[ExtremeRangeDay, ...]:
+    """Scan a 1-minute frame for sessions whose intraday range is extreme — pure.
+
+    DEC-HALT-DAY-TREATMENT-001 — the self-maintaining halt-day DISCOVERY
+    instrument: any COMPLETE session (``ist_date < before`` — the same
+    forming-session cutoff the daily derive uses) whose
+    ``(max(high) - min(low)) / min(low) >= threshold`` (default
+    :data:`DAILY_RANGE_WARN_RATIO`, 9% — just under the first SEBI 10%
+    market-wide circuit band) is returned for review. A KNOWN annotated date
+    (2020-03-13 / 2020-03-23 halts, the 2021-02-24 extended day) is returned
+    with ``known_halt=True`` so the emitter files it INFO ("expected — no
+    action"), while an UN-annotated hit is the manual-review WARN whose
+    remediation is "add the date to ``calendars/nse.CIRCUIT_HALT_SESSIONS``
+    with its NSE/SEBI citation" — the annotation list maintains itself going
+    forward instead of relying on asserted future halt dates.
+
+    One O(1m-rows) polars group-by folded to O(sessions) aggregates over the
+    frame ALREADY in memory (the :func:`detect_daily_open_substitutions`
+    template; only the flag loop is O(sessions)) — zero extra lake I/O,
+    frame never mutated, derived bytes byte-unchanged (pinned). A defensive
+    non-positive session low SKIPS that session (never a division by zero —
+    price sanity makes it unreachable on a real lake). HONEST limits (Golden
+    Rule #10): a pure intraday RANGE ratio — a gap-open-then-day-long-halt
+    shape (tiny intraday range, huge move vs the prior close) is the
+    session-density census's net (:mod:`brutex.data.session_density`), not
+    this ratio's; and the scan runs at the pipeline prebuild only, so a
+    CLI-fetch-only lake is scanned on the next dashboard pipeline run (the
+    DEC-PIPELINE-AUTOPREBUILD-001 #1145 asymmetry).
+    """
+    import polars as pl
+
+    resolved = (
+        threshold
+        if threshold is not None
+        else _tunable_ratio("BRUTEX_DAILY_RANGE_WARN_RATIO", DAILY_RANGE_WARN_RATIO)
+    )
+    if df_1m.is_empty():
+        return ()
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    per_day = (
+        df_1m.select(
+            ist.dt.date().alias("_ist_date"),
+            pl.col("high").alias("_high"),
+            pl.col("low").alias("_low"),
+        )
+        .filter(pl.col("_ist_date") < before)
+        .group_by("_ist_date")
+        .agg(pl.col("_high").max().alias("_day_high"), pl.col("_low").min().alias("_day_low"))
+        .sort("_ist_date")
+    )
+    flagged: list[ExtremeRangeDay] = []
+    for row in per_day.iter_rows(named=True):
+        session_date: date = row["_ist_date"]
+        day_high = float(row["_day_high"])
+        day_low = float(row["_day_low"])
+        if day_low <= 0.0:
+            # Defensive: a non-positive low cannot be ratioed (and cannot enter
+            # a price-sane lake) — skip, never divide by zero / fabricate.
+            continue
+        ratio = (day_high - day_low) / day_low
+        if ratio < resolved:
+            continue
+        flagged.append(
+            ExtremeRangeDay(
+                session_date=session_date,
+                range_ratio=ratio,
+                known_halt=is_known_irregular_session(session_date),
+                reason=known_irregular_reason(session_date),
+            )
+        )
+    return tuple(flagged)
+
+
+def emit_extreme_daily_ranges(days: Sequence[ExtremeRangeDay], *, symbol: str) -> None:
+    """Emit the observe-only extreme-range log events for one symbol's scan.
+
+    * :data:`DAILY_RANGE_KNOWN_EVENT` — ONE INFO per KNOWN annotated day,
+      naming its :func:`~brutex.calendars.nse.known_irregular_reason` —
+      "annotated (DEC-HALT-DAY-TREATMENT-001) — no action needed".
+    * :data:`DAILY_RANGE_EVENT` — WARN per UN-annotated day, capped at
+      :data:`MAX_RANGE_WARNS`, remediation naming the add-with-citation path.
+    * :data:`DAILY_RANGE_SUPPRESSED_EVENT` — ONE summary iff the WARNs capped,
+      always carrying the TRUE count.
+
+    A zero-hit scan emits NOTHING (a healthy lake's log surface is
+    byte-identical to before this detector existed). Pure emitter — production
+    wires it through the guarded :func:`observe_extreme_daily_ranges`.
+    """
+    unknown = [d for d in days if not d.known_halt]
+    for day in days:
+        if day.known_halt:
+            _LOG.info(
+                DAILY_RANGE_KNOWN_EVENT,
+                symbol=symbol,
+                session_date=day.session_date.isoformat(),
+                range_ratio=day.range_ratio,
+                reason=day.reason,
+                remediation="annotated (DEC-HALT-DAY-TREATMENT-001) — no action needed",
+            )
+    for day in unknown[:MAX_RANGE_WARNS]:
+        _LOG.warning(
+            DAILY_RANGE_EVENT,
+            symbol=symbol,
+            session_date=day.session_date.isoformat(),
+            range_ratio=day.range_ratio,
+            remediation=(
+                "manual review — possible un-cataloged market-wide halt; if "
+                "confirmed by an NSE/SEBI circular, add the date to "
+                "calendars/nse.CIRCUIT_HALT_SESSIONS with its citation "
+                "(DEC-HALT-DAY-TREATMENT-001)"
+            ),
+        )
+    if len(unknown) > MAX_RANGE_WARNS:
+        _LOG.warning(
+            DAILY_RANGE_SUPPRESSED_EVENT,
+            symbol=symbol,
+            cap=MAX_RANGE_WARNS,
+            total=len(unknown),
+        )
+
+
+def observe_extreme_daily_ranges(df_1m: pl.DataFrame, *, before: date, symbol: str) -> int:
+    """Detect + emit extreme daily ranges in ONE guarded call — the entry point.
+
+    OBSERVE-ONLY by construction (the
+    :func:`observe_daily_open_substitutions` guard discipline): the whole
+    detect+emit pass runs inside one ``try/except``, so an unexpected error
+    logs :data:`DAILY_RANGE_ERROR_EVENT` and returns ``0`` (an honest "not
+    observed", never a fabricated count) — a detector bug can NEVER fail the
+    prebuild that hosts it, and the derived/stored bytes are untouched either
+    way (read-only scan, pinned). Returns the flagged-session count.
+    """
+    try:
+        days = detect_extreme_daily_ranges(df_1m, before=before)
+        emit_extreme_daily_ranges(days, symbol=symbol)
+    except Exception as exc:  # pylint: disable=broad-except - observe-only, must never break the prebuild
+        _LOG.warning(
+            DAILY_RANGE_ERROR_EVENT,
+            symbol=symbol,
+            error=repr(exc),
+        )
+        return 0
+    return len(days)
 
 
 @dataclass(frozen=True, slots=True)

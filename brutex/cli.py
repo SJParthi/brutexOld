@@ -7713,6 +7713,41 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         return EXIT_USER_ERROR
 
+    # WARN-only per-session bar-density NOTE (DEC-SESSION-DENSITY-CENSUS-001):
+    # name interior low-density sessions in the loaded 1-minute slices — the
+    # retro-lake census arm, over the SAME bars the sweep is about to consume
+    # (zero extra lake I/O) — so the operator never mistakes a lake hole for a
+    # strategy verdict. NEVER a refusal, NO escape flag (the
+    # one_day_trade_law_note posture): the sweep proceeds; remediation is a
+    # re-pull of the named window(s). The ONE census kill switch
+    # (BRUTEX_SESSION_DENSITY_CENSUS) gates THIS consumption too — the
+    # classifier/note builder carries no KILL-SWITCH read (its two threshold
+    # tunables stay documented fail-soft internal reads when not injected);
+    # callers gate, exactly like observe_session_density's ingest-tail check
+    # — so the switch genuinely kills ALL census output (review round-1 fix).
+    from brutex.calendars.observed_sessions import load_observed_holidays
+    from brutex.data.session_density import session_density_census_enabled
+    from brutex.engine.sweep_preflight import preflight_session_density
+
+    if session_density_census_enabled():
+        # Observed-holiday overlay threaded exactly like BOTH ingest wirings
+        # (review round-3 — the preflight arm previously dropped it, so an
+        # overlaid interior date false-flagged missing_session at every sweep
+        # launch while the ingest tail of the SAME census abstained). The
+        # loader NEVER raises (missing/corrupt sidecar -> empty overlay).
+        density_note = preflight_session_density(
+            slices, observed=load_observed_holidays(resolved_lake)
+        )
+        if not density_note.ok:
+            print(
+                f"[brutex] WARNING: {len(density_note.flagged)} low-density session(s) in "
+                "the loaded 1-minute slices (bar-density census, "
+                "DEC-SESSION-DENSITY-CENSUS-001) — remediation: re-pull the named "
+                "window(s); the sweep proceeds:"
+            )
+            for line in density_note.lines():
+                print(f"[brutex]   {line}")
+
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
         Timeframe(interval, trading_minutes_for_lake_interval(interval))
