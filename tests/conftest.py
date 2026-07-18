@@ -110,6 +110,41 @@ os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
 # tested law.
 os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
+# DEC-STRATEGIES-RUST-COMBO-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the AMBIENT ENVIRONMENT): the combo_rust
+# facade's flag (`BRUTEX_STRATEGIES_RUST_COMBO`, default OFF) is read per call
+# from the REAL ``os.environ``, so a developer/CI runner with the flag
+# exported truthy would RED every OFF-asserting test (the flag-OFF bomb-crate
+# spy + the combo.py OFF-arm byte-identity pins). The suite therefore runs
+# with the flag explicitly OFF (`setdefault` so an explicit outer choice
+# wins). The facade's OWN tests stay fully armed on both arms — the ON-arm
+# tests set the flag EXPLICITLY via ``monkeypatch.setenv`` (which overrides
+# this setdefault) — so this default disables ONLY the ambient env read,
+# never the tested law.
+#
+# WHEEL-FREE DISCIPLINE: this file must stay importable in the wheel-LESS
+# lanes (lake-rust-parity installs only the brutex-lake wheel;
+# redteam-nightly installs only ``.[dev]``), and importing
+# ``brutex.strategies.combo_rust`` runs the ``brutex.strategies`` package
+# __init__, which hard-imports ``combo.py`` -> ``import fno_math`` (the
+# blake3 wheel) — reproduced red on the lake lane 2026-07-17 (actions run
+# 29599656943, ``ModuleNotFoundError: No module named 'fno_math'`` at this
+# very import). The env-name constant is therefore imported when the wheel
+# is present (one source of truth) and falls back to the pinned literal
+# when it is not — the fallback literal is DRIFT-PINNED equal to
+# ``combo_rust.STRATEGIES_RUST_COMBO_ENV`` by
+# tests/unit/test_strategies_combo_rust.py::TestConftestBelt (which runs in
+# the wheel-present lanes). In a wheel-less lane the strategies package is
+# unimportable anyway, so the setdefault is vacuous-but-harmless there.
+try:
+    from brutex.strategies import combo_rust as _combo_rust
+except ModuleNotFoundError:  # the wheel-less lane arm (lake-rust-parity / redteam)
+    _combo_rust = None
+STRATEGIES_RUST_COMBO_ENV = (
+    "BRUTEX_STRATEGIES_RUST_COMBO" if _combo_rust is None else _combo_rust.STRATEGIES_RUST_COMBO_ENV
+)
+os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")
+
 
 @pytest.fixture(autouse=True)
 def _fresh_today_gate_log_state() -> None:
