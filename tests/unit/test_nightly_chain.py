@@ -583,6 +583,10 @@ def test_report_to_dict_golden() -> None:
         "absent_artifacts": ["run_manifest", "top100"],
         "honesty_notes": ["R48 decay diff deferred to v1.1"],
         "dry_run": False,
+        # DEC-BOX-AUTODEPLOY-LANE-001 §5 — the report golden CONSCIOUSLY
+        # re-locked for the two ADDITIVE keys (emitted always; None = absent).
+        "box_update": None,
+        "env_preflight": None,
         "ok": False,
         "suspect": False,
         "blocker": None,
