@@ -6,6 +6,7 @@
 > **Authority order:**
 > 1. This file + the Golden Rules — full verbatim text in
 >    `docs/claude/04-golden-rules.md` (MANDATORY read before any work)
+>    Session start: also honor docs/claude/12-session-etiquette.md (old §10 — it mandates reading docs/TRACK1_BACKTEST_SPEC.md + docs/MIGRATION.md at session start).
 > 2. Defaults
 >
 > **2026-07-18 restructure:** the previous 966 KB single-file CLAUDE.md
