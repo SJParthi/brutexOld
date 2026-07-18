@@ -1,0 +1,30 @@
+# DEC-STRATEGIES-RUST-COMBO-001 — the ONE cargo-mutants scope for
+# brutex-strategies, resolved by BOTH the CI job
+# (.github/workflows/mutation.yml, rust-mutation-brutex-strategies) and any
+# local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; the trading-core / brutex-feed toml precedent).
+#
+# Scope: the two pure decision cores —
+#   src/canon.rs    — the canonical-JSON render (code-point key sort,
+#                     separators, the ensure_ascii escaper incl. the
+#                     surrogate-pair math, the true/false/null literals);
+#   src/scan_sep.rs — the \x1f first-offender scan.
+# The in-crate tests/canon_tests.rs (escaper matrix + shared-literal
+# cross-crate corpus + sort adversaries + the frozen payload golden +
+# proptest invariants) and tests/scan_sep_tests.rs are the killing suites;
+# zero-survivor is the standard (DEC-MUTATION-RUNTIME-003).
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the
+# trading-core toml sets the disclosure standard):
+#   src/python.rs — the thin PyO3 extraction/boundary edge. cargo-mutants
+#                   does not resolve the `PyResult` alias and fabricates
+#                   only non-compiling replacements for PyErr-constructing
+#                   wrappers (the trading-core 229-UNVIABLE measurement,
+#                   restated by the brutex-feed toml); the edge is
+#                   exercised end-to-end by the Python wheel suites in
+#                   ci.yml (the wheel-ON hypothesis differential + the
+#                   frozen cross-language payload golden + the flag-ON
+#                   golden wrappers).
+#   src/lib.rs    — re-exports + the baked SOURCE_DIGEST const only;
+#                   nothing behavioural for cargo-mutants to perturb.
+examine_globs = ["src/canon.rs", "src/scan_sep.rs"]

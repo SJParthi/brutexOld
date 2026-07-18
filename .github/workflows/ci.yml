@@ -259,6 +259,23 @@ jobs:
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel (canonical-JSON render +
+        # \x1f first-offender scan): mypy/pyright must see the
+        # wheel-PRESENT import arm of brutex/strategies/combo_rust.py
+        # (the brutex-feed precedent above). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -466,6 +483,25 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel: this job is the wheel-ON
+        # hypothesis differential's EXECUTION HOME — the coverage pass
+        # below runs tests/property, so
+        # tests/property/test_combo_rust_differential.py executes wheel-ON
+        # here, never skip-only (absent wheel = the ON arm goes unproven).
+        # The fail-loud retry means wheel-present-or-RED. Belt-and-
+        # suspenders crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest with coverage gate
@@ -1016,11 +1052,23 @@ jobs:
           else
             echo "(brutex.strategies.registry test file not present yet — gate inactive)"
           fi
-          # 16d · brutex.strategies.combo (55 stmts, 38 branches, 34 tests)
+          # 16d · brutex.strategies.combo (79 stmts, 52 branches, 92 tests)
           if compgen -G "tests/unit/test_strategies_combo.py" > /dev/null; then
             pytest --cov=brutex.strategies.combo --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_combo.py
           else
             echo "(brutex.strategies.combo test file not present yet — gate inactive)"
+          fi
+          # 16d2 · brutex.strategies.combo_rust (DEC-STRATEGIES-RUST-COMBO-001):
+          #        the default-OFF combo Rust-facade leaf (flag + crate
+          #        handshake + per-law burn-in/autorevert + refuse-poison
+          #        gates); 100% line+branch STANDALONE on its dedicated
+          #        WHEEL-FREE unit suite (crate interaction via sys.modules
+          #        fakes — the wheel-ON teeth live in tests/property +
+          #        tests/golden).
+          if compgen -G "tests/unit/test_strategies_combo_rust.py" > /dev/null; then
+            pytest --cov=brutex.strategies.combo_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_combo_rust.py
+          else
+            echo "(brutex.strategies.combo_rust test file not present yet — gate inactive)"
           fi
           # 16e · brutex.vocabulary.conflicts (12 stmts, 4 branches, 65 tests)
           if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
@@ -2937,6 +2985,25 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # A LIVE install site — deliberately unlike brutex-feed's pruned
+        # one (the comment below): the feed's dead-weight rationale is
+        # pyarrow-SPECIFIC and does not transfer. The combo differential
+        # (tests/property/test_combo_rust_differential.py) is
+        # wheel-only-gated with no pyarrow dependency, so this job is a
+        # second wheel-ON execution home for it. Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3182,6 +3249,25 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_strategies Rust extension (DEC-STRATEGIES-RUST-COMBO-001)
+        # The default-OFF combo decision kernel: this job hosts the
+        # flag-ON golden WRAPPER (test_combo_rust_flag_on_golden.py —
+        # re-drives the frozen _GOLDEN_RUN_ID / content-hash / combo-hash
+        # corpus goldens flag-ON under an engagement spy, never by editing
+        # the frozen files) + the pytest half of the frozen cross-language
+        # canonical-params payload golden. Belt-and-suspenders crates.io
+        # flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-strategies; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-strategies failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-strategies failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest golden tests
@@ -3443,6 +3529,53 @@ jobs:
       # itself is built by the Python jobs above).
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
+
+  rust-brutex-strategies:
+    name: Rust (brutex-strategies build + clippy + test)
+    # DEC-STRATEGIES-RUST-COMBO-001: the combo byte-law decision kernel's
+    # own crate gate (the rust-brutex-feed shape, plus `--locked` — the
+    # crate commits its Cargo.lock, so the lockstep is enforced here like
+    # the lake-rust-parity lane does for brutex-lake). The Python-side
+    # byte-identity proof (frozen combo/run-identity goldens flag-ON + the
+    # wheel-ON hypothesis differential) lives in the test/golden/property
+    # jobs, which install the wheel via `pip install ./rust/brutex-strategies`
+    # (type installs it too for the wheel-present import arm).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-strategies
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-strategies -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # DEC-STRATEGIES-RUST-COMBO-001: the pure cores' cargo suites — the
+      # shared-literal escaper corpus (the stats_shard matrix, the
+      # cross-crate anti-drift gate of the DEC's recorded escaper
+      # duplication), sort adversaries incl. the non-BMP boundary, the
+      # [null,true,false,1,0] extraction-ORDER value-render pin, the
+      # i128 boundary pins, the frozen cross-language payload golden's
+      # cargo half, the \x1f scan edge matrix + proptest invariants and
+      # the source-digest twin parity.
+      - name: cargo test
+        run: cargo test --release --locked
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
 
   rust-brutexd:
     name: Rust (brutexd build + clippy + test)
@@ -4326,15 +4459,22 @@ jobs:
           # clean 100% kill (the only un-killable mutant, the quantum string →
           # invalid Decimal, is excluded via `# pragma: no mutate`). Same bounded
           # timeout + the SHARED parser above at a strict floor.
+          # DEC-CONFIG-RUST-LEAVES-001 (slice T35): the runner ALSO drives
+          # tests/unit/test_money_rust.py — the BRUTEX_CORE_RUST_MONEY seam's
+          # flag-routing mutants (`if not money_rust_enabled()` flips) are
+          # value-invisible to test_money.py alone when the crate is absent
+          # (the facade degrades to the identical oracle), and are killed by
+          # the seam suite's bomb-crate latch teeth + routing spies. Timeout
+          # raised 240 → 420 s for the grown module (~3x statements).
           set +e
-          timeout 240 mutmut run \
+          timeout 420 mutmut run \
             --paths-to-mutate brutex/money.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_money.py"
+            --runner "pytest -x tests/unit/test_money.py tests/unit/test_money_rust.py"
           run_rc=$?
           set -e
           if [ $run_rc -eq 124 ]; then
-            echo "ERROR: mutmut timed out after 4 minutes on money.py"
+            echo "ERROR: mutmut timed out after 7 minutes on money.py"
             exit 124
           fi
           echo "::group::mutmut results — money.py"
@@ -4834,6 +4974,9 @@ jobs:
       - rust-trading-core
       # DEC-FEED-RUST-CORE-001: the feed decision-kernel crate gate.
       - rust-brutex-feed
+      # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-strategies
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
