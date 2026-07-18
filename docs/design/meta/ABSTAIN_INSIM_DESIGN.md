@@ -19,11 +19,23 @@
   oracle / the `rust/brutex-meta` kernel behind the default-OFF
   `BRUTEX_META_GATE` facade `brutex/meta/meta_rust.py`).
 * The REPLAY consumer (`brutex/meta/annotate.py`) judges each captured
-  trade's ENTRY snapshot — regime + event flag from the SessionLens at the
-  entry's IST session date, VIX from the trade's own `vix_at_entry` stamp,
+  trade's ENTRY snapshot — regime = the PRIOR session's SessionLens label
+  (the round-1 MAJOR-1 entry-observability law: the lens labels day D only
+  after day D's full daily bar, so the replay — like the `prev_regime_*`
+  features — reads the nearest lens date strictly BEFORE the entry's IST
+  date, never the post-entry same-day label), event flag from the
+  SessionLens at the entry's IST session date (calendar facts, knowable in
+  advance), VIX from the trade's own `vix_at_entry` stamp,
   confidence from the strictly out-of-fold `p_win` — and records
   per-trade reasons + `would_abstain_count` + `kept_pct`. Annotation only:
   no trade is removed, no metric re-ranked, `top100.json` byte-untouched.
+  The aggs winners' VIX band (`vix_band_lo/hi` — the p10-p90 of the
+  combo's WINNING trades' entry VIX, label-conditional + in-sample) is
+  recorded ONLY as the informational `vix_band_winners_p10_p90` sidecar
+  field with its verbatim disclosure; the DEFAULT config never adopts it
+  (round-1 MAJOR-2 — this document's §4 sentence was already the law, the
+  code was brought to it), and `annotate_run(abstain_config=…)` is the
+  explicit operator seam for a deliberately-set band.
 
 ## 2. Identity re-key law (the future in-sim arm)
 
@@ -55,7 +67,9 @@ TradeSimWalker(
   defaulted-kw-only pattern `reference_stamper`/`detail_sink` already use.
 * A non-None gate is consulted ONCE per would-be entry, at the signal bar's
   ENTRY SNAPSHOT (never the fill bar — no look-ahead: every gate input is
-  observable at the signal bar under the P-06 barrier). `reasons != ()` ⇒
+  observable at the signal bar under the P-06 barrier; the regime input is
+  the PRIOR session's label, the annotation layer's entry-observability
+  law carried over). `reasons != ()` ⇒
   the signal is DROPPED-AND-COUNTED (a new append-only counter
   `entries_abstained`, the `exits_session_gap` serialization template:
   EXIT_REASONS untouched — abstention prevents entries, it never exits).
@@ -107,7 +121,10 @@ track). The compose contract with it:
   as a hard precondition, not silently decided here.
 * **Missing-stamp fail-open vs fail-closed:** the shipped replay treats a
   missing VIX stamp as `vix_missing` (a named reason) ONLY when a VIX band
-  is configured; the default config configures NO band, so a stampless
+  is configured; the default config configures NO band (since the round-1
+  MAJOR-2 fold the CODE matches this sentence — the pre-fold default
+  silently adopted the aggs winners' band, a label-conditional in-sample
+  choice, now recorded informationally only), so a stampless
   lake gates on confidence + event days alone (honest, counted). The
   in-sim arm inherits the same law.
 * **P(win) provenance:** in-sim confidence must come from a model FROZEN

@@ -23,7 +23,7 @@ from brutex.engine.minute_path import PathStatus
 from brutex.engine.session_lens import SessionLens
 from brutex.engine.trade_capture import CapturedTrade, ComboCapture
 from brutex.engine.trade_store import sidecar_paths_for, sweep_run_dir, write_tuple_sidecars
-from brutex.meta.abstain import ABSTAIN_REASON_ORDER
+from brutex.meta.abstain import ABSTAIN_REASON_ORDER, REGIME_CODES, AbstainGateConfig
 from brutex.meta.annotate import (
     META_SCHEMA_VERSION,
     META_SIDECAR_SUFFIX,
@@ -123,6 +123,27 @@ def read_meta(lake: Path, *, stem: str = "tuple-abc", instrument: str = "NSE-NIF
     return json.loads(meta.read_text(encoding="utf-8"))
 
 
+def depth_dir(lake: Path, *, instrument: str = "NSE-NIFTY") -> Path:
+    return lake / "sweep_runs" / RUN_ID / "results-depth" / instrument / "5minute"
+
+
+def restamp_sidecars(lake: Path, *, stem: str = "tuple-abc") -> None:
+    """Recompute the stamp's per-file hash + size from the CURRENT disk bytes.
+
+    Lets a test mutate a sidecar file (a REAL corrupt parquet, a planted
+    aggs band) while keeping the stamp VALID — so the mutated bytes reach
+    the reader instead of tripping the stamp's own hash gate.
+    """
+    base = depth_dir(lake)
+    stamp_path = base / f"{stem}.stamp.json"
+    payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+    for key in ("trades", "aggs", "equity"):
+        raw = (base / f"{stem}.{key}.parquet").read_bytes()
+        payload["content_hashes"][key] = hashlib.sha256(raw).hexdigest()
+        payload["content_sizes"][key] = len(raw)
+    stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class TestAnnotateRun:
     def test_happy_path_writes_the_fourth_sidecar_and_summary(self, tmp_path: Path) -> None:
         sweeps = seed_fixture(tmp_path)
@@ -145,15 +166,65 @@ class TestAnnotateRun:
         assert combo["feature_names"] == list(FEATURE_NAMES)
         assert combo["n_thresholds_swept"] == 10
         assert set(combo["kept_pct_at"]) == {"0.6", "0.7", "0.8"}
+        # M-4 (real fit): every kept_pct_at echo is NON-NULL and equals its
+        # OWN tau's curve point kept_pct — never the precision (this real
+        # fixture's tau-0.7 point reads kept_pct 0.0 while precision is
+        # null, so the kept_pct→precision field-swap mutant is caught here).
+        curve_by_tau = {point["tau"]: point for point in combo["tau_curve"]}
+        for tau_key, tau in (("0.6", 0.6), ("0.7", 0.7), ("0.8", 0.8)):
+            assert combo["kept_pct_at"][tau_key] is not None
+            assert combo["kept_pct_at"][tau_key] == curve_by_tau[tau]["kept_pct"]
+        assert curve_by_tau[0.7]["kept_pct"] == 0.0
+        assert curve_by_tau[0.7]["precision"] is None
+        # N-8: the two kept_pct denominators are documented IN the sidecar.
+        assert "n_scored" in combo["kept_pct_denominators"]
+        assert "ALL extracted trades" in combo["kept_pct_denominators"]
+        # MAJOR-2: the winners' band is recorded informationally (null here —
+        # the seeded aggs carries no rows) WITH the verbatim disclosure.
+        band = combo["vix_band_winners_p10_p90"]
+        assert (band["lo"], band["hi"]) == (None, None)
+        assert "label-conditional" in band["note"]
         assert len(combo["p_win"]) == 40
         assert all(p is None or 0.0 <= p <= 1.0 for p in combo["p_win"].values())
         abstain = combo["abstain"]
         assert abstain["dec"] == "DEC-ABSTAIN-GATE-STREAM-001"
         assert list(abstain["gate_reasons_counts"]) == sorted(ABSTAIN_REASON_ORDER)
         assert abstain["would_abstain_count"] + abstain["kept_trades"] == 40
+        # MAJOR-2: the DEFAULT config never carries a VIX gate.
+        assert abstain["config"]["vix_lo"] is None
+        assert abstain["config"]["vix_hi"] is None
+        assert "DEFAULT ILLUSTRATIVE" in abstain["config"]["note"]
         summary = json.loads((tmp_path / "sweep_runs" / RUN_ID / META_SUMMARY_FILENAME).read_text())
         assert summary["stems_annotated"] == 1
         assert report.summary_path is not None
+
+    def test_kept_pct_at_maps_the_exact_tau_point(self, tmp_path: Path) -> None:
+        # M-4 mutant killers over a SPREAD p_win column (deterministic
+        # injected scorer): the three kept_pct_at echoes are pairwise
+        # DISTINCT and differ from tau 0.5's kept_pct, so the
+        # `p.tau == tau` → `!=` mutant (which would serve the first
+        # NON-matching tau's value for every key) fails here; and tau 0.7's
+        # kept_pct (0.4) differs from its precision (0.375), so the
+        # `p.kept_pct` → `p.precision` field-swap mutant fails too.
+        sweeps = seed_fixture(tmp_path)
+
+        def spread(
+            flat: list[float], n_features: int, weights: list[float], bias: float
+        ) -> list[float]:
+            cycle = (0.55, 0.65, 0.75, 0.85)
+            return [cycle[i % 4] for i in range(len(flat) // n_features)]
+
+        report = annotate_run(sweeps, RUN_ID, scorer=spread)
+        assert report.ok is True
+        combo = read_meta(tmp_path)["combos"][COMBO]
+        curve_by_tau = {point["tau"]: point for point in combo["tau_curve"]}
+        for tau_key, tau in (("0.6", 0.6), ("0.7", 0.7), ("0.8", 0.8)):
+            assert combo["kept_pct_at"][tau_key] is not None
+            assert combo["kept_pct_at"][tau_key] == curve_by_tau[tau]["kept_pct"]
+        assert combo["kept_pct_at"] == {"0.6": 0.75, "0.7": 0.4, "0.8": 0.15}
+        assert curve_by_tau[0.5]["kept_pct"] == 1.0  # != every echoed value
+        assert curve_by_tau[0.7]["precision"] == pytest.approx(0.375)
+        assert curve_by_tau[0.7]["kept_pct"] != curve_by_tau[0.7]["precision"]
 
     def test_existing_artifacts_stay_byte_untouched(self, tmp_path: Path) -> None:
         # The R13 zero-risk law: the pass ADDS files, it never rewrites one.
@@ -210,10 +281,10 @@ class TestAnnotateRun:
 
         real = annotate_module._combo_annotation
 
-        def poisoned(paths: Any, combo_id: str, lens: Any, scorer: Any) -> Any:
+        def poisoned(paths: Any, combo_id: str, lens: Any, scorer: Any, config: Any) -> Any:
             if "tuple-aaa" in str(paths.trades):
                 raise RuntimeError("planted stem poison")
-            return real(paths, combo_id, lens, scorer)
+            return real(paths, combo_id, lens, scorer, config)
 
         monkeypatch.setattr(annotate_module, "_combo_annotation", poisoned)
         report = annotate_run(sweeps, RUN_ID)
@@ -288,6 +359,111 @@ class TestAnnotateRun:
         combo = payload["combos"]["combo-aa"]
         assert combo["oof"]["degenerate_reason"] == "too_few_trades"
         assert all(p is None for p in combo["p_win"].values())
+
+
+class TestCorruptTradesParquet:
+    """M-5: REAL garbage bytes as ``<stem>.trades.parquet`` — never a crash."""
+
+    GARBAGE = b"NOT A PARQUET FILE \x00\x01\x02 planted garbage bytes"
+
+    def test_garbage_trades_under_the_original_stamp_is_a_stamp_skip(self, tmp_path: Path) -> None:
+        # The stamp's own sha256 gate catches the corruption FIRST: the stem
+        # skips as stamp_invalid, the sibling stem still annotates, no
+        # .meta.json lands for the corrupt stem, and the pass never crashes.
+        sweeps = seed_fixture(tmp_path, stem="tuple-bad")
+        seed_fixture(tmp_path, stem="tuple-good")
+        (depth_dir(tmp_path) / "tuple-bad.trades.parquet").write_bytes(self.GARBAGE)
+        report = annotate_run(sweeps, RUN_ID)
+        assert report.stems_total == 2
+        assert report.stems_annotated == 1
+        assert report.stems_skipped == 1
+        bad = next(o for o in report.outcomes if "tuple-bad" in o.stem_rel)
+        assert bad.annotated is False
+        assert bad.reason == "stamp_invalid"
+        assert not (depth_dir(tmp_path) / "tuple-bad.meta.json").exists()
+        assert (depth_dir(tmp_path) / "tuple-good.meta.json").is_file()
+        good = next(o for o in report.outcomes if "tuple-good" in o.stem_rel)
+        assert good.annotated is True
+
+    def test_garbage_trades_under_a_matching_stamp_is_an_isolated_annotate_failure(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp validates (hash/size re-stamped over the garbage), so
+        # the REAL polars reader hits the undecodable bytes: the typed
+        # TradeStoreError is a COUNTED per-stem skip (annotate_failed:*),
+        # never an abort — the sibling stem still annotates.
+        sweeps = seed_fixture(tmp_path, stem="tuple-bad")
+        seed_fixture(tmp_path, stem="tuple-good")
+        (depth_dir(tmp_path) / "tuple-bad.trades.parquet").write_bytes(self.GARBAGE)
+        restamp_sidecars(tmp_path, stem="tuple-bad")
+        report = annotate_run(sweeps, RUN_ID)
+        assert report.stems_total == 2
+        assert report.stems_annotated == 1
+        assert report.stems_skipped == 1
+        bad = next(o for o in report.outcomes if "tuple-bad" in o.stem_rel)
+        assert bad.reason == "annotate_failed:TradeStoreError"
+        assert not (depth_dir(tmp_path) / "tuple-bad.meta.json").exists()
+        assert (depth_dir(tmp_path) / "tuple-good.meta.json").is_file()
+        # The summary still writes and names the skip (the pass never aborts).
+        summary = json.loads((tmp_path / "sweep_runs" / RUN_ID / META_SUMMARY_FILENAME).read_text())
+        assert summary["stems_skipped"] == 1
+
+
+class TestAbstainConfigSeam:
+    """MAJOR-2: default = NO VIX gate; the aggs band is informational only;
+    an explicit operator config is the ONE way to gate on VIX."""
+
+    def _plant_aggs_band(self, lake: Path, lo: float, hi: float) -> None:
+        import polars as pl
+
+        aggs = depth_dir(lake) / "tuple-abc.aggs.parquet"
+        pl.DataFrame({"run_id": [COMBO], "vix_band_lo": [lo], "vix_band_hi": [hi]}).write_parquet(
+            aggs
+        )
+        restamp_sidecars(lake)
+
+    def test_default_config_ignores_a_stamped_aggs_band_but_records_it(
+        self, tmp_path: Path
+    ) -> None:
+        sweeps = seed_fixture(tmp_path)
+        self._plant_aggs_band(tmp_path, 12.0, 20.0)
+        report = annotate_run(sweeps, RUN_ID)
+        assert report.ok is True
+        combo = read_meta(tmp_path)["combos"][COMBO]
+        band = combo["vix_band_winners_p10_p90"]
+        assert (band["lo"], band["hi"]) == (12.0, 20.0)
+        assert "label-conditional" in band["note"]
+        assert "never a held-out estimate" in band["note"]
+        # The DEFAULT config still gates NOTHING on VIX (the MAJOR-2 law).
+        cfg = combo["abstain"]["config"]
+        assert cfg["vix_lo"] is None
+        assert cfg["vix_hi"] is None
+        counts = combo["abstain"]["gate_reasons_counts"]
+        assert counts["vix_out_of_band"] == 0
+        assert counts["vix_missing"] == 0
+
+    def test_explicit_config_gates_vix_and_echoes_the_explicit_note(self, tmp_path: Path) -> None:
+        sweeps = seed_fixture(tmp_path)
+        explicit = AbstainGateConfig(
+            allowed_regimes=frozenset(REGIME_CODES),
+            vix_lo=12.0,
+            vix_hi=13.0,  # every stamped 14.5 is out-of-band
+            block_event_days=False,
+            tau=None,
+        )
+        report = annotate_run(sweeps, RUN_ID, abstain_config=explicit)
+        assert report.ok is True
+        abstain = read_meta(tmp_path)["combos"][COMBO]["abstain"]
+        assert abstain["config"]["vix_lo"] == 12.0
+        assert abstain["config"]["vix_hi"] == 13.0
+        assert "EXPLICIT operator-supplied" in abstain["config"]["note"]
+        counts = abstain["gate_reasons_counts"]
+        # 30 trades stamp 14.5 (> 13.0) → out-of-band; 10 stamp None →
+        # vix_missing under the configured band (fail-closed, counted).
+        assert counts["vix_out_of_band"] == 30
+        assert counts["vix_missing"] == 10
+        assert counts["low_confidence"] == 0  # tau=None — no τ door
+        assert abstain["would_abstain_count"] == 40
 
 
 class TestLensArms:

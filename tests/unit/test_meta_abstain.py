@@ -122,27 +122,23 @@ class TestDefaultConfig:
         assert cfg.block_event_days is True
         assert cfg.tau == DEFAULT_TAU
 
-    def test_full_band_adopted(self) -> None:
-        cfg = default_abstain_config(12.0, 20.0)
-        assert (cfg.vix_lo, cfg.vix_hi) == (12.0, 20.0)
+    def test_default_never_carries_a_vix_band(self) -> None:
+        # The round-1 MAJOR-2 law: the only stamped band available at
+        # annotation time is the aggs winners' p10-p90 — label-conditional
+        # and in-sample (fit-on-self) — so the DEFAULT config takes NO band
+        # parameters at all (an explicit AbstainGateConfig is the ONE way
+        # to configure a VIX gate, an operator's deliberate act).
+        import inspect
 
-    @pytest.mark.parametrize(
-        ("lo", "hi"),
-        [
-            (None, 20.0),  # partial stamp — never a half-invented band
-            (12.0, None),
-            (None, None),
-            (NAN, 20.0),  # non-finite stamp
-            (12.0, NAN),
-            (20.0, 12.0),  # inverted stamp
-        ],
-    )
-    def test_partial_or_junk_band_yields_no_vix_gate(
-        self, lo: float | None, hi: float | None
-    ) -> None:
-        cfg = default_abstain_config(lo, hi)
-        assert cfg.vix_lo is None
-        assert cfg.vix_hi is None
+        from brutex.meta.abstain import default_abstain_config as fn
+
+        assert list(inspect.signature(fn).parameters) == []
+        assert (fn().vix_lo, fn().vix_hi) == (None, None)
+
+    def test_default_docstring_discloses_the_label_conditional_band(self) -> None:
+        doc = default_abstain_config.__doc__ or ""
+        assert "label-conditional" in doc.lower()
+        assert "vix_band_winners_p10_p90" in doc
 
 
 class TestAbstainReasons:

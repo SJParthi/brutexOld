@@ -9,6 +9,13 @@
 * The CPCV purge invariant over the fit's own split parameters (no train
   index inside any test block's ``[start − span, end + span + embargo]``
   window — the leakage-free law the OOF fit rides).
+* Intraday ENTRY-OBSERVABILITY of the feature vector (the round-1 MAJOR-1
+  law): a day-``D`` trade's vector is computable from lens data of
+  sessions strictly ``< D`` — mutating day ``D``'s + later days' OHLC in
+  the lens inputs never changes it.
+* The end-to-end composition law (round-1 N-9): ``compute_label_span`` +
+  ``cpcv_splits(label_span=span, embargo=span)`` leave NO train trade
+  time-overlapping ANY test trade's ``[entry, exit]`` window.
 """
 
 from __future__ import annotations
@@ -16,8 +23,12 @@ from __future__ import annotations
 import math
 import random
 import struct
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import pairwise
 
+from brutex.data.models import CandleBar
+from brutex.engine.session_lens import build_session_lens
 from brutex.meta.abstain import (
     REGIME_CODES,
     AbstainGateConfig,
@@ -26,6 +37,8 @@ from brutex.meta.abstain import (
     abstain_reasons,
     reasons_from_mask,
 )
+from brutex.meta.cpcv_fit import compute_label_span
+from brutex.meta.features import trade_features_from_wire
 from brutex.meta.logistic import score_logistic
 from brutex.meta.threshold import tau_curve
 from brutex.metrics.cpcv import cpcv_splits
@@ -205,6 +218,90 @@ class TestTauMonotonicity:
         assert all(a >= b for a, b in pairwise(kept))
         pcts = [point.kept_pct for point in points if point.kept_pct is not None]
         assert all(a >= b for a, b in pairwise(pcts))
+
+
+def _daily_bar(day_index: int, close_int: int) -> CandleBar:
+    ts = datetime(2024, 1, 1, 10, 0, tzinfo=UTC) + timedelta(days=day_index)
+    close = Decimal(close_int)
+    return CandleBar(
+        timestamp=ts,
+        open=close,
+        high=close + 1,
+        low=close - 1,
+        close=close,
+        volume=0,
+        open_interest=None,
+    )
+
+
+class TestEntryObservability:
+    """MAJOR-1: the vector for a day-D trade reads sessions strictly < D."""
+
+    @settings(max_examples=60, deadline=None)
+    @given(
+        closes=st.lists(st.integers(min_value=95, max_value=105), min_size=4, max_size=10),
+        mutated=st.lists(st.integers(min_value=200, max_value=400), min_size=10, max_size=10),
+        data=st.data(),
+    )
+    def test_mutating_day_d_and_later_ohlc_never_moves_a_day_d_vector(
+        self, closes: list[int], mutated: list[int], data: st.DataObject
+    ) -> None:
+        n = len(closes)
+        d = data.draw(st.integers(min_value=1, max_value=n - 1), label="entry_day_index")
+        original = [_daily_bar(i, c) for i, c in enumerate(closes)]
+        # Mutate day D's AND every later day's OHLC (a wildly different
+        # price path from the entry day onward — post-entry information).
+        poisoned = [_daily_bar(i, closes[i] if i < d else mutated[i]) for i in range(n)]
+        lens_a = build_session_lens(original, instrument="NIFTY")
+        lens_b = build_session_lens(poisoned, instrument="NIFTY")
+        entry = datetime(2024, 1, 1, 4, 0, tzinfo=UTC) + timedelta(days=d)  # 09:30 IST day D
+        row = {
+            "trade_seq": 0,
+            "entry_ts": entry.isoformat(),
+            "exit_ts": (entry + timedelta(minutes=30)).isoformat(),
+            "pnl_paisa": 100,
+            "vix_entry": 14.0,
+        }
+        a = trade_features_from_wire(row, lens=lens_a)
+        b = trade_features_from_wire(row, lens=lens_b)
+        assert a is not None and b is not None
+        assert a.vector == b.vector
+        assert a.prev_regime == b.prev_regime
+        assert a.event_day == b.event_day
+
+
+class TestLeakageFreeComposition:
+    """N-9: span + cpcv_splits(span, span) ⇒ zero train/test time overlap."""
+
+    @settings(max_examples=60, deadline=None)
+    @given(
+        gaps=st.lists(st.integers(min_value=0, max_value=5_000), min_size=30, max_size=80),
+        holds=st.data(),
+    )
+    def test_no_train_trade_overlaps_any_test_trade_window(
+        self, gaps: list[int], holds: st.DataObject
+    ) -> None:
+        n = len(gaps)
+        entries: list[int] = []
+        t = 0
+        for gap in gaps:
+            t += gap
+            entries.append(t)
+        holding = holds.draw(
+            st.lists(st.integers(min_value=0, max_value=20_000), min_size=n, max_size=n),
+            label="holding",
+        )
+        exits = [entries[i] + holding[i] for i in range(n)]
+        span = compute_label_span(entries, exits)
+        for split in cpcv_splits(n, n_groups=8, n_test_groups=2, label_span=span, embargo=span):
+            for j in split.test.tolist():
+                for i in split.train.tolist():
+                    # Closed-interval time overlap of trade i and trade j.
+                    overlaps = entries[j] <= exits[i] and entries[i] <= exits[j]
+                    assert not overlaps, (
+                        f"train trade {i} [{entries[i]}, {exits[i]}] overlaps test "
+                        f"trade {j} [{entries[j]}, {exits[j]}] (span={span})"
+                    )
 
 
 class TestPurgeInvariant:

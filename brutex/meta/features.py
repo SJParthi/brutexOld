@@ -11,6 +11,19 @@ trade rows (``brutex/engine/trade_store.py`` TRADE_COLUMNS) plus the
 results-depth aggregates already use — nothing is re-simulated, nothing
 new is measured.
 
+ENTRY-OBSERVABILITY LAW (the hostile-review round-1 MAJOR-1 fix): the lens
+labels session ``D`` only AFTER folding day ``D``'s FULL daily OHLC bar
+(``session_lens.build_session_lens``), so for an intraday trade entered
+mid-day ``D`` the same-day label encodes post-entry information. The regime
+one-hots therefore read the PRIOR session's label — the nearest lens date
+STRICTLY BEFORE the entry's IST date (:func:`prior_session_regime`; no
+prior session → ``"unknown"``) — and are NAMED ``prev_regime_*`` so the
+semantics live in the wire name. The event-day flag stays at the ENTRY
+date: every event class is a calendar fact (expiry/muhurat/budget-weekend/
+rebalance) knowable in advance, never derived from day-``D`` prices —
+property-pinned (mutating day ``D``'s + later days' OHLC in the lens
+inputs leaves a day-``D`` trade's vector byte-identical).
+
 W4 FOLD-KEY LAW (lane coordination, 2026-07-18): every derivation here keys
 on ``trade_seq`` + entry/exit TIMESTAMPS only — NEVER on bar indices or
 ``holding_bars``-derived quantities, because post-PR-B those become
@@ -20,8 +33,10 @@ law for future columns.)
 
 Standardization note: ``vix_entry`` is emitted RAW here (missing → ``0.0`` +
 the ``vix_missing`` indicator); the per-fold standardization (mean/std
-computed on TRAINING rows ONLY — never the test fold, the leakage law) is
-applied inside :mod:`brutex.meta.cpcv_fit` at fit time.
+computed on TRAINING rows whose ``vix_missing`` indicator is 0 ONLY — never
+the test fold, and never the ``0.0`` placeholder rows, which keep exactly
+``0.0`` + indicator — the leakage law + the round-1 M-6 fix) is applied
+inside :mod:`brutex.meta.cpcv_fit` at fit time.
 
 Total + deterministic: :func:`trade_features_from_wire` never raises on a
 malformed row — it returns ``None`` (the caller counts the skip; the
@@ -31,7 +46,7 @@ correct-or-absent law). No I/O, no wall clock, no RNG.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING, Final
 
@@ -45,6 +60,7 @@ __all__ = [
     "N_FEATURES",
     "REGIME_TOKENS",
     "TradeFeatures",
+    "prior_session_regime",
     "trade_features_from_wire",
 ]
 
@@ -55,20 +71,22 @@ _SESSION_HOURS: Final[tuple[int, ...]] = (9, 10, 11, 12, 13, 14, 15)
 
 #: The regime one-hot tokens, in emission order — the
 #: :class:`~brutex.engine.session_lens.TrendRegime` values plus the
-#: lens-miss token ``"unknown"`` (the ``combo_aggregates`` convention).
+#: no-prior-session/lens-miss token ``"unknown"`` (the ``combo_aggregates``
+#: convention).
 REGIME_TOKENS: Final[tuple[str, ...]] = ("up", "down", "sideways", "unknown")
 
 #: THE fixed documented feature vector — order is the wire contract the
 #: fitted weights + the Rust kernel + every ``.meta.json`` echo share.
 #: 16 features: intercept · raw VIX + missing indicator · 8 entry-hour
-#: one-hots · 4 regime one-hots · the event-day flag.
+#: one-hots · 4 PRIOR-SESSION regime one-hots (``prev_regime_*`` — the
+#: entry-observability law in the module docstring) · the event-day flag.
 FEATURE_NAMES: Final[tuple[str, ...]] = (
     "intercept",
     "vix_entry",
     "vix_missing",
     *(f"hour_{hour:02d}" for hour in _SESSION_HOURS),
     "hour_other",
-    *(f"regime_{token}" for token in REGIME_TOKENS),
+    *(f"prev_regime_{token}" for token in REGIME_TOKENS),
     "event_day",
 )
 
@@ -82,7 +100,8 @@ class TradeFeatures:
 
     ``vector`` is ordered exactly by :data:`FEATURE_NAMES`. ``label_win`` is
     ``pnl_paisa > 0`` (a zero-P&L scratch trade labels as a LOSS — the
-    conservative reading, documented). ``regime`` / ``vix_entry`` /
+    conservative reading, documented). ``prev_regime`` (the PRIOR session's
+    trend label — the entry-observability law) / ``vix_entry`` /
     ``event_day`` are kept raw so the abstention replay
     (:mod:`brutex.meta.annotate`) judges the SAME snapshot the model saw.
     """
@@ -92,7 +111,7 @@ class TradeFeatures:
     exit_ts_us: int
     vector: tuple[float, ...]
     label_win: bool
-    regime: str
+    prev_regime: str
     vix_entry: float | None
     event_day: bool
 
@@ -132,6 +151,28 @@ def _ts_from_us(ts_us: int) -> datetime | None:
         return None
 
 
+def prior_session_regime(lens: SessionLens, entry_date: date) -> str:
+    """The PRIOR session's trend label for a trade entered on *entry_date*.
+
+    The entry-observability law (module docstring): the lens labels day
+    ``D`` only after day ``D``'s FULL daily bar, so an intraday trade
+    entered mid-day ``D`` may consult sessions STRICTLY BEFORE ``D`` only.
+    The nearest lens date ``< entry_date`` wins; no prior session (or an
+    empty lens) reads ``"unknown"`` — never the same-day label.
+
+    HONEST O(): one O(lens sessions) scan per call (a lens holds a few
+    thousand dates at most; no sorted index is built — the annotation pass
+    is offline).
+    """
+    prior: date | None = None
+    for day in lens.trend_by_date:
+        if day < entry_date and (prior is None or day > prior):
+            prior = day
+    if prior is None:
+        return "unknown"
+    return lens.trend_by_date[prior].value
+
+
 def trade_features_from_wire(
     row: Mapping[str, object], *, lens: SessionLens
 ) -> TradeFeatures | None:
@@ -149,10 +190,12 @@ def trade_features_from_wire(
 
     * entry hour → :func:`~brutex.engine.session_lens.entry_hour_ist`
       one-hot over :data:`_SESSION_HOURS` + ``hour_other``;
-    * trend regime → ``lens.trend_by_date`` at the entry IST date
-      (miss → ``"unknown"``, the ``combo_aggregates`` convention);
+    * PRIOR-session trend regime → :func:`prior_session_regime` (the
+      nearest lens date STRICTLY BEFORE the entry IST date — the
+      entry-observability law; no prior → ``"unknown"``);
     * event day → ``lens.event_flags_by_date`` at the entry IST date
-      (ANY of the four verified classes);
+      (ANY of the four verified classes — calendar facts, knowable in
+      advance, never derived from day-``D`` prices);
     * ``vix_entry`` raw with missing → ``0.0`` + the ``vix_missing``
       indicator (a NaN/±inf stamp reads missing — a NaN feature would
       poison the fit silently).
@@ -180,14 +223,13 @@ def trade_features_from_wire(
 
     entry_date = ist_trade_date(entry_dt)
     hour = entry_hour_ist(entry_dt)
-    regime_obj = lens.trend_by_date.get(entry_date)
-    regime = regime_obj.value if regime_obj is not None else "unknown"
+    prev_regime = prior_session_regime(lens, entry_date)
     event_day = bool(lens.event_flags_by_date.get(entry_date, ()))
 
     vector = [1.0, vix if vix is not None else 0.0, 0.0 if vix is not None else 1.0]
     vector.extend(1.0 if hour == h else 0.0 for h in _SESSION_HOURS)
     vector.append(1.0 if hour not in _SESSION_HOURS else 0.0)
-    vector.extend(1.0 if regime == token else 0.0 for token in REGIME_TOKENS)
+    vector.extend(1.0 if prev_regime == token else 0.0 for token in REGIME_TOKENS)
     vector.append(1.0 if event_day else 0.0)
 
     return TradeFeatures(
@@ -196,7 +238,7 @@ def trade_features_from_wire(
         exit_ts_us=exit_us,
         vector=tuple(vector),
         label_win=pnl > 0,
-        regime=regime,
+        prev_regime=prev_regime,
         vix_entry=vix,
         event_day=event_day,
     )

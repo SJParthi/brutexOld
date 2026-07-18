@@ -1129,7 +1129,11 @@ def build_parser() -> argparse.ArgumentParser:
     meta.add_argument(
         "--dry-run",
         action="store_true",
-        help="Enumerate stems + validate stamps only; write nothing",
+        help=(
+            "Enumerate stems + validate stamps only; write nothing. Invalid "
+            "stamps are named SKIPPED on stderr but the exit stays 0 by "
+            "design (a dry-run reports, it never gates)"
+        ),
     )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
@@ -5940,17 +5944,26 @@ def cmd_meta_annotate(
     ``<stem>.meta.json`` fourth sidecar + the run-level
     ``meta_annotation.json`` summary; ``top100.json`` and every other
     existing artifact stay byte-untouched. ``--dry-run`` enumerates +
-    validates stamps only (zero writes, zero fits). Exit: :data:`EXIT_OK`
+    validates stamps only (zero writes, zero fits) and exits
+    :data:`EXIT_OK` BY DESIGN even when a stamp fails validation — the
+    invalid stem is still NAMED on stderr as ``SKIPPED (stamp_invalid)``,
+    but a dry-run validates and reports, it never gates (only a WET run's
+    skips flip the exit code). Exit: :data:`EXIT_OK`
     iff every discovered stem annotated (or dry-run);
-    :data:`EXIT_INTERNAL_ERROR` when any stem was skipped (the sidecar
-    names each reason); :data:`EXIT_USER_ERROR` on a bad lake root /
-    unknown run id / malformed lens dates.
+    :data:`EXIT_INTERNAL_ERROR` when any WET-run stem was skipped (the
+    summary names each reason); :data:`EXIT_USER_ERROR` on a bad lake
+    root / unknown run id / malformed lens dates.
 
     The trend/event lens loads each instrument's derived-1day bars through
     the SAME best-effort :func:`_depth_reference_loader` shim the run-end
     results-depth pass binds (a failed load degrades to an empty lens —
     every regime ``"unknown"``, counted, never a crash); ``--no-lens``
-    skips the lake reads entirely.
+    skips the lake reads entirely. DISCLOSED write surface (annotation
+    scope note, DEC-META-LABEL-ANNOTATE-001): that shim runs a catalog
+    RECONCILE (``reconcile_catalog_from_lake``) before each per-instrument
+    read, which may write catalog registration METADATA for
+    on-disk-but-unregistered partitions — the one write outside the pass's
+    own sidecars; ``--no-lens`` (or ``--dry-run``) avoids it entirely.
     """
     from brutex.engine.trade_store import sweep_run_dir
     from brutex.meta.annotate import annotate_run

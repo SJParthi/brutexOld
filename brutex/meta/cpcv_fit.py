@@ -76,6 +76,11 @@ OOF_N_TEST_GROUPS: Final[int] = 2
 #: per-fold on TRAIN rows only — the leakage law).
 _VIX_COLUMN: Final[int] = FEATURE_NAMES.index("vix_entry")
 
+#: The vix MISSING-indicator column: rows with the indicator set carry the
+#: ``0.0`` placeholder, which must never enter the standardization stats
+#: nor be shifted by them (the round-1 M-6 law).
+_VIX_MISSING_COLUMN: Final[int] = FEATURE_NAMES.index("vix_missing")
+
 #: Degenerate-reason tokens (the sidecar vocabulary).
 REASON_TOO_FEW_TRADES: Final[str] = "too_few_trades"
 REASON_SINGLE_CLASS: Final[str] = "single_class"
@@ -132,23 +137,33 @@ def compute_label_span(entries_us: Sequence[int], exits_us: Sequence[int]) -> in
 
 
 def _standardize_vix(matrix: list[list[float]], train_rows: Sequence[int]) -> list[list[float]]:
-    """Standardize the vix column using TRAIN-row statistics only.
+    """Standardize the vix column using PRESENT-row TRAIN statistics only.
 
-    Population mean/std over the train rows' vix column; ``std <= 0`` (a
-    constant column) leaves the column RAW (no divide-by-zero, no
-    information anyway). Returns a NEW matrix — the input is never mutated
-    (the caller reuses it across splits).
+    The round-1 M-6 law: the mean/std are the population statistics over
+    the train rows whose ``vix_missing`` indicator is 0 ONLY — the ``0.0``
+    missing-value placeholders are EXCLUDED from the statistics (they are
+    an encoding, not an observation; folding them in dragged the mean
+    toward 0 and inflated the variance) AND are never shifted by them:
+    every row with the indicator set keeps exactly ``0.0`` + indicator,
+    in train and test alike. An all-missing train fold is the documented
+    degenerate identity arm (equivalent to mean 0 / std 1 — the column
+    ships raw, there is no information to scale by). ``std <= 0`` (a
+    constant present column) also leaves the column RAW (no
+    divide-by-zero, no information anyway). Returns a NEW matrix — the
+    input is never mutated (the caller reuses it across splits).
     """
-    if not train_rows:
-        return [row[:] for row in matrix]
-    values = [matrix[i][_VIX_COLUMN] for i in train_rows]
+    out = [row[:] for row in matrix]
+    present_train = [i for i in train_rows if matrix[i][_VIX_MISSING_COLUMN] == 0.0]
+    if not present_train:
+        return out
+    values = [matrix[i][_VIX_COLUMN] for i in present_train]
     mean = sum(values) / len(values)
     variance = sum((v - mean) ** 2 for v in values) / len(values)
     std = variance**0.5
-    out = [row[:] for row in matrix]
     if std > 0.0:
         for row in out:
-            row[_VIX_COLUMN] = (row[_VIX_COLUMN] - mean) / std
+            if row[_VIX_MISSING_COLUMN] == 0.0:
+                row[_VIX_COLUMN] = (row[_VIX_COLUMN] - mean) / std
     return out
 
 

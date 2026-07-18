@@ -1,8 +1,10 @@
 """Unit gate for :mod:`brutex.meta.features` (DEC-META-LABEL-ANNOTATE-001).
 
 The fixed documented feature vector: name/order pin, every one-hot bucket,
-the vix missing/NaN normalisation, the label law, and the TOTAL-function
-malformed-row matrix (every junk shape reads ``None``, never a raise).
+the PRIOR-session regime law (entry-observability — the round-1 MAJOR-1
+fix: the same-day lens label is NEVER consulted), the vix missing/NaN
+normalisation, the label law, and the TOTAL-function malformed-row matrix
+(every junk shape reads ``None``, never a raise).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from brutex.meta.features import (
     FEATURE_NAMES,
     N_FEATURES,
     REGIME_TOKENS,
+    prior_session_regime,
     trade_features_from_wire,
 )
 
@@ -23,6 +26,8 @@ from brutex.meta.features import (
 ENTRY_ISO = "2024-01-02T04:00:00+00:00"
 EXIT_ISO = "2024-01-02T05:00:00+00:00"
 ENTRY_DATE = date(2024, 1, 2)
+#: The PRIOR session the regime one-hots must read from (MAJOR-1).
+PRIOR_DATE = date(2024, 1, 1)
 
 EMPTY_LENS = SessionLens(trend_by_date={}, event_flags_by_date={})
 
@@ -57,10 +62,10 @@ class TestVectorContract:
             "hour_14",
             "hour_15",
             "hour_other",
-            "regime_up",
-            "regime_down",
-            "regime_sideways",
-            "regime_unknown",
+            "prev_regime_up",
+            "prev_regime_down",
+            "prev_regime_sideways",
+            "prev_regime_unknown",
             "event_day",
         )
         assert N_FEATURES == 16
@@ -68,14 +73,14 @@ class TestVectorContract:
 
     def test_happy_row_extracts_the_documented_vector(self) -> None:
         lens = SessionLens(
-            trend_by_date={ENTRY_DATE: TrendRegime.UP},
+            trend_by_date={PRIOR_DATE: TrendRegime.UP},
             event_flags_by_date={ENTRY_DATE: ("expiry",)},
         )
         extracted = trade_features_from_wire(wire_row(), lens=lens)
         assert extracted is not None
         assert extracted.trade_seq == 0
         assert extracted.label_win is True
-        assert extracted.regime == "up"
+        assert extracted.prev_regime == "up"
         assert extracted.vix_entry == 14.5
         assert extracted.event_day is True
         v = extracted.vector
@@ -85,8 +90,8 @@ class TestVectorContract:
         assert feature(v, "vix_missing") == 0.0
         assert feature(v, "hour_09") == 1.0
         assert feature(v, "hour_other") == 0.0
-        assert feature(v, "regime_up") == 1.0
-        assert feature(v, "regime_down") == 0.0
+        assert feature(v, "prev_regime_up") == 1.0
+        assert feature(v, "prev_regime_down") == 0.0
         assert feature(v, "event_day") == 1.0
         # Timestamps are exact epoch-µs (the W4 fold-key law: ts-keyed only).
         assert extracted.entry_ts_us == int(
@@ -118,20 +123,55 @@ class TestVectorContract:
         assert hot == [expected]
 
     @pytest.mark.parametrize("regime", [TrendRegime.UP, TrendRegime.DOWN, TrendRegime.SIDEWAYS])
-    def test_regime_one_hot(self, regime: TrendRegime) -> None:
-        lens = SessionLens(trend_by_date={ENTRY_DATE: regime}, event_flags_by_date={})
+    def test_prev_regime_one_hot_reads_the_prior_session(self, regime: TrendRegime) -> None:
+        lens = SessionLens(trend_by_date={PRIOR_DATE: regime}, event_flags_by_date={})
         extracted = trade_features_from_wire(wire_row(), lens=lens)
         assert extracted is not None
-        assert extracted.regime == regime.value
-        assert feature(extracted.vector, f"regime_{regime.value}") == 1.0
+        assert extracted.prev_regime == regime.value
+        assert feature(extracted.vector, f"prev_regime_{regime.value}") == 1.0
         others = [t for t in REGIME_TOKENS if t != regime.value]
-        assert all(feature(extracted.vector, f"regime_{t}") == 0.0 for t in others)
+        assert all(feature(extracted.vector, f"prev_regime_{t}") == 0.0 for t in others)
+
+    def test_same_day_lens_label_is_never_consulted(self) -> None:
+        # MAJOR-1 (entry-observability): the lens labels day D only AFTER
+        # day D's full daily bar, so a same-day-only lens must read
+        # "unknown" — never the post-entry same-day label.
+        lens = SessionLens(trend_by_date={ENTRY_DATE: TrendRegime.DOWN}, event_flags_by_date={})
+        extracted = trade_features_from_wire(wire_row(), lens=lens)
+        assert extracted is not None
+        assert extracted.prev_regime == "unknown"
+        assert feature(extracted.vector, "prev_regime_unknown") == 1.0
+        assert feature(extracted.vector, "prev_regime_down") == 0.0
+
+    def test_nearest_prior_session_wins(self) -> None:
+        # Weekend/holiday gaps: the NEAREST lens date strictly before the
+        # entry date is the one consulted (not merely entry_date − 1 day).
+        lens = SessionLens(
+            trend_by_date={
+                date(2023, 12, 27): TrendRegime.DOWN,
+                date(2023, 12, 29): TrendRegime.UP,  # nearest prior (Fri)
+                ENTRY_DATE: TrendRegime.SIDEWAYS,  # same-day: never read
+            },
+            event_flags_by_date={},
+        )
+        extracted = trade_features_from_wire(wire_row(), lens=lens)
+        assert extracted is not None
+        assert extracted.prev_regime == "up"
+
+    def test_prior_session_regime_helper_laws(self) -> None:
+        lens = SessionLens(
+            trend_by_date={PRIOR_DATE: TrendRegime.DOWN, ENTRY_DATE: TrendRegime.UP},
+            event_flags_by_date={},
+        )
+        assert prior_session_regime(lens, ENTRY_DATE) == "down"
+        assert prior_session_regime(lens, PRIOR_DATE) == "unknown"  # no prior
+        assert prior_session_regime(EMPTY_LENS, ENTRY_DATE) == "unknown"
 
     def test_lens_miss_reads_unknown_regime_and_no_event(self) -> None:
         extracted = trade_features_from_wire(wire_row(), lens=EMPTY_LENS)
         assert extracted is not None
-        assert extracted.regime == "unknown"
-        assert feature(extracted.vector, "regime_unknown") == 1.0
+        assert extracted.prev_regime == "unknown"
+        assert feature(extracted.vector, "prev_regime_unknown") == 1.0
         assert extracted.event_day is False
         assert feature(extracted.vector, "event_day") == 0.0
 

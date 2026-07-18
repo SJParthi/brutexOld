@@ -324,3 +324,16 @@ class TestRealWheel:
         # SAME class — the caller contract is arm-independent.
         with pytest.raises(ValueError, match="n_features"):
             score_probabilities([1.0], 0, [], 0.0)
+
+    def test_concrete_ffi_return_types_on_the_real_wheel(self) -> None:
+        # N-1 truth pin (probed on the BUILT wheel, pyo3 0.29): `Vec<u8>`
+        # crosses as Python `bytes` — the .pyi's documented contract — and
+        # `Vec<f64>` as `list[float]`. A pyo3 bump that changes either
+        # concrete type fails HERE, not silently in the facade normalizer.
+        import brutex_meta
+
+        masks = brutex_meta.abstain_masks([0], 1, [NAN], NAN, NAN, [0], False, [NAN], NAN)
+        assert type(masks) is bytes
+        probs = brutex_meta.score_logistic([0.0], 1, [1.0], 0.0)
+        assert type(probs) is list
+        assert all(type(p) is float for p in probs)

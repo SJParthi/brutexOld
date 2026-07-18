@@ -24,6 +24,7 @@ from brutex.meta.cpcv_fit import (
 from brutex.meta.features import FEATURE_NAMES, N_FEATURES, TradeFeatures
 
 VIX_COL = FEATURE_NAMES.index("vix_entry")
+VIX_MISSING_COL = FEATURE_NAMES.index("vix_missing")
 DAY_US = 86_400_000_000
 
 
@@ -47,7 +48,7 @@ def trade(
         exit_ts_us=exit_us if exit_us is not None else entry_us + 60_000_000,
         vector=tuple(vector),
         label_win=win,
-        regime="unknown",
+        prev_regime="unknown",
         vix_entry=vix,
         event_day=False,
     )
@@ -94,11 +95,25 @@ class TestComputeLabelSpan:
             compute_label_span([10, 0], [11, 1])
 
 
+def _present_row(vix: float) -> list[float]:
+    """A feature row with a PRESENT vix stamp (`vix_missing` indicator 0)."""
+    row = [1.0] * N_FEATURES
+    row[VIX_COL] = vix
+    row[VIX_MISSING_COL] = 0.0
+    return row
+
+
+def _missing_row() -> list[float]:
+    """A feature row with the MISSING encoding: vix 0.0 + indicator 1.0."""
+    row = [1.0] * N_FEATURES
+    row[VIX_COL] = 0.0
+    row[VIX_MISSING_COL] = 1.0
+    return row
+
+
 class TestStandardizeVix:
     def test_train_only_statistics(self) -> None:
-        matrix = [[1.0] * N_FEATURES for _ in range(4)]
-        for i, vix in enumerate((10.0, 20.0, 30.0, 1000.0)):
-            matrix[i][VIX_COL] = vix
+        matrix = [_present_row(v) for v in (10.0, 20.0, 30.0, 1000.0)]
         out = _standardize_vix(matrix, [0, 1, 2])  # the 1000.0 row is TEST
         # Train mean 20, population std over {10,20,30}.
         std = ((100 + 0 + 100) / 3) ** 0.5
@@ -108,15 +123,36 @@ class TestStandardizeVix:
         assert matrix[0][VIX_COL] == 10.0
         assert out[0][0] == 1.0
 
+    def test_placeholder_rows_excluded_from_stats_and_untouched(self) -> None:
+        # The round-1 M-6 law: a missing-vix TRAIN row's 0.0 placeholder is
+        # (a) EXCLUDED from the mean/std and (b) NEVER shifted by them.
+        matrix = [_present_row(10.0), _missing_row(), _present_row(30.0), _missing_row()]
+        out = _standardize_vix(matrix, [0, 1, 2])  # rows 0-2 TRAIN, 3 TEST
+        # Stats over the PRESENT train rows {10, 30} only: mean 20, std 10.
+        assert out[0][VIX_COL] == pytest.approx(-1.0)
+        assert out[2][VIX_COL] == pytest.approx(1.0)
+        # Missing rows (train AND test) keep exactly 0.0 + the indicator.
+        assert out[1][VIX_COL] == 0.0
+        assert out[1][VIX_MISSING_COL] == 1.0
+        assert out[3][VIX_COL] == 0.0
+        assert out[3][VIX_MISSING_COL] == 1.0
+
+    def test_all_missing_train_fold_is_the_identity_arm(self) -> None:
+        # The documented degenerate: no present train row → mean 0 / std 1
+        # equivalent — the column ships raw (nothing to scale by).
+        matrix = [_missing_row(), _missing_row(), _present_row(50.0)]
+        out = _standardize_vix(matrix, [0, 1])  # every TRAIN row missing
+        assert out == matrix
+        assert out is not matrix
+        assert out[2][VIX_COL] == 50.0  # the test row also stays raw
+
     def test_zero_std_leaves_the_column_raw(self) -> None:
-        matrix = [[0.0] * N_FEATURES for _ in range(2)]
-        matrix[0][VIX_COL] = 5.0
-        matrix[1][VIX_COL] = 5.0
+        matrix = [_present_row(5.0), _present_row(5.0)]
         out = _standardize_vix(matrix, [0, 1])
         assert out[0][VIX_COL] == 5.0
 
     def test_empty_train_rows_copies_raw(self) -> None:
-        matrix = [[2.0] * N_FEATURES]
+        matrix = [_present_row(2.0)]
         out = _standardize_vix(matrix, [])
         assert out == matrix
         assert out is not matrix

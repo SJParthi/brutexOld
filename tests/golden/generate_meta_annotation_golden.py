@@ -114,6 +114,19 @@ def main() -> None:
 
     vectors = {
         "schema_version": 1,
+        # The libm-bits residual, documented IN the fixture (round-1 N-10):
+        # the non-IEEE-exact scorer cases freeze the generating box's libm
+        # exp() bit patterns — glibc's correctly-rounded exp on the CI/dev
+        # toolchains, the greeks_golden precedent. A libm/toolchain change
+        # fails the golden LOUDLY; re-freezing is a conscious, ledgered act
+        # (BRUTEX_REGEN_META_GOLDEN=1), never a silent drift.
+        "note": (
+            "libm-bits residual: non-IEEE-exact scorer cases freeze the "
+            "generating box's libm exp() bit patterns (glibc "
+            "correctly-rounded exp assumption — the greeks_golden "
+            "precedent); a libm change fails this golden loudly and any "
+            "re-freeze is a conscious, ledgered act."
+        ),
         "scorer": [
             {
                 "features": _hex_bits(features),

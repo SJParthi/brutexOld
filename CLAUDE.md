@@ -3320,12 +3320,18 @@ hostile-review pass._
   DEC-LEDGER-RENUMBER-001** — P0 items 14+15 as ONE annotation-only change
   set. ITEM 14 (meta-labeling, AFML Ch.3/10): NEW `brutex/meta/` —
   `features.py` (the FIXED 16-name entry-observable feature vector, TOTAL
-  extraction from the trade_store wire), `logistic.py` (offline numpy
+  extraction from the trade_store wire; since the round-1 MAJOR-1 fold the
+  regime one-hots are the PRIOR session's label — `prev_regime_*`, the
+  nearest lens date strictly before the entry's IST date, never the
+  post-entry same-day label; entry-observability property-pinned),
+  `logistic.py` (offline numpy
   IRLS+ridge fit, NO sklearn; `score_logistic` = the pinned
   ascending-accumulation Python inference ORACLE), `cpcv_fit.py`
   (strictly OUT-OF-FOLD p_win via the EXISTING `metrics.cpcv.cpcv_splits`
   — REUSED, never re-minted; label_span = embargo = the conservative
   trade-index max-overlap approximation over entry/exit TIMESTAMPS;
+  train-rows-only + present-vix-rows-only standardization — the round-1
+  M-6 law;
   < MIN_TRADES_FOR_FIT=30 / single-class → the honest degenerate),
   `threshold.py` (τ 0.50→0.95 step 0.05; `N_THRESHOLDS_SWEPT`=10 recorded
   in every sidecar — the DSR anti-double-dipping trials count), and
@@ -3349,10 +3355,16 @@ hostile-review pass._
   TOTAL `abstain_reasons()` (NaN-normalized; EXACT `>= tau` boundary;
   fail-closed on missing confidence under a configured τ; passes ⇔
   reasons==(), property-pinned); the DEFAULT ILLUSTRATIVE config (no
-  regime restriction · stamped-aggs vix band else None ·
+  regime restriction · NO VIX gate — the round-1 MAJOR-2 law: the aggs
+  vix_band_lo/hi is the p10-p90 of the combo's WINNING trades' entry VIX,
+  label-conditional + in-sample, so it is recorded only as the
+  informational `vix_band_winners_p10_p90` sidecar field with its verbatim
+  disclosure, never adopted; an explicit operator config via
+  `annotate_run(abstain_config=…)` is the ONE way to gate on VIX ·
   block_event_days=True · τ=0.7) replayed per trade into the `.meta.json`
   abstain block (reasons keyed by trade_seq, `would_abstain_count`,
-  `kept_pct`); the DORMANT in-sim arm: `BRUTEX_ABSTAIN_GATE_INSIM` set to
+  `kept_pct`; the regime judged is the PRIOR session's label — the MAJOR-1
+  entry-observability law); the DORMANT in-sim arm: `BRUTEX_ABSTAIN_GATE_INSIM` set to
   ANY value raises the typed `AbstainGateInSimRefusedError` at the
   `cmd_sweep_all` eager chokepoint BEFORE any artifact (the
   BRUTEX_FILL_MODE precedent; refusal-leaves-zero-artifacts
@@ -3389,7 +3401,15 @@ hostile-review pass._
   is research evidence, never a validated gate or frozen deployable
   model; the abstain replay judges the UNGATED sim's entry snapshots —
   not a counterfactual re-simulation; p_win floats are per-box
-  BLAS-deterministic, so the byte-golden freezes only the float-free arm.
+  BLAS-deterministic, so re-annotation is byte-identical on the SAME box
+  only (the round-1 N-7 qualifier — the byte-golden freezes only the
+  float-free arm); the lens loader's catalog-reconcile METADATA write is
+  the one disclosed write outside the pass's own sidecars (`--no-lens`
+  avoids it). HOSTILE-REVIEW ROUND 1 folded (2 MAJORs — the prev_regime_*
+  prior-session re-source + the None-default/label-conditional-band
+  disclosure — + 4 MINORs + ~12 NITs, all at root cause; goldens
+  consciously re-frozen; the per-finding record lives in MIGRATION.md
+  #1984's fold clause).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; run identity untouched; no new
   routes; new env vars `BRUTEX_META_GATE` (default OFF) +

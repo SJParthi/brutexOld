@@ -82,6 +82,7 @@
    ]
   }
  ],
+ "note": "libm-bits residual: non-IEEE-exact scorer cases freeze the generating box's libm exp() bit patterns (glibc correctly-rounded exp assumption \u2014 the greeks_golden precedent); a libm change fails this golden loudly and any re-freeze is a conscious, ledgered act.",
  "schema_version": 1,
  "scorer": [
   {

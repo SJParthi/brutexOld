@@ -19,10 +19,12 @@ writes them.
 Determinism + idempotence: canonical JSON (``sort_keys`` + compact
 separators + trailing newline — the trade_store stamp discipline), NO
 timestamps, combos keyed by sorted ``run_id``, trades keyed by
-``trade_seq`` — a re-run over unchanged sidecars is BYTE-IDENTICAL
-(integration-pinned). Trades are keyed ONLY by ``trade_seq`` +
-entry/exit TIMESTAMPS (the W4 fold-key law — never bar indices or
-holding-bar quantities).
+``trade_seq`` — a re-run over unchanged sidecars is BYTE-IDENTICAL **on
+the SAME box** (integration-pinned; the honest qualifier: real-fit
+``p_win`` floats are numpy/BLAS/libm-dependent, so CROSS-box re-runs may
+differ in float bits — the box-stable byte pin is the float-free golden).
+Trades are keyed ONLY by ``trade_seq`` + entry/exit TIMESTAMPS (the W4
+fold-key law — never bar indices or holding-bar quantities).
 
 Correct-or-absent: a stem whose stamp fails validation, or whose trades
 file is unreadable, is a COUNTED skip (named reason) — the pass continues,
@@ -94,6 +96,22 @@ _DEC_ABSTAIN: Final[str] = "DEC-ABSTAIN-GATE-STREAM-001"
 #: kept_pct echo thresholds (all members of the τ grid; pinned by tests).
 _KEPT_PCT_TAUS: Final[tuple[float, ...]] = (0.6, 0.7, 0.8)
 
+#: The verbatim disclosure attached to the informational winners' VIX band
+#: (the hostile-review round-1 MAJOR-2 law — recorded, never adopted).
+_VIX_BAND_DISCLOSURE: Final[str] = (
+    "label-conditional and in-sample: the [p10, p90] band of THIS combo's "
+    "WINNING trades' entry VIX (the aggs vix_band_lo/hi) — descriptive "
+    "only, never a held-out estimate and never a default gate; an explicit "
+    "config adopting a band requires its own validation."
+)
+
+#: The two kept_pct denominators, documented IN the sidecar (round-1 N-8).
+_KEPT_PCT_DENOMINATORS_NOTE: Final[str] = (
+    "tau_curve.kept_pct / kept_pct_at: n_kept over n_scored (trades "
+    "carrying an out-of-fold p_win); abstain.kept_pct: kept_trades over "
+    "ALL extracted trades (unscored trades included)."
+)
+
 #: The honest-limits notes every sidecar carries VERBATIM (wire-stable).
 _HONEST_NOTES: Final[tuple[str, ...]] = (
     "annotation-only: nothing is gated, filtered or re-ranked anywhere; a "
@@ -112,8 +130,16 @@ _HONEST_NOTES: Final[tuple[str, ...]] = (
     "VIX stays REFERENCE-ONLY: this annotation READS the stored "
     "vix_entry stamps, never adds VIX to the 60-bit vocabulary; gating on "
     "VIX would make it load-bearing — a recorded operator collision point.",
+    "the DEFAULT abstain config carries NO VIX band: the stamped aggs "
+    "vix_band_lo/hi is the p10-p90 of this combo's WINNING trades' entry "
+    "VIX — label-conditional and in-sample (fit-on-self), recorded only "
+    "as the informational vix_band_winners_p10_p90 field; a VIX gate "
+    "exists only under an explicit operator config.",
     "training reuses cascade-validated trades under the OOF discipline "
     "only (the disclosed double-dip boundary).",
+    "re-annotation over unchanged sidecars is byte-identical on the SAME "
+    "box only: real-fit p_win floats are numpy/BLAS/libm-dependent, so "
+    "cross-box float bits may differ (expected, disclosed).",
 )
 
 
@@ -190,24 +216,46 @@ def _vix_band(paths: SidecarPaths, run_id: str) -> tuple[float | None, float | N
     )
 
 
+#: The abstain-block config note per source (echoed verbatim in-sidecar).
+_CONFIG_NOTE_DEFAULT: Final[str] = (
+    "DEFAULT ILLUSTRATIVE config — gating on it requires re-validation; "
+    "alternate configs are a re-run of the annotator"
+)
+_CONFIG_NOTE_EXPLICIT: Final[str] = (
+    "EXPLICIT operator-supplied config — gating on it requires "
+    "re-validation; a deliberately-set VIX band is the operator's own "
+    "choice, never the label-conditional aggs band adopted by default"
+)
+
+
 def _abstain_block(
     trades: Sequence[TradeFeatures],
     p_win: Sequence[float | None],
     config: AbstainGateConfig,
+    *,
+    config_note: str,
 ) -> dict[str, Any]:
     """Replay the abstention config over every trade's ENTRY snapshot.
 
-    Routes through the :func:`brutex.meta.meta_rust.abstain_reason_masks`
-    facade (the Rust kernel when enabled; the Python oracle otherwise) —
-    the SAME per-element judgment a future in-sim arm would make, so the
-    annotation IS the gate stream's dry run.
+    The regime judged is the trade's PRIOR-session label
+    (``TradeFeatures.prev_regime`` — the entry-observability law), the SAME
+    snapshot the P(win) model saw. Routes through the
+    :func:`brutex.meta.meta_rust.abstain_reason_masks` facade (the Rust
+    kernel when enabled; the Python oracle otherwise) — the SAME
+    per-element judgment a future in-sim arm would make, so the annotation
+    IS the gate stream's dry run.
+
+    Denominator law (round-1 N-8, also in-sidecar via
+    :data:`_KEPT_PCT_DENOMINATORS_NOTE`): the block's ``kept_pct`` divides
+    by ALL extracted trades (unscored included), unlike the τ curve's
+    ``kept_pct`` which divides by the SCORED count only.
     """
     nan = float("nan")
     allowed_mask = 0
     for token in config.allowed_regimes:
         allowed_mask |= 1 << REGIME_CODES[token]
     masks = abstain_reason_masks(
-        [REGIME_CODES[t.regime] for t in trades],
+        [REGIME_CODES[t.prev_regime] for t in trades],
         allowed_mask,
         [t.vix_entry if t.vix_entry is not None else nan for t in trades],
         config.vix_lo if config.vix_lo is not None else nan,
@@ -237,11 +285,7 @@ def _abstain_block(
             "vix_hi": config.vix_hi,
             "block_event_days": config.block_event_days,
             "tau": config.tau,
-            "note": (
-                "DEFAULT ILLUSTRATIVE config — gating on it requires "
-                "re-validation; alternate configs are a re-run of the "
-                "annotator"
-            ),
+            "note": config_note,
         },
         # EMIT-ON-PRESENT: only trades with a non-empty reason tuple appear.
         "per_trade_reasons": per_trade,
@@ -257,8 +301,16 @@ def _combo_annotation(
     run_id: str,
     lens: SessionLens,
     scorer: Scorer | None,
+    abstain_config: AbstainGateConfig | None,
 ) -> tuple[dict[str, Any], int, int]:
-    """Annotate ONE combo: returns ``(payload, n_trades, malformed_rows)``."""
+    """Annotate ONE combo: returns ``(payload, n_trades, malformed_rows)``.
+
+    *abstain_config* ``None`` binds :func:`default_abstain_config` (NO VIX
+    gate — the MAJOR-2 anti-overfit posture); a non-None config is the
+    operator's EXPLICIT deliberate choice and is echoed with the explicit
+    note. Either way the aggs winners' band is RECORDED informationally
+    (``vix_band_winners_p10_p90`` + the verbatim disclosure), never adopted.
+    """
     features: list[TradeFeatures] = []
     malformed = 0
     for row in iter_trades_for_export(paths, run_id):
@@ -271,7 +323,12 @@ def _combo_annotation(
     wins = [t.label_win for t in features]
     curve = tau_curve(oof.p_win, wins)
     band_lo, band_hi = _vix_band(paths, run_id)
-    config = default_abstain_config(band_lo, band_hi)
+    if abstain_config is None:
+        config = default_abstain_config()
+        config_note = _CONFIG_NOTE_DEFAULT
+    else:
+        config = abstain_config
+        config_note = _CONFIG_NOTE_EXPLICIT
     payload: dict[str, Any] = {
         "n_trades": len(features),
         "n_malformed_rows": malformed,
@@ -301,7 +358,15 @@ def _combo_annotation(
         "kept_pct_at": {
             f"{tau:.1f}": next(p.kept_pct for p in curve if p.tau == tau) for tau in _KEPT_PCT_TAUS
         },
-        "abstain": _abstain_block(features, oof.p_win, config),
+        "kept_pct_denominators": _KEPT_PCT_DENOMINATORS_NOTE,
+        # Informational ONLY (MAJOR-2): the aggs winners' band is recorded,
+        # never adopted as a default gate — the disclosure travels with it.
+        "vix_band_winners_p10_p90": {
+            "lo": band_lo,
+            "hi": band_hi,
+            "note": _VIX_BAND_DISCLOSURE,
+        },
+        "abstain": _abstain_block(features, oof.p_win, config, config_note=config_note),
     }
     return payload, len(features), malformed
 
@@ -342,10 +407,11 @@ def _lens_for(
     except (MemoryError, KeyboardInterrupt, SystemExit):
         raise
     except SessionLensError as exc:
-        _LOG.warning("meta.lens_failed", instrument=instrument, error=repr(str(exc)))
+        # Vendor/path-derived tokens ride repr() (the #907 log-injection law).
+        _LOG.warning("meta.lens_failed", instrument=repr(instrument), error=repr(str(exc)))
         lens = SessionLens(trend_by_date={}, event_flags_by_date={})
     if not lens.trend_by_date:
-        _LOG.info("meta.lens_empty", instrument=instrument)
+        _LOG.info("meta.lens_empty", instrument=repr(instrument))
     cache[instrument] = lens
     return lens
 
@@ -356,6 +422,7 @@ def annotate_run(
     *,
     daily_bars_for: Callable[[str], Sequence[CandleBar] | None] | None = None,
     scorer: Scorer | None = None,
+    abstain_config: AbstainGateConfig | None = None,
     dry_run: bool = False,
 ) -> MetaAnnotationReport:
     """Annotate every finalist stem of one sweep run (the CLI's engine).
@@ -376,6 +443,11 @@ def annotate_run(
     scorer
         Inference seam override (tests); ``None`` binds the production
         :func:`brutex.meta.meta_rust.score_probabilities` facade.
+    abstain_config
+        An EXPLICIT operator-supplied :class:`AbstainGateConfig` for the
+        replay block (echoed with the explicit note), or ``None`` — the
+        :func:`default_abstain_config` (NO VIX gate; the winners' aggs
+        band is recorded informationally, never adopted — MAJOR-2).
     dry_run
         Enumerate + validate stamps ONLY: zero writes, zero fits (the
         integration suite pins the tree byte-untouched).
@@ -432,7 +504,9 @@ def annotate_run(
             # counted stem skip, never a pass abort (correct-or-absent).
             lens = _lens_for(instrument, lens_cache, daily_bars_for)
             for combo_id in combo_ids:
-                payload, n_trades, malformed = _combo_annotation(paths, combo_id, lens, scorer)
+                payload, n_trades, malformed = _combo_annotation(
+                    paths, combo_id, lens, scorer, abstain_config
+                )
                 combos[combo_id] = payload
                 stem_trades += n_trades
                 stem_malformed += malformed
@@ -455,7 +529,7 @@ def annotate_run(
             raise
         except Exception as exc:
             _LOG.warning(
-                "meta.stem_failed", stem=stem_rel, error=repr(f"{type(exc).__name__}: {exc}")
+                "meta.stem_failed", stem=repr(stem_rel), error=repr(f"{type(exc).__name__}: {exc}")
             )
             outcomes.append(
                 StemOutcome(
@@ -482,7 +556,7 @@ def annotate_run(
         )
         _LOG.info(
             "meta.stem_annotated",
-            stem=stem_rel,
+            stem=repr(stem_rel),
             combos=len(combo_ids),
             trades=stem_trades,
             malformed=stem_malformed,

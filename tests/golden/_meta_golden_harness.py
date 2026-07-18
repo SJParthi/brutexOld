@@ -13,6 +13,16 @@ libm/BLAS-dependent floats — the golden pins the SCHEMA + canonical
 serialization + reason vocabulary + abstain-block shape, byte-stable on
 every box. The float parity surface is pinned separately by the frozen
 scorer/abstain vectors in ``fixtures/meta_scorer_vectors_v1.json``.
+
+RE-FREEZE RECORD (conscious, ledgered — Golden Rule #1): the fixtures were
+regenerated ONCE at the hostile-review round-1 fold (MIGRATION.md
+#1984/#1985) — the ``feature_names`` echo moved ``regime_*`` →
+``prev_regime_*`` (MAJOR-1: prior-session regime, entry-observability),
+the sidecar gained the informational ``vix_band_winners_p10_p90`` +
+``kept_pct_denominators`` fields, and the honest-notes list grew (MAJOR-2
+band disclosure + the same-box byte-identity qualifier). Every frozen
+value stayed float-free; the pre-fold bytes were never a value oracle for
+the renamed schema.
 """
 
 from __future__ import annotations

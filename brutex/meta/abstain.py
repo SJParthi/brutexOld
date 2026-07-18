@@ -153,18 +153,24 @@ class AbstainGateConfig:
             )
 
 
-def default_abstain_config(
-    vix_band_lo: float | None = None, vix_band_hi: float | None = None
-) -> AbstainGateConfig:
+def default_abstain_config() -> AbstainGateConfig:
     """The DEFAULT ILLUSTRATIVE annotation config (echoed in every sidecar).
 
     * NO regime restriction (all four tokens allowed — deriving a
       restriction from the run's own ``pnl_by_trend_json`` was REJECTED as
       overfit-prone: gating on in-sample per-regime P&L is exactly the
       double-dip the annotation-first law exists to prevent).
-    * The VIX band = the entry's stamped aggs band (``vix_band_lo``/``hi``)
-      when BOTH bounds are present + finite + ordered, else NO VIX gate —
-      never a half-invented band from a partial stamp.
+    * NO VIX gate (``vix_lo = vix_hi = None`` — the anti-overfit posture,
+      the hostile-review round-1 MAJOR-2 fix): the only stamped band
+      available at annotation time is the aggs ``vix_band_lo``/``hi``,
+      which ``combo_aggregates`` computes as the p10–p90 of THIS combo's
+      WINNING trades' entry VIX — a LABEL-CONDITIONAL, IN-SAMPLE statistic
+      (fit-on-self). Adopting it as a default gate would be exactly the
+      double-dip above. The annotator still RECORDS that band as the
+      informational ``vix_band_winners_p10_p90`` sidecar field (descriptive
+      only, never a held-out estimate), and an operator may set a band
+      DELIBERATELY via an explicit :class:`AbstainGateConfig` — which then
+      needs its own validation before any gating use.
     * ``block_event_days=True`` (the four verified event classes).
     * ``tau`` = :data:`DEFAULT_TAU` (0.7 — mid-grid, illustrative).
 
@@ -172,17 +178,10 @@ def default_abstain_config(
     as its OWN strategy (the DEC's MIN_TRADES/DSR disclosure); alternate
     configs are a re-run of the annotator, never a hand-edit of a sidecar.
     """
-    band_ok = (
-        vix_band_lo is not None
-        and vix_band_hi is not None
-        and math.isfinite(vix_band_lo)
-        and math.isfinite(vix_band_hi)
-        and vix_band_lo <= vix_band_hi
-    )
     return AbstainGateConfig(
         allowed_regimes=_ALL_REGIMES,
-        vix_lo=vix_band_lo if band_ok else None,
-        vix_hi=vix_band_hi if band_ok else None,
+        vix_lo=None,
+        vix_hi=None,
         block_event_days=True,
         tau=DEFAULT_TAU,
     )

@@ -325,6 +325,12 @@ class TestInSimGateRefusal:
         run_dirs = sorted((tmp_path / "sweep_runs").iterdir())
         assert len(run_dirs) == 1
         run_id = run_dirs[0].name
+        # N-4 / the R13 zero-risk law: the sweep's OWN top100.json bytes
+        # must survive meta-annotate untouched (snapshot BEFORE, compare
+        # AFTER — never inferred from the generic whole-tree pin alone).
+        top100_path = run_dirs[0] / "top100.json"
+        assert top100_path.is_file()
+        top100_before = top100_path.read_bytes()
         rc = cli.main(
             [
                 "meta-annotate",
@@ -337,6 +343,7 @@ class TestInSimGateRefusal:
             ]
         )
         assert rc == EXIT_OK
+        assert top100_path.read_bytes() == top100_before
         summary = json.loads(
             (tmp_path / "sweep_runs" / run_id / META_SUMMARY_FILENAME).read_text(encoding="utf-8")
         )

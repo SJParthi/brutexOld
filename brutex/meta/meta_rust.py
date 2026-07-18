@@ -136,7 +136,8 @@ def meta_gate_enabled(raw: str | None = None) -> bool:
     verdict = env_flag_tristate(value)
     if verdict is None and value.strip() and META_RUST_FLAG_EVENT not in _WARNED:
         _WARNED.add(META_RUST_FLAG_EVENT)
-        _LOG.warning(META_RUST_FLAG_EVENT, env=META_GATE_ENV, value=value)
+        # The env VALUE is operator-typed junk — repr() it (the #907 law).
+        _LOG.warning(META_RUST_FLAG_EVENT, env=META_GATE_ENV, value=repr(value))
     return verdict is True
 
 

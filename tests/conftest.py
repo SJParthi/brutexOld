@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -139,6 +141,25 @@ os.environ.pop("BRUTEX_FILL_MODE", None)
 # suites inject env explicitly on both arms).
 os.environ.pop("BRUTEX_ABSTAIN_GATE_INSIM", None)
 os.environ.pop("BRUTEX_META_GATE", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_meta_rust_latch() -> Iterator[None]:
+    """Belt-and-braces: never let a meta-facade latch leak across suites.
+
+    DEC-META-LABEL-ANNOTATE-001 (round-1 N-2): `brutex.meta.meta_rust`
+    keeps a per-process burn-in counter + autorevert LATCH plus a warn-once
+    registry. The meta suites reset it locally, but any OTHER test that
+    drives the facade (an integration chain with `BRUTEX_META_GATE` set)
+    could latch it and silently change a later suite's arm. Reset AFTER
+    every test — but only when the module was actually imported (the lazy
+    `sys.modules` probe keeps this a no-op for the rest of the battery and
+    never imports the facade into tests that pin import-freeness).
+    """
+    yield
+    meta_rust = sys.modules.get("brutex.meta.meta_rust")
+    if meta_rust is not None:
+        meta_rust.reset_meta_rust_for_tests()
 
 
 @pytest.fixture(autouse=True)

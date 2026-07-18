@@ -87,6 +87,13 @@ class TestAnnotationBytesGolden:
 
 
 class TestScorerVectorsGolden:
+    # Libm-bits residual (round-1 N-10, also noted in the fixture's own
+    # "note" key): the non-IEEE-exact cases freeze the GENERATING box's
+    # libm exp() bit patterns under the glibc correctly-rounded-exp
+    # assumption (the greeks_golden precedent — greeks_golden.json pins the
+    # same class of bits for Black-76). A libm/toolchain change fails these
+    # asserts LOUDLY; the remedy is a conscious, ledgered re-freeze via
+    # BRUTEX_REGEN_META_GOLDEN=1 — never a tolerance widening.
     def test_python_oracle_matches_the_frozen_bits(self, vectors: dict[str, Any]) -> None:
         for case in vectors["scorer"]:
             got = score_logistic(
