@@ -3286,7 +3286,7 @@ class TestCorruptParquetNeverAborts:
 # MIGRATION.md #1918). The flag-gated ``_ledger_parquet_bytes`` render seam
 # it pinned (pyarrow oracle default / BRUTEX_LAKE_RUST_LEDGER_RENDER →
 # brutex-lake crate arm) was SUPERSEDED-IN-PART on the render plane by
-# DEC-RUST-RUNID-STORES-001 (#1954) per the coordinator ruling of 2026-07-18:
+# DEC-RUST-RUNID-STORES-001 (#1962) per the coordinator ruling of 2026-07-18:
 # the ``brutex_identity`` kernel render is unconditionally the ONE writer, so
 # the seam class's intent is void — its substance survives as (a) the kernel
 # canonical-bytes goldens (``tests/golden/test_window_ledger_bytes_probe.py``

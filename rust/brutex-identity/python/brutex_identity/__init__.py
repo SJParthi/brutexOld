@@ -3,16 +3,20 @@
 ``DEC-RUST-RUNID-STORES-001``: mixed Python + Rust layout (the ``fno_math`` /
 ``trading_core`` / ``brutex_feed`` shape). The compiled cdylib ships as the
 private submodule ``brutex_identity._brutex_identity``; this ``__init__.py``
-re-exports its symbols so the consumers (``brutex/strategies/combo.py``,
-``brutex/engine/snapshot_hash.py``, ``brutex/engine/results_store.py``,
-``brutex/data/window_ledger_store.py``) write ``import brutex_identity; …``.
+re-exports its symbols so the consumers (``brutex/engine/snapshot_hash.py``,
+``brutex/engine/results_store.py``, ``brutex/data/window_ledger_store.py``)
+write ``import brutex_identity; …``.
 
 Exposed surface:
 
-* ``canonicalise_params_json`` / ``combo_hash`` / ``find_unit_separator_field``
-  — the 9-field BLAKE3 run-identity join + the full param canonicaliser
-  (CPython-repr floats, CPython-``json.dumps`` byte-law, the ``\\x1f`` screen);
 * ``SnapshotHasher`` — the streamed ``bxsnap2`` data-snapshot digest;
+  (SCOPE — the crate-ownership ruling of 2026-07-18: combo CONSTRUCTION
+  (param canonicaliser + the ``\x1f`` scan + the 9-field hash assembly)
+  is OWNED by ``brutex/strategies/combo.py`` + ``rust/brutex-strategies``
+  (DEC-STRATEGIES-RUST-COMBO-001 #1955); the former
+  ``canonicalise_params_json``/``combo_hash``/``find_unit_separator_field``
+  entry points were removed at that ruling — this crate only CONSUMES
+  already-assembled run-id bytes);
 * ``classify_result_append`` / ``validate_run_id_error`` / ``mask_to_limbs`` /
   ``mask_from_limbs`` / ``rank_top_k`` — the results-store laws;
 * ``merge_ledger_rows`` / ``render_ledger_parquet`` / ``read_ledger_rows`` /
@@ -58,12 +62,9 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "SOURCE_DIGEST",
     "SnapshotHasher",
     "__version__",
-    "canonicalise_params_json",
     "classify_result_append",
-    "combo_hash",
     "derive_empty_streak",
     "derive_in_pull_fetches",
-    "find_unit_separator_field",
     "mask_from_limbs",
     "mask_to_limbs",
     "merge_ledger_rows",
@@ -92,12 +93,9 @@ LEDGER_CORE_COLUMNS = _compiled.LEDGER_CORE_COLUMNS
 LedgerStringPool = _compiled.LedgerStringPool
 SOURCE_DIGEST = _compiled.SOURCE_DIGEST
 SnapshotHasher = _compiled.SnapshotHasher
-canonicalise_params_json = _compiled.canonicalise_params_json
 classify_result_append = _compiled.classify_result_append
-combo_hash = _compiled.combo_hash
 derive_empty_streak = _compiled.derive_empty_streak
 derive_in_pull_fetches = _compiled.derive_in_pull_fetches
-find_unit_separator_field = _compiled.find_unit_separator_field
 mask_from_limbs = _compiled.mask_from_limbs
 mask_to_limbs = _compiled.mask_to_limbs
 merge_ledger_rows = _compiled.merge_ledger_rows
@@ -119,12 +117,9 @@ __all__ = [
     "SOURCE_DIGEST",
     "LedgerStringPool",
     "SnapshotHasher",
-    "canonicalise_params_json",
     "classify_result_append",
-    "combo_hash",
     "derive_empty_streak",
     "derive_in_pull_fetches",
-    "find_unit_separator_field",
     "mask_from_limbs",
     "mask_to_limbs",
     "merge_ledger_rows",

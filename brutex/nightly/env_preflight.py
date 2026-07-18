@@ -85,7 +85,7 @@ REMOVED_ENV_FLAGS: Final[tuple[RemovedEnvFlag, ...]] = (
     RemovedEnvFlag(
         name="BRUTEX_LAKE_RUST_LEDGER_RENDER",
         removed_by=(
-            "DEC-RUST-RUNID-STORES-001 (MIGRATION.md #1954 — supersedes-in-part "
+            "DEC-RUST-RUNID-STORES-001 (MIGRATION.md #1962 — supersedes-in-part "
             "DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane)"
         ),
         remediation=(

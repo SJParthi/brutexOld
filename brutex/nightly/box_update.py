@@ -274,7 +274,7 @@ class WheelSpec:
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
 #: target's build list (Makefile:90-111: fno-math, trading-core,
 #: brutex-identity — the HARD-import run-identity/stores kernel, joined at
-#: the DEC-RUST-RUNID-STORES-001 (#1954) merge-forward reconcile — and
+#: the DEC-RUST-RUNID-STORES-001 (#1962) merge-forward reconcile — and
 #: brutex-feed; brutex-lake ABSENT — coordinator policy, excluded pending
 #: DEC-BRUTEX-LAKE-BOX-WHEEL-001), drift-pinned by a test that PARSES the
 #: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set

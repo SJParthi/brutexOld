@@ -2,8 +2,7 @@
 //!
 //! Thin mapping only: every LAW lives in the pure-core modules
 //! ([`crate::store_law`], [`crate::ledger`], [`crate::parquet_codec`],
-//! [`crate::snapshot`]) or the object-walking canonicaliser
-//! ([`crate::canonical`]); this module extracts/builds Python objects and
+//! [`crate::snapshot`]); this module extracts/builds Python objects and
 //! raises `ValueError` with the exact retired-Python message bytes (the
 //! Python wrappers re-raise their own domain error classes).
 //!
@@ -26,7 +25,7 @@
 
 use crate::ledger::{LedgerRow, RowKey};
 use crate::store_law::{AppendDecision, RankKey, ResultRowFfi};
-use crate::{canonical, ledger, parquet_codec, snapshot, store_law};
+use crate::{ledger, parquet_codec, snapshot, store_law};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
@@ -38,54 +37,6 @@ use std::collections::HashSet;
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-// ── combo / canonicalisation ────────────────────────────────────────────────
-
-/// The deterministic canonical-JSON encoding of a params Mapping
-/// (`brutex.strategies.combo.canonicalise_params`'s computation).
-#[pyfunction]
-fn canonicalise_params_json(py: Python<'_>, params: &Bound<'_, PyAny>) -> PyResult<String> {
-    canonical::canonicalise_params_text(py, params)
-}
-
-/// The 9-field BLAKE3 hex run-identity (`combo_hash`'s computation).
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-fn combo_hash(
-    py: Python<'_>,
-    strategy_id: &str,
-    direction: &str,
-    instrument: &str,
-    tf: &str,
-    mode: &str,
-    params: &Bound<'_, PyAny>,
-    data_snapshot_hash: &str,
-    indicator_version: &str,
-    code_commit_sha: &str,
-) -> PyResult<String> {
-    canonical::combo_hash_hex(
-        py,
-        strategy_id,
-        direction,
-        instrument,
-        tf,
-        mode,
-        params,
-        data_snapshot_hash,
-        indicator_version,
-        code_commit_sha,
-    )
-}
-
-/// The `\x1f` unit-separator screen: the FIRST field name whose value
-/// carries the delimiter, or `None` (`reject_unit_separator`'s scan).
-#[pyfunction]
-fn find_unit_separator_field(fields: Vec<(String, String)>) -> Option<String> {
-    fields
-        .into_iter()
-        .find(|(_, value)| value.contains('\u{1f}'))
-        .map(|(name, _)| name)
 }
 
 // ── bxsnap2 snapshot hasher ────────────────────────────────────────────────
@@ -564,9 +515,6 @@ fn _brutex_identity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LEDGER_COLUMNS", ledger::LEDGER_COLUMNS)?;
     m.add("LEDGER_CORE_COLUMNS", ledger::LEDGER_CORE_COLUMNS)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(canonicalise_params_json, m)?)?;
-    m.add_function(wrap_pyfunction!(combo_hash, m)?)?;
-    m.add_function(wrap_pyfunction!(find_unit_separator_field, m)?)?;
     m.add_function(wrap_pyfunction!(classify_result_append, m)?)?;
     m.add_function(wrap_pyfunction!(validate_run_id_error, m)?)?;
     m.add_function(wrap_pyfunction!(mask_to_limbs, m)?)?;

@@ -1,11 +1,11 @@
 # brutex-identity — run-identity + ledger-store kernels (Rust).
 #
 # DEC-RUST-RUNID-STORES-001 (L14 conversion lane): the COMPUTATION plane of
-# the four run-identity/store surfaces —
+# the three run-identity-consumption/store surfaces (combo CONSTRUCTION is
+# OWNED by `brutex/strategies/combo.py` + `rust/brutex-strategies` per the
+# crate-ownership ruling of 2026-07-18 — DEC-STRATEGIES-RUST-COMBO-001
+# #1955; this crate only CONSUMES already-assembled run-id bytes) —
 #
-# * `brutex/strategies/combo.py`   — the 9-field BLAKE3 run-identity join +
-#   the full param canonicaliser (CPython-repr floats, CPython-`json.dumps`
-#   byte-law encoding, the `\x1f` unit-separator screen);
 # * `brutex/engine/snapshot_hash.py` — the streamed `bxsnap2` data-snapshot
 #   digest (framing + ISO-8601 timestamp render + BLAKE3);
 # * `brutex/engine/results_store.py` — the store LAWS (run-id validation, the

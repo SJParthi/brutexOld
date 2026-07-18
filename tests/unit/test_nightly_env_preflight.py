@@ -28,7 +28,7 @@ class TestRegistry:
         assert "DEC-FILL-WORST-CASE-ONLY-001" in by_name["BRUTEX_FILL_MODE"].removed_by
         assert by_name["BRUTEX_SKIP_WHEEL_FRESHNESS"].tier == "active_escape"
         # The retired ledger-render flag joined at the DEC-RUST-RUNID-STORES-001
-        # (#1954) merge-forward reconcile — the FILL_MODE "removed" class.
+        # (#1962, renumbered from #1954) merge-forward reconcile — the FILL_MODE "removed" class.
         assert by_name["BRUTEX_LAKE_RUST_LEDGER_RENDER"].tier == "removed"
         assert "DEC-RUST-RUNID-STORES-001" in by_name["BRUTEX_LAKE_RUST_LEDGER_RENDER"].removed_by
 

@@ -7,10 +7,6 @@ against the LIVE interpreter over generated corpora — so a CPython minor-bump
 drift (repr shortest-round-trip, ``json.dumps`` escaping, ``isoformat``) or a
 kernel regression fails loudly on ANY input, not only the captured ones:
 
-* ``canonicalise_params_json`` ≡ the retired composition
-  ``json.dumps(canonical-walk, sort_keys=True, separators=(",", ":"),
-  ensure_ascii=True)`` — floats via ``repr``, Decimals via ``str`` (hypothesis
-  + directed boundary corpora);
 * ``SnapshotHasher`` ≡ the retired blake3 streaming body (verbatim in-test
   oracle) over hostile timestamp shapes;
 * the store laws (run-id validation, limb codec, top-k) against in-test
@@ -22,12 +18,9 @@ kernel regression fails loudly on ANY input, not only the captured ones:
 from __future__ import annotations
 
 import json
-import math
 import subprocess
 import sys
-from abc import ABCMeta
 from datetime import UTC, datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -43,34 +36,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ── the retired-Python oracles (verbatim law bodies, test-local) ─────────────
-
-
-def _canonicalise_value_oracle(value: Any) -> Any:
-    """The retired ``_canonicalise_value`` walk, verbatim (test-local oracle)."""
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return repr(value + 0.0)
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return {k: _canonicalise_value_oracle(v) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return [_canonicalise_value_oracle(v) for v in value]
-    raise AssertionError(f"oracle: unsupported {type(value)}")
-
-
-def _canonicalise_params_oracle(params: dict[str, Any]) -> str:
-    return json.dumps(
-        _canonicalise_value_oracle(params),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
 
 
 #: One (symbol, interval) → bars slice map — annotated at each literal build
@@ -96,139 +61,25 @@ def _snapshot_oracle(
     return str(hasher.hexdigest())
 
 
-# ── canonical params: CPython repr/json.dumps differentials ──────────────────
-
-#: Directed float boundary corpus — the shortest-repr law's hardest cases.
-_FLOAT_BOUNDARIES = [
-    0.0,
-    -0.0,
-    0.5,
-    0.1,
-    1e15,
-    1e16,
-    1e-4,
-    1e-5,
-    5e-324,
-    2.2250738585072014e-308,
-    1.7976931348623157e308,
-    9007199254740993.0,
-    123456789012345.6,
-    2.5e-10,
-    1e100,
-    1.2345678901234567,
-    -1.5,
-    3.0000000000000004,
-]
-
-
-class TestCanonicalDifferential:
-    def test_directed_float_boundaries(self) -> None:
-        params = {f"f{i}": v for i, v in enumerate(_FLOAT_BOUNDARIES)}
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )
-
-    @given(st.floats(allow_nan=False, allow_infinity=False))
-    def test_float_repr_law_over_the_full_plane(self, value: float) -> None:
-        params = {"x": value}
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )
-
-    @given(st.text(alphabet=st.characters(codec="utf-8"), max_size=64))
-    def test_string_escape_law_over_hostile_text(self, text: str) -> None:
-        params = {"s": text, text or "k": 1}
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )
-
-    @given(
-        st.dictionaries(
-            st.text(alphabet=st.characters(codec="utf-8"), max_size=16),
-            st.recursive(
-                st.none()
-                | st.booleans()
-                | st.integers()
-                | st.floats(allow_nan=False, allow_infinity=False)
-                | st.text(max_size=16)
-                | st.decimals(allow_nan=False, allow_infinity=False),
-                lambda inner: (
-                    st.lists(inner, max_size=3)
-                    | st.dictionaries(st.text(max_size=8), inner, max_size=3)
-                ),
-                max_leaves=12,
-            ),
-            max_size=6,
-        )
-    )
-    def test_nested_structures_differential(self, params: dict[str, Any]) -> None:
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )
-
-    def test_int_bignum_and_decimal_scale(self) -> None:
-        params = {
-            "big": 2**200,
-            "neg": -(3**150),
-            "i64": 2**63 - 1,
-            "d1": Decimal("1.00"),
-            "d2": Decimal("1E+5"),
-            "d3": Decimal("-0"),
-        }
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )
-
-    def test_duplicate_mapping_keys_keep_last(self) -> None:
-        # A generic Mapping whose items() yields a duplicate key — the retired
-        # dict-comprehension semantics keep the LAST value.
-        class Dupes:
-            def keys(self) -> list[str]:  # pragma: no cover - Mapping shape
-                return ["k", "k"]
-
-            def __getitem__(self, key: str) -> int:  # pragma: no cover
-                return 0
-
-            def items(self) -> list[tuple[str, int]]:
-                return [("k", 1), ("k", 2)]
-
-            def __len__(self) -> int:  # pragma: no cover - Mapping shape
-                return 1
-
-            def __iter__(self) -> Any:  # pragma: no cover - Mapping shape
-                return iter(["k"])
-
-        from collections.abc import Mapping
-
-        # Virtual-subclass registration (the kernel gates on
-        # `isinstance(params, collections.abc.Mapping)`): `Mapping` IS an
-        # ABCMeta instance at runtime, and a registered `Dupes()` IS a Mapping
-        # per isinstance — both facts are invisible to static checkers by
-        # design (PEP 3119), so each is asserted via one honest cast.
-        cast(ABCMeta, Mapping).register(Dupes)
-        params = cast("Mapping[str, Any]", Dupes())
-        assert brutex_identity.canonicalise_params_json(params) == '{"k":2}'
-
-    def test_lone_surrogate_is_rejected_typed(self) -> None:
-        # The DISCLOSED narrowing: the retired body hashed the raw code point;
-        # the kernel rejects invalid Unicode with a typed error.
-        bad = "a\udc80b"
-        with pytest.raises(ValueError, match="lone surrogate"):
-            brutex_identity.canonicalise_params_json({"s": bad})
-        with pytest.raises(ValueError, match="lone surrogate"):
-            brutex_identity.canonicalise_params_json({bad: 1})
-
-    def test_depth_cap_boundary(self) -> None:
-        def nested(depth: int) -> dict[str, Any]:
-            leaf: dict[str, Any] = {"leaf": "x"}
-            for _ in range(depth):
-                leaf = {"d": leaf}
-            return leaf
-
-        brutex_identity.canonicalise_params_json(nested(63))
-        with pytest.raises(ValueError, match="nesting deeper than 64"):
-            brutex_identity.canonicalise_params_json(nested(64))
-
+# ── RETIRED: the canonical-params differentials (the 2026-07-18 crate-ownership
+# ruling) ────────────────────────────────────────────────────────────────────
+#
+# The former ``TestCanonicalDifferential`` + ``TestFloatReprEdge`` classes and
+# the ``_canonicalise_value_oracle``/``_canonicalise_params_oracle`` bodies
+# drove the kernel's ``canonicalise_params_json``/``combo_hash``/
+# ``find_unit_separator_field`` entry points against the retired combo.py law.
+# Per the coordinator-relayed crate-ownership ruling of 2026-07-18, combo
+# CONSTRUCTION is a STRATEGIES concern (DEC-STRATEGIES-RUST-COMBO-001 #1955 —
+# ``brutex/strategies/combo.py`` + ``rust/brutex-strategies`` own the param
+# canonicaliser, the ``\x1f`` scan and the 9-field hash assembly; identity
+# only CONSUMES run-id bytes), so those kernel entry points were REMOVED and
+# their differentials retire WITH them. The laws stay covered by strategies'
+# own suites (``test_strategies_combo.py`` · ``test_strategies_combo_rust.py``
+# · ``test_combo_rust_differential.py`` · ``test_combo_rust_flag_on_golden.py``)
+# and the end-to-end run-identity byte proof stays EXECUTABLE in
+# ``tests/golden/test_runid_stores_oracle_golden.py`` (its canonical/combo
+# sections drive the PUBLIC ``brutex.strategies.combo`` path against the
+# frozen pre-conversion fixture).
 
 # ── snapshot hasher: isoformat + framing differential ────────────────────────
 
@@ -607,20 +458,3 @@ class TestMergeLawDifferential:
         degraded = keys_for(degraded_ids, "groww")
         got = brutex_identity.merge_ledger_rows(memory_rows, disk_rows, pruned, reopened, degraded)
         assert got == _merge_oracle(memory_rows, disk_rows, pruned, reopened, degraded)
-
-
-# ── the float repr twin exercised directly through canonical output ──────────
-
-
-class TestFloatReprEdge:
-    @given(st.integers(min_value=0, max_value=2**64 - 1))
-    def test_bit_pattern_floats_round_trip_the_repr_law(self, bits: int) -> None:
-        import struct
-
-        value = struct.unpack("<d", struct.pack("<Q", bits))[0]
-        if not math.isfinite(value):
-            return  # rejected by both sides — covered elsewhere
-        params = {"x": value}
-        assert brutex_identity.canonicalise_params_json(params) == _canonicalise_params_oracle(
-            params
-        )

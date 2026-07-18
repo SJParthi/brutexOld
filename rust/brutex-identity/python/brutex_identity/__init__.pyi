@@ -4,8 +4,8 @@
 # compiled surface exactly (the fno_math / brutex_feed stub convention).
 
 import datetime
-from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from collections.abc import Sequence
+from typing import Final
 
 __version__: Final[str]
 __build_crate_version__: Final[str]
@@ -77,19 +77,6 @@ type ResultRowTupleFfi = tuple[
 ]
 
 def version() -> str: ...
-def canonicalise_params_json(params: Mapping[str, Any]) -> str: ...
-def combo_hash(
-    strategy_id: str,
-    direction: str,
-    instrument: str,
-    tf: str,
-    mode: str,
-    params: Mapping[str, Any],
-    data_snapshot_hash: str,
-    indicator_version: str,
-    code_commit_sha: str,
-) -> str: ...
-def find_unit_separator_field(fields: Sequence[tuple[str, str]]) -> str | None: ...
 def derive_empty_streak(status: str, attempts: int, skipped_streak: int) -> int: ...
 def derive_in_pull_fetches(status: str) -> int: ...
 def classify_result_append(

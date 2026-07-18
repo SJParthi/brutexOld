@@ -610,7 +610,7 @@ class TestWheelBuilds:
             assert str(Path.home() / ".cargo" / "bin") in env["PATH"]
         assert runner.pip_calls() == []
         # One "ok" per WHEEL_SET member (4 since the DEC-RUST-RUNID-STORES-001
-        # #1954 merge-forward added the required brutex-identity wheel).
+        # #1962 merge-forward added the required brutex-identity wheel).
         assert [w.result for w in out.wheels] == ["ok"] * len(WHEEL_SET)
 
     def test_restore_porcelain_read_after_every_maturin_call(self, tmp_path: Path) -> None:

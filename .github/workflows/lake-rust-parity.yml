@@ -79,7 +79,7 @@ on:
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
       # Window-ledger store (its render plane is superseded by
-      # DEC-RUST-RUNID-STORES-001, ledger #1954 — the G10 CONVERT seam is
+      # DEC-RUST-RUNID-STORES-001, ledger #1962 — the G10 CONVERT seam is
       # RETIRED); the path entries are kept for the G8 pure-law suite +
       # lane co-triggering.
       - "brutex/data/window_ledger_store.py"
@@ -135,7 +135,7 @@ on:
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
       # Window-ledger store (its render plane is superseded by
-      # DEC-RUST-RUNID-STORES-001, ledger #1954 — the G10 CONVERT seam is
+      # DEC-RUST-RUNID-STORES-001, ledger #1962 — the G10 CONVERT seam is
       # RETIRED); the path entries are kept for the G8 pure-law suite +
       # lane co-triggering.
       - "brutex/data/window_ledger_store.py"

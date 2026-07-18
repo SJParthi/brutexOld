@@ -5,13 +5,20 @@ DEC-RUST-RUNID-STORES-001. The fixture
 LAST all-Python implementation of the four converted surfaces — BEFORE the
 ``brutex_identity`` kernel existed — and is never regenerated silently
 (``BRUTEX_REGEN_RUNID_ORACLE`` guard). This test drives the CURRENT
-(Rust-backed) implementations over the SAME input corpora (imported from the
+implementations — Rust-backed (``brutex_identity``) for the snapshot / store
+/ ledger surfaces; the strategies-owned ``brutex.strategies.combo`` path for
+the canonical/combo sections — over the SAME input corpora (imported from the
 generator — ONE source, CLAUDE.md §11 COMMON) and asserts every captured
 output byte-for-byte, proving the conversion changed no observable value on:
 
 * ``canonicalise_params`` — the canonical-JSON byte law (CPython ``repr``
-  floats, ``json.dumps`` sorted/compact/``ensure_ascii`` escaping);
-* ``combo_hash`` — the 9-field BLAKE3 run identity (Golden Rule #4);
+  floats, ``json.dumps`` sorted/compact/``ensure_ascii`` escaping) — driven
+  through the PUBLIC ``brutex.strategies.combo`` path, which since the
+  2026-07-18 crate-ownership ruling is OWNED by the strategies lane
+  (DEC-STRATEGIES-RUST-COMBO-001 #1955; combo construction is a strategies
+  concern — this lane's run-identity proof CONSUMES the bytes, end-to-end);
+* ``combo_hash`` — the 9-field BLAKE3 run identity (Golden Rule #4; same
+  public-path/ownership note as above);
 * ``data_snapshot_hash`` — the streamed ``bxsnap2`` digest;
 * the results-store append/VIX-merge/conflict law + ``top_k`` ordering;
 * the window-ledger merge-on-save law + the legacy-column derivations + the
