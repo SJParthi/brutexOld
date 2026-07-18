@@ -2594,3 +2594,66 @@ def test_cmd_fetch_dry_run_threads_today_gate_false(
     assert rc == cli.EXIT_OK
     assert captured
     assert all(flag is False for flag in captured)
+
+
+def test_cmd_fetch_live_overlay_hoisted_above_the_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-SEED-OBSERVED-OVERLAY-001 ordering spy: the CLI loads the overlay ONCE,
+    strictly BEFORE the cold-start reconcile, and the SAME snapshot reaches the
+    seed gate (``observed=``) AND the ingest spine (``observed_holidays=``)."""
+    from brutex.data import window_ledger_store as store_module
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    expected = _write_overlay_sidecar(tmp_path)
+    order: list[str] = []
+    seed_observed: list[Any] = []
+    observed_sessions = importlib.import_module("brutex.calendars.observed_sessions")
+    real_load = observed_sessions.load_observed_holidays
+    real_reconcile = store_module.reconcile_ledger_with_lake
+
+    def _load_spy(root: Path) -> Any:
+        order.append("load")
+        return real_load(root)
+
+    def _reconcile_spy(*args: Any, **kwargs: Any) -> int:
+        order.append("reconcile")
+        seed_observed.append(kwargs.get("observed"))
+        return real_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(observed_sessions, "load_observed_holidays", _load_spy)
+    monkeypatch.setattr(store_module, "reconcile_ledger_with_lake", _reconcile_spy)
+    ingest_observed = _spy_ingest_observed(monkeypatch)
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            _RealVendorSpotAdapter(bars_per_window=2),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    assert rc == cli.EXIT_OK
+    # ONE load per pull, strictly BEFORE the reconcile (the hoist).
+    assert order.count("load") == 1
+    assert "reconcile" in order
+    assert order.index("load") < order.index("reconcile")
+    # ONE consistent snapshot — the seed gate AND the detectors read the same set.
+    assert seed_observed == [expected]
+    assert ingest_observed and all(observed == expected for observed in ingest_observed)

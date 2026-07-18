@@ -46,11 +46,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-#: The four lifecycle states a sweep moves through.
+#: The five lifecycle states a sweep moves through.
 STATE_IDLE: Final[str] = "idle"
 STATE_RUNNING: Final[str] = "running"
 STATE_DONE: Final[str] = "done"
 STATE_ERROR: Final[str] = "error"
+#: Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the sweep
+#: stopped CLEANLY at the tuple boundary — a resumable checkpoint, never a
+#: failure (``error`` stays reserved for genuine aborts).
+STATE_CANCELLED: Final[str] = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +65,7 @@ class SweepProgressSnapshot:
     ----------
     state
         One of :data:`STATE_IDLE` / :data:`STATE_RUNNING` / :data:`STATE_DONE`
-        / :data:`STATE_ERROR`.
+        / :data:`STATE_ERROR` / :data:`STATE_CANCELLED`.
     enumerated
         Total combos the sweep intends to evaluate (``0`` before
         :meth:`SweepProgress.start`). The percent / ETA denominator.
@@ -254,6 +258,19 @@ class SweepProgress:
             self._detail = detail
             self._updated_at = self._clock()
 
+    def cancelled(self, detail: str) -> None:
+        """Mark the sweep operator-CANCELLED (``cancelled``) with a reason — O(1).
+
+        DEC-JOB-COOPERATIVE-CANCEL-001: the cooperative twin of :meth:`fail` —
+        the run stopped CLEANLY at the tuple boundary with a resumable
+        checkpoint, so the terminal state is honest ``cancelled``, never a red
+        ``error`` (and never a fabricated ``done``).
+        """
+        with self._lock:
+            self._state = STATE_CANCELLED
+            self._detail = detail
+            self._updated_at = self._clock()
+
     def snapshot(self) -> SweepProgressSnapshot:
         """Return an immutable, consistent O(1) view of the current state."""
         with self._lock:
@@ -271,6 +288,7 @@ class SweepProgress:
 
 
 __all__ = [
+    "STATE_CANCELLED",
     "STATE_DONE",
     "STATE_ERROR",
     "STATE_IDLE",

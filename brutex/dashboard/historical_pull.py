@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
@@ -108,6 +109,8 @@ from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    CancelCheck,
+    PullCancelled,
     PullStep,
     PullVerdict,
     StepOrderMonitor,
@@ -882,6 +885,7 @@ def _build_note(
     greeks_enrich_error: str | None = None,
     class_unresolved: int = 0,
     greeks_strict_withheld: bool = False,
+    greeks_cancel_withheld: bool = False,
     contracts_step_filtered: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
@@ -933,6 +937,15 @@ def _build_note(
     a FAILED verdict (nothing ran, nothing is lost — the overlay is
     re-derivable). The ``False`` default renders byte-identically to before.
 
+    *greeks_cancel_withheld* (DEC-JOB-COOPERATIVE-CANCEL-001, combined-PR fix
+    round 2): ``True`` appends ", Greeks enrichment withheld (cancelled) —
+    re-attempted next pull" — an operator cancel withheld the post-pull tail
+    (L2 heal + Greeks) so the stop honours its latency contract. NEVER a
+    FAILED verdict (the overlay is re-derivable; the next pull re-attempts).
+    Mutually exclusive with the strict clause by construction (a cancelled
+    tail never reaches the strict gate). The ``False`` default renders
+    byte-identically to before.
+
     *contracts_step_filtered* (DEC-STAGED-SEQUENCER-SEAMS-001): a positive
     count appends ", N contract(s) outside the step filter skipped (pulled by
     their own stage invocation)" — the honest step-scoped-invocation clause
@@ -975,6 +988,10 @@ def _build_note(
         # DEC-PULL-SIX-STEP-ORDER-001: the strict-withheld pass is NAMED (never
         # silence, never FAILED — the pass did not run; ok stays None).
         greeks_suffix = ", Greeks enrichment withheld (strict gate) — re-attempted next pull"
+    if greeks_cancel_withheld:
+        # DEC-JOB-COOPERATIVE-CANCEL-001 (fix round 2): the cancel-withheld tail
+        # is NAMED too (mutually exclusive with the strict clause by construction).
+        greeks_suffix = ", Greeks enrichment withheld (cancelled) — re-attempted next pull"
     if contracts_selected == 0 and contracts_out_of_scope:
         base = (
             f"all {contracts_out_of_scope} selected contract(s) across "
@@ -1199,9 +1216,20 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
+    should_stop: CancelCheck | None = None,
     ledger: WindowLedger | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is threaded verbatim into every
+    :func:`run_groww_option_ingest` pass — checked per ``(contract, interval)``
+    pair (the F&O window boundary) — and its propagated
+    :class:`~brutex.adapters.ingest_common.PullCancelled` is CAUGHT at the bucket
+    loop (like the mass-empty halt, but with NO Telegram alert — the operator
+    asked): the remaining steps are announced ``pull.step.halted``
+    (``reason="cancelled"``), the ``finally`` drains the pipeline + persists the
+    ledger, so a cancelled phase's on-disk state ≡ a graceful stop at that
+    boundary. ``None`` (every legacy caller) is byte-identical.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
@@ -1259,6 +1287,16 @@ def _run_phase(
     # spent only on a real pull.
     census_spans: Sequence[dict[str, Any]] = []
     census_rows: list[tuple[Any, ...]] = []
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+    # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per phase — HOISTED ABOVE the F&O
+    # cold-start reconcile so the seed and the FUTURES partial-window observe judge
+    # ONE consistent overlay snapshot; threaded into the detectors' margin
+    # arithmetic + the (documented-INERT, symmetry-pinned) F&O seed gate ONLY — an
+    # observed holiday is not a data hole — NEVER into window planning / the
+    # 30d/60d window law. A dry-run threads the empty overlay (the
+    # ``capture_hook_factory`` gating pattern); the loader never raises
+    # (missing/corrupt -> empty).
+    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
     if ledger is not None:
         spans = load_lake_spans(lake_root)
         # Buckets REFINE (never cross) the market split, so the per-bucket
@@ -1278,6 +1316,7 @@ def _run_phase(
                 end=end,
                 market=reconcile_market,
                 contract_windows=contract_windows,
+                observed=observed_holidays,
                 span_index=span_index,
             )
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
@@ -1348,12 +1387,9 @@ def _run_phase(
     # to ``False`` WITHOUT touching the env (belt — the F&O dry-run client returns
     # EMPTY payloads, so the gate could never fire offline anyway).
     today_gate = (not dry_run) and resolve_today_completeness_enabled()
-    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
-    # phase and threaded into the FUTURES partial-window observe margin ONLY (an
-    # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
-    # window law. A dry-run threads the empty overlay (the ``capture_hook_factory``
-    # gating pattern); the loader never raises (missing/corrupt -> empty).
-    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+    # (The observed-sessions overlay was loaded ONCE above, before the F&O
+    # reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME snapshot feeds the
+    # FUTURES partial-window observe below.)
     # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
     # REAL live pull (a dry-run threads None — the same gating as the storm
     # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O
@@ -1362,6 +1398,20 @@ def _run_phase(
     # healthy canary means the mass empties are genuine (a 2020-era dead chain
     # at the bucket head), so the phase continues instead of false-halting.
     breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
+    # ONE mass ALL-FILTERED breaker per PHASE (DEC-ALLFILTERED-MASS-BREAKER-001,
+    # review round 4 — supersedes the round-3 per-pass resolve): resolved HERE —
+    # not per until-clean round — so the trip LATCHES across EVERY round's market
+    # buckets of this pull's F&O phase. A per-pass fresh instance broke the
+    # alarm's pull-wide promise: a retry round re-attempts exactly the FAILED
+    # windows the tripped prior round suppressed, and when that re-attempt set
+    # sits below the observation/series floors its fresh breaker never tripped —
+    # a suppressed window bumped to threshold and settled SKIPPED post-alarm,
+    # un-rescinded (the spot spine's identical round-4 leak). Round 3's
+    # cross-bucket pooling is preserved (the SAME instance feeds every
+    # `run_groww_option_ingest` bucket call below); a fresh PHASE still starts
+    # clean (Golden Rule #7 — no state leak across pulls), and a dry-run stays
+    # ineligible by construction (empty payloads → raw_bars == 0).
+    af_breaker = resolve_all_filtered_breaker()
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional).
@@ -1420,6 +1470,12 @@ def _run_phase(
             _progress(label, bars, failed)
             step_monitor.observe_write(step, symbol=label)
 
+        # The ONE phase-scoped mass ALL-FILTERED breaker — `af_breaker`, resolved
+        # ABOVE the bucket/round loops (review round 4) — is injected into EVERY
+        # bucket call, so the futures + options buckets of EVERY step and EVERY
+        # until-clean round POOL their evidence into ONE latched counter
+        # (review round 3), unchanged by the step-major split of
+        # DEC-PULL-SIX-STEP-ORDER-001.
         try:
             report: GrowwOptionIngestReport = run_groww_option_ingest(
                 client,
@@ -1442,6 +1498,7 @@ def _run_phase(
                 write_pool=write_pool,
                 fetch_pipeline=fetch_pipeline,
                 observed_holidays=observed_holidays,
+                all_filtered_breaker=af_breaker,
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
                 market_closed=market_closed,
@@ -1455,6 +1512,7 @@ def _run_phase(
                 # Pre-settle TODAY minute-completeness gate
                 # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                 today_completeness_gate=today_gate,
+                should_stop=should_stop,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1633,6 +1691,30 @@ def _run_phase(
             )
             if step_auth:
                 auth_latched = True
+    except PullCancelled as exc:
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spine
+        # raised at a (contract, interval) window boundary. Everything already
+        # committed survives (bars via the sink; window records via the finally's
+        # drain + ledger persist below); every un-fetched window stays
+        # PLANNED/unsettled — idempotently re-pulled next time. Deliberately NO
+        # Telegram alert (the operator asked for this stop); the sequencer's
+        # between-phase probe carries the "cancelled" attribution to the report.
+        _LOG.warning(
+            "historical.pull.cancelled",
+            error=str(exc),
+            note=(
+                "operator cancel at the window boundary — committed work kept; "
+                "the next pull resumes the remaining windows"
+            ),
+        )
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="cancelled",
+            )
     except MassEmptySettleHalt as exc:
         # The mass-empty circuit breaker TRIPPED mid-phase (DEC-EMPTY-WINDOW-CIRCUIT-
         # BREAKER-001 minor M-5 — the F&O bulk route's polished halt, mirroring the
@@ -1898,6 +1980,21 @@ _GREEKS_STRICT_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
     ok=None, error=None, errored_targets=0
 )
 
+#: The operator-cancel WITHHELD outcome (DEC-JOB-COOPERATIVE-CANCEL-001, combined-PR
+#: fix round 2): a cooperative cancel observed AFTER the 1-minute phase settles
+#: withholds the post-pull tail — the O(pulled-scope) L2 heal AND the FULL Greeks
+#: enrichment pass — so the stop-latency contract ("finishing the current window,
+#: then stop") holds instead of silently running a potentially-hours-long tail.
+#: SAFE by construction: the L2 heal is best-effort (the next pull's L2 + the
+#: L1/L3 sweeps cover the slice) and the overlay is re-derivable (the next pull's
+#: stamp-gated enrich pass re-attempts it — exactly the ``_GREEKS_STRICT_WITHHELD``
+#: precedent). ``ok=None`` — the pass did NOT run; never a FAILED verdict. A
+#: DISTINCT instance so the caller's identity check can never collide with the
+#: module-level ``GREEKS_NOT_RUN`` / the strict-withheld sentinel.
+_GREEKS_CANCEL_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
+    ok=None, error=None, errored_targets=0
+)
+
 
 def _heal_lake_after_pull(
     *,
@@ -2075,6 +2172,7 @@ def pull_contract_candles(
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    should_stop: CancelCheck | None = None,
     ledger: WindowLedger | None = None,
     step_filter: Collection[PullStep] | None = None,
 ) -> HistoricalPullReport:
@@ -2243,6 +2341,17 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         is re-derivable, the next pull re-attempts). ``None`` (every
         non-pipeline caller — the /db selection route, tests) keeps today's
         best-effort behavior byte-identical.
+    should_stop
+        Optional cooperative-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001):
+        threaded into the F&O spine and checked BEFORE every
+        ``(contract, interval)`` window's vendor fetch, AND re-consulted after
+        the phase settles (combined-PR fix round 2) so a cancelled pull also
+        WITHHOLDS the post-pull tail — the O(pulled-scope) L2 heal + the FULL
+        Greeks-enrichment pass (`_GREEKS_CANCEL_WITHHELD`; the note reads
+        "withheld (cancelled) — re-attempted next pull"). Nothing is lost:
+        the next pull's L2 heal (+ L1/L3) covers the slice and the
+        stamp-gated enrich pass re-attempts the re-derivable overlay.
+        ``None`` (every legacy caller) is byte-identical.
     ledger
         Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
         to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
@@ -2501,6 +2610,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
                 form_preference=form_preference,
+                should_stop=should_stop,
                 # Shared pipeline ledger seam (DEC-LEDGER-LOAD-SPACE-V1-001):
                 # an injected instance skips _run_phase's own full-ledger load.
                 ledger=ledger,
@@ -2578,11 +2688,29 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
     contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
 
     greeks_outcome = _GREEKS_NOT_RUN
-    if not dry_run:
+    # DEC-JOB-COOPERATIVE-CANCEL-001 (combined-PR fix round 2): re-consult the
+    # cancel token AFTER the phase settled (the token is per-run and stays set).
+    # A cancelled pull previously ran the O(pulled-scope) L2 heal + the FULL
+    # Greeks-enrichment tail below — contradicting the "finishing current
+    # window, then stop" latency contract at every claim site. On cancel BOTH
+    # are WITHHELD (never a data loss: the next pull's L2 heal — plus L1/L3 —
+    # covers the slice, and the stamp-gated enrich pass re-attempts the
+    # re-derivable overlay), the withholding is NAMED on the note.
+    cancelled_tail = should_stop is not None and should_stop()
+    if not dry_run and cancelled_tail:
+        _LOG.warning(
+            "historical.pull.cancel_tail_skipped",
+            note=(
+                "operator cancel — post-pull L2 heal + Greeks enrichment withheld; "
+                "the next pull heals the slice and re-attempts the overlay"
+            ),
+        )
+        greeks_outcome = _GREEKS_CANCEL_WITHHELD
+    elif not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
         # Greeks enrichment below (and the pipeline's later prebuild phase)
         # reads clean 1-minute (LakeWriteHalt re-raises). Integrity, NOT a
-        # post-step — it always runs, strict gate or not.
+        # post-step — it always runs on an un-cancelled pull, strict gate or not.
         _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
         # The strict Greeks arm (DEC-PULL-SIX-STEP-ORDER-001): the literal
         # all-or-nothing barrier needs BOTH the threaded prior-step verdict
@@ -2640,6 +2768,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         greeks_enrich_error=greeks_outcome.error,
         class_unresolved=class_unresolved,
         greeks_strict_withheld=greeks_outcome is _GREEKS_STRICT_WITHHELD,
+        greeks_cancel_withheld=greeks_outcome is _GREEKS_CANCEL_WITHHELD,
         contracts_step_filtered=contracts_step_filtered,
     )
     return HistoricalPullReport(

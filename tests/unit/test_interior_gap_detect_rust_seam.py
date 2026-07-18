@@ -132,6 +132,49 @@ class TestFlagOnFakeCrate:
         bare = _interior_barless_runs_python(covered)
         assert routed[0][2] == bare[0][2] - 1
 
+    def test_covered_overlaid_date_breaks_the_run_in_both_arms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The hypothesis differential's falsifying case (covered Jan 1/3/5
+        # 2024, overlay Jan 1/3): the covered+overlaid Jan 3 must BREAK the
+        # run on BOTH arms — the oracle's covered-breaks-static law
+        # (DEC-SEED-OBSERVED-OVERLAY-001 review fold: bars beat a stale
+        # overlay entry, which can never MERGE the two flanking runs). The
+        # pre-fix payload factory consulted the overlay for covered dates,
+        # dropped Jan 3 from the session ordinals, and the crate merged the
+        # flanks into one 2-session run. remaining=0 (steady state) so the
+        # crate value genuinely SHIPS — under burn-in the autorevert would
+        # mask a payload divergence by shipping the oracle (fails-before
+        # verified at the pre-fix payload under exactly this pin).
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, fake_detectors_crate())
+        dr.reset_detectors_rust_for_tests(remaining=0)
+        covered = [date(2024, 1, 1), date(2024, 1, 3), date(2024, 1, 5)]
+        observed = frozenset({date(2024, 1, 1), date(2024, 1, 3)})
+        routed = _interior_barless_runs(covered, observed)
+        assert routed == _interior_barless_runs_python(covered, observed)
+        assert routed == [
+            (date(2024, 1, 2), date(2024, 1, 2), 1),
+            (date(2024, 1, 4), date(2024, 1, 4), 1),
+        ]
+
+    def test_covered_nonsession_leak_stays_inert_in_the_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A covered date the STATIC calendar calls a NON-session (a legacy
+        # weekend bar leak — Sat 2021-03-06) enters NEITHER arm's session
+        # list: it neither breaks nor extends a run on either arm (the
+        # covered-breaks-static law's inert half). remaining=0 (steady
+        # state) so the crate value genuinely SHIPS — under burn-in the
+        # autorevert would mask a payload divergence by shipping the oracle.
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, fake_detectors_crate())
+        dr.reset_detectors_rust_for_tests(remaining=0)
+        covered = [date(2021, 3, 5), date(2021, 3, 6), date(2021, 3, 10)]
+        routed = _interior_barless_runs(covered)
+        assert routed == _interior_barless_runs_python(covered)
+        assert routed == [(date(2021, 3, 8), date(2021, 3, 9), 2)]
+
     def test_interior_gap_runs_bounds_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
         _install_crate(monkeypatch, fake_detectors_crate())
