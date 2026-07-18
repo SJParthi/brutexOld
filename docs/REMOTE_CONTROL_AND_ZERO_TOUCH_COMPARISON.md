@@ -221,6 +221,9 @@ esac
   <key>EnvironmentVariables</key><dict>
     <key>BRUTEX_LAKE_ROOT</key><string>/Volumes/brutex-lake/lake</string>
     <key>BRUTEX_TELEGRAM_ENABLED</key><string>true</string>
+    <!-- master opt-in (DEC-AUTO-RESUME-DEFAULT-OFF-001, default OFF):
+         boot auto-resume arms ONLY when BRUTEX_AUTO_RESUME=1 is set -->
+    <key>BRUTEX_AUTO_RESUME</key><string>1</string>
     <key>BRUTEX_AUTO_RESUME_ON_BOOT</key><string>1</string>
     <key>TZ</key><string>Asia/Kolkata</string>
   </dict>
@@ -299,7 +302,7 @@ curl -sf --max-time 8 "http://127.0.0.1:9080/api/v1/state" >/dev/null \
 3. **Power/boot floor (sudo):** run the pmset-harden block + install the re-assert plist.
 4. **Tailscale:** install as system daemon; `tailscale up` (reusable key, **disable key-expiry**); `tailscale serve --bg --https=443 http://127.0.0.1:9080`; bookmark the MagicDNS name **and** the 100.x IP.
 5. **Secrets:** TOTP secret in a `0600` file (NOT login-keychain, NOT env var) or the AWS minter; gitleaks pre-commit; enable `BRUTEX_TELEGRAM_ENABLED=true` (verify `brutex notify test`).
-6. **Supervisor fleet:** drop the wrapper + 6 plists; `launchctl bootstrap`; grant Full-Disk-Access to the venv python; `BRUTEX_AUTO_RESUME_ON_BOOT=1`.
+6. **Supervisor fleet:** drop the wrapper + 6 plists; `launchctl bootstrap`; grant Full-Disk-Access to the venv python; `BRUTEX_AUTO_RESUME=1` (the master opt-in — boot auto-resume is OFF by default, DEC-AUTO-RESUME-DEFAULT-OFF-001) + `BRUTEX_AUTO_RESUME_ON_BOOT=1`.
 7. **External dead-man switch:** healthchecks.io check (period 2m/grace 10m) → Telegram/push. **Do NOT skip — this is the keystone.**
 8. **Backups:** restic/rclone to S3 Object-Lock (or B2 immutable) + local snapshots; run the pull as a non-admin dir-scoped account.
 9. **Phone side:** Tailscale Always-on VPN + battery exemption; bookmark the dashboard; install Telegram + Claude app; set up `tailscale ssh`.
@@ -327,7 +330,7 @@ curl -sf --max-time 8 "http://127.0.0.1:9080/api/v1/state" >/dev/null \
 
 ### C.10 — The honest guarantee (Golden Rule #10)
 
-- **✅ GUARANTEED zero-touch** (once armed): Groww 06:00 token reset · transient vendor errors (429/5xx/empty/malformed) · corrupt-partition quarantine + re-pull · partial/interior-gap window demote+re-pull · disk-full/OOM graceful halt (no torn data) · wedged fsync (hung-write deadline) · concurrent-writer races (flock) · process crash (ledger + KeepAlive + auto-resume, bit-identical) · WAN-IP change/CGNAT (Tailscale) · soft SSD remount · slept Mac on AC lid-open (caffeinate) · **total death at least ANNOUNCED** via the dead-man switch.
+- **✅ GUARANTEED zero-touch** (once armed): Groww 06:00 token reset · transient vendor errors (429/5xx/empty/malformed) · corrupt-partition quarantine + re-pull · partial/interior-gap window demote+re-pull · disk-full/OOM graceful halt (no torn data) · wedged fsync (hung-write deadline) · concurrent-writer races (flock) · process crash (ledger + KeepAlive + auto-resume, bit-identical — auto-resume needs the explicit `BRUTEX_AUTO_RESUME=1` master opt-in, OFF by default) · WAN-IP change/CGNAT (Tailscale) · soft SSD remount · slept Mac on AC lid-open (caffeinate) · **total death at least ANNOUNCED** via the dead-man switch.
 - **🟡 BEST-EFFORT** (caveat, not a promise): completeness of an unfinished night (resume scheduler — unbuilt) · stall *detection* (needs a work-delta signal) · clamshell/battery keep-awake (physical) · bit-rot (scrub catches re-pullable ranges only) · alert delivery through an outage (durable retry — unbuilt) · Claude-RC continuity (degrades to dashboard).
 - **❌ TRULY NEEDS A HUMAN** (physical/security floor): FileVault unlock after an unplanned reboot · mains power · single-WAN ISP outage · fried/unplugged hardware/dead RTC · Groww ban / vendor 2FA / re-mint a revoked secret · first-time TCC/OAuth/extension grants.
 - **CURRENT-STATE CAVEAT:** the app-layer resilience is **largely real today**, but Telegram defaults **OFF**, the repo ships only a **sweep-only** LaunchAgent, and the **dead-man switch + per-service supervisors + resume scheduler + dashboard-auth are DESIGNS to build**. So **"~90–95 % zero-touch" is the honest target after the bootstrap is done and each recovery path is actually exercised** — not an out-of-the-box guarantee.

@@ -1999,7 +1999,9 @@ class TestRunner:
             "resumed_from",
             "dry_run",
             "note",
+            "cancelled",
         }
+        assert payload["cancelled"] is False  # an uncancelled run reads False
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -2365,3 +2367,226 @@ class TestModuleDocstringHonesty:
         # The reworded sentence NAMES the real engine-visible change.
         assert "sweep_checkpoint" in flat and "fail-loud corruption refusals" in flat
         assert "NIFTY/BANKNIFTY/SENSEX" in flat  # the scope claim that IS true stays
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Runner — cooperative operator cancel (DEC-JOB-CANCEL-CONTROL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _StopAfter:
+    """A ``should_stop`` probe scripted to read ``True`` after N consultations."""
+
+    def __init__(self, after: int) -> None:
+        self.after = after
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return self.calls > self.after
+
+
+class TestRunnerCancel:
+    """DEC-JOB-CANCEL-CONTROL-001 — the Greeks-backfill arm of the
+    DEC-JOB-COOPERATIVE-CANCEL-001 mechanism: ``run_greeks_backfill``'s
+    ``should_stop`` probe is consulted at the BETWEEN-BATCHES boundary ONLY,
+    the in-flight batch always lands its driver call + checkpoint record
+    first, a cancelled run returns an honest ``cancelled=True`` report
+    (never a raise, never an error), and the frozen checkpoint stays
+    ADOPTABLE for the next same-plan run.
+    """
+
+    def test_cancel_before_first_batch_runs_zero_batches(self, lake: Path) -> None:
+        """A cancel already pending at entry (the mid-SCAN ack shape — the scan
+        has no interior probe, so a Stop acked during it lands exactly here,
+        at the FIRST batch boundary): ZERO driver calls, honest note."""
+        from structlog.testing import capture_logs
+
+        spy = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake,
+                plan=_plan(4),
+                rate_source=_RATE,
+                batch_size=2,
+                enrich=spy,
+                should_stop=lambda: True,
+            )
+        assert spy.calls == []  # never mid-batch — nothing was in flight
+        assert report.cancelled is True and report.batches == 0
+        assert report.enriched == 0 and report.bars_written == 0
+        assert "CANCELLED by operator at contract 0/4" in report.note
+        # Nothing was recorded, so there is no checkpoint to keep — and the
+        # cancel wrote none (no fabricated resume state).
+        assert not checkpoint_path(lake).exists()
+        # HOSTILE-REVIEW REGRESSION (#1748 fix round): with NO file on disk
+        # the note takes the honest no-checkpoint arm — it must NOT claim
+        # "checkpoint kept" for a file that does not exist (the pre-fix note
+        # did, unconditionally). Resume stays correct via the stored stamps.
+        assert "resumable" in report.note
+        assert "checkpoint kept" not in report.note
+        assert "no checkpoint recorded" in report.note
+        assert "resume correct via stored stamps" in report.note
+        cancelled_logs = [r for r in logs if r["event"] == "greeks_backfill.cancelled"]
+        assert len(cancelled_logs) == 1
+        assert cancelled_logs[0]["completed"] == 0 and cancelled_logs[0]["total"] == 4
+        # The log field is branched on the SAME on-disk truth as the note.
+        checkpoint_field = str(cancelled_logs[0]["checkpoint"])
+        assert "none recorded" in checkpoint_field and "kept" not in checkpoint_field
+
+    def test_cancel_between_batches_completes_inflight_batch(self, lake: Path) -> None:
+        """A cancel acked while batch 1 runs lands at the boundary: batch 1's
+        driver call + clean-prefix checkpoint record complete DURABLY first,
+        batch 2 never starts, and the checkpoint file is KEPT (the
+        clean-completion unlink is skipped)."""
+        from structlog.testing import capture_logs
+
+        plan = _plan(4)
+        stop = _StopAfter(1)  # boundary 1 → False (batch 1 runs), boundary 2 → True
+        spy = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy, should_stop=stop
+            )
+        assert [len(c) for c in spy.calls] == [2]  # the in-flight batch completed
+        assert report.cancelled is True and report.batches == 1
+        assert report.enriched == 2
+        assert "CANCELLED by operator at contract 2/4" in report.note
+        # HOSTILE-REVIEW pin (#1748 fix round): a frozen file genuinely
+        # survives HERE, so this arm — and only this arm — claims it (the
+        # note branch keys on the on-disk truth, never unconditionally).
+        assert "resumable (checkpoint kept; re-run to resume)" in report.note
+        assert "no checkpoint recorded" not in report.note
+        cancelled_logs = [r for r in logs if r["event"] == "greeks_backfill.cancelled"]
+        assert len(cancelled_logs) == 1
+        assert "kept (frozen at the last clean prefix)" in str(cancelled_logs[0]["checkpoint"])
+        # The checkpoint survives, frozen at batch 1's fully-clean prefix.
+        assert checkpoint_path(lake).exists()
+        store = SweepCheckpointStore(
+            path=checkpoint_path(lake),
+            sweep_id=plan.backfill_id,
+            total_combos=len(plan.targets),
+        )
+        assert store.load() is not None
+        assert store.next_index == 2  # exactly the recorded clean prefix
+
+    def test_cancel_then_resume_adopts_same_plan_checkpoint(self, lake: Path) -> None:
+        """MANDATORY PIN (coordinator-required): cancel → same-plan re-run
+        ADOPTS the frozen checkpoint and resumes PAST the recorded prefix.
+
+        The round-10 adoption interaction under test: the cancelled run's
+        batch 1 WROTE bars, so its OWN ``revision_marker`` touch (stamped with
+        this plan's ``backfill_id``) exists at/after the checkpoint's
+        ``updated_at`` — ``_checkpoint_superseded_reason`` must treat that
+        own-plan touch as IDENTITY-EXEMPT (never a trip), so the resume
+        adopts instead of discarding to a fresh start.
+        """
+        from structlog.testing import capture_logs
+
+        plan = _plan(6)
+        first = _SpyEnrich()
+        report1 = run_greeks_backfill(
+            lake,
+            plan=plan,
+            rate_source=_RATE,
+            batch_size=2,
+            enrich=first,
+            should_stop=_StopAfter(1),
+        )
+        assert report1.cancelled is True and report1.batches == 1
+        assert checkpoint_path(lake).exists()
+        # The round-10 precondition really holds: the own-plan marker touch landed.
+        assert revision_marker_path(lake).exists()
+        resumed = _SpyEnrich()
+        with capture_logs() as logs:
+            report2 = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=resumed
+            )
+        # ADOPTED — never discarded: no checkpoint_ignored trip fired …
+        assert not [r for r in logs if r["event"] == "greeks_backfill.checkpoint_ignored"]
+        # … and the resume starts strictly PAST the recorded clean prefix.
+        assert report2.resumed_from == 2
+        assert resumed.calls == [list(plan.targets[2:4]), list(plan.targets[4:6])]
+        assert report2.cancelled is False
+        assert "resumed from target 2" in report2.note
+        assert "CANCELLED" not in report2.note
+        # Clean completion deletes the adopted checkpoint as always.
+        assert not checkpoint_path(lake).exists()
+
+    def test_cancel_with_errored_prefix_keeps_frozen_checkpoint(self, lake: Path) -> None:
+        """A cancel AFTER an errored batch adds nothing to the round-3 freeze:
+        no record was ever written past the errored contract, the cancel
+        deletes nothing, and the next run re-feeds from index 0."""
+        plan = _plan(4)
+        spy = _SpyEnrich(
+            reports=[_enrich_report(enriched=0, errored=1, bars_written=0, bars_solved=0)]
+        )
+        report = run_greeks_backfill(
+            lake,
+            plan=plan,
+            rate_source=_RATE,
+            batch_size=1,
+            enrich=spy,
+            should_stop=_StopAfter(2),  # batches 1 (errored) + 2 (clean) run, then Stop
+        )
+        assert report.cancelled is True and report.batches == 2
+        assert report.errored == 1
+        # The round-3 freeze stands: the errored prefix was never recorded,
+        # so there is no checkpoint file — the cancel neither wrote nor kept one.
+        assert not checkpoint_path(lake).exists()
+        # HOSTILE-REVIEW pin (#1748 fix round): the errored-prefix cancel is
+        # the SECOND no-file shape — the note must take the honest
+        # no-checkpoint arm here too, never claim a kept file.
+        assert "checkpoint kept" not in report.note
+        assert "no checkpoint recorded" in report.note
+        resumed = _SpyEnrich()
+        report2 = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=resumed
+        )
+        assert report2.resumed_from == 0  # the errored contract IS re-fed
+        assert [len(c) for c in resumed.calls] == [1, 1, 1, 1]
+
+    def test_never_firing_probe_is_byte_identical_to_no_probe(self, lake: Path) -> None:
+        """The default-None parity law: a wired-but-never-firing probe changes
+        NOTHING — the frozen report (every field incl. the note) equals the
+        probe-less run's, and the probe is consulted exactly once per batch
+        boundary (cost honesty: O(batches) consultations, never per contract)."""
+        consultations: list[int] = []
+
+        def _never() -> bool:
+            consultations.append(1)
+            return False
+
+        with_probe = run_greeks_backfill(
+            lake,
+            plan=_plan(3),
+            rate_source=_RATE,
+            batch_size=2,
+            enrich=_SpyEnrich(),
+            should_stop=_never,
+        )
+        baseline = run_greeks_backfill(
+            lake, plan=_plan(3), rate_source=_RATE, batch_size=2, enrich=_SpyEnrich()
+        )
+        assert with_probe == baseline  # frozen-dataclass equality — every field
+        assert with_probe.cancelled is False
+        assert "CANCELLED" not in with_probe.note
+        assert len(consultations) == 2  # batches of 2+1 → two boundaries
+        assert not checkpoint_path(lake).exists()
+
+    def test_cancelled_report_to_dict_carries_cancelled_true(self, lake: Path) -> None:
+        report = run_greeks_backfill(
+            lake,
+            plan=_plan(2),
+            rate_source=_RATE,
+            batch_size=1,
+            enrich=_SpyEnrich(),
+            should_stop=lambda: True,
+        )
+        assert report.to_dict()["cancelled"] is True
+
+    def test_dry_run_report_defaults_cancelled_false(self) -> None:
+        """The additive defaulted field: the dry-run constructor (which never
+        passes ``cancelled``) stays byte-compatible."""
+        assert dry_run_backfill_report(_plan(2)).cancelled is False
+        assert dry_run_backfill_report(_plan(2)).to_dict()["cancelled"] is False

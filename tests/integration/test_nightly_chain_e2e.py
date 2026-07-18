@@ -93,8 +93,8 @@ class FakePipeline:
 
 
 @contextmanager
-def _noop_keep_awake(reason: str) -> Generator[None]:
-    yield
+def _noop_keep_awake(reason: str) -> Generator[bool]:
+    yield False
 
 
 def _fixture_lake(tmp_path: Path) -> tuple[Path, Path]:
