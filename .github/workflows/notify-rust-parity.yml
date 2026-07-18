@@ -1,6 +1,6 @@
 # notify-rust-parity.yml — the brutex-notify crate build + flag-ON parity lane.
 #
-# DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1955). The notification pure-law
+# DEC-NOTIFY-RUST-CORE-001 (MIGRATION.md #1957). The notification pure-law
 # seams are DEFAULT-OFF behind BRUTEX_NOTIFY_RUST and the main CI test job
 # deliberately never installs the crate (the facade degrades loudly to the
 # Python oracle when it is absent), so this dedicated lane is where the

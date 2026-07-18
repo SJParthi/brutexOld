@@ -1,6 +1,6 @@
 """Tests for the ``notify_rust`` routing facade (DEC-NOTIFY-RUST-CORE-001).
 
-MIGRATION.md #1955. Yields 100% line + branch on
+MIGRATION.md #1957. Yields 100% line + branch on
 ``brutex/notifications/notify_rust.py`` ALONE (the discovery-gate contract):
 the flag matrix, the ``_TRUTHY``/``_FALSY`` mirror pin against
 ``sweep_lookahead``'s sets, the OFF-never-imports-crate bomb spy (poisoned
@@ -603,7 +603,7 @@ class TestDefinitionSites:
 class TestDefinitionSiteEngagement:
     """ENGAGEMENT TEETH — the FOUR definition sites genuinely ROUTE.
 
-    Hostile-review round 1 (MIGRATION.md #1955): the routing is
+    Hostile-review round 1 (MIGRATION.md #1957): the routing is
     byte-identical-by-design, so byte-equality alone cannot catch a
     definition site silently un-wired back onto its Python oracle (the
     executed round-1 mutation reverted all four sites and the whole battery
