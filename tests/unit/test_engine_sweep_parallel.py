@@ -711,7 +711,9 @@ class TestRunTupleInWorker:
         grid = _grid()
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        # DEC-FILL-EXEC-GRID-1M-001: the worker signature gained the 4th
+        # positional exec_bars; at tf==1minute the SAME list is both streams.
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS, _BARS)
         assert result.index == 0
         assert result.failed_error is None
         assert result.summary is not None
@@ -723,7 +725,7 @@ class TestRunTupleInWorker:
         grid = _grid()
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = mod._run_tuple_in_worker(2, tuple_, [])
+        result = mod._run_tuple_in_worker(2, tuple_, [], [])
         assert result.index == 2
         assert result.summary is None
         assert result.failed_error is None
@@ -743,7 +745,7 @@ class TestRunTupleInWorker:
         grid = _grid()
         mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
         tuple_ = next(iter_sweep_tuples(grid))
-        result = mod._run_tuple_in_worker(1, tuple_, _BARS)
+        result = mod._run_tuple_in_worker(1, tuple_, _BARS, _BARS)
         assert result.summary is None
         assert result.failed_error is not None
         assert "combo blew up" in result.failed_error
@@ -767,7 +769,7 @@ class TestRunTupleInWorker:
         store = tuple_store_path(root, tuple_, grid)
         store.parent.mkdir(parents=True, exist_ok=True)
         store.write_bytes(b"garbage - not parquet")
-        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS, _BARS)
         assert result.summary is not None  # retry regenerated the store cleanly
         assert result.failed_error is None
         assert len(result.quarantine_events) == 1
@@ -791,8 +793,8 @@ class TestOutcomeAndResultMapping:
         grid = _grid()
         t = next(iter_sweep_tuples(grid))
         mod._worker_init(mod._WorkerContext(grid=grid, root=Path("/tmp/z")))
-        # A real summary via the worker.
-        res = mod._run_tuple_in_worker(0, t, _BARS)
+        # A real summary via the worker (tf==1minute: one list, both streams).
+        res = mod._run_tuple_in_worker(0, t, _BARS, _BARS)
         outcome = mod._result_to_outcome(res, t)
         assert outcome.kind == "done"
         assert outcome.summary is not None
@@ -1036,15 +1038,22 @@ class _FakePool:
         self._never_resolve = never_resolve or set()
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
+        # DEC-FILL-EXEC-GRID-1M-001: the real dispatch now submits the 1m
+        # execution stream as the 4th worker positional — mirrored here.
         fut: Future[mod.TupleWorkResult] = Future()
         if index in self._never_resolve:
             return fut  # deliberately never resolved → drives the stall watchdog
         if index in self._result_for:
             fut.set_result(self._result_for[index])
         else:
-            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
         return fut
 
 
@@ -1361,13 +1370,18 @@ class _CrashingPool:
         self._crash_index = crash_index
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         fut: Future[mod.TupleWorkResult] = Future()
         if index == self._crash_index:
             fut.set_exception(RuntimeError("worker exploded"))
         else:
-            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
         return fut
 
 
@@ -1387,23 +1401,34 @@ class _DeferredPool:
     def __init__(self, ctx: mod._WorkerContext) -> None:
         mod._worker_init(ctx)
         self.outstanding: list[
-            tuple[int, SweepTuple, Sequence[CandleBar], Future[mod.TupleWorkResult]]
+            tuple[
+                int,
+                SweepTuple,
+                Sequence[CandleBar],
+                Sequence[CandleBar],
+                Future[mod.TupleWorkResult],
+            ]
         ] = []
         self.peak = 0
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         fut: Future[mod.TupleWorkResult] = Future()
-        self.outstanding.append((index, tuple_, bars, fut))
+        self.outstanding.append((index, tuple_, bars, exec_bars, fut))
         self.peak = max(self.peak, len(self.outstanding))
         return fut
 
     def resolve_one(self) -> None:
         """Resolve the LOWEST-index outstanding future (one completion)."""
         self.outstanding.sort(key=lambda e: e[0])
-        index, tuple_, bars, fut = self.outstanding.pop(0)
-        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+        index, tuple_, bars, exec_bars, fut = self.outstanding.pop(0)
+        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
 
 
 class TestBackPressure:
@@ -1456,21 +1481,34 @@ class _HeadBlockedPool:
         mod._worker_init(ctx)
         self._blocked_index = blocked_index
         self._head: Future[mod.TupleWorkResult] | None = None
-        self._head_payload: tuple[int, SweepTuple, Sequence[CandleBar]] | None = None
+        self._head_payload: (
+            tuple[int, SweepTuple, Sequence[CandleBar], Sequence[CandleBar]] | None
+        ) = None
         self.deferred: list[
-            tuple[int, SweepTuple, Sequence[CandleBar], Future[mod.TupleWorkResult]]
+            tuple[
+                int,
+                SweepTuple,
+                Sequence[CandleBar],
+                Sequence[CandleBar],
+                Future[mod.TupleWorkResult],
+            ]
         ] = []
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         """Return an UNRESOLVED future; park it as the head or a resolvable sibling."""
         fut: Future[mod.TupleWorkResult] = Future()
         if index == self._blocked_index:
             self._head = fut
-            self._head_payload = (index, tuple_, bars)
+            self._head_payload = (index, tuple_, bars, exec_bars)
         else:
-            self.deferred.append((index, tuple_, bars, fut))
+            self.deferred.append((index, tuple_, bars, exec_bars, fut))
         return fut
 
     def resolve_one_sibling(self) -> bool:
@@ -1478,15 +1516,15 @@ class _HeadBlockedPool:
         if not self.deferred:
             return False
         self.deferred.sort(key=lambda e: e[0])
-        index, tuple_, bars, fut = self.deferred.pop(0)
-        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+        index, tuple_, bars, exec_bars, fut = self.deferred.pop(0)
+        fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
         return True
 
     def resolve_head(self) -> None:
         """Resolve the blocked head future (the slow tuple finally finishes)."""
         assert self._head is not None and self._head_payload is not None
-        index, tuple_, bars = self._head_payload
-        self._head.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+        index, tuple_, bars, exec_bars = self._head_payload
+        self._head.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
 
 
 class TestHeadOfLineHeapBound:
@@ -1864,7 +1902,12 @@ class _BrokenPool:
         self._raise_on_submit = raise_on_submit
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         if self._raise_on_submit:
             raise BrokenProcessPool("A child process terminated abruptly (OOM)")
@@ -1872,7 +1915,7 @@ class _BrokenPool:
         if self._break_on is None or index in self._break_on:
             fut.set_exception(BrokenProcessPool("A child process terminated abruptly (OOM)"))
         else:
-            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars, exec_bars))
         return fut
 
 
@@ -1884,10 +1927,15 @@ class _RecordingFakePool(_FakePool):
         self.submitted: list[int] = []
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         self.submitted.append(index)
-        return super().submit(fn, index, tuple_, bars)
+        return super().submit(fn, index, tuple_, bars, exec_bars)
 
 
 class TestQuarantineSidecar:
@@ -2033,13 +2081,18 @@ class _MemoryErrorPool(_FakePool):
         self._memory_error_index = memory_error_index
 
     def submit(
-        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+        self,
+        fn: object,
+        index: int,
+        tuple_: SweepTuple,
+        bars: Sequence[CandleBar],
+        exec_bars: Sequence[CandleBar],
     ) -> Future[mod.TupleWorkResult]:
         if index == self._memory_error_index:
             fut: Future[mod.TupleWorkResult] = Future()
             fut.set_exception(MemoryError("worker allocation failed"))
             return fut
-        return super().submit(fn, index, tuple_, bars)
+        return super().submit(fn, index, tuple_, bars, exec_bars)
 
 
 class TestBrokenProcessPoolQuarantine:
@@ -2252,7 +2305,7 @@ class TestBrokenProcessPoolQuarantine:
             acc = mod._Accumulator()
             mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
             done_fut: Future[mod.TupleWorkResult] = Future()
-            done_fut.set_result(mod._run_tuple_in_worker(0, tuples[0], _BARS))
+            done_fut.set_result(mod._run_tuple_in_worker(0, tuples[0], _BARS, _BARS))
             broken_fut: Future[mod.TupleWorkResult] = Future()
             broken_fut.set_exception(BrokenProcessPool("terminated abruptly"))
             # A genuinely IN-FLIGHT (never-resolved) future — the pool broke under it.

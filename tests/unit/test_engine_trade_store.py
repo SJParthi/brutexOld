@@ -156,6 +156,13 @@ def _agg_record(run_id: str, **overrides: object) -> dict[str, object]:
         "exits_forced_1520": 0,
         "exits_end_of_data": 0,
         "exits_session_gap": 0,
+        # DEC-FILL-EXEC-GRID-1M-001 (50 → 55): the five 1m-execution-grid
+        # counters, inserted after exits_session_gap in to_record() order.
+        "exits_deferred": 0,
+        "signals_dropped_collision": 0,
+        "fill_slid_minutes": 0,
+        "exit_fill_slid_minutes": 0,
+        "forced_fill_slid_minutes": 0,
         "max_consecutive_losses": 1,
         "max_consecutive_wins": 1,
         "composite_score": 1.234567890123,
@@ -316,7 +323,7 @@ class TestWriteAndStamp:
 
         Pins a PRE-EXISTING strictness law adjacent to the AGG_COLUMNS
         extension (refuter round 5 MS4 — in-scope hardening beside the
-        `exits_session_gap` row, not a drive-by): a record carrying ALL 50
+        `exits_session_gap` row, not a drive-by): a record carrying ALL 55
         pinned columns PLUS one unknown extra key must refuse with
         ``missing=[]`` under the STRICT ``keys != _AGG_COLUMN_NAMES`` compare.
         A superset-weakening mutant (``not keys >= _AGG_COLUMN_NAMES``)
@@ -607,15 +614,29 @@ class TestValidatorEdges:
 
 
 def test_agg_columns_cover_the_b2_schema() -> None:
-    """The B2 schema authority: 50 pinned columns, run_id first.
+    """The B2 schema authority: 55 pinned columns, run_id first.
 
     49 → 50: ``exits_session_gap`` joined the per-reason counter block
     (DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the exit-reason vocabulary is
     append-only, and the agg schema tracks it in lockstep).
+    50 → 55: the five 1m-execution-grid counters
+    (DEC-FILL-EXEC-GRID-1M-001 — ``exits_deferred`` ·
+    ``signals_dropped_collision`` · the ``fill_slid_minutes`` family),
+    inserted after ``exits_session_gap`` / before
+    ``max_consecutive_losses`` in ``to_record()`` order.
     """
     names = [name for name, _ in AGG_COLUMNS]
     assert names[0] == "run_id"
-    assert len(names) == len(set(names)) == 50
+    assert len(names) == len(set(names)) == 55
     assert "exits_session_gap" in names
+    gap = names.index("exits_session_gap")
+    assert names[gap + 1 : gap + 6] == [
+        "exits_deferred",
+        "signals_dropped_collision",
+        "fill_slid_minutes",
+        "exit_fill_slid_minutes",
+        "forced_fill_slid_minutes",
+    ]
+    assert names[gap + 6] == "max_consecutive_losses"
     assert "fingerprint" in names
     assert "composite_score" in names

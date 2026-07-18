@@ -630,15 +630,24 @@ class TestTupleDigestGateSelectionIdentity:
     default-selection) sweep stays BYTE-STABLE — no existing on-disk store
     re-keys WITHIN the one-law era. The default digest is the
     empirically-captured constant, DELIBERATELY re-locked once by
-    DEC-FILL-WORST-CASE-ONLY-001: the descriptor now folds the permanent
-    ``fill_mode: worst_case`` token unconditionally, so every post-DEC store
-    address is distinct from every precise-era address by construction (the
-    anti-aliasing pin below keeps the retired digest dead).
+    DEC-FILL-WORST-CASE-ONLY-001 (the permanent ``fill_mode: worst_case``
+    token) and once more by DEC-FILL-EXEC-GRID-1M-001: the descriptor now
+    ALSO folds ``execution_grid: 1m_next_bar`` unconditionally (emitted
+    right after fill_mode), so every 1m-grid store address is distinct from
+    every pre-grid address by construction (the anti-aliasing pin below
+    keeps both retired digests dead).
     """
 
-    # The one-law default digest (16-char _PATH_DIGEST_LEN) captured after
-    # DEC-FILL-WORST-CASE-ONLY-001 folded the unconditional fill_mode token.
-    _DEFAULT_DIGEST = "7a0120c1123b44c6"
+    # The 1m-grid default digest (16-char _PATH_DIGEST_LEN): blake3 over the
+    # sort_keys canonical-JSON params dict now carrying BOTH permanent tokens
+    # {"fill_mode": "worst_case", "execution_grid": "1m_next_bar"} —
+    # re-locked by DEC-FILL-EXEC-GRID-1M-001 (the digest over the params dict
+    # now carrying execution_grid).
+    _DEFAULT_DIGEST = "3e0dd7d080da66b7"
+    #: The FROZEN worst-case-era pre-grid default digest (captured on the
+    #: DEC-FILL-WORST-CASE-ONLY-001 tree, before execution_grid folded in) —
+    #: a retired address no 1m-grid sweep may ever mint again.
+    _WORST_CASE_PRE_GRID_DIGEST = "7a0120c1123b44c6"
     #: The FROZEN precise-era default digest (captured on 0f411437) — a
     #: retired address no one-law sweep may ever mint again.
     _PRECISE_ERA_DIGEST = "5b020e892247deac"
@@ -673,15 +682,17 @@ class TestTupleDigestGateSelectionIdentity:
         assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
 
     def test_one_law_digest_never_aliases_the_precise_era(self) -> None:
-        # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the unconditional
-        # fill_mode token moves the default store address off the frozen
-        # precise-era digest, so a one-law sweep can never adopt (or
-        # overwrite) a precise-era Parquet at the same path.
+        # DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001
+        # anti-aliasing pin: the unconditional fill_mode + execution_grid
+        # tokens move the default store address off BOTH frozen prior-era
+        # digests, so a 1m-grid sweep can never adopt (or overwrite) a
+        # precise-era or pre-grid worst-case Parquet at the same path.
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
         d0 = _tuple_digest(_tuple(), _grid())
         assert d0 == self._DEFAULT_DIGEST
         assert d0 != self._PRECISE_ERA_DIGEST
+        assert d0 != self._WORST_CASE_PRE_GRID_DIGEST
 
     def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest

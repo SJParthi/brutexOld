@@ -336,7 +336,11 @@ class TestOverride1DefaultOmit:
     # (the one-law identity re-key), so the pre-flip capture b264fd0b… moved
     # to this value; the default-omit law under test (no price-source keys at
     # the default cell) is unchanged and still pinned by the key-set tests.
-    _DEFAULT_TRADE_RUN_ID = "92b8ef5a3501a9e7a8787b2493e1e9f2ad077da6bd267cffd9fd7f1059611558"
+    # Re-locked for DEC-FILL-EXEC-GRID-1M-001: the params preimage gained
+    # exactly the one `execution_grid: 1m_next_bar` permanent key (the
+    # key-set pin below), so the digest moved off the PR-A-era
+    # `92b8ef5a…1558`; the default-omit law under test is unchanged.
+    _DEFAULT_TRADE_RUN_ID = "062ea604c2a1de07e669f0a39ee9b7560abc0eedc0927e6da5d782520589a2a8"
 
     def _default_trade_params(self) -> dict[str, object]:
         return canonical_trade_params(
@@ -352,9 +356,10 @@ class TestOverride1DefaultOmit:
         params = self._default_trade_params()
         assert "vwap_source" not in params
         assert "ema_source" not in params
-        # The pre-axis key layout + the UNCONDITIONAL fill_mode key
-        # (DEC-FILL-WORST-CASE-ONLY-001 — emitted always, orthogonal to the
-        # price-source default-omit law under test here).
+        # The pre-axis key layout + the TWO unconditional permanent keys
+        # (DEC-FILL-WORST-CASE-ONLY-001 fill_mode +
+        # DEC-FILL-EXEC-GRID-1M-001 execution_grid — emitted always,
+        # orthogonal to the price-source default-omit law under test here).
         assert set(params) == {
             "sl_paisa",
             "tp_paisa",
@@ -363,6 +368,7 @@ class TestOverride1DefaultOmit:
             "fib_anchor",
             "start_equity_paisa",
             "fill_mode",
+            "execution_grid",
         }
 
     def test_default_trade_params_explicit_default_sources_omit_too(self) -> None:
@@ -528,6 +534,9 @@ class TestKernelSourceGuard:
                 store=ResultsStore(path=tmp_path / "r.parquet"),
                 dedup=ComboDedup(OptionDedupIndex(capacity=1000, fpr_target=1e-6)),
                 audit=audit,
+                # tf=1minute — the decision stream IS the execution stream
+                # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+                exec_bars_1m=bars,
                 kernel=kernel,
             )
 
@@ -545,6 +554,9 @@ class TestKernelSourceGuard:
                 store=ResultsStore(path=tmp_path / "r.parquet"),
                 dedup=ComboDedup(OptionDedupIndex(capacity=1000, fpr_target=1e-6)),
                 audit=audit,
+                # tf=1minute — the decision stream IS the execution stream
+                # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+                exec_bars_1m=bars,
                 kernel=kernel,
             )
 

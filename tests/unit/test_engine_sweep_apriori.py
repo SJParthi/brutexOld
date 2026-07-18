@@ -1081,7 +1081,11 @@ def test_run_persisted_sweep_on_path_matches_off(tmp_path, monkeypatch: pytest.M
             min_hits=5,
         )
         with AuditWriter.open(d / "cell.jsonl") as audit:
-            summary = run_persisted_sweep(bars, cfg, store=store, dedup=dedup, audit=audit)
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+            summary = run_persisted_sweep(
+                bars, cfg, store=store, dedup=dedup, audit=audit, exec_bars_1m=bars
+            )
         return summary, (d / "cell.parquet").read_bytes()
 
     monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)

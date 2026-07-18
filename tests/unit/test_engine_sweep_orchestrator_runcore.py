@@ -186,9 +186,18 @@ def test_r45_diffcheck_invoked_post_persist_with_kernel_bits(tmp_path: Path) -> 
     out = tmp_path / "out"
     seen: list[dict[str, Any]] = []
 
-    def _diffcheck(*, bars: Any, bar_bits: Any, tuple_: Any, grid: Any) -> None:
-        seen.append({"n_bars": len(bars), "n_bits": len(bar_bits), "tuple": tuple_.instrument})
+    # DEC-FILL-EXEC-GRID-1M-001: the hook now receives the 1m execution
+    # stream too; at tf==1minute it is the SAME bars_for feed (40 bars).
+    def _diffcheck(*, bars: Any, bar_bits: Any, exec_bars: Any, tuple_: Any, grid: Any) -> None:
+        seen.append(
+            {
+                "n_bars": len(bars),
+                "n_bits": len(bar_bits),
+                "n_exec": len(exec_bars),
+                "tuple": tuple_.instrument,
+            }
+        )
 
     summary = _run(out, tmp_path / "a.jsonl", diffcheck=_diffcheck)
     assert summary is not None
-    assert seen == [{"n_bars": 40, "n_bits": 40, "tuple": "NIFTY"}]
+    assert seen == [{"n_bars": 40, "n_bits": 40, "n_exec": 40, "tuple": "NIFTY"}]

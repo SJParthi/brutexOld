@@ -137,7 +137,15 @@ def _run(
     dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
     with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
         return run_persisted_sweep(
-            _BARS, cfg, store=store, dedup=dedup, audit=audit, trial_stats_digest=digest
+            _BARS,
+            cfg,
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            trial_stats_digest=digest,
+            # tf=1minute — the decision stream IS the execution stream
+            # (DEC-FILL-EXEC-GRID-1M-001 §6 fixed point).
+            exec_bars_1m=_BARS,
         )
 
 

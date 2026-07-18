@@ -219,6 +219,7 @@ class _FakeKernel:
         ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: object | None = None,
     ) -> None:
         self.bars = bars
         self.proximity = proximity
@@ -228,6 +229,9 @@ class _FakeKernel:
         self.ema_source = ema_source
         self.roll_schedule = roll_schedule
         self.apply_1day_mask = apply_1day_mask
+        # DEC-FILL-EXEC-GRID-1M-001: the cache now threads the 1m execution
+        # stream to the builder on a miss — the fake mirrors the real ctor.
+        self.exec_bars_1m = exec_bars_1m
 
 
 def _fake_builder() -> tuple[list[int], object]:
@@ -244,6 +248,7 @@ def _fake_builder() -> tuple[list[int], object]:
         ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
+        exec_bars_1m: object | None = None,
     ) -> _FakeKernel:
         calls.append(1)
         return _FakeKernel(
@@ -255,6 +260,7 @@ def _fake_builder() -> tuple[list[int], object]:
             ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            exec_bars_1m=exec_bars_1m,
         )
 
     return calls, build
@@ -357,16 +363,28 @@ class TestRunPersistedSweepWithKernel:
     def test_kernel_path_matches_no_kernel_byte_for_byte(self, tmp_path: Path) -> None:
         bars = _trending_bars()
         cfg = _make_config()  # default min_hits = MIN_TRADES > 0 → prefilter runs
-        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        # DEC-FILL-EXEC-GRID-1M-001 tf==1minute fixed point: the SAME list is
+        # both the decision and the 1m execution stream.
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, exec_bars_1m=bars
+        )
 
         store_a = ResultsStore(path=tmp_path / "a.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
-            summary_a = run_persisted_sweep(bars, cfg, store=store_a, dedup=_dedup(), audit=audit)
+            summary_a = run_persisted_sweep(
+                bars, cfg, store=store_a, dedup=_dedup(), audit=audit, exec_bars_1m=bars
+            )
 
         store_b = ResultsStore(path=tmp_path / "b.parquet")
         with AuditWriter.open(tmp_path / "b.jsonl") as audit:
             summary_b = run_persisted_sweep(
-                bars, cfg, store=store_b, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                cfg,
+                store=store_b,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
 
         assert isinstance(summary_b, SweepRunSummary)
@@ -379,11 +397,20 @@ class TestRunPersistedSweepWithKernel:
         # min_hits=0 exercises the kernel branch that skips the Stage-1B count.
         bars = _trending_bars()
         cfg = _make_config(min_hits=0)
-        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        # tf==1minute fixed point (DEC-FILL-EXEC-GRID-1M-001): exec == decision.
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, exec_bars_1m=bars
+        )
         store = ResultsStore(path=tmp_path / "r.parquet")
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                bars, cfg, store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
         assert isinstance(summary, SweepRunSummary)
         assert summary.evaluated == summary.enumerated  # nothing dedup/conflict pruned here
@@ -398,7 +425,13 @@ class TestRunPersistedSweepWithKernel:
             pytest.raises(ValueError, match="kernel has .* bars but .* bars were supplied"),
         ):
             run_persisted_sweep(
-                bars, _make_config(), store=store, dedup=_dedup(), audit=audit, kernel=kernel
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                exec_bars_1m=bars,
+                kernel=kernel,
             )
 
 
@@ -445,14 +478,20 @@ class TestGridReuseBarBits:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
+# exec_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001, rebased onto the
+# 1m EXECUTION stream by DEC-FILL-EXEC-GRID-1M-001 (was ``kernel_columns``)
 # ════════════════════════════════════════════════════════════════════════════
 
 
-class TestKernelColumns:
-    def test_kernel_columns_derived_once_and_memoised(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+class TestExecColumns:
+    def test_exec_columns_none_without_exec_stream(self) -> None:
+        # A legacy kernel built with no execution stream exposes None — the
+        # trade sim then derives its own columns locally.
+        kernel = ResidentSweepKernel(_trending_bars(n_days=1, per_day=10))
+        assert kernel.exec_bars_1m is None
+        assert kernel.exec_columns is None
+
+    def test_exec_columns_derived_once_and_memoised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # ONE derive_price_columns call per kernel lifetime (spy) — repeat
         # property reads are the memo handoff.
         from brutex.engine import sweep_kernel as sk_module
@@ -467,24 +506,30 @@ class TestKernelColumns:
 
         monkeypatch.setattr(sk_module, "derive_price_columns", _counting)
         bars = _trending_bars(n_days=2, per_day=10)
-        kernel = ResidentSweepKernel(bars)
+        # tf==1minute fixed point: exec stream == decision stream.
+        kernel = ResidentSweepKernel(bars, exec_bars_1m=bars)
         assert calls[0] == 0  # lazy: construction derives nothing
-        first = kernel.kernel_columns
-        second = kernel.kernel_columns
+        first = kernel.exec_columns
+        second = kernel.exec_columns
         assert calls[0] == 1
         assert first is second
-        # The columns equal a fresh module-level derivation (same seam).
+        # The columns equal a fresh module-level derivation (same seam), over
+        # the EXECUTION stream (here identical to the decision stream).
         assert first == real(bars)
 
-    def test_kernel_columns_feed_the_trade_sim_byte_identically(self) -> None:
+    def test_exec_columns_feed_the_trade_sim_byte_identically(self) -> None:
         from brutex.engine.rust_trade_sim import ResidentTradeSim
 
         bars = _trending_bars(n_days=2, per_day=10)
-        kernel = ResidentSweepKernel(bars)
+        kernel = ResidentSweepKernel(bars, exec_bars_1m=bars)
         injected = ResidentTradeSim(
-            bars, kernel.bar_bits, tf_minutes=1, precomputed_columns=kernel.kernel_columns
+            bars,
+            kernel.bar_bits,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            precomputed_columns=kernel.exec_columns,
         )
-        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1)
+        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1, exec_bars_1m=bars)
         assert (
             injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
             == derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
