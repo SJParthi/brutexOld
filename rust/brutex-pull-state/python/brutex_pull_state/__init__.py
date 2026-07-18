@@ -50,7 +50,10 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "SOURCE_DIGEST",
     "__version__",
+    # --- pull_stall (Wave 1C) ---
+    "alive_log_due",
     "pull_allowed_us",
+    "wedge_decision",
 )
 
 
@@ -86,7 +89,9 @@ _assert_compiled_surface(_compiled)
 from ._brutex_pull_state import (  # noqa: E402
     SOURCE_DIGEST,
     __version__,
+    alive_log_due,
     pull_allowed_us,
+    wedge_decision,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -103,5 +108,8 @@ __source_digest__: str = SOURCE_DIGEST
 __all__ = [
     "SOURCE_DIGEST",
     "__version__",
+    # --- pull_stall (Wave 1C) ---
+    "alive_log_due",
     "pull_allowed_us",
+    "wedge_decision",
 ]

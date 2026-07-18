@@ -4,6 +4,8 @@
   "symbols": [
     "SOURCE_DIGEST",
     "__version__",
-    "pull_allowed_us"
+    "alive_log_due",
+    "pull_allowed_us",
+    "wedge_decision"
   ]
 }
