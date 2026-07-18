@@ -477,7 +477,7 @@ class TestLeaderboardRouteRollup:
         rebuilds = {"n": 0}
         real_rebuild = rr.rebuild_rollup_from_scan_best_effort
 
-        def _spy(root: Path, scan: SweepScan) -> bool:
+        def _spy(root: Path, scan: SweepScan) -> None:
             rebuilds["n"] += 1
             return real_rebuild(root, scan)
 
