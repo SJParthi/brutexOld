@@ -73,6 +73,12 @@ on:
       # Wave-B resample seam (DEC-LAKE-RUST-RESAMPLE-001, ledger #1913).
       - "brutex/data/lake_rust_resample.py"
       - "brutex/data/tf_resampler.py"
+      # T11 resample tails (DEC-LAKE-RUST-RESAMPLE-DAILY-001, ledger #1946):
+      # the daily facade + the session/batch/daily consumer seams.
+      - "brutex/data/lake_rust_resample_daily.py"
+      - "brutex/data/fno_resample.py"
+      - "brutex/data/fno_daily_resample.py"
+      - "brutex/data/spot_daily_resample.py"
       # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
       # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
       - "brutex/data/window_ledger_rust.py"
@@ -98,6 +104,12 @@ on:
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
       - "tests/integration/test_lake_rust_resample_parity.py"
+      - "tests/unit/test_lake_rust_resample_daily.py"
+      - "tests/unit/test_tf_resampler_batch_seam.py"
+      - "tests/unit/test_fno_resample_session_seam.py"
+      - "tests/unit/test_fno_daily_resample_rust_seam.py"
+      - "tests/unit/test_spot_daily_resample_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_daily_parity.py"
       # The stats-shard render seam (DEC-LAKE-RUST-STATS-MANIFEST-001).
       - "brutex/data/lake_rust_stats.py"
       - "brutex/data/lake_stats_manifest.py"
@@ -131,6 +143,11 @@ on:
       - "brutex/data/models.py"
       - "brutex/data/lake_rust_resample.py"
       - "brutex/data/tf_resampler.py"
+      # T11 resample tails (DEC-LAKE-RUST-RESAMPLE-DAILY-001, ledger #1946).
+      - "brutex/data/lake_rust_resample_daily.py"
+      - "brutex/data/fno_resample.py"
+      - "brutex/data/fno_daily_resample.py"
+      - "brutex/data/spot_daily_resample.py"
       # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
       # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
       - "brutex/data/window_ledger_rust.py"
@@ -156,6 +173,12 @@ on:
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
       - "tests/integration/test_lake_rust_resample_parity.py"
+      - "tests/unit/test_lake_rust_resample_daily.py"
+      - "tests/unit/test_tf_resampler_batch_seam.py"
+      - "tests/unit/test_fno_resample_session_seam.py"
+      - "tests/unit/test_fno_daily_resample_rust_seam.py"
+      - "tests/unit/test_spot_daily_resample_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_daily_parity.py"
       - "brutex/data/lake_rust_stats.py"
       - "brutex/data/lake_stats_manifest.py"
       - "tests/unit/test_lake_rust_stats.py"
@@ -410,6 +433,12 @@ jobs:
             tests/unit/test_lake_rust_resample.py \
             tests/unit/test_tf_resampler_rust_seam.py \
             tests/integration/test_lake_rust_resample_parity.py \
+            tests/unit/test_lake_rust_resample_daily.py \
+            tests/unit/test_tf_resampler_batch_seam.py \
+            tests/unit/test_fno_resample_session_seam.py \
+            tests/unit/test_fno_daily_resample_rust_seam.py \
+            tests/unit/test_spot_daily_resample_rust_seam.py \
+            tests/integration/test_lake_rust_resample_daily_parity.py \
             tests/unit/test_window_ledger_rust.py \
             tests/unit/test_detectors_rust.py \
             tests/unit/test_raw_integrity_rust_seam.py \

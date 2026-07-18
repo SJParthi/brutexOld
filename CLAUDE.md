@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
+_Last updated: 2026-07-17 (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md
+#1946, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
+ADR-0020 conversion: the DAILY residues (`fno_daily_resample` +
+`spot_daily_resample` cores) gain a Rust route behind the NEW independent
+default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY` facade
+(`brutex/data/lake_rust_resample_daily.py` — own burn-in/latch, ints-only
+`days_since_epoch` FFI), and the session/batch tails
+(`fno_resample.resample_session_to_tf` forming-bucket fold +
+`tf_resampler.resample_all_21_tfs` ONE-crossing batch face) ride the EXISTING
+`BRUTEX_LAKE_RUST_RESAMPLE` flag — closing the #1913-named follow-ups. Both
+flags OFF (default) BYTE-IDENTICAL (bomb-spy-pinned); flag-ON proven by the
+real-wheel parity suite at CandleBar+Decimal-repr strength + whole-prebuild
+sha256 A/B (daily-ON and both-ON). Honesty banner verbatim: "expected payoff
+≈ 0 — conversion is for uniformity, not speed". ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1946 — this header carries the pointer, never the
+story.)
+Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
 provisional, branch `claude/rust-observability-lane` — the observability
 Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
 (loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
@@ -3588,7 +3605,80 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-observability-lane`
+- **Active branch:** `claude/rust-slice-t11-resample` (**DEC-LAKE-RUST-RESAMPLE-DAILY-001,
+  MIGRATION.md #1946** — T11 "resample tails" (phase A+B) of the ADR-0020
+  conversion, closing the #1913-named follow-ups (daily residues ·
+  session-fold · batch adoption). **ARM 1 (daily residues, NEW independent
+  flag):** `fno_daily_resample.resample_1m_to_fno_daily` +
+  `spot_daily_resample.resample_1m_to_daily` route their FRAME derivation
+  through the NEW `rust/brutex-lake/src/resample_daily.rs`
+  (`resample_daily_ipc` — the G5 375-minute resample core → the
+  `< before_days` IST-day filter → the midnight-IST restamp
+  `ist_days·86_400_000_000 − 19_800_000_000` µs cast Datetime(us, UTC)
+  ALWAYS → OHLCV + carry-last OI when `oi_aware` and present; Greeks
+  overlays dropped — daily bars never carried them) behind the NEW
+  default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY` facade
+  `brutex/data/lake_rust_resample_daily.py` — OWN latch/burn-in/warn-once
+  state (a daily autorevert never disables the intraday seam,
+  independence-pinned), own `_CRATE_API_DAILY` + the polars version guard
+  KEPT, `before` crossing the FFI as `days_since_epoch` int (ints-only
+  discipline), 16-call dtype-exact burn-in + ship-the-ORACLE autorevert;
+  materialization STAYS PYTHON — fno per-row `Decimal(str(x))`/`int(oi)`
+  mirroring its OFF arm bit-for-bit (daily OHLC are float SELECTIONS —
+  bit-copies), spot via the shared `frame_to_candle_bars`; the verbatim
+  Python bodies extracted (`_fno_daily_frame_python` /
+  `_resample_daily_frame_python`) double as OFF bodies AND live parity
+  oracles. **ARM 2 (session/batch tails, the EXISTING
+  `BRUTEX_LAKE_RUST_RESAMPLE` flag):** `fno_resample.resample_session_to_tf`
+  flag-ON+cutoff routes via the NEW crate session face
+  (`resample_session_ipc` — resample then the rem_euclid minute-of-day
+  forming-bucket cut, ONE crossing; oracle = the extracted
+  `_forming_bucket_cutoff` over `_resample_1m_to_tf_python`; P-06 posture
+  unchanged) and `tf_resampler.resample_all_21_tfs` gains the batch route
+  (`resample_all_via_rust` — ONE `resample_all_ipc` crossing per 21-TF
+  derive, per-TF burn-in, ANY degrade ⇒ the WHOLE dict from the oracle —
+  never a partial mix); `resample_session_frame_via_rust` resolves the
+  session face getattr-at-call-time (a pre-T11 wheel degrades ONLY that
+  face — a DISCLOSED deviation from the PR-2 all-or-nothing precedent);
+  `lake_rust_resample.py`'s guard ladder refactored into shared helpers
+  (every pinned literal preserved verbatim, suite pins unmodified) +
+  public aliases for the daily sibling (§11 COMMON — shared BY IMPORT).
+  `spot_resample.derive_intraday_tfs` inherits the batch face transitively
+  (module untouched, spy-pinned); `feed/resampler.py` NOT touched
+  (ADR-EXEMPT oracle, #1492 G3). PROOF (executed, real maturin wheel):
+  cargo fmt/clippy(-D warnings)/test --release --locked 81 passed (14 new:
+  5 session + 9 daily; crate stays 0.1.0, Cargo.lock byte-untouched); the
+  real-wheel parity suite 30 passed — daily ON-vs-OFF at CandleBar strength
+  INCLUDING Decimal reprs, session-cutoff parity, batch 21-TF parity + the
+  one-crossing count pin, whole-prebuild sha256 A/B
+  (`materialize_lake_timeframes(include_daily=True)` — derived + 1day bytes
+  sha256-EQUAL daily-ON vs OFF AND both-flags-ON vs OFF); flag-OFF
+  regression: the pre-existing resampler/daily suites pass UNMODIFIED.
+  GATES (measured): `lake_rust_resample.py` 100.00% line+branch (226/78,
+  83 tests — session+batch classes APPENDED); `lake_rust_resample_daily.py`
+  100.00% standalone (129/38, 60 tests incl. the mutation-wiring pin); the
+  four seam suites 26 passed; the ci.yml 21c/21c-fno-daily/21c-fno-resample
+  static gates extended with the stem-matched seam files + re-measured
+  100.00% (62/28 · 46/12 · 32/6); `spot_daily_resample.py` 100.00% over its
+  discovery set (212/56, 99 passed — no static stanza, the #1914 discovery
+  precedent, likewise both facades); mutation.yml gains the daily-facade
+  mutmut pair — WIRED AND EXECUTED (the #1614 law): 110 mutants, first
+  pass 106 killed / 4 survived (all `remedy=` log-prose), the four killed
+  by exact-remedy pins, re-run 110/110 KILLED zero-survivor;
+  lake-rust-parity.yml extended (T11
+  paths + run step); ruff/ruff-format clean; `mypy --strict` clean on the
+  six touched modules (residuals = pre-existing venv gaps in untouched
+  transitive files); pyright 0 errors on every touched file. HONEST: the
+  honesty banner holds verbatim — "expected payoff ≈ 0 — conversion is for
+  uniformity, not speed"; NO speedup claimed (each seam ADDS an IPC
+  round-trip); the fno per-row naive-ts `astimezone` local-TZ dependence is
+  pre-existing + disclosed; the daily default-ON flip needs its own DEC
+  citing a fresh parity-lane run. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run
+  identity untouched by construction — but stated, not assumed: the daily
+  1day partition is the PDH/PDL anchor the sweep reads, so the parity gates
+  are load-bearing.)
+  Earlier: `claude/rust-observability-lane`
   (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
   #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync — main took #1954 for
@@ -11052,7 +11142,26 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-observability-lane`
+- **Active feature branch:** `claude/rust-slice-t11-resample`
+  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1946 — T11 "resample
+  tails" of the ADR-0020 conversion, closing the #1913-named follow-ups:
+  the daily residues (`fno_daily_resample` + `spot_daily_resample` frame
+  cores) route through the NEW `rust/brutex-lake/src/resample_daily.rs`
+  behind the NEW independent default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY`
+  facade (`brutex/data/lake_rust_resample_daily.py` — own burn-in/latch,
+  ints-only days-since-epoch FFI; materialization stays Python, the
+  extracted verbatim bodies double as OFF bodies AND parity oracles), and
+  the session/batch tails (`fno_resample.resample_session_to_tf`
+  forming-bucket fold via the new crate session face +
+  `tf_resampler.resample_all_21_tfs` ONE-crossing batch face) ride the
+  EXISTING `BRUTEX_LAKE_RUST_RESAMPLE` flag; both flags OFF (default)
+  BYTE-IDENTICAL (bomb-spy-pinned); real-wheel parity 30 passed at
+  CandleBar+Decimal-repr strength + whole-prebuild sha256 A/B (daily-ON
+  and both-ON); cargo 81 passed, crate stays 0.1.0, Cargo.lock untouched;
+  honesty banner verbatim — payoff ≈ 0, uniformity not speed; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1946 for the full blurb)
+  Earlier: `claude/rust-observability-lane`
   (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
   #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync, main took #1954 for

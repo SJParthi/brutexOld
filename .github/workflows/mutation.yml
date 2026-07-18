@@ -514,6 +514,7 @@ jobs:
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
+            "brutex/data/lake_rust_resample_daily.py:tests/unit/test_lake_rust_resample_daily.py:" \
             "brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:" \
             "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
             "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
