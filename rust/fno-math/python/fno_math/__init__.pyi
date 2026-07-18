@@ -235,6 +235,27 @@ class ResidentSweepSim:
         """
         ...
 
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]]:
+        """`simulate_masks` PLUS per-mask exit-reason counters (the additive twin).
+
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: `out[j]` is
+        `(trades, exit_reason_counts)` for `masks[j]` — the trades byte-equal
+        to `simulate_masks`'s (one shared walk core), the counts one `u64` per
+        `EXIT_REASONS` member in vocabulary order `(stop_loss, take_profit,
+        forced_1520, signal, end_of_data, session_gap)`, with
+        `sum(counts) == len(trades)`.
+        """
+        ...
+
 class ResidentSweepSimU128:
     """Resident Stage-2 trade-sim buffer over a >64-bit vocabulary (u128 twin).
 
@@ -293,4 +314,19 @@ class ResidentSweepSimU128:
 
         `out[j]` aligns with `masks[j]`.
         """
+        ...
+
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]]:
+        """Batch trades PLUS per-mask exit-reason counters — the wide twin of
+        `ResidentSweepSim.simulate_masks_with_exit_counts` (same vocabulary
+        order, same `sum(counts) == len(trades)` law)."""
         ...

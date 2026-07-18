@@ -212,6 +212,19 @@ class _ExitReason(Enum):
 #: never copied (CLAUDE.md §11 COMMON).
 EXIT_REASONS: Final[tuple[str, ...]] = tuple(reason.value for reason in _ExitReason)
 
+#: Position of ``"stop_loss"`` in :data:`EXIT_REASONS` — the ONE index the
+#: metrics tail reads out of a per-mask exit-reason counters tuple to derive
+#: ``sl_hit_rate`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B). Derived from
+#: the vocabulary, never a re-pinned literal (CLAUDE.md §11 COMMON); the
+#: vocabulary is append-only, so the index can never move.
+STOP_LOSS_REASON_INDEX: Final[int] = EXIT_REASONS.index(_ExitReason.STOP_LOSS.value)
+
+#: Enum member → :data:`EXIT_REASONS` position, for the walker's O(1)/trade
+#: per-reason counter increment at the single ``_close`` seam.
+_EXIT_REASON_INDEX: Final[dict[_ExitReason, int]] = {
+    reason: index for index, reason in enumerate(_ExitReason)
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TradeDetail:
@@ -409,6 +422,26 @@ class TradeSimWalker:
         # ``-1`` = no trade has closed yet; never read before a close by
         # construction (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
         self._last_exit_idx: int = -1
+        # Per-reason close counters in EXIT_REASONS order — incremented once
+        # per ``_close`` (O(1)/trade; the seam already holds the reason), read
+        # out via :attr:`exit_reason_counts`
+        # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B). A pure OBSERVER: no
+        # branch reads it, so the emitted trades are byte-identical with the
+        # counters present.
+        self._exit_reason_counts: list[int] = [0] * len(EXIT_REASONS)
+
+    @property
+    def exit_reason_counts(self) -> tuple[int, ...]:
+        """Closed-trade counts per exit reason, in :data:`EXIT_REASONS` order.
+
+        The additive counter surface (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        Stage B — the ``_last_exit_idx`` exposure precedent): one integer per
+        vocabulary member, accumulated across every trade this walker has
+        closed so far; ``sum(exit_reason_counts) == n_closed_trades`` by
+        construction (each close increments exactly one counter). A snapshot
+        tuple — mutating walker state never aliases into a caller's copy.
+        """
+        return tuple(self._exit_reason_counts)
 
     # ── Batch path ────────────────────────────────────────────────────────
 
@@ -863,6 +896,7 @@ class TradeSimWalker:
             )
         self._position = None
         self._last_exit_idx = exit_idx
+        self._exit_reason_counts[_EXIT_REASON_INDEX[reason]] += 1
         _LOG.debug(
             "trade_sim.exit",
             exit_idx=exit_idx,
@@ -971,6 +1005,59 @@ def simulate_trades_with_exit_indices(
         ``(trades, exit_indices)`` — positionally aligned; ``exit_indices``
         is ``None`` for an uncertified window.
     """
+    trades, exit_indices, _counts = simulate_trades_with_exit_counts(
+        bars,
+        entry_signals,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        exit_signals=exit_signals,
+        policy=policy,
+        reference_stamper=reference_stamper,
+        detail_sink=detail_sink,
+    )
+    return trades, exit_indices
+
+
+def simulate_trades_with_exit_counts(
+    bars: Sequence[CandleBar],
+    entry_signals: Sequence[bool],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    exit_signals: Sequence[bool] | None = None,
+    policy: FillPolicy = DEFAULT_FILL_POLICY,
+    reference_stamper: TradeReferenceStamper | None = None,
+    detail_sink: list[TradeDetail] | None = None,
+) -> tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]:
+    """Walk a feed into trades + certified exit indices + exit-reason counters.
+
+    The counter-carrying twin of :func:`simulate_trades_with_exit_indices`
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B, the additive-twin
+    precedent) — and the ONE batch spine both thinner surfaces delegate to
+    (:func:`simulate_trades_with_exit_indices` drops the counters;
+    :func:`simulate_trades` drops indices too), so the three entries can
+    never drift. The trades + indices are byte-identical to the pre-counter
+    surfaces on the same inputs; the third element is the walker's
+    :attr:`TradeSimWalker.exit_reason_counts` — one integer per
+    :data:`EXIT_REASONS` member in vocabulary order, ``sum == len(trades)``
+    by construction. The metrics tail reads position
+    :data:`STOP_LOSS_REASON_INDEX` to derive ``sl_hit_rate``; counters are
+    pure observers, so results are byte-identical whether or not a caller
+    consumes them.
+
+    Parameters are exactly :func:`simulate_trades`'s.
+
+    Returns
+    -------
+    tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]
+        ``(trades, exit_indices, exit_reason_counts)`` — trades/indices
+        positionally aligned (``exit_indices`` ``None`` for an uncertified
+        window, exactly the exit-indices twin's contract).
+    """
     certified = bars_strictly_increasing(bars)
     walker = TradeSimWalker(
         direction=direction,
@@ -982,17 +1069,19 @@ def simulate_trades_with_exit_indices(
         detail_sink=detail_sink,
     )
     trades, exit_indices = walker.run_with_exit_indices(bars, entry_signals, exit_signals)
-    return trades, exit_indices if certified else None
+    return trades, exit_indices if certified else None, walker.exit_reason_counts
 
 
 __all__ = [
     "DEFAULT_FILL_POLICY",
     "EXIT_REASONS",
+    "STOP_LOSS_REASON_INDEX",
     "FillPolicy",
     "LevelFill",
     "SameBarTie",
     "TradeDetail",
     "TradeSimWalker",
     "simulate_trades",
+    "simulate_trades_with_exit_counts",
     "simulate_trades_with_exit_indices",
 ]

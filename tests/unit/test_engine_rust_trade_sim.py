@@ -42,12 +42,22 @@ from brutex.engine.trade_sim import (
     LevelFill,
     SameBarTie,
     simulate_trades,
+    simulate_trades_with_exit_counts,
 )
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday
+
+#: The counted kernel batch shape — one (records, exit_counts) pair per mask
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+_CountedBatch = list[
+    tuple[
+        list[tuple[int, int, int, int, int, int]],
+        tuple[int, int, int, int, int, int],
+    ]
+]
 
 
 def _ts(hh: int, mm: int) -> datetime:
@@ -1168,12 +1178,14 @@ class TestWideMaskPromotion:
         calls: list[list[int]] = []
 
         class _RecordingWide:
-            def simulate_masks(
+            def simulate_masks_with_exit_counts(
                 self, masks: list[int], *args: object
-            ) -> list[list[tuple[int, int, int, int, int, int]]]:
+            ) -> _CountedBatch:
                 calls.append(list(masks))
-                result = real_wide.simulate_masks(masks, *args)  # type: ignore[attr-defined]
-                return cast("list[list[tuple[int, int, int, int, int, int]]]", result)
+                result = real_wide.simulate_masks_with_exit_counts(  # type: ignore[attr-defined]
+                    masks, *args
+                )
+                return cast("_CountedBatch", result)
 
         sim._rust_wide = _RecordingWide()
         mixed = [1, (1 << 64) | 1]
@@ -1500,10 +1512,16 @@ class TestSimulateMasksWithExitIndices:
         class _ShuffledKernel:
             """Returns two well-formed records with REVERSED exit order."""
 
-            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
                 record_late = (100, 100, 0, 2, 2, 3)
                 record_early = (50, 50, 0, 1, 1, 1)
-                return [[record_late, record_early], [record_early, record_late]]
+                counts = (2, 0, 0, 0, 0, 0)
+                return [
+                    ([record_late, record_early], counts),
+                    ([record_early, record_late], counts),
+                ]
 
         sim._rust = _ShuffledKernel()  # pyright: ignore[reportPrivateUsage]
         with capture_logs() as logs:
@@ -1530,10 +1548,12 @@ class TestSimulateMasksWithExitIndices:
         class _DuplicateKernel:
             """Returns two well-formed records sharing ONE exit index."""
 
-            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
                 record_a = (50, 50, 0, 1, 0, 1)
                 record_b = (60, 60, 0, 1, 1, 1)  # duplicate exit_idx 1
-                return [[record_a, record_b]]
+                return [([record_a, record_b], (2, 0, 0, 0, 0, 0))]
 
         sim._rust = _DuplicateKernel()  # pyright: ignore[reportPrivateUsage]
         with capture_logs() as logs:
@@ -1543,6 +1563,134 @@ class TestSimulateMasksWithExitIndices:
         events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
         assert len(events) == 1
         assert events[0]["reason"] == "exit_indices_not_monotonic"
+
+
+# ── exit-reason counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ───────
+
+
+class TestSimulateMasksWithExitCounts:
+    """The counted triple spine: kernel counters ≡ walker counters, validated."""
+
+    def _sim(self) -> ResidentTradeSim:
+        bars = _feed()
+        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+
+    def test_kernel_counts_match_the_python_walker(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        masks = [0, 1]
+        triples = sim.simulate_masks_with_exit_counts(
+            masks, direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        for mask, (trades, exit_indices, counts) in zip(masks, triples, strict=True):
+            py_trades, py_idx, py_counts = simulate_trades_with_exit_counts(
+                bars,
+                mask_to_entry_signals(bits, mask),
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=200,
+                take_profit_paisa=300,
+            )
+            assert trades == py_trades
+            assert exit_indices == py_idx
+            assert counts == py_counts
+            assert sum(counts) == len(trades)
+
+    def test_python_fallback_arm_emits_identical_triples(self) -> None:
+        bars = _feed()
+        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        fallback._rust = None  # pyright: ignore[reportPrivateUsage] — the forcing seam
+        assert wired.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == fallback.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+
+    def test_exit_indices_delegate_drops_the_counts(self) -> None:
+        sim = self._sim()
+        triples = sim.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        assert sim.simulate_masks_with_exit_indices(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == [(trades, idx) for trades, idx, _counts in triples]
+
+    def test_u128_kernel_counts_match_the_python_walker(self) -> None:
+        """The wide (u128-resident) kernel accumulates identically."""
+        bars = _feed()
+        bits = [b | (1 << 100) for b in build_bar_bits(bars)]
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        mask = (1 << 100) | 1
+        with capture_logs() as logs:
+            triples = sim.simulate_masks_with_exit_counts(
+                [mask], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+            )
+        assert _call_fallback_events(logs) == []  # genuinely kernel-served
+        py_trades, py_idx, py_counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bits, mask),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=200,
+            take_profit_paisa=300,
+        )
+        assert triples == [(py_trades, py_idx, py_counts)]
+
+    def test_stale_wheel_without_counted_twin_serves_the_oracle_warn_once(self) -> None:
+        """A kernel object lacking ``simulate_masks_with_exit_counts`` (a
+        hand-imported stale wheel) serves the WHOLE call through the Python
+        oracle — triples identical, one ``wheel_missing_exit_counts`` WARNING
+        per instance, silent on repeat."""
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+
+        class _StaleKernel:
+            """Only the PRE-counter surface — no counted twin."""
+
+            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+                raise AssertionError("the stale surface must never be called")
+
+        sim._rust = _StaleKernel()  # pyright: ignore[reportPrivateUsage]
+        oracle = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        oracle._rust = None  # pyright: ignore[reportPrivateUsage]
+        with capture_logs() as logs:
+            got = sim.simulate_masks_with_exit_counts(
+                [0, 1], direction=Side.BUY, stop_loss_paisa=200
+            )
+        events = _call_fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing_exit_counts"
+        assert got == oracle.simulate_masks_with_exit_counts(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200
+        )
+        # Repeat call: already warned — silent oracle service.
+        with capture_logs() as logs2:
+            sim.simulate_masks_with_exit_counts([0], direction=Side.BUY)
+        assert _call_fallback_events(logs2) == []
+
+    def test_kernel_count_sum_mismatch_raises_value_error(self) -> None:
+        """A kernel whose counters do not sum to its trade count is a
+        marshalling bug — refused with ``ValueError`` (rides the sweep's
+        chunk-failure ladder), never a silently wrong sl_hit_rate."""
+        sim = self._sim()
+
+        class _MiscountingKernel:
+            def simulate_masks_with_exit_counts(
+                self, *args: object
+            ) -> list[tuple[list[tuple[int, ...]], tuple[int, ...]]]:
+                record = (50, 50, 0, 1, 0, 1)
+                return [([record], (2, 0, 0, 0, 0, 0))]  # sum 2 != 1 trade
+
+        sim._rust = _MiscountingKernel()  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(ValueError, match="exit_counts sum 2 != trade count 1"):
+            sim.simulate_masks_with_exit_counts([0], direction=Side.BUY)
+
+    def test_empty_masks_returns_empty(self) -> None:
+        assert self._sim().simulate_masks_with_exit_counts([], direction=Side.BUY) == []
 
 
 # ── reference-stamper seam (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────

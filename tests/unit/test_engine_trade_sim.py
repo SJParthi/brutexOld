@@ -1604,3 +1604,157 @@ class TestExitIndices:
         via_run = walker_a.run(self._bars(), self._signals())
         via_pair, _ = walker_b.run_with_exit_indices(self._bars(), self._signals())
         assert via_run == via_pair
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Exit-reason counters (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestExitReasonCounters:
+    """The walker's per-reason counters + the counted batch spine.
+
+    The counters are pure observers over the SAME closes the walker already
+    performs — one integer per :data:`~brutex.engine.trade_sim.EXIT_REASONS`
+    member in vocabulary order, ``sum == n_closed_trades`` always, and the
+    position under :data:`~brutex.engine.trade_sim.STOP_LOSS_REASON_INDEX`
+    counts exactly the ``stop_loss`` closes the detail sink attributes.
+    """
+
+    def test_vocabulary_position_constants(self) -> None:
+        assert ts_mod.EXIT_REASONS[ts_mod.STOP_LOSS_REASON_INDEX] == "stop_loss"
+        assert ts_mod.STOP_LOSS_REASON_INDEX == 0  # the wire position is frozen
+
+    def test_fresh_walker_counts_are_all_zero(self) -> None:
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        assert walker.exit_reason_counts == (0, 0, 0, 0, 0, 0)
+
+    def _count_for(self, reason: str, counts: tuple[int, ...]) -> int:
+        return counts[ts_mod.EXIT_REASONS.index(reason)]
+
+    def test_each_reason_lands_in_its_own_slot(self) -> None:
+        """Six scenarios — one per EXIT_REASONS member — each bumps exactly
+        its own counter, cross-checked against the detail sink's attribution."""
+        gap_bars = [
+            _bar(11, 10, "100", "100", "100", "100"),
+            _bar(11, 11, "100", "100", "100", "100"),
+            _bar(11, 14, "100", "100", "100", "100"),
+            _bar(9, 15, "600", "601", "599", "600", day=_NEXT_DAY),
+        ]
+        # (reason, bars, entry_signals, stop_loss_paisa, take_profit_paisa)
+        scenarios: list[tuple[str, list[CandleBar], list[bool], int | None, int | None]] = [
+            (
+                "stop_loss",
+                [_flat(9, 15), _flat(9, 16), _bar(9, 17, "100", "100", "98", "99")],
+                [True, False, False],
+                100,
+                None,
+            ),
+            (
+                "take_profit",
+                [_flat(9, 15), _flat(9, 16), _bar(9, 17, "100", "102", "100", "101")],
+                [True, False, False],
+                None,
+                100,
+            ),
+            (
+                "forced_1520",
+                [_flat(15, 18), _flat(15, 19), _flat(15, 20)],
+                [True, False, False],
+                None,
+                None,
+            ),
+            (
+                "end_of_data",
+                [_flat(9, 15), _flat(9, 16), _flat(9, 17)],
+                [True, False, False],
+                None,
+                None,
+            ),
+            (
+                "session_gap",
+                gap_bars,
+                [True, False, False, False],
+                None,
+                None,
+            ),
+        ]
+        for reason, bars, signals, sl, tp in scenarios:
+            sink: list[ts_mod.TradeDetail] = []
+            walker = TradeSimWalker(
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=sl,
+                take_profit_paisa=tp,
+                detail_sink=sink,
+            )
+            trades = walker.run(bars, signals)
+            counts = walker.exit_reason_counts
+            assert sum(counts) == len(trades) == 1, reason
+            assert self._count_for(reason, counts) == 1, reason
+            assert [d.exit_reason for d in sink] == [reason]
+
+    def test_signal_exit_reason_slot(self) -> None:
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _flat(9, 18), _flat(9, 19)]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        trades = walker.run(
+            bars,
+            [True, False, False, False, False],
+            [False, False, True, False, False],  # Mode-B signal exit @ 9:17
+        )
+        assert len(trades) == 1
+        counts = walker.exit_reason_counts
+        assert self._count_for("signal", counts) == 1
+        assert sum(counts) == 1
+
+    def test_counts_accumulate_across_multiple_trades(self) -> None:
+        """Two SL closes + one end_of_data close in ONE walk."""
+        bars = [
+            _flat(9, 15),  # signal
+            _flat(9, 16),  # entry
+            _bar(9, 17, "100", "100", "98", "99"),  # SL hit
+            _flat(9, 18),  # signal again
+            _flat(9, 19),  # entry
+            _bar(9, 20, "100", "100", "98", "99"),  # SL hit
+            _flat(9, 21),  # signal again
+            _flat(9, 22),  # entry — never closed by a level
+        ]
+        signals = [True, False, False, True, False, False, True, False]
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1, stop_loss_paisa=100)
+        trades = walker.run(bars, signals)
+        counts = walker.exit_reason_counts
+        assert len(trades) == 3
+        assert sum(counts) == 3
+        assert self._count_for("stop_loss", counts) == 2
+        assert self._count_for("end_of_data", counts) == 1
+
+    def test_counted_spine_matches_the_indices_twin(self) -> None:
+        """simulate_trades_with_exit_counts ≡ ..._with_exit_indices + counters."""
+        bars = [
+            _flat(9, 15),
+            _flat(9, 16),
+            _bar(9, 17, "100", "102", "100", "101"),
+            _flat(9, 18),
+            _flat(9, 19),
+        ]
+        signals = [True, False, False, True, False]
+        trades3, idx3, counts = ts_mod.simulate_trades_with_exit_counts(
+            bars, signals, direction=Side.BUY, tf_minutes=1, take_profit_paisa=100
+        )
+        trades2, idx2 = ts_mod.simulate_trades_with_exit_indices(
+            bars, signals, direction=Side.BUY, tf_minutes=1, take_profit_paisa=100
+        )
+        assert trades3 == trades2
+        assert idx3 == idx2
+        assert sum(counts) == len(trades3)
+        assert self._count_for("take_profit", counts) == 1
+
+    def test_counted_spine_uncertified_window_still_counts(self) -> None:
+        """A duplicate timestamp withholds indices (None) — counters unaffected."""
+        bars = [_flat(9, 15), _flat(9, 16), _flat(9, 17), _flat(9, 17)]
+        trades, exit_indices, counts = ts_mod.simulate_trades_with_exit_counts(
+            bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1
+        )
+        assert exit_indices is None
+        assert sum(counts) == len(trades) == 1
+        assert self._count_for("end_of_data", counts) == 1
