@@ -1,10 +1,15 @@
-"""Property: the ONE worst-case fill law is a per-trade P&L FLOOR.
+"""Property: the ONE worst-case fill law is a per-trade P&L FLOOR (1m grid).
 
-DEC-FILL-WORST-CASE-ONLY-001. Worst-case is the ONLY fill model — there is no
-PRECISE run to diff against — so the floor law binds each simulated trade to
-an INDEPENDENT open-anchored re-price of its OWN legs (the retired precise
-conventions, restated in-test from the trade's entry/exit bars + exit reason,
-never imported):
+DEC-FILL-WORST-CASE-ONLY-001 + DEC-FILL-EXEC-GRID-1M-001. Worst-case is the
+ONLY fill model — there is no PRECISE run to diff against — so the floor law
+binds each simulated trade to an INDEPENDENT open-anchored re-price of its
+OWN legs (the retired precise conventions, restated in-test from the trade's
+entry/exit bars + exit reason, never imported). Under the dual-feed 1-minute
+execution grid the walker is driven at ``tf_minutes=1`` with the SAME stream
+passed as both the decision and execution feed (the §6 degenerate fixed
+point): a signal on bar ``N`` still fills on bar ``N+1``, fills are 1m-bar
+prices, and every exit index is a 1m index — the property's laws are
+unchanged in substance:
 
 * **Open-anchored dominance** (the assurance register's monotonicity pin,
   [FILL-WORSTCASE-SIDE-SIGN]): for EVERY trade,
@@ -12,6 +17,8 @@ never imported):
   UNDERSTATE a trade versus the open/at-level pricing, never overstate.
 * **Entry side-sign law**: a BUY entry fills at the entry bar's HIGH exactly,
   a SELL entry at its LOW exactly — a high/low swap mutant fails both legs.
+  (The B3 terminal carve-out moves only the EXIT fill to the entry bar's
+  CLOSE; the ENTRY fill stays the adverse extreme, so this law is total.)
 * **Determinism**: the one law has no hidden mode input — two identical runs
   are bit-identical.
 
@@ -25,6 +32,16 @@ OPEN entry (pnl exactly ``+tp`` / ``-sl``); the open-anchored exit classes
 (``signal`` / ``forced_1520``) = the exit bar's OPEN; ``end_of_data`` /
 ``session_gap`` = the priced bar's CLOSE (the exit_ts lands on that bar in
 both laws) — and each worst-case leg is weakly adverse of it by construction.
+
+The B3 terminal same-bar carve-out (DEC-FILL-EXEC-GRID-1M-001 §3.12) needs NO
+exemption from the floor: when the trade's entry bar IS the last stored bar,
+the worst-case ``end_of_data`` exit fills at that bar's CLOSE (not the
+adverse extreme), so ``pnl = sign*(close - adverse_entry)`` — and since the
+adverse entry is weakly worse than the OPEN the reference uses
+(``high >= open`` for BUY, ``low <= open`` for SELL), the dominance
+``sign*(close - adverse_entry) <= sign*(close - open)`` still holds exactly;
+the arm is exercised by the corpus (an entry filling on the final bar) and
+audited by the same assertion.
 """
 
 from __future__ import annotations
@@ -97,11 +114,14 @@ def _run(
     tp: int | None,
 ) -> list[TradeDetail]:
     sink: list[TradeDetail] = []
+    # Dual-feed call shape (DEC-FILL-EXEC-GRID-1M-001): at tf_minutes=1 the
+    # SAME stream is both the decision and the 1-minute execution feed.
     simulate_trades(
         bars,
         entry_signals,
         direction=direction,
         tf_minutes=1,
+        exec_bars_1m=bars,
         stop_loss_paisa=sl,
         take_profit_paisa=tp,
         detail_sink=sink,
@@ -128,6 +148,13 @@ def _open_anchored_pnl(
     exit_ts bar's CLOSE. Pure arithmetic over the SAME bars the worst-case
     trade used — no simulation, so trigger timing cannot diverge from the
     trade under audit.
+
+    The B3 terminal degenerate (entry bar == last bar → the worst-case exit
+    fill is that bar's CLOSE, exit_ts = the entry bar's ts) rides the SAME
+    close-priced reference: worst = sign*(close - adverse_entry) <=
+    sign*(close - open) = this reference, because the adverse entry is weakly
+    worse than the open on the side sign — no exemption needed (module
+    docstring).
     """
     entry_ref = _paisa(bars_by_ts[detail.trade.entry_ts].open)
     sign = 1 if direction is Side.BUY else -1
