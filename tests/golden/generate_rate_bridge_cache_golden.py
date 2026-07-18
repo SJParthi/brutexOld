@@ -59,7 +59,9 @@ def main() -> None:
         encoding="utf-8",
     )
     _TSV_PATH.write_text(compute_tsv(payload), encoding="utf-8")
-    print(f"wrote {_JSON_PATH} ({len(payload['serve'])} serve + {len(payload['token'])} token rows)")
+    print(
+        f"wrote {_JSON_PATH} ({len(payload['serve'])} serve + {len(payload['token'])} token rows)"
+    )
     print(f"wrote {_TSV_PATH}")
 
 

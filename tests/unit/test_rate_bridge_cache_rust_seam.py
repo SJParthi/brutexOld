@@ -28,9 +28,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from brutex import pull_state_rust
 from structlog.testing import capture_logs
 
-from brutex import pull_state_rust
 from tests.golden import _rate_bridge_cache_harness as harness
 
 FLAG_ENV = "BRUTEX_PULL_STATE_RUST"
@@ -61,11 +61,14 @@ def _install(monkeypatch: pytest.MonkeyPatch, **symbols: Any) -> None:
 
 
 def _cache(
-    *, now: float = 1024.0, ttl: float = 2.0, token: str | None = "tok"
+    *,
+    now: float = 1024.0,
+    ttl: float = 2.0,
+    token: str | None = "tok",  # noqa: S107 — a content-digest fixture, not a secret
 ) -> tuple[Any, dict[str, int]]:
     calls = {"probe": 0, "read": 0, "guard": 0}
     return (
-        harness._build_cache(now=now, ttl=ttl, token=token, calls=calls),  # noqa: SLF001
+        harness._build_cache(now=now, ttl=ttl, token=token, calls=calls),
         calls,
     )
 
@@ -109,9 +112,7 @@ class TestFacadeAccessors:
             assert pull_state_rust.rust_token_revalidates("a", "a") is None
         assert any(log.get("reason") == "wheel_missing" for log in logs)
 
-    def test_stale_wheel_degrades_naming_the_symbols(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stale_wheel_degrades_naming_the_symbols(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch)
         with capture_logs() as logs:
             assert pull_state_rust.rust_memo_serve_arm(None, 2.0, True) is None
@@ -129,9 +130,7 @@ class TestFacadeAccessors:
             for log in logs2
         )
 
-    def test_raising_kernels_degrade_kernel_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raising_kernels_degrade_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(*_args: object) -> object:
             raise RuntimeError("kernel exploded")
 

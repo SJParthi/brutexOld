@@ -173,10 +173,7 @@ def classify_payload(data: object) -> dict[str, Any] | None:
             return None
         field_kinds.append(code)
     raw_pa = data.get("pull_active")
-    if isinstance(raw_pa, bool):
-        pa_kind = PA_TRUE if raw_pa else PA_FALSE
-    else:
-        pa_kind = PA_NONE
+    pa_kind = (PA_TRUE if raw_pa else PA_FALSE) if isinstance(raw_pa, bool) else PA_NONE
     return {
         "root_mapping": 1,
         "schema_kind": schema_kind,
@@ -275,7 +272,10 @@ def enumerate_cases() -> list[tuple[str, bytes]]:
         ("corrupt_non_utf8", b"\xff\xfe{}"),
         ("corrupt_empty", b""),
         # -- the documented Python-arm raises (OverflowError escapes) ---------
-        ("raises_huge_float_field", ("{" + '"schema": 3, "effective_rps": 1' + "0" * 400 + "}").encode()),
+        (
+            "raises_huge_float_field",
+            ("{" + '"schema": 3, "effective_rps": 1' + "0" * 400 + "}").encode(),
+        ),
         ("raises_inf_in_int_field", _dumps(_valid_payload(recent_minute=float("inf")))),
         # first failure (ValueError field) precedes the huge field in probe
         # order → the ORACLE serves None; the classifier still abstains
@@ -300,7 +300,7 @@ def _observe(raw: bytes) -> dict[str, Any]:
         dest.write_bytes(raw)
         try:
             snapshot = read_rate_snapshot(lake)
-        except Exception as exc:  # noqa: BLE001 — the documented raises family is captured honestly
+        except Exception as exc:
             return {"kind": "raises", "type": type(exc).__name__}
     if snapshot is None:
         return {"kind": "none"}

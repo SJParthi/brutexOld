@@ -104,9 +104,7 @@ class TestAntiVacuous:
             assert row["outcome"] == {"kind": "raises", "type": "OverflowError"}
             assert row["classified"] is None  # the documented Python arm
 
-    def test_bad_then_huge_stays_python_arm_but_serves_none(
-        self, frozen: dict[str, Any]
-    ) -> None:
+    def test_bad_then_huge_stays_python_arm_but_serves_none(self, frozen: dict[str, Any]) -> None:
         row = _row(frozen, "pythonarm_bad_then_huge")
         assert row["outcome"]["kind"] == "none"  # oracle short-circuits first
         assert row["classified"] is None  # classifier's probe sweep abstains

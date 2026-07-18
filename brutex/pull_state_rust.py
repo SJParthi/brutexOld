@@ -1242,9 +1242,7 @@ def rust_bridge_payload_verdict(
         and result[1] in _BRIDGE_PA_CODES
     ):
         return (result[0], result[1])
-    warn_degrade_once(
-        "kernel_invalid", symbol="bridge_payload_verdict", detail=repr(result)[:80]
-    )
+    warn_degrade_once("kernel_invalid", symbol="bridge_payload_verdict", detail=repr(result)[:80])
     return None
 
 
@@ -1257,9 +1255,7 @@ MEMO_ARM_OWNER: Final[int] = 2
 _MEMO_ARMS: Final[frozenset[int]] = frozenset(range(MEMO_ARM_OWNER + 1))
 
 
-def rust_memo_serve_arm(
-    age_s: float | None, ttl_s: float, inflight: bool
-) -> int | None:
+def rust_memo_serve_arm(age_s: float | None, ttl_s: float, inflight: bool) -> int | None:
     """Consult the three-arm memo serve kernel; ``None`` = use the oracle.
 
     ``age_s`` is the caller's PRE-COMPUTED clamped monotonic delta
@@ -1290,9 +1286,7 @@ def rust_token_revalidates(token: str | None, prior: str | None) -> bool | None:
     if verdict is _KERNEL_FAULT:
         return None
     if not isinstance(verdict, bool):
-        warn_degrade_once(
-            "kernel_invalid", symbol="token_revalidates", detail=repr(verdict)[:80]
-        )
+        warn_degrade_once("kernel_invalid", symbol="token_revalidates", detail=repr(verdict)[:80])
         return None
     return verdict
 

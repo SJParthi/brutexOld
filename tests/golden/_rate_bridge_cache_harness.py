@@ -37,13 +37,13 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from brutex.data.rate_bridge import RateBridgeSnapshot
 from brutex.dashboard.rate_bridge_cache import (
     MEMO_SOURCE_CACHED,
     MEMO_SOURCE_LIVE,
     MEMO_SOURCE_UNVERIFIED,
     RateBridgeCache,
 )
+from brutex.data.rate_bridge import RateBridgeSnapshot
 
 #: Serve-arm names, index == the Rust kernel's token value
 #: (``rust/brutex-pull-state/src/rate_bridge.rs`` — the shared vocabulary).
@@ -92,7 +92,7 @@ def _build_cache(
     *,
     now: float,
     ttl: float,
-    token: str | None = "tok",
+    token: str | None = "tok",  # noqa: S107 — a content-digest fixture, not a secret
     calls: dict[str, int] | None = None,
 ) -> RateBridgeCache:
     """A cache with an injected frozen clock, INLINE guard + counting seams."""
@@ -128,7 +128,7 @@ SERVE_CASES: tuple[tuple[str, float | None, float, float, bool], ...] = (
     ("fresh_hit_inflight_ttl_wins", 1023.0, 1024.0, 2.0, True),
     ("boundary_exact_owner", 1022.0, 1024.0, 2.0, False),
     ("boundary_exact_follower", 1022.0, 1024.0, 2.0, True),
-    ("just_under_boundary", 1022.0 + 2.0 ** -10, 1024.0, 2.0, False),
+    ("just_under_boundary", 1022.0 + 2.0**-10, 1024.0, 2.0, False),
     ("stale_owner", 1000.0, 1024.0, 2.0, False),
     ("stale_follower", 1000.0, 1024.0, 2.0, True),
     ("ttl_zero_owner", 1023.5, 1024.0, 0.0, False),
@@ -264,7 +264,6 @@ def compute_tsv(payload: dict[str, Any]) -> str:
     for row in payload["token"]:
         revalidates = "1" if row["revalidates"] else "0"
         lines.append(
-            f"token\t{row['id']}\t{_opt_str(row['prior'])}\t{_opt_str(row['token'])}\t"
-            f"{revalidates}"
+            f"token\t{row['id']}\t{_opt_str(row['prior'])}\t{_opt_str(row['token'])}\t{revalidates}"
         )
     return "\n".join(lines) + "\n"

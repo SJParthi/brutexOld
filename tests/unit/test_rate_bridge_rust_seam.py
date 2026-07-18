@@ -27,15 +27,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from structlog.testing import capture_logs
-
 from brutex import pull_state_rust
-from brutex.data import rate_bridge
 from brutex.data.rate_bridge import (
     _classify_bridge_payload_for_kernel,
     rate_bridge_path,
     read_rate_snapshot,
 )
+from structlog.testing import capture_logs
+
 from tests.golden import _rate_bridge_harness as harness
 
 FLAG_ENV = "BRUTEX_PULL_STATE_RUST"
@@ -260,21 +259,16 @@ class TestFacadeAccessor:
             assert pull_state_rust.rust_bridge_payload_verdict(*_GOOD_ARGS) is None
         assert any(log.get("reason") == "wheel_missing" for log in logs)
 
-    def test_stale_wheel_degrades_naming_the_symbol(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stale_wheel_degrades_naming_the_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch)  # importable, symbol absent
         with capture_logs() as logs:
             assert pull_state_rust.rust_bridge_payload_verdict(*_GOOD_ARGS) is None
         assert any(
-            log.get("reason") == "wheel_stale"
-            and log.get("symbol") == "bridge_payload_verdict"
+            log.get("reason") == "wheel_stale" and log.get("symbol") == "bridge_payload_verdict"
             for log in logs
         )
 
-    def test_raising_kernel_degrades_kernel_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raising_kernel_degrades_kernel_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(*_args: object) -> object:
             raise RuntimeError("kernel exploded")
 
