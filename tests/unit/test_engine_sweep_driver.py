@@ -1024,3 +1024,98 @@ class TestExitReasonCountersThreading:
         m = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, stop_loss_paisa=50)
         assert m.sl_hit_rate is not None
         assert 0.0 <= m.sl_hit_rate <= 1.0
+
+
+class TestRecencyAnchorThreading:
+    """metrics_from_trades threads the GLOBAL trailing_anchor to the recency
+    pass on BOTH arms (DEC-METRICS-TRAILING-WINDOW-001); absent anchor is the
+    honest all-None legacy arm."""
+
+    def _bars_and_trades(self) -> tuple[list[CandleBar], list[ClosedTrade]]:
+        from brutex.engine.combo_mask import mask_to_entry_signals
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.trade_sim import simulate_trades_with_exit_counts
+
+        bars = _session_bars()
+        bits = build_bar_bits(bars)
+        trades, _idx, _counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+        )
+        assert trades
+        return bars, trades
+
+    def _metrics(self, anchor: object = None) -> ResultMetrics:
+        bars, trades = self._bars_and_trades()
+        kwargs: dict[str, object] = {}
+        if anchor is not None:
+            kwargs["trailing_anchor"] = anchor
+        return metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            tf_minutes=1,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_anchor_yields_concrete_recency_on_the_default_kernel_arm(self) -> None:
+        bars, _ = self._bars_and_trades()
+        m = self._metrics(anchor=bars[-1].timestamp)
+        # The fixture spans one session (<< the 730-day window, << one
+        # 30-day decay bucket): trailing == full history, decay == net.
+        assert m.trailing_net_pnl_paisa == m.net_pnl_paisa
+        assert m.decay_weighted_net_paisa == float(m.net_pnl_paisa)
+        assert m.trailing_profit_factor == m.profit_factor
+
+    def test_python_tail_matches_the_kernel_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bars, _ = self._bars_and_trades()
+        default_arm = self._metrics(anchor=bars[-1].timestamp)
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
+        python_arm = self._metrics(anchor=bars[-1].timestamp)
+        for name in (
+            "trailing_sharpe_ratio",
+            "trailing_profit_factor",
+            "trailing_net_pnl_paisa",
+            "decay_weighted_net_paisa",
+        ):
+            assert getattr(python_arm, name) == getattr(default_arm, name), name
+
+    def test_absent_anchor_is_the_honest_all_none_legacy_arm(self) -> None:
+        m = self._metrics()
+        assert m.trailing_sharpe_ratio is None
+        assert m.trailing_profit_factor is None
+        assert m.trailing_net_pnl_paisa is None
+        assert m.decay_weighted_net_paisa is None
+
+    def test_metrics_for_mask_passes_the_anchor_through(self) -> None:
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.sweep_driver import metrics_for_mask
+
+        bars = _session_bars()
+        bits = build_bar_bits(bars)
+        with_anchor = metrics_for_mask(
+            bars,
+            bits,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+            take_profit_paisa=None,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            trailing_anchor=bars[-1].timestamp,
+        )
+        without = metrics_for_mask(
+            bars,
+            bits,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+            take_profit_paisa=None,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+        )
+        assert with_anchor.decay_weighted_net_paisa is not None
+        assert without.decay_weighted_net_paisa is None

@@ -184,6 +184,40 @@ class TestPresetParam:
             run_id_hex(3),  # None rate last within the tied win rate
         ]
 
+    def test_recent_presets_thread_the_recency_columns(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """DEC-METRICS-TRAILING-WINDOW-001: the view's _preset_rank_record
+        threads the persisted trailing_sharpe_ratio / decay_weighted_net_paisa
+        — each recency preset orders its metric DESC with a None (a
+        pre-extension row / anchor-less run) last."""
+        write_tuple_store(
+            store.path.parent,
+            [
+                make_leaderboard_row(1, trailing_sharpe_ratio=0.2, decay_weighted_net_paisa=50.0),
+                make_leaderboard_row(
+                    2, trailing_sharpe_ratio=1.7, decay_weighted_net_paisa=-10.0
+                ),
+                make_leaderboard_row(
+                    3, trailing_sharpe_ratio=None, decay_weighted_net_paisa=None
+                ),
+            ],
+        )
+        recent = client.get("/api/v1/sweep/leaderboard?preset=recent").json()
+        assert recent["preset"] == "recent"
+        assert [r["run_id"] for r in recent["rows"]] == [
+            run_id_hex(2),  # highest trailing Sharpe first
+            run_id_hex(1),
+            run_id_hex(3),  # None last
+        ]
+        decay = client.get("/api/v1/sweep/leaderboard?preset=recent_decay").json()
+        assert decay["preset"] == "recent_decay"
+        assert [r["run_id"] for r in decay["rows"]] == [
+            run_id_hex(1),  # highest decay-weighted net first
+            run_id_hex(2),
+            run_id_hex(3),  # None last
+        ]
+
     def test_preset_on_empty_tree_is_honest_empty_board(self, client: TestClient) -> None:
         """A preset over an empty sweeps tree is the honest empty board, preset echoed."""
         payload = client.get("/api/v1/sweep/leaderboard?preset=calmar").json()

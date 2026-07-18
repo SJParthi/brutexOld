@@ -339,6 +339,29 @@ class TestRankCandidates:
             unknown.row.run_id,  # None rate last within the tied win rate
         ]
 
+    def test_recent_presets_thread_the_recency_row_fields(self) -> None:
+        # DEC-METRICS-TRAILING-WINDOW-001: the recent / recent_decay presets
+        # read the row's persisted trailing_sharpe_ratio /
+        # decay_weighted_net_paisa through _rank_record's projection — a
+        # None (the fixture default, a pre-extension row) ranks last.
+        unscored = make_candidate(1, fingerprint=fingerprint_seed(1))
+        assert unscored.row.trailing_sharpe_ratio is None
+        assert unscored.row.decay_weighted_net_paisa is None
+        low = make_candidate(
+            2,
+            fingerprint=fingerprint_seed(2),
+            row_overrides={"trailing_sharpe_ratio": -0.3, "decay_weighted_net_paisa": -900.0},
+        )
+        high = make_candidate(
+            3,
+            fingerprint=fingerprint_seed(3),
+            row_overrides={"trailing_sharpe_ratio": 1.2, "decay_weighted_net_paisa": 4500.0},
+        )
+        expected = [high.row.run_id, low.row.run_id, unscored.row.run_id]
+        for preset in ("recent", "recent_decay"):
+            ranked = rank_candidates([unscored, low, high], preset=preset)
+            assert [c.row.run_id for c in ranked] == expected, preset
+
     def test_composite_preset_ranks_descending_none_last(self) -> None:
         none_score = make_candidate(
             1, fingerprint=fingerprint_seed(1), agg_overrides={"composite_score": None}
