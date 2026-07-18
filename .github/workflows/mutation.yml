@@ -517,6 +517,7 @@ jobs:
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/observability/observability_rust.py:tests/unit/test_observability_rust.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
