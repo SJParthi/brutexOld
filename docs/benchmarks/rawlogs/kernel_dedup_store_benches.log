@@ -1,0 +1,131 @@
+=== printed measurement lines (grep-extracted from the full log) ===
+  per-combo (20k bars) = 80.38 µs/combo
+  combos/sec           = 12,441
+  regression floor     = 5 ms/combo
+Rust trade-sim O(1)-per-op ratio:
+  ratio                  = 1.07× (ceiling 8.00×)
+  combos/sec         = 12,325
+  rust   =     2.59 ms  (9,274 combos/s)
+  python =   629.17 ms  (38 combos/s)
+  ratio  = 243.1×  (floor 15×; density-dependent — the blueprint spike read ~40× at ~81 trades/mask, sparser windows read higher)
+  u128 per-combo (20k bars) = 85.24 µs/combo  (11,731 combos/s)
+  u64  per-combo (20k bars) = 91.82 µs/combo  (10,890 combos/s)
+  u128/u64 ratio            = 0.93×  (measured, informational — never asserted equal)
+SUPERSET kernel bench (DEC-RUST-SUPERMASK-KERNEL-001) — best of 5 runs:
+  workload          = 94,000 bars × 10,000 masks = 940,000,000 mask·bar ops
+  numpy reference   = 2.6565s | 353.9 M ops/s | 265.65 µs/trial
+  rust kernel       = 0.1809s | 5197.4 M ops/s | 18.09 µs/trial
+  rust per bar·mask = 0.192 ns
+Name (time in ns)                              Min                     Max                  Mean                StdDev                Median                IQR            Outliers  OPS (Kops/s)            Rounds  Iterations
+  OPS: Operations Per Second, computed as 1 / Mean
+SKIPPED [1] tests/bench/test_trade_sim_throughput.py:169: BRUTEX_M4PRO_ABS=1 not set — the absolute combos/s SLA gate runs only on the M4 Pro self-hosted runner (number printed above). Shared CI keeps the O(1) ratio + regression-floor gates (DEC-P0-020 honest envelope).
+15 passed, 1 skipped in 26.84s
+
+=== final 12KB of raw log ===
+ection=BUY entry_price_paisa=10061 idx=1405
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1490 holding_bars=86 pnl_paisa=-170 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10224 idx=2237
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2240 holding_bars=4 pnl_paisa=-426 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10078 idx=2285
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2615 holding_bars=331 pnl_paisa=-232 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10218 idx=3261
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=3365 holding_bars=105 pnl_paisa=-466 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10093 idx=4477
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4490 holding_bars=14 pnl_paisa=-169 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10159 idx=4525
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4865 holding_bars=341 pnl_paisa=-381 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10258 idx=5309
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5615 holding_bars=307 pnl_paisa=-376 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10082 idx=109
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=365 holding_bars=257 pnl_paisa=-153 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10154 idx=456
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=740 holding_bars=285 pnl_paisa=-371 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10072 idx=768
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1115 holding_bars=348 pnl_paisa=-235 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10202 idx=1285
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1490 holding_bars=206 pnl_paisa=-311 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10126 idx=1597
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1865 holding_bars=269 pnl_paisa=-186 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10192 idx=1944
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2240 holding_bars=297 pnl_paisa=-394 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10078 idx=2285
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2615 holding_bars=331 pnl_paisa=-232 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10070 idx=2645
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2990 holding_bars=346 pnl_paisa=-163 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10068 idx=3016
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=3365 holding_bars=350 pnl_paisa=-316 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10064 idx=3376
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=3740 holding_bars=365 pnl_paisa=-249 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10190 idx=3821
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4115 holding_bars=295 pnl_paisa=-320 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10064 idx=4229
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4490 holding_bars=262 pnl_paisa=-140 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10184 idx=4552
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4865 holding_bars=314 pnl_paisa=-406 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10108 idx=5064
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5240 holding_bars=177 pnl_paisa=-276 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10258 idx=5309
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5615 holding_bars=307 pnl_paisa=-376 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10176 idx=5765
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5990 holding_bars=226 pnl_paisa=-246 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10092 idx=131
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=365 holding_bars=235 pnl_paisa=-163 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10061 idx=1405
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1490 holding_bars=86 pnl_paisa=-170 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10198 idx=1501
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=1865 holding_bars=365 pnl_paisa=-258 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10112 idx=1891
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=2240 holding_bars=350 pnl_paisa=-314 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10218 idx=3261
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=3365 holding_bars=105 pnl_paisa=-466 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10212 idx=3837
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4115 holding_bars=279 pnl_paisa=-342 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10194 idx=4131
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=4490 holding_bars=360 pnl_paisa=-270 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10258 idx=5309
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5615 holding_bars=307 pnl_paisa=-376 reason=forced_1520
+2026-07-18 14:53:07 [debug    ] trade_sim.entry                direction=BUY entry_price_paisa=10152 idx=5699
+2026-07-18 14:53:07 [debug    ] trade_sim.exit                 exit_idx=5990 holding_bars=292 pnl_paisa=-222 reason=forced_1520
+
+Wired ResidentTradeSim.simulate_masks vs Python-oracle arm (6,000 bars × 24 masks):
+  rust   =     2.59 ms  (9,274 combos/s)
+  python =   629.17 ms  (38 combos/s)
+  ratio  = 243.1×  (floor 15×; density-dependent — the blueprint spike read ~40× at ~81 trades/mask, sparser windows read higher)
+
+.
+Rust trade-sim u128 kernel (DEC-TRADE-SIM-U128-KERNEL-001):
+  u128 per-combo (20k bars) = 85.24 µs/combo  (11,731 combos/s)
+  u64  per-combo (20k bars) = 91.82 µs/combo  (10,890 combos/s)
+  u128/u64 ratio            = 0.93×  (measured, informational — never asserted equal)
+
+.
+SUPERSET kernel bench (DEC-RUST-SUPERMASK-KERNEL-001) — best of 5 runs:
+  workload          = 94,000 bars × 10,000 masks = 940,000,000 mask·bar ops
+  numpy reference   = 2.6565s | 353.9 M ops/s | 265.65 µs/trial
+  rust kernel       = 0.1809s | 5197.4 M ops/s | 18.09 µs/trial
+  speedup           = 14.69×
+  rust per bar·mask = 0.192 ns
+
+.2026-07-18 14:53:22 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=14.378 capacity=2000 fpr_target=0.001 impl_k=10 k=10 m_bits=28756 m_bytes=3595
+.2026-07-18 14:53:23 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=14.37759 capacity=200000 fpr_target=0.001 impl_k=10 k=10 m_bits=2875518 m_bytes=359440
+.2026-07-18 14:53:23 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=14.378 capacity=2000 fpr_target=0.001 impl_k=10 k=10 m_bits=28756 m_bytes=3595
+2026-07-18 14:53:23 [info     ] bloom_init                     backend=fastbloom-rs bits_per_item=14.37759 capacity=200000 fpr_target=0.001 impl_k=10 k=10 m_bits=2875518 m_bytes=359440
+........
+
+------------------------------------------------------------------------------------------------------ benchmark: 6 tests -----------------------------------------------------------------------------------------------------
+Name (time in ns)                              Min                     Max                  Mean                StdDev                Median                IQR            Outliers  OPS (Kops/s)            Rounds  Iterations
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+test_get_at_small_scale                   155.4375 (1.0)        4,275.3750 (1.0)        173.6464 (1.0)         80.6409 (1.0)        159.5937 (1.0)       1.5312 (1.01)   6061;10658    5,758.8280 (1.0)      107193          32
+test_get_at_large_scale                   156.4194 (1.01)      35,647.2258 (8.34)       173.7051 (1.00)       113.2341 (1.40)       161.1613 (1.01)      1.5161 (1.0)    6317;17946    5,756.8844 (1.00)     198571          31
+test_seen_at_large_scale                  938.0000 (6.03)      75,275.0000 (17.61)    1,068.6265 (6.15)     1,002.2488 (12.43)    1,001.0000 (6.27)     25.0001 (16.49)    660;3341      935.7806 (0.16)      65232           1
+test_seen_at_small_scale                  939.0000 (6.04)     125,299.9999 (29.31)    1,184.2202 (6.82)     1,463.1260 (18.14)    1,004.0001 (6.29)     36.0000 (23.74)    127;4194      844.4375 (0.15)      23749           1
+test_append_dup_noop_at_small_scale     1,157.9999 (7.45)     126,855.0000 (29.67)    1,283.7451 (7.39)     1,178.1763 (14.61)    1,198.9999 (7.51)     23.9999 (15.83)    611;4489      778.9709 (0.14)      79479           1
+test_append_dup_noop_at_large_scale     1,161.0000 (7.47)     193,507.9999 (45.26)    1,285.3413 (7.40)     1,245.3713 (15.44)    1,208.0000 (7.57)     23.0000 (15.17)   1064;5155      778.0035 (0.14)     125787           1
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Legend:
+  Outliers: 1 Standard Deviation from Mean; 1.5 IQR (InterQuartile Range) from 1st Quartile and 3rd Quartile.
+  OPS: Operations Per Second, computed as 1 / Mean
+=========================== short test summary info ============================
+SKIPPED [1] tests/bench/test_trade_sim_throughput.py:169: BRUTEX_M4PRO_ABS=1 not set — the absolute combos/s SLA gate runs only on the M4 Pro self-hosted runner (number printed above). Shared CI keeps the O(1) ratio + regression-floor gates (DEC-P0-020 honest envelope).
+15 passed, 1 skipped in 26.84s
