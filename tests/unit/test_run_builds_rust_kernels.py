@@ -190,7 +190,7 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
-    # DEC-RUST-OBSERVABILITY-001 (MIGRATION.md #1956): brutex_observability is
+    # DEC-RUST-OBSERVABILITY-001 (MIGRATION.md #1961): brutex_observability is
     # the observability decision-law crate behind a deliberately default-OFF
     # import-guarded facade (BRUTEX_OBSERVABILITY_RUST). It is consumed ONLY
     # through brutex/observability/observability_rust.py

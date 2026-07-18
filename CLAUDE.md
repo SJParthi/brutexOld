@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1956
+_Last updated: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
 provisional, branch `claude/rust-observability-lane` — the observability
 Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
 (loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
@@ -57,7 +57,7 @@ wired). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
 REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; ONE
 new env var (`BRUTEX_OBSERVABILITY_RUST`). This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
-blurb + MIGRATION.md #1956.)
+blurb + MIGRATION.md #1961.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3431,9 +3431,12 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-observability-lane`
-  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1956** — renumbered
-  #1954 → #1956 at the 2026-07-18 merge-reconcile (main took #1954 for
+  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
+  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  #1956 at the 3ee742b3 resync — main took #1954 for
   DEC-TEST-AWS-HERMETICITY-001 + #1955 for DEC-STRATEGIES-RUST-COMBO-001;
+  #1956 → #1961 at the 71fb2ee5 resync — main took #1956 for
+  DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master allocation;
   the DEC-ID is the stable handle per DEC-LEDGER-RENUMBER-001); the id itself is adopted from the coordinator
   partition's T27 row (the in-code citations swept from the spec's interim
   working id to this resolving handle in the packaging commit) — the
@@ -10627,9 +10630,12 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-observability-lane`
-  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1956 — renumbered
-  #1954 → #1956 at the 2026-07-18 merge-reconcile, main took #1954 for
-  DEC-TEST-AWS-HERMETICITY-001 (DEC-LEDGER-RENUMBER-001) — the
+  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
+  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  #1956 at the 3ee742b3 resync, main took #1954 for
+  DEC-TEST-AWS-HERMETICITY-001; #1956 → #1961 at the 71fb2ee5 resync,
+  main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master
+  allocation; DEC-LEDGER-RENUMBER-001) — the
   observability Rust decision-kernel lane, FIRST CUT: the four pure
   detector/stamp laws (loop_watchdog tiered stall machine · watchdog
   heartbeat decide · sla predicate+hysteresis edge · stage_stamp
@@ -10655,7 +10661,7 @@ hostile-review pass._
   DEC-RUST-OBSERVABILITY-TRIPWIRES-002 ·
   DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the ci.yml crate job + weekly
   cargo-mutants wiring; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
-  §1's Active branch line — see §1 + MIGRATION.md #1956 for the full blurb)
+  §1's Active branch line — see §1 + MIGRATION.md #1961 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
