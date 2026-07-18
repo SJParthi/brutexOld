@@ -62,6 +62,9 @@ from collections.abc import Sequence
 #: list; a test pins the two equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentBars",
+    # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (fenced
+    # additive entries; keep-both union seam with sibling fno-math lanes).
+    "ResidentBarsU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -69,7 +72,9 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "count_supermask_u128s",
     "count_supermask_u64s",
+    "count_supermasks_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
@@ -111,6 +116,7 @@ _assert_compiled_surface(_compiled)
 # wheel raises the actionable message, not a bare from-import failure.
 from ._fno_math import (  # noqa: E402
     ResidentBars,
+    ResidentBarsU128,
     ResidentSweepSim,
     ResidentSweepSimU128,
     __version__,
@@ -119,8 +125,10 @@ from ._fno_math import (  # noqa: E402
     bitcount_u64s,
     blake3_hash,
     count_supermask_u64s,
+    count_supermask_u128s,
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
+    count_supermasks_u128s,
     popcount_bytes,
     stats_cpcv_pass_count,
     sweep_drawdown_stats,
@@ -143,6 +151,7 @@ __build_crate_version__: str = __version__
 
 __all__ = [
     "ResidentBars",
+    "ResidentBarsU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -151,8 +160,10 @@ __all__ = [
     "bitcount_u64s",
     "blake3_hash",
     "count_supermask_u64s",
+    "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "count_supermasks_u128s",
     "popcount_bytes",
     "stats_cpcv_pass_count",
     "sweep_drawdown_stats",
