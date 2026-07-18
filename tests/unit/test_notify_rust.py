@@ -1,6 +1,6 @@
 """Tests for the ``notify_rust`` routing facade (DEC-NOTIFY-RUST-CORE-001).
 
-MIGRATION.md #1954. Yields 100% line + branch on
+MIGRATION.md #1955. Yields 100% line + branch on
 ``brutex/notifications/notify_rust.py`` ALONE (the discovery-gate contract):
 the flag matrix, the ``_TRUTHY``/``_FALSY`` mirror pin against
 ``sweep_lookahead``'s sets, the OFF-never-imports-crate bomb spy (poisoned
@@ -193,32 +193,39 @@ class TestOffArm:
     def test_off_never_imports_crate_and_matches_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Belt AND suspenders: a bombed import_module + a poisoned
-        # sys.modules entry that explodes on ANY attribute access.
+        # Belt AND suspenders (the feed_rust None-poison house shape —
+        # CodeQL-clean, no special-method raise): the bombed import_module
+        # explodes loudly on the facade's REAL lazy-import path, and the
+        # poisoned ``None`` sys.modules entry turns even a hypothetical
+        # plain ``import brutex_notify`` rewrite into an ImportError → the
+        # crate_unavailable latch — which the trailing no-latch / zero-log
+        # assertions then catch (teeth verified: deleting the OFF-arm guard
+        # in ``_routed`` fails this test loudly).
         def _bomb(name: str) -> object:
             raise AssertionError(f"flag-OFF path imported {name!r}")
 
-        class _Poison:
-            def __getattr__(self, name: str) -> object:
-                raise AssertionError(f"flag-OFF path touched brutex_notify.{name}")
-
         monkeypatch.setattr(nr.importlib, "import_module", _bomb)
-        monkeypatch.setitem(sys.modules, "brutex_notify", _Poison())
+        monkeypatch.setitem(sys.modules, "brutex_notify", None)
 
-        assert (
-            nr.routed_escape_markdown_v2("a._x!", python_law=_escape_markdown_v2_python)
-            == "a\\.\\_x\\!"
-        )
-        assert nr.routed_count_or_question(None, python_law=_count_or_question_python) == "?"
-        assert nr.routed_count_or_question(7, python_law=_count_or_question_python) == "7"
-        assert (
-            nr.routed_dedupe_should_drop(60.0, 100.0, 120.0, python_law=_dedupe_should_drop_python)
-            is True
-        )
-        assert (
-            nr.routed_truncate_id_12("0123456789abcdef", python_law=_truncate_id_12_python)
-            == "0123456789ab"
-        )
+        with capture_logs() as logs:
+            assert (
+                nr.routed_escape_markdown_v2("a._x!", python_law=_escape_markdown_v2_python)
+                == "a\\.\\_x\\!"
+            )
+            assert nr.routed_count_or_question(None, python_law=_count_or_question_python) == "?"
+            assert nr.routed_count_or_question(7, python_law=_count_or_question_python) == "7"
+            assert (
+                nr.routed_dedupe_should_drop(
+                    60.0, 100.0, 120.0, python_law=_dedupe_should_drop_python
+                )
+                is True
+            )
+            assert (
+                nr.routed_truncate_id_12("0123456789abcdef", python_law=_truncate_id_12_python)
+                == "0123456789ab"
+            )
+        assert nr.rust_notify_disabled() is False  # never latched — the crate was never touched
+        assert logs == []  # zero fallback/disable/engaged events on the OFF arm
 
     def test_latched_process_serves_oracle_without_import(
         self, monkeypatch: pytest.MonkeyPatch
