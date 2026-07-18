@@ -73,7 +73,7 @@ still climbing to perfect is test coverage (next section).
 | Same input → same output | "Re-run it, get the identical result" | 🟢 every run stamped with a reproducibility fingerprint |
 | Live logs you can read | "See what it's doing, right now" | 🟢 structured logs + a live `/logs` web viewer |
 | Dashboards & alerts | "Charts + pings when something's off" | 🟡 core in place; richer live dashboards/alerting on the roadmap |
-| Auto-recover | "If a step breaks, it heals" | 🟡 rerun-safe ingest + auto-resume; full self-healing is progressive |
+| Auto-recover | "If a step breaks, it heals" | 🟡 rerun-safe ingest + opt-in boot auto-resume (`BRUTEX_AUTO_RESUME=1` — OFF by default); full self-healing is progressive |
 
 ---
 

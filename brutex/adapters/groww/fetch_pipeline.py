@@ -133,7 +133,10 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     quota stop (:class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` /
     ``QuotaInvariantError``), a tripped mass-empty circuit breaker
     (:class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`,
-    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), a market-hours halt
+    DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001), an operator's COOPERATIVE cancel
+    (:class:`~brutex.adapters.ingest_common.PullCancelled`,
+    DEC-JOB-COOPERATIVE-CANCEL-001 — quarantining it per-symbol would silently
+    CONTINUE the very pull the operator asked to stop), a market-hours halt
     (:class:`~brutex.data.errors.MarketHoursHalt` — the NSE session opened mid-pull,
     DEC-GROWW-MARKET-HOURS-GUARD-001: every remaining vendor window is equally
     forbidden until 15:35 IST, so the whole pull must stop, never a per-window
@@ -166,6 +169,7 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import GrowwCredentialDeadError, is_terminal_auth_failure
+    from brutex.adapters.ingest_common import PullCancelled
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
     if is_terminal_auth_failure(exc):
@@ -190,6 +194,10 @@ def _is_pool_isolatable(exc: BaseException) -> bool:
             MassEmptySettleHalt,
             VendorDownError,
             GrowwCredentialDeadError,
+            # DEC-JOB-COOPERATIVE-CANCEL-001: an operator cancel surfacing in the
+            # async consumer stops the WHOLE pull (the spines' _GLOBAL_STOP_ERRORS
+            # twin) — a per-symbol quarantine would silently keep pulling.
+            PullCancelled,
         ),
     )
 
