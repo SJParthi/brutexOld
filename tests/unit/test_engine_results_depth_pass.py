@@ -1012,3 +1012,215 @@ class TestWorstCaseCaptureChain:
         entry_ts = capture.trades[0].entry_ts
         (entry_bar,) = [b for b in bars if b.timestamp == entry_ts]
         assert capture.trades[0].entry_px == entry_bar.high
+
+
+# ── Exec-provider + fill-sensitivity threading (DEC-OPTIONS-EXEC-FEEDBACK-001 /
+#    DEC-FILL-EXEC-GRID-1M-001, R13) ─────────────────────────────────────────────
+
+
+class TestExecProviderAndFillSensitivityThreading:
+    """The provider kwargs thread VERBATIM; ``fill_sensitivity=True`` builds the
+    resolver over the pass's own caches — the default arm stays byte-identical
+    (no additive keys, ``None`` providers into :func:`build_top100`)."""
+
+    @staticmethod
+    def _spy_build(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object]) -> None:
+        real_build = results_depth_pass.build_top100
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            for key in (
+                "options_exec_provider",
+                "futures_exec_provider",
+                "fill_sensitivity_provider",
+            ):
+                seen[key] = kwargs.get(key)
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(results_depth_pass, "build_top100", _spy)
+
+    def test_default_threads_none_and_keeps_the_prechange_artifact_shape(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        self._spy_build(monkeypatch, seen)
+        _run_pass(out_root)
+        assert seen["options_exec_provider"] is None
+        assert seen["futures_exec_provider"] is None
+        assert seen["fill_sensitivity_provider"] is None
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.entries
+        # The pre-change artifact SHAPE: the emit-on-wired keys are ABSENT on
+        # every entry AND on the source header (absence == not wired — the
+        # additive-key law that keeps provider-None artifact bytes identical).
+        for entry in loaded.entries:
+            assert "options_exec" not in entry
+            assert "futures_exec" not in entry
+            assert "fill_sensitivity" not in entry
+        for flag in ("options_exec_wired", "futures_exec_wired", "fill_sensitivity_wired"):
+            assert flag not in loaded.source
+
+    def test_wired_providers_thread_verbatim_and_annotate_every_ranked_entry(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.results_depth_pass import _FillSensitivityResolver
+        from brutex.engine.top100_artifact import Top100Candidate
+
+        def _options(_candidate: Top100Candidate) -> dict[str, object]:
+            return {"status": "not_priced", "reason": "sentinel_options"}
+
+        def _futures(_candidate: Top100Candidate) -> dict[str, object]:
+            return {"status": "not_priced", "reason": "sentinel_futures"}
+
+        seen: dict[str, object] = {}
+        self._spy_build(monkeypatch, seen)
+        _run_pass(
+            out_root,
+            options_exec_provider=_options,
+            futures_exec_provider=_futures,
+            fill_sensitivity=True,
+        )
+        # Threaded VERBATIM — the exact callables, identity not copies.
+        assert seen["options_exec_provider"] is _options
+        assert seen["futures_exec_provider"] is _futures
+        resolver = seen["fill_sensitivity_provider"]
+        assert isinstance(resolver, _FillSensitivityResolver)
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.entries
+        for entry in loaded.entries:
+            assert entry["options_exec"] == {"status": "not_priced", "reason": "sentinel_options"}
+            assert entry["futures_exec"] == {"status": "not_priced", "reason": "sentinel_futures"}
+            # The REAL resolver re-simulated the fixture finalist (parity-OK on
+            # this fixture) and PRICED the fold — the haircut arithmetic law.
+            verdict = entry["fill_sensitivity"]
+            assert isinstance(verdict, dict)
+            assert verdict["status"] == "priced"
+            assert verdict["reference_basis"] == "open_anchored"
+            assert verdict["n_trades"] > 0
+            assert (
+                verdict["haircut_paisa"]
+                == verdict["reference_net_pnl_paisa"] - verdict["worst_case_net_pnl_paisa"]
+            )
+        assert loaded.source["fill_sensitivity_wired"] is True
+        # The captured resolver degrades HONESTLY on an out-of-band candidate
+        # (a run_id no pooled tuple recorded) — the named reason, never a crash.
+        from tests.fakes.wp5_depth_fixtures import make_candidate
+
+        stray = make_candidate(999, fingerprint="f" * 16)
+        assert resolver(stray) == {"status": "not_priced", "reason": "no_replay_context"}
+
+
+class TestFillSensitivityResolver:
+    """`_FillSensitivityResolver` direct unit arms (DEC-FILL-EXEC-GRID-1M-001):
+    every NAMED degrade, the global-stop re-raise law, and the per-tuple memos."""
+
+    @staticmethod
+    def _context(minute_bars: Sequence[CandleBar]) -> object:
+        from brutex.engine.results_depth_pass import _InstrumentContext
+        from brutex.engine.session_lens import build_session_lens
+
+        return _InstrumentContext(
+            minute_index=None,
+            minute_bars=tuple(minute_bars),
+            lens=build_session_lens((), instrument="NIFTY"),
+        )
+
+    def _resolver(
+        self,
+        *,
+        mapped_run_id: str | None,
+        minute_bars: Sequence[CandleBar],
+        bars_of: object,
+    ) -> object:
+        from brutex.engine.results_depth_pass import _FillSensitivityResolver
+
+        grid = _grid()
+        (tuple_,) = iter_sweep_tuples(grid)
+        tuple_of = {} if mapped_run_id is None else {mapped_run_id: tuple_}
+        context = self._context(minute_bars)
+        return _FillSensitivityResolver(
+            bars_of=bars_of,  # type: ignore[arg-type]
+            context_of=lambda _instrument: context,  # type: ignore[arg-type, return-value]
+            tuple_of=tuple_of,
+            grid=grid,
+        )
+
+    @staticmethod
+    def _candidate(n: int) -> object:
+        from tests.fakes.wp5_depth_fixtures import make_candidate
+
+        return make_candidate(n, fingerprint="ab" * 8)
+
+    def test_unmapped_run_id_degrades_no_replay_context(self) -> None:
+        def _never(*_args: object) -> object:
+            raise AssertionError("must not touch bars for an unmapped candidate")
+
+        resolver = self._resolver(mapped_run_id=None, minute_bars=_BARS, bars_of=_never)
+        assert resolver(self._candidate(7)) == {  # type: ignore[operator]
+            "status": "not_priced",
+            "reason": "no_replay_context",
+        }
+
+    def test_empty_minute_stream_degrades_no_1m_data(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _never(*_args: object) -> object:
+            raise AssertionError("must not load bars without a 1m stream")
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=(), bars_of=_never)
+        assert resolver(self._candidate(7)) == {  # type: ignore[operator]
+            "status": "not_priced",
+            "reason": "no_1m_data",
+        }
+
+    def test_memory_error_re_raises_raw(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _oom(*_args: object) -> object:
+            raise MemoryError
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_oom)
+        with pytest.raises(MemoryError):
+            resolver(self._candidate(7))  # type: ignore[operator]
+
+    def test_resim_failure_degrades_named_and_logged(self) -> None:
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        def _boom(*_args: object) -> object:
+            raise ValueError("planted re-sim fault")
+
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_boom)
+        with capture_logs() as logs:
+            verdict = resolver(self._candidate(7))  # type: ignore[operator]
+        assert verdict == {"status": "not_priced", "reason": "resim_failed"}
+        assert any(log["event"] == "results_depth.fill_sensitivity_resim_failed" for log in logs)
+
+    def test_parity_mismatch_degrades_and_memos_are_per_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from tests.fakes.wp5_depth_fixtures import run_id_of as _rid
+
+        calls = {"capture": 0, "bars": 0}
+
+        def _bars_of(_instrument: str, _tf_label: str) -> Sequence[CandleBar]:
+            calls["bars"] += 1
+            return _BARS
+
+        def _fake_capture(*_args: object, **_kwargs: object) -> object:
+            calls["capture"] += 1
+            return SimpleNamespace(parity_ok=False)
+
+        monkeypatch.setattr(results_depth_pass, "capture_combo", _fake_capture)
+        resolver = self._resolver(mapped_run_id=_rid(7), minute_bars=_BARS, bars_of=_bars_of)
+        expected = {"status": "not_priced", "reason": "resim_parity_mismatch"}
+        assert resolver(self._candidate(7)) == expected  # type: ignore[operator]
+        # A second resolve for the SAME tuple hits BOTH memos (bar_bits + the
+        # exec map are mask-independent) — no rebuild, identical verdict.
+        assert resolver(self._candidate(7)) == expected  # type: ignore[operator]
+        assert calls["capture"] == 2
+        assert calls["bars"] == 2
