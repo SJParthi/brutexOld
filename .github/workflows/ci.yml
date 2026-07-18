@@ -3615,6 +3615,10 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          # brutex_identity is a HARD import of brutex.engine/strategies/data
+          # (DEC-RUST-RUNID-STORES-001) — run-smoke's `import brutex.engine`
+          # line below crashes without it.
+          install_with_retry ./rust/brutex-identity
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math; print('kernels OK')"

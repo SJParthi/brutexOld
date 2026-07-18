@@ -992,6 +992,21 @@ _ResultRowFfi = tuple[
 ]
 
 
+def _price_ffi_text(value: Decimal) -> str:
+    """Render a price for the kernel's TEXT comparison, signed-zero normalised.
+
+    The kernel compares prices as strings, and the retired dataclass ``__eq__``
+    compared them NUMERICALLY — under which ``Decimal("-0.00")`` equals
+    ``Decimal("0.00")``. ``abs()`` on the zero class drops the sign while
+    preserving the scale text, so a signed-zero price stays the numeric-law
+    no-op instead of flipping into a false run-identity conflict (the
+    hostile-review MINOR of DEC-RUST-RUNID-STORES-001). Non-zero values pass
+    through verbatim — ``round_money`` fixes their scale at construction, so
+    text equality matches numeric equality for every producible price.
+    """
+    return str(abs(value) if value == 0 else value)
+
+
 def _row_to_ffi(row: ResultRow) -> _ResultRowFfi:
     """Marshal one row for the kernel append decision."""
     return (
@@ -1015,8 +1030,8 @@ def _row_to_ffi(row: ResultRow) -> _ResultRowFfi:
         row.profit_factor,
         row.win_rate,
         row.max_drawdown_pct,
-        str(row.avg_entry_price),
-        str(row.avg_exit_price),
+        _price_ffi_text(row.avg_entry_price),
+        _price_ffi_text(row.avg_exit_price),
         row.deflated_sharpe,
         row.vix_mean,
         row.vix_min,

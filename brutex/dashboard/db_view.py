@@ -6845,7 +6845,8 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
     """Coerce ONE DuckDB ledger page row to the canonical ``LedgerRowTuple`` shape.
 
     DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
-    parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
+    parse applies (since DEC-RUST-RUNID-STORES-001 that parse lives in the
+    ``brutex_identity`` ledger codec — ``str``/``int`` on
     the required cells, ``None``-passthrough on the optional trio), so the fast
     path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
     ``None`` in ANY column the legacy parse either requires or DERIVES

@@ -872,3 +872,38 @@ class TestKernelVerdictTotality:
         with pytest.raises(ResultsStoreError, match="unexpected kernel verdict 'teleport'"):
             store.append(_row())
         assert len(store) == 1  # the stored row is untouched
+
+
+class TestSignedZeroPriceNoop:
+    """The kernel's TEXT price compare must keep the retired NUMERIC law on zeros.
+
+    ``Decimal("-0.00")`` passes the ``price >= 0`` validation and equals
+    ``Decimal("0.00")`` NUMERICALLY, so the retired dataclass ``__eq__`` read an
+    identical re-append as a silent no-op. ``_price_ffi_text`` normalises the
+    sign wrapper-side (the hostile-review MINOR of DEC-RUST-RUNID-STORES-001) —
+    without it the text compare would flip this into a false run-identity
+    conflict.
+    """
+
+    def test_signed_zero_price_reappend_is_noop_not_conflict(self) -> None:
+        from dataclasses import replace
+        from decimal import Decimal
+
+        store = ResultsStore(path=Path("unused.parquet"))
+        stored = _row(avg_entry_price=Decimal("0.00"))
+        incoming = replace(stored, avg_entry_price=Decimal("-0.00"))
+        assert stored == incoming  # the retired NUMERIC law: equal rows
+        assert store.append(stored) is True
+        assert store.append(incoming) is False  # noop — never a conflict
+        assert len(store) == 1
+
+    def test_price_ffi_text_normalises_only_zero(self) -> None:
+        from decimal import Decimal
+
+        from brutex.engine.results_store import _price_ffi_text
+
+        assert _price_ffi_text(Decimal("-0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("123.45")) == "123.45"
+        # Scale text preserved on the zero class (only the SIGN is dropped).
+        assert _price_ffi_text(Decimal("-0")) == "0"

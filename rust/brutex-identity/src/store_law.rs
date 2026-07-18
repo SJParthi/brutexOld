@@ -16,12 +16,17 @@
 //! * [`rank_top_k`] — the deterministic leaderboard order (rank column,
 //!   ties by `run_id` ascending; exact int ranking above 2^53).
 //!
-//! Prices cross the FFI as their `str(Decimal)` texts: every stored price is
-//! `round_money`-snapped to exponent −2 at row construction, so text
-//! equality ⟺ numeric equality (the Python dataclass compared Decimals
-//! NUMERICALLY; the snap makes the two laws coincide — pinned by the
-//! append-law oracle corpus). Floats carry no NaN and no −0.0 (both rejected
-//! /normalised at construction), so `f64 ==` matches Python `==` exactly.
+//! Prices cross the FFI as their `str(Decimal)` texts, SIGNED-ZERO
+//! NORMALISED wrapper-side (`_price_ffi_text` — `abs()` on the zero class):
+//! every producible stored price is `round_money`-snapped to exponent −2 at
+//! row construction, so after that normalisation text equality matches the
+//! retired dataclass's NUMERIC Decimal comparison for every producible
+//! price (pinned by the append-law oracle corpus + the signed-zero noop
+//! regression). Disclosed residual: two ZERO prices of DIFFERENT scale
+//! ("0" vs "0.00") would still text-differ while numerically equal — no
+//! production writer mints an off-scale price. Floats carry no NaN and no
+//! −0.0 (both rejected/normalised at construction), so `f64 ==` matches
+//! Python `==` exactly.
 
 /// The FFI projection of one `ResultRow` — field order = the dataclass
 /// declaration order (`dataclasses.fields(ResultRow)`), `condition_names`
