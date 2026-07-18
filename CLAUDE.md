@@ -35,6 +35,21 @@ INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
 §1 Active-branch blurb + MIGRATION.md #1940.)
+Earlier: 2026-07-17 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943 —
+slice T35 root-leaf Rust conversion, milestones 1-3: the NEW `rust/brutex-core`
+crate (0.3.0 as shipped) + FIVE default-OFF seams — `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001
+money laws as exact decimal-string HALF_UP arithmetic; STORED-BYTES critical —
+frozen literal-corpus rounding goldens + the brutex-lake `_snap_price_expr`
+twin-impl coordination pins) and `BRUTEX_CORE_RUST_HWENV` (the
+hardware-envelope DERIVATION laws only — detection stays Python) plus the
+milestone-3 trio `BRUTEX_CORE_RUST_PATHS`/`_DOTENV`/`_BACKUPENV` over the ONE
+shared `brutex/config/seam_core.py` engaged-call core. Flag OFF
+(default) is behavior-identical + crate-untouched; "expected payoff ≈ 0 —
+conversion is for uniformity, not speed" (the ADR-0020 banner verbatim);
+ships INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record + the T35 HOLDS live in the §1
+Active-branch blurb + MIGRATION.md #1943 — this header carries the pointer,
+never the story.)
 Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
@@ -3280,6 +3295,62 @@ hostile-review pass._
   its own DEC + a fresh green lane run. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; run identity untouched; the per-item record lives in
   the §1 blurb + MIGRATION.md #1940 — this header carries the pointer, never the story.)
+  Earlier: `claude/rust-slice-t35-leaves-v2`
+  (**DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943** —
+  slice T35 root-leaf Rust conversion, milestones 1-3: NEW standalone crate `rust/brutex-core` (0.3.0
+  as shipped — 0.1.0→0.2.0 at the review-r1 fold so a stale money-only wheel cannot masquerade,
+  0.2.0→0.3.0 at the milestone-3 fold; pyo3 0.29
+  abi3-py312, maturin mixed layout, committed pyo3-only Cargo.lock `--locked` everywhere, catch_unwind
+  panic belt — the brutex-lake conventions, deliberately in NO workspace) + TWO default-OFF seams.
+  (1) **`BRUTEX_CORE_RUST_MONEY`** (`brutex/money_rust.py` — the lake_rust_stats facade template:
+  per-call tristate resolve, import/API handshake latches, per-law 16-sample burn-in bit-compare +
+  ship-the-ORACLE autorevert, the ELIGIBILITY GATE strings-only FFI law (only inputs provably in the
+  oracle's non-raising domain cross; ineligible → oracle WITHOUT touching the crate, bomb-spy-pinned),
+  refuse-poison shape gates, pyo3 panic belt + RAW escape-set re-raise; two documented template
+  deviations — the LOCAL mirror-pinned `_TRUTHY`/`_FALSY` twin (money is a ROOT leaf; importing
+  lake_rust_render would be circular — the feed_rust.py precedent) and NO version guard (pure std-Rust
+  vs the stdlib decimal law — the burn-in + frozen goldens are the drift teeth)): the four
+  DEC-MONEY-2DP-001 laws as hand-rolled EXACT decimal-string HALF_UP arithmetic (zero third-party
+  numeric deps) — STORED-BYTES CRITICAL (`round_money` snaps every stored OHLC at the lake-write
+  boundary), pinned by the NEW frozen literal-corpus rounding golden (literal expected strings, never
+  oracle-vs-crate parity) + the brutex-lake `_snap_price_expr` TWIN-IMPL coordination pins (the SAME
+  literal corpus in cargo AND Python; any change must move BOTH plus the Python oracle) + the
+  HALF_UP-vs-`round_half_even` negative pin (trading-core's is a DIFFERENT law, never imitated).
+  (2) **`BRUTEX_CORE_RUST_HWENV`** (`brutex/config/hardware_envelope_rust.py`): DERIVATION-ONLY —
+  `cpu_pool_workers`' derivation arm · `library_thread_budget` · `memory_budget_bytes`' post-override
+  arm (sentinel → floor EXACTLY; detected → `max(1, int(total × fraction / workers))`) ·
+  `hardware_key`'s render twin; DETECTION STAYS PYTHON (the recorded decision — a Rust port would add
+  libc + a macOS sysctlbyname arm UNTESTABLE in the Linux build env, dead oracle-gated code for zero
+  payoff, Golden Rule #10); parity bar BEHAVIORAL — sizing/parallelism only, NO run-identity exposure.
+  Flag-OFF (default) is BEHAVIOR-identical + crate-untouched (resolver-bomb + bomb-crate spies; the
+  disclosed per-call env probe ≈700 ns — deliberate, spawn workers must read their own env; the public
+  composition changed deliberately to prevent seam recursion — never claim "byte-identical call
+  graph"). HONEST: "expected payoff ≈ 0 — conversion is for uniformity, not speed" (the ADR-0020
+  banner verbatim); ON-arm parity enforced only by the NEW non-required `core-rust-parity.yml` lane +
+  local runs; the post-burn-in steady state ships a well-shaped wrong crate value un-oracled (the
+  documented, test-pinned envelope); ON-arm mutation evidence is hand-kill (the #1911 precedent).
+  PROOF executed 2026-07-17: money family 184 + hwenv 7-file family 280 passed flag-OFF AND flag-ON;
+  coverage 100.00% line+branch on all four touched modules; cargo fmt/clippy `-D warnings
+  --locked`/test `--release --locked` 32 passed; the ~1.6M-sample money differential vs CPython
+  Decimal (0 divergence) + the 300-example hwenv hypothesis differential; TEN hand-applied mutants
+  verified killed; hostile review r1 SHIP with all four findings folded (flag-resolve fast path ·
+  OFF-arm wording · corpus docstring · crate 0.2.0). CI: the parity lane + the ci.yml money mutmut
+  runner extension + BOTH mutation.yml proven pairs. Ships INERT — a default flip needs its own DEC.
+  MILESTONE 3 (same branch): THREE more default-OFF seams over the ONE shared engaged-call core
+  `brutex/config/seam_core.py` (the milestone-1/2 facade machinery hoisted ONCE — §11 COMMON) —
+  `BRUTEX_CORE_RUST_PATHS` (`paths_rust.py` — the lake-root decision + volume-parent laws; `~`-bearing
+  overrides oracle-gated wholesale, the r2 normalized-first-component correction) ·
+  `BRUTEX_CORE_RUST_DOTENV` (`dotenv_rust.py` — the value-REDACTING `.env` line-parse law) ·
+  `BRUTEX_CORE_RUST_BACKUPENV` (`backup_env_rust.py` — the restic verify-subset shape law); the
+  NO-SEAM verdicts recorded for `ports.py` (no convertible law) + `credentials.py` (secret-bearing
+  trivial; pinned seam-free) and the mechanical AWS boundary pin
+  (`tests/unit/test_brutex_core_boundary_pin.py` — crate dep graph AWS-free, no facade touches
+  credentials_aws/boto at any scope incl. dynamic-import strings). The full milestone-3 record +
+  the r2 review fold live in MIGRATION.md #1943.
+  T35 HOLDS recorded in #1943: `universe.py` + feed_scope/scope_filter until #1934 ·
+  `credentials_aws` → T36 · `deadline.py` → the concurrency-primitives row · `runtime.py` slice-9 ·
+  `universe_constituents` HELD-DORMANT per the coordinator ruling. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run identity untouched.)
   Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
@@ -9891,6 +9962,24 @@ hostile-review pass._
   not speed; ships INERT — a default flip needs its own DEC; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
   §1 + MIGRATION.md #1940 for the full blurb)
+  Earlier: `claude/rust-slice-t35-leaves-v2`
+  (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943 — slice T35 root-leaf Rust
+  conversion, milestones 1-3: the NEW `rust/brutex-core` crate (0.3.0 as shipped, pyo3-only
+  Cargo.lock, the brutex-lake conventions) + the two default-OFF seams
+  `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001 money laws as hand-rolled
+  exact decimal-string HALF_UP arithmetic — STORED-BYTES critical; frozen
+  literal-corpus rounding goldens + the brutex-lake `_snap_price_expr`
+  twin-impl coordination pins + the HALF_UP-vs-round_half_even negative pin)
+  and `BRUTEX_CORE_RUST_HWENV` (the hardware-envelope DERIVATION laws only —
+  detection stays Python; parity bar BEHAVIORAL, sizing-only, no run-identity
+  exposure) + the milestone-3 trio `BRUTEX_CORE_RUST_PATHS`/`_DOTENV`/`_BACKUPENV`
+  over the shared `seam_core` (NO-SEAM verdicts for ports/credentials; the
+  mechanical AWS boundary pin); flag OFF (default) is behavior-identical + crate-untouched
+  (bomb-spy-pinned); "expected payoff ≈ 0 — conversion is for uniformity, not
+  speed" (the ADR-0020 banner verbatim); ships INERT — a default flip needs its
+  own DEC; the T35 HOLDS recorded in #1943; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1943 for the full blurb)
   Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored

@@ -4293,15 +4293,22 @@ jobs:
           # clean 100% kill (the only un-killable mutant, the quantum string →
           # invalid Decimal, is excluded via `# pragma: no mutate`). Same bounded
           # timeout + the SHARED parser above at a strict floor.
+          # DEC-CONFIG-RUST-LEAVES-001 (slice T35): the runner ALSO drives
+          # tests/unit/test_money_rust.py — the BRUTEX_CORE_RUST_MONEY seam's
+          # flag-routing mutants (`if not money_rust_enabled()` flips) are
+          # value-invisible to test_money.py alone when the crate is absent
+          # (the facade degrades to the identical oracle), and are killed by
+          # the seam suite's bomb-crate latch teeth + routing spies. Timeout
+          # raised 240 → 420 s for the grown module (~3x statements).
           set +e
-          timeout 240 mutmut run \
+          timeout 420 mutmut run \
             --paths-to-mutate brutex/money.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_money.py"
+            --runner "pytest -x tests/unit/test_money.py tests/unit/test_money_rust.py"
           run_rc=$?
           set -e
           if [ $run_rc -eq 124 ]; then
-            echo "ERROR: mutmut timed out after 4 minutes on money.py"
+            echo "ERROR: mutmut timed out after 7 minutes on money.py"
             exit 124
           fi
           echo "::group::mutmut results — money.py"
