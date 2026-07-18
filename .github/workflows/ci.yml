@@ -4162,6 +4162,13 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # DEC-CI-TRIVY-SEVERITY-LIMIT-001: in `format: sarif` mode
+          # trivy-action DROPS the declared `severity` filter unless this flag
+          # is set ("Building SARIF report with all severities" in the job
+          # log), so the exit-code gate re-fires on ANY-severity finding. This
+          # restores the intended CRITICAL/HIGH-only gate lost when the #1651
+          # CI-sharding merge took main's ci.yml wholesale and dropped it.
+          limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
