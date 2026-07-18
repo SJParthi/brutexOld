@@ -21,6 +21,7 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentBarsU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -29,8 +30,10 @@ __all__ = [
     "bitcount_u64s",
     "blake3_hash",
     "count_supermask_u64s",
+    "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "count_supermasks_u128s",
     "popcount_bytes",
     "stats_cpcv_pass_count",
 ]
@@ -91,6 +94,27 @@ def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
     `bar` in `bar_bits` with `(bar & masks[j]) == masks[j]`. Positionally
     aligned with `masks`. Empty `masks` → `[]`; empty `bar_bits` → `0` per
     mask.
+    """
+    ...
+
+def count_supermask_u128s(bar_bits: list[int], mask: int) -> int:
+    """Single-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermask_u64s`: counts `bar` in `bar_bits` with
+    `(bar & mask) == mask` over native u128 words. A value outside
+    `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge.
+    """
+    ...
+
+def count_supermasks_u128s(bar_bits: list[int], masks: list[int]) -> list[int]:
+    """Batched per-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermasks_u64s` — same contract with `bar_bits`
+    / `masks` widened to u128 (positional alignment; empty `masks` → `[]`;
+    empty `bar_bits` → `0` per mask; `mask == 0` matches every bar). Routes
+    through the SAME width-generic dispatch as the u64 kernel, so the counts
+    cannot drift between widths. A value outside `[0, 2**128)` raises
+    `OverflowError` at the PyO3 extraction edge.
     """
     ...
 
@@ -155,6 +179,22 @@ class ResidentBars:
     The `O(N_bars)` Python→Rust copy is paid ONCE in `__init__`; subsequent
     `count_supermasks` calls marshal only `masks`. Frozen + immutable: only
     `n_bars` is exposed (a `bars` getter would copy `O(N)` per access).
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def count_supermasks(self, masks: list[int]) -> list[int]: ...
+    def count_supermask(self, mask: int) -> int: ...
+
+class ResidentBarsU128:
+    """Resident bar buffer over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `ResidentBars`: holds u128 `bar_bits` Rust-side across
+    batch calls (the `O(N_bars)` copy paid ONCE in `__init__`; subsequent
+    `count_supermasks` calls marshal only `masks`). Frozen + immutable; only
+    `n_bars` is exposed. A `bar_bits` / mask value outside `[0, 2**128)`
+    raises `OverflowError` at the PyO3 extraction edge.
     """
 
     def __init__(self, bar_bits: list[int]) -> None: ...

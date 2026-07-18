@@ -63,6 +63,11 @@ from datetime import date, datetime, timedelta
 
 from brutex.calendars.nse import IST, is_holiday_data_available
 from brutex.calendars.observed_sessions import is_trading_day_observed
+from brutex.data.detectors_rust import (
+    InteriorRunsPayload,
+    interior_gap_rust_enabled,
+    routed_interior_barless_runs,
+)
 
 __all__ = [
     "INTERIOR_GAP",
@@ -160,7 +165,50 @@ def _interior_barless_runs(
     The ONE shared run-walker (CLAUDE.md §11 COMMON —
     :func:`_largest_interior_session_gap` and :func:`interior_gap_runs` both
     derive from it, so the fetch-time classifier and the cold-start seed gate can
-    never drift). *covered* is the sorted, de-duplicated set of IST trading dates
+    never drift; contract prose in :func:`_interior_barless_runs_python`, the
+    verbatim law body).
+
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-1): the
+    GROUPING decision is served by :func:`_interior_barless_runs_python` —
+    the verbatim walker, the LIVE parity oracle — via the default-OFF
+    ``BRUTEX_LAKE_RUST_INTERIOR_GAP`` facade
+    (:mod:`brutex.data.detectors_rust`). The NSE calendar + observed
+    overlay stay PYTHON on both arms: the Rust arm's payload factory walks
+    the interior once with the SAME
+    :func:`~brutex.calendars.observed_sessions.is_trading_day_observed` and
+    passes plain TRADING-session ordinals — the calendar is never
+    re-implemented in Rust. The fewer-than-two-covered arm and flag OFF
+    (the default) return the oracle directly — the crate is never imported,
+    byte-identical to the pre-facade law.
+    """
+    if len(covered) < _MIN_BRACKETING_SESSIONS or not interior_gap_rust_enabled():
+        return _interior_barless_runs_python(covered, observed)
+
+    def _payload() -> InteriorRunsPayload:
+        interior: list[int] = []
+        cursor = covered[0] + timedelta(days=1)
+        last = covered[-1]
+        while cursor < last:
+            if is_trading_day_observed(cursor, observed=observed):
+                interior.append(cursor.toordinal())
+            cursor += timedelta(days=1)
+        return InteriorRunsPayload(
+            covered_ordinals=tuple(d.toordinal() for d in covered),
+            interior_session_ordinals=tuple(interior),
+        )
+
+    return routed_interior_barless_runs(
+        payload_factory=_payload,
+        python_law=lambda: _interior_barless_runs_python(covered, observed),
+    )
+
+
+def _interior_barless_runs_python(
+    covered: Sequence[date], observed: AbstractSet[date] = frozenset()
+) -> list[tuple[date, date, int]]:
+    """The verbatim run-walker body — the LIVE parity oracle (SLICE T24 PR-1).
+
+    *covered* is the sorted, de-duplicated set of IST trading dates
     that carry bars. Walks the calendar from the FIRST covered date to the LAST
     and emits one ``(run_first, run_last, run_sessions)`` per maximal run of
     trading sessions with NO bar — ``run_first`` / ``run_last`` are the run's
