@@ -47,6 +47,11 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Final, Protocol
 
+from brutex.notifications.notify_rust import (
+    routed_count_or_question,
+    routed_escape_markdown_v2,
+    routed_truncate_id_12,
+)
 from brutex.notifications.telegram import (
     TelegramEvent,
     TelegramEventKind,
@@ -92,6 +97,22 @@ _MDV2_SPECIALS: Final[frozenset[str]] = frozenset(r"_*[]()~`>#+-=|{}.!")
 CRASH_LOOP_RELAUNCH_THRESHOLD: Final[int] = 3
 
 
+def _escape_markdown_v2_python(text: str) -> str:
+    """The VERBATIM Python escape law — the LIVE parity oracle.
+
+    DEC-NOTIFY-RUST-CORE-001: the pre-facade :func:`escape_markdown_v2` body,
+    extracted token-for-token (the Slice-0 idiom) so the default-OFF
+    ``BRUTEX_NOTIFY_RUST`` routing always has the byte-identical oracle in
+    the path — flag OFF returns exactly this.
+    """
+    out: list[str] = []
+    for char in text:
+        if char in _MDV2_SPECIALS:
+            out.append("\\")
+        out.append(char)
+    return "".join(out)
+
+
 def escape_markdown_v2(text: str) -> str:
     """Return *text* with every MarkdownV2-reserved character backslash-escaped.
 
@@ -106,12 +127,13 @@ def escape_markdown_v2(text: str) -> str:
         The MarkdownV2-safe body — each reserved char prefixed with ``\\`` so
         Telegram parses the message instead of rejecting it ``HTTP 400``.
     """
-    out: list[str] = []
-    for char in text:
-        if char in _MDV2_SPECIALS:
-            out.append("\\")
-        out.append(char)
-    return "".join(out)
+    return routed_escape_markdown_v2(text, python_law=_escape_markdown_v2_python)
+
+
+def _count_or_question_python(value: int | None) -> str:
+    """The VERBATIM Python count law — the LIVE parity oracle
+    (DEC-NOTIFY-RUST-CORE-001; the pre-facade ``_count_or_question`` body)."""
+    return "?" if value is None else str(value)
 
 
 def _count_or_question(value: int | None) -> str:
@@ -120,7 +142,23 @@ def _count_or_question(value: int | None) -> str:
     (DEC-SWEEP-NIGHTLY-AUTOMATION-001, the ``bars_net_new`` honest-unknown
     precedent — Golden Rule #1.)
     """
-    return "?" if value is None else str(value)
+    return routed_count_or_question(value, python_law=_count_or_question_python)
+
+
+def _truncate_id_12_python(text: str) -> str:
+    """The VERBATIM Python id-truncation law (``text[:12]``) — the LIVE
+    parity oracle (DEC-NOTIFY-RUST-CORE-001)."""
+    return text[:12]
+
+
+def _short_id(text: str) -> str:
+    """The 12-code-point id truncation every alert body/dedupe-key uses.
+
+    Python slices by CODE POINT — the routed Rust law mirrors it via
+    ``chars().take(12)`` (equivalence pinned by the crate matrix + the
+    hypothesis differential); flag OFF is byte-identical ``text[:12]``.
+    """
+    return routed_truncate_id_12(text, python_law=_truncate_id_12_python)
 
 
 def _resolve_singleton_notifier() -> NotifierLike | None:  # pragma: no cover — lazy wiring import
@@ -1522,7 +1560,7 @@ class SweepAlerter:
             head = f"✅ Sweep complete — {summary.tuples_run}/{summary.tuples_total} tuples run"
         message = escape_markdown_v2(
             f"{head}; evaluated={summary.evaluated}, ranked={summary.ranked}, "
-            f"persisted={summary.persisted} (sweep {summary.sweep_id[:12]})."
+            f"persisted={summary.persisted} (sweep {_short_id(summary.sweep_id)})."
         )
         return self._publish(
             kind=TelegramEventKind.RUN_COMPLETE,
@@ -1554,7 +1592,7 @@ class SweepAlerter:
             The full enumerated tuple count.
         """
         message = escape_markdown_v2(
-            f"⏳ Sweep {run_id[:12]} reached {pct}% — {tuples_done}/{total} tuples done. "
+            f"⏳ Sweep {_short_id(run_id)} reached {pct}% — {tuples_done}/{total} tuples done. "
             "The run continues unattended."
         )
         return self._publish(
@@ -1585,7 +1623,7 @@ class SweepAlerter:
             Short evidence string (values, never secrets).
         """
         message = escape_markdown_v2(
-            f"🛑 Sweep {run_id[:12]} marked SUSPECT by tripwire {tripwire}: {detail}. "
+            f"🛑 Sweep {_short_id(run_id)} marked SUSPECT by tripwire {tripwire}: {detail}. "
             "The run continues but its results need triage before use — see "
             "runs/<run_id>/manifest.json + flight-recorder.jsonl."
         )
@@ -1616,7 +1654,7 @@ class SweepAlerter:
             ``"daemon_init"``).
         """
         message = escape_markdown_v2(
-            f"🛑 Sweep {run_id[:12]} HALTED: {reason}. Compute already done is safe "
+            f"🛑 Sweep {_short_id(run_id)} HALTED: {reason}. Compute already done is safe "
             "(checkpoint + per-tuple sentinels) — fix the cause and relaunch; the "
             "run resumes where it stopped."
         )
@@ -1663,13 +1701,13 @@ class SweepAlerter:
             )
         message = escape_markdown_v2(
             f"{head}; already current={report.already_current}, "
-            f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
+            f"bars written={report.bars_written} (backfill {_short_id(report.backfill_id)})."
         )
         return self._publish(
             kind=TelegramEventKind.RUN_COMPLETE,
             severity=TelegramSeverity.INFO,
             message=message,
-            dedupe_key=f"greeks-backfill:{report.backfill_id[:12]}",
+            dedupe_key=f"greeks-backfill:{_short_id(report.backfill_id)}",
         )
 
     # ── Callback adapters for the existing seams ────────────────────
