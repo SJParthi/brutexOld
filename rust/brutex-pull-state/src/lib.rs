@@ -48,6 +48,17 @@ pub mod pull_scope;
 // spike-proven <= 2**53 count domain; the counter state machine + every
 // string/clock stay Python (the pyclass flip is a LATER lane phase).
 pub mod progress;
+// Wave 3H (DEC-RUST-PULL-STATE-001): the rate-bridge payload-verdict core
+// (DEC-CLI-RATE-BRIDGE-001 + DEC-CLI-BRIDGE-PULL-ACTIVE-001 re-hosted) —
+// codes only; the file read, the JSON decode (CPython's whole failure
+// taxonomy), the float()/int() coercion PROBES and the RateBridgeSnapshot
+// construction stay Python (see src/rate_bridge.rs).
+pub mod rate_bridge;
+// Wave 3H (DEC-RUST-PULL-STATE-001): the rate-bridge-cache memo decision
+// core (the design §2.3 minimal kernel — serve arm + token revalidation);
+// the NonBlockingFileMemoBase thread machinery (lock, deadline guard,
+// _inflight clearing, degrade latch) is PERMANENT-PYTHON.
+pub mod rate_bridge_cache;
 pub mod stall;
 
 pub use auto_pull_gate::{
@@ -59,6 +70,16 @@ pub use intent::{refused_restore_decision, resume_decision, resume_enabled, shap
 pub use market_hours::{BLOCK_END_US, BLOCK_START_US, DAY_US, pull_allowed_us};
 pub use progress::{COUNT_DOMAIN_MAX, CountDomainError, progress_derived};
 pub use pull_outcome::{classify_pull_outcome, verdict_correlates};
+pub use rate_bridge::{
+    BRIDGE_FIELD_COUNT, BRIDGE_VERDICT_BAD_INPUT, BRIDGE_VERDICT_FIELD_BASE,
+    BRIDGE_VERDICT_NOT_MAPPING, BRIDGE_VERDICT_SCHEMA, BRIDGE_VERDICT_VALID, FIELD_ABSENT,
+    FIELD_BAD, FIELD_OK, PA_FALSE, PA_NONE, PA_TRUE, SCHEMA_KIND_BOOL, SCHEMA_KIND_FLOAT,
+    SCHEMA_KIND_INT, SCHEMA_KIND_INT_HUGE, SCHEMA_KIND_MISSING, SCHEMA_KIND_OTHER,
+    bridge_payload_verdict,
+};
+pub use rate_bridge_cache::{
+    MEMO_ARM_CACHED_HIT, MEMO_ARM_FOLLOWER, MEMO_ARM_OWNER, memo_serve_arm, token_revalidates,
+};
 pub use stall::{
     WEDGE_ABSTAIN_PROBE_NONE, WEDGE_ADOPT_BASELINE, WEDGE_DEFER, WEDGE_ESCALATE, WEDGE_NO_PROBE,
     WEDGE_REBASELINE, alive_log_due, wedge_decision,

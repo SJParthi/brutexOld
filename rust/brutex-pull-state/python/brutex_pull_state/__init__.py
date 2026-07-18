@@ -52,6 +52,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "__version__",
     "alive_log_due",  # pull_stall (Wave 1C)
     "auto_gate_decision",  # auto_pull_gate (Wave 2D)
+    "bridge_payload_verdict",  # rate_bridge (Wave 3H)
     "classify_pull_outcome",  # pull_outcome (Wave 1A)
     "fno_only_note_surgery",  # pull_scope (Wave 1B)
     "intent_refused_restore_decision",  # pull_intent (Wave 2E)
@@ -59,12 +60,14 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "intent_resume_enabled",  # pull_intent (Wave 2E)
     "intent_shape_verdict",  # pull_intent (Wave 2E)
     "market_hours_note_rewrite",  # pull_scope (Wave 1B)
+    "memo_serve_arm",  # rate_bridge_cache (Wave 3H)
     "muhurat_window_active",  # auto_pull_gate (Wave 2D)
     "progress_derived",  # pull_progress (Wave 2F)
     "pull_allowed_us",
     "scope_token",  # pull_scope (Wave 1B)
     "settle_token_verdict",  # auto_pull_gate (Wave 2D)
     "spot_only_note_surgery",  # pull_scope (Wave 1B)
+    "token_revalidates",  # rate_bridge_cache (Wave 3H)
     "verdict_correlates",  # pull_outcome (Wave 1A)
     "wedge_decision",  # pull_stall (Wave 1C)
 )
@@ -104,6 +107,7 @@ from ._brutex_pull_state import (  # noqa: E402
     __version__,
     alive_log_due,
     auto_gate_decision,
+    bridge_payload_verdict,
     classify_pull_outcome,
     fno_only_note_surgery,
     intent_refused_restore_decision,
@@ -111,12 +115,14 @@ from ._brutex_pull_state import (  # noqa: E402
     intent_resume_enabled,
     intent_shape_verdict,
     market_hours_note_rewrite,
+    memo_serve_arm,
     muhurat_window_active,
     progress_derived,
     pull_allowed_us,
     scope_token,
     settle_token_verdict,
     spot_only_note_surgery,
+    token_revalidates,
     verdict_correlates,
     wedge_decision,
 )
@@ -137,6 +143,7 @@ __all__ = [
     "__version__",
     "alive_log_due",
     "auto_gate_decision",
+    "bridge_payload_verdict",
     "classify_pull_outcome",
     "fno_only_note_surgery",
     "intent_refused_restore_decision",
@@ -144,12 +151,14 @@ __all__ = [
     "intent_resume_enabled",
     "intent_shape_verdict",
     "market_hours_note_rewrite",
+    "memo_serve_arm",
     "muhurat_window_active",
     "progress_derived",
     "pull_allowed_us",
     "scope_token",
     "settle_token_verdict",
     "spot_only_note_surgery",
+    "token_revalidates",
     "verdict_correlates",
     "wedge_decision",
 ]
