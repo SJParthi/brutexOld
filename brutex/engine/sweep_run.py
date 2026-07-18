@@ -85,6 +85,7 @@ memory in bounded mode is O(kept), NOT O(1).
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -591,6 +592,14 @@ class SweepRunConfig:
     #: contained). ``None`` — every spot config — emits NO params key, so spot
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
+    #: Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    #: Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob, threaded here by
+    #: ``to_run_config``): a gate-time SELECTION knob, so it is folded into the
+    #: store-address identity by ``_gate_config_fragment``
+    #: (active-only — ``None``, the default, leaves every digest AND every gate
+    #: verdict byte-identical) and is NEVER part of ``canonical_trade_params``
+    #: (simulation is unchanged). Appended LAST (defaulted-last law).
+    max_sl_hit_rate: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -649,6 +658,17 @@ class SweepRunConfig:
             raise ValueError(f"SweepRunConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepRunConfig.min_hits must be >= 0, got {self.min_hits}")
+        # The SAME range law SweepGridConfig enforces (CLAUDE.md §11 COMMON —
+        # one validation contract on both config layers, so a direct
+        # run_persisted_sweep caller cannot smuggle a junk ceiling past the
+        # grid's check).
+        if self.max_sl_hit_rate is not None and (
+            not math.isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0
+        ):
+            raise ValueError(
+                f"SweepRunConfig.max_sl_hit_rate must be a finite fraction in "
+                f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1830,7 +1850,11 @@ def run_persisted_sweep(
     # an EXACT owned-bytes watermark that degrades gracefully to a
     # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
     pairs: list[tuple[int, ResultMetrics]] = []
-    columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
+    columns = (
+        SurvivorColumns(with_overfit=cfg.overfit is not None, max_sl_hit_rate=cfg.max_sl_hit_rate)
+        if plan.bounded
+        else None
+    )
     sim: ResidentTradeSim | None = None
     if kept:
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
@@ -1878,7 +1902,7 @@ def run_persisted_sweep(
                     )
                 )
     if columns is None:
-        ranked = rank_combos(pairs, overfit=cfg.overfit)
+        ranked = rank_combos(pairs, overfit=cfg.overfit, max_sl_hit_rate=cfg.max_sl_hit_rate)
         finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
         n_ranked = len(ranked)
         backtested = len(pairs)

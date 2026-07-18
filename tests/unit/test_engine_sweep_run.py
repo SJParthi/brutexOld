@@ -3478,3 +3478,48 @@ class TestSlHitRateConcretePersist:
         for row in store.rows():
             assert row.sl_hit_rate is not None
             assert 0.0 <= row.sl_hit_rate <= 1.0
+
+
+class TestMaxSlHitRateEnforcement:
+    """Door-6 enforcement end-to-end (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    Stage B): an active ``SweepRunConfig.max_sl_hit_rate`` ceiling gates the
+    persisted survivor set at ranking time; the default knob is
+    byte-identical to the pre-door sweep."""
+
+    @staticmethod
+    def _run(tmp_path: Path, name: str, **overrides: object) -> ResultsStore:
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / f"{name}.parquet")
+        with AuditWriter.open(tmp_path / f"{name}.jsonl") as audit:
+            run_persisted_sweep(
+                bars, _make_config(**overrides), store=store, dedup=_dedup(), audit=audit
+            )
+        return store
+
+    def test_active_ceiling_drops_exactly_the_over_ceiling_rows(self, tmp_path: Path) -> None:
+        baseline = self._run(tmp_path, "base")
+        rates = {row.run_id: row.sl_hit_rate for row in baseline.rows()}
+        assert rates  # anti-vacuity: the fixture persists survivors
+        values = sorted({rate for rate in rates.values() if rate is not None})
+        assert len(values) >= 2, "fixture must spread sl_hit_rate to exercise the door"
+        ceiling = values[0]  # keep only the lowest observed rate(s)
+        gated = self._run(tmp_path, "gated", max_sl_hit_rate=ceiling)
+        gated_ids = {row.run_id for row in gated.rows()}
+        expected = {
+            run_id for run_id, rate in rates.items() if rate is not None and rate <= ceiling
+        }
+        assert gated_ids == expected
+        assert gated_ids < set(rates)  # strictly fewer survivors — the door bit
+
+    def test_ceiling_of_one_keeps_every_measured_row(self, tmp_path: Path) -> None:
+        """``sl_hit_rate <= 1.0`` always, and sweep rows are always measured,
+        so the loosest legal ceiling is survivor-set-identical to default."""
+        baseline = self._run(tmp_path, "base1")
+        gated = self._run(tmp_path, "gated1", max_sl_hit_rate=1.0)
+        assert {row.run_id for row in gated.rows()} == {row.run_id for row in baseline.rows()}
+
+    def test_junk_ceiling_is_refused_at_config(self) -> None:
+        with pytest.raises(ValueError, match="finite fraction"):
+            _make_config(max_sl_hit_rate=0.0)
+        with pytest.raises(ValueError, match="finite fraction"):
+            _make_config(max_sl_hit_rate=float("nan"))

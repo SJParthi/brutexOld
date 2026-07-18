@@ -244,6 +244,29 @@ def _fails_consecutive_losses_door(m: ResultMetrics) -> bool:
     return m.max_consecutive_losses > streak_door_threshold(m.total_trades, m.loss_rate)
 
 
+def _fails_sl_hit_rate_door(m: ResultMetrics, max_sl_hit_rate: float | None) -> bool:
+    """Door 6 verdict — ONE body shared by :func:`passes_gates` + :func:`gate_reasons`.
+
+    The opt-in SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob, folded into the
+    store-address identity by ``_gate_config_fragment``). ``None`` knob (the
+    default) — the door does not exist: every input passes, byte-identical to
+    the pre-door gates. ACTIVE knob — FAIL-CLOSED: a row whose
+    ``sl_hit_rate`` is ``None`` (a counter-less legacy caller / a
+    pre-extension store row — "reasons unavailable") FAILS the door, because
+    an active gate must never pass a row it cannot judge (the non-finite
+    fail-closed posture applied to absence); a measured rate STRICTLY ABOVE
+    the ceiling fails. Callers own the non-finite guard (an active knob adds
+    ``sl_hit_rate`` to the guard's scan), so this body sees
+    finite-or-``None`` inputs in gate context.
+    """
+    if max_sl_hit_rate is None:
+        return False
+    if m.sl_hit_rate is None:
+        return True
+    return m.sl_hit_rate > max_sl_hit_rate
+
+
 def _non_finite_gate_input(value: float | None) -> bool:
     """Whether a float-valued gate input is present but non-finite (``NaN``/±``inf``).
 
@@ -256,7 +279,7 @@ def _non_finite_gate_input(value: float | None) -> bool:
     return value is not None and not math.isfinite(value)
 
 
-def passes_gates(m: ResultMetrics) -> bool:
+def passes_gates(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> bool:
     """Apply the hard rejection gates to one result (lockbox gate deferred).
 
     Returns ``True`` iff the result survives every applicable gate. A ``None``
@@ -280,17 +303,27 @@ def passes_gates(m: ResultMetrics) -> bool:
     :func:`streak_door_threshold` (floored at the legacy 10 so the door only
     LOOSENS), with the high-payoff exemption ``win_loss_ratio >=
     STREAK_DOOR_WLR_EXEMPT`` — see :func:`_fails_consecutive_losses_door`.
+
+    **Door 6 is the opt-in SL-hit-rate ceiling**
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): ``max_sl_hit_rate=None``
+    (the default) leaves every verdict byte-identical — ``sl_hit_rate`` is
+    then not a gate input at all (a non-finite value in it cannot trip the
+    guard). An ACTIVE ceiling judges the door LAST and FAIL-CLOSED: an
+    absent (``None``) ``sl_hit_rate`` fails (an active gate never passes a
+    row it cannot judge), a present rate joins the non-finite guard's scan,
+    and a measured rate strictly above the ceiling fails — see
+    :func:`_fails_sl_hit_rate_door`.
     """
-    if any(
-        _non_finite_gate_input(value)
-        for value in (
-            m.profit_factor,
-            m.max_drawdown_pct,
-            m.win_rate,
-            m.win_loss_ratio,
-            m.loss_rate,
-        )
-    ):
+    guarded: tuple[float | None, ...] = (
+        m.profit_factor,
+        m.max_drawdown_pct,
+        m.win_rate,
+        m.win_loss_ratio,
+        m.loss_rate,
+    )
+    if max_sl_hit_rate is not None:
+        guarded = (*guarded, m.sl_hit_rate)
+    if any(_non_finite_gate_input(value) for value in guarded):
         return False
     if m.total_trades < MIN_TRADES:
         return False
@@ -308,7 +341,9 @@ def passes_gates(m: ResultMetrics) -> bool:
     wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0  # pragma: no mutate
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         return False
-    return not _fails_consecutive_losses_door(m)
+    if _fails_consecutive_losses_door(m):
+        return False
+    return not _fails_sl_hit_rate_door(m, max_sl_hit_rate)
 
 
 # ── Gate-door reason vocabulary (DEC-SWEEP-RESULTS-DEPTH-001 · gap-register
@@ -337,6 +372,14 @@ GATE_WIN_RATE_WLR: Final[str] = "win_rate_wlr"
 #: STREAK_DOOR_WLR_EXEMPT``). The wire TOKEN is UNCHANGED — the reason
 #: vocabulary is a stable contract; only the door's bound derivation moved.
 GATE_CONSECUTIVE_LOSSES: Final[str] = "consecutive_losses"
+#: Door 6 — the opt-in SL-hit-rate ceiling
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): with an ACTIVE
+#: ``max_sl_hit_rate`` knob, ``sl_hit_rate > max_sl_hit_rate`` — or
+#: ``sl_hit_rate is None`` (an active gate never passes a row it cannot
+#: judge; fail-closed). Never emitted when the knob is ``None`` (the door
+#: does not exist then). APPENDED LAST — the wire vocabulary is
+#: append-only (the Ruling-12 stable-token contract).
+GATE_SL_HIT_RATE: Final[str] = "sl_hit_rate"
 
 #: The COMPLETE reason vocabulary in EVALUATION order — the exact order
 #: :func:`passes_gates` checks its doors, so ``gate_reasons(m)[0]`` is always
@@ -349,10 +392,11 @@ GATE_REASON_ORDER: Final[tuple[str, ...]] = (
     GATE_MAX_DRAWDOWN,
     GATE_WIN_RATE_WLR,
     GATE_CONSECUTIVE_LOSSES,
+    GATE_SL_HIT_RATE,
 )
 
 
-def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
+def gate_reasons(m: ResultMetrics, *, max_sl_hit_rate: float | None = None) -> tuple[str, ...]:
     """The reason-returning twin of :func:`passes_gates` — every failed door, named.
 
     DEC-SWEEP-RESULTS-DEPTH-001 (gap-register ruling 12 / R28 per-door kill
@@ -379,25 +423,33 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
       doors reports all three, in evaluation order. ``gate_reasons(m)[0]`` is
       therefore exactly the door ``passes_gates`` would short-circuit on;
       counter folds may count first-door-only or every-door as they choose.
-    * **Scope** — the 5 hard gates + the fail-closed guard ONLY. The opt-in
-      6th (overfit / Deflated-Sharpe) gate is deliberately OUT of this
-      vocabulary: it runs pool-relatively inside :func:`rank_combos`
-      (``N = len(candidates)`` — not a per-result predicate) and is counted at
-      its own rank seam, never fabricated per-row here.
+    * **Scope** — the hard gates + the fail-closed guard + (knob-active) the
+      Door-6 SL-hit-rate ceiling. The opt-in overfit / Deflated-Sharpe gate
+      is deliberately OUT of this vocabulary: it runs pool-relatively inside
+      :func:`rank_combos` (``N = len(candidates)`` — not a per-result
+      predicate) and is counted at its own rank seam, never fabricated
+      per-row here.
+    * **Door 6** (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) mirrors
+      :func:`passes_gates` exactly: ``max_sl_hit_rate=None`` (the default)
+      emits no :data:`GATE_SL_HIT_RATE` token ever and leaves the non-finite
+      guard's scan byte-identical; an ACTIVE ceiling adds ``sl_hit_rate`` to
+      the guard's scan and appends the token via the SHARED
+      :func:`_fails_sl_hit_rate_door` body (absent ``None`` rate fails —
+      fail-closed).
 
     O(1) per call (a handful of comparisons + one small tuple allocation);
     holds no state, so it is safe from any fold/counter thread.
     """
-    if any(
-        _non_finite_gate_input(value)
-        for value in (
-            m.profit_factor,
-            m.max_drawdown_pct,
-            m.win_rate,
-            m.win_loss_ratio,
-            m.loss_rate,
-        )
-    ):
+    guarded: tuple[float | None, ...] = (
+        m.profit_factor,
+        m.max_drawdown_pct,
+        m.win_rate,
+        m.win_loss_ratio,
+        m.loss_rate,
+    )
+    if max_sl_hit_rate is not None:
+        guarded = (*guarded, m.sl_hit_rate)
+    if any(_non_finite_gate_input(value) for value in guarded):
         return (GATE_NON_FINITE_INPUT,)
     reasons: list[str] = []
     if m.total_trades < MIN_TRADES:
@@ -415,6 +467,10 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     # binomial-null streak door + exemption — the two can never drift).
     if _fails_consecutive_losses_door(m):
         reasons.append(GATE_CONSECUTIVE_LOSSES)
+    # Door 6 rides the SAME shared body passes_gates consults (the opt-in
+    # SL-hit-rate ceiling — a ``None`` knob makes this a no-op).
+    if _fails_sl_hit_rate_door(m, max_sl_hit_rate):
+        reasons.append(GATE_SL_HIT_RATE)
     return tuple(reasons)
 
 
@@ -661,6 +717,7 @@ def rank_combos(
     candidates: Sequence[tuple[int, ResultMetrics]],
     *,
     overfit: OverfitGateConfig | None = None,
+    max_sl_hit_rate: float | None = None,
 ) -> list[RankedCombo]:
     """Rank a leaderboard: gate, z-normalise the composite terms, score, sort.
 
@@ -681,6 +738,12 @@ def rank_combos(
         **6th (overfit) gate + the 8th (Deflated-Sharpe) ranking term**
         (DEC-RANKING-OVERFIT-001). ``None`` (the default) keeps the legacy
         five-gate / seven-term ranking byte-identical.
+    max_sl_hit_rate
+        Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob). ``None`` (the
+        default) leaves every gate verdict byte-identical; an active ceiling
+        is threaded into :func:`passes_gates` (fail-closed on an absent
+        ``sl_hit_rate``).
 
     Returns
     -------
@@ -703,7 +766,9 @@ def rank_combos(
         offending mask(s) named (DEC-RANKING-TIEBREAK-001) — a deterministic,
         auditable error instead of latent nondeterminism.
     """
-    survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+    survivors = [
+        (mask, m) for mask, m in candidates if passes_gates(m, max_sl_hit_rate=max_sl_hit_rate)
+    ]
 
     # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable
     # annotation is never evaluated at runtime, so mutmut's ``| None`` → ``& None``
@@ -775,6 +840,7 @@ __all__ = [
     "GATE_NON_FINITE_INPUT",
     "GATE_PROFIT_FACTOR",
     "GATE_REASON_ORDER",
+    "GATE_SL_HIT_RATE",
     "GATE_WIN_RATE_WLR",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",

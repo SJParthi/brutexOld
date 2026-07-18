@@ -379,6 +379,18 @@ class TestRankCombos:
         ranked = rank_combos(cand)
         assert len(ranked) == 2
 
+    def test_max_sl_hit_rate_knob_gates_the_survivor_pool(self) -> None:
+        """Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): an active
+        ceiling drops the over-ceiling AND the unmeasured (``None``) rows;
+        the default knob keeps every row (byte-identical pre-door)."""
+        cand = [
+            (1, _m(sl_hit_rate=0.2)),
+            (2, _m(sl_hit_rate=0.8)),
+            (3, _m(sl_hit_rate=None)),
+        ]
+        assert {rc.mask for rc in rank_combos(cand)} == {1, 2, 3}
+        assert {rc.mask for rc in rank_combos(cand, max_sl_hit_rate=0.5)} == {1}
+
 
 # ────── tie-break determinism (DEC-RANKING-TIEBREAK-001) ──────
 

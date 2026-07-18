@@ -693,17 +693,17 @@ class TestTupleDigestGateSelectionIdentity:
         assert len({p_base, p_topk, p_mh}) == 3
 
 
-# ────── max_sl_hit_rate — the Stage-A config knob (DEC-METRICS-KELLY-GROWTH-001) ──────
+# ── max_sl_hit_rate — the Door-6 gate knob (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) ──
 
 
 class TestMaxSlHitRateKnob:
-    """The opt-in SL-hit-rate gate knob: identity elision + the Stage-A refusal.
+    """The opt-in SL-hit-rate gate knob: identity elision + Stage-B enforcement.
 
-    Stage A ships the CONFIG PLUMBING only — the ``sl_hit_rate`` metric lands
-    with the Stage-B exit-reason wire, so a SET value is REFUSED at
-    construction (a store address must never claim a gate that never ran).
-    The identity-fragment fold is covered through a Protocol-satisfying fake
-    (the only route while the refusal stands).
+    Stage A shipped the config plumbing with a construction refusal; Stage B
+    (the exit-reason wire) DELETED the refusal — a SET value is now accepted,
+    range-validated, folded into the store-address identity
+    (``_gate_config_fragment``) and threaded to ranking Door 6 via
+    ``to_run_config``.
     """
 
     def test_default_none_keeps_the_frozen_digest(self) -> None:
@@ -714,13 +714,41 @@ class TestMaxSlHitRateKnob:
         # An EXPLICIT None is the default — byte-identical, never a re-key.
         assert _tuple_digest(_tuple(), _grid(max_sl_hit_rate=None)) == digest
 
-    def test_set_value_is_refused_not_yet_enforced(self) -> None:
-        with pytest.raises(ValueError, match="not yet enforced"):
-            _grid(max_sl_hit_rate=0.5)
+    def test_set_value_is_accepted_and_rekeys_the_digest(self) -> None:
+        """Stage B: an in-range ceiling constructs (the Stage-A refusal is
+        GONE) and moves the tuple digest off the frozen default — a gated vs
+        an ungated tree can never share a store address."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
 
-    def test_boundary_one_is_range_valid_but_still_refused(self) -> None:
-        with pytest.raises(ValueError, match="not yet enforced"):
-            _grid(max_sl_hit_rate=1.0)
+        default = TestTupleDigestGateSelectionIdentity._PRE_FIX_DEFAULT_DIGEST
+        gated = _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.5))
+        assert gated != default
+        # Distinct ceilings are distinct addresses too.
+        assert gated != _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.25))
+
+    def test_boundary_one_is_accepted(self) -> None:
+        assert _grid(max_sl_hit_rate=1.0).max_sl_hit_rate == 1.0
+
+    def test_gated_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """The C1/C2 law for Door 6: a gated grid maps to fresh store paths."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        p_base = tuple_store_path(tmp_path, t, _grid())
+        p_gated = tuple_store_path(tmp_path, t, _grid(max_sl_hit_rate=0.5))
+        assert p_base != p_gated
+        assert completion_sentinel_path(p_base) != completion_sentinel_path(p_gated)
+
+    def test_to_run_config_threads_the_ceiling(self) -> None:
+        """The grid knob reaches every tuple's SweepRunConfig (the Door-6
+        enforcement input) — and the default stays None."""
+        grid = _grid(max_sl_hit_rate=0.5)
+        run_cfg = next(iter_sweep_tuples(grid)).to_run_config(grid)
+        assert run_cfg.max_sl_hit_rate == 0.5
+        default_grid = _grid()
+        assert next(iter_sweep_tuples(default_grid)).to_run_config(
+            default_grid
+        ).max_sl_hit_rate is (None)
 
     @pytest.mark.parametrize("bad", [0.0, -0.1, 1.0000001, float("nan"), float("inf")])
     def test_out_of_range_value_is_a_range_refusal(self, bad: float) -> None:
@@ -729,9 +757,8 @@ class TestMaxSlHitRateKnob:
 
     def test_fragment_folds_the_active_knob_via_a_protocol_fake(self) -> None:
         """The active-only identity fold, exercised through the structural
-        ``_GateConfigInput`` seam (the real config refuses a set value until
-        Stage B deletes the refusal — the fold itself must already be
-        correct so Stage B is a one-line deletion)."""
+        ``_GateConfigInput`` seam (kept beside the real-grid digest tests —
+        the fold contract is independent of the concrete config class)."""
         from brutex.engine.sweep_identity import (
             _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
         )

@@ -399,6 +399,15 @@ def passes_hard_gates(row: ResultRow, agg: ComboAggregate) -> bool:
     Door 1 already refused ``total_trades < 30``, and the mirror
     short-circuits), with the high-payoff exemption ``win_loss_ratio >=
     STREAK_DOOR_WLR_EXEMPT`` (a ``None`` ratio never exempts).
+
+    HONEST SCOPE: the opt-in gates (the overfit / Deflated-Sharpe gate and
+    the Door-6 ``max_sl_hit_rate`` ceiling —
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) are deliberately NOT
+    mirrored here: both are per-grid config, already enforced at sweep rank
+    time on the persisted survivors (the gate config is folded into the
+    store ADDRESS by ``_gate_config_fragment``, so a gated tree's rows are
+    gate-passing by construction), and the display-zone artifact has no
+    authoritative gate config to re-judge them under.
     """
     if row.total_trades < GATE_MIN_TRADES:
         return False
