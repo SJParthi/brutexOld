@@ -1007,6 +1007,49 @@ class TestAlphaThreading:
         for entry in artifact.entries:
             assert "alpha_pct" not in entry["metrics"]  # type: ignore[operator]
 
+    def test_alpha_derivation_raise_never_skips_the_baseline_write(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review r1 latent-defect pin: the ADDITIVE alpha derivation is
+        fail-soft in its OWN narrow guard — a raise there can never skip the
+        pre-existing R27 baseline WRITE (still written + referenced +
+        tallied, pass completes, alpha honestly absent)."""
+        import brutex.engine.results_depth_pass as pass_module
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise ValueError("alpha derivation exploded")
+
+        monkeypatch.setattr(pass_module, "alpha_baseline_from_series", _boom)
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        # The R27 baseline artifact is untouched by the alpha raise.
+        run_id = grid_identity(grid)
+        run_dir = sweep_run_dir(out_root, run_id)
+        assert (run_dir / "baseline-NIFTY.json").is_file()
+        assert report.baselines_written == 1
+        # The pass completes; the artifact still REFERENCES the baseline and
+        # its entries carry NO alpha keys (the honest "—").
+        assert report.top100_written is True
+        artifact = load_top100(run_dir.parent, run_id)
+        assert artifact is not None
+        assert artifact.baselines == {"NIFTY": "baseline-NIFTY.json"}
+        assert artifact.entries
+        for entry in artifact.entries:
+            assert "alpha_pct" not in entry["metrics"]  # type: ignore[operator]
+
+    def test_alpha_derivation_memory_error_re_raises_raw(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The alpha guard's escape trio propagates raw (never fail-soft)."""
+        import brutex.engine.results_depth_pass as pass_module
+
+        def _oom(*_args: object, **_kwargs: object) -> object:
+            raise MemoryError
+
+        monkeypatch.setattr(pass_module, "alpha_baseline_from_series", _oom)
+        with pytest.raises(MemoryError):
+            _run_pass(out_root)
+
     def test_junk_alpha_gate_env_fails_the_pass_before_any_tuple_work(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

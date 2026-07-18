@@ -719,14 +719,16 @@ def run_results_depth_pass(
     # The SAME computed series ALSO feeds the alpha-vs-buy-&-hold inputs
     # (DEC-ALPHA-BUYHOLD-METRIC-001): its anchor OPEN + last session CLOSE
     # as exact 2-dp paisa — one source, never a second derivation. An
-    # instrument whose baseline errors carries NO alpha (the honest "—").
+    # instrument whose baseline errors carries NO alpha (the honest "—") —
+    # and the ADDITIVE alpha derivation runs strictly AFTER the baseline
+    # write + tally in its OWN narrow guard, so a raise there can never
+    # skip the pre-existing R27 artifact (one WARN, alpha honestly absent).
     baselines: dict[str, str] = {}
     alpha_baselines: dict[str, AlphaBaseline] = {}
     first_tf = grid.timeframes[0].label
     for instrument in instruments_pooled:
         try:
             series = compute_baseline(_bars(instrument, first_tf), instrument=instrument)
-            alpha_baseline = alpha_baseline_from_series(series)
             write_baseline(
                 run_dir / baseline_filename(instrument),
                 series,
@@ -743,8 +745,18 @@ def run_results_depth_pass(
             )
         else:
             baselines[instrument] = baseline_filename(instrument)
-            alpha_baselines[instrument] = alpha_baseline
             tallies.baselines_written += 1
+            try:
+                alpha_baselines[instrument] = alpha_baseline_from_series(series)
+            except (KeyboardInterrupt, SystemExit, MemoryError):
+                raise
+            except Exception as exc:
+                _LOG.warning(
+                    "results_depth.alpha_baseline_error",
+                    instrument=instrument,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
     # ── The global top-100 (R21/R26/R34), in its own fence ──
     top100_written = False
