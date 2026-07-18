@@ -302,3 +302,17 @@ class TestGateEnvResolution:
         assert resolve_alpha_gate_enabled() is True
         monkeypatch.delenv(ALPHA_GATE_ENV)
         assert resolve_alpha_gate_enabled() is False
+
+
+class TestConftestBelt:
+    """The suite-wide hermeticity belt (tests/conftest.py) drift pins."""
+
+    def test_env_name_matches_the_conftest_literal(self) -> None:
+        # conftest.py pins the literal (wheel-free discipline); this pin
+        # keeps the two homes equal so they can never silently drift.
+        assert ALPHA_GATE_ENV == "BRUTEX_ALPHA_GATE"
+
+    def test_suite_runs_with_the_gate_defaulted_off(self) -> None:
+        import os
+
+        assert os.environ.get(ALPHA_GATE_ENV, "0") in {"0", "off", "false", "no"}
