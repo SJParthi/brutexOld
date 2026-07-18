@@ -96,7 +96,20 @@ _EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1
 #: stays 5 enumerated / 4 persisted, and the snapshot-hash + run-id
 #: literals above pass UNMODIFIED (run identity untouched); ONLY the one
 #: appended column differs.
-_EXPECTED_STORE_HASH = "2a612204e1f24d123f7d41844f00d66c5dd1553584b87e314d5140bc15897bb0"
+#: Re-locked AGAIN for DEC-METRICS-TRAILING-WINDOW-001 Stage C
+#: (schema-additive, the same audited-re-lock precedent): the persisted
+#: schema gained the FOUR appended nullable recency columns
+#: (``results_store.RECENCY_FIELDS``), CONCRETE on every row (the sweep
+#: spine threads the GLOBAL trailing anchor — the stitched slice's last
+#: bar). AUDIT: this 6-day 2025 fixture sits entirely inside the 24-month
+#: (730-day) trailing window AND inside decay age-bucket 0 (< 30 days at
+#: the anchor), so each row's trailing trio EQUALS its full-history
+#: figures and ``decay_weighted_net_paisa == net_pnl_paisa`` exactly
+#: (weight 0.5^0 = 1.0) — audited per row: net [2040, 390, 610, 710]. The
+#: row set stays 5 enumerated / 4 persisted, and the snapshot-hash +
+#: run-id literals above pass UNMODIFIED (run identity untouched); ONLY
+#: the four appended columns differ.
+_EXPECTED_STORE_HASH = "3eaa8b082a6e2a110b43da6e168e8577a4108db82e06ef2571dbf259dc9f99da"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:

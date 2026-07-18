@@ -55,6 +55,8 @@ class TestPresetVocabulary:
             "calmar",
             "growth",
             "win_rate_safe",
+            "recent",
+            "recent_decay",
         )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
         assert PRESET_WIN_RATE_SAFE == "win_rate_safe"
@@ -233,7 +235,9 @@ class TestWinRateSafeLaw:
         assert _rec("a" * 64).sl_hit_rate is None
 
     def test_registered_appended_last(self) -> None:
-        assert PRESET_NAMES[-1] == PRESET_WIN_RATE_SAFE
+        # Stage C appended the two recency presets AFTER win_rate_safe (each
+        # generation strictly after the previous — the appended-LAST law).
+        assert PRESET_NAMES[-3:] == (PRESET_WIN_RATE_SAFE, "recent", "recent_decay")
         assert PRESETS[PRESET_WIN_RATE_SAFE].key is win_rate_safe_key
 
 

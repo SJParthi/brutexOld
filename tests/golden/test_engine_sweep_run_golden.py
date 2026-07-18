@@ -197,7 +197,25 @@ def test_golden_run_id_is_byte_stable() -> None:
 # (test_golden_summary_is_stable passed UNMODIFIED) and every run_id is
 # byte-stable (test_golden_run_id_is_byte_stable UNMODIFIED — run identity
 # untouched); ONLY the one appended column differs.
-_GOLDEN_CONTENT_HASH = "3b6ce42724f3eb4004f9822c351474c1fa6ced12b21836cbd4437256adc5752e"
+# Re-locked AGAIN for DEC-METRICS-TRAILING-WINDOW-001 Stage C
+# (schema-additive, the same audited-re-lock precedent): the persisted schema
+# gained the FOUR appended nullable recency columns
+# (results_store.RECENCY_FIELDS — trailing_sharpe_ratio /
+# trailing_profit_factor / trailing_net_pnl_paisa / decay_weighted_net_paisa),
+# CONCRETE on every row because the sweep spine threads the GLOBAL
+# trailing_anchor (the loaded bar range's end). AUDIT: this fixture's 12
+# synthetic days all sit inside the 24-month (730-day) trailing window AND
+# inside decay age-bucket 0 (< 30 days old at the anchor), so each row's
+# trailing trio EQUALS its full-history figures (trailing_sharpe_ratio ==
+# sharpe_ratio, trailing_profit_factor == profit_factor,
+# trailing_net_pnl_paisa == net_pnl_paisa) and decay_weighted_net_paisa ==
+# net_pnl_paisa exactly (weight 0.5^0 = 1.0) — audited per row: net
+# [4820, 2470, 1430, 2150, 2240]. The ROW SET is UNCHANGED —
+# enumerated/evaluated/ranked/persisted stay 5/5/5/5
+# (test_golden_summary_is_stable passed UNMODIFIED) and every run_id is
+# byte-stable (test_golden_run_id_is_byte_stable UNMODIFIED — run identity
+# untouched); ONLY the four appended columns differ.
+_GOLDEN_CONTENT_HASH = "2f335da9f2689e43eb0d52dfb91deac26ecd96fa084587ef21dcdb0270e0b279"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
