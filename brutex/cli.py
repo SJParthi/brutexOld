@@ -547,6 +547,29 @@ def _add_sweep_grid_args(
         dest="options_broker",
         help="Brokerage rate card for the auto options-sim (default groww)",
     )
+    parser.add_argument(
+        "--no-futures-sim",
+        action="store_false",
+        dest="futures_sim",
+        help=(
+            "Disable the automatic post-sweep futures-sim "
+            "(`DEC-OPTIONS-EXEC-FEEDBACK-001` — the --no-options-sim mirror). "
+            "By default each INDEX winner is re-priced on its front-month "
+            "futures contract and the verdict persists into top100.json."
+        ),
+    )
+    parser.add_argument(
+        "--top100-preset",
+        default=None,
+        dest="top100_preset",
+        help=(
+            "Ranking preset for the run-end top-100 artifact (default "
+            "min_dd_first; `DEC-OPTIONS-EXEC-FEEDBACK-001` adds "
+            "net_after_cost — options-execution net after the full cost "
+            "stack, unpriced entries last). An unknown token refuses "
+            "pre-sweep, never after a multi-day run."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -7366,6 +7389,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     options_sim: bool = True,
     options_expiry: str = "weekly",
     options_broker: str = "groww",
+    futures_sim: bool = True,
+    top100_preset: str | None = None,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
     stage3_fevals: int | None = None,
@@ -7568,6 +7593,16 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         results_depth_enabled = resolve_results_depth_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # `DEC-OPTIONS-EXEC-FEEDBACK-001` — eager-validate the top-100 preset
+    # token pre-sweep (the results-depth kill-switch precedent): a typo'd
+    # --top100-preset is a clean user-config error NOW, never a
+    # silently-degraded ranking discovered after a multi-day run.
+    try:
+        resolved_top100_preset = _resolve_top100_preset(top100_preset)
+    except CliUserError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
     # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
@@ -8286,21 +8321,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
 
-        # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
-        # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
-        if options_sim:
-            _maybe_run_options_sim_on_winners(
-                out_root=out_root,
-                lake_root=resolved_lake,
-                catalog_path=catalog,
-                exchange=exchange,
-                segment=segment,
-                start=start,
-                end=end,
-                expiry=options_expiry,
-                broker=options_broker,
-                top=top,
-            )
+        # Automatic options + futures exec-sims on the winners
+        # (DEC-OPTIONS-EXECUTOR-001 + `DEC-OPTIONS-EXEC-FEEDBACK-001`),
+        # zero-touch + non-fatal: skips cleanly when a lake leg is absent or a
+        # replay fails; the per-run_id verdict maps thread IN-MEMORY into the
+        # results-depth adapter below (no disk re-read — the #1749 law).
+        exec_sims = _maybe_run_exec_sims_on_winners(
+            out_root=out_root,
+            lake_root=resolved_lake,
+            catalog_path=catalog,
+            exchange=exchange,
+            segment=segment,
+            start=start,
+            end=end,
+            expiry=options_expiry,
+            broker=options_broker,
+            top=top,
+            options_sim=options_sim,
+            futures_sim=futures_sim,
+        )
 
         # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
         # Re-build the cascade inputs from each tuple's persisted finalists + the
@@ -8434,6 +8473,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
                 cascade_report=cascade_report,
+                options_exec=exec_sims.options,
+                futures_exec=exec_sims.futures,
+                top100_preset=resolved_top100_preset,
             )
         else:
             print(
@@ -10129,7 +10171,7 @@ class _LakeOptionBarSource:
         )
 
 
-def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, operator-verified
+def _replay_spot_trades_for_row(  # pragma: no cover — engine + lake I/O, operator-verified
     row: Any,
     *,
     lake_root: Path,
@@ -10138,14 +10180,17 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     segment: str,
     start: str,
     end: str,
-    expiry_kind: Any,
-) -> list[Any]:
-    """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
+) -> tuple[list[Any], dict[datetime, Any]]:
+    """Re-derive the winning combo's spot round-trips (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
 
-    Replays ``row.mask_bits`` over the spot lake for ``(row.instrument, row.tf)``
-    via the SAME Stage-1A matrix → mask projection → trade-sim path the sweep
-    used, then lifts each closed trade into a :class:`SpotSignal` (the entry
-    bar's OPEN is the spot at entry; the expiry is resolved per the calendar).
+    The TRADES half of the former ``_replay_spot_signals_for_row`` — split out
+    so ONE replay per winner feeds BOTH exec sims (options via the
+    ``SpotSignal`` conversion wrapper below, futures via its own
+    ``signals_from_spot_trades`` over the ``SpotTrade`` protocol). Replays
+    ``row.mask_bits`` over the spot lake for ``(row.instrument, row.tf)`` via
+    the SAME Stage-1A matrix → mask projection → trade-sim path the sweep
+    used. Returns ``(trades, open_by_ts)`` — the closed round-trips + the
+    keep-first entry-bar-open map the options conversion prices spot from.
     """
     from brutex.data.catalog import Catalog
     from brutex.data.timeframes import trading_minutes_for_lake_interval
@@ -10154,9 +10199,6 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     from brutex.engine.trade_sim import simulate_trades
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.feed.series_load import load_sweep_slice
-    from brutex.options.executor import signals_from_spot_trades
-    from brutex.options.lot_size_history import OptionsUnderlying
-    from brutex.options.strike_rules import TradeDirection
     from brutex.strategies.types import Side
 
     interval = row.tf
@@ -10166,13 +10208,6 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     tf_minutes = trading_minutes_for_lake_interval(interval)
     is_bull = row.direction.lower() in ("bull", "buy", "long")
     side = Side.BUY if is_bull else Side.SELL
-    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
-    # A futures winner row (instrument == the ADR-0012 series alias) raises
-    # ValueError HERE — caught + honestly SKIPPED by the caller's existing
-    # per-row net (futures→options translation is the ADR-0012 PR-6 named
-    # follow-up, DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001), so the loader below only
-    # ever sees spot rows on this path today.
-    underlying = OptionsUnderlying(row.instrument)
 
     from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL
 
@@ -10206,7 +10241,7 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         )
 
     if not bars or not exec_bars:
-        return []
+        return [], {}
     # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
     # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
     # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
@@ -10218,10 +10253,14 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
-    # replayed trades exist ONLY to become SpotSignals — the very next call,
+    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review; wording
+    # updated at the `DEC-OPTIONS-EXEC-FEEDBACK-001` split): these replayed
+    # trades exist ONLY to become exec-sim signals — the options conversion,
     # signals_from_spot_trades, reads entry_ts/exit_ts/direction and NOTHING
-    # else (SpotSignal carries no VIX field; _render_options_leaderboard
+    # else, and the futures twin passes the (honestly-None) VIX stamps
+    # through into its COUNTED n_vix_missing disclosure — a stamper build
+    # here would still be a full VIX lake read for stamps no surface renders
+    # (SpotSignal carries no VIX field; _render_options_leaderboard
     # renders no VIX column), so a stamp here is DISCARDED at conversion and
     # can never reach any output. The Stage-B bind at this site was
     # provably-dead work costing a full window-bounded VIX lake read per
@@ -10259,6 +10298,32 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
             bars, source=f"options_sim_spot:{row.instrument}/{row.tf}"
         ).items()
     }
+    return trades, open_by_ts
+
+
+def _options_signals_from_trades(
+    row: Any,
+    trades: Sequence[Any],
+    open_by_ts: Mapping[datetime, Any],
+    *,
+    expiry_kind: Any,
+) -> list[Any]:
+    """Lift replayed spot round-trips into options ``SpotSignal`` inputs — PURE.
+
+    The CONVERSION half of the former ``_replay_spot_signals_for_row``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001` split): no lake I/O, directly
+    unit-testable. A futures-series / non-index winner row raises
+    ``ValueError`` at the ``OptionsUnderlying`` construction — caught +
+    honestly SKIPPED by the callers' existing per-row nets (futures→options
+    translation is the ADR-0012 PR-6 named follow-up).
+    """
+    from brutex.options.executor import signals_from_spot_trades
+    from brutex.options.lot_size_history import OptionsUnderlying
+    from brutex.options.strike_rules import TradeDirection
+
+    underlying = OptionsUnderlying(row.instrument)
+    is_bull = row.direction.lower() in ("bull", "buy", "long")
+    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
     return signals_from_spot_trades(
         trades,
         instrument=underlying,
@@ -10266,6 +10331,41 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         spot_open_at=lambda ts: open_by_ts[ts],
         expiry_kind=expiry_kind,
     )
+
+
+def _replay_spot_signals_for_row(  # pragma: no cover — thin composition of the two split halves
+    row: Any,
+    *,
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry_kind: Any,
+) -> list[Any]:
+    """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
+
+    The pre-split face, kept byte-compatible for the manual
+    ``brutex options-sim`` path: ONE trades replay
+    (:func:`_replay_spot_trades_for_row`) composed with the pure options
+    conversion (:func:`_options_signals_from_trades`). The early
+    ``OptionsUnderlying`` probe preserves the pre-split contract that a
+    non-spot row fails BEFORE any lake I/O.
+    """
+    from brutex.options.lot_size_history import OptionsUnderlying
+
+    OptionsUnderlying(row.instrument)  # fail-fast BEFORE the lake replay (pre-split contract)
+    trades, open_by_ts = _replay_spot_trades_for_row(
+        row,
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=exchange,
+        segment=segment,
+        start=start,
+        end=end,
+    )
+    return _options_signals_from_trades(row, trades, open_by_ts, expiry_kind=expiry_kind)
 
 
 def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
@@ -10309,6 +10409,33 @@ def _render_options_leaderboard(row: Any, results: tuple[Any, ...]) -> str:
     return "\n".join(lines)
 
 
+def _options_sim_from_signals(  # pragma: no cover — composes lake source + tested executor
+    signals: Sequence[Any],
+    *,
+    lake_root: Path,
+    broker: str,
+    audit_path: Path,
+) -> tuple[Any, ...]:
+    """Price already-replayed ``SpotSignal`` inputs into per-rule results + audit.
+
+    The EXECUTE half of the former ``_options_sim_for_row``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001` split) — shared by the manual
+    ``brutex options-sim`` path and the automatic winners hook, whose ONE
+    replay per winner feeds both exec sims.
+    """
+    from brutex.options.executor import execute_options_sim
+    from brutex.orchestrator.audit import AuditWriter
+
+    source = _LakeOptionBarSource(lake_root=lake_root)
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        return execute_options_sim(
+            signals,
+            source=source,
+            broker=broker,  # type: ignore[arg-type]
+            audit=audit,
+        )
+
+
 def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + tested executor
     row: Any,
     *,
@@ -10323,8 +10450,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
     audit_path: Path,
 ) -> tuple[Any, ...]:
     """Replay a winning spot run into priced per-rule options results + audit."""
-    from brutex.options.executor import ExpiryKind, execute_options_sim
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.options.executor import ExpiryKind
 
     expiry_kind = ExpiryKind.MONTHLY if expiry.lower() == "monthly" else ExpiryKind.WEEKLY
     signals = _replay_spot_signals_for_row(
@@ -10337,14 +10463,9 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
         end=end,
         expiry_kind=expiry_kind,
     )
-    source = _LakeOptionBarSource(lake_root=lake_root)
-    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
-        return execute_options_sim(
-            signals,
-            source=source,
-            broker=broker,  # type: ignore[arg-type]
-            audit=audit,
-        )
+    return _options_sim_from_signals(
+        signals, lake_root=lake_root, broker=broker, audit_path=audit_path
+    )
 
 
 def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + tested executor
@@ -10441,7 +10562,56 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
     return EXIT_OK
 
 
-def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over real-lake I/O
+@dataclass(frozen=True)
+class ExecSimResults:
+    """The winners hook's per-run_id verdict maps (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    ``options`` / ``futures`` map ``run_id`` → the per-entry ``options_exec``
+    / ``futures_exec`` object (priced, deferred, or the NAMED ``not_priced``).
+    ``None`` means that sim never ran AT ALL (flag off / lake leg absent /
+    results tree unreadable) — the depth adapter then threads NO provider and
+    the key stays ABSENT from every top100 entry (byte-identical artifacts).
+    IN-MEMORY within the same ``cmd_sweep_all`` invocation over the same
+    ``out_root`` stores — the cascade's #1749 no-disk-re-read staleness law.
+    """
+
+    options: dict[str, dict[str, object]] | None
+    futures: dict[str, dict[str, object]] | None
+
+
+def _futures_sim_for_row(  # pragma: no cover — composes real-lake resolver/source + tested executor
+    row: Any,
+    signals: Sequence[Any],
+    *,
+    out_root: Path,
+    resolver: Any,
+    source: Any,
+) -> Any:
+    """Run + audit the futures translation sim for one INDEX winner row."""
+    from brutex.futures.executor import execute_futures_sim
+    from brutex.options.strike_rules import TradeDirection
+    from brutex.orchestrator.audit import AuditWriter
+
+    is_bull = row.direction.lower() in ("bull", "buy", "long")
+    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
+    # A DISTINCT audit stem from write_translation_sidecar's
+    # `futures-exec-<id>.jsonl` (that path is the R42 content-hash-stamped
+    # sidecar, not a hash-chained audit log — two artifacts, two files).
+    audit_path = out_root / "audit" / f"futures-sim-{row.run_id[:12]}.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        return execute_futures_sim(
+            signals,
+            instrument=row.instrument,
+            direction=direction,
+            run_id=row.run_id,
+            resolver=resolver,
+            source=source,
+            audit=audit,
+        )
+
+
+def _maybe_run_exec_sims_on_winners(  # pragma: no cover — auto-hook over real-lake I/O
     *,
     out_root: Path,
     lake_root: Path,
@@ -10453,35 +10623,101 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
     expiry: str,
     broker: str,
     top: int,
-) -> None:
-    """Automatic post-sweep options-sim on the top winners (zero-touch).
+    options_sim: bool,
+    futures_sim: bool,
+) -> ExecSimResults:
+    """Automatic post-sweep options + futures exec-sims on the top winners.
 
-    Runs after a sweep persists its winners. Best-effort + non-fatal: when the
-    rolling-option lake is absent (spot-only setup) or a replay raises, it logs
-    and returns without failing the sweep.
+    The renamed/extended ``_maybe_run_options_sim_on_winners``
+    (`DEC-OPTIONS-EXEC-FEEDBACK-001`): ONE spot replay per winner
+    (:func:`_replay_spot_trades_for_row`) feeds BOTH the options sim
+    (unchanged stdout leaderboard + per-rule audit) and the finally-wired
+    futures executor (leaderboard + the R42 translation sidecar), and the
+    verdicts now PERSIST — returned as in-memory per-run_id maps the
+    results-depth adapter threads into ``build_top100``. Best-effort +
+    non-fatal: an absent lake leg or a failed replay logs + degrades to the
+    NAMED verdict, never fails the sweep. HONEST set-mismatch envelope: only
+    the ``store.top_k(top)`` replayed set is priced — a top100 entry outside
+    it reads ``not_priced/not_in_replay_set`` (the ``--top`` knob bounds the
+    run-end replay cost; deliberately not auto-widened to 100).
     """
-    if not (lake_root / "options").exists():
+    from brutex.futures.executor import ExecutionKind, route_execution
+    from brutex.futures.executor import signals_from_spot_trades as futures_signals
+    from brutex.futures.leaderboard import (
+        futures_annotation,
+        futures_exec_not_priced,
+        futures_exec_verdict,
+        render_futures_leaderboard,
+        write_translation_sidecar,
+    )
+    from brutex.options.exec_verdict import options_exec_not_priced, options_exec_verdict
+    from brutex.options.executor import ExpiryKind
+    from brutex.options.strike_rules import TradeDirection
+
+    options_enabled = options_sim
+    if options_enabled and not (lake_root / "options").exists():
         print("[brutex] options-sim: skipped (no rolling-option lake at <lake>/options)")
-        return
+        options_enabled = False
+    futures_enabled = futures_sim
+    if futures_enabled:
+        # The futures leg needs SOME contract source — the registry calendar
+        # or discoverable FNO bar partitions; with neither, every trade would
+        # read no_contract, so the sim honestly never runs (key ABSENT).
+        has_registry = (lake_root / "registry.duckdb").exists()
+        has_fno_dirs = any((lake_root / "bars").glob("*/FNO"))
+        if not has_registry and not has_fno_dirs:
+            print(
+                "[brutex] futures-sim: skipped (no registry.duckdb and no "
+                "bars/<exch>/FNO contract partitions in the lake)"
+            )
+            futures_enabled = False
+    if not options_enabled and not futures_enabled:
+        return ExecSimResults(options=None, futures=None)
+
     from brutex.engine.results_report import load_results_tree
     from brutex.engine.results_store import ResultsStoreError
 
     try:
         store = load_results_tree(out_root)
     except ResultsStoreError as exc:
-        print(f"[brutex] options-sim: skipped ({exc})")
-        return
+        print(f"[brutex] exec-sims: skipped ({exc})")
+        return ExecSimResults(options=None, futures=None)
     winners = store.top_k(top, by="net_pnl_paisa")
-    print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    legs = " + ".join(
+        leg for leg, on in (("options", options_enabled), ("futures", futures_enabled)) if on
+    )
+    print(f"[brutex] exec-sims: pricing {legs} for top {len(winners)} winner(s)…")
+
+    options_map: dict[str, dict[str, object]] | None = {} if options_enabled else None
+    futures_map: dict[str, dict[str, object]] | None = {} if futures_enabled else None
+    expiry_kind = ExpiryKind.MONTHLY if expiry.lower() == "monthly" else ExpiryKind.WEEKLY
+    futures_resolver: Any = None
+    futures_source: Any = None
+    if futures_enabled:
+        from brutex.futures.contract_resolver import RegistryFrontMonthResolver
+        from brutex.futures.lake_source import LakeFuturesBarSource
+
+        futures_resolver = RegistryFrontMonthResolver(lake_root)
+        futures_source = LakeFuturesBarSource(lake_root)
+
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # Stage-B build at this hook was a SECOND full VIX lake read per
     # sweep-all --options-sim launch (the launch stamper was already built,
     # and it even ran for ZERO winners) whose stamps were then discarded at
-    # the SpotSignal conversion — see _replay_spot_signals_for_row.
+    # the SpotSignal conversion; the futures leg passes the honest None
+    # stamps through into its COUNTED n_vix_missing disclosure — see
+    # _replay_spot_trades_for_row.
     for row in winners:
-        audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
+        kind = route_execution(row.instrument)
+        if futures_map is not None and kind is not ExecutionKind.INDEX_FUTURES:
+            # Structural totality (DEC-ENGINE-SPOT-ONLY-001): the engine
+            # sweeps EXACTLY the 3 spot indexes, so every producible winner
+            # routes INDEX_FUTURES — these deferred/unsupported arms are
+            # forensic-only honesty, never fabricated legs.
+            futures_map[row.run_id] = futures_annotation(None, kind=kind)
+        wants_futures = futures_map is not None and kind is ExecutionKind.INDEX_FUTURES
         try:
-            results = _options_sim_for_row(
+            trades, open_by_ts = _replay_spot_trades_for_row(
                 row,
                 lake_root=lake_root,
                 catalog_path=catalog_path,
@@ -10489,14 +10725,66 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
                 segment=segment,
                 start=start,
                 end=end,
-                expiry=expiry,
-                broker=broker,
-                audit_path=audit_path,
             )
         except (ValueError, KeyError, OSError) as exc:
-            print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
+            print(f"[brutex] exec-sims: {row.run_id[:12]}… replay skipped ({exc})")
+            if options_map is not None:
+                options_map[row.run_id] = options_exec_not_priced("replay_failed")
+            if wants_futures and futures_map is not None:
+                futures_map[row.run_id] = futures_exec_not_priced("replay_failed")
             continue
-        print(_render_options_leaderboard(row, results))
+
+        if options_map is not None:
+            audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
+            try:
+                signals = _options_signals_from_trades(
+                    row, trades, open_by_ts, expiry_kind=expiry_kind
+                )
+                if not signals:
+                    options_map[row.run_id] = options_exec_not_priced("no_signals")
+                else:
+                    results = _options_sim_from_signals(
+                        signals, lake_root=lake_root, broker=broker, audit_path=audit_path
+                    )
+                    print(_render_options_leaderboard(row, results))
+                    options_map[row.run_id] = options_exec_verdict(
+                        results,
+                        expiry_kind=expiry_kind.value,
+                        broker=broker,
+                        replay_start=start,
+                        replay_end=end,
+                    )
+            except (ValueError, KeyError, OSError) as exc:
+                print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
+                options_map[row.run_id] = options_exec_not_priced("replay_failed")
+
+        if wants_futures and futures_map is not None:
+            try:
+                is_bull = row.direction.lower() in ("bull", "buy", "long")
+                fut_signals = futures_signals(
+                    trades,
+                    instrument=row.instrument,
+                    direction=TradeDirection.BULL if is_bull else TradeDirection.BEAR,
+                )
+                if not fut_signals:
+                    futures_map[row.run_id] = futures_exec_not_priced("no_signals")
+                else:
+                    result = _futures_sim_for_row(
+                        row,
+                        fut_signals,
+                        out_root=out_root,
+                        resolver=futures_resolver,
+                        source=futures_source,
+                    )
+                    print(render_futures_leaderboard(row, result))
+                    write_translation_sidecar(result, out_root=out_root, run_id=row.run_id)
+                    futures_map[row.run_id] = futures_exec_verdict(
+                        result, replay_start=start, replay_end=end
+                    )
+            except (ValueError, KeyError, OSError) as exc:
+                print(f"[brutex] futures-sim: {row.run_id[:12]}… skipped ({exc})")
+                futures_map[row.run_id] = futures_exec_not_priced("replay_failed")
+    return ExecSimResults(options=options_map, futures=futures_map)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -10585,6 +10873,28 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
     return _load
 
 
+def _resolve_top100_preset(token: str | None) -> str:
+    """Resolve the ``--top100-preset`` token (`DEC-OPTIONS-EXEC-FEEDBACK-001`).
+
+    ``None`` / blank → the default preset (the writer's pre-change behavior,
+    byte-identical). A known token passes through stripped; an unknown token
+    raises :class:`CliUserError` naming every valid value — eager-validated
+    PRE-sweep by ``cmd_sweep_all`` (a typo must refuse loudly NOW, never
+    silently degrade the ranking after a multi-day run — the
+    ``resolve_preset_param`` /results law, CLI-shaped).
+    """
+    from brutex.engine.top100_artifact import DEFAULT_TOP100_PRESET, TOP100_PRESETS
+
+    if token is None or not token.strip():
+        return DEFAULT_TOP100_PRESET
+    stripped = token.strip()
+    if stripped in TOP100_PRESETS:
+        return stripped
+    raise CliUserError(
+        f"unknown --top100-preset {stripped!r}; valid presets: {', '.join(TOP100_PRESETS)}"
+    )
+
+
 def _run_results_depth_adapter(
     *,
     out_root: Path,
@@ -10596,6 +10906,10 @@ def _run_results_depth_adapter(
     margin_entry_date: date,
     pass_runner: Callable[..., Any] | None = None,
     cascade_report: Any | None = None,
+    options_exec: Mapping[str, Mapping[str, object]] | None = None,
+    futures_exec: Mapping[str, Mapping[str, object]] | None = None,
+    top100_preset: str | None = None,
+    fill_sensitivity: bool = True,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -10623,6 +10937,17 @@ def _run_results_depth_adapter(
     production-unreachable belt (our own serialization feeds it) that logs
     ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
     still runs, the sweep never fails.
+
+    ``options_exec`` / ``futures_exec`` (`DEC-OPTIONS-EXEC-FEEDBACK-001`) are
+    the winners hook's IN-MEMORY per-run_id verdict maps — flattened HERE
+    into the TOTAL provider closures ``build_top100`` consumes (a run_id
+    absent from a wired map reads the NAMED ``not_priced/not_in_replay_set``,
+    never a wrong join); ``None`` (that sim never ran) threads NO provider —
+    the entry key stays ABSENT, artifact bytes byte-identical.
+    ``top100_preset`` threads the writer's ranking preset (``None`` = the
+    default, byte-identical); ``fill_sensitivity`` (default ``True`` — the
+    production wiring of DEC-FILL-EXEC-GRID-1M-001's annotation half) turns
+    on the pass-internal open-anchored reference re-sim per ranked entry.
     """
     import structlog
 
@@ -10633,6 +10958,34 @@ def _run_results_depth_adapter(
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    options_exec_provider: Callable[[Any], Mapping[str, object]] | None = None
+    if options_exec is not None:
+        from brutex.options.exec_verdict import options_exec_not_priced
+
+        options_verdicts = dict(options_exec)
+
+        def _options_provider(candidate: Any) -> Mapping[str, object]:
+            verdict = options_verdicts.get(candidate.row.run_id)
+            if verdict is not None:
+                return verdict
+            return options_exec_not_priced("not_in_replay_set")
+
+        options_exec_provider = _options_provider
+
+    futures_exec_provider: Callable[[Any], Mapping[str, object]] | None = None
+    if futures_exec is not None:
+        from brutex.futures.leaderboard import futures_exec_not_priced
+
+        futures_verdicts = dict(futures_exec)
+
+        def _futures_provider(candidate: Any) -> Mapping[str, object]:
+            verdict = futures_verdicts.get(candidate.row.run_id)
+            if verdict is not None:
+                return verdict
+            return futures_exec_not_priced("not_in_replay_set")
+
+        futures_exec_provider = _futures_provider
 
     cascade_join = None
     if cascade_report is not None:
@@ -10669,9 +11022,13 @@ def _run_results_depth_adapter(
             minute_bars_for=minute_bars_for,
             daily_bars_for=daily_bars_for,
             vix_bars=vix_bars,
+            preset_name=_resolve_top100_preset(top100_preset),
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
             cascade_join=cascade_join,
+            options_exec_provider=options_exec_provider,
+            futures_exec_provider=futures_exec_provider,
+            fill_sensitivity=fill_sensitivity,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -10933,6 +11290,8 @@ def _dispatch(argv: list[str] | None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            futures_sim=args.futures_sim,
+            top100_preset=args.top100_preset,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
@@ -10989,6 +11348,8 @@ def _dispatch(argv: list[str] | None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            futures_sim=args.futures_sim,
+            top100_preset=args.top100_preset,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
