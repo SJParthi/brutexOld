@@ -439,7 +439,10 @@ def minute_path_max_drawdown(
     larger percentage, so the two maxima may occur at DIFFERENT points
     (the pre-amendment behaviour reported the pct AT the absolute-max point,
     understating the honest max-pct — DEC-SWEEP-RESULTS-DEPTH-001 review
-    NIT (a) fix). Full precision, never rounded (CLAUDE.md §4); a drop
+    NIT (a) fix). Never display-rounded (CLAUDE.md §4); the pct is an
+    f64 ``drop / peak`` ratio — exact int/int true-division parity holds
+    for operands ≤ 2**53 paisa, far above any production equity
+    (DEC-RUST-CASCADE-RESULTS-001 round-1 NIT-1 wording fix); a drop
     against a non-positive peak contributes ``0.0`` to the pct fold (no
     meaningful base to divide by).
 

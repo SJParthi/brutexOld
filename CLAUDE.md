@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
+branch `claude/rust-cascade-results` — the cascade/results-depth Rust
+conversion PHASE A: the NEW standalone `rust/brutex-cascade` crate (pyo3
+abi3-py312) hosts the `cascade_join` + `minute_path` + `combo_aggregates`
+law families token-for-token under the capture-first compressed cycle (the
+27-case parity corpus FROZEN against the UNTOUCHED Python BEFORE any
+conversion); the three Python law bodies are DELETED — type-face shims +
+the new `brutex/engine/cascade_rust.py` facade HARD-REQUIRE the wheel
+(`BRUTEX_CASCADE_RUST` default-ON; explicit-falsy/junk/wheel-missing = a
+loud typed refusal naming the DEC — the BRUTEX_FILL_MODE set-knob
+precedent). The branch's own hypothesis differential caught + fixed the ONE
+executed parity defect (CPython 3.12 `sum()` is NEUMAIER-compensated on its
+float fast path — the crate's `py_float_sum` mirrors it bit-exactly,
+cargo-pinned with real-interpreter bit-pattern witnesses; fail-before/
+pass-after recorded). The 150 pre-existing unit tests pass UNMODIFIED
+against Rust; all 7 test types executed incl. SIX hand-applied Rust mutants
+KILLED from the committed base. Phase B+ (the trade_sim port with the
+Python walker RETAINED as the parity ORACLE; cascade_wire / top100_artifact
+/ trade_store / results_depth_pass / results_report et al.) is the recorded
+remainder under this same DEC. ENGINE UNCHANGED — the sweep hot path + run
+identity take ZERO diffs (run-END artifact/aggregate layers only) —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ONE new env
+var `BRUTEX_CASCADE_RUST`. This header carries the pointer, never the
+story — the full record lives in the §1 Active-branch blurb + MIGRATION.md
+#1954.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
@@ -3243,7 +3268,75 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-day-freshness-guard`
+- **Active branch:** `claude/rust-cascade-results`
+  (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
+  cascade/results-depth Rust conversion, PHASE A, under the operator's
+  standing greenfield-conversion approval as relayed via the coordinator
+  (not a direct-user approval in this session). THE CYCLE (capture-first):
+  the 27-case parity corpus + fixtures were FROZEN against the UNTOUCHED
+  Python laws at merge base 415e863 BEFORE any conversion
+  (`tests/golden/_cascade_rust_parity_corpus.py` +
+  `gen_cascade_rust_parity.py` — regeneration refused without
+  `BRUTEX_REGEN_CASCADE_PARITY=1`), then the NEW standalone crate
+  `rust/brutex-cascade` (pyo3 0.29 abi3-py312 maturin mixed layout,
+  committed Cargo.lock, cdylib+rlib, pyo3 the ONLY dep) took the three law
+  families token-for-token: `cascade_join` (the report join
+  flattener/validator — structural fail-closed root/version/sweep_id law,
+  per-item skip+count, junk numerics NULLED never clamped, dup ids exclude
+  EVERY copy, WARN_DETAIL_CAP=5 notes carrying REAL CPython reprs,
+  insertion-order maps, PyBool-before-exact-PyInt classification),
+  `minute_path` (bisect span_slice · the exit-bar open-only excursion fold
+  · the session equity walk · independent paisa/pct drawdown maxima · IST
+  session dates; i128 outputs), `combo_aggregates` (nearest-rank via exact
+  `-(-pct·n).div_euclid(100)`, floor-mean int stats, the clamped float
+  stats over the NEW CPython-Neumaier `py_float_sum`, the ≥0.8
+  one-regime-wonder rule, the whole aggregate_fold with the append-only
+  EXIT_REASONS order + unknown-reason KeyError parity, byte-identical
+  `json.dumps` lens renders). The three Python law bodies are DELETED —
+  type-face shims keep every dataclass/enum/error + the repr-carrying
+  validation raises + the marshalling laws (prices as `str(Decimal)`,
+  timestamps as EXACT epoch-µs ints), resolved through the NEW
+  `brutex/engine/cascade_rust.py` facade: `BRUTEX_CASCADE_RUST` default-ON;
+  explicit-falsy/junk/wheel-missing = a loud typed `CascadeRustError`
+  naming the DEC + the bootstrap remediation (the BRUTEX_FILL_MODE
+  set-knob-refusal precedent — a silent pretend-OFF over deleted code
+  would be a lie). EXECUTED PARITY DEFECT (this branch's own apparatus):
+  CPython 3.12's builtin `sum()` is NEUMAIER-compensated on floats — the
+  first-cut naive `iter().sum()` diverged in the last ULP (hypothesis
+  falsifying mean 262144.634119352 vs …35203; re-verified on the real
+  3.12.3: `sum([1e16, 1.0, -1e16]) == 1.0` vs naive 0.0); `py_float_sum`
+  now mirrors `builtin_sum_impl` exactly, cargo-pinned with bit-pattern
+  witnesses. ALL 7 TEST TYPES EXECUTED: the 150 pre-existing unit tests
+  pass UNMODIFIED against Rust; 27-case frozen golden parity; hypothesis
+  differentials vs VERBATIM in-test copies of the deleted laws (the
+  retained-independent-oracle convention — the suite that caught the
+  defect); 10k/5k stress determinism + conservation; the span_slice
+  flat-ratio bench pin; the 1386-test consumer battery green; SIX
+  hand-applied Rust mutants EXECUTED KILLED from the committed base
+  (mutation.yml not wired for this crate — disclosed, the #1892
+  precedent). GATES: the four touched Python modules 100.00% line+branch
+  the ci.yml way; cargo fmt/clippy `-D warnings`/test `--release --locked`
+  green (38 tests); ruff/ruff-format clean; `mypy --strict` clean (477
+  files, 0 new); pyright 0 errors on touched files; ci.yml gains the
+  wheel-install step at all ten sites + the `rust-brutex-cascade` job in
+  ci-ok.needs + the cascade_rust coverage stanza. HONEST divergence
+  envelope (non-production shapes, each disclosed): beyond-±i128 ints
+  refuse loudly; lone-surrogate note strings fold into the named corrupt
+  degrade; >2^53 division parity f64-bounded; pre-1970 IST refuses; naive
+  datetimes raise TypeError at `epoch_us`. HONEST REMAINDER (phase B+
+  under this same DEC, recorded in the lane plan): the trade_sim port
+  (Python walker RETAINED as the parity ORACLE — the mission's named
+  exception), trade_capture, results_baseline, twin_detect,
+  reference_series, session_lens, metrics/cascade, candidate,
+  margin_history, cascade_wire, top100_artifact, trade_store,
+  results_depth_pass, results_report. SCOPE-LOCK honored:
+  results_store.py / stage3_wire.py / stage3_refine*+grid+select /
+  exit_index.py / metrics/compute.py BYTE-UNTOUCHED (other live lanes).
+  ENGINE UNCHANGED — the sweep hot path + run identity take ZERO diffs —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; ONE new env var
+  `BRUTEX_CASCADE_RUST`.)
+  Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard + the B-3 derived-intraday null-OI
@@ -9841,7 +9934,27 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/rust-cascade-results`
+  (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954 — the T14
+  cascade/results-depth Rust conversion PHASE A: the NEW
+  `rust/brutex-cascade` crate (pyo3 abi3-py312, committed Cargo.lock) hosts
+  the `cascade_join` + `minute_path` + `combo_aggregates` law families
+  token-for-token under the capture-first cycle (the 27-case parity corpus
+  frozen against the untouched Python BEFORE conversion); the three Python
+  law bodies DELETED — type-face shims + the `brutex/engine/cascade_rust.py`
+  facade hard-require the wheel (`BRUTEX_CASCADE_RUST` default-ON;
+  explicit-falsy/junk/wheel-missing = a loud typed refusal naming the DEC);
+  the ONE executed parity defect (CPython Neumaier float `sum()`) caught by
+  this branch's own hypothesis differential and fixed bit-exactly
+  (`py_float_sum`, cargo-pinned with real-interpreter witnesses); all 7
+  test types executed incl. six hand-applied Rust mutants killed; the 150
+  pre-existing unit tests pass UNMODIFIED; phase B+ (the trade_sim port
+  with the Python walker retained as ORACLE + the remaining in-lane files)
+  is the recorded remainder under this same DEC; scope-locked files of
+  other lanes byte-untouched; ENGINE UNCHANGED — the sweep hot path + run
+  identity take zero diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1954 for the full blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample
