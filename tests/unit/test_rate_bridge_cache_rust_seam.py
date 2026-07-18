@@ -29,6 +29,11 @@ from typing import Any
 
 import pytest
 from brutex import pull_state_rust
+from brutex.dashboard.rate_bridge_cache import (
+    MEMO_SOURCE_CACHED,
+    MEMO_SOURCE_LIVE,
+    MEMO_SOURCE_UNVERIFIED,
+)
 from structlog.testing import capture_logs
 
 from tests.golden import _rate_bridge_cache_harness as harness
@@ -92,10 +97,10 @@ class TestFlagOffNeverImports:
         cache, calls = _cache()
         cache._probed_at = 1023.0  # fresh — the TTL fast path
         result = cache.get(Path("/nonexistent-lake"))
-        assert result.source == "cached" and calls["guard"] == 0
+        assert result.source == MEMO_SOURCE_CACHED and calls["guard"] == 0
         cache._probed_at = None  # cold — the owner arm runs the refresh
         result = cache.get(Path("/nonexistent-lake"))
-        assert result.source == "live" and calls["guard"] == 1
+        assert result.source == MEMO_SOURCE_LIVE and calls["guard"] == 1
         assert bomb.touches == []
 
 
@@ -182,7 +187,7 @@ class TestSeamLaw:
         cache, calls = _cache()
         cache._probed_at = 1000.0  # stale — the oracle would take OWNER
         result = cache.get(Path("/nonexistent-lake"))
-        assert result.source == "cached" and calls["guard"] == 0
+        assert result.source == MEMO_SOURCE_CACHED and calls["guard"] == 0
 
     def test_owner_while_inflight_is_belted_to_follower(
         self, monkeypatch: pytest.MonkeyPatch
@@ -197,7 +202,7 @@ class TestSeamLaw:
         cache._probed_at = 1000.0
         cache._inflight = True
         result = cache.get(Path("/nonexistent-lake"))
-        assert result.source == "unverified"
+        assert result.source == MEMO_SOURCE_UNVERIFIED
         assert calls["guard"] == 0  # no second daemon
         assert cache._inflight is True  # the flag is the daemon's to clear
 
@@ -208,9 +213,9 @@ class TestSeamLaw:
         monkeypatch.setitem(sys.modules, "brutex_pull_state", None)  # wheel missing
         cache, calls = _cache()
         cache._probed_at = 1023.0
-        assert cache.get(Path("/nonexistent-lake")).source == "cached"
+        assert cache.get(Path("/nonexistent-lake")).source == MEMO_SOURCE_CACHED
         cache._probed_at = 1000.0
-        assert cache.get(Path("/nonexistent-lake")).source == "live"
+        assert cache.get(Path("/nonexistent-lake")).source == MEMO_SOURCE_LIVE
         assert calls["guard"] == 1
 
     def test_token_kernel_is_authoritative(self, monkeypatch: pytest.MonkeyPatch) -> None:
