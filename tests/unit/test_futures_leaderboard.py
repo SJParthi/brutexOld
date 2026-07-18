@@ -15,6 +15,13 @@ import pytest
 from brutex.futures.executor import STOCK_SPOT_DEFERRAL_NOTE, ExecutionKind, FuturesRuleResult
 from brutex.futures.leaderboard import (
     ANNOTATION_KEY,
+    FUTURES_EXEC_ETC_NOTE,
+    FUTURES_EXEC_NOT_PRICED_REASONS,
+    FUTURES_EXEC_STATUS_EXECUTED,
+    FUTURES_EXEC_STATUS_NOT_PRICED,
+    futures_annotation,
+    futures_exec_not_priced,
+    futures_exec_verdict,
     project_futures_annotation,
     read_translation_sidecar,
     render_futures_leaderboard,
@@ -190,3 +197,119 @@ class TestTranslationSidecar:
         path.write_text(json.dumps(["not", "a", "dict"]))
         with pytest.raises(ValueError, match="malformed"):
             read_translation_sidecar(path)
+
+
+# ── DEC-OPTIONS-EXEC-FEEDBACK-001: extraction parity + the futures_exec verdict ─
+
+
+class TestFuturesAnnotationExtraction:
+    """``futures_annotation`` is the EXTRACTED body of
+    ``project_futures_annotation`` — the delegator must stay byte-identical:
+    ``{**row_dict, ANNOTATION_KEY: futures_annotation(result, kind=kind)}``."""
+
+    def test_executed_arm_byte_parity(self) -> None:
+        result = _result()
+        row = {"run_id": "abc", "rank": 1}
+        assert project_futures_annotation(row, result) == {
+            **row,
+            ANNOTATION_KEY: futures_annotation(result, kind=ExecutionKind.INDEX_FUTURES),
+        }
+
+    def test_deferred_arm_byte_parity(self) -> None:
+        row = {"run_id": "xyz"}
+        projected = project_futures_annotation(row, None, kind=ExecutionKind.STOCK_SPOT_DEFERRED)
+        assert projected == {
+            **row,
+            ANNOTATION_KEY: futures_annotation(None, kind=ExecutionKind.STOCK_SPOT_DEFERRED),
+        }
+        assert projected[ANNOTATION_KEY]["note"] == STOCK_SPOT_DEFERRAL_NOTE
+
+    def test_annotation_status_token_is_the_executed_constant(self) -> None:
+        annotation = futures_annotation(_result(), kind=ExecutionKind.INDEX_FUTURES)
+        assert annotation["status"] == FUTURES_EXEC_STATUS_EXECUTED
+        assert FUTURES_EXEC_STATUS_EXECUTED == "executed"
+
+    def test_annotation_mismatches_fail_loud_directly(self) -> None:
+        # The extracted body owns the result/kind mismatch refusals too.
+        with pytest.raises(ValueError, match="requires the executed FuturesRuleResult"):
+            futures_annotation(None, kind=ExecutionKind.INDEX_FUTURES)
+        with pytest.raises(ValueError, match="must not carry a result"):
+            futures_annotation(_result(), kind=ExecutionKind.STOCK_SPOT_DEFERRED)
+
+
+class TestFuturesExecVerdict:
+    def test_verdict_object_shape(self) -> None:
+        # _result(): n_signals=4, n_accepted=2 → priced_trade_pct = 2/4*100
+        # = 50.0 exactly (the ×100 law); suspect + differential_checked ride
+        # through verbatim; the window carries the replay envelope + the
+        # constant ETC-honesty note.
+        result = _result(suspect=True, differential_checked=3)
+        verdict = futures_exec_verdict(result, replay_start="2024-01-01", replay_end="2025-01-01")
+        assert verdict["status"] == FUTURES_EXEC_STATUS_EXECUTED
+        assert verdict["suspect"] is True
+        assert verdict["differential_checked"] == 3
+        assert verdict["priced_trade_pct"] == 2 / 4 * 100.0
+        assert verdict["priced_trade_pct"] == 50.0
+        assert verdict["window"] == {
+            "replay_start": "2024-01-01",
+            "replay_end": "2025-01-01",
+            "etc_note": FUTURES_EXEC_ETC_NOTE,
+        }
+
+    def test_verdict_is_the_annotation_plus_additive_keys(self) -> None:
+        # Shape reuse (§11 COMMON): every annotation key/value passes through
+        # byte-identical; the verdict only ADDS the four feedback keys.
+        result = _result()
+        annotation = futures_annotation(result, kind=ExecutionKind.INDEX_FUTURES)
+        verdict = futures_exec_verdict(result, replay_start="s", replay_end="e")
+        for key, value in annotation.items():
+            assert verdict[key] == value
+        assert set(verdict) - set(annotation) == {
+            "suspect",
+            "differential_checked",
+            "priced_trade_pct",
+            "window",
+        }
+        # Defaults ride through when never stamped.
+        assert verdict["suspect"] is False
+        assert verdict["differential_checked"] == 0
+
+    def test_priced_trade_pct_null_on_zero_signals(self) -> None:
+        result = _result(
+            n_signals=0,
+            n_accepted=0,
+            n_rejected_lot_size_unknown=0,
+            n_rejected_no_data=0,
+            gross_pnl_paisa=0,
+            net_pnl_paisa=0,
+            n_winners=0,
+            n_losers=0,
+            n_vix_missing=0,
+        )
+        verdict = futures_exec_verdict(result, replay_start="s", replay_end="e")
+        assert verdict["priced_trade_pct"] is None
+
+
+class TestFuturesExecNotPriced:
+    def test_reason_vocabulary_frozen(self) -> None:
+        # The options_exec vocabulary, shared law.
+        assert FUTURES_EXEC_NOT_PRICED_REASONS == (
+            "not_in_replay_set",
+            "replay_failed",
+            "no_signals",
+        )
+
+    @pytest.mark.parametrize("reason", FUTURES_EXEC_NOT_PRICED_REASONS)
+    def test_every_named_reason(self, reason: str) -> None:
+        assert futures_exec_not_priced(reason) == {
+            "status": FUTURES_EXEC_STATUS_NOT_PRICED,
+            "reason": reason,
+        }
+        assert FUTURES_EXEC_STATUS_NOT_PRICED == "not_priced"
+
+    def test_unknown_reason_refused_loud(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"futures_exec_not_priced: unknown reason 'typo'; expected one of",
+        ):
+            futures_exec_not_priced("typo")
