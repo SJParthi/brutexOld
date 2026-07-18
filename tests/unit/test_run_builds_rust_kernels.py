@@ -154,6 +154,57 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/meta/meta_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-DATA-RUST-PURELAW-001 (MIGRATION.md #1940 / ADR-0020 slice T10):
+    # brutex_data is the default-OFF data pure-law crate (the fno_symbol
+    # structural grammar). It is consumed ONLY through the import-guarded
+    # facade brutex/data/fno_symbol_rust.py
+    # (`importlib.import_module("brutex_data")` inside the guard — an
+    # absent or broken install latches BRUTEX_DATA_RUST OFF with one loud
+    # WARN and the Python oracle serves, byte-identical). Deliberately NOT
+    # a turnkey build prerequisite: in NO cargo workspace, built ONLY by
+    # its own CI lane (.github/workflows/data-rust-parity.yml). A
+    # module-top `import brutex_data` anywhere in brutex/ would reclassify
+    # it REQUIRED — the inverse pin below forbids exactly that.
+    "brutex_data": (
+        "brutex/data/fno_symbol_rust.py",
+        ".github/workflows/data-rust-parity.yml",
+    ),
+    # DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943 / slice T35):
+    # brutex_core is the default-OFF config-leaf crate (money / hwenv /
+    # paths / dotenv / backupenv laws). It is consumed ONLY through FIVE
+    # default-OFF import-guarded facades that resolve it lazily via
+    # `importlib.import_module("brutex_core")` — brutex/money_rust.py's
+    # own guard, brutex/config/hardware_envelope_rust.py's, and the
+    # shared brutex/config/seam_core.py ConfigRustSeam guard serving
+    # paths_rust/dotenv_rust/backup_env_rust (an absent or broken
+    # install latches `crate_unavailable` with one loud WARN and the
+    # Python oracle serves, behavior-identical). It is deliberately NOT
+    # a build prerequisite: never module-top imported, in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/core-rust-parity.yml). A module-top
+    # `import brutex_core` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_core": (
+        "brutex/money_rust.py",
+        ".github/workflows/core-rust-parity.yml",
+    ),
+    # DEC-STRATEGIES-RUST-COMBO-001 (MIGRATION.md #1955): brutex_strategies is
+    # the default-OFF combo canonical-JSON + unit-separator crate. It is
+    # consumed ONLY through the import-guarded facade
+    # brutex/strategies/combo_rust.py (`importlib.import_module("brutex_strategies")`
+    # inside `_resolve_crate` — an absent or stale wheel latches the
+    # `BRUTEX_STRATEGIES_RUST_COMBO` flag OFF with one loud WARN and the Python
+    # oracle serves, byte-identical). It is deliberately NOT a build
+    # prerequisite (a verified engine import cycle forbids a module-top import;
+    # a clean clone runs the Python oracle with the flag OFF). It is built by
+    # its OWN CI lane — the `rust-brutex-strategies` job + the wheel-install
+    # steps in .github/workflows/ci.yml. A module-top `import brutex_strategies`
+    # anywhere in brutex/ would make a clean clone crash-prone again — the
+    # inverse pin (test_optional_kernel_never_module_top_imported) forbids it.
+    "brutex_strategies": (
+        "brutex/strategies/combo_rust.py",
+        ".github/workflows/ci.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {
@@ -166,6 +217,7 @@ def test_known_kernels_are_discovered() -> None:
     assert "fno_math" in REQUIRED_KERNELS, KERNELS
     assert "trading_core" in REQUIRED_KERNELS, KERNELS
     assert "brutex_lake" in KERNELS, KERNELS
+    assert "brutex_core" in KERNELS, KERNELS
 
 
 @pytest.mark.parametrize("import_name", sorted(REQUIRED_KERNELS))
