@@ -60,6 +60,10 @@ FIXTURES_DIR: Final[Path] = Path(__file__).resolve().parent / "fixtures"
 PRE_VIX_FIXTURE: Final[Path] = FIXTURES_DIR / "results_store_pre_vix_columns.parquet"
 #: The pre-``deflated_sharpe`` optional-column generation (no VIX trio either).
 PRE_DEFLATED_FIXTURE: Final[Path] = FIXTURES_DIR / "results_store_pre_deflated_sharpe.parquet"
+#: The pre-DEC-RANK-PARETO-PERSIST-001 generation (LANE W1): has
+#: ``deflated_sharpe`` AND the VIX trio, but NOT the ``pareto_member`` /
+#: ``selection_basis`` selection columns.
+PRE_SELECTION_FIXTURE: Final[Path] = FIXTURES_DIR / "results_store_pre_selection_columns.parquet"
 
 # ── The FROZEN historical column layouts (deliberate local copies — see the
 #    module docstring; a committed legacy file never tracks the live schema) ──
@@ -92,6 +96,9 @@ _LEGACY_METRIC_COLUMNS: Final[tuple[str, ...]] = (
     "max_drawdown_pct",
 )
 _LEGACY_PRICE_COLUMNS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
+#: The pre-selection generation's TRAILING trio (frozen local copy — the VIX
+#: columns were LAST on disk before the W1 selection columns landed).
+_LEGACY_VIX_COLUMNS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 
 #: The u64→signed-Int64 limb offset (frozen copy of the on-disk mask encoding).
 _U64_TO_I64_OFFSET: Final[int] = 1 << 63
@@ -142,7 +149,21 @@ def fixture_rows() -> tuple[ResultRow, ...]:
     return (row_one, row_two)
 
 
-def render_legacy_store_bytes(rows: Sequence[ResultRow], *, with_deflated_sharpe: bool) -> bytes:
+def fixture_rows_with_vix() -> tuple[ResultRow, ...]:
+    """The :func:`fixture_rows` pair with the VIX trio populated on row 1.
+
+    Row 1 carries a real trio (value round-trip beside the ABSENT selection
+    columns); row 2 keeps the all-``None`` trio (the nullable arm).
+    """
+    from dataclasses import replace
+
+    row_one, row_two = fixture_rows()
+    return (replace(row_one, vix_mean=14.5, vix_min=12.25, vix_max=17.75), row_two)
+
+
+def render_legacy_store_bytes(
+    rows: Sequence[ResultRow], *, with_deflated_sharpe: bool, with_vix: bool = False
+) -> bytes:
     """Serialise *rows* into one HISTORICAL results-store Parquet byte blob.
 
     Byte-for-byte the pre-VIX ``ResultsStore._render_bytes`` output
@@ -165,6 +186,9 @@ def render_legacy_store_bytes(rows: Sequence[ResultRow], *, with_deflated_sharpe
         columns["deflated_sharpe"] = [row.deflated_sharpe for row in ordered]
     for name in _LEGACY_PRICE_COLUMNS:
         columns[name] = [float(getattr(row, name)) for row in ordered]
+    if with_vix:
+        for name in _LEGACY_VIX_COLUMNS:
+            columns[name] = [getattr(row, name) for row in ordered]
 
     # Polars orders columns by the SCHEMA dict, so it must mirror the historical
     # insertion order exactly: strings → ints → metrics → deflated → prices.
@@ -176,6 +200,8 @@ def render_legacy_store_bytes(rows: Sequence[ResultRow], *, with_deflated_sharpe
     if with_deflated_sharpe:
         schema["deflated_sharpe"] = pl.Float64
     schema.update(dict.fromkeys(_LEGACY_PRICE_COLUMNS, pl.Float64))
+    if with_vix:
+        schema.update(dict.fromkeys(_LEGACY_VIX_COLUMNS, pl.Float64))
     df = pl.DataFrame(columns, schema=schema)
     bio = io.BytesIO()
     df.write_parquet(
@@ -200,6 +226,13 @@ def main() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         print(f"{hashlib.sha256(content).hexdigest()}  {path.name}")
+    # The pre-W1-selection-columns generation (deflated + VIX, no selection).
+    content = render_legacy_store_bytes(
+        fixture_rows_with_vix(), with_deflated_sharpe=True, with_vix=True
+    )
+    PRE_SELECTION_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+    PRE_SELECTION_FIXTURE.write_bytes(content)
+    print(f"{hashlib.sha256(content).hexdigest()}  {PRE_SELECTION_FIXTURE.name}")
 
 
 if __name__ == "__main__":

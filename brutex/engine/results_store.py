@@ -131,6 +131,7 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.money import round_money
+from brutex.ranking.multi_select import join_basis_tokens
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from brutex.vocabulary.describe import matched_condition_names
@@ -226,10 +227,25 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: field here can never silently desync the attribution's nulling/schema gates.
 VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 
+#: Nullable selection-provenance columns (LANE W1, DEC-RANK-PARETO-PERSIST-001
+#: / DEC-RANK-QUOTA-PERSIST-1000-001): ``pareto_member`` (Boolean — the row is
+#: an ε-Pareto frontier member of its tuple's ranked pool) and
+#: ``selection_basis`` (Utf8 — the comma-joined, canonical-order basis tokens
+#: from :data:`brutex.ranking.multi_select.BASIS_ORDER` the row qualified
+#: under). Appended LAST in the on-disk column order (after the VIX trio —
+#: the optional-column back-compat template); ``None`` = the honest unknown
+#: (a store written before LANE W1). ANNOTATION-ONLY: deliberately excluded
+#: from :data:`_RANKABLE_FIELDS` (provenance never drives ranking) and NEVER
+#: an input to the BLAKE3 run identity. PUBLIC for the same reason as
+#: :data:`VIX_FIELDS` — one cross-module source of truth for the pair's
+#: column names.
+SELECTION_FIELDS: Final[tuple[str, ...]] = ("pareto_member", "selection_basis")
+
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
-#: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
-#: deliberately NOT rankable — VIX must never drive strategy ranking
-#: (CLAUDE.md §2 Rule 3) and a nullable column has no total order.
+#: The nullable ``deflated_sharpe``, the REFERENCE-ONLY VIX trio and the
+#: LANE-W1 selection-provenance pair are deliberately NOT rankable — VIX must
+#: never drive strategy ranking (CLAUDE.md §2 Rule 3), provenance is
+#: annotation not a metric, and a nullable column has no total order.
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
@@ -436,6 +452,12 @@ class ResultRow:
     vix_mean: float | None = None
     vix_min: float | None = None
     vix_max: float | None = None
+    #: LANE-W1 selection provenance (:data:`SELECTION_FIELDS`): ε-Pareto
+    #: frontier membership + the canonical-order basis tokens. ``None`` = the
+    #: honest unknown (a pre-W1 store / an un-tagged producer). Never
+    #: rankable, never in the run identity.
+    pareto_member: bool | None = None
+    selection_basis: str | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -526,6 +548,27 @@ class ResultRow:
                 raise ResultsStoreError(f"ResultRow.{name} must be >= 0, got {price}")
             # Snap to the 2dp tick grid so the row is canonical (DEC-SPOT-PRICE-2DP-001).
             object.__setattr__(self, name, round_money(price))
+
+        # LANE-W1 selection-basis vocabulary law: a present tag must be
+        # non-empty, canonical-order tokens from the ONE vocabulary
+        # (brutex.ranking.multi_select.join_basis_tokens — imported, never a
+        # mirrored literal). A poisoned/misordered tag is refused at
+        # construction, never persisted.
+        if self.selection_basis is not None:
+            if not self.selection_basis:
+                raise ResultsStoreError(
+                    "ResultRow.selection_basis must be a non-empty token string or None"
+                )
+            tokens = tuple(self.selection_basis.split(","))
+            try:
+                canonical = join_basis_tokens(tokens)
+            except ValueError as exc:
+                raise ResultsStoreError(f"ResultRow.selection_basis invalid: {exc}") from exc
+            if canonical != self.selection_basis:
+                raise ResultsStoreError(
+                    f"ResultRow.selection_basis {self.selection_basis!r} is not in the "
+                    f"canonical BASIS_ORDER join (expected {canonical!r})"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -854,8 +897,11 @@ class ResultsStore:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
         for name in VIX_FIELDS:
-            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
-            # optional-column back-compat template); None → Parquet null.
+            # The nullable REFERENCE-ONLY VIX trio (None → Parquet null).
+            columns[name] = [getattr(row, name) for row in ordered]
+        for name in SELECTION_FIELDS:
+            # The LANE-W1 selection-provenance pair — appended LAST, after
+            # the VIX trio (the optional-column back-compat template).
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
@@ -874,6 +920,8 @@ class ResultsStore:
                     (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
                     pl.Float64,
                 ),
+                "pareto_member": pl.Boolean,
+                "selection_basis": pl.Utf8,
             },
         )
         bio = io.BytesIO()
@@ -1037,6 +1085,27 @@ def _optional_float(record: dict[str, object], name: str) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
+def _optional_bool(record: dict[str, object], name: str) -> bool | None:
+    """Read a nullable Boolean column with optional-column back-compat.
+
+    The :func:`_optional_float` law for the LANE-W1 ``pareto_member`` column:
+    an absent column (a pre-W1 store) reads ``None`` exactly like a stored
+    Parquet null — the honest unknown, never a fabricated ``False``.
+    """
+    value = record.get(name)
+    return None if value is None else bool(value)
+
+
+def _optional_str(record: dict[str, object], name: str) -> str | None:
+    """Read a nullable Utf8 column with optional-column back-compat.
+
+    The :func:`_optional_float` law for the LANE-W1 ``selection_basis``
+    column: absent-or-null reads ``None`` — the honest unknown.
+    """
+    value = record.get(name)
+    return None if value is None else str(value)
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -1077,6 +1146,8 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         vix_mean=_optional_float(record, "vix_mean"),
         vix_min=_optional_float(record, "vix_min"),
         vix_max=_optional_float(record, "vix_max"),
+        pareto_member=_optional_bool(record, "pareto_member"),
+        selection_basis=_optional_str(record, "selection_basis"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -1112,6 +1183,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 __all__ = [
     "CONDITION_NAME_SEP",
     "MASK_BITS_MAX",
+    "SELECTION_FIELDS",
     "VIX_FIELDS",
     "FlushResult",
     "ResultRow",

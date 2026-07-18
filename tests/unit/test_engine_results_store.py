@@ -831,3 +831,59 @@ class TestTopThousandStorage:
         after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
         assert after == before
         assert len(after) == 1000
+
+
+class TestSelectionFields:
+    """LANE W1 (DEC-RANK-PARETO-PERSIST-001): the selection-provenance pair."""
+
+    def test_defaults_are_honest_none(self) -> None:
+        row = _row()
+        assert row.pareto_member is None
+        assert row.selection_basis is None
+
+    def test_valid_canonical_tag_accepted(self) -> None:
+        row = _row(pareto_member=True, selection_basis="composite,dd,frontier")
+        assert row.pareto_member is True
+        assert row.selection_basis == "composite,dd,frontier"
+
+    def test_empty_tag_refused(self) -> None:
+        with pytest.raises(ResultsStoreError, match="non-empty token string"):
+            _row(selection_basis="")
+
+    def test_unknown_token_refused(self) -> None:
+        with pytest.raises(ResultsStoreError, match="selection_basis invalid"):
+            _row(selection_basis="composite,sharpe")
+
+    def test_misordered_tag_refused(self) -> None:
+        # Tokens valid but NOT in the canonical BASIS_ORDER join.
+        with pytest.raises(ResultsStoreError, match="canonical BASIS_ORDER"):
+            _row(selection_basis="dd,composite")
+
+    def test_selection_fields_round_trip_flush_load(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        path = tmp_path / "sel.parquet"
+        store = ResultsStore(path=path)
+        store.append(_row(run_id="1" * 64, pareto_member=True, selection_basis="composite"))
+        store.append(_row(run_id="2" * 64, mask_bits=0b11))
+        store.flush()
+        loaded = ResultsStore.load(path)
+        rows = loaded.rows()
+        assert (rows[0].pareto_member, rows[0].selection_basis) == (True, "composite")
+        assert (rows[1].pareto_member, rows[1].selection_basis) == (None, None)
+
+    def test_differing_selection_tags_are_a_strict_conflict(self) -> None:
+        # The append-conflict law: tags are computed BEFORE the single append
+        # per run_id; a second append with a different tag is a run-identity
+        # conflict (never a silent merge — the VIX backfill is the ONE
+        # sanctioned directional exception, and selection is not in it).
+        store = ResultsStore(path=Path("/tmp/unused.parquet"))
+        store.append(_row(selection_basis="composite"))
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            store.append(_row(selection_basis="composite,frontier"))
+
+    def test_not_rankable(self) -> None:
+        store = ResultsStore(path=Path("/tmp/unused.parquet"))
+        store.append(_row())
+        for name in ("pareto_member", "selection_basis"):
+            with pytest.raises(ResultsStoreError, match="unknown ranking field"):
+                store.top_k(1, by=name)

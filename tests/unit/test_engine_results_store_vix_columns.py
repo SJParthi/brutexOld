@@ -314,8 +314,20 @@ class TestVixFlushLoad:
         store.append(_row())
         store.flush()
         schema = pl.read_parquet_schema(path)
-        assert [*schema][-3:] == ["vix_mean", "vix_min", "vix_max"]
+        # CONSCIOUSLY RE-DERIVED (DEC-RANK-PARETO-PERSIST-001): the LANE-W1
+        # selection pair is now the on-disk TAIL; the VIX trio sits directly
+        # before it (the optional-column append-last template, one
+        # generation on).
+        assert [*schema][-5:] == [
+            "vix_mean",
+            "vix_min",
+            "vix_max",
+            "pareto_member",
+            "selection_basis",
+        ]
         assert all(schema[name] == pl.Float64 for name in VIX_FIELDS)
+        assert schema["pareto_member"] == pl.Boolean
+        assert schema["selection_basis"] == pl.Utf8
 
     def test_store_without_the_columns_loads_none_trio(self, tmp_path: Path) -> None:
         """The optional-column law on a synthetic legacy file (unit-level twin
