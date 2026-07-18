@@ -30,13 +30,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.pull_outcome import (
     _HALT_NAME_OUTCOMES,
     MARKET_HOURS_DEFERRAL_PREFIX,
     classify_last_pull_outcome,
     classify_retained_pull_outcome,
 )
-from brutex.dashboard.pull_jobs import RetainedPullState
 from brutex.dashboard.pull_progress import ProgressSnapshot
 from brutex.dashboard.verdict_banner import _KIND_STYLE
 
@@ -341,7 +341,5 @@ def compute_kernel_rows() -> list[str]:
         ("run-α", "run-α"),
     ):
         expected = bool(retained_id and verdict_id == retained_id)
-        rows.append(
-            "\t".join(("correlates", retained_id, verdict_id, "1" if expected else "0"))
-        )
+        rows.append("\t".join(("correlates", retained_id, verdict_id, "1" if expected else "0")))
     return rows

@@ -269,6 +269,11 @@ def _resolve_wheel_symbol(symbol: str) -> object | None:
     return kernel
 
 
+#: The outcome kernel's result arity — ``(outcome, tone, headline_code,
+#: detail_code)`` (the refuse-poison shape gate consults it).
+_OUTCOME_CODES_ARITY: Final[int] = 4
+
+
 def rust_classify_pull_outcome(
     state: str,
     detail: str,
@@ -301,7 +306,7 @@ def rust_classify_pull_outcome(
         return None
     if (
         not isinstance(raw, tuple)
-        or len(raw) != 4
+        or len(raw) != _OUTCOME_CODES_ARITY
         or not all(isinstance(part, str) for part in raw)
     ):
         warn_degrade_once("kernel_invalid", detail=type(raw).__name__)

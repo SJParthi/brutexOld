@@ -69,9 +69,10 @@ def main() -> None:
             "deliberately."
         )
     FIXTURES.mkdir(parents=True, exist_ok=True)
+    classify_rows = compute_classify_table()
     payload = {
         "schema": 1,
-        "classify": compute_classify_table(),
+        "classify": classify_rows,
         "retained": compute_retained_table(),
     }
     MODULE_FIXTURE.write_text(
@@ -84,7 +85,7 @@ def main() -> None:
             if "\n" in field or "\r" in field:
                 raise SystemExit(f"REFUSED: kernel fixture field contains a newline: {field!r}")
     KERNEL_FIXTURE.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    print(f"wrote {MODULE_FIXTURE} ({len(payload['classify'])} classify rows)")
+    print(f"wrote {MODULE_FIXTURE} ({len(classify_rows)} classify rows)")
     print(f"wrote {KERNEL_FIXTURE} ({len(rows)} kernel rows)")
 
 
