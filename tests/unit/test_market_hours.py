@@ -247,17 +247,29 @@ def test_resolve_market_closed_reads_os_environ_by_default(
 
 
 class _BombKernelModule:
-    """A sys.modules plant that detonates on ANY attribute access.
+    """A sys.modules plant that RECORDS any attribute access (the flag-OFF spy).
 
-    The flag-OFF never-imports spy: if ``pull_allowed_now`` under an unset /
-    falsy flag ever imports or touches the kernel module, the import
-    machinery (``__spec__``) or the resolver (``pull_allowed_us``) trips this
-    and the test fails LOUDLY — ``getattr(..., default)`` only swallows
-    ``AttributeError``, never this.
+    The never-imports pin: if ``pull_allowed_now`` under an unset/falsy flag
+    ever imports or touches the kernel module, the import machinery
+    (``__spec__``) or the resolver (``pull_allowed_us``) trips ``__getattr__``
+    and the access lands in ``touched``. ``__getattr__`` raises the STANDARD
+    ``AttributeError`` (CodeQL py/unexpected-raise-in-special-method — an
+    ``AssertionError`` in a special method is non-standard), so the LOUDNESS
+    deliberately does NOT ride the exception: the facade's
+    ``getattr(..., default)`` and ``except (ImportError, AttributeError)``
+    would swallow it silently. The tooth is the after-the-fact
+    ``assert bomb.touched == []`` in each flag-OFF test — ANY illicit
+    import/consult still fails the test loudly (tooth proven by simulating
+    the illicit access: flag ON against this bomb records
+    ``['__spec__', 'pull_allowed_us']`` and the empty-ledger assert fails).
     """
 
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
     def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"flag-OFF path touched the Rust kernel module: {name}")
+        self.touched.append(name)
+        raise AttributeError(f"flag-OFF path touched the Rust kernel module: {name}")
 
 
 class TestPullStateRustSeam:
@@ -276,20 +288,26 @@ class TestPullStateRustSeam:
         import sys
 
         monkeypatch.delenv("BRUTEX_PULL_STATE_RUST", raising=False)
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", _BombKernelModule())
+        bomb = _BombKernelModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
         # The full boundary truth table — the oracle's own law, untouched.
         assert pull_allowed_now(_at(8, 44, 59), True) is True
         assert pull_allowed_now(_at(8, 45, 0), True) is False
         assert pull_allowed_now(_at(15, 34, 59), True) is False
         assert pull_allowed_now(_at(15, 35, 0), True) is True
         assert pull_allowed_now(_at(12, 0, 0, day=_SATURDAY), False) is True
+        # The tooth: the flag-OFF path never touched the kernel module.
+        assert bomb.touched == []
 
     def test_explicit_falsy_flag_also_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import sys
 
         monkeypatch.setenv("BRUTEX_PULL_STATE_RUST", "0")
-        monkeypatch.setitem(sys.modules, "brutex_pull_state", _BombKernelModule())
+        bomb = _BombKernelModule()
+        monkeypatch.setitem(sys.modules, "brutex_pull_state", bomb)
         assert pull_allowed_now(_at(9, 0), True) is False
+        # The tooth: an explicit falsy flag never touches the kernel module.
+        assert bomb.touched == []
 
     def test_flag_on_serves_the_kernel_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A deliberately-WRONG fake kernel verdict is served — proving the

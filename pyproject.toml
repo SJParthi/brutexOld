@@ -316,7 +316,7 @@ no_implicit_reexport = true
 # site (e.g. strategies/combo.py -> fno_math.blake3_hash) failed the hook with
 # `no-any-return` on files the commit never touched. mypy_path lets BOTH envs
 # resolve the same in-repo stubs (mypy has no CLI flag for this — config only).
-mypy_path = ["rust/fno-math/python", "rust/trading-core/python", "rust/brutex-feed/python"]
+mypy_path = ["rust/fno-math/python", "rust/trading-core/python", "rust/brutex-feed/python", "rust/brutex-pull-state/python"]
 # DEC-P0-004 Agent 5 HIGH fix: pyright [tool.pyright] exclude already
 # covers redteam planted-bug fixtures; mypy needs the same exclusion or
 # strict mode will trip on the intentional bugs on every PR.
@@ -368,6 +368,7 @@ module = [
     "trading_core", "trading_core.*",
     "fno_math", "fno_math.*",
     "brutex_feed", "brutex_feed.*",  # DEC-FEED-RUST-CORE-001: same in-repo shim promotion class
+    "brutex_pull_state", "brutex_pull_state.*",  # `DEC-RUST-PULL-STATE-001` lane (unminted): same in-repo shim promotion class
 ]
 follow_imports = "silent"
 

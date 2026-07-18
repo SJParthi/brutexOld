@@ -259,6 +259,27 @@ jobs:
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The default-OFF pull-state guard kernel (the lane's own ledger row
+        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
+        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
+        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
+        # module must resolve for `mypy --strict brutex` (the wheel here; the
+        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
+        # real-wheel suites importorskip without it (absent wheel = those
+        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -466,6 +487,27 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The default-OFF pull-state guard kernel (the lane's own ledger row
+        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
+        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
+        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
+        # module must resolve for `mypy --strict brutex` (the wheel here; the
+        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
+        # real-wheel suites importorskip without it (absent wheel = those
+        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest with coverage gate
@@ -3050,6 +3092,27 @@ jobs:
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The default-OFF pull-state guard kernel (the lane's own ledger row
+        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
+        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
+        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
+        # module must resolve for `mypy --strict brutex` (the wheel here; the
+        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
+        # real-wheel suites importorskip without it (absent wheel = those
+        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3149,6 +3212,27 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_pull_state Rust extension (Rust pull-state lane)
+        # The default-OFF pull-state guard kernel (the lane's own ledger row
+        # `DEC-RUST-PULL-STATE-001` lands with its final phase; the ported
+        # guard law is DEC-GROWW-MARKET-HOURS-GUARD-001): the facade
+        # brutex/pull_state_rust.py lazy-imports `brutex_pull_state`, so the
+        # module must resolve for `mypy --strict brutex` (the wheel here; the
+        # in-repo stub via mypy_path in wheel-absent envs) and the flag-ON
+        # real-wheel suites importorskip without it (absent wheel = those
+        # arms skip loudly and the ON arm goes unproven). Belt-and-suspenders
+        # crates.io flake guard (see the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-pull-state; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-pull-state failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-pull-state failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest golden tests
