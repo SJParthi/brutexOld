@@ -117,14 +117,16 @@ class TestEngineIndexPathIsSignalOnly:
     """The engine walker prices index spot + index futures with ZERO cost."""
 
     def _run_one_trade(self) -> int:
-        # Signal on bar 0 → enter at bar 1's OPEN (₹100.00), exit at forced
-        # close far away is not reached; a Mode-B signal exit at bar 1 fills at
-        # bar 2's OPEN (₹110.00). Long P&L = +₹10.00 = 1000 paisa, RAW — no
+        # Signal on bar 0 → enter at bar 1 (FLAT at ₹100.00 — under the one
+        # worst-case law, DEC-FILL-WORST-CASE-ONLY-001, the fill is the bar's
+        # adverse extreme, which on a flat bar IS ₹100.00); a Mode-B signal
+        # exit at bar 1 fills at bar 2 (flat at ₹110.00 — adverse extreme
+        # ₹110.00). Long P&L = +₹10.00 = 1000 paisa, RAW — no
         # brokerage/STT/slippage is ever subtracted by the signal-only walker.
         bars = [
             _bar(9, 15, "100.00", "100.00", "100.00", "100.00"),
-            _bar(9, 16, "100.00", "112.00", "99.00", "110.00"),
-            _bar(9, 17, "110.00", "111.00", "109.00", "110.00"),
+            _bar(9, 16, "100.00", "100.00", "100.00", "100.00"),
+            _bar(9, 17, "110.00", "110.00", "110.00", "110.00"),
         ]
         entry = [True, False, False]
         exit_sig = [False, True, False]
@@ -177,6 +179,14 @@ class TestOptionPathIsCostBearing:
             expiry_date=date(2025, 3, 27),
             entry_bar_open_paisa=10_000,
             exit_bar_open_paisa=12_000,
+            # The one worst-case fill law REQUIRES the fill-bar extremes
+            # (DEC-FILL-WORST-CASE-ONLY-001): flat bars here — the adverse
+            # extreme is the open, so the ± one-tick discipline is the whole
+            # slippage term.
+            entry_bar_high_paisa=10_000,
+            entry_bar_low_paisa=10_000,
+            exit_bar_high_paisa=12_000,
+            exit_bar_low_paisa=12_000,
             side="long_call",
             n_lots=1,
             broker="groww",

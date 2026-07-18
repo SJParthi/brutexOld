@@ -87,12 +87,20 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
-def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+def _trending_bars(n_days: int = 45, per_day: int = 120) -> list[CandleBar]:
+    # The sweep_run suite's worst-case-rankable recipe
+    # (DEC-FILL-WORST-CASE-ONLY-001): mostly-up drift, every 5th day DOWN so
+    # profit_factor stays finite; EOD-only exits (sl/tp None below) because a
+    # tight SL/TP fills at the adverse extreme and gate-rejects every combo.
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
@@ -113,8 +121,8 @@ def _make_config(**overrides: object) -> SweepRunConfig:
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
         "tf_minutes": 1,
-        "sl_paisa": 80,
-        "tp_paisa": 50,
+        "sl_paisa": None,
+        "tp_paisa": None,
         "top_k": 3,
     }
     base.update(overrides)
@@ -424,8 +432,8 @@ class TestGridTupleSkip:
             directions=[Side.BUY],
             k_values=[1],
             condition_bits=[0, 1, 2, 3, 4],
-            stop_losses=[80],
-            take_profits=[50],
+            stop_losses=[None],
+            take_profits=[None],
             proximities=[None],
             mode="A",
             data_snapshot_hash="snap0001",

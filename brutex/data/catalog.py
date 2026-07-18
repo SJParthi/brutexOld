@@ -607,6 +607,12 @@ class Catalog:
                     f"catalog references missing partition file {path} "
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
+            # _read_partition_frame keeps the torn-read-retry helper
+            # (DEC-WINDOW-TORN-READ-RETRY-001, #1376) AND reads with glob=False
+            # so the ENGINE's feed mouth never glob-interprets a `[`-carrying
+            # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law; the writer also
+            # refuses to mint such dirs — partition._FORBIDDEN_SYMBOL_CHARS).
             frames.append(_read_partition_frame(path, retry_sleep=retry_sleep))
 
         combined = pl.concat(frames, how="vertical_relaxed")
@@ -780,15 +786,20 @@ def _read_partition_frame(
 
     sleep = retry_sleep if retry_sleep is not None else time.sleep
     skip_errors = parquet_read_skip_errors()
+    # glob=False on every read below: the caller resolves ONE concrete partition
+    # file, so the ENGINE's feed mouth must never glob-interpret a `[`-carrying
+    # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001,
+    # the #1594 round-15 metachar law; partition._FORBIDDEN_SYMBOL_CHARS refuses
+    # to mint such dirs, but a legacy dir must still read its literal file).
     try:
-        frame = pl.read_parquet(str(path))
+        frame = pl.read_parquet(str(path), glob=False)
     except skip_errors as first:
         # Torn read (concurrent writer). Retry ONCE — the writer's os.replace is
         # atomic, so a second open sees one consistent inode on a healthy lake.
         _LOG.warning("catalog.read.parquet_retry", path=str(path), error=str(first))
         sleep(_PARTITION_READ_RETRY_DELAY_S)
         try:
-            frame = pl.read_parquet(str(path))
+            frame = pl.read_parquet(str(path), glob=False)
         except skip_errors as second:
             raise CatalogError(
                 f"UNREADABLE partition file {path}: {second} — a corrupt partition "

@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -110,7 +111,11 @@ from brutex.metrics.lockbox import (
     resolve_lockbox_window,
 )
 from brutex.models import BruteXError
-from brutex.strategies.types import FibAnchorKind
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    price_source_params_fragment,
+)
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -197,6 +202,13 @@ class CascadeTupleSpec:
         survivor against its OWN Fib levels, not the prev-day default. An
         additive field (default prev-day) so a pre-axis manifest round-trips
         byte-compatibly; the default keeps the prev-day path byte-identical.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source cell the tuple was evaluated against
+        (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Threaded into
+        :func:`candidates_for_spec`'s ``build_bar_bits`` so the Stage-4 cascade
+        re-scores a non-default survivor against ITS OWN source's bits (52-53 /
+        0-5). Additive fields (default ``(HLC3, CLOSE)``) — DEFAULT-OMITTED from
+        the manifest so a pre-axis manifest round-trips byte-compatibly.
 
     Raises
     ------
@@ -216,6 +228,8 @@ class CascadeTupleSpec:
     start_equity_paisa: int
     winners: tuple[tuple[str, int], ...]
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -333,6 +347,13 @@ class Stage3CellRecord:
     #: must round-trip so a non-prev-day refined cell's ``run_id`` re-derives on
     #: verification. Stored as the string enum value.
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP / EMA price-source cell this refined cell was evaluated
+    #: against (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Additive fields (default
+    #: ``(HLC3, CLOSE)``) so a pre-axis / baseline manifest parses byte-compatibly
+    #: (the ``fib_anchor`` precedent); they must round-trip so a non-default cell's
+    #: ``run_id`` re-derives on verification. Stored as the string enum values.
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -620,7 +641,8 @@ def _make_mc_evaluate(
     """Build the Monte-Carlo exit-logic callable (filter #9) for one candidate.
 
     Returns a closure that, given a sorted array of entry-bar positions, relocates
-    the entry signals there, re-runs the SAME trade-sim (identical exit logic), and
+    the entry signals there, re-runs the SAME trade-sim (identical exit logic —
+    the one hardcoded worst-case fill law, DEC-FILL-WORST-CASE-ONLY-001), and
     returns the per-trade Sharpe — comparable to the candidate's observed per-trade
     Sharpe. An undefined Sharpe (``< 2`` trades / zero variance) returns ``nan``,
     which the permutation test treats as "did not beat" the observed statistic.
@@ -729,6 +751,8 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        # The candidate re-simulation reproduces the persisted finalist under
+        # the ONE hardcoded worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001).
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
         # candidate re-simulation's trades are a DISCARDED stream — every
         # observable output is the CandidateInput SCALARS + returns tuples
@@ -876,6 +900,8 @@ def candidates_for_spec(
         proximity=proximity,
         prior_n=spec.prior_n,
         fib_anchor=spec.fib_anchor,
+        vwap_source=spec.vwap_source,
+        ema_source=spec.ema_source,
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
@@ -1354,7 +1380,7 @@ def build_leaderboard_trials(
 
 def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
     """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict."""
-    return {
+    payload: dict[str, object] = {
         "instrument": spec.instrument,
         "tf_label": spec.tf_label,
         "tf_minutes": spec.tf_minutes,
@@ -1366,7 +1392,18 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "start_equity_paisa": spec.start_equity_paisa,
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
         "fib_anchor": spec.fib_anchor.value,
+        # DEC-FILL-WORST-CASE-ONLY-001: the manifest carries the UNCONDITIONAL
+        # "fill_mode": "worst_case" key (the canonical-params law's manifest
+        # twin) — the reader REFUSES a manifest without it (precise-era) so a
+        # manual replay can never re-score precise-priced winners.
+        "fill_mode": FillMode.WORST_CASE.value,
+        # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
+        # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
+        # when non-default, so a baseline manifest is byte-identical to a pre-axis one
+        # (modulo the unconditional fill_mode key above — the two laws compose).
+        **price_source_params_fragment(spec.vwap_source, spec.ema_source),
     }
+    return payload
 
 
 def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
@@ -1375,6 +1412,19 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     # scalar coercions below read cleanly. Every malformed value is caught by the
     # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
     raw = cast(dict[str, Any], data)
+    if raw.get("fill_mode") is None or str(raw["fill_mode"]) != FillMode.WORST_CASE.value:
+        # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is
+        # the ONLY fill model and every post-DEC manifest carries the
+        # unconditional "fill_mode": "worst_case" key. An ABSENT key or a
+        # literal "precise" token identifies a PRECISE-era manifest whose
+        # winners were ranked under fills the deleted mode produced —
+        # re-scoring them here would silently launder precise-priced results
+        # as worst-case. Refuse LOUDLY; the remediation is a fresh sweep.
+        raise CascadeWireError(
+            "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
+            f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
+            "model; re-run the sweep to produce a worst-case manifest"
+        )
     try:
         proximity = raw["proximity_bps"]
         proximity_bps = (
@@ -1399,6 +1449,18 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 if raw.get("fib_anchor") is None
                 else FibAnchorKind(str(raw["fib_anchor"]))
             ),
+            # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001): absent ⟺ the
+            # baseline (HLC3, CLOSE), the only source pre-axis / baseline sweeps ran.
+            vwap_source=(
+                PriceSource.HLC3
+                if raw.get("vwap_source") is None
+                else PriceSource(str(raw["vwap_source"]))
+            ),
+            ema_source=(
+                PriceSource.CLOSE
+                if raw.get("ema_source") is None
+                else PriceSource(str(raw["ema_source"]))
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
@@ -1420,6 +1482,10 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
                 "rel_path": cell.rel_path,
                 "fib_anchor": cell.fib_anchor.value,
+                # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via
+                # the ONE COMMON fragment: a baseline refined cell's manifest entry
+                # is byte-identical to a pre-axis one.
+                **price_source_params_fragment(cell.vwap_source, cell.ema_source),
             }
             for cell in record.refined_cells
         ],
@@ -1454,6 +1520,19 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                         FibAnchorKind.PREV_DAY
                         if cell.get("fib_anchor") is None
                         else FibAnchorKind(str(cell["fib_anchor"]))
+                    ),
+                    # Absent on pre-DEC-NIFTY-PRICE-SOURCE-AXIS-001 / baseline
+                    # manifests (additive parse): default to (HLC3, CLOSE), the only
+                    # source those sweeps ran.
+                    vwap_source=(
+                        PriceSource.HLC3
+                        if cell.get("vwap_source") is None
+                        else PriceSource(str(cell["vwap_source"]))
+                    ),
+                    ema_source=(
+                        PriceSource.CLOSE
+                        if cell.get("ema_source") is None
+                        else PriceSource(str(cell["ema_source"]))
                     ),
                 )
             )
@@ -1670,6 +1749,8 @@ def spec_from_store_rows(
     rows: Sequence[ResultRow],
     top_k: int | None = None,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1690,6 +1771,11 @@ def spec_from_store_rows(
         (DEC-NIFTY-FIB-AXIS-001); carried onto the spec so the Stage-4 cascade
         re-scores against the tuple's OWN Fib levels. Default prev-day keeps the
         prev-day path byte-identical.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source cell the tuple was evaluated against
+        (DEC-NIFTY-PRICE-SOURCE-AXIS-001); carried onto the spec so the Stage-4
+        cascade re-scores against the tuple's OWN source bits. Default
+        ``(HLC3, CLOSE)`` keeps the baseline path byte-identical.
 
     Returns
     -------
@@ -1714,6 +1800,8 @@ def spec_from_store_rows(
         start_equity_paisa=start_equity_paisa,
         winners=winners,
         fib_anchor=fib_anchor,
+        vwap_source=vwap_source,
+        ema_source=ema_source,
     )
 
 
@@ -1803,6 +1891,8 @@ def build_stage2_cascade_specs(
             rows=rows,
             top_k=top_k,
             fib_anchor=sweep_tuple.fib_anchor,
+            vwap_source=sweep_tuple.price_source.vwap_source,
+            ema_source=sweep_tuple.price_source.ema_source,
         )
         if spec is not None:
             specs.append(spec)

@@ -8,9 +8,17 @@ fully-clean-fetch all-or-nothing gate) — never mid-pull (the always-on
 post-pull daily derives and the ``BRUTEX_AUTO_DERIVE_TFS`` pull-settle
 auto-derive are removed) and never from a manual button (the
 ``derive-timeframes`` surface is removed).
-Coverage: SPOT underlyings + their FUTURES contracts + their **OPTIONS**
-contracts (the CE/PE chain the F&O candle lake actually holds), each including
-the ``1day`` partition (``include_daily=True`` on the injected materialiser).
+Coverage: SPOT underlyings + their FUTURES contracts, each including the
+``1day`` partition (``include_daily=True`` on the injected materialiser).
+OPTIONS are RETIRED from the prebuild (DEC-OPTIONS-PREBUILD-RETIRE-001 — the
+operator ruling of 2026-07-15 as relayed via the coordinator, ADR-0021
+RULING B, draft PR #1555): option data stays 1-minute-native (fills resolve
+on the next 1-minute bar worst-case, so derived option TFs are pure cost),
+NEITHER path discovers or materialises a CE/PE contract, the gated spine
+reports the honest by-design no-op
+(:data:`~brutex.dashboard.gated_prebuild.OPTIONS_PREBUILD_SKIPPED_NOTE`),
+and already-stored derived option TFs stay INERT on disk (never deleted —
+disk reclaim is an optional operator action).
 
 Honest envelope (Golden Rule #10):
 
@@ -44,9 +52,8 @@ Pure composition — the actual lake materialise is ONE injected callable
 (``PrebuildTarget -> MaterializeResult``, bound by the route to
 :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes` with
 ``include_daily=True``), and the contract discovery reuses the COMMON cascade
-walkers (:func:`~brutex.dashboard.gated_prebuild.discover_futures_contracts` /
-:func:`~brutex.dashboard.gated_prebuild.discover_option_contracts`), so the
-whole flow is 100% unit-testable offline (CLAUDE.md §4 / §11).
+walker (:func:`~brutex.dashboard.gated_prebuild.discover_futures_contracts`),
+so the whole flow is 100% unit-testable offline (CLAUDE.md §4 / §11).
 """
 
 from __future__ import annotations
@@ -58,11 +65,11 @@ from typing import TYPE_CHECKING, Final, cast
 import structlog
 
 from brutex.dashboard.gated_prebuild import (
+    OPTIONS_PREBUILD_SKIPPED_NOTE,
     SPOT_PREBUILD_SKIPPED_NOTE,
     GatedPrebuildReport,
     PhasePrebuildReport,
     discover_futures_contracts,
-    discover_option_contracts,
     run_gated_prebuild,
     underlying_match_tokens,
 )
@@ -271,7 +278,12 @@ def run_pipeline_prebuild(
     disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
     include_spot: bool = True,
 ) -> PrebuildOutcome:
-    """Compose + run the SPOT → FUTURES → OPTIONS prebuild over *instruments*.
+    """Compose + run the SPOT → FUTURES prebuild over *instruments*.
+
+    The OPTIONS phase is RETIRED (DEC-OPTIONS-PREBUILD-RETIRE-001 — the
+    operator ruling of 2026-07-15 as relayed via the coordinator, ADR-0021
+    RULING B, draft PR #1555): CE/PE contracts are never discovered or
+    materialised — the gated spine reports the honest by-design no-op.
 
     Discovery is EAGER (one cascade walk per underlying, pure in-memory) so the
     ``pipeline.prebuild.started`` log can honestly name the full scope up
@@ -311,7 +323,7 @@ def run_pipeline_prebuild(
         bare ticker e.g. ``NIFTY``, and its own ``underlying_symbol``) is in
         the set — so both spot-quarantine names (``symbol_name``-shaped) and
         historical-quarantine names (bare-underlying-shaped) match; excluding
-        an underlying also excludes its FUTURES + OPTIONS contract discovery.
+        an underlying also excludes its FUTURES contract discovery.
         HONEST envelope: an undecodable raw CONTRACT symbol in the set matches
         no underlying token and filters nothing (its underlying is unknown —
         reported by the pipeline note, never guessed). The default empty set
@@ -342,11 +354,12 @@ def run_pipeline_prebuild(
         a guard bug never blocks the data stage.
     include_spot
         ``False`` makes the SPOT phase an explicit REPORTED no-op while the
-        FUTURES + OPTIONS contract phases run for real over the SAME
+        FUTURES contract phase runs for real over the SAME
         *instruments*-driven cascade discovery — the fno-only pipeline's
         spot-exclusion arm (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6, the
         structural mirror of the spot-only empty-cascade arm). Default
-        ``True`` is byte-identical to the pre-round-6 prebuild.
+        ``True`` is byte-identical to the pre-round-6 prebuild (modulo the
+        retired OPTIONS phase).
 
     Returns
     -------
@@ -370,7 +383,6 @@ def run_pipeline_prebuild(
         _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
     instruments = _unique_spot_instruments(kept)
     futures_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
-    options_by_underlying: dict[str, tuple[FnoContract, ...]] = {}
     contract_exchange: dict[str, str] = {}
     # M4, sequential twin (DEC-HARDWARE-ENVELOPE-001): the loose token-set
     # discovery can match a #911 drift pair (``NSE-M&M`` + ``M&M``) to the SAME
@@ -391,10 +403,8 @@ def run_pipeline_prebuild(
 
     for inst in instruments:
         futures = _first_seen(discover_futures_contracts(inst, cascade))
-        options = _first_seen(discover_option_contracts(inst, cascade))
         futures_by_underlying[inst.symbol_name] = futures
-        options_by_underlying[inst.symbol_name] = options
-        for contract in (*futures, *options):
+        for contract in futures:
             contract_exchange[contract.symbol] = contract.exchange
     _LOG.info(
         "pipeline.prebuild.started",
@@ -403,7 +413,11 @@ def run_pipeline_prebuild(
         # contract discovery above).
         spot_symbols=len(instruments) if include_spot else 0,
         futures_contracts=sum(len(v) for v in futures_by_underlying.values()),
-        options_contracts=sum(len(v) for v in options_by_underlying.values()),
+        # Honest scope key (DEC-OPTIONS-PREBUILD-RETIRE-001): CE/PE contracts
+        # are never DISCOVERED any more, so a numeric "options_contracts=0"
+        # would read as a real empty chain — the static token names the law
+        # instead (the by-design skip, never a fake count).
+        options_prebuild=OPTIONS_PREBUILD_SKIPPED_NOTE,
         # Honest payload extension (DEC-PREBUILD-CLEANSET-001): how many
         # quarantined underlyings the clean-set exclusion removed (0 on a
         # clean pull — the pre-cleanset payload plus this one key).
@@ -466,10 +480,9 @@ def run_pipeline_prebuild(
             c.symbol for c in futures_by_underlying[inst.symbol_name]
         ],
         materialize_future=lambda symbol: _materialize_contract(symbol, PrebuildKind.FUTURES),
-        options_contracts_for=lambda inst: [
-            c.symbol for c in options_by_underlying[inst.symbol_name]
-        ],
-        materialize_option=lambda symbol: _materialize_contract(symbol, PrebuildKind.OPTIONS),
+        # The options callables are DELIBERATELY not injected
+        # (DEC-OPTIONS-PREBUILD-RETIRE-001): the gated spine reports the
+        # honest by-design no-op (OPTIONS_PREBUILD_SKIPPED_NOTE).
         source=source,
     )
     _log_phase_done(report)
@@ -603,8 +616,10 @@ def run_pipeline_prebuild_parallel(
 ) -> PrebuildOutcome:
     """PARALLEL twin of :func:`run_pipeline_prebuild` — fan the per-symbol derive across cores.
 
-    The CPU-bound win (DEC-HARDWARE-ENVELOPE-001): the SAME SPOT → FUTURES →
-    OPTIONS discovery + report + outcome as the sequential path, but every
+    The CPU-bound win (DEC-HARDWARE-ENVELOPE-001): the SAME SPOT → FUTURES
+    discovery + report + outcome as the sequential path (the OPTIONS phase is
+    the SAME reported by-design no-op — DEC-OPTIONS-PREBUILD-RETIRE-001,
+    never a planned CE/PE work item), but every
     symbol's :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`
     runs in a :class:`~concurrent.futures.ThreadPoolExecutor` of *workers*
     threads (:func:`brutex.dashboard.prebuild_parallel.run_work_items` — THREADS
@@ -713,7 +728,6 @@ def run_pipeline_prebuild_parallel(
         else []
     )
     futures_items: list[tuple[str, PrebuildWorkItem]] = []
-    options_items: list[tuple[str, PrebuildWorkItem]] = []
     for inst in instruments:
         for contract in discover_futures_contracts(inst, cascade):
             futures_items.append(
@@ -728,24 +742,13 @@ def run_pipeline_prebuild_parallel(
                     ),
                 )
             )
-        for contract in discover_option_contracts(inst, cascade):
-            options_items.append(
-                (
-                    contract.symbol,
-                    _item(
-                        contract.exchange,
-                        fno_segment,
-                        contract.symbol,
-                        PrebuildKind.OPTIONS,
-                        dense=False,
-                    ),
-                )
-            )
     _LOG.info(
         "pipeline.prebuild.started",
         spot_symbols=len(spot_items),
         futures_contracts=len(futures_items),
-        options_contracts=len(options_items),
+        # DEC-OPTIONS-PREBUILD-RETIRE-001 (sequential-path parity): never a
+        # numeric count for a phase that is skipped by design.
+        options_prebuild=OPTIONS_PREBUILD_SKIPPED_NOTE,
         excluded_symbols=excluded_count,
         fs_allocation=fs_note if fs_note is not None else "ok",
         parallel_workers=workers,
@@ -761,11 +764,11 @@ def run_pipeline_prebuild_parallel(
             futures_items,
             "no futures contracts found in the F&O candle lake for the selection",
         ),
-        (
-            PrebuildKind.OPTIONS,
-            options_items,
-            "no option contracts found in the F&O candle lake for the selection",
-        ),
+        # The OPTIONS phase plans ZERO work items BY DESIGN
+        # (DEC-OPTIONS-PREBUILD-RETIRE-001 — options are 1-minute-native);
+        # the COMMON by-design note keeps the report shape identical to the
+        # sequential path's gated no-op (§11 COMMON, never a silent skip).
+        (PrebuildKind.OPTIONS, [], OPTIONS_PREBUILD_SKIPPED_NOTE),
     )
 
     # M4 (no double-write race): DEDUPE work by ``(exchange, segment, symbol)``

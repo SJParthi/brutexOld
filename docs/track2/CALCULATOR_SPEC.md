@@ -124,15 +124,23 @@ only for display.
 INPUT:  entry_dt, exit_dt, instrument, side, entry_open_paisa, exit_open_paisa,
         n_lots, broker, gst_split
 
-# ── Step 1: apply slippage (flat 1-tick adverse, per Track 2 §9) ───────────
-buy_fill_paisa  = (entry_open_paisa + TICK_PAISA) if side starts with "long"
-                  else (exit_open_paisa + TICK_PAISA)
-sell_fill_paisa = (entry_open_paisa - TICK_PAISA) if side starts with "short"
-                  else (exit_open_paisa - TICK_PAISA)
-# Long side: BUY at entry+1tick, SELL at exit-1tick
-# Short side: SELL entry at entry-1tick, BUY cover at exit+1tick — adverse both
-# legs (buy higher, sell lower; PnL inverts); §8 is authoritative
-# (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 — resolves the #963 MINOR-4 contradiction)
+# ── Step 1: apply slippage (flat 1-tick adverse around the WORST-CASE bar
+#            anchor — DEC-FILL-WORST-CASE-ONLY-001; the retired open anchor
+#            is deleted with its PRECISE mode) ─────────────────────────────
+# The four fill-bar extremes are REQUIRED inputs (entry_bar_high/low_paisa,
+# exit_bar_high/low_paisa) — an anchor-less input is unpriceable and
+# refuses fail-loud naming the DEC.
+buy_fill_paisa  = (entry_high_paisa + TICK_PAISA) if side starts with "long"
+                  else (exit_high_paisa + TICK_PAISA)
+sell_fill_paisa = (exit_low_paisa  - TICK_PAISA) if side starts with "long"
+                  else (entry_low_paisa - TICK_PAISA)
+# Long side: BUY at entry-bar HIGH+1tick, SELL at exit-bar LOW-1tick.
+# Short side: SELL entry at entry-bar LOW-1tick, BUY cover at exit-bar
+# HIGH+1tick — adverse both legs (buy higher, sell lower; PnL inverts);
+# §8 is authoritative (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 resolved the
+# leg SIGNS; DEC-FILL-WORST-CASE-ONLY-001 moved the ANCHOR open → extreme).
+# Every fill floors at one tick; on a FLAT bar (high == low == open) the
+# fills equal the retired open±tick values exactly — worst never flatters.
 
 # ── Step 2: lookup lot size ──────────────────────────────────────────────
 n_shares_per_lot = lot_size_lookup(instrument, entry_dt.date())
@@ -499,10 +507,13 @@ branch. Expected `n_orders_per_leg = 2`, `brokerage_paisa = 8000`.
 
 | Side | Entry fill | Exit fill |
 |---|---|---|
-| Long (long_call / long_put) | `entry_bar_open + 1 tick` | `exit_bar_open - 1 tick` |
-| Short (short_call / short_put) | `entry_bar_open - 1 tick` | `exit_bar_open + 1 tick` |
+| Long (long_call / long_put) | `entry_bar_HIGH + 1 tick` | `exit_bar_LOW - 1 tick` |
+| Short (short_call / short_put) | `entry_bar_LOW - 1 tick` | `exit_bar_HIGH + 1 tick` |
 
-(Slippage is adverse — buy higher, sell lower.)
+(Slippage is adverse — buy higher, sell lower — applied ON TOP of the
+worst-case bar-extreme anchor, DEC-FILL-WORST-CASE-ONLY-001; the retired
+PRECISE open anchor is deleted. On a flat bar the fills equal the old
+open±tick values, so the worst-case fill can never flatter.)
 
 `1 tick = TICK_PAISA = 5` paisa = ₹0.05.
 
@@ -1003,6 +1014,7 @@ work but calculator can ship without them.
 | 2026-05-16 | TradeOutcome enum added to §11 API | Replaces `held_to_expiry_exercise: bool`. Backward-compat via DEPRECATED label on the bool. New fixtures use enum. |
 | 2026-07-06 | §4 Step-1 short-side slippage resolved to the §8 ADVERSE rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) | §4's pseudocode disagreed with §8 on BOTH short legs (short sell = `exit_open + tick` — wrong bar; short cover buy = `exit_open − tick` — favorable) and carried a literal "# CHECK SIGN" inside a LOCKED spec (the #963 MINOR-4 contradiction). §8 (adverse — buy higher, sell lower; consistent with `TRACK2_OPTIONS_SPEC §9.2`'s per-action rule) is authoritative; "# CHECK SIGN" deleted; `brutex/costs/calculator.py`'s short SELL leg + the byte-exact test re-pinned to the resolved rule (branch stays production-unreachable — BUY-only DEC-EXEC-008 unchanged). §4.2 gained the implementation-status block (Step-0 guard ≠ state machine, MIGRATION.md #963); the `exit_dt` era-key + assign premium-STT drifts registered as §16 items 18-19 WITHOUT deciding them; §2 gained the pre-2024-10-01 0.0625% STT regime row. |
 | 2026-07-07 | Citation hygiene on the pre-2024-10-01 0.0625% STT regime (§2 row, §4.2 EXPIRY_ASSIGN note, §16 item 19) — reconstruction round-4 review | The three sites added on 2026-07-06 attributed the 0.0625% rate to DEC-COST-003 (MIGRATION.md #128), which locks ONLY the Finance-Act-2026 0.10%→0.15% arm and never states 0.0625% (Golden Rule #1: a citation must resolve to a source stating the claim). Re-cited to COSTS_VERIFIED §13 (three-regime history) / §14 (rate constants) + DEC-COST-002 (#127, the date-keyed regime lookup), keeping DEC-COST-003 only for the 0.10%→0.15% arm. Rate VALUES unchanged. |
+| 2026-07-15 | §4 Step-1 + §8 fill anchors moved open → WORST-CASE bar extreme; adverse (ceiling) levy rounding made PERMANENT (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825) | By operator directive worst-case is the ONLY fill law: each leg's 1-tick adverse slippage anchors on the fill bar's ADVERSE EXTREME (long: entry HIGH + tick / exit LOW − tick; short mirrored adverse-both — the §8 leg SIGNS from DEC-TRACK2-COSTS-SPEC-RECONCILE-001 unchanged), the four fill-bar extremes become REQUIRED calculator inputs (anchor-less input refuses fail-loud naming the DEC), and the absorbed #1522 design's fix-round-2 adverse-levy-rounding law (every rate-scaled levy CEILs — paisa for exch/SEBI/IPFT per leg, whole-rupee for STT/stamp/GST) is now unconditional since the mode axis is deleted. On a flat bar the fills equal the retired open±tick values (worst never flatters). COSTS_VERIFIED §5 tables regenerated to the ceiled stack; the golden suite `tests/golden/test_costs_verified_examples.py` re-locks every figure with in-file hand-derivations. |
 
 ---
 

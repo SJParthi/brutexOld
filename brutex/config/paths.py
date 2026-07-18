@@ -5,6 +5,16 @@ HERE, so the rule lives in exactly one place (the CLI, the wiper, and any
 future caller all delegate). Pure path computation — ``$HOME`` and the
 ``BRUTEX_*`` environment are injected, no directory is created, and nothing on
 disk is touched — so the module imports and unit-tests with zero side effects.
+
+Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35
+milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_PATHS`` is set
+truthy, the lake-root decision + the volume-parent derivation route
+through the default-OFF, burn-in-checked, fail-closed
+:mod:`brutex.config.paths_rust` facade to the ``rust/brutex-core`` crate
+(strings only cross the FFI). The flag-OFF default is the verbatim
+``_*_python`` oracle below — behavior-identical AND crate-untouched
+(bomb-crate spy-pinned). Honesty banner (ADR-0020, mandatory verbatim):
+expected payoff ≈ 0 — conversion is for uniformity, not speed.
 """
 
 from __future__ import annotations
@@ -14,6 +24,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+
+from brutex.config.paths_rust import paths_rust_enabled, route_lake_root, route_volume_parent
 
 #: Env var overriding the lake root (a directory). See ``CLAUDE.md §6``.
 ENV_LAKE_ROOT: Final[str] = "BRUTEX_LAKE_ROOT"
@@ -64,6 +76,21 @@ def resolve_lake_root(env: Mapping[str, str] | None = None, *, home: Path | None
     """
     environ = os.environ if env is None else env
     override = environ.get(ENV_LAKE_ROOT)
+    if not paths_rust_enabled():
+        return _resolve_lake_root_python(override, home)
+    return route_lake_root(
+        override,
+        lambda: _home(home),
+        lambda: _resolve_lake_root_python(override, home),
+    )
+
+
+def _resolve_lake_root_python(override: str | None, home: Path | None) -> Path:
+    """The verbatim :func:`resolve_lake_root` decision body — the LIVE oracle.
+
+    Token-for-token the pre-seam public body (DEC-CONFIG-RUST-LEAVES-001);
+    every flag-OFF / ineligible / degraded / burn-in call serves this.
+    """
     if override:
         return Path(override).expanduser()
     return brutex_home(home=home) / "lake"
@@ -139,17 +166,11 @@ def lake_root_identity(
 
     dev_probe = stat_dev if stat_dev is not None else _real_stat_dev
 
-    # A ``/Volumes/<name>/…`` path has ≥ 3 parts: ("/", "Volumes", "<name>", …).
-    min_volume_parts = 3
     resolved = lake_root.expanduser()
-    parts = resolved.parts
-    volume_parent: Path | None = None
-    if (
-        len(parts) >= min_volume_parts
-        and parts[0] == "/"
-        and parts[1] == _VOLUMES_PREFIX.lstrip("/")
-    ):
-        volume_parent = Path(parts[0]) / parts[1] / parts[2]
+    if not paths_rust_enabled():
+        volume_parent = _volume_parent_python(resolved)
+    else:
+        volume_parent = route_volume_parent(resolved, lambda: _volume_parent_python(resolved))
     volume_mounted = ismount(str(volume_parent)) if volume_parent is not None else None
 
     device: int | None = None
@@ -167,6 +188,25 @@ def lake_root_identity(
         volume_mounted=volume_mounted,
         device=device,
     )
+
+
+def _volume_parent_python(resolved: Path) -> Path | None:
+    """The verbatim volume-parent derivation body — the LIVE oracle.
+
+    Token-for-token the pre-seam inline block of :func:`lake_root_identity`
+    (DEC-CONFIG-RUST-LEAVES-001); every flag-OFF / ineligible / degraded /
+    burn-in call serves this.
+    """
+    # A ``/Volumes/<name>/…`` path has ≥ 3 parts: ("/", "Volumes", "<name>", …).
+    min_volume_parts = 3
+    parts = resolved.parts
+    if (
+        len(parts) >= min_volume_parts
+        and parts[0] == "/"
+        and parts[1] == _VOLUMES_PREFIX.lstrip("/")
+    ):
+        return Path(parts[0]) / parts[1] / parts[2]
+    return None
 
 
 __all__ = [

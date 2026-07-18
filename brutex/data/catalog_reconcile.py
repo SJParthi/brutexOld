@@ -355,7 +355,13 @@ def reconcile_catalog_from_lake(
         # present-but-unreadable (→ `unreadable` → launch REFUSES), while
         # FileNotFoundError alone is a benign vanished-file skip.
         try:
-            timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
+            # glob=False: ONE concrete walked file (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
+            # symbol dir must never glob-read a sibling's rows into this row's
+            # reconcile stats.
+            timestamps = pl.read_parquet(path, columns=["timestamp"], glob=False).get_column(
+                "timestamp"
+            )
             row_count = timestamps.len()
             if row_count == 0:
                 # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,

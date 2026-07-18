@@ -148,6 +148,21 @@ class TestFreshnessPreflight:
         assert "prebuild" in report.remediation()
         assert "DEC-PIPELINE-AUTOPREBUILD-001" in report.remediation()
 
+    def test_remediation_names_the_ghost_bucket_escape(self) -> None:
+        """DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001: the gate has NO escape flag by
+        design, so the printed remedy must name the ONE stale shape a prebuild
+        re-run can NEVER clear — a stored derived bucket whose sole 1-minute
+        source is screened away (the latest-wins derived writer never deletes;
+        the prune is the named follow-up DEC-DERIVED-GHOST-BUCKET-PRUNE-001) —
+        with its working manual escape, or the refusal is a permanent wedge."""
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        remedy = preflight_derived_freshness({("NIFTY", "5minute"): "stale"}).remediation()
+        assert "ghost bucket" in remedy
+        assert "DEC-DERIVED-GHOST-BUCKET-PRUNE-001" in remedy
+        assert "delete the symbol's derived TF partition dirs" in remedy
+        assert "re-run the prebuild" in remedy
+
     def test_unexpected_verdict_fails_closed(self) -> None:
         """Anything not EXACTLY 'fresh' counts stale — an unknown verdict string
         can never silently pass the gate (fail-closed)."""

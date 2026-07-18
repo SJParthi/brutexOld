@@ -63,29 +63,51 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _bars() -> list[CandleBar]:
-    """The sweep golden's fixed 12-day upward-drift fixture, verbatim."""
+    """A 12-day gap-up drift ALL FIVE masks rank on under the one worst-case law.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old ±0.5-pad drift SL'd every entry on its own bar):
+    7-bar cycles of NARROW gap-up bars (open = prior close + 3.00, range 0.50
+    < the SL 0.80; the next gap-up's low clears the TP level → +50 wins), a
+    shallow bearish bar at cycle position 3, and a DEEP bearish bar (range
+    0.85 > the SL) every 4th cycle whose stop-out keeps profit_factor finite.
+    The per-day price RESET to 100 under carried EMAs makes the below-EMA
+    bits (1/3) fire early-day and the above-EMA bits (0/2/4) late-day, so
+    every k=1 mask trades on both win and loss bars. Measured at sl=80/tp=50:
+    masks 1/2/4/8/16 → PF 3.47/3.04/3.58/3.11/3.63, all gates green.
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar (below-EMA bits fire)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
@@ -1297,3 +1319,115 @@ class TestReferenceFingerprintRedo:
         assert fp1 == fp2
         for p, data in trio1.items():
             assert p.read_bytes() == data
+
+
+# ── WORST_CASE capture chain (DEC-FILL-WORST-CASE-ONLY-001 fix round 3) ────────────
+
+
+def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    """The `test_engine_sweep_run` worst-case RANKING fixture, verbatim.
+
+    Rises 1.0 with a 0.5 dip every 4th bar under a tight ±0.05 pad — strong
+    enough that combos rank + persist under the WORST_CASE adverse-max floor,
+    with SL/TP trigger timing diverging HARD between the modes (the
+    observable the parity tooth keys on).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 1.0 if m % 4 else price - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            hi = max(price, close) + 0.05
+            lo = min(price, close) - 0.05
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestWorstCaseCaptureChain:
+    """DEC-FILL-WORST-CASE-ONLY-001: the capture chain runs the ONE hardcoded
+    worst-case law end-to-end — `results_depth_pass._process_tuple` →
+    `capture_combo` → the walker re-sim reproduce a worst-case store with
+    ZERO parity failures, and the mode seams are GONE (killed-token pins).
+    The anti-vacuity check proves the captured entry genuinely fills at the
+    entry bar's adverse extreme (BUY HIGH), never its open.
+    """
+
+    def test_one_law_pass_captures_with_parity(self, tmp_path: Path) -> None:
+        bars = _worst_case_ranking_bars()
+        grid = _grid(stop_losses=[200], take_profits=[100])
+        root = tmp_path / "sweeps"
+        root.mkdir()
+        _run_sweep(root, grid, bars)
+        report = run_results_depth_pass(
+            out_root=root,
+            grid=grid,
+            bars_for=lambda _instrument, _tf: bars,
+            minute_bars_for=lambda _i: bars,
+        )
+        # The chain is EXERCISED, not vacuously green: finalists persisted,
+        # every one captured, ZERO parity failures.
+        assert report.combos_captured >= 1
+        assert report.combos_parity_failed == 0
+
+        # Killed-token pins: no fill_mode/policy seam survives on the chain.
+        import inspect
+
+        from brutex.engine.combo_mask import mask_to_entry_signals
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.trade_capture import capture_combo
+        from brutex.engine.trade_sim import simulate_trades
+
+        assert "fill_mode" not in inspect.signature(capture_combo).parameters
+        assert "policy" not in inspect.signature(simulate_trades).parameters
+
+        # Anti-vacuity: the captured first trade's entry fill IS the entry
+        # bar's HIGH (the adverse extreme for a BUY) — under any open-fill
+        # regression this equality breaks.
+        (tuple_,) = iter_sweep_tuples(grid)
+        rows = ResultsStore.load(tuple_store_path(root, tuple_, grid)).rows()
+        assert rows
+        row = rows[0]
+        bar_bits = build_bar_bits(bars)
+        capture = capture_combo(
+            row,
+            bars=bars,
+            bar_bits=bar_bits,
+            tf_minutes=1,
+            sl_paisa=200,
+            tp_paisa=100,
+            minute_index=None,
+            stamper=None,
+        )
+        assert capture.parity_ok is True
+        assert capture.trades
+        detail_sink: list[object] = []
+        simulate_trades(
+            bars,
+            mask_to_entry_signals(bar_bits, row.mask_bits),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=200,
+            take_profit_paisa=100,
+            detail_sink=detail_sink,  # type: ignore[arg-type]
+        )
+        assert detail_sink
+        first = detail_sink[0]
+        assert capture.trades[0].entry_px == Decimal(first.entry_fill_paisa) / 100  # type: ignore[attr-defined]
+        # The fill is the entry bar's HIGH — locate the entry bar by ts.
+        entry_ts = capture.trades[0].entry_ts
+        (entry_bar,) = [b for b in bars if b.timestamp == entry_ts]
+        assert capture.trades[0].entry_px == entry_bar.high

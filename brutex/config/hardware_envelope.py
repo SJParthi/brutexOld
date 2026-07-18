@@ -94,6 +94,24 @@ token; CLAUDE.md §2 Rule 6) and are deliberately NOT hardware-scaled. The
 engine sweep's per-worker ``OMP/RAYON/POLARS=1`` determinism pins
 (:mod:`brutex.engine.sweep_parallel`) and the Greeks process-pool worker pins
 (:mod:`brutex.data.greeks_enrich`) are likewise untouched.
+
+## Rust seam (DEC-CONFIG-RUST-LEAVES-001, slice T35 milestone 2)
+
+When — and ONLY when — ``BRUTEX_CORE_RUST_HWENV`` is set truthy, the four
+PURE derivation laws (the :func:`cpu_pool_workers` derivation arm ·
+:func:`library_thread_budget` · :func:`memory_budget_bytes`' post-override
+sentinel/derived arm · :func:`hardware_key`'s render arm) route through
+the default-OFF, burn-in-checked, fail-closed
+:mod:`brutex.config.hardware_envelope_rust` facade to the
+``rust/brutex-core`` crate. The flag-OFF default is the verbatim
+``_*_python`` oracle beside each public function — byte-identical AND
+crate-untouched (bomb-crate spy-pinned). DETECTION (the ``sysctl`` /
+affinity / ``sysconf`` / ``/proc/cpuinfo`` probes), every env-override
+fail-loud parse, both ``apply_*`` side-effect surfaces, the caches and the
+dataclass construction ALL stay Python — the honest seam-split record
+lives in the facade's module docstring. Honesty banner (ADR-0020,
+mandatory verbatim): expected payoff ≈ 0 — conversion is for uniformity,
+not speed.
 """
 
 from __future__ import annotations
@@ -108,6 +126,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
+
+# STRICTLY one-direction (CodeQL py/cyclic-import 670/671): the hwenv-seam
+# facade is a config LEAF (stdlib + structlog only at module scope —
+# AST-pinned in its test file), so this import can never re-enter this
+# module.
+from brutex.config.hardware_envelope_rust import (
+    hwenv_rust_enabled,
+    route_hardware_key,
+    route_library_thread_budget,
+    route_memory_budget,
+    route_pool_workers,
+)
 
 # STRICTLY one-direction (CodeQL py/cyclic-import 670/671): the bench-baseline
 # core is a pure-stdlib LEAF with ZERO brutex imports (its runtime-key lookup
@@ -485,7 +515,34 @@ def cpu_pool_workers(
     if override is not None:
         return override
     hw = cached_envelope() if envelope is None else envelope
-    base = hw.performance_cores if prefer_performance else hw.logical_cores
+    if not hwenv_rust_enabled():
+        return _pool_workers_python(
+            hw.performance_cores, hw.logical_cores, prefer_performance, reserve, cap
+        )
+    return route_pool_workers(
+        hw.performance_cores,
+        hw.logical_cores,
+        prefer_performance,
+        reserve,
+        cap,
+        _pool_workers_python,
+    )
+
+
+def _pool_workers_python(
+    performance_cores: int,
+    logical_cores: int,
+    prefer_performance: bool,
+    reserve: int,
+    cap: int | None,
+) -> int:
+    """The verbatim :func:`cpu_pool_workers` derivation — the LIVE oracle.
+
+    Token-for-token the pre-seam derivation body over the resolved
+    envelope fields (DEC-CONFIG-RUST-LEAVES-001); every flag-OFF /
+    ineligible / degraded / burn-in call serves this.
+    """
+    base = performance_cores if prefer_performance else logical_cores
     workers = max(1, base - reserve)
     if cap is not None:
         workers = min(workers, cap)
@@ -516,8 +573,15 @@ def library_thread_budget(
         The worker count to divide the physical cores across (floored to 1).
     """
     hw = cached_envelope() if envelope is None else envelope
+    if not hwenv_rust_enabled():
+        return _library_thread_budget_python(hw.physical_cores, workers)
+    return route_library_thread_budget(hw.physical_cores, workers, _library_thread_budget_python)
+
+
+def _library_thread_budget_python(physical_cores: int, workers: int) -> int:
+    """The verbatim :func:`library_thread_budget` body — the LIVE oracle."""
     safe_workers = workers if workers >= 1 else 1
-    return max(1, hw.physical_cores // safe_workers)
+    return max(1, physical_cores // safe_workers)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -750,10 +814,13 @@ def memory_budget_bytes(
                 raise ValueError(f"{env_var}={value} must be > 0 bytes")
             return value
     detected = detect_total_ram_bytes()
-    if detected == UNDETECTED_RAM:
-        return floor_bytes
-    derived = max(1, int(detected * fraction / workers))
-    if derived != floor_bytes:
+    if not hwenv_rust_enabled():
+        derived = _memory_budget_python(detected, fraction, floor_bytes, workers)
+    else:
+        derived = route_memory_budget(
+            detected, fraction, floor_bytes, workers, _memory_budget_python
+        )
+    if detected != UNDETECTED_RAM and derived != floor_bytes:
         _log_budget_derived_once(
             key=env_var if env_var is not None else f"fraction={fraction}:floor={floor_bytes}",
             detected_ram_bytes=detected,
@@ -763,6 +830,24 @@ def memory_budget_bytes(
             derived_bytes=derived,
         )
     return derived
+
+
+def _memory_budget_python(
+    detected_ram_bytes: int, fraction: float, floor_bytes: int, workers: int
+) -> int:
+    """The verbatim :func:`memory_budget_bytes` post-override arm — the LIVE oracle.
+
+    The DEC-RAM-BUDGETS-001 sentinel + derived laws, token-for-token: the
+    undetected sentinel returns *floor_bytes* EXACTLY; a detected total
+    derives ``max(1, int(total × fraction / workers))`` — deliberately NOT
+    floor-clamped. Validation + the env override + the derivation INFO log
+    stay in the public function (the flag-OFF path is byte-identical: the
+    sentinel arm always equals its floor, so the log condition gains only
+    the equivalent ``detected != UNDETECTED_RAM`` guard).
+    """
+    if detected_ram_bytes == UNDETECTED_RAM:
+        return floor_bytes
+    return max(1, int(detected_ram_bytes * fraction / workers))
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -956,13 +1041,48 @@ def hardware_key(
             )
         return override
     fp = hardware_fingerprint() if fingerprint is None else fingerprint
+    if not hwenv_rust_enabled():
+        return _hardware_key_python(
+            fp.model_slug,
+            fp.physical_cores,
+            fp.performance_cores,
+            fp.efficiency_cores,
+            fp.total_ram_gib,
+            fp.arch,
+        )
+    return route_hardware_key(
+        fp.model_slug,
+        fp.physical_cores,
+        fp.performance_cores,
+        fp.efficiency_cores,
+        fp.total_ram_gib,
+        fp.arch,
+        _hardware_key_python,
+    )
+
+
+def _hardware_key_python(
+    model_slug: str,
+    physical_cores: int,
+    performance_cores: int,
+    efficiency_cores: int,
+    total_ram_gib: int,
+    arch: str,
+) -> str:
+    """The verbatim :func:`hardware_key` render arm — the LIVE oracle.
+
+    A thin field-splat over the ONE format law
+    (:func:`brutex.observability.bench_baseline.format_hardware_key`) —
+    the law itself stays in its bench_baseline home; the Rust twin's
+    burn-in compares against exactly this call.
+    """
     return format_hardware_key(
-        model_slug=fp.model_slug,
-        physical_cores=fp.physical_cores,
-        performance_cores=fp.performance_cores,
-        efficiency_cores=fp.efficiency_cores,
-        total_ram_gib=fp.total_ram_gib,
-        arch=fp.arch,
+        model_slug=model_slug,
+        physical_cores=physical_cores,
+        performance_cores=performance_cores,
+        efficiency_cores=efficiency_cores,
+        total_ram_gib=total_ram_gib,
+        arch=arch,
     )
 
 

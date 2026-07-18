@@ -124,9 +124,24 @@ unconditionally (MIGRATION.md #1614: an options CE/PE same-minute tie renders
 in ONE pinned order either way; the pre-manifest tie order was engine-plan
 whim, the row SET is identical). Default ON.
 
+Read-side deadline (DEC-DASHBOARD-COLD-IO-DEADLINE-001, guarantee-audit
+BUG-2): the read entry's whole revalidation sweep (clause-1 shard open/read +
+clause-2 walk + clause-3 D-stat loop) and the /db post-query TOCTOU re-stat
+pass run under the :class:`~brutex.data.stat_deadline.StatSweepGate` — a
+WEDGED volume (a hang that never raises) times out after
+``BRUTEX_LAKE_STAT_DEADLINE_S`` (default 5 s) into the NAMED
+``consult_deadline`` / ``restat_deadline`` fallback clauses (never
+misattributed as ``stat_token``/``file_set`` data drift), and while the
+zombie sweep stays wedged every later consult on that lake fails fast with
+ZERO new threads (the breach-armed latch). The WRITE hooks are deliberately
+NOT gated — they already run under the 90 s ``GROWW_WRITE_DEADLINE_S`` spine
+guard, and re-guarding ``_load_shard_with_clause`` (shared by both sides)
+would add a surprise thread inside the pull's partition-locked section.
+
 Leaf discipline (PR #1177 ``py/cyclic-import``): imports are stdlib +
 :mod:`brutex.data.atomic_io` + :mod:`brutex.data.partition_lock` +
-:mod:`brutex.data.lake_manifest` ONLY — no duckdb/polars/dashboard. The
+:mod:`brutex.data.lake_manifest` + :mod:`brutex.data.stat_deadline` (itself
+config-layer + structlog only) — no duckdb/polars/dashboard. The
 month-grammar rel-path parsing (``<yyyy>/<mm>.parquet`` bars,
 ``<YYYY>-<MM>.parquet`` options) is implemented locally and TEST-PINNED
 against ``partition.py`` / ``option_parquet_writer.py`` (the
@@ -141,7 +156,7 @@ import math
 import os
 import re
 import shutil
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import MAXYEAR, UTC, datetime
 from itertools import pairwise
@@ -154,7 +169,13 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.lake_manifest import manifest_dir
+from brutex.data.lake_rust_stats import (
+    ShardRenderPayload,
+    lake_rust_stats_enabled,
+    render_shard_json,
+)
 from brutex.data.partition_lock import partition_write_lock
+from brutex.data.stat_deadline import StatSweepGate, StatSweepTimeout
 
 # ``__name__`` (== "brutex.data.lake_stats_manifest") — no string literal, so
 # the logger name carries no unkillable mutant surface (review round 8).
@@ -277,6 +298,21 @@ _MONTHS_PER_YEAR: Final[int] = 12
 #: rather than growing a private copy (CLAUDE.md §11 COMMON).
 FALLBACK_REL_LOG_CAP: Final[int] = 20
 
+#: Verdict tokens for :func:`bounded_token_sweep` — the /db post-query TOCTOU
+#: re-stat pass's three outcomes (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+TOKEN_SWEEP_OK: Final[str] = "ok"  # noqa: S105  # nosec B105 — a sweep verdict, not a secret
+TOKEN_SWEEP_MOVED: Final[str] = "moved"  # noqa: S105  # nosec B105 — a sweep verdict, not a secret
+TOKEN_SWEEP_TIMEOUT: Final[str] = "timeout"  # noqa: S105  # nosec B105 — a sweep verdict, not a secret
+
+#: The ONE read-side deadline gate for this module's metadata sweeps
+#: (DEC-DASHBOARD-COLD-IO-DEADLINE-001) — keyed per ``str(lake_root)`` at
+#: every run, so unrelated lakes (unique ``tmp_path`` test lakes) never
+#: collide while every dataset on ONE wedged volume shares one latch. A
+#: module-level instance is the sanctioned shape for a process-wide volume
+#: fact (the ``partition_lock`` process-registry precedent); its
+#: ``wedged(key)`` accessor is the introspection/test seam.
+_SWEEP_GATE: Final[StatSweepGate] = StatSweepGate(what="lake stats sweep")
+
 #: Upper bound (bytes) on a shard READ. A real shard is ~16 KB (one JSON row
 #: per month file — spec §7), so 16 MiB is ~1000× headroom; a shard replaced
 #: out-of-band with a multi-GB file would otherwise be read WHOLE on every
@@ -359,6 +395,32 @@ class DatasetStats:
     max_ts: datetime
     files: tuple[StatsFileRow, ...]
     updated_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class StatsConsult:
+    """One deadline-aware manifest consult's outcome (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+
+    Returned by :func:`load_valid_dataset_stats_guarded` so the /db read side
+    can tell a plain validation failure (``stats is None, timed_out=False`` —
+    reseed after the legacy scan, today's exact behaviour) apart from a
+    WEDGED-VOLUME timeout (``timed_out=True`` — degrade to legacy AND
+    suppress the seed, whose three unbounded stat sweeps would re-hit the
+    same wedged volume). The new exception type never crosses the module
+    boundary — return shapes only.
+
+    Attributes
+    ----------
+    stats
+        The fully revalidated shard, or ``None`` (validation failed OR the
+        sweep timed out OR the kill switch is off).
+    timed_out
+        ``True`` iff the revalidation sweep blew (or was latched behind) the
+        stat deadline — a volume-outage verdict, never a data-drift one.
+    """
+
+    stats: DatasetStats | None
+    timed_out: bool = False
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -755,6 +817,13 @@ def render_shard(stats: DatasetStats) -> str:
     Deterministic byte-for-byte for identical inputs — the golden schema-freeze
     pin (``tests/golden/test_lake_stats_manifest_golden.py``) compares this
     literal.
+
+    DEC-LAKE-RUST-STATS-MANIFEST-001 (MIGRATION.md #1914): when
+    ``BRUTEX_LAKE_RUST_STATS_MANIFEST`` is ON the assembly routes through the
+    burn-in-checked, fail-closed :mod:`brutex.data.lake_rust_stats` seam
+    (Python pre-formats every ``isoformat()`` string — ints + strings only
+    cross the FFI); the flag-OFF default is the verbatim stdlib
+    ``json.dumps`` below — byte-identical AND crate-untouched (spy-pinned).
     """
     payload = {
         "version": STATS_MANIFEST_VERSION,
@@ -778,7 +847,42 @@ def render_shard(stats: DatasetStats) -> str:
         ],
         "updated_utc": stats.updated_utc,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _python_render() -> str:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    if not lake_rust_stats_enabled():
+        return _python_render()
+
+    def _rust_payload() -> ShardRenderPayload:
+        # The SAME DatasetStats, pre-formatted to the ints+strings-only FFI
+        # shape — every timestamp through the identical CPython
+        # ``isoformat()`` the payload dict above uses (both arms consume
+        # one formatter; parity-pinned).
+        return ShardRenderPayload(
+            version=STATS_MANIFEST_VERSION,
+            kind=stats.kind,
+            key=tuple(stats.key.items()),
+            identity_key=tuple(stats.identity_key),
+            row_count=stats.row_count,
+            min_ts_iso=stats.min_ts.isoformat(),
+            max_ts_iso=stats.max_ts.isoformat(),
+            files=tuple(
+                (
+                    row.rel,
+                    row.rows,
+                    row.min_ts.isoformat(),
+                    row.max_ts.isoformat(),
+                    row.mtime_ns,
+                    row.size,
+                    row.raw_hash,
+                )
+                for row in stats.files
+            ),
+            updated_utc=stats.updated_utc,
+        )
+
+    return render_shard_json(payload_factory=_rust_payload, python_render=_python_render)
 
 
 def _row_from_json(obj: object) -> StatsFileRow:
@@ -1076,35 +1180,21 @@ def _log_fallback(kind: str, key: Mapping[str, str], clause: str, **extra: objec
     _LOG.info("lake.stats_manifest.fallback", kind=kind, key=dict(key), clause=clause, **extra)
 
 
-def load_valid_dataset_stats(
-    lake_root: Path, *, kind: str, key: Mapping[str, str]
+def _validate_dataset_stats(
+    lake_root: Path, *, kind: str, key: Mapping[str, str], canonical: Mapping[str, str]
 ) -> DatasetStats | None:
-    """Serve the dataset's stats ONLY after FULL per-request revalidation.
+    """The FULL clause-1..4 revalidation sweep — the guarded region's body.
 
-    The anti-illusion gate (module docstring): clause 1 structural (parse +
-    version + key echo + rows well-formed + month-grammar rels in
-    strictly-increasing chronological order + sum invariant), clause 2
-    FILE-SET EQUALITY (recursive walk, any depth — the legacy-glob file set),
-    clause 3 PER-FILE STAT EQUALITY
-    (``mtime_ns`` + ``size`` vs the stamped token), clause 4 MONTH-BOUNDS
-    SANITY (stamped bounds inside the rel's UTC month). ANY failure returns
-    ``None`` after ONE ``lake.stats_manifest.fallback`` log naming the failed
-    clause — the caller runs the byte-identical legacy live scan (+ best-effort
-    reseed). Kill switch off returns ``None`` silently (no consult happened).
-
-    Cost: O(D) metadata syscalls + O(D) JSON-row parse, D = the ONE dataset's
-    month files — independent of total lake depth. NOT a literal O(1).
-    Readers take NO lock.
-
-    Raises
-    ------
-    ValueError
-        On an unknown *kind* or malformed *key* (programming error at the
-        call site, never a data condition).
+    Extracted VERBATIM from the pre-DEC-DASHBOARD-COLD-IO-DEADLINE-001
+    :func:`load_valid_dataset_stats` body (after the kill switch +
+    ``_canonical_key``) so :func:`load_valid_dataset_stats_guarded` can run
+    the WHOLE sweep — clause-1 shard open/read/parse, clause-2 walk, clause-3
+    D-stat loop, clause-4 pure bounds — under ONE
+    :class:`~brutex.data.stat_deadline.StatSweepGate` daemon (never per
+    file). Pure metadata syscalls + JSON parse — no DuckDB. Runs on the gate
+    daemon in production, so its clause fallback logs fire there (structlog
+    is thread-safe; the daemon carries the caller's contextvars copy).
     """
-    if not stats_manifest_enabled():
-        return None
-    canonical = _canonical_key(kind, key)
     loaded = _load_shard_with_clause(lake_root, kind=kind, key=key)
     if isinstance(loaded, str):
         # The parser returns EXACTLY one of (stats, clause) — structurally,
@@ -1153,6 +1243,112 @@ def load_valid_dataset_stats(
             _log_fallback(kind, canonical, "month_bounds", rel=row.rel)
             return None
     return stats
+
+
+def load_valid_dataset_stats_guarded(
+    lake_root: Path, *, kind: str, key: Mapping[str, str]
+) -> StatsConsult:
+    """Deadline-aware manifest consult — the anti-illusion gate, wedge-bounded.
+
+    The anti-illusion gate (module docstring): clause 1 structural (parse +
+    version + key echo + rows well-formed + month-grammar rels in
+    strictly-increasing chronological order + sum invariant), clause 2
+    FILE-SET EQUALITY (recursive walk, any depth — the legacy-glob file set),
+    clause 3 PER-FILE STAT EQUALITY (``mtime_ns`` + ``size`` vs the stamped
+    token), clause 4 MONTH-BOUNDS SANITY (stamped bounds inside the rel's UTC
+    month). ANY validation failure yields ``StatsConsult(None)`` after ONE
+    ``lake.stats_manifest.fallback`` log naming the failed clause — the
+    caller runs the byte-identical legacy live scan (+ best-effort reseed).
+    Kill switch off yields ``StatsConsult(None)`` silently (no consult
+    happened, zero gate calls).
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2a): the WHOLE
+    sweep runs under the module :data:`_SWEEP_GATE` (ONE daemon per consult,
+    never per file; keyed ``str(lake_root)``) — a WEDGED volume times out
+    after ``BRUTEX_LAKE_STAT_DEADLINE_S`` into ``StatsConsult(None,
+    timed_out=True)`` with ONE NAMED ``consult_deadline`` fallback log on the
+    CALLER thread (a volume outage is never misattributed as
+    ``stat_token``/``file_set`` data drift), and while the zombie stays
+    wedged every later consult on that lake fails fast with ZERO new threads.
+
+    Cost: O(D) metadata syscalls + O(D) JSON-row parse, D = the ONE dataset's
+    month files — independent of total lake depth; plus one short-lived
+    guard-daemon spawn/join per consult (~0.1 ms). NOT a literal O(1).
+    Readers take NO lock.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or malformed *key* (programming error at the
+        call site, never a data condition) — raised EAGERLY on the caller,
+        before any guarded I/O.
+    """
+    if not stats_manifest_enabled():
+        return StatsConsult(None)
+    canonical = _canonical_key(kind, key)
+    try:
+        stats = _SWEEP_GATE.run(
+            str(lake_root),
+            lambda: _validate_dataset_stats(lake_root, kind=kind, key=key, canonical=canonical),
+            op="stats_consult",
+        )
+    except StatSweepTimeout:
+        _log_fallback(kind, canonical, "consult_deadline")
+        return StatsConsult(None, timed_out=True)
+    return StatsConsult(stats)
+
+
+def load_valid_dataset_stats(
+    lake_root: Path, *, kind: str, key: Mapping[str, str]
+) -> DatasetStats | None:
+    """Back-compat thin wrapper over :func:`load_valid_dataset_stats_guarded`.
+
+    NEVER raises a new type (the pre-DEC-DASHBOARD-COLD-IO-DEADLINE-001
+    contract preserved for every caller that needs only the stats): a
+    wedged-volume timeout reads as a plain ``None`` here — a caller that must
+    TELL the timeout apart (the /db seed suppression) uses the guarded
+    variant's :class:`StatsConsult` return shape.
+
+    Raises
+    ------
+    ValueError
+        On an unknown *kind* or malformed *key* (programming error).
+    """
+    return load_valid_dataset_stats_guarded(lake_root, kind=kind, key=key).stats
+
+
+def bounded_token_sweep(
+    lake_root: Path, root: Path, rows: Sequence[StatsFileRow]
+) -> tuple[str, str | None]:
+    """Deadline-bounded stat-token re-check over *rows* — the TOCTOU re-stat pass.
+
+    ONE :data:`_SWEEP_GATE` daemon for the WHOLE pass (never per file), same
+    gate + key as the consult — so a mid-request wedge that latched the
+    consult fails this fast with no second daemon. The sweep calls
+    :func:`file_token_matches` per row (dynamic ``os.stat`` resolution
+    PRESERVED — the bench stat-spy law) in the given order, so the
+    first-moved rel matches the pre-guard iteration order byte-for-byte.
+
+    Returns
+    -------
+    tuple[str, str | None]
+        ``(TOKEN_SWEEP_OK, None)`` — every token intact;
+        ``(TOKEN_SWEEP_MOVED, rel)`` — the FIRST moved file's rel;
+        ``(TOKEN_SWEEP_TIMEOUT, None)`` — the pass blew (or was latched
+        behind) the stat deadline. No log here — the caller names its own
+        fallback clause (``stat_token_moved`` / ``restat_deadline``).
+    """
+
+    def _sweep() -> tuple[str, str | None]:
+        for row in rows:
+            if not file_token_matches(root / row.rel, row):
+                return (TOKEN_SWEEP_MOVED, row.rel)
+        return (TOKEN_SWEEP_OK, None)
+
+    try:
+        return _SWEEP_GATE.run(str(lake_root), _sweep, op="stats_restat")
+    except StatSweepTimeout:
+        return (TOKEN_SWEEP_TIMEOUT, None)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1581,14 +1777,20 @@ __all__ = [
     "STATS_MANIFEST_OFF",
     "STATS_MANIFEST_VERSION",
     "STATS_SUBDIRNAME",
+    "TOKEN_SWEEP_MOVED",
+    "TOKEN_SWEEP_OK",
+    "TOKEN_SWEEP_TIMEOUT",
     "DatasetStats",
+    "StatsConsult",
     "StatsFileRow",
+    "bounded_token_sweep",
     "build_dataset_stats",
     "dataset_dir",
     "dest_rel",
     "file_token_matches",
     "load_shard_stats",
     "load_valid_dataset_stats",
+    "load_valid_dataset_stats_guarded",
     "parse_rel_month",
     "partition_stats_tracked",
     "record_partition_stats",

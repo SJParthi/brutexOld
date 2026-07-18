@@ -285,7 +285,9 @@ def metrics_for_mask(
     those callers need not duplicate the chain (CLAUDE.md §11 COMMON). The
     walker's certified exit indices are threaded into the metrics tail
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
-    byte-identical with or without it.
+    byte-identical with or without it. Every fill follows the ONE hardcoded
+    worst-case adverse-max law (DEC-FILL-WORST-CASE-ONLY-001) — the retired
+    ``FillPolicy`` threading is deleted with its modes.
     """
     trades, exit_indices = _simulate_window(
         bars,

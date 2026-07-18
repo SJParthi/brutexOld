@@ -141,12 +141,18 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
     write_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    Side,
+    price_source_params_fragment,
+)
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -562,6 +568,15 @@ class SweepRunConfig:
     prior_n: int = 3
     proximity: ProximityParams | None = None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001) —
+    #: which per-bar scalar feeds the running VWAP (bits 52-53) / EMA (bits 0-5)
+    #: accumulators. Default ``(HLC3, CLOSE)`` reproduces today's hardcoded
+    #: reduction, so a legacy caller is byte-identical; the sources are folded
+    #: into the run-identity via :func:`canonical_trade_params` (DEFAULT-OMITTED,
+    #: Override 1) and into the Stage-1A build so a non-default source is a
+    #: distinct, reproducible combo (Golden Rule #4).
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
     top_k: int | None = None
@@ -709,6 +724,8 @@ def canonical_trade_params(
     proximity: ProximityParams | None,
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
     roll_schedule: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
@@ -720,14 +737,24 @@ def canonical_trade_params(
     ``None`` when defaulted) so two configs with the same effective proximity
     hash identically.
 
-    The swept Fib anchor is folded in as ``"fib_anchor"`` (its string enum value —
-    DEC-NIFTY-FIB-AXIS-001): the anchor genuinely changes the Group-4 Fib levels a
-    combo evaluates against, so a run under a different anchor is a DIFFERENT
-    computation and MUST get a distinct run-identity (Golden Rule #4 / #7 — else
-    two anchors' results would collide in one store and one silently overwrite the
-    other). The key is emitted UNCONDITIONALLY (never omitted for the prev-day
-    default), so the honest run-identity carries the anchor for every family; there
-    is no production sweep tree yet, so this is a zero-cost identity choice.
+    Two params-emit classes ride this dict (both eval-affecting, both
+    params-carried, neither an ``indicator_version`` bump):
+
+    * **Unconditionally emitted** — ``{fib_anchor}``. The anchor genuinely
+      changes the Group-4 Fib levels a combo evaluates against, so a run under a
+      different anchor is a DIFFERENT computation and MUST get a distinct
+      run-identity (Golden Rule #4 / #7). It is emitted for EVERY family
+      (including prev-day) so the honest run-identity always carries it.
+    * **Optionally emitted when non-default** — ``{vwap_source, ema_source}``
+      (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1). The keys are OMITTED when
+      they equal the default ``(HLC3, CLOSE)`` and emitted only when a non-default
+      source is swept. RATIONALE: unconditional emit would re-key EVERY existing
+      run's identity (a hard back-compat break for the sibling Rust-core owner's
+      + product-audit's twin-baseline capture, which depend on existing run_ids
+      staying byte-identical). Default-omit has no canonicalisation ambiguity —
+      absent ALWAYS means the default, a clean bijection — and follows the repo's
+      optional-param convention. A default cell is byte-identical to the pre-axis
+      run-identity; a non-default cell gets a distinct one (no store collision).
 
     The ADR-0012 futures ``roll_schedule`` enters CONDITIONALLY
     (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): ``bar_bits`` are a function of
@@ -765,8 +792,21 @@ def canonical_trade_params(
         "fib_anchor": fib_anchor.value,
         "start_equity_paisa": start_equity_paisa,
     }
+    # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
+    params.update(price_source_params_fragment(vwap_source, ema_source))
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model, and the
+    # key is emitted UNCONDITIONALLY. Removing the key instead would ALIAS
+    # every worst-case run_id with the frozen precise-era identities (the
+    # retired emit-on-non-PRECISE elide law meant "no key = PRECISE legacy"),
+    # silently re-serving precise-priced stores as worst-case results. The
+    # permanent key makes every post-DEC identity distinct from every
+    # precise-era identity by construction (Golden Rule #4 / #7); the
+    # verify/recount law is now "fill_mode key MUST be present and MUST read
+    # 'worst_case' — anything else is a refused legacy artifact".
+    params["fill_mode"] = FillMode.WORST_CASE.value
     return params
 
 
@@ -779,6 +819,8 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        vwap_source=cfg.vwap_source,
+        ema_source=cfg.ema_source,
         roll_schedule=cfg.roll_schedule,
     )
 
@@ -860,7 +902,10 @@ def ranked_combo_to_result_row(
         re-simulation; ``bar_bits`` is reused, not rebuilt).
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
-        reproduce the ranked combo's trades exactly.
+        reproduce the ranked combo's trades exactly. The fill law itself is
+        NOT a knob: worst-case is the only fill model
+        (DEC-FILL-WORST-CASE-ONLY-001), so the re-simulation prices under the
+        same hardcoded adverse-max law the sweep did by construction.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -1567,6 +1612,10 @@ def run_persisted_sweep(
             "data_snapshot_hash": cfg.data_snapshot_hash,
             "indicator_version": cfg.indicator_version,
             "code_commit_sha": cfg.code_commit_sha,
+            # DEC-FILL-WORST-CASE-ONLY-001: `params` already carries the
+            # UNCONDITIONAL "fill_mode": "worst_case" key (the elide law is
+            # retired with the PRECISE mode), so the audit line records the
+            # identity dict verbatim — hash inputs and audit wire agree.
             "params": params,
         },
     )
@@ -1577,6 +1626,8 @@ def run_persisted_sweep(
             proximity=cfg.proximity,
             prior_n=cfg.prior_n,
             fib_anchor=cfg.fib_anchor,
+            vwap_source=cfg.vwap_source,
+            ema_source=cfg.ema_source,
             roll_schedule=cfg.roll_schedule,
             apply_1day_mask=apply_1day_mask_for(cfg.instrument, cfg.tf),
         )
@@ -1595,6 +1646,22 @@ def run_persisted_sweep(
                 f"run_persisted_sweep: kernel was built for Fib anchor "
                 f"{kernel.fib_anchor.value!r} but the tuple sweeps "
                 f"{cfg.fib_anchor.value!r} — the kernel must match this tuple's anchor"
+            )
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001 (MANDATORY): ``bar_bits`` bits 52-53
+        # (VWAP position) and 0-5 (EMA-vs-close) are price-source-SPECIFIC, so a
+        # kernel built for a different source would silently serve the WRONG bits.
+        # Fail-fast on a mismatch, exactly like the Fib-anchor guard above.
+        if kernel.vwap_source is not cfg.vwap_source:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for VWAP source "
+                f"{kernel.vwap_source.value!r} but the tuple sweeps "
+                f"{cfg.vwap_source.value!r} — the kernel must match this tuple's source"
+            )
+        if kernel.ema_source is not cfg.ema_source:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for EMA source "
+                f"{kernel.ema_source.value!r} but the tuple sweeps "
+                f"{cfg.ema_source.value!r} — the kernel must match this tuple's source"
             )
         # ADR-0012 roll-schedule twin of the anchor guard: the ``bar_bits``
         # matrix is schedule-SPECIFIC (the per-contract hard resets), so a

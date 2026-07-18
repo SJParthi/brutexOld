@@ -1,0 +1,39 @@
+SLUG: getlastquotearrayshort
+LINK: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getlastquotearrayshort/
+TITLE: GetLastQuoteArrayShort
+MODIFIED: 2026-05-04T17:02:59
+-----DECODED-----
+
+<h3 class="wp-block-heading">GetLastQuoteArrayShort : Returns LastTradePrice of multiple Symbols – max 25 in single call (short)</h3>
+
+
+
+<div><b><span style="color: #dd3333;">Supported parameters</span></b></div>
+
+
+
+<figure class="wp-block-table"><table class="has-fixed-layout"><tbody><tr><td><b>Exchange</b></td><td><i>String value like MCX</i></td><td>Name of supported exchange. How to get list of supported exchanges you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getexchanges-2/">here</a></td></tr><tr><td><b>InstrumentIdentifiers</b></td><td><i>Value of instrument identifiers – max 25</i></td><td>How to get list of available instruments and identifiers you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getinstruments/">here</a></td></tr><tr><td><b>isShortIdentifiers</b></td><td><i>[true]/[false], default = [false]</i></td><td>Optional parameter. By default function will use long instrument identifier format. Functions will use short instrument identifier format if set as [true]. Example of ShortIdentifiers are NIFTY25MAR21FUT, RELIANCE25MAR21FUT, NIFTY25MAR2115000CE, etc.</td></tr></tbody></table></figure>
+
+
+
+<div><b><span style="color: #dd3333;">What is returned ?</span></b></div>
+
+
+
+<figure class="wp-block-table"><table class="has-fixed-layout"><tbody><tr><td><strong>Exchange, InstrumentIdentifier</strong> (Symbol), <strong>LastTradeTime, BuyPrice</strong> (Bid Price), <strong>LastTradePrice, SellPrice</strong> (Ask Price)</td></tr><tr><td>LastTradeTime : This value is expressed as no. of seconds since Epoch time (i.e. 1st January 1970). Also known as Unix Time. Please Visit <a href="https://www.epochconverter.com/" target="_blank" rel="noopener noreferrer">https://www.epochconverter.com/</a> to get formulae to convert human readable time to Epoch and vice versa (scroll to end of their home page)</td></tr></tbody></table></figure>
+
+
+
+<div><b><span style="color: #dd3333;">Sample request(JavaScript)</span></b></div>
+
+
+
+<pre class="wp-block-preformatted">            {<br>                MessageType: "GetLastQuoteArrayShort",<br>                Exchange: "NFO",<br>				isShortIdentifiers: "true",<br>                InstrumentIdentifiers:[{Value:"NIFTY26MAY26FUT"}, {Value:"BANKNIFTY26MAY26FUT"}, {Value:"RELIANCE26MAY26FUT"}],<br>            };<br>     doSend(request);<br></pre>
+
+
+
+<div><b><span style="color: #dd3333;">Example of returned data in JSON format</span></b></div>
+
+
+
+<pre class="wp-block-preformatted">{"Result":[{<br>"Exchange":"NFO",<br>"InstrumentIdentifier":"NIFTY26MAY26FUT",<br>"LastTradeTime":1777888801,<br>"BuyPrice":24190.0,<br>"LastTradePrice":24199.0,<br>"SellPrice":24200.0,<br>"MessageType":"LastQuoteShortResult"},<br>{"Exchange":"NFO",<br>"InstrumentIdentifier":"BANKNIFTY26MAY26FUT",<br>"LastTradeTime":1777888799<br>,"BuyPrice":55100.0,<br>"LastTradePrice":55100.0,<br>"SellPrice":55130.0,<br>"MessageType":"LastQuoteShortResult"},<br>{"Exchange":"NFO",<br>"InstrumentIdentifier":"RELIANCE26MAY26FUT",<br>"LastTradeTime":1777888799,<br>"BuyPrice":1469.7,<br>"LastTradePrice":1469.7,<br>"SellPrice":1469.8,<br>"MessageType":"LastQuoteShortResult"}],<br>"MessageType":"LastQuoteArrayShortResult"}<br></pre>

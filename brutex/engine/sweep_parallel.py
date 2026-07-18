@@ -90,8 +90,8 @@ the flag, not a real production limitation.
   locality-TUNED: the default-OFF arm rebuilds per TUPLE (``run_persisted_sweep``
   takes its ``kernel is None`` fresh-build arm on every call) and the flag-ON arm
   caches per distinct ``(instrument, tf, proximity, prior_n, fib_anchor,
-  roll_schedule)`` key per worker (the DONE bullet below); contiguous
-  block dispatch to preserve the DEC-SWEEP-RESIDENT-KERNEL-001 reuse win is
+  price_source, roll_schedule)`` key per worker (the DONE bullet below);
+  contiguous block dispatch to preserve the DEC-SWEEP-RESIDENT-KERNEL-001 reuse win is
   future work. This slice dispatches per-tuple (correct, just not locality-tuned).
 * ~~Resident-kernel reuse across the pool / a persistent worker kernel~~ —
   DONE behind a DEFAULT-OFF flag (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
@@ -99,10 +99,12 @@ the flag, not a real production limitation.
   each worker PROCESS holds ONE
   :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` (constructed in
   ``_worker_init``, capacity = the orchestrator's own
-  ``len(proximities) × len(fib_anchors)`` law, env-overridable) and passes it
+  ``len(proximities) × len(fib_anchors) × len(price_source_cells)`` law,
+  env-overridable) and passes it
   through the EXISTING ``run_one_tuple(kernel_cache=)`` seam — so Stage-1A
   ``bar_bits`` is built once per distinct
-  ``(instrument, tf, proximity, prior_n, fib_anchor, roll_schedule)`` key per
+  ``(instrument, tf, proximity, prior_n, fib_anchor, price_source,
+  roll_schedule)`` key per
   worker instead of once per TUPLE, byte-identically (the ON≡OFF golden).
   A tiny per-worker bars-intern memo (capacity 2) keeps same-``(instrument,
   tf)`` kernels sharing ONE resident bars copy (the memory bound) under an
@@ -547,13 +549,14 @@ WORKER_KERNEL_CACHE_DEFAULT: Final[bool] = False
 #: Environment variable overriding the per-worker kernel-cache CAPACITY (a
 #: positive integer). Unset/blank keeps the grid-derived default
 #: (:func:`worker_kernel_capacity_default` — the orchestrator's own
-#: ``len(proximities) × len(fib_anchors)`` sizing law, itself clamped at
+#: ``len(proximities) × len(fib_anchors) × len(price_source_cells)`` sizing
+#: law, itself clamped at
 #: :data:`WORKER_KERNEL_CAPACITY_MAX`); an INVALID value
 #: (non-integer / ``< 1``) falls back to the default and is logged LOUDLY at
 #: WARNING (the :func:`resolve_stall_seconds` invalid-env loudness); a value
 #: above :data:`WORKER_KERNEL_CAPACITY_MAX` is CLAMPED to it, logged LOUDLY.
 #: A smaller capacity trades builds for RSS, never correctness; a LARGER
-#: capacity above the grid's prox×anchor fan-out multiplies PINNED BARS
+#: capacity above the grid's prox×anchor×price-source fan-out multiplies PINNED BARS
 #: sets, not just kernel state — see :data:`WORKER_KERNEL_CAPACITY_MAX`.
 WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 
@@ -564,7 +567,7 @@ WORKER_KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 #: proximities × ≤4 anchors) while keeping the LRU bound a REAL memory
 #: bound: each resident kernel retains ~30 MB-class state beyond the bars
 #: it pins — and bars are shared only WITHIN one ``(instrument, tf)``
-#: block, so an env capacity above the grid's prox×anchor fan-out pins one
+#: block, so an env capacity above the grid's prox×anchor×price-source fan-out pins one
 #: UNSHARED ~318 MB bars set per block the kernel LRU spans (measured
 #: 8–16 pinned bars sets ≈ 2.5–5 GB/worker at the 64 ceiling with fan-out
 #: 4 — refuter round 3a attack 1b; the 64 ceiling BOUNDS that worst case,
@@ -647,24 +650,31 @@ def resolve_worker_kernel_cache(env: dict[str, str] | None = None) -> bool:
 def worker_kernel_capacity_default(grid: SweepGridConfig) -> int:
     """The grid-derived per-worker kernel-cache capacity — the orchestrator's own law, clamped.
 
-    ``max(1, len(grid.proximities) × len(grid.fib_anchors))`` — the EXACT
-    formula the sequential ``run_sweep_grid`` already sizes its
+    ``max(1, len(grid.proximities) × len(grid.fib_anchors) ×
+    len(grid.price_source_cells))`` — the EXACT formula the sequential
+    ``run_sweep_grid`` already sizes its
     :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` with
-    (DEC-SWEEP-RESIDENT-KERNEL-001 / DEC-NIFTY-FIB-AXIS-001):
-    ``(proximity, fib_anchor)`` are the two INNERMOST enumeration axes, so a
-    per-worker LRU smaller than their fan-out thrashes to 100% miss on the
-    cycle (classic LRU cyclic-access pathology) while this capacity gets a hit
-    on every recurrence — builds ≤ distinct keys × workers, exactly — THEN
-    clamped at :data:`WORKER_KERNEL_CAPACITY_MAX` (fix-round-2, refuter-2
+    (DEC-SWEEP-RESIDENT-KERNEL-001 / DEC-NIFTY-FIB-AXIS-001 /
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 — price_source joined the kernel key in
+    #1681, so it joins the fan-out here or a multi-cell price-source sweep
+    LRU-thrashes per worker):
+    ``(proximity, fib_anchor, price_source)`` are the INNERMOST enumeration
+    axes, so a per-worker LRU smaller than their fan-out thrashes to 100% miss
+    on the cycle (classic LRU cyclic-access pathology) while this capacity gets
+    a hit on every recurrence — builds ≤ distinct keys × workers, exactly —
+    THEN clamped at :data:`WORKER_KERNEL_CAPACITY_MAX` (fix-round-2, refuter-2
     NIT): a DELIBERATE deviation from the sequential path's unclamped sizing,
     because the retained-kernel RSS multiplies by POOL SIZE here; every
     capacity that reaches a worker is therefore in ``[1, 64]`` regardless of
     source. A hypothetical >64-product grid pays per-worker LRU thrash (more
-    builds, identical bytes) — unreachable for real proximity×anchor
-    fan-outs. O(1).
+    builds, identical bytes) — unreachable for real
+    proximity×anchor×price-source fan-outs. O(1).
     """
     return min(
-        max(1, len(grid.proximities) * len(grid.fib_anchors)),
+        max(
+            1,
+            len(grid.proximities) * len(grid.fib_anchors) * len(grid.price_source_cells),
+        ),
         WORKER_KERNEL_CAPACITY_MAX,
     )
 
