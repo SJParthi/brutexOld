@@ -1,7 +1,8 @@
 """Property tests for the recency metrics (DEC-METRICS-TRAILING-WINDOW-001).
 
 The window-membership differentials (all-inside ≡ full-history figures;
-all-outside ⇒ ``None``), the infinite-half-life plain-net limit, and the
+all-outside ⇒ ``None``), the infinite-half-life REFUSAL and the
+huge-finite-half-life plain-net limit, and the
 anchor-shift decay monotonicity — each over hypothesis-drawn trade streams.
 """
 
