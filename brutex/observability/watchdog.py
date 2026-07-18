@@ -46,7 +46,31 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from brutex.observability import observability_rust
+
 logger = logging.getLogger(__name__)
+
+
+def _worker_decide_python(
+    now: float,
+    last_beat: float,
+    timeout_seconds: float,
+    prev_hung: bool,
+) -> tuple[float, bool, bool]:
+    """The per-worker HEALTHY↔HUNG decision — the LIVE parity oracle.
+
+    A disclosed COMPOSITION of the loop-inlined lines of
+    :meth:`Watchdog.check_once` (DEC-OBS-RUST-DETECTOR-CORE-001 — the
+    Slice-0 exemption): ``elapsed = now - last_beat`` (NO clamp — negative
+    elapsed is legal and preserved), strict ``>`` (elapsed exactly AT the
+    timeout is NOT hung), and the two-state edge law
+    (``is_hung != prev_hung`` ≡ ``new_state != prev_state`` over the
+    2-member :class:`WorkerState`). Flag-OFF the seam returns this
+    function's result DIRECTLY — the default path is byte-identical.
+    """
+    elapsed = now - last_beat
+    is_hung = elapsed > timeout_seconds
+    return elapsed, is_hung, is_hung != prev_hung
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -171,11 +195,22 @@ class Watchdog:
         emitted: list[WorkerEvent] = []
         now = self.clock()
         for name in tuple(self._state.keys()):
-            elapsed = now - self._last_beat[name]
-            is_hung = elapsed > self.timeout_seconds
+            # The decision routes through the default-OFF observability_rust
+            # facade with `_worker_decide_python` as the live oracle
+            # (DEC-OBS-RUST-DETECTOR-CORE-001; branch-free here — all
+            # flag/guard/burn-in branching lives facade-side). prev_state is
+            # read BEFORE the decision (a side-effect-free dict read; the
+            # ONE disclosed re-ordering vs the pre-seam loop).
             prev_state = self._state[name]
+            elapsed, is_hung, edge = observability_rust.routed_watchdog_decide(
+                now,
+                self._last_beat[name],
+                self.timeout_seconds,
+                prev_state == WorkerState.HUNG,
+                python_law=_worker_decide_python,
+            )
             new_state = WorkerState.HUNG if is_hung else WorkerState.HEALTHY
-            if new_state == prev_state:
+            if not edge:
                 continue  # hysteresis: steady state, no edge
             self._state[name] = new_state
             event = WorkerEvent(
