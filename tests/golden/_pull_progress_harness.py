@@ -230,8 +230,7 @@ def compute_tsv(payload: dict[str, Any]) -> str:
     """
     lines = [
         "# pull_progress derived-metrics golden (DEC-RUST-PULL-STATE-001 Wave 2F)",
-        "# state_running\topen_ended\ttotal\tcompleted\tbase\tupdated\tstarted"
-        "\tphase_started\tpercent\telapsed\tups\teta_present\teta",
+        "# state_running\topen_ended\ttotal\tcompleted\tbase\tupdated\tstarted\tphase_started\tpercent\telapsed\tups\teta_present\teta",
     ]
     for row in payload["rows"]:
         case = row["case"]
