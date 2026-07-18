@@ -39,19 +39,25 @@ import os
 import struct
 import sys
 import types
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from brutex.metrics import compute_rust
 from brutex.metrics.compute import (
+    TRAILING_WINDOW,
     Moments,
+    RecencyFolds,
     TradeFolds,
     _compute_metrics_impl,
     _fold_trades,
     _fold_wire,
     _folds_from_wire,
+    _recency_folds_from_wire,
+    _recency_wire,
     _resolve_folds,
+    _resolve_recency_folds,
+    fold_recency,
 )
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
@@ -701,3 +707,453 @@ class TestFoldsBitEquality:
         assert isinstance(folds.moments, Moments)
         assert isinstance(folds.net_pnl_paisa, int)
         assert isinstance(folds.sum_holding_bars, int)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The RECENCY wire face (DEC-METRICS-TRAILING-WINDOW-001 Stage-C2) — the
+# ``fold_recency`` twin: its own burn-in budget over the SHARED autorevert
+# latch, the epoch-µs conversion law, the refuse-poison gate (structure +
+# windowed count + sorted non-negative keys + the exact conservation law),
+# every degrade arm, the compute.py dispatch (``_resolve_recency_folds``)
+# and the NON-VACUOUS flag-ON parity over hostile window/bucket edges.
+
+_ANCHOR = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+_ANCHOR_US = compute_rust.datetime_to_epoch_us(_ANCHOR)
+_CUTOFF_US = compute_rust.datetime_to_epoch_us(_ANCHOR - TRAILING_WINDOW)
+
+
+def _rtrade(pnl: int, *, age_us: int) -> ClosedTrade:
+    """A trade exiting ``age_us`` microseconds before the pinned anchor."""
+    exit_ts = _ANCHOR - timedelta(microseconds=age_us)
+    return ClosedTrade(
+        pnl_paisa=pnl,
+        mfe_paisa=max(pnl, 0),
+        mae_paisa=max(-pnl, 0),
+        holding_bars=1,
+        entry_ts=exit_ts - timedelta(minutes=5),
+        exit_ts=exit_ts,
+        direction=Side.BUY,
+    )
+
+
+_DAY_US = 86_400_000_000
+
+#: A mixed stream exercising both window arms + four distinct buckets:
+#: ages 0d + 29d (bucket 0, in-window), 30d (bucket 1, in-window),
+#: 731d (bucket 24, OUTSIDE the 730d window), 3000d (bucket 100, outside).
+_RECENCY_TRADES: list[ClosedTrade] = [
+    _rtrade(500, age_us=0),
+    _rtrade(-300, age_us=29 * _DAY_US),
+    _rtrade(700, age_us=30 * _DAY_US),
+    _rtrade(-400, age_us=731 * _DAY_US),
+    _rtrade(900, age_us=3000 * _DAY_US),
+]
+
+
+def _recency_oracle_for(trades: Sequence[ClosedTrade], start: int) -> Any:
+    """The consumer-side recency burn-in oracle for *trades*/*start*."""
+    return lambda: _recency_wire(fold_recency(trades, start, trailing_anchor=_ANCHOR))
+
+
+def _recency_via_kernel(
+    trades: Sequence[ClosedTrade] = _RECENCY_TRADES,
+    start: int = _PIN_START,
+    oracle: Any = None,
+) -> Any:
+    return compute_rust.recency_wire_via_kernel(
+        trades,
+        start,
+        anchor_us=_ANCHOR_US,
+        cutoff_us=_CUTOFF_US,
+        oracle_wire=oracle if oracle is not None else _oracle_bomb,
+    )
+
+
+def _plant_recency_kernel(monkeypatch: pytest.MonkeyPatch, kernel: Any) -> None:
+    """Fake ``fno_math`` exposing *kernel* as ``metrics_fold_recency``."""
+    fake = types.SimpleNamespace(
+        metrics_fold_trades=fno_math.metrics_fold_trades,
+        metrics_fold_recency=kernel,
+    )
+    monkeypatch.setitem(sys.modules, "fno_math", fake)
+
+
+def _kernel_recency_wire(trades: Sequence[ClosedTrade] = _RECENCY_TRADES) -> tuple[Any, ...]:
+    """A structurally valid RAW recency kernel result for *trades*."""
+    returns = [t.pnl_paisa / _PIN_START for t in trades]
+    exit_us = [compute_rust.datetime_to_epoch_us(t.exit_ts) for t in trades]
+    result: tuple[Any, ...] = fno_math.metrics_fold_recency(
+        [t.pnl_paisa for t in trades],
+        [t.mfe_paisa for t in trades],
+        [t.mae_paisa for t in trades],
+        [t.holding_bars for t in trades],
+        returns,
+        exit_us,
+        _ANCHOR_US,
+        _CUTOFF_US,
+    )
+    return result
+
+
+class TestEpochUs:
+    """`datetime_to_epoch_us` — the one exact epoch basis."""
+
+    def test_exact_microsecond_resolution(self) -> None:
+        ts = datetime(2026, 1, 1, 10, 0, 0, 1, tzinfo=UTC)
+        assert compute_rust.datetime_to_epoch_us(ts) == _ANCHOR_US + 1
+
+    def test_pre_1970_is_negative_and_exact(self) -> None:
+        ts = datetime(1969, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)
+        assert compute_rust.datetime_to_epoch_us(ts) == -1
+
+    def test_tz_offset_invariance(self) -> None:
+        # The SAME instant expressed in IST compares equal in epoch µs.
+        from datetime import timezone
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        assert compute_rust.datetime_to_epoch_us(
+            _ANCHOR.astimezone(ist)
+        ) == compute_rust.datetime_to_epoch_us(_ANCHOR)
+
+    def test_matches_the_python_window_compare(self) -> None:
+        # exit >= cutoff in datetime space ⟺ exit_us >= cutoff_us — the
+        # boundary instant itself (equality) included.
+        cutoff = _ANCHOR - TRAILING_WINDOW
+        at = compute_rust.datetime_to_epoch_us(cutoff)
+        assert at == _CUTOFF_US
+        assert compute_rust.datetime_to_epoch_us(cutoff - timedelta(microseconds=1)) == at - 1
+
+
+class TestValidRecencyWire:
+    """The recency refuse-poison gate — every violation refused."""
+
+    def _net(self, trades: Sequence[ClosedTrade] = _RECENCY_TRADES) -> int:
+        return sum(t.pnl_paisa for t in trades)
+
+    def test_real_kernel_result_accepted(self) -> None:
+        result = _kernel_recency_wire()
+        assert compute_rust._valid_recency_wire(result, 3, self._net())
+
+    def test_tuple_buckets_accepted_too(self) -> None:
+        trailing, buckets = _kernel_recency_wire()
+        assert compute_rust._valid_recency_wire((trailing, tuple(buckets)), 3, self._net())
+
+    @pytest.mark.parametrize("poison", [None, [], ("only",), ("a", "b", "c"), "junk"])
+    def test_outer_shape_refused(self, poison: object) -> None:
+        assert not compute_rust._valid_recency_wire(poison, 3, 0)
+
+    def test_trailing_presence_must_match_windowed_count(self) -> None:
+        trailing, buckets = _kernel_recency_wire()
+        # None trailing with a non-empty window — refused.
+        assert not compute_rust._valid_recency_wire((None, buckets), 3, self._net())
+        # A present trailing with a ZERO windowed count — refused.
+        assert not compute_rust._valid_recency_wire((trailing, buckets), 0, self._net())
+        # A present trailing whose n differs from the windowed count — the
+        # inner _valid_fold_wire law.
+        assert not compute_rust._valid_recency_wire((trailing, buckets), 2, self._net())
+
+    def test_none_trailing_accepted_for_empty_window(self) -> None:
+        outside = [_rtrade(-400, age_us=731 * _DAY_US), _rtrade(900, age_us=3000 * _DAY_US)]
+        result = _kernel_recency_wire(outside)
+        assert result[0] is None
+        assert compute_rust._valid_recency_wire(result, 0, 500)
+
+    @pytest.mark.parametrize(
+        "buckets",
+        [
+            "junk",  # not a sequence of pairs
+            [],  # empty (n_trades >= 1 ⇒ at least one bucket)
+            [[0, 200]],  # pair not a tuple
+            [(0, 200, 1)],  # wrong pair arity
+            [(True, 200)],  # bool key refused (genuine-int law)
+            [(0, True)],  # bool sum refused
+            [(0, 200.0)],  # float sum refused
+            [(-1, 200)],  # negative key
+            [(1, 100), (1, 100)],  # equal keys (strictly ascending law)
+            [(1, 100), (0, 100)],  # descending keys
+            [(0, 100), (1, 99)],  # conservation broken (net is 200 here)
+        ],
+    )
+    def test_bucket_poisons_refused(self, buckets: object) -> None:
+        trades = [_rtrade(100, age_us=0), _rtrade(100, age_us=40 * _DAY_US)]
+        result = _kernel_recency_wire(trades)
+        assert not compute_rust._valid_recency_wire((result[0], buckets), 2, 200)
+
+
+class TestRecencyViaKernelDegrades:
+    """Every recency kernel fault serves the row from the Python oracle."""
+
+    def test_kernel_disabled_short_circuits(self) -> None:
+        compute_rust.disable_kernel("test_latch")
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is None
+        warns = _events(logs, "metrics_rust_fold.fallback")
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "kernel_disabled"
+
+    def test_wheel_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is None
+        assert _events(logs, "metrics_rust_fold.fallback")[0]["reason"] == "wheel_missing"
+
+    def test_pre_c2_wheel_degrades_as_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A wheel carrying the FOLD face but not the recency face (the
+        # pre-C2 shape) degrades wheel_stale, naming the missing symbol.
+        _plant_kernel(monkeypatch, fno_math.metrics_fold_trades)
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is None
+        warns = _events(logs, "metrics_rust_fold.fallback")
+        assert warns[0]["reason"] == "wheel_stale"
+        assert warns[0]["symbol"] == "metrics_fold_recency"
+
+    @pytest.mark.parametrize(
+        "exc", [ValueError("boundary"), TypeError("conversion"), RuntimeError("poisoned")]
+    )
+    def test_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+        def _bomb(*_args: object) -> object:
+            raise exc
+
+        _plant_recency_kernel(monkeypatch, _bomb)
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is None
+        warns = _events(logs, "metrics_rust_fold.fallback")
+        assert warns[0]["reason"] == "kernel_error"
+        assert repr(exc) in str(warns[0]["error"])
+
+    def test_memory_error_reraises_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _oom(*_args: object) -> object:
+            raise MemoryError
+
+        _plant_recency_kernel(monkeypatch, _oom)
+        with pytest.raises(MemoryError):
+            _recency_via_kernel()
+
+    def test_beyond_i64_anchor_degrades_via_real_kernel(self) -> None:
+        """An anchor outside i64 fails PyO3 conversion → OverflowError → oracle."""
+        with capture_logs() as logs:
+            assert (
+                compute_rust.recency_wire_via_kernel(
+                    _RECENCY_TRADES,
+                    _PIN_START,
+                    anchor_us=2**70,
+                    cutoff_us=2**70 - 730 * _DAY_US,
+                    oracle_wire=_oracle_bomb,
+                )
+                is None
+            )
+        warns = _events(logs, "metrics_rust_fold.fallback")
+        assert warns[0]["reason"] == "kernel_error"
+
+    def test_invalid_wire_refused_loudly_once_own_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _plant_recency_kernel(monkeypatch, lambda *_a: ("junk",))
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is None
+            assert _recency_via_kernel() is None
+        errors = _events(logs, "metrics_rust_fold.recency_kernel_result_refused")
+        assert len(errors) == 1
+        assert errors[0]["log_level"] == "error"
+        assert errors[0]["n_trades"] == len(_RECENCY_TRADES)
+
+
+class TestRecencyBurnIn:
+    """The recency face's own budget over the SHARED autorevert latch."""
+
+    def test_clean_burn_in_serves_kernel_and_consumes_own_budget(self) -> None:
+        fold_before = compute_rust._SELF_CHECK_REMAINING[0]
+        before = compute_rust._RECENCY_SELF_CHECK_REMAINING[0]
+        wire = _recency_via_kernel(oracle=_recency_oracle_for(_RECENCY_TRADES, _PIN_START))
+        assert wire is not None
+        assert compute_rust._RECENCY_SELF_CHECK_REMAINING[0] == before - 1
+        # The FOLD face's budget is untouched — per-face budgets.
+        assert compute_rust._SELF_CHECK_REMAINING[0] == fold_before
+        assert not compute_rust.kernel_disabled()
+
+    def test_mismatch_ships_oracle_and_latches_the_shared_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        trailing, buckets = _kernel_recency_wire()
+
+        def _wrong(*_args: object) -> object:
+            # Conservation-consistent poison: shift ONE bucket's sum and
+            # compensate in another so the structural gate passes and only
+            # the burn-in bit-compare can catch it.
+            pairs = list(buckets)
+            pairs[0] = (pairs[0][0], pairs[0][1] + 1)
+            pairs[-1] = (pairs[-1][0], pairs[-1][1] - 1)
+            return (trailing, pairs)
+
+        _plant_recency_kernel(monkeypatch, _wrong)
+        oracle = _recency_oracle_for(_RECENCY_TRADES, _PIN_START)
+        with capture_logs() as logs:
+            wire = _recency_via_kernel(oracle=oracle)
+        # The ORACLE wire shipped, not the poisoned kernel wire.
+        assert wire == oracle()
+        assert compute_rust.kernel_disabled()
+        errors = _events(logs, "metrics_rust_fold.kernel_autoreverted")
+        assert len(errors) == 1
+        assert errors[0]["reason"] == "recency_burn_in_mismatch"
+        # The SHARED latch: the FOLD face now short-circuits too.
+        assert (
+            compute_rust.fold_wire_via_kernel(_PIN_TRADES, _PIN_START, oracle_wire=_oracle_bomb)
+            is None
+        )
+
+    def test_steady_state_serves_without_oracle(self) -> None:
+        compute_rust.reset_self_check_for_tests(remaining=0)
+        wire = _recency_via_kernel()  # oracle bomb — must not be evaluated
+        assert wire is not None
+        assert wire == _recency_wire(
+            fold_recency(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        )
+
+    def test_recency_engaged_logged_once_per_process(self) -> None:
+        compute_rust.reset_self_check_for_tests(remaining=0)
+        with capture_logs() as logs:
+            assert _recency_via_kernel() is not None
+            assert _recency_via_kernel() is not None
+        infos = _events(logs, "metrics_rust_fold.recency_engaged")
+        assert len(infos) == 1
+
+    def test_consume_clamps_at_zero(self) -> None:
+        compute_rust.reset_self_check_for_tests(remaining=0)
+        assert not compute_rust.recency_self_check_pending()
+        compute_rust.consume_recency_self_check_sample()
+        assert compute_rust._RECENCY_SELF_CHECK_REMAINING[0] == 0
+
+
+class TestRecencyDispatchChokepoint:
+    """`_resolve_recency_folds` — the compute.py recency dispatch arms."""
+
+    def test_default_path_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _seam_bomb(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("the default path must never consult the kernel seam")
+
+        monkeypatch.setattr(compute_rust, "recency_wire_via_kernel", _seam_bomb)
+        folds = _resolve_recency_folds(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        assert folds == fold_recency(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+
+    def test_flag_off_explicit_never_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FLAG, "0")
+
+        def _seam_bomb(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("flag OFF must never consult the kernel seam")
+
+        monkeypatch.setattr(compute_rust, "recency_wire_via_kernel", _seam_bomb)
+        folds = _resolve_recency_folds(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        assert folds == fold_recency(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+
+    def test_naive_anchor_takes_the_python_value_error_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+
+        def _seam_bomb(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("a naive anchor must never reach the kernel seam")
+
+        monkeypatch.setattr(compute_rust, "recency_wire_via_kernel", _seam_bomb)
+        with pytest.raises(ValueError, match="must be tz-aware"):
+            _resolve_recency_folds(
+                _RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR.replace(tzinfo=None)
+            )
+
+    def test_flag_on_kernel_serves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+        folds = _resolve_recency_folds(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        oracle = fold_recency(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        assert compute_rust.recency_wire_compare_key(
+            _recency_wire(folds)
+        ) == compute_rust.recency_wire_compare_key(_recency_wire(oracle))
+        # The dispatch rebuilt genuine dataclasses from the wire.
+        assert isinstance(folds, RecencyFolds)
+        assert folds.trailing is not None
+        assert isinstance(folds.trailing, TradeFolds)
+        assert isinstance(folds.trailing.moments, Moments)
+
+    def test_flag_on_none_trailing_round_trips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+        outside = [_rtrade(-400, age_us=731 * _DAY_US), _rtrade(900, age_us=3000 * _DAY_US)]
+        folds = _resolve_recency_folds(outside, _PIN_START, trailing_anchor=_ANCHOR)
+        assert folds.trailing is None
+        assert folds == fold_recency(outside, _PIN_START, trailing_anchor=_ANCHOR)
+
+    def test_flag_on_kernel_unavailable_falls_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(_FLAG, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        folds = _resolve_recency_folds(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+        assert folds == fold_recency(_RECENCY_TRADES, _PIN_START, trailing_anchor=_ANCHOR)
+
+    def test_recency_wire_pair_round_trips(self) -> None:
+        for trades in (
+            _RECENCY_TRADES,
+            [_rtrade(-400, age_us=731 * _DAY_US)],  # trailing-None shape
+        ):
+            folds = fold_recency(trades, _PIN_START, trailing_anchor=_ANCHOR)
+            assert _recency_folds_from_wire(_recency_wire(folds)) == folds
+
+
+class TestRecencyFlagOnParity:
+    """NON-VACUOUS flag-ON proof over hostile window/bucket edge streams."""
+
+    _EDGE_STREAMS: ClassVar[list[list[ClosedTrade]]] = [
+        _RECENCY_TRADES,
+        # The cutoff straddle: exactly AT the cutoff instant (IN), 1 µs
+        # earlier (OUT).
+        [_rtrade(100, age_us=730 * _DAY_US), _rtrade(200, age_us=730 * _DAY_US + 1)],
+        # Bucket edges 29/30/31 days + the fractional-day floor.
+        [
+            _rtrade(10, age_us=29 * _DAY_US),
+            _rtrade(20, age_us=30 * _DAY_US - 1),
+            _rtrade(30, age_us=30 * _DAY_US),
+            _rtrade(40, age_us=31 * _DAY_US),
+        ],
+        # A defensively-future exit (negative age — clamps to bucket 0).
+        [_rtrade(-50, age_us=-1), _rtrade(75, age_us=0)],
+        # All outside the window (trailing None).
+        [_rtrade(-400, age_us=731 * _DAY_US), _rtrade(900, age_us=3000 * _DAY_US)],
+        # A single trade (the smallest legal stream).
+        [_rtrade(1, age_us=45 * _DAY_US)],
+    ]
+
+    def test_edge_streams_bit_equal_with_kernel_engaged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Widen the burn-in so EVERY stream is kernel-vs-oracle
+        # cross-checked inside the seam.
+        compute_rust.reset_self_check_for_tests(remaining=10_000)
+        calls = [0]
+        real = fno_math.metrics_fold_recency
+
+        def _spy(*args: object) -> object:
+            calls[0] += 1
+            return real(*args)
+
+        monkeypatch.setattr(fno_math, "metrics_fold_recency", _spy)
+        for trades in self._EDGE_STREAMS:
+            monkeypatch.delenv(_FLAG, raising=False)
+            expected = _compute_metrics_impl(
+                trades,
+                100,
+                0.0,
+                start_equity_paisa=_PIN_START,
+                span_years=2.0,
+                drawdown=(0, 0.0, 0, 0.0),
+                trailing_anchor=_ANCHOR,
+            )
+            monkeypatch.setenv(_FLAG, "1")
+            actual = _compute_metrics_impl(
+                trades,
+                100,
+                0.0,
+                start_equity_paisa=_PIN_START,
+                span_years=2.0,
+                drawdown=(0, 0.0, 0, 0.0),
+                trailing_anchor=_ANCHOR,
+            )
+            assert _pack_metrics(actual) == _pack_metrics(expected)
+        assert calls[0] == len(self._EDGE_STREAMS)
+        assert not compute_rust.kernel_disabled()
