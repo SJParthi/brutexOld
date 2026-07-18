@@ -261,6 +261,13 @@ class TestRunIdContainment:
     ``meta_annotation.json`` OUTSIDE ``sweep_runs/`` (the executed refuter
     repro shapes) — both shapes are pinned refused + NOTHING-written, and
     a plain id still annotates (the happy-path guard).
+
+    Fix-round-4 J polish: the two sibling operator-input arms —
+    empty/whitespace-only (pre-fix a raw ``TradeStoreError`` traceback from
+    ``sweep_run_dir``'s own guard) and >255-byte (pre-fix an uncaught
+    ENAMETOOLONG ``OSError`` from ``run_dir.is_dir()``) — are pinned as
+    clean ``--run-id``-naming user errors, with the exactly-255-byte
+    boundary proven to pass the length gate.
     """
 
     def test_absolute_run_id_refused_and_nothing_written(
@@ -302,6 +309,54 @@ class TestRunIdContainment:
             rc = cli.main(["meta-annotate", "--lake-root", str(lake), "--run-id", bad, "--no-lens"])
             assert rc == EXIT_USER_ERROR, bad
             assert "--run-id" in capsys.readouterr().err
+
+    def test_empty_and_whitespace_run_ids_refused_and_nothing_written(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Fix-round-4 J polish: pre-fix "" surfaced sweep_run_dir's own raw
+        # TradeStoreError traceback; whitespace-only is the same
+        # never-a-directory-name shape — both now clean user errors.
+        lake = _seed_run(tmp_path / "lake")
+        before = _tree_digest(lake)
+        for bad in ("", "   ", "\t"):
+            rc = cli.main(["meta-annotate", "--lake-root", str(lake), "--run-id", bad, "--no-lens"])
+            assert rc == EXIT_USER_ERROR, repr(bad)
+            assert "--run-id" in capsys.readouterr().err
+        assert _tree_digest(lake) == before
+
+    def test_overlong_run_ids_refused_and_nothing_written(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Fix-round-4 J polish: pre-fix a ~4096-char id raised an uncaught
+        # OSError (ENAMETOOLONG) from run_dir.is_dir(); >255 bytes can never
+        # be a single filesystem NAME, and an engine grid-identity digest is
+        # 16-64 chars — the bound can never refuse a legitimate id.
+        lake = _seed_run(tmp_path / "lake")
+        before = _tree_digest(lake)
+        for n in (300, 4096):
+            rc = cli.main(
+                ["meta-annotate", "--lake-root", str(lake), "--run-id", "a" * n, "--no-lens"]
+            )
+            assert rc == EXIT_USER_ERROR, n
+            err = capsys.readouterr().err
+            assert "--run-id" in err
+            assert "255" in err
+        assert _tree_digest(lake) == before
+
+    def test_255_byte_run_id_passes_the_length_gate(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Exactly AT the limit is a valid filesystem name: it must reach the
+        # clean unknown-run arm (is_dir() probes without ENAMETOOLONG), never
+        # the overlong refusal — pins the strict `> 255` boundary.
+        lake = _seed_run(tmp_path / "lake")
+        rc = cli.main(
+            ["meta-annotate", "--lake-root", str(lake), "--run-id", "a" * 255, "--no-lens"]
+        )
+        assert rc == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "no run directory" in err
+        assert "filesystem name limit" not in err
 
     def test_plain_run_id_still_annotates(self, tmp_path: Path) -> None:
         # The happy-path guard: containment never blocks a legitimate id.

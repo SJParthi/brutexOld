@@ -5924,6 +5924,14 @@ def cmd_enrich_greeks(
     return EXIT_INTERNAL_ERROR
 
 
+#: The single-filesystem-NAME byte limit (POSIX NAME_MAX / common FS name
+#: cap) an operator ``--run-id`` must fit — an engine grid-identity digest
+#: is 16-64 chars, so no legitimate id can ever reach this bound; a longer
+#: value would otherwise surface as an uncaught ``OSError`` (ENAMETOOLONG)
+#: from the ``run_dir.is_dir()`` probe (fix-round-4 J polish).
+_RUN_ID_MAX_BYTES = 255
+
+
 def _run_id_escapes(run_id: str) -> bool:
     """True when an operator ``--run-id`` could escape ``sweep_runs/``.
 
@@ -5974,9 +5982,17 @@ def cmd_meta_annotate(
     iff every discovered stem annotated (or dry-run);
     :data:`EXIT_INTERNAL_ERROR` when any WET-run stem was skipped (the
     summary names each reason); :data:`EXIT_USER_ERROR` on a bad lake
-    root / a path-escaping ``--run-id`` / unknown run id / malformed lens
-    dates. RUN-ID CONTAINMENT (refuter round-3 I3-1): the operator
-    ``--run-id`` is refused BEFORE any path join when it is absolute,
+    root / an empty-or-whitespace, overlong or path-escaping ``--run-id`` /
+    unknown run id / malformed lens
+    dates. RUN-ID CONTAINMENT (refuter round-3 I3-1 + the fix-round-4 J
+    polish): the operator
+    ``--run-id`` is refused BEFORE any path join when it is
+    empty/whitespace-only (``sweep_run_dir``'s own guard would otherwise
+    raise a raw ``TradeStoreError``), longer than
+    :data:`_RUN_ID_MAX_BYTES` = 255 bytes (the filesystem NAME limit —
+    ``run_dir.is_dir()`` would otherwise raise an uncaught ENAMETOOLONG
+    ``OSError``; an engine grid-identity digest is 16-64 chars, so no
+    legitimate id can ever reach the bound), absolute,
     carries a path separator (``/`` or ``\\``) or has a ``..`` component
     (:func:`_run_id_escapes`) — so the run-summary write can never land
     outside ``sweep_runs/``; the shared
@@ -6002,6 +6018,27 @@ def cmd_meta_annotate(
     resolved = _resolve_lake_root(lake_root)
     _require_lake_dir(resolved, command="meta-annotate")
     results = results_root if results_root is not None else resolved / "sweeps"
+    if not run_id.strip():
+        # Sibling of the containment check (fix-round-4 J polish): an empty
+        # --run-id would otherwise surface as sweep_run_dir's own raw
+        # TradeStoreError traceback instead of a clean user error.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "
+            "must be a non-empty sweep_runs/<run_id> directory name",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if len(run_id.encode("utf-8")) > _RUN_ID_MAX_BYTES:
+        # An overlong name would otherwise surface as an uncaught OSError
+        # (ENAMETOOLONG) from the run_dir.is_dir() probe; a grid-identity
+        # digest is 16-64 chars, so this can never refuse a legitimate id.
+        print(
+            f"[brutex] meta-annotate: invalid --run-id — {len(run_id.encode('utf-8'))} "
+            f"bytes exceeds the {_RUN_ID_MAX_BYTES}-byte filesystem name limit "
+            "(an engine grid-identity digest is 16-64 chars)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     if _run_id_escapes(run_id):
         print(
             f"[brutex] meta-annotate: invalid --run-id {run_id!r} — a run id "

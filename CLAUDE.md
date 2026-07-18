@@ -3431,7 +3431,7 @@ hostile-review pass._
   `annotate.py` — the pass writing ONE canonical-JSON `<stem>.meta.json`
   FOURTH sidecar + the run-level `meta_annotation.json` (NO timestamps;
   re-runs BYTE-IDENTICAL; per-stem isolation, counted named skips;
-  global-stops re-raise raw; six verbatim honest-limits notes +
+  global-stops re-raise raw; eight verbatim honest-limits notes +
   `revalidation_required: true` on every artifact), surfaced as the
   manual-invoke `brutex meta-annotate` CLI (lens via the SAME
   `_depth_reference_loader` shim, best-effort empty-lens degrade;
