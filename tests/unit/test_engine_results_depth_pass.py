@@ -801,18 +801,9 @@ class TestCompositesFor:
         from tests.fakes.wp5_depth_fixtures import make_agg
 
         row = make_result_row(run_id_of(1))
-        # The shared fake predates the 1m-grid counter family — thread the
-        # five now-required ComboAggregate fields as overrides
-        # (DEC-FILL-EXEC-GRID-1M-001; event tallies, honest 0).
-        agg = make_agg(
-            run_id_of(1),
-            fingerprint=fingerprint_seed(1),
-            exits_deferred=0,
-            signals_dropped_collision=0,
-            fill_slid_minutes=0,
-            exit_fill_slid_minutes=0,
-            forced_fill_slid_minutes=0,
-        )
+        # The shared fake defaults the five 1m-grid counter fields to 0
+        # (DEC-FILL-EXEC-GRID-1M-001) — no per-call overrides needed.
+        agg = make_agg(run_id_of(1), fingerprint=fingerprint_seed(1))
         relaxed = replace(
             agg, mae_avg_paisa=None, mfe_avg_paisa=None, recovery_factor=None, win_loss_ratio=None
         )
