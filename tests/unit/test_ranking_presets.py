@@ -41,7 +41,16 @@ def _rec(run_id: str, **overrides: Any) -> RankRecord:
 
 class TestPresetVocabulary:
     def test_display_order_and_default(self) -> None:
-        assert PRESET_NAMES == ("min_dd_first", "composite", "profit_factor", "win_rate", "calmar")
+        # DEC-ALPHA-BUYHOLD-METRIC-001: "alpha" APPENDED (additive — every
+        # pre-existing token + the default keep their positions).
+        assert PRESET_NAMES == (
+            "min_dd_first",
+            "composite",
+            "profit_factor",
+            "win_rate",
+            "calmar",
+            "alpha",
+        )
         assert DEFAULT_PRESET == PRESET_MIN_DD_FIRST == "min_dd_first"
 
     def test_every_preset_names_itself(self) -> None:
@@ -53,7 +62,7 @@ class TestPresetVocabulary:
         # min_dd_first is the ONE ascending preset; the alternates all rank
         # descending on the raw value (the ResultsStore.top_k law).
         assert PRESETS["min_dd_first"].reverse is False
-        for token in ("composite", "profit_factor", "win_rate", "calmar"):
+        for token in ("composite", "profit_factor", "win_rate", "calmar", "alpha"):
             assert PRESETS[token].reverse is True
 
     @pytest.mark.parametrize("token", PRESET_NAMES)
@@ -212,3 +221,31 @@ class TestMinDdFirstLockedOrder:
             "00",  # dd 12.0
             "07",  # dd 29.9
         ]
+
+
+class TestAlphaPreset:
+    """DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha axis + None-after-scored law."""
+
+    def test_orders_descending_on_raw_alpha(self) -> None:
+        low = _rec("b" * 64, alpha_pct=1.0)
+        high = _rec("a" * 64, alpha_pct=7.5)
+        negative = _rec("c" * 64, alpha_pct=-2.0)
+        ordered = PRESETS["alpha"].sort_records([low, negative, high])
+        assert [r.run_id for r in ordered] == [high.run_id, low.run_id, negative.run_id]
+
+    def test_none_alpha_ranks_after_every_scored_record(self) -> None:
+        scored_negative = _rec("a" * 64, alpha_pct=-99.0)
+        unscored = _rec("b" * 64)  # alpha_pct defaults to None (uncomputable)
+        ordered = PRESETS["alpha"].sort_records([unscored, scored_negative])
+        assert [r.run_id for r in ordered] == [scored_negative.run_id, unscored.run_id]
+
+    def test_none_ties_fall_to_run_id_asc(self) -> None:
+        first = _rec("a" * 64)
+        second = _rec("b" * 64)
+        ordered = PRESETS["alpha"].sort_records([second, first])
+        assert [r.run_id for r in ordered] == [first.run_id, second.run_id]
+
+    def test_default_field_keeps_existing_constructions_byte_identical(self) -> None:
+        # The defaulted-LAST field law: a pre-alpha construction site (no
+        # alpha_pct kwarg) yields the honest None — never a fabricated 0.
+        assert _rec("a" * 64).alpha_pct is None

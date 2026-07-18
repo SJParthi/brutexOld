@@ -79,6 +79,13 @@ class RankRecord:
     profit_factor: float
     win_rate: float
     calmar_ratio: float
+    #: ALPHA vs buy-&-hold, percent (DEC-ALPHA-BUYHOLD-METRIC-001) — an
+    #: ARTIFACT-level display metric, not persisted on ``ResultRow``.
+    #: Defaulted LAST so every existing construction site is byte-identical;
+    #: ``None`` == honestly uncomputable (no baseline for the window) and
+    #: ranks AFTER every real value under the ``alpha`` preset (the
+    #: None-after-scored law), never coerced to a fake number.
+    alpha_pct: float | None = None
 
 
 #: A preset sort key — either the 4-part min-DD ascending key or the
@@ -125,6 +132,17 @@ def _win_rate_key(record: RankRecord) -> tuple[int, float]:
 def _calmar_key(record: RankRecord) -> tuple[int, float]:
     """Raw persisted Calmar ratio (full precision)."""
     return (1, record.calmar_ratio)
+
+
+def _alpha_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, raw_value)`` — the alpha-vs-buy-&-hold axis
+    (DEC-ALPHA-BUYHOLD-METRIC-001). A ``None`` alpha (no baseline for the
+    window) sorts LAST under ``reverse=True`` via the presence flag, never
+    coerced to a fake number (the ``_composite_key`` law, verbatim)."""
+    alpha = record.alpha_pct
+    if alpha is None:
+        return (0, 0.0)
+    return (1, alpha)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +217,18 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         describe="Calmar ratio, descending",
         reverse=True,
         key=_calmar_key,
+    ),
+    # DEC-ALPHA-BUYHOLD-METRIC-001 — APPENDED (additive; the default token
+    # and every existing preset's position are byte-identical).
+    "alpha": RankingPreset(
+        name="alpha",
+        describe=(
+            "alpha vs buy-&-hold, descending (strategy return % minus the "
+            "instrument's buy-&-hold return % over the same window; "
+            "uncomputable rows rank last)"
+        ),
+        reverse=True,
+        key=_alpha_key,
     ),
 }
 

@@ -996,3 +996,170 @@ class TestCascadeJoinAtWriter:
         assert loaded is not None
         assert loaded.cascade_join == artifact.cascade_join
         assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha-vs-buy-&-hold display metric + the
+# DEFAULT-OFF rejection gate at the writer.
+# ---------------------------------------------------------------------------
+
+from brutex.engine.alpha_metric import AlphaBaseline  # noqa: E402
+
+#: A hand-derivable baseline: anchor ₹20,000.00 → close ₹20,400.00 = +2%.
+_ALPHA_BASELINE = AlphaBaseline(anchor_open_paisa=2_000_000, last_close_paisa=2_040_000)
+
+#: Start equity ₹10,000.00 = 1_000_000 paisa (the fixture rows' default
+#: net_pnl_paisa of 10_000 then reads +1%: alpha = 1 − 2 = −1.0 exactly).
+_ALPHA_EQUITY = 1_000_000
+
+
+def _alpha_kwargs(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "alpha_baselines": {"NIFTY": _ALPHA_BASELINE},
+        "start_equity_paisa": _ALPHA_EQUITY,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestAlphaMetricsAtWriter:
+    def test_default_build_bytes_are_identical_without_alpha_inputs(self) -> None:
+        """Defaults (no alpha_baselines / start_equity / gate) == pre-alpha bytes."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        assert (
+            _build(candidates).rendered_bytes()
+            == _build(
+                candidates, alpha_baselines=None, start_equity_paisa=None, alpha_gate=False
+            ).rendered_bytes()
+        )
+        # An EMPTY baselines map is also a no-op (no instrument covered).
+        assert (
+            _build(
+                candidates, alpha_baselines={}, start_equity_paisa=_ALPHA_EQUITY
+            ).rendered_bytes()
+            == _build(candidates).rendered_bytes()
+        )
+
+    def test_alpha_build_is_additive_only_vs_the_default_build(self) -> None:
+        """Stripping the three alpha metric keys recovers the default payload."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        default_payload = _build(candidates).to_payload()
+        alpha_payload = _build(candidates, **_alpha_kwargs()).to_payload()
+        for entry in alpha_payload["entries"]:
+            metrics = entry["metrics"]
+            for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
+                assert key in metrics
+                metrics.pop(key)
+        assert alpha_payload == default_payload
+
+    def test_alpha_values_hand_derived(self) -> None:
+        # net +₹100 on ₹10,000 = +1%; B&H ₹20,000 → ₹20,400 = +2%; alpha −1.0.
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], **_alpha_kwargs())
+        metrics = artifact.entries[0]["metrics"]
+        assert metrics["strategy_return_pct"] == 1.0
+        assert metrics["bh_return_pct"] == 2.0
+        assert metrics["alpha_pct"] == -1.0
+
+    def test_uncovered_instrument_emits_no_alpha_keys(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            **_alpha_kwargs(alpha_baselines={"SENSEX": _ALPHA_BASELINE}),
+        )
+        metrics = artifact.entries[0]["metrics"]
+        for key in ("alpha_pct", "strategy_return_pct", "bh_return_pct"):
+            assert key not in metrics
+
+    def test_missing_start_equity_emits_no_alpha_keys(self) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            alpha_baselines={"NIFTY": _ALPHA_BASELINE},
+            start_equity_paisa=None,
+        )
+        metrics = artifact.entries[0]["metrics"]
+        assert "alpha_pct" not in metrics
+
+
+class TestAlphaRejectionGate:
+    def test_gate_off_by_default_source_carries_no_gate_keys(self) -> None:
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))], **_alpha_kwargs())
+        assert "alpha_gate" not in artifact.source
+        assert "alpha_gate_excluded" not in artifact.source
+
+    def test_gate_excludes_nonpositive_computable_alpha_counted_and_named(self) -> None:
+        # positive alpha: net +₹500 on ₹10,000 = +5% vs B&H +2% → alpha +3.
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        # negative alpha: the default net +1% vs B&H +2% → alpha −1 (excluded).
+        loser = make_candidate(2, fingerprint=fingerprint_seed(2))
+        # ZERO alpha: net +₹200 on ₹10,000 = +2% == B&H +2% → alpha 0 (<= 0,
+        # excluded — the boundary law).
+        boundary = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"net_pnl_paisa": 20_000}
+        )
+        # UNCOMPUTABLE alpha (no baseline for SENSEX): NEVER excluded.
+        uncovered = make_candidate(
+            4,
+            fingerprint=fingerprint_seed(4),
+            row_overrides={"instrument": "SENSEX", "net_pnl_paisa": -10_000},
+        )
+        with capture_logs() as logs:
+            artifact = _build(
+                [winner, loser, boundary, uncovered],
+                **_alpha_kwargs(alpha_gate=True),
+            )
+        kept = [entry["run_id"] for entry in artifact.entries]
+        assert winner.row.run_id in kept
+        assert uncovered.row.run_id in kept
+        assert loser.row.run_id not in kept
+        assert boundary.row.run_id not in kept
+        assert artifact.source["alpha_gate"] is True
+        assert artifact.source["alpha_gate_excluded"] == 2
+        events = [log for log in logs if log["event"] == "top100.alpha_gate_excluded"]
+        assert len(events) == 1
+        assert events[0]["excluded"] == 2
+        assert set(events[0]["sample"]) == {loser.row.run_id, boundary.row.run_id}
+
+    def test_gate_on_with_zero_exclusions_is_counted_zero_no_warn(self) -> None:
+        winner = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 50_000}
+        )
+        with capture_logs() as logs:
+            artifact = _build([winner], **_alpha_kwargs(alpha_gate=True))
+        assert artifact.source["alpha_gate"] is True
+        assert artifact.source["alpha_gate_excluded"] == 0
+        assert [log for log in logs if log["event"] == "top100.alpha_gate_excluded"] == []
+
+    def test_gate_without_alpha_inputs_excludes_nothing(self) -> None:
+        """Gate ON but nothing computable — every passer kept (never judged
+        on a number that does not exist)."""
+        candidates = [make_candidate(1, fingerprint=fingerprint_seed(1))]
+        artifact = _build(candidates, alpha_gate=True)
+        assert len(artifact.entries) == 1
+        assert artifact.source["alpha_gate_excluded"] == 0
+
+
+class TestAlphaPreset:
+    def test_alpha_preset_orders_by_alpha_desc_none_after_scored(self) -> None:
+        low = make_candidate(
+            1, fingerprint=fingerprint_seed(1), row_overrides={"net_pnl_paisa": 30_000}
+        )  # +3% − 2% = +1
+        high = make_candidate(
+            2, fingerprint=fingerprint_seed(2), row_overrides={"net_pnl_paisa": 90_000}
+        )  # +9% − 2% = +7
+        uncovered = make_candidate(
+            3, fingerprint=fingerprint_seed(3), row_overrides={"instrument": "SENSEX"}
+        )  # None alpha — ranks LAST
+        artifact = _build([low, high, uncovered], preset="alpha", **_alpha_kwargs())
+        assert [entry["run_id"] for entry in artifact.entries] == [
+            high.row.run_id,
+            low.row.run_id,
+            uncovered.row.run_id,
+        ]
+        assert artifact.preset == "alpha"
+
+    def test_rank_candidates_default_map_matches_pre_alpha_order(self) -> None:
+        candidates = [make_candidate(n, fingerprint=fingerprint_seed(n)) for n in (3, 1, 2)]
+        no_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET)
+        empty_map = rank_candidates(candidates, preset=DEFAULT_TOP100_PRESET, alpha_by_run_id={})
+        assert [c.row.run_id for c in no_map] == [c.row.run_id for c in empty_map]

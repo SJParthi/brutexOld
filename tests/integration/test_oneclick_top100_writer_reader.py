@@ -657,3 +657,81 @@ class TestCascadeJoinWriterToWire:
         assert payload["cascade_join"] is None
         assert all("cascade" not in row for row in payload["rows"])
         assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — the alpha triple writer → reader → route.
+# ---------------------------------------------------------------------------
+from brutex.engine.alpha_metric import AlphaBaseline  # noqa: E402
+
+
+def _alpha_engine_artifact() -> engine_top100.Top100Artifact:
+    """A REAL alpha-carrying artifact from the engine's own builder.
+
+    Hand-derivable: net +₹100 on ₹10,000 equity = +1%; B&H ₹20,000.00 →
+    ₹20,400.00 = +2% → alpha −1.0 for every fixture candidate.
+    """
+    candidates = [make_candidate(n, fingerprint=f"fp{n:02d}" + "0" * 62) for n in (1, 2)]
+    families = TwinFamilies(
+        family_by_run_id={run_id_of(n): run_id_of(n) for n in (1, 2)},
+        members_by_family={run_id_of(n): (run_id_of(n),) for n in (1, 2)},
+    )
+    return build_top100(
+        candidates,
+        run_id=_GRID_RUN_ID,
+        preset="min_dd_first",
+        families=families,
+        counts=PoolCounts(stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0),
+        data_snapshot_hashes=["a" * 64],
+        baselines={"NIFTY": "baseline-NIFTY.json"},
+        alpha_baselines={"NIFTY": AlphaBaseline(2_000_000, 2_040_000)},
+        start_equity_paisa=1_000_000,
+    )
+
+
+class TestAlphaWriterReaderRouteChain:
+    """Writer bytes → load_top100 → /api/v1/oneclick/top100 wire, alpha intact."""
+
+    def test_alpha_triple_survives_the_reader_boundary(self, tmp_path: Path) -> None:
+        artifact = _alpha_engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        run_dir = (tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID
+        result = oc.load_top100(run_dir)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            metrics = row["metrics"]
+            assert metrics["alpha_pct"] == -1.0
+            assert metrics["strategy_return_pct"] == 1.0
+            assert metrics["bh_return_pct"] == 2.0
+
+    def test_alpha_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _alpha_engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["metrics"]["alpha_pct"] == -1.0
+
+    def test_pre_alpha_artifact_serves_no_alpha_keys_on_the_wire(self, tmp_path: Path) -> None:
+        """A default (no alpha inputs) artifact carries NO alpha keys — the
+        client renders the honest '—', never a fabricated 0 (the #1631 law)."""
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from brutex.dashboard.app import DashboardState, build_app
+        from fastapi.testclient import TestClient
+
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        store = SimpleNamespace(path=lake / "instruments.duckdb")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        for row in payload["rows"]:
+            assert "alpha_pct" not in row["metrics"]

@@ -953,3 +953,91 @@ class TestWorstCaseCaptureChain:
         entry_ts = capture.trades[0].entry_ts
         (entry_bar,) = [b for b in bars if b.timestamp == entry_ts]
         assert capture.trades[0].entry_px == entry_bar.high
+
+
+# ---------------------------------------------------------------------------
+# DEC-ALPHA-BUYHOLD-METRIC-001 — alpha threading through the pass.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+
+class TestAlphaThreading:
+    def test_alpha_metrics_land_on_every_top100_entry(self, out_root: Path) -> None:
+        """The pass threads the R27 baseline's paisa pair + the grid equity
+        into the writer: every entry carries the alpha triple, and the triple
+        satisfies the exact formula over the WRITTEN baseline artifact."""
+        grid = _grid()
+        _run_pass(out_root, grid)
+        run_id = grid_identity(grid)
+        run_dir = sweep_run_dir(out_root, run_id)
+        artifact = load_top100(run_dir.parent, run_id)
+        assert artifact is not None
+        assert artifact.entries, "fixture pool must produce entries"
+        baseline = json.loads((run_dir / "baseline-NIFTY.json").read_text(encoding="utf-8"))
+        anchor_paisa = round(Decimal(baseline["anchor_open"]) * 100)
+        close_paisa = round(Decimal(baseline["sessions"][-1][1]) * 100)
+        equity = _grid().start_equity_paisa
+        for entry in artifact.entries:
+            metrics = entry["metrics"]
+            assert isinstance(metrics, dict)
+            strat = float(int(metrics["net_pnl_paisa"])) / float(equity) * 100.0
+            bh = float(close_paisa - anchor_paisa) / float(anchor_paisa) * 100.0
+            assert metrics["strategy_return_pct"] == strat
+            assert metrics["bh_return_pct"] == bh
+            assert metrics["alpha_pct"] == strat - bh
+
+    def test_errored_baseline_leaves_alpha_honestly_absent(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed baseline carries NO alpha keys (the honest '—'), while
+        the pass + artifact still complete (the R27 fence law)."""
+        import brutex.engine.results_depth_pass as pass_module
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise ValueError("baseline exploded")
+
+        monkeypatch.setattr(pass_module, "compute_baseline", _boom)
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        assert report.baselines_written == 0
+        assert report.top100_written is True
+        run_id = grid_identity(grid)
+        artifact = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert artifact is not None
+        for entry in artifact.entries:
+            assert "alpha_pct" not in entry["metrics"]  # type: ignore[operator]
+
+    def test_junk_alpha_gate_env_fails_the_pass_before_any_tuple_work(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "junk")
+        with pytest.raises(ValueError, match="BRUTEX_ALPHA_GATE"):
+            _run_pass(out_root, _grid())
+        # Nothing was built — the resolve runs FIRST (eager fail-loud law).
+        assert not sweep_run_dir(out_root, grid_identity(_grid())).exists()
+
+    def test_alpha_gate_param_overrides_the_env(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit alpha_gate bool never consults the env (junk inert)."""
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "junk")
+        report = _run_pass(out_root, _grid(), alpha_gate=False)
+        assert report.top100_written is True
+
+    def test_alpha_gate_env_on_threads_to_the_writer(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_ALPHA_GATE", "1")
+        grid = _grid()
+        report = _run_pass(out_root, grid)
+        assert report.top100_written is True
+        run_id = grid_identity(grid)
+        artifact = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert artifact is not None
+        assert artifact.source["alpha_gate"] is True
+        excluded = artifact.source["alpha_gate_excluded"]
+        assert isinstance(excluded, int) and excluded >= 0
+        # Accounting: the pass's gate_passers (pre-alpha-gate hard-gate
+        # passers) == the shipped entries + the alpha-gate exclusions (the
+        # fixture pool collapses no twin families).
+        assert len(artifact.entries) + excluded == report.gate_passers

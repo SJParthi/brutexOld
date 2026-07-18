@@ -335,11 +335,20 @@ RANKABLE_COLUMNS: Final[tuple[str, ...]] = (
 #: ``SweepLeaderboard.inert_axes`` (``composite_score`` removed), closing the
 #: /results read-time half of HIGH #40; ``max_consecutive_losses`` stays inert
 #: (still not persisted anywhere readable per-row — the persist half is the
-#: named follow-up DEC-CASCADE-ROW-PERSIST-002).
-PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+#: named follow-up DEC-CASCADE-ROW-PERSIST-002). ``alpha_pct``
+#: (DEC-ALPHA-BUYHOLD-METRIC-001) is an ARTIFACT-level metric never
+#: persisted on ``ResultRow`` — permanently inert on /results (a
+#: ``?preset=alpha`` view orders by nothing but the ``run_id`` tie law and
+#: says so honestly; the /results read-time join is the named follow-up
+#: DEC-ALPHA-RESULTS-JOIN-001).
+PRESET_INERT_AXES: Final[tuple[str, ...]] = (
+    "composite_score",
+    "max_consecutive_losses",
+    "alpha_pct",
+)
 
 #: The effective inert axes once the composite index joined non-empty.
-_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses",)
+_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses", "alpha_pct")
 
 
 @dataclass(frozen=True, slots=True)

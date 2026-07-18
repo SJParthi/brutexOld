@@ -387,6 +387,28 @@ def test_junk_kill_switch_is_a_clean_pre_sweep_user_error(
     assert fired == []  # a config error is not an abort — never a false alert
 
 
+def test_junk_alpha_gate_is_a_clean_pre_sweep_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEC-ALPHA-BUYHOLD-METRIC-001: a junk BRUTEX_ALPHA_GATE refuses BEFORE
+    any compute — the eager fail-loud-at-launch law (the results-depth /
+    resume-store-guard precedent); never a false abort alert."""
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+    monkeypatch.setenv("BRUTEX_ALPHA_GATE", "maybe")
+
+    rc = _sweep_all(lake_root, catalog_path, results_root)
+
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "BRUTEX_ALPHA_GATE" in captured.err
+    assert "sweep-all done" not in captured.out  # the sweep never launched …
+    assert not (results_root / "audit").exists()  # … and wrote nothing
+    assert fired == []  # a config error is not an abort — never a false alert
+
+
 def test_pass_failure_is_fenced_and_never_fails_the_sweep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

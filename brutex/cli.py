@@ -7537,6 +7537,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # DEC-ALPHA-BUYHOLD-METRIC-001: resolve the DEFAULT-OFF alpha rejection
+    # gate EAGERLY too — a junk BRUTEX_ALPHA_GATE is a clean pre-sweep
+    # user-config error, never a failure discovered AFTER an already-completed
+    # multi-day sweep (the depth pass re-resolves the same switch at its own
+    # entry; this eager pass only front-loads the failure — the
+    # resume_store_guard_enabled precedent).
+    from brutex.engine.alpha_metric import resolve_alpha_gate_enabled
+
+    try:
+        resolve_alpha_gate_enabled()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
     # BRUTEX_FILL_MODE — ANY value, even the literal "worst_case" — is a
     # stale launch config from the deleted mode machinery and REFUSES loudly

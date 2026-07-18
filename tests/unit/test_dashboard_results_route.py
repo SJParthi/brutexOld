@@ -444,7 +444,7 @@ class TestLeaderboardCascadeJoin:
         assert payload["rows"][0]["composite_score"] == 1.75
         # The ?preset=composite axis is now honestly ACTIVE.
         preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
-        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+        assert preset["preset_inert_axes"] == ["max_consecutive_losses", "alpha_pct"]
 
     def test_aggs_landing_after_a_poll_surfaces_without_a_sweeps_write(
         self, client: TestClient, store: InstrumentStore
@@ -485,7 +485,7 @@ class TestLeaderboardCascadeJoin:
         assert second["rows"][0]["composite_score"] == 1.75
         # The activation reaches the preset axis too — still no sweeps write.
         preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
-        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+        assert preset["preset_inert_axes"] == ["max_consecutive_losses", "alpha_pct"]
 
     def test_composite_index_reads_once_per_token(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch

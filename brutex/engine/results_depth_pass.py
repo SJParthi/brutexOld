@@ -84,6 +84,11 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.engine.alpha_metric import (
+    AlphaBaseline,
+    alpha_baseline_from_series,
+    resolve_alpha_gate_enabled,
+)
 from brutex.engine.baseline import baseline_filename, compute_baseline, write_baseline
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
 from brutex.engine.minute_path import MinuteIndex
@@ -547,6 +552,7 @@ def run_results_depth_pass(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    alpha_gate: bool | None = None,
 ) -> ResultsDepthReport:
     """Run the full results-depth pass over one grid's persisted stores.
 
@@ -583,12 +589,25 @@ def run_results_depth_pass(
         there); ``None`` (the default — every pre-change caller) means no
         report was threaded. The fence law is unchanged: a pass failure
         never fails the sweep.
+    alpha_gate
+        DEC-ALPHA-BUYHOLD-METRIC-001: the DEFAULT-OFF alpha rejection gate
+        threaded to :func:`build_top100`. ``None`` (the default) resolves
+        :data:`~brutex.engine.alpha_metric.ALPHA_GATE_ENV` HERE — at the
+        very start of the pass, before any tuple work — so a junk env fails
+        the pass instantly and loudly (the WP6 CLI adapter ALSO resolves it
+        eagerly pre-sweep, so a CLI launch refuses cleanly before the sweep
+        even starts; this in-pass resolve only front-loads the same law for
+        direct callers).
 
     Returns
     -------
     ResultsDepthReport
         The honest counters — loud failures included, never masked.
     """
+    # DEC-ALPHA-BUYHOLD-METRIC-001: resolve the gate FIRST (before any tuple
+    # work) — a junk BRUTEX_ALPHA_GATE raises here, never after hours of
+    # capture work (the eager fail-loud env convention).
+    alpha_gate_enabled = resolve_alpha_gate_enabled() if alpha_gate is None else alpha_gate
     run_id = grid_identity(grid)
     # Ruling 4: EVERY run-end artifact path rides the ONE sweep_run_dir seam —
     # a SIBLING sweep_runs/ root beside the sweeps tree, never inside the
@@ -697,11 +716,17 @@ def run_results_depth_pass(
             )
 
     # ── Baselines (R27): per pooled instrument, from the sweep's own bars ──
+    # The SAME computed series ALSO feeds the alpha-vs-buy-&-hold inputs
+    # (DEC-ALPHA-BUYHOLD-METRIC-001): its anchor OPEN + last session CLOSE
+    # as exact 2-dp paisa — one source, never a second derivation. An
+    # instrument whose baseline errors carries NO alpha (the honest "—").
     baselines: dict[str, str] = {}
+    alpha_baselines: dict[str, AlphaBaseline] = {}
     first_tf = grid.timeframes[0].label
     for instrument in instruments_pooled:
         try:
             series = compute_baseline(_bars(instrument, first_tf), instrument=instrument)
+            alpha_baseline = alpha_baseline_from_series(series)
             write_baseline(
                 run_dir / baseline_filename(instrument),
                 series,
@@ -718,6 +743,7 @@ def run_results_depth_pass(
             )
         else:
             baselines[instrument] = baseline_filename(instrument)
+            alpha_baselines[instrument] = alpha_baseline
             tallies.baselines_written += 1
 
     # ── The global top-100 (R21/R26/R34), in its own fence ──
@@ -743,6 +769,9 @@ def run_results_depth_pass(
             reason_provider=reason_provider,
             margin_roi_provider=margin_roi_provider,
             cascade_join=cascade_join,
+            alpha_baselines=alpha_baselines,
+            start_equity_paisa=grid.start_equity_paisa,
+            alpha_gate=alpha_gate_enabled,
         )
         write_top100(runs_dir, artifact)
         top100_written = True
