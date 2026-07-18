@@ -120,13 +120,18 @@ class TestComposeVerdict:
 
 
 class TestValidateCandidate:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream — every call passes
+    # exec_bars_1m=bars (empty input mirrors with exec_bars_1m=[]).
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            validate_candidate([], 0, [], direction=Side.BUY, tf_minutes=1)
+            validate_candidate([], 0, [], direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_runs_all_three_and_composes(self) -> None:
         bars = _multiday(4, bars_per_day=5)
-        result = validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        result = validate_candidate(
+            bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert isinstance(result, CandidateVerdict)
         assert result.mask == 0
         assert isinstance(result.oos, OOSValidation)
@@ -170,6 +175,7 @@ class TestValidateCandidate:
             [(0, _m())],
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
             roll_schedule=covering,
             apply_1day_mask=True,
         )
@@ -192,7 +198,9 @@ class TestValidateCandidate:
 
         monkeypatch.setattr(validation_mod, "build_bar_bits", _spy_for("oos"))
         monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
-        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        validate_candidate(
+            bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert seen == {"oos": (None, False), "cpcv": (None, False)}
 
     def test_no_fill_policy_seam_survives(self) -> None:

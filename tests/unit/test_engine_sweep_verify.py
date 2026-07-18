@@ -23,6 +23,7 @@ from typing import ClassVar
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.exec_grid import EXECUTION_GRID_1M_NEXT_BAR
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_orchestrator import (
@@ -451,8 +452,18 @@ class TestWorstCaseGenerationRefusal:
     def test_worst_case_generation_reads_clean(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
-            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(
+                audit,
+                params={
+                    "fill_mode": "worst_case",
+                    "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
+                    "sl_paisa": 80,
+                },
+            )
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+            )
         context, _schedules, others = recorded_audit_facts(path)
         assert context is not None
         assert context.data_snapshot_hash == "snap0001"
@@ -466,7 +477,11 @@ class TestWorstCaseGenerationRefusal:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
-            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+                snapshot="snap0002",
+            )
         context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
         assert context is not None
         assert context.data_snapshot_hash == "snap0002"
@@ -480,7 +495,10 @@ class TestWorstCaseGenerationRefusal:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
-            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+            )
         assert recorded_audit_facts(path)[0] is not None
 
     def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
@@ -506,6 +524,98 @@ class TestWorstCaseGenerationRefusal:
         report = verify_identity(root, grid)
         assert report.checked_stores == 1
         assert not report.corrupt, report.findings
+
+
+# ── Recorded execution grid (DEC-FILL-EXEC-GRID-1M-001) ──
+
+
+class TestExecGridGenerationRefusal:
+    """DEC-FILL-EXEC-GRID-1M-001: the fill_mode law's TWIN refusal arm in
+    `_require_worst_case_entries` — a scoped generation whose recorded params
+    pass the worst-case gate but lack ``execution_grid == "1m_next_bar"`` is a
+    DECISION-TF-era tree (fills resolved on the decision bar, pre-1m-grid);
+    verifying it would launder pre-grid prices, so fact-derivation refuses
+    LOUDLY naming the DEC. Generation-scoping is preserved exactly like the
+    fill_mode arm's.
+    """
+
+    _CTX: ClassVar[dict[str, str]] = {
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+
+    _REFUSAL = r"decision-TF-era sweep tree refused \(DEC-FILL-EXEC-GRID-1M-001\)"
+
+    def _append(
+        self,
+        audit: AuditWriter,
+        *,
+        params: dict[str, object],
+        snapshot: str = "snap0001",
+    ) -> None:
+        audit.append(
+            action="SWEEP_START",
+            subject="s",
+            payload={
+                **self._CTX,
+                "data_snapshot_hash": snapshot,
+                "instrument": "NIFTY",
+                "params": params,
+            },
+        )
+
+    def test_missing_grid_key_refuses_as_decision_tf_era(self, tmp_path: Path) -> None:
+        # A worst-case-clean generation with NO execution_grid key is the
+        # exact PR-A-era shape — refused, never verified.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case", "sl_paisa": 80})
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_junk_grid_token_refuses_identically(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(
+                audit, params={"fill_mode": "worst_case", "execution_grid": "decision_bar"}
+            )
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path)
+
+    def test_refusal_is_generation_scoped(self, tmp_path: Path) -> None:
+        # Generation A is decision-TF-era (worst-case but gridless),
+        # generation B carries the canonical token: the scoped B read
+        # succeeds, the scoped A read refuses, the unscoped read (latest=B)
+        # succeeds — the refusal never folds the whole file.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0001")
+            self._append(
+                audit,
+                params={"fill_mode": "worst_case", "execution_grid": EXECUTION_GRID_1M_NEXT_BAR},
+                snapshot="snap0002",
+            )
+        context, _schedules, others = recorded_audit_facts(path, snapshot="snap0002")
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0002"
+        assert others == ("snap0001",)
+        with pytest.raises(SweepVerifyError, match=self._REFUSAL):
+            recorded_audit_facts(path, snapshot="snap0001")
+        assert recorded_audit_facts(path)[0] is not None  # unscoped = latest = B
+
+    def test_fill_mode_refusal_takes_precedence(self, tmp_path: Path) -> None:
+        # A generation failing BOTH laws refuses on the fill_mode arm first
+        # (the checks run in that order per entry — pinned so the wording
+        # stays deterministic for operators).
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80})
+        with pytest.raises(
+            SweepVerifyError,
+            match=r"precise-era sweep tree refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            recorded_audit_facts(path)
 
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
@@ -661,6 +771,7 @@ class TestRecordedAuditFacts:
                     "instrument": "NSE-NIFTY-FUT",
                     "params": {
                         "fill_mode": "worst_case",
+                        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
                         "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE),
                     },
                 },
@@ -865,7 +976,11 @@ class TestRecordedAuditFacts:
                     "data_snapshot_hash": "snap0001",
                     "indicator_version": "ind-v1",
                     "code_commit_sha": "deadbeef",
-                    "params": {"fill_mode": "worst_case", "roll_schedule": list(self._SCHEDULE)},
+                    "params": {
+                        "fill_mode": "worst_case",
+                        "execution_grid": EXECUTION_GRID_1M_NEXT_BAR,
+                        "roll_schedule": list(self._SCHEDULE),
+                    },
                 },
             )
         context, schedules, others = recorded_audit_facts(path)

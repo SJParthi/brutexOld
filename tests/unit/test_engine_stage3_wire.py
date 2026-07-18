@@ -25,6 +25,7 @@ O(bars)-per-eval offline work, Golden Rule #10 — no O(1) claim anywhere here).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -35,6 +36,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.cascade_wire import Stage3ManifestRecord
+from brutex.engine.exec_grid import EXEC_INTERVAL_LABEL, build_exec_grid_map
 from brutex.engine.reference_series import ReferenceSeries, TradeReferenceStamper
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.stage1a import build_bar_bits
@@ -51,6 +53,7 @@ from brutex.engine.stage3_wire import (
     cascade_specs_for_refined_cells,
     data_snapshot_hash,
     ensure_stage3_runtime,
+    lockbox_boundary,
     recover_survivor_cell,
     run_stage3_pass,
     stage3_manifest_record,
@@ -325,6 +328,44 @@ class TestTrainSliceBars:
         bars = [_bar(5, 0, 100.0, 101.0), _bar(1, 0, 100.0, 101.0)]
         with pytest.raises(Stage3WireError, match="chronological"):
             train_slice_bars(bars)
+
+    def test_explicit_earlier_boundary_overrides_the_default(self) -> None:
+        # The dual-stream ONE-BOUNDARY seam (DEC-FILL-EXEC-GRID-1M-001 design
+        # §7.2/Q3): a pre-resolved boundary REPLACES the stream's own default
+        # derivation. 10 daily bars, boundary = day 4's ordinal → the slice
+        # keeps days 0..3 only (strictly before), while the default window
+        # (182 ≫ 10 days) would keep nothing.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(10)]
+        day4 = bars[4].timestamp.astimezone(_IST).date().toordinal()
+        train = train_slice_bars(bars, boundary=day4)
+        assert [b.timestamp for b in train] == [b.timestamp for b in bars[:4]]
+        assert train_slice_bars(bars) == ()  # the default is byte-preserved
+
+    def test_default_equals_own_lockbox_boundary(self) -> None:
+        # boundary=None ≡ boundary=lockbox_boundary(bars) — the pre-PR-B
+        # behaviour is the explicit-boundary law's fixed point.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        assert train_slice_bars(bars) == train_slice_bars(bars, boundary=lockbox_boundary(bars))
+
+
+class TestLockboxBoundary:
+    """`lockbox_boundary` — the per-STREAM half of the dual-stream train law."""
+
+    def test_empty_bars_yield_none(self) -> None:
+        assert lockbox_boundary([]) is None
+
+    def test_boundary_is_last_day_minus_window_plus_one(self) -> None:
+        # 190 daily bars (days 0..189): with W = LOCKBOX_DEFAULT_WINDOW_DAYS
+        # the boundary is ord(day 189) − W + 1 — the exact lockbox default
+        # start `train_slice_bars` cuts at.
+        bars = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        last_day = bars[-1].timestamp.astimezone(_IST).date().toordinal()
+        assert lockbox_boundary(bars) == last_day - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+
+    def test_non_chronological_bars_rejected(self) -> None:
+        bars = [_bar(5, 0, 100.0, 101.0), _bar(1, 0, 100.0, 101.0)]
+        with pytest.raises(Stage3WireError, match="chronological"):
+            lockbox_boundary(bars)
 
 
 # ────── data_snapshot_hash (shared non-CLI helper, Amendment A1) ──────
@@ -652,6 +693,186 @@ class TestRunStage3PassEdges:
         assert report.cells == ()
 
 
+class TestDualStreamTrainSlices:
+    """The dual-stream train-slice law (DEC-FILL-EXEC-GRID-1M-001 §7.2/Q3).
+
+    Per instrument, ONE lockbox boundary — the EARLIEST across the decision
+    stream(s) and the 1-minute EXECUTION stream — is applied to BOTH streams,
+    a divergence is a ``stage3_wire.lockbox_tail_skew`` WARN, and the CUT
+    exec slice enters the same train fold (``train_snapshot_hash``).
+    """
+
+    def _coarse_grid(self, **overrides: object) -> SweepGridConfig:
+        """A 2-minute decision grid — the exec stream is a DISTINCT label."""
+        base: dict[str, object] = {"timeframes": [Timeframe("2minute", 2)]}
+        base.update(overrides)
+        return _grid(**base)
+
+    def test_exec_tail_skew_warns_and_the_earliest_boundary_cuts_both(self, tmp_path: Path) -> None:
+        # Decision ("2minute") daily bars over days 0..189; exec ("1minute")
+        # daily bars over days 0..186 — the exec stream's last day is THREE
+        # days earlier, so its own boundary (ord(day186) − W + 1) is 3 days
+        # before the decision one (ord(day189) − W + 1). The resolved
+        # boundary is the EARLIEST (the exec one), applied to BOTH streams:
+        # each slice keeps days strictly before ord(day186) − W + 1 =
+        # ord(day0) + (186 − W + 1) = days 0..4 (W = 182 ⇒ 5 bars each).
+        decision = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        exec_1m = [_bar(d, 1, 100.0, 101.0) for d in range(187)]
+        streams = {"2minute": decision, "1minute": exec_1m}
+        calls: list[tuple[str, str]] = []
+
+        def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
+            calls.append((instrument, tf_label))
+            return streams[tf_label]
+
+        grid = self._coarse_grid()
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit, capture_logs() as logs:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=bars_for,
+                audit=audit,
+                **_SCOPE,
+            )
+        # The pass fetched BOTH streams — the exec stream via the canonical
+        # "1minute" label (bars_for MUST answer that key now).
+        assert EXEC_INTERVAL_LABEL == "1minute"
+        assert set(calls) == {("NIFTY", "2minute"), ("NIFTY", EXEC_INTERVAL_LABEL)}
+        boundary_dec = lockbox_boundary(decision)
+        boundary_exec = lockbox_boundary(exec_1m)
+        assert boundary_dec is not None and boundary_exec is not None
+        assert boundary_exec == boundary_dec - 3  # the crafted skew
+        skew = [e for e in logs if e["event"] == "stage3_wire.lockbox_tail_skew"]
+        assert len(skew) == 1
+        assert skew[0]["instrument"] == "NIFTY"
+        assert skew[0]["resolved"] == boundary_exec  # the EARLIEST wins
+        assert skew[0]["boundaries"] == {"1minute": boundary_exec, "2minute": boundary_dec}
+        # The train fold hashes BOTH one-boundary cuts — including the
+        # (instrument, "1minute") exec entry (design §7.2: the exec cut is
+        # part of the train-slice snapshot identity).
+        expected_hash = data_snapshot_hash(
+            **_SCOPE,
+            slices={
+                ("NIFTY", "2minute"): train_slice_bars(decision, boundary=boundary_exec),
+                ("NIFTY", "1minute"): train_slice_bars(exec_1m, boundary=boundary_exec),
+            },
+        )
+        assert report.train_snapshot_hash == expected_hash
+        # Sanity: the resolved cut is 5 bars per stream (days 0..4) — the
+        # decision stream's OWN default cut would have kept days 0..7.
+        assert len(train_slice_bars(decision, boundary=boundary_exec)) == 5
+        assert len(train_slice_bars(exec_1m, boundary=boundary_exec)) == 5
+        assert len(train_slice_bars(decision)) == 8
+
+    def test_empty_exec_train_slice_skips_the_leaderboard(self, tmp_path: Path) -> None:
+        # A survivor leaderboard whose EXEC train slice is empty (the exec
+        # stream covers ONLY the lockbox window) is SKIPPED + counted — a
+        # refinement eval without its exec stream would be a decision-TF-era
+        # backtest (DEC-FILL-EXEC-GRID-1M-001 §3.3), never a silent fallback.
+        grid = self._coarse_grid(k_values=[0])
+        # Fabricate ONE persisted survivor at the grid's own tuple path (the
+        # skip fires BEFORE any cell recovery, so the row content is inert
+        # plumbing — only its (instrument, tf, mode) leaderboard key matters).
+        [tuple_] = iter_sweep_tuples(grid)
+        store_path = tuple_store_path(tmp_path, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store = ResultsStore(path=store_path)
+        store.append(dataclasses.replace(_row_for("ab" * 32), tf="2minute"))
+        store.flush()
+
+        decision = [_bar(d, 0, 100.0, 101.0) for d in range(190)]
+        # Exec stream: days 8..189 EXACTLY — its own boundary equals the
+        # decision one (same last day), so the resolved boundary is shared
+        # (no skew) and every exec bar is AT/AFTER it ⇒ empty exec train cut,
+        # while the decision train cut keeps days 0..7 (8 bars).
+        exec_1m = [_bar(d, 1, 100.0, 101.0) for d in range(8, 190)]
+        streams = {"2minute": decision, "1minute": exec_1m}
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit, capture_logs() as logs:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=lambda _i, tf_label: streams[tf_label],
+                audit=audit,
+                **_SCOPE,
+            )
+        assert lockbox_boundary(exec_1m) == lockbox_boundary(decision)  # no skew
+        assert not [e for e in logs if e["event"] == "stage3_wire.lockbox_tail_skew"]
+        assert train_slice_bars(decision) != ()  # the DECISION train is non-empty
+        assert report.leaderboards == 1
+        assert report.survivors_total == 1
+        assert report.skipped_empty_train == 1  # the exec-empty arm, counted
+        assert report.masks_refined == 0
+        assert report.cells == ()
+
+    def test_exec_map_is_memoised_per_instrument_tf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TWO leaderboards sharing ONE (instrument, tf) — same instrument,
+        # modes "A"/"B" (LeaderboardKey = (instrument, tf, mode)) — share ONE
+        # ExecGridMap build: the first board builds (the miss arm), the
+        # second reads the memo (the hit arm). The map is mask/SL/TP/mode-
+        # independent (design §1.5). The spy wraps stage3_wire's OWN
+        # reference so nothing else's builds are counted.
+        from brutex.engine import stage3_wire as stage3_mod
+
+        grid = _grid(k_values=[0])
+        # Fabricate ONE persisted store holding a mode-"A" and a mode-"B"
+        # survivor (mask 0, the grid's only sl=80/tp=50 cell) — each run_id
+        # re-derived exactly as recover_survivor_cell will (row.mode enters
+        # mask_run_id, so the two ids differ and each board recovers).
+        run_id_a = _run_id_for(grid, sl=80, tp=50)
+        run_id_b = mask_run_id(
+            mask=0,
+            direction="bull",
+            instrument="NIFTY",
+            tf="1minute",
+            mode="B",
+            params=canonical_trade_params(
+                sl_paisa=80,
+                tp_paisa=50,
+                prior_n=grid.prior_n,
+                proximity=None,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=grid.data_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        [tuple_] = iter_sweep_tuples(grid)
+        store_path = tuple_store_path(tmp_path, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store = ResultsStore(path=store_path)
+        store.append(_row_for(run_id_a))
+        store.append(dataclasses.replace(_row_for(run_id_b), mode="B"))
+        store.flush()
+
+        real_build = stage3_mod.build_exec_grid_map
+        built: list[int] = []
+
+        def counting_build(
+            decision_bars: object, exec_bars_1m: object, *, tf_minutes: int
+        ) -> object:
+            built.append(tf_minutes)
+            return real_build(decision_bars, exec_bars_1m, tf_minutes=tf_minutes)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(stage3_mod, "build_exec_grid_map", counting_build)
+        bars = _trending_bars(_N_DAYS)
+        audit_path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            report = run_stage3_pass(
+                grid,
+                results_root=tmp_path,
+                bars_for=lambda _i, _t: bars,
+                audit=audit,
+                **_SCOPE,
+            )
+        assert report.leaderboards == 2  # (NIFTY, 1minute, A) + (…, B)
+        assert report.masks_refined == 2  # both boards refined...
+        assert built == [1]  # ...over ONE memoised (instrument, tf) map build
+
+
 class TestRunStage3PassFull:
     def test_refines_every_leaderboard_survivor(
         self, pipeline: tuple[Path, Stage3PassReport]
@@ -729,12 +950,17 @@ class TestRunStage3PassFull:
         train_bars = train_slice_bars(_trending_bars(_N_DAYS))
         bar_bits = build_bar_bits(train_bars, proximity=None, prior_n=grid.prior_n)
         assert cell.tuple_.sl_paisa is not None and cell.tuple_.tp_paisa is not None
+        # Dual-feed fixed point (DEC-FILL-EXEC-GRID-1M-001): the grid tf label
+        # IS "1minute" == EXEC_INTERVAL_LABEL, so the pass's exec train slice
+        # equals the decision train slice (one boundary, same stream) — the
+        # re-evaluation passes the SAME cut as exec_bars_1m.
         metrics: ResultMetrics = metrics_for_mask(
             train_bars,
             bar_bits,
             row.mask_bits,
             direction=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=train_bars,
             stop_loss_paisa=cell.tuple_.sl_paisa,
             take_profit_paisa=cell.tuple_.tp_paisa,
             start_equity_paisa=grid.start_equity_paisa,
@@ -1474,16 +1700,36 @@ class TestManifestRecordRelPath:
 
 
 class TestEvaluatorOneLawWorstCase:
-    """DEC-FILL-WORST-CASE-ONLY-001: stage3_wire's ``_make_evaluator`` runs the
-    ONE hardcoded worst-case law — the fill_mode/policy seam is DELETED.
+    """DEC-FILL-WORST-CASE-ONLY-001 on the 1m grid: stage3_wire's
+    ``_make_evaluator`` runs the ONE hardcoded worst-case law — the
+    fill_mode/policy seam is DELETED — with fills on the 1-minute execution
+    stream (DEC-FILL-EXEC-GRID-1M-001; tf=1minute fixed point here).
 
-    Hand-derived pins on ``_trending_bars(3)`` (the worst-case-rankable
-    gap-up fixture) at ``evaluate(80, 50)``: 27 trades — 24 TP wins of
-    exactly +50 (entry at the narrow gap-up bar's HIGH; the next gap-up's
-    low clears the TP level so the fill is AT level) and 3 deep-bar
-    stop-outs (−115 each: entry fill o+0.40, stop floor o−0.40, deep low
-    o−0.75 → adverse fill min(level, low) = o−0.75) → gross_profit
-    24 × 50 = 1_200, gross_loss 3 × 115 = 345, net +855.
+    Hand-derived pins on ``_trending_bars(3)`` (3 days x 30 bars) at
+    ``evaluate(80, 50)``, mask=0 (a signal on EVERY decision bar):
+
+    * CADENCE (the delta vs the retired PR-A 27-trade pin): the exec-grid
+      map arms bar ``j`` from decision bar ``j-1``'s signal, and the walker
+      fills a due entry whenever it is flat and nothing closed ON that bar
+      — so after a TP exit on bar ``i``, bar ``i+1`` (armed by the EXIT
+      bar's own signal) fills immediately: a 2-bar win cycle
+      (entry j @HIGH, TP exit j+1), not PR-A's 3-bar one.
+    * WINS: entry at a narrow gap-up bar's HIGH = o+0.40; the next gap-up
+      opens +3.00 with low o'-0.10 far above the TP level (entry+0.50), so
+      the fill is AT level → exactly +50 each. A shallow bar interposing
+      (range o_s+0.10 .. o_s-0.10 vs TP entry+0.50 / SL entry-0.80) exits
+      nothing — the win completes on the following gap-up (3-bar hold).
+    * LOSSES: a trade entered on the gap-up BEFORE a shallow+deep pair
+      (entry h = o+0.40, SL floor o-0.40) survives the shallow bar
+      (low o-0.10) and stops on the deep bar (low o-0.75 <= floor):
+      adverse fill min(floor, low) = o-0.75 → −115. One deep bar per day
+      (cycles 4/8/12) → 3 losses.
+    * PER DAY: entries at bars 1,3,5,7,9 · 12,14,16 · 19,21,23 · 26,28
+      (the shallow bars at m=3,10,17,24 shift the cadence by one; the
+      cross-session drop kills each day's bar-0 arm) = 13 trades/day, 12
+      wins + 1 deep-bar loss → totals 39 trades, 36 wins, 3 losses:
+      gross_profit 36 × 50 = 1_800, gross_loss 3 × 115 = 345,
+      net 1_800 − 345 = +1_455.
     """
 
     def test_one_law_evaluation_reproduces_the_worst_case_pins(self) -> None:
@@ -1494,17 +1740,28 @@ class TestEvaluatorOneLawWorstCase:
         assert "fill_mode" not in inspect.signature(stage3_mod._make_evaluator).parameters
         bars = _trending_bars(3)
         bar_bits = build_bar_bits(bars)
+        # tf == 1minute fixed point (DEC-FILL-EXEC-GRID-1M-001 design §6):
+        # exec stream == decision stream + the once-per-(instrument, tf) map.
+        # Per-fill prices are PR-A-identical (no same-bar SL/TP trigger
+        # exists: narrow 0.50-range entry bars < the 0.80 stop; entry-bar
+        # high o+0.40 < the o+0.90 TP level, so the same-bar deferral never
+        # engages) — only the entry CADENCE changed (class docstring).
+        exec_map = build_exec_grid_map(bars, bars, tf_minutes=1)
         evaluate = stage3_mod._make_evaluator(
             bars=bars,
             bar_bits=bar_bits,
             mask=0,
             side=Side.BUY,
             tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=exec_map,
             start_equity_paisa=10_000_000,
             reference_stamper=None,
         )
         worst = evaluate(80, 50)
-        assert worst.total_trades == 27
-        assert worst.net_pnl_paisa == 855
-        assert worst.gross_profit_paisa == 1_200
+        # 39 trades = 3 days × 13 (class-docstring cadence derivation);
+        # 36 wins × 50 = 1_800; 3 deep-bar stops × 115 = 345; net +1_455.
+        assert worst.total_trades == 39
+        assert worst.net_pnl_paisa == 1_455
+        assert worst.gross_profit_paisa == 1_800
         assert worst.gross_loss_paisa == 345

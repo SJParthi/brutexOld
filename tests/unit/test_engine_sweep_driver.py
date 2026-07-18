@@ -20,6 +20,7 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     iter_masks_k_of_n,
 )
+from brutex.engine.exec_grid import build_exec_grid_map
 from brutex.engine.rust_metrics import (
     MAX_EXACT_EQUITY_PAISA,
     SELF_CHECK_SAMPLES,
@@ -135,19 +136,58 @@ class TestBuildEquityCurve:
         # +300 and -100 both land on bar index 1 → net +200 from there on.
         assert curve.equity_paisa == (1_000, 1_200, 1_200, 1_200, 1_200)
 
-    def test_trade_exit_not_a_bar_timestamp_raises(self) -> None:
+    def test_interior_and_late_exits_fold_onto_the_owning_bar(self) -> None:
+        # DEC-FILL-EXEC-GRID-1M-001 (design §3.8): the old exact-timestamp law
+        # ("exit_ts must be a bar timestamp") is RETIRED — exits now resolve on
+        # the 1-minute execution grid, so a coarse-TF trade's exit_ts is an
+        # INTERIOR instant of its owning decision bucket. P&L lands on the
+        # LAST bar whose label <= exit_ts (bisect_right - 1).
         bars = _session_bars()
-        stray = bars[-1].timestamp + timedelta(minutes=99)
+        trades = [
+            # Interior instant: bars[2].ts + 30s → bisect_right over the five
+            # labels finds the first label > exit at index 3 → owner idx 2.
+            ClosedTrade(
+                pnl_paisa=500,
+                mfe_paisa=600,
+                mae_paisa=50,
+                holding_bars=2,
+                entry_ts=bars[0].timestamp,
+                exit_ts=bars[2].timestamp + timedelta(seconds=30),
+                direction=Side.BUY,
+            ),
+            # Past the last label (the retired law's raise case): every label
+            # <= exit → owner is the LAST bar (idx 4), never an error.
+            ClosedTrade(
+                pnl_paisa=-200,
+                mfe_paisa=0,
+                mae_paisa=200,
+                holding_bars=1,
+                entry_ts=bars[3].timestamp,
+                exit_ts=bars[-1].timestamp + timedelta(minutes=99),
+                direction=Side.BUY,
+            ),
+        ]
+        curve = build_equity_curve(bars, trades, start_equity_paisa=1_000, tf_minutes=1)
+        # 1_000 flat → +500 on idx 2 → 1_500 → -200 on idx 4 → 1_300.
+        assert curve.equity_paisa == (1_000, 1_000, 1_500, 1_500, 1_300)
+
+    def test_trade_exit_before_first_label_raises(self) -> None:
+        # The ONE remaining out-of-window refusal: an exit_ts strictly before
+        # the first bar's label has no owning bar (bisect idx < 0) → LOUD.
+        bars = _session_bars()
+        stray = bars[0].timestamp - timedelta(minutes=1)
         trade = ClosedTrade(
             pnl_paisa=1,
             mfe_paisa=1,
             mae_paisa=0,
             holding_bars=1,
-            entry_ts=bars[0].timestamp,
+            # entry_ts == exit_ts (ClosedTrade refuses exit < entry) — both
+            # strictly before the first bar's label, the out-of-window shape.
+            entry_ts=stray,
             exit_ts=stray,
             direction=Side.BUY,
         )
-        with pytest.raises(ValueError, match="not a bar timestamp"):
+        with pytest.raises(ValueError, match="precedes the first bar's label"):
             build_equity_curve(bars, [trade], tf_minutes=1)
 
     def test_single_bar_span_floor(self) -> None:
@@ -162,13 +202,18 @@ class TestBuildEquityCurve:
 
 
 class TestEvaluateCombo:
+    # tf == 1minute FIXED POINT (DEC-FILL-EXEC-GRID-1M-001 design §6): the
+    # decision stream IS the execution stream, so every call passes
+    # exec_bars_1m=bars — the dual-feed call shape with PR-A-identical timing.
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            evaluate_combo([], 0, direction=Side.BUY, tf_minutes=1)
+            evaluate_combo([], 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_runs_full_chain_and_returns_metrics(self) -> None:
         bars = _session_bars()
-        metrics = evaluate_combo(bars, required_mask=0, direction=Side.BUY, tf_minutes=1)
+        metrics = evaluate_combo(
+            bars, required_mask=0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         # mask=0 enters on every bar → at least one trade closes by end-of-data.
         assert metrics.total_trades >= 1
         assert metrics.winning_trades + metrics.losing_trades <= metrics.total_trades
@@ -180,7 +225,11 @@ class TestEvaluateCombo:
         # The self-contradictory mask never fires (and day-1 anchor bits are
         # cleared too) → zero trades → an all-zero metrics row, not an error.
         metrics = evaluate_combo(
-            bars, required_mask=_IMPOSSIBLE_MASK, direction=Side.BUY, tf_minutes=1
+            bars,
+            required_mask=_IMPOSSIBLE_MASK,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
         )
         assert metrics.total_trades == 0
         assert metrics.net_pnl_paisa == 0
@@ -193,6 +242,7 @@ class TestEvaluateCombo:
             required_mask=0,
             direction=Side.SELL,
             tf_minutes=1,
+            exec_bars_1m=bars,
             stop_loss_paisa=200,
             take_profit_paisa=100,
             start_equity_paisa=5_000_000,
@@ -207,7 +257,9 @@ class TestEvaluateCombo:
         bars = _session_bars()
         stale = (bars[0].timestamp.astimezone(_IST).date().toordinal() - 1,)
         with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
-            evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=stale)
+            evaluate_combo(
+                bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, roll_schedule=stale
+            )
 
     def test_covering_schedule_matches_the_schedule_aware_sweep(self) -> None:
         # The single-contract equivalence oracle: evaluate_combo under a
@@ -215,28 +267,37 @@ class TestEvaluateCombo:
         # already-threaded sibling), and the defaults stay the spot path.
         bars = _session_bars()
         covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
-        direct = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=covering)
+        direct = evaluate_combo(
+            bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, roll_schedule=covering
+        )
         [(_, swept)] = sweep_masks(
-            bars, [0], direction=Side.BUY, tf_minutes=1, roll_schedule=covering
+            bars, [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, roll_schedule=covering
         )
         assert direct == swept
         assert evaluate_combo(
-            bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=None, apply_1day_mask=False
-        ) == evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+            bars,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            roll_schedule=None,
+            apply_1day_mask=False,
+        ) == evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
 
 
 # ────── sweep_masks + rank_sweep (the leaderboard machine) ──────
 
 
 class TestSweepMasks:
+    # tf == 1minute fixed point throughout: exec_bars_1m=bars (design §6).
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            sweep_masks([], [0], direction=Side.BUY, tf_minutes=1)
+            sweep_masks([], [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_one_pair_per_mask(self) -> None:
         bars = _session_bars()
         masks = list(iter_masks_k_of_n(1, n=52))[:5]
-        pairs = sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1)
+        pairs = sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         assert [mask for mask, _ in pairs] == masks
         assert all(isinstance(m, ResultMetrics) for _, m in pairs)
 
@@ -245,17 +306,37 @@ class TestSweepMasks:
         # metrics as evaluate_combo per mask (no behavioural drift from the refactor).
         bars = _session_bars()
         mask = 0
-        pairs = sweep_masks(bars, [mask], direction=Side.BUY, tf_minutes=1)
+        pairs = sweep_masks(bars, [mask], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         _, swept = pairs[0]
-        direct = evaluate_combo(bars, mask, direction=Side.BUY, tf_minutes=1)
+        direct = evaluate_combo(bars, mask, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         assert swept == direct
+
+    def test_prebuilt_exec_map_is_adopted_not_rebuilt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The hot sweep spine threads the tuple's memoised ExecGridMap
+        # (DEC-FILL-EXEC-GRID-1M-001 design §1.5): a caller-supplied map is
+        # ADOPTED — the build seam is never re-entered — and the results are
+        # byte-identical to the derive-here arm.
+        bars = _session_bars()
+        baseline = sweep_masks(bars, [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
+        emap = build_exec_grid_map(bars, bars, tf_minutes=1)
+
+        def _bomb(*args: object, **kwargs: object) -> None:
+            raise AssertionError("a supplied exec_map must never be rebuilt")
+
+        monkeypatch.setattr("brutex.engine.sweep_driver.build_exec_grid_map", _bomb)
+        with_map = sweep_masks(
+            bars, [0], direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, exec_map=emap
+        )
+        assert with_map == baseline
 
 
 class TestRankSweep:
     def test_returns_ranked_leaderboard(self) -> None:
         bars = _session_bars()
         masks = list(iter_masks_k_of_n(1, n=52))[:6]
-        ranked = rank_sweep(bars, masks, direction=Side.BUY, tf_minutes=1)
+        ranked = rank_sweep(bars, masks, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         # A list of RankedCombo — possibly empty when no combo clears the hard
         # gates on this tiny synthetic session (the gate discipline, not an error).
         assert isinstance(ranked, list)
@@ -271,7 +352,7 @@ class TestRankSweepOverBits:
 
     def test_empty_bars_raises(self) -> None:
         with pytest.raises(ValueError, match="bars must be non-empty"):
-            rank_sweep_over_bits([], [0, 1], 2, direction=Side.BUY, tf_minutes=1)
+            rank_sweep_over_bits([], [0, 1], 2, direction=Side.BUY, tf_minutes=1, exec_bars_1m=[])
 
     def test_equivalent_to_explicit_rank_sweep(self) -> None:
         # rank_sweep_over_bits is exactly rank_sweep over the K-of-bits mask space —
@@ -279,9 +360,15 @@ class TestRankSweepOverBits:
         bars = _session_bars()
         bits = [0, 1, 2]
         explicit = rank_sweep(
-            bars, list(iter_masks_k_of_bits(bits, 2)), direction=Side.BUY, tf_minutes=1
+            bars,
+            list(iter_masks_k_of_bits(bits, 2)),
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
         )
-        viabits = rank_sweep_over_bits(bars, bits, 2, direction=Side.BUY, tf_minutes=1)
+        viabits = rank_sweep_over_bits(
+            bars, bits, 2, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         assert viabits == explicit
         assert isinstance(viabits, list)
         assert all(isinstance(rc, RankedCombo) for rc in viabits)
@@ -290,13 +377,23 @@ class TestRankSweepOverBits:
         # C(3, 2) = 3 masks > max_combos=2 → refuse (honest guardrail), no sweep run.
         bars = _session_bars()
         with pytest.raises(ValueError, match=r"exceeds max_combos=2"):
-            rank_sweep_over_bits(bars, [0, 1, 2], 2, direction=Side.BUY, tf_minutes=1, max_combos=2)
+            rank_sweep_over_bits(
+                bars,
+                [0, 1, 2],
+                2,
+                direction=Side.BUY,
+                tf_minutes=1,
+                exec_bars_1m=bars,
+                max_combos=2,
+            )
 
     def test_k_too_large_raises(self) -> None:
         # count_combos rejects k > n_unique before any enumeration.
         bars = _session_bars()
         with pytest.raises(ValueError, match="invalid k"):
-            rank_sweep_over_bits(bars, [0, 1], 3, direction=Side.BUY, tf_minutes=1)
+            rank_sweep_over_bits(
+                bars, [0, 1], 3, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+            )
 
     def test_out_of_range_bit_raises_after_cap_passes(self) -> None:
         # C(2, 1) = 2 clears the default cap, so the range check in the generator
@@ -305,7 +402,9 @@ class TestRankSweepOverBits:
         # 128 is the first out-of-range position.
         bars = _session_bars()
         with pytest.raises(ValueError, match="out of range"):
-            rank_sweep_over_bits(bars, [0, 128], 1, direction=Side.BUY, tf_minutes=1)
+            rank_sweep_over_bits(
+                bars, [0, 128], 1, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+            )
 
     def test_default_cap_admits_full_vocab_k_of_4(self) -> None:
         # The documented envelope: the default cap admits C(52,4)=270,725? No — it is
@@ -314,7 +413,9 @@ class TestRankSweepOverBits:
         assert DEFAULT_MAX_COMBOS == 100_000
         bars = _session_bars()
         with pytest.raises(ValueError, match="exceeds max_combos=100000"):
-            rank_sweep_over_bits(bars, list(range(52)), 4, direction=Side.BUY, tf_minutes=1)
+            rank_sweep_over_bits(
+                bars, list(range(52)), 4, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+            )
 
 
 class TestStage1BPreFilter:
@@ -330,14 +431,24 @@ class TestStage1BPreFilter:
         bars = _session_bars()
         # mask 0 fires on every bar (5 hits); the all-52 mask fires on no bar.
         pairs = sweep_masks(
-            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=1
+            bars,
+            [0, _IMPOSSIBLE_MASK],
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            min_hits=1,
         )
         assert [m for m, _ in pairs] == [0]
 
     def test_min_hits_zero_keeps_every_mask(self) -> None:
         bars = _session_bars()
         pairs = sweep_masks(
-            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=0
+            bars,
+            [0, _IMPOSSIBLE_MASK],
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            min_hits=0,
         )
         assert [m for m, _ in pairs] == [0, _IMPOSSIBLE_MASK]
 
@@ -345,8 +456,14 @@ class TestStage1BPreFilter:
         bars = _session_bars()
         # Prepend mask 0 (always 5 hits → always survives) so a survivor exists.
         masks = [0, *list(iter_masks_k_of_n(1, n=52))[:7]]
-        full = dict(sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1, min_hits=0))
-        filtered = sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1, min_hits=1)
+        full = dict(
+            sweep_masks(
+                bars, masks, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, min_hits=0
+            )
+        )
+        filtered = sweep_masks(
+            bars, masks, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, min_hits=1
+        )
         hits = count_supermasks(build_bar_bits(bars), masks)
         expected = [m for m, h in zip(masks, hits, strict=True) if h >= 1]
         assert [m for m, _ in filtered] == expected
@@ -359,7 +476,12 @@ class TestStage1BPreFilter:
         # The impossible mask is pruned; empty leaderboard either way (5 synthetic
         # bars never clear the 30-trade gate) — proving the prune changes no ranking.
         ranked = rank_sweep(
-            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=1
+            bars,
+            [0, _IMPOSSIBLE_MASK],
+            direction=Side.BUY,
+            tf_minutes=1,
+            exec_bars_1m=bars,
+            min_hits=1,
         )
         assert ranked == []
 
@@ -368,9 +490,11 @@ class TestStage1BPreFilter:
         # is identical to simulating them all (they would all be gated out anyway).
         bars = _session_bars()
         bits = [0, 1, 2]
-        with_filter = rank_sweep_over_bits(bars, bits, 2, direction=Side.BUY, tf_minutes=1)
+        with_filter = rank_sweep_over_bits(
+            bars, bits, 2, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars
+        )
         no_filter = rank_sweep_over_bits(
-            bars, bits, 2, direction=Side.BUY, tf_minutes=1, min_hits=0
+            bars, bits, 2, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars, min_hits=0
         )
         assert with_filter == no_filter
 
@@ -445,14 +569,24 @@ class TestRustMetricsTail:
         tf_minutes: int = 1,
     ) -> tuple[ResultMetrics, ResultMetrics]:
         # Explicit "0" — the operator kill switch — so the OFF arm stays the
-        # Python tail under the ADR-0017 default-ON constant.
+        # Python tail under the ADR-0017 default-ON constant. exec_bars_1m=bars
+        # is the tf=1minute fixed point (DEC-FILL-EXEC-GRID-1M-001 design §6) —
+        # total_bars = len(exec_bars_1m) = len(bars), identical on both arms.
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
-            bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+            bars,
+            trades,
+            start_equity_paisa=start_equity_paisa,
+            tf_minutes=tf_minutes,
+            exec_bars_1m=bars,
         )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         on = metrics_from_trades(
-            bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+            bars,
+            trades,
+            start_equity_paisa=start_equity_paisa,
+            tf_minutes=tf_minutes,
+            exec_bars_1m=bars,
         )
         return off, on
 
@@ -493,7 +627,7 @@ class TestRustMetricsTail:
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         bars = _session_bars()
         metrics = metrics_from_trades(
-            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
         )
         assert metrics.total_trades == 3
 
@@ -505,10 +639,10 @@ class TestRustMetricsTail:
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         with pytest.raises(ValueError, match="build_equity_curve: bars must be non-empty"):
-            metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1)
+            metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1, exec_bars_1m=[])
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         with pytest.raises(ValueError, match="build_equity_curve: bars must be non-empty"):
-            metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1)
+            metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1, exec_bars_1m=[])
 
     def test_nonpositive_start_equity_raises_identically_on_both_arms(
         self, monkeypatch: pytest.MonkeyPatch
@@ -521,24 +655,34 @@ class TestRustMetricsTail:
         for env in ("0", "1"):
             monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
-                metrics_from_trades(bars, [], start_equity_paisa=0, tf_minutes=1)
+                metrics_from_trades(bars, [], start_equity_paisa=0, tf_minutes=1, exec_bars_1m=bars)
             errors.append(str(exc_info.value))
         assert errors[0] == errors[1]
         assert "start_equity_paisa must be > 0" in errors[0]
 
-    def test_exit_ts_not_a_bar_timestamp_raises_identically_on_both_arms(
+    def test_exit_ts_before_first_label_raises_identically_on_both_arms(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The exact build_equity_curve ValueError (the _combo_error
-        fingerprint feed) fires with the SAME text on both arms."""
+        fingerprint feed) fires with the SAME text on both arms.
+
+        DEC-FILL-EXEC-GRID-1M-001: the retired "is not a bar timestamp" law
+        is gone — a post-window exit now folds onto the LAST bar (bisect),
+        so the out-of-window refusal both arms must share is the
+        PRE-window exit (no owning bar: idx < 0 → the ON arm's _exit_pairs
+        returns None and the Python tail raises the one exact error).
+        """
         bars = _session_bars()
+        # entry_ts == exit_ts (ClosedTrade refuses exit < entry) — both
+        # strictly before the first bar's label, the out-of-window shape.
+        pre_window = bars[0].timestamp - timedelta(minutes=7)
         stray = ClosedTrade(
             pnl_paisa=100,
             mfe_paisa=100,
             mae_paisa=0,
             holding_bars=1,
-            entry_ts=bars[0].timestamp,
-            exit_ts=bars[-1].timestamp + timedelta(minutes=7),
+            entry_ts=pre_window,
+            exit_ts=pre_window,
             direction=Side.BUY,
         )
         errors: list[str] = []
@@ -547,10 +691,12 @@ class TestRustMetricsTail:
         for env in ("0", "1"):
             monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
-                metrics_from_trades(bars, [stray], start_equity_paisa=1_000, tf_minutes=1)
+                metrics_from_trades(
+                    bars, [stray], start_equity_paisa=1_000, tf_minutes=1, exec_bars_1m=bars
+                )
             errors.append(str(exc_info.value))
         assert errors[0] == errors[1]
-        assert "is not a bar timestamp" in errors[0]
+        assert "precedes the first bar's label" in errors[0]
 
     def test_zero_tf_minutes_single_bar_raises_identically_on_both_arms(
         self, monkeypatch: pytest.MonkeyPatch
@@ -564,7 +710,9 @@ class TestRustMetricsTail:
         for env in ("0", "1"):
             monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
-                metrics_from_trades(bars, [], start_equity_paisa=1_000, tf_minutes=0)
+                metrics_from_trades(
+                    bars, [], start_equity_paisa=1_000, tf_minutes=0, exec_bars_1m=bars
+                )
             errors.append(str(exc_info.value))
         assert errors[0] == errors[1]
         assert "span_years must be > 0" in errors[0]
@@ -615,7 +763,7 @@ class TestRustMetricsTail:
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
-            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
         )
         monkeypatch.setattr(
             "brutex.engine.sweep_driver.drawdown_stats_via_kernel",
@@ -623,7 +771,7 @@ class TestRustMetricsTail:
         )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         on = metrics_from_trades(
-            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
         )
         _assert_metrics_bit_identical(off, on)
 
@@ -645,7 +793,7 @@ class TestRustMetricsTail:
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         reset_self_check_for_tests(remaining=0)
         on = metrics_from_trades(
-            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
         )
         assert on.max_drawdown_paisa == 12_345
         assert on.max_drawdown_pct == 6.25
@@ -663,7 +811,7 @@ class TestRustMetricsTail:
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
-            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+            bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
         )
         monkeypatch.setattr(
             fno_math,
@@ -673,7 +821,11 @@ class TestRustMetricsTail:
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         with capture_logs() as logs:
             on = metrics_from_trades(
-                bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
+                bars,
+                _hand_trades(bars),
+                start_equity_paisa=1_000_000,
+                tf_minutes=1,
+                exec_bars_1m=bars,
             )
         _assert_metrics_bit_identical(off, on)
         refused = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_result_refused"]
@@ -690,9 +842,9 @@ class TestRustMetricsTail:
         # Python tail under the ADR-0017 default-ON constant (delenv would
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
-        off = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+        off = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
-        on = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+        on = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         _assert_metrics_bit_identical(off, on)
 
 
@@ -700,7 +852,15 @@ class TestRustMetricsTail:
 
 
 class TestExitIndexFastPath:
-    """metrics_from_trades(exit_indices=…): fast path, demotion, OFF-arm inertness."""
+    """metrics_from_trades(exit_indices=…): fast path, demotion, OFF-arm inertness.
+
+    On the 1m grid (DEC-FILL-EXEC-GRID-1M-001 §3.8) the certified fast path
+    needs BOTH the execution stream and its ExecGridMap (`decision_of`
+    translates each 1-minute exit index to the owning decision bar); a
+    missing/None exec_map DEMOTES to the owning-bucket bisect fold. At the
+    tf=1minute fixed point (exec == decision stream) `decision_of[i] == i`,
+    so the translated pairs equal the bisect fold's — bit-identical results.
+    """
 
     @pytest.fixture(autouse=True)
     def _fresh_memo(self) -> None:
@@ -708,40 +868,54 @@ class TestExitIndexFastPath:
         reset_self_check_for_tests()
 
     def test_consistent_indices_skip_the_dict_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The certified fast path never builds the ts→index dict — the whole
-        point (O(trades) instead of O(N_bars) per mask)."""
+        """The certified fast path never builds a ts→index dict — the whole
+        point (O(trades) instead of O(N_bars) per mask) — and never demotes
+        (no `exit_indices_demoted` fallback: the map+indices are consumed)."""
         bars = _session_bars()
         trades = _hand_trades(bars)
+        emap = build_exec_grid_map(bars, bars, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
-        baseline = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        baseline = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
         def _bomb(window: object) -> None:
             raise AssertionError("fast path must not build the ts_to_index dict")
 
         monkeypatch.setattr("brutex.engine.sweep_driver.build_ts_index", _bomb)
-        fast = metrics_from_trades(
-            bars,
-            trades,
-            start_equity_paisa=1_000_000,
-            tf_minutes=1,
-            exit_indices=[1, 2, 4],
-        )
+        with capture_logs() as logs:
+            fast = metrics_from_trades(
+                bars,
+                trades,
+                start_equity_paisa=1_000_000,
+                tf_minutes=1,
+                exec_bars_1m=bars,
+                exec_map=emap,
+                exit_indices=[1, 2, 4],
+            )
         _assert_metrics_bit_identical(baseline, fast)
+        # The certified path was genuinely taken — no demotion fallback fired.
+        assert not [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
 
     def test_fast_path_equals_off_arm_bitwise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _session_bars()
         trades = _hand_trades(bars)
+        emap = build_exec_grid_map(bars, bars, tf_minutes=1)
         # Explicit "0" — the operator kill switch — so this arm stays the
         # Python tail under the ADR-0017 default-ON constant (delenv would
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
-        off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        off = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         fast = metrics_from_trades(
             bars,
             trades,
             start_equity_paisa=1_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
+            exec_map=emap,
             exit_indices=[1, 2, 4],
         )
         _assert_metrics_bit_identical(off, fast)
@@ -756,22 +930,26 @@ class TestExitIndexFastPath:
             [1, 3, 4],  # in range but the WRONG bar for trade 2's exit_ts
         ],
     )
-    def test_inconsistent_indices_demote_to_the_dict_not_the_oracle(
+    def test_inconsistent_indices_demote_to_the_fold_not_the_oracle(
         self, monkeypatch: pytest.MonkeyPatch, bad_indices: list[int]
     ) -> None:
-        """A bad stream demotes to the dict path (same kernel result) with one
-        warn-once — NEVER adopted, never a Python-oracle downgrade. The oracle
-        tail's entry (``build_equity_curve``) is BOMBED for the demoted call:
-        the demotion must land on the kernel-dict path, so the bomb proves the
-        "NEVER to the Python oracle" half of the demotion law (bit-identity
-        alone cannot — the oracle reproduces the kernel bytes by design)."""
+        """A bad stream demotes to the owning-bucket bisect fold (same kernel
+        result) with one warn-once — NEVER adopted, never a Python-oracle
+        downgrade. The oracle tail's entry (``build_equity_curve``) is BOMBED
+        for the demoted call: the demotion must land on the kernel fold path,
+        so the bomb proves the "NEVER to the Python oracle" half of the
+        demotion law (bit-identity alone cannot — the oracle reproduces the
+        kernel bytes by design)."""
         bars = _session_bars()
         trades = _hand_trades(bars)
+        emap = build_exec_grid_map(bars, bars, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
-        baseline = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        baseline = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
         def _bomb(*args: object, **kwargs: object) -> None:
-            raise AssertionError("demotion must land on the kernel dict path, not the oracle")
+            raise AssertionError("demotion must land on the kernel fold path, not the oracle")
 
         monkeypatch.setattr("brutex.engine.sweep_driver.build_equity_curve", _bomb)
         with capture_logs() as logs:
@@ -780,7 +958,74 @@ class TestExitIndexFastPath:
                 trades,
                 start_equity_paisa=1_000_000,
                 tf_minutes=1,
+                exec_bars_1m=bars,
+                exec_map=emap,
                 exit_indices=bad_indices,
+            )
+        _assert_metrics_bit_identical(baseline, demoted)
+        events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert [e["reason"] for e in events] == ["exit_indices_demoted"]
+
+    def test_certified_index_owned_by_no_decision_bar_raises_out_of_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CONSISTENT exit index landing on an exec bar BEFORE the first
+        decision label (decision_of == -1) is out-of-window: the fast path
+        withholds its pairs (never a fabricated fold at index -1) and the
+        Python tail raises build_equity_curve's exact pre-window error —
+        identically on both arms (DEC-FILL-EXEC-GRID-1M-001 §3.8)."""
+        exec_bars = _session_bars()
+        decision = exec_bars[2:]  # the first two exec bars precede every label
+        emap = build_exec_grid_map(decision, exec_bars, tf_minutes=1)
+        early = exec_bars[1].timestamp  # a real exec bar ts, pre-window
+        trade = ClosedTrade(
+            pnl_paisa=100,
+            mfe_paisa=100,
+            mae_paisa=0,
+            holding_bars=1,
+            entry_ts=early,
+            exit_ts=early,
+            direction=Side.BUY,
+        )
+        errors: list[str] = []
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+            with pytest.raises(ValueError) as exc_info:
+                metrics_from_trades(
+                    decision,
+                    [trade],
+                    start_equity_paisa=1_000,
+                    tf_minutes=1,
+                    exec_bars_1m=exec_bars,
+                    exec_map=emap,
+                    # Consistent vs the EXEC stream (exec_bars[1].ts == exit_ts)
+                    # — only the decision translation is out of window.
+                    exit_indices=[1],
+                )
+            errors.append(str(exc_info.value))
+        assert errors[0] == errors[1]
+        assert "precedes the first bar's label" in errors[0]
+
+    def test_missing_exec_map_demotes_the_supplied_indices(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """exec_map=None cannot translate 1m exit indices to decision bars —
+        even a CONSISTENT stream demotes to the bisect fold (one warn-once),
+        bit-identically (DEC-FILL-EXEC-GRID-1M-001 §3.8)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        baseline = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
+        with capture_logs() as logs:
+            demoted = metrics_from_trades(
+                bars,
+                trades,
+                start_equity_paisa=1_000_000,
+                tf_minutes=1,
+                exec_bars_1m=bars,
+                exit_indices=[1, 2, 4],  # consistent — but no map to translate
             )
         _assert_metrics_bit_identical(baseline, demoted)
         events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
@@ -797,6 +1042,7 @@ class TestExitIndexFastPath:
         (with samples pending the poison would autorevert instead)."""
         bars = _session_bars()
         trades = _hand_trades(bars)
+        emap = build_exec_grid_map(bars, bars, tf_minutes=1)
         monkeypatch.setattr(
             fno_math,
             "sweep_drawdown_stats",
@@ -810,6 +1056,8 @@ class TestExitIndexFastPath:
                 trades,
                 start_equity_paisa=1_000_000,
                 tf_minutes=1,
+                exec_bars_1m=bars,
+                exec_map=emap,
                 exit_indices=[1, 2, 5],  # out of range → inconsistent → demote
             )
         assert demoted.max_drawdown_paisa == 12_345
@@ -827,12 +1075,15 @@ class TestExitIndexFastPath:
         # Python tail under the ADR-0017 default-ON constant (delenv would
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
-        off_plain = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        off_plain = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         off_poison = metrics_from_trades(
             bars,
             trades,
             start_equity_paisa=1_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_indices=[0, 0, 0],  # wrong on purpose — must be ignored
         )
         _assert_metrics_bit_identical(off_plain, off_poison)
@@ -844,13 +1095,13 @@ class TestExitIndexFastPath:
         certified indices to the kernel arm — no per-mask dict build."""
         bars = _session_bars()
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
-        baseline = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+        baseline = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
 
         def _bomb(window: object) -> None:
             raise AssertionError("metrics_for_mask fast path must not build the dict")
 
         monkeypatch.setattr("brutex.engine.sweep_driver.build_ts_index", _bomb)
-        fast = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+        fast = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, exec_bars_1m=bars)
         _assert_metrics_bit_identical(baseline, fast)
 
 
@@ -874,9 +1125,13 @@ class TestKernelSelfCheck:
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         reset_self_check_for_tests(remaining=2)
         assert self_check_pending() is True
-        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         assert self_check_pending() is True  # one sample left
-        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         assert self_check_pending() is False  # budget exhausted — steady state
 
     def test_mismatch_ships_the_oracle_value_and_autoreverts(
@@ -892,7 +1147,9 @@ class TestKernelSelfCheck:
         # Python tail under the ADR-0017 default-ON constant (delenv would
         # resolve ON and silently compare kernel-vs-kernel).
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
-        off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        off = metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
         monkeypatch.setattr(
             fno_math,
             "sweep_drawdown_stats",
@@ -900,8 +1157,12 @@ class TestKernelSelfCheck:
         )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         with capture_logs() as logs:
-            first = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
-            second = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+            first = metrics_from_trades(
+                bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
+            second = metrics_from_trades(
+                bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
         _assert_metrics_bit_identical(off, first)  # the oracle value shipped
         _assert_metrics_bit_identical(off, second)  # latched → Python tail
         reverted = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
@@ -930,7 +1191,9 @@ class TestKernelSelfCheck:
         monkeypatch.setattr(fno_math, "sweep_drawdown_stats", _negzero)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         with capture_logs() as logs:
-            metrics_from_trades(bars, winners, start_equity_paisa=1_000_000, tf_minutes=1)
+            metrics_from_trades(
+                bars, winners, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
         reverted = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
         assert len(reverted) == 1
 
@@ -946,7 +1209,9 @@ class TestKernelSelfCheck:
             raise AssertionError("steady state must not run the oracle drawdown")
 
         monkeypatch.setattr("brutex.engine.sweep_driver._oracle_drawdown", _bomb)
-        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        metrics_from_trades(
+            bars, trades, start_equity_paisa=1_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
     def test_default_burn_in_budget_is_pinned(self) -> None:
         assert SELF_CHECK_SAMPLES == 16
