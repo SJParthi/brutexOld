@@ -413,6 +413,196 @@ pub fn metrics_fold_trades(
         .map_err(PyValueError::new_err)
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Recency fold twin — DEC-METRICS-TRAILING-WINDOW-001 Stage-C2 (the Rust
+// mirror of `brutex.metrics.compute.fold_recency`).
+//
+// TWO fold products, both IEEE/integer-exact (the fold/combine exactness
+// law — NO libm in the fold; the exponential decay WEIGHTS stay in the
+// Python combine):
+//
+// 1. `trailing` — the EXISTING [`fold_trades_checked`] fold over the
+//    windowed subsequence `exit_us >= cutoff_us` (kernel-side filtering —
+//    the exact instant-compare law: two tz-aware datetimes compare
+//    identically to their epoch-µs integers, and a trade exiting exactly
+//    AT the cutoff instant is IN the window). `None` when the window
+//    holds zero trades — mirroring the Python fold's `None` arm.
+// 2. `decay_buckets` — the ONLY new fold state: exact i128 P&L sums keyed
+//    by whole 30-day months of age at exit. The bucket key mirrors
+//    Python's `max(0, (anchor - exit_ts).days) // DECAY_BUCKET_DAYS`
+//    EXACTLY: `timedelta.days` is floor division of the µs delta by
+//    86_400_000_000 with FLOOR toward -inf for negatives (`div_euclid`,
+//    NEVER `/` truncation — the FFI-semantics trap: a -1µs future exit is
+//    day -1, clamped to bucket 0, not day 0 via truncation), the max-0
+//    clamp applies BEFORE the `// 30`, and `// 30` on the then-non-negative
+//    days is plain division. Emitted SORTED ascending by key (BTreeMap —
+//    the Python fold sorts at emit so the combine's float summation order
+//    is deterministic; the kernel must match order-sensitively).
+//
+// The epoch basis is irrelevant to correctness — both the window compare
+// and the bucket key read only DIFFERENCES of the µs instants — but the
+// Python seam converts anchor/cutoff/exit through the ONE epoch helper so
+// the integers share a basis by construction.
+
+/// Microseconds per day — the `timedelta.days` divisor (86_400 s · 10⁶).
+pub const US_PER_DAY: i128 = 86_400_000_000;
+
+/// Whole days per decay bucket — mirrors
+/// `brutex.metrics.compute.DECAY_BUCKET_DAYS` (pinned by the differential
+/// suite; a drift here fails the burn-in bit-compare on the first row).
+pub const DECAY_BUCKET_DAYS: i128 = 30;
+
+/// The recency fold outputs, mirroring
+/// `brutex.metrics.compute.RecencyFolds` field-for-field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecencyFoldsOut {
+    /// The windowed [`TradeFoldsOut`], or `None` when zero trades exit
+    /// inside the trailing window.
+    pub trailing: Option<TradeFoldsOut>,
+    /// `(age_month_bucket, net_pnl_paisa)` pairs, sorted ascending by key.
+    pub decay_buckets: Vec<(i64, i128)>,
+}
+
+/// Pure core of [`metrics_fold_recency`] — `Result<_, String>` (NO
+/// `PyErr`) so the no-libpython `cargo test` link exercises every branch
+/// (the [`fold_trades_checked`] split). Columns are the SAME five the main
+/// fold takes plus the per-trade exit instants as epoch µs; `anchor_us` /
+/// `cutoff_us` are the Python-converted window bounds (the seam computes
+/// `cutoff = anchor - TRAILING_WINDOW` Python-side — the kernel treats the
+/// two independently, no window-width re-derivation).
+pub fn fold_recency_checked(
+    pnl_paisa: &[i64],
+    mfe_paisa: &[i64],
+    mae_paisa: &[i64],
+    holding_bars: &[i64],
+    returns: &[f64],
+    exit_us: &[i64],
+    anchor_us: i64,
+    cutoff_us: i64,
+) -> Result<RecencyFoldsOut, String> {
+    let n_trades = pnl_paisa.len();
+    if n_trades == 0 {
+        return Err(
+            "metrics_fold_recency: trades must be non-empty (the zero-trade row \
+             is _empty_metrics, the caller's arm)"
+                .to_string(),
+        );
+    }
+    if mfe_paisa.len() != n_trades
+        || mae_paisa.len() != n_trades
+        || holding_bars.len() != n_trades
+        || returns.len() != n_trades
+        || exit_us.len() != n_trades
+    {
+        return Err(format!(
+            "metrics_fold_recency: column lengths differ — pnl {}, mfe {}, mae {}, \
+             holding {}, returns {}, exit_us {}",
+            n_trades,
+            mfe_paisa.len(),
+            mae_paisa.len(),
+            holding_bars.len(),
+            returns.len(),
+            exit_us.len()
+        ));
+    }
+
+    // ── The trailing window fold — kernel-side filter + the verbatim main
+    // fold over the windowed columns (per-trade returns are subsequence-
+    // independent, so slicing the full-list returns column is exact).
+    let mut w_pnl: Vec<i64> = Vec::with_capacity(n_trades);
+    let mut w_mfe: Vec<i64> = Vec::with_capacity(n_trades);
+    let mut w_mae: Vec<i64> = Vec::with_capacity(n_trades);
+    let mut w_hold: Vec<i64> = Vec::with_capacity(n_trades);
+    let mut w_ret: Vec<f64> = Vec::with_capacity(n_trades);
+    for i in 0..n_trades {
+        if exit_us[i] >= cutoff_us {
+            w_pnl.push(pnl_paisa[i]);
+            w_mfe.push(mfe_paisa[i]);
+            w_mae.push(mae_paisa[i]);
+            w_hold.push(holding_bars[i]);
+            w_ret.push(returns[i]);
+        }
+    }
+    let trailing = if w_pnl.is_empty() {
+        None
+    } else {
+        Some(fold_trades_checked(
+            &w_pnl, &w_mfe, &w_mae, &w_hold, &w_ret,
+        )?)
+    };
+
+    // ── The decay buckets — exact integer partition of the trade stream.
+    // BTreeMap iteration is ascending by key, so the emit order matches the
+    // Python fold's `sorted(buckets.items())` with no extra sort. The µs
+    // delta is folded in i128 (two i64s differ by < 2⁶⁵ — overflow-free),
+    // and the bucket key is bounded by delta/(86_400e6·30) < 2⁶⁵/2.6e12 <
+    // 2³³, so the i64 narrowing below is provably in range.
+    let mut buckets: std::collections::BTreeMap<i64, i128> = std::collections::BTreeMap::new();
+    for i in 0..n_trades {
+        let delta_us = i128::from(anchor_us) - i128::from(exit_us[i]);
+        let days = delta_us.div_euclid(US_PER_DAY);
+        let key = if days < 0 {
+            0
+        } else {
+            days / DECAY_BUCKET_DAYS
+        };
+        let key_i64 = i64::try_from(key)
+            .map_err(|_| format!("metrics_fold_recency: bucket key {key} beyond i64"))?;
+        *buckets.entry(key_i64).or_insert(0) += i128::from(pnl_paisa[i]);
+    }
+
+    Ok(RecencyFoldsOut {
+        trailing,
+        decay_buckets: buckets.into_iter().collect(),
+    })
+}
+
+/// The wire shape [`metrics_fold_recency`] returns — `(trailing FoldWire
+/// or None, sorted (bucket, pnl_sum) pairs)`. The i128 sums cross as exact
+/// Python ints; the Python seam owns the `RecencyFolds` reassembly.
+pub type RecencyWire = (Option<FoldWire>, Vec<(i64, i128)>);
+
+/// Group a [`RecencyFoldsOut`] into the [`RecencyWire`] tuple shape.
+pub fn recency_wire(out: &RecencyFoldsOut) -> RecencyWire {
+    (
+        out.trailing.as_ref().map(fold_wire),
+        out.decay_buckets.clone(),
+    )
+}
+
+/// The recency FOLD over the five main columns + exit instants — the Rust
+/// mirror of `brutex.metrics.compute.fold_recency` (see the section
+/// docstring above). `returns` MUST be the Python-computed
+/// `[t.pnl_paisa / start_equity_paisa …]` column and `exit_us` /
+/// `anchor_us` / `cutoff_us` the Python-converted epoch-µs instants
+/// (bit-identity by construction — the seam owns those expressions).
+/// Raises `ValueError` on any input outside the validated envelope; the
+/// Python seam routes that row to the bit-exact Python oracle instead.
+#[pyfunction]
+pub fn metrics_fold_recency(
+    pnl_paisa: Vec<i64>,
+    mfe_paisa: Vec<i64>,
+    mae_paisa: Vec<i64>,
+    holding_bars: Vec<i64>,
+    returns: Vec<f64>,
+    exit_us: Vec<i64>,
+    anchor_us: i64,
+    cutoff_us: i64,
+) -> PyResult<RecencyWire> {
+    fold_recency_checked(
+        &pnl_paisa,
+        &mfe_paisa,
+        &mae_paisa,
+        &holding_bars,
+        &returns,
+        &exit_us,
+        anchor_us,
+        cutoff_us,
+    )
+    .map(|out| recency_wire(&out))
+    .map_err(PyValueError::new_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +812,186 @@ mod tests {
         assert_eq!(floats.0.to_bits(), out.downside_sum_sq.to_bits());
         assert_eq!(floats.1.to_bits(), out.p95.to_bits());
         assert_eq!(floats.2.to_bits(), out.p5.to_bits());
+    }
+
+    // ── Recency twin tests (DEC-METRICS-TRAILING-WINDOW-001 Stage-C2) ──
+
+    const DAY_US: i64 = 86_400_000_000;
+
+    /// Anchor at an arbitrary positive epoch instant; ages expressed in
+    /// exact days so the expected buckets are hand-derivable.
+    const ANCHOR_US: i64 = 1_767_262_800_000_000; // 2026-01-01T10:00+00:00
+    const CUTOFF_US: i64 = ANCHOR_US - 730 * DAY_US;
+
+    fn recency_columns(
+        pnl: &[i64],
+        ages_days: &[i64],
+    ) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, Vec<f64>, Vec<i64>) {
+        let mfe: Vec<i64> = pnl.iter().map(|&p| p.max(0)).collect();
+        let mae: Vec<i64> = pnl.iter().map(|&p| (-p).max(0)).collect();
+        let hold: Vec<i64> = vec![1; pnl.len()];
+        let returns: Vec<f64> = pnl.iter().map(|&p| (p as f64) / 1_000_000.0).collect();
+        let exit_us: Vec<i64> = ages_days.iter().map(|&d| ANCHOR_US - d * DAY_US).collect();
+        (pnl.to_vec(), mfe, mae, hold, returns, exit_us)
+    }
+
+    /// Bucket keys at the day 29/30/31 edges + the whole-month grid —
+    /// `max(0, days) // 30` exactly.
+    #[test]
+    fn recency_bucket_key_is_whole_30_day_months() {
+        let (pnl, mfe, mae, hold, ret, exit_us) =
+            recency_columns(&[10, 20, 30, 40, -50], &[0, 29, 30, 31, 95]);
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &exit_us, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        // day 0 + day 29 → bucket 0; day 30 + day 31 → bucket 1; day 95 → 3.
+        assert_eq!(out.decay_buckets, vec![(0, 30), (1, 70), (3, -50)]);
+    }
+
+    /// A fractional-day-old exit floors at `.days` — 29d23h59m59.999999s of
+    /// age is day 29 (bucket 0), never day 30; and a NEGATIVE age (exit
+    /// 1 µs AFTER the anchor) is day -1 via div_euclid (floor toward -inf,
+    /// NOT truncation-to-zero) then clamps to bucket 0.
+    #[test]
+    fn recency_bucket_fractional_and_negative_age_laws() {
+        let pnl = vec![7, 11];
+        let mfe = vec![7, 11];
+        let mae = vec![0, 0];
+        let hold = vec![1, 1];
+        let ret = vec![7e-6, 11e-6];
+        let exit_us = vec![ANCHOR_US - (30 * DAY_US - 1), ANCHOR_US + 1];
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &exit_us, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        assert_eq!(out.decay_buckets, vec![(0, 18)]);
+    }
+
+    /// The cutoff boundary is INCLUSIVE: an exit exactly AT the cutoff
+    /// instant is in the trailing window; 1 µs earlier is out.
+    #[test]
+    fn recency_cutoff_boundary_exact() {
+        let pnl = vec![100, 200];
+        let mfe = vec![100, 200];
+        let mae = vec![0, 0];
+        let hold = vec![1, 1];
+        let ret = vec![1e-4, 2e-4];
+        let exit_us = vec![CUTOFF_US, CUTOFF_US - 1];
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &exit_us, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        let trailing = match out.trailing {
+            Some(t) => t,
+            None => panic!("boundary exit must be IN the window"),
+        };
+        assert_eq!(trailing.n_trades, 1);
+        assert_eq!(trailing.net_pnl_paisa, 100);
+        // Both trades land in the buckets regardless of the window.
+        assert_eq!(out.decay_buckets.iter().map(|&(_, s)| s).sum::<i128>(), 300);
+    }
+
+    /// Zero trades in the window ⇒ trailing None; every trade in the
+    /// window ⇒ trailing == the full main fold (bit-for-bit).
+    #[test]
+    fn recency_trailing_none_and_full_window_equivalence() {
+        let (pnl, mfe, mae, hold, ret, _) = recency_columns(&[500, -300], &[0, 0]);
+        // All outside: ages beyond the window.
+        let far: Vec<i64> = vec![ANCHOR_US - 1000 * DAY_US, ANCHOR_US - 2000 * DAY_US];
+        let out =
+            match fold_recency_checked(&pnl, &mfe, &mae, &hold, &ret, &far, ANCHOR_US, CUTOFF_US) {
+                Ok(out) => out,
+                Err(err) => panic!("{err}"),
+            };
+        assert!(out.trailing.is_none());
+        assert_eq!(out.decay_buckets.iter().map(|&(_, s)| s).sum::<i128>(), 200);
+        // All inside: trailing == the main fold over the same columns.
+        let near: Vec<i64> = vec![ANCHOR_US - DAY_US, ANCHOR_US - 2 * DAY_US];
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &near, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        let full = match fold_trades_checked(&pnl, &mfe, &mae, &hold, &ret) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        assert_eq!(out.trailing, Some(full));
+    }
+
+    /// Bucket sums conserve the exact net; emit order is sorted ascending.
+    #[test]
+    fn recency_bucket_conservation_and_sort() {
+        let (pnl, mfe, mae, hold, ret, exit_us) =
+            recency_columns(&[5, -7, 9, -11, 13], &[400, 10, 3000, 10, 65]);
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &exit_us, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        assert_eq!(out.decay_buckets.iter().map(|&(_, s)| s).sum::<i128>(), 9);
+        let keys: Vec<i64> = out.decay_buckets.iter().map(|&(k, _)| k).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+        assert!(keys.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// Boundary refusals: empty trades; column length mismatches (each
+    /// column individually, incl. exit_us); a windowed-row invariant
+    /// violation surfaces the inner fold's error.
+    #[test]
+    fn recency_refusals() {
+        let empty: Vec<i64> = vec![];
+        let empty_f: Vec<f64> = vec![];
+        assert!(
+            fold_recency_checked(
+                &empty, &empty, &empty, &empty, &empty_f, &empty, ANCHOR_US, CUTOFF_US
+            )
+            .is_err()
+        );
+        let ok = vec![1i64];
+        let two = vec![1i64, 2];
+        let r = vec![1e-6];
+        let h = vec![1i64];
+        let e = vec![ANCHOR_US];
+        assert!(fold_recency_checked(&ok, &two, &ok, &h, &r, &e, ANCHOR_US, CUTOFF_US).is_err());
+        assert!(fold_recency_checked(&ok, &ok, &two, &h, &r, &e, ANCHOR_US, CUTOFF_US).is_err());
+        assert!(fold_recency_checked(&ok, &ok, &ok, &two, &r, &e, ANCHOR_US, CUTOFF_US).is_err());
+        assert!(
+            fold_recency_checked(&ok, &ok, &ok, &h, &[1e-6, 2e-6], &e, ANCHOR_US, CUTOFF_US)
+                .is_err()
+        );
+        assert!(fold_recency_checked(&ok, &ok, &ok, &h, &r, &two, ANCHOR_US, CUTOFF_US).is_err());
+        // A windowed row violating the main fold's envelope (holding < 1).
+        assert!(fold_recency_checked(&ok, &ok, &ok, &[0], &r, &e, ANCHOR_US, CUTOFF_US).is_err());
+    }
+
+    /// The recency wire grouping is a pure reshape.
+    #[test]
+    fn recency_wire_grouping_is_lossless() {
+        let (pnl, mfe, mae, hold, ret, exit_us) = recency_columns(&[500, -300], &[10, 900]);
+        let out = match fold_recency_checked(
+            &pnl, &mfe, &mae, &hold, &ret, &exit_us, ANCHOR_US, CUTOFF_US,
+        ) {
+            Ok(out) => out,
+            Err(err) => panic!("{err}"),
+        };
+        let (trailing_wire, buckets) = recency_wire(&out);
+        let trailing = match (&out.trailing, trailing_wire) {
+            (Some(t), Some(w)) => (t, w),
+            _ => panic!("trailing must be present on this fixture"),
+        };
+        assert_eq!(trailing.1, fold_wire(trailing.0));
+        assert_eq!(buckets, out.decay_buckets);
     }
 }

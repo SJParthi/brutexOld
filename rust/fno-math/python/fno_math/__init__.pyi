@@ -31,6 +31,7 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "metrics_fold_recency",
     "metrics_fold_trades",
     "popcount_bytes",
 ]
@@ -125,6 +126,39 @@ def sweep_drawdown_stats(
     `brutex.metrics.compute._drawdown_stats` returns them (percentages ×100),
     bit-identical inside the `start + Σ|pnl| ≤ 2**52` exactness envelope the
     Python wrapper pre-guards. Raises `ValueError` outside the envelope.
+    """
+    ...
+
+def metrics_fold_recency(
+    pnl_paisa: list[int],
+    mfe_paisa: list[int],
+    mae_paisa: list[int],
+    holding_bars: list[int],
+    returns: list[float],
+    exit_us: list[int],
+    anchor_us: int,
+    cutoff_us: int,
+) -> tuple[
+    tuple[
+        tuple[int, int, int, int, int, int, int],
+        tuple[int, int, int, int, int, int],
+        tuple[int, float, float, float, float],
+        tuple[float, float, float],
+    ]
+    | None,
+    list[tuple[int, int]],
+]:
+    """Recency FOLD twin (DEC-METRICS-TRAILING-WINDOW-001 Stage-C2).
+
+    The Rust mirror of `brutex.metrics.compute.fold_recency`: the trailing
+    window's `metrics_fold_trades` wire over the `exit_us >= cutoff_us`
+    subsequence (`None` when the window holds zero trades) plus the exact
+    integer `(age_month_bucket, net_pnl_paisa)` pairs sorted ascending
+    (bucket = `max(0, div_euclid(anchor_us - exit_us, 86_400_000_000)) //
+    30` — the `timedelta.days` floor law). `returns` and the epoch-µs
+    instants are Python-computed (bit-identity by construction). Raises
+    `ValueError` outside the validated envelope; the seam degrades to the
+    Python oracle.
     """
     ...
 
