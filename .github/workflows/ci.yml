@@ -1943,8 +1943,11 @@ jobs:
           # crossverify tail fence, and the CLI --auto gate (settle constant +
           # Muhurat deferral + composed mid-run belt). Both ship at 100%
           # line+branch standalone from the start.
+          # DEC-RUST-PULL-STATE-001 Wave 1B: the pull_scope kernel-seam arms
+          # (flag consults + degrade paths) live in the seam suite, which MUST
+          # join this gate so the module stays 100% line+branch.
           if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py tests/unit/test_pull_scope_rust_seam.py
           else
             echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
           fi
@@ -2568,10 +2571,26 @@ jobs:
           # last-pull OUTCOME classifier — a HALTED pull (disk-full /
           # market-hours / quota / …) must never render the clean-completion
           # green. 100% line+branch on pull_outcome.py.
+          # DEC-RUST-PULL-STATE-001 Wave 1A: the pull_outcome kernel-seam arms
+          # (flag consults + code composition + degrade paths) live in the seam
+          # suite, which MUST join this gate so the module stays 100%
+          # line+branch.
           if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py tests/unit/test_pull_outcome_rust_seam.py
           else
             echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-RUST-PULL-STATE-001 (Waves 1A/1B/1C): the pull-state Rust
+          # facade brutex/pull_state_rust.py — its 100% line+branch is a
+          # MULTI-FILE-suite property by construction (each wave's accessor
+          # section is exercised by that wave's OWN seam suite, stem-named for
+          # the CONSUMER module it gates), so this STATIC gate runs exactly
+          # the curated 4-file suite; the discovery gate excludes the facade
+          # for the same structural reason (see COVERAGE_DISCOVERY_EXCLUDE).
+          if compgen -G "tests/unit/test_pull_state_rust.py" > /dev/null; then
+            pytest --cov=brutex.pull_state_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_state_rust.py tests/unit/test_pull_state_rust_stall.py tests/unit/test_pull_outcome_rust_seam.py tests/unit/test_pull_scope_rust_seam.py
+          else
+            echo "(brutex.pull_state_rust test file not present yet — gate inactive)"
           fi
           # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
           # health-hub fold (nightly · backup dead-man · doctor · mutation ·

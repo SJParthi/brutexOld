@@ -229,6 +229,15 @@ class TestDiscoverTouchedModules:
         #     stem match, 100.00% with the pair; the static whole-engine gate runs
         #     tests/unit/test_engine_*.py together at 100%
         #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
+        #   * brutex/pull_state_rust.py — the pull-state Rust facade
+        #     (DEC-RUST-PULL-STATE-001 Waves 1A/1B/1C): each wave's
+        #     kernel-accessor section is exercised by that wave's OWN seam
+        #     suite, stem-named for the CONSUMER module it gates
+        #     (test_pull_outcome_rust_seam.py / test_pull_scope_rust_seam.py),
+        #     so the stem-matched test_pull_state_rust*.py pair measures ~62%
+        #     standalone; the dedicated static ci.yml gate runs the curated
+        #     4-file suite at 100.00% + the whole-package floor (the
+        #     pull_controller.py precedent).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -240,6 +249,7 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
                     "brutex/engine/sweep_driver.py",
+                    "brutex/pull_state_rust.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
