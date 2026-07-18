@@ -35,3 +35,9 @@ SNAPSHOT body, so an edit alone does not re-run them — close→reopen the PR
 body and heals on edit alone.
 
 Delete this prmeta branch after applying.
+
+> STATUS UPDATE (2026-07-18, lane owner): the relay's body-apply to PR #1629 is
+> CONFIRMED DONE (all four body gates re-verified green against current main's
+> scripts). This branch is deletable — but leave deletion to the coordinator
+> after verification. The lane owner's resync push (post merge-forward) is the
+> CI retrigger; no close/reopen needed.
