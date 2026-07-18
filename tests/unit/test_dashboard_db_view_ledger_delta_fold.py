@@ -641,7 +641,7 @@ def _write_pre_provenance_base(lake: Path, security_id: str, *, bars: int = 5) -
         ]
     )
     # Drift pin: "14-col" IS the store schema's pre-#1512/#1585 prefix, by name.
-    assert tuple(schema.names) == wls._COLUMNS[:14]
+    assert tuple(schema.names) == _STORE_COLUMNS[:14]
     table = pa.table(
         {
             "market": ["groww"],
