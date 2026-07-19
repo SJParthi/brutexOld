@@ -3659,16 +3659,39 @@ hostile-review pass._
   retains the DELETED oracle loop VERBATIM as the frozen IN-TEST reference
   (the tf_resampler frozen-oracle idiom) and hypothesis-differentials the
   unified path against it (bars str()-level, exception triple,
-  log-sequence equality). BEHAVIOR DELTAS (each hostile/planted-input-only,
-  sanctioned + disclosed): wheel-absent materialization fails LOUD (boot
-  without the wheel still works — imports stay wheel-lazy, the requirement
-  bites at the first materialization/barrier construction); null consulted
-  columns → typed corrupt-column ValueError; out-of-envelope timestamps
-  with the screen on → the loud envelope refusal; SET-falsy/junk
+  log-sequence equality). BEHAVIOR DELTAS (SIX after the refuter
+  round — each hostile/planted-input-only, sanctioned + disclosed):
+  wheel-absent materialization fails LOUD (boot without the wheel still
+  works — imports stay wheel-lazy, the requirement bites at the first
+  materialization/barrier construction); null consulted columns → typed
+  corrupt-column ValueError (refuter wording correction: on the ONE
+  null-`volume`-on-a-screen-SKIPPED-row sub-case the deleted oracle
+  silently SERVED 2 bars — refuse-harder, silent-serve→typed-refusal,
+  not raw-escape→typed); out-of-envelope timestamps with the screen on →
+  the loud envelope refusal (refuter wording correction: the NAIVE
+  pre-1970 stamp was oracle-RAISED — raise-vs-raise-differently inside
+  the same trigger class, never serve→refuse); SET-falsy/junk
   `BRUTEX_FEED_RUST`/`BRUTEX_FEED_MATERIALIZE_RUST` → a loud refusal; the
   decision-plane f64 rounding on hostile >2^53 integer-price tables
   (materialized values unchanged; decisions could differ from exact-int
-  comparisons — the disclosed residue). CI: the brutex_feed wheel joins
+  comparisons — the disclosed residue); and the REFUTER-FOUND delta (6) —
+  a planted `decimal128(20,2)`-price table with the screen ON: the
+  deleted oracle CRASHED (raw Decimal×float TypeError inside
+  BadTickScreen), the new kernel SERVES and skips-and-WARNs on a ≥4x
+  decimal jump — accidental-crash → plausibly-correct serve;
+  planted-dtype-only, no production writer emits decimal128 price
+  columns. REFUTER ROUND folded (docs-only ledger amendment over gate
+  widening — the per-item record lives in MIGRATION.md #1957): Claim A
+  (P-06 barrier parity) UNREFUTED over 19,933 differential ops — the
+  ≥2^63 / bool-index / float-index observations each stricter-or-equal,
+  degenerate-input-only (`advance_to(2**63)` old-silent-succeed → new
+  OverflowError — a loud raise, never a silent look-ahead); Claim B
+  letter-refuted on the ONE decimal128 shape → delta (6) + the two
+  wording corrections, canonical-plane parity-clean over ~3,000 executed
+  cases; Claim C (the >2^53 residue is unreachable from a healthy
+  production lake) STANDS over REAL-writer lakes; the Decimal-price
+  junk-typed-gate refusal stays the backticked unminted follow-up
+  `DEC-FEED-DECIMAL-PRICE-GATE-001`. CI: the brutex_feed wheel joins
   the property job's install subset (test_lookahead_properties.py + the
   parity module now construct wheel-required barriers). GATES: touched
   modules 100% line+branch on their ci.yml gates (feed_rust standalone;
