@@ -36,7 +36,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import TradeDetail, TradeSimWalker, simulate_trades
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 
@@ -86,6 +86,19 @@ def _corpus() -> list[tuple[str, list[CandleBar], int, Side, int | None, int | N
         _bar(9, 15, "119", "120", "118", "119", day=_NEXT_DAY),  # +19 gap
         _bar(9, 16, "119.50", "120.50", "119", "119.50", day=_NEXT_DAY),
     ]
+    # A GENUINE both-levels-touched same-bar tie: entry at the flat @09:16 bar's
+    # 100.00 (BUY LOW / SELL LOW = 10000); the @09:17 bar (low 98.00 / high
+    # 102.00) fires BOTH the SL and TP levels at sl=tp=100 paisa, so the tie
+    # order is exercised (SL-first, DEC-FILL-WORST-CASE-ONLY-001). The
+    # worst-case level fill is level-invariant on a genuine tie, so the
+    # kernel/oracle trade is bit-identical either way — the exit_reason
+    # (SL-first) is pinned separately in ``test_genuine_same_bar_tie_reason``.
+    genuine_tie = [
+        _bar(9, 15, "100", "100", "100", "100"),
+        _bar(9, 16, "100", "100", "100", "100"),  # entry fill bar (flat 100.00)
+        _bar(9, 17, "100", "102", "98", "100"),  # both SL(99) + TP(101) fire
+        _bar(9, 18, "100", "100", "100", "100"),
+    ]
     return [
         ("cross_session_boundary", two_session, 0, Side.BUY, None, None),
         ("long_end_of_data", morning, 0, Side.BUY, None, None),
@@ -95,6 +108,8 @@ def _corpus() -> list[tuple[str, list[CandleBar], int, Side, int | None, int | N
         ("short_sl_at_adverse_max", morning, 0, Side.SELL, 500, None),
         ("short_tp_at_adverse_max", morning, 0, Side.SELL, None, 700),
         ("long_same_bar_sl_first", morning, 0, Side.BUY, 800, 600),
+        ("long_same_bar_genuine_tie", genuine_tie, 0, Side.BUY, 100, 100),
+        ("short_same_bar_genuine_tie", genuine_tie, 0, Side.SELL, 100, 100),
         ("forced_exit", afternoon, 0, Side.BUY, 5000, 5000),
         ("never_fires", morning, 1 << 63, Side.BUY, None, None),
     ]
@@ -124,6 +139,41 @@ class TestKernelMatchesOracle:
             )
         ]
         assert kernel == oracle
+
+    def test_genuine_same_bar_tie_reason(self) -> None:
+        # The genuine both-levels-touched tie's exit_reason is SL-first ALWAYS
+        # (DEC-FILL-WORST-CASE-ONLY-001). On a genuine tie the worst-case level
+        # fill is level-invariant (both legs clamp to min(level, low) for a BUY
+        # / max(level, high) for a SELL = the bar extreme), so the kernel's
+        # ClosedTrade output is bit-identical under either tie order — the
+        # kernel exposes NO separate exit-reason surface (the wire-visible
+        # exits_stop_loss / exits_take_profit counters + the top100 exits dict
+        # are folded from the Python walker's TradeDetail sink in
+        # combo_aggregates / trade_capture, never the kernel). So the tie order
+        # is pinned on the Python reason surface while parity (above) pins that
+        # the kernel handles the tie identically — together catching a Python
+        # walker tie flip OR a Python<->Rust tie-fill divergence.
+        genuine_tie = [
+            _bar(9, 15, "100", "100", "100", "100"),
+            _bar(9, 16, "100", "100", "100", "100"),  # entry fill bar
+            _bar(9, 17, "100", "102", "98", "100"),  # both SL(99) + TP(101) fire
+            _bar(9, 18, "100", "100", "100", "100"),
+        ]
+        bar_bits = build_bar_bits(genuine_tie)
+        for direction in (Side.BUY, Side.SELL):
+            sink: list[TradeDetail] = []
+            walker = TradeSimWalker(
+                direction=direction,
+                tf_minutes=1,
+                stop_loss_paisa=100,
+                take_profit_paisa=100,
+                detail_sink=sink,
+            )
+            trades = walker.run(genuine_tie, genuine_tie, mask_to_entry_signals(bar_bits, 0))
+            # trade[0] is the genuine tie exit at @09:17: pnl -200 (invariant),
+            # reason stop_loss (SL-first over TP on the tie).
+            assert trades[0].pnl_paisa == -200
+            assert sink[0].exit_reason == "stop_loss"
 
 
 class TestAbsoluteFrozenValues:

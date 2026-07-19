@@ -321,19 +321,42 @@ class TestSameBarTieBreak:
         ]
 
     def test_sl_first_tie_hardcoded(self) -> None:
-        # The tie is SL-first ALWAYS (DEC-FILL-WORST-CASE-ONLY-001). Fill =
-        # min(level 99.00, bar low 98.00) = 98.00; entry = the flat @09:16
-        # bar's HIGH 100.00.
-        trades = _sim(self._bars(), [True, False, False, False], sl=100, tp=100)
+        # The tie is SL-first ALWAYS (DEC-FILL-WORST-CASE-ONLY-001). Entry =
+        # the flat @09:16 bar's HIGH 100.00 (10000). SL level = 100.00 - 1.00
+        # = 99.00 (9900); TP level = 100.00 + 1.00 = 101.00 (10100). On the
+        # @09:17 bar (low 98.00 / high 102.00) BOTH levels fire — low 9800 <=
+        # SL 9900 AND high 10200 >= TP 10100 — a GENUINE both-levels-touched
+        # tie. The worst-case level fill is min(level, low): SL -> min(9900,
+        # 9800) = 9800, TP -> min(10100, 9800) = 9800, so pnl == -200 is
+        # INVARIANT under either leg — the DISTINGUISHING observable is
+        # exit_reason, which MUST read stop_loss (SL-first). A test that pins
+        # only pnl is vacuous w.r.t. its stated purpose (hostile-review
+        # coverage-honesty; the same SL-first tie is hardcoded in the Rust
+        # kernel — pinned in tests/golden/test_trade_sim_rust_golden.py).
+        sink: list[ts_mod.TradeDetail] = []
+        trades = _sim(self._bars(), [True, False, False, False], sl=100, tp=100, sink=sink)
         assert trades[0].pnl_paisa == 9800 - 10000  # SL first, at the bar LOW
+        assert sink[0].exit_reason == "stop_loss"  # pins SL over TP on the genuine tie
 
     def test_short_same_bar_sl_first(self) -> None:
-        # SELL mirror: entry at the flat bar's LOW 100.00; SL level 101.00;
-        # cover = max(level 10100, bar high 10200) = 10200.
+        # SELL mirror: entry at the flat @09:16 bar's LOW 100.00 (10000). SL
+        # level = 100.00 + 1.00 = 101.00 (10100, above); TP level = 100.00 -
+        # 1.00 = 99.00 (9900, below). On the @09:17 bar (low 98.00 / high
+        # 102.00) BOTH fire — high 10200 >= SL 10100 AND low 9800 <= TP 9900 —
+        # a GENUINE tie. Cover = max(level, high): SL -> max(10100, 10200) =
+        # 10200, TP -> max(9900, 10200) = 10200, so pnl == -200 is INVARIANT;
+        # exit_reason MUST read stop_loss (SL-first).
+        sink: list[ts_mod.TradeDetail] = []
         trades = _sim(
-            self._bars(), [True, False, False, False], direction=Side.SELL, sl=100, tp=100
+            self._bars(),
+            [True, False, False, False],
+            direction=Side.SELL,
+            sl=100,
+            tp=100,
+            sink=sink,
         )
         assert trades[0].pnl_paisa == 10000 - 10200
+        assert sink[0].exit_reason == "stop_loss"  # pins SL over TP on the genuine tie
 
 
 # ────────────────────────────────────────────────────────────────────────
