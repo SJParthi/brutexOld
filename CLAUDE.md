@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-19 (CLUB REGIME merge vehicle, branch
+`integration/club-regime` — the stack-fold of FOUR regime-robustness member
+PRs as ONE merge event off main tip 184a48a4: #1677 DEC-REGIME-TAXONOMY-001
+(MIGRATION.md #1961 — the shared regime taxonomy leaf
+`brutex/metrics/regime_taxonomy.py`: trend strata + VIX bands +
+structural-era boundaries under the RegimeRow refusal pattern, the SEBI
+2021-09-01 boundary honestly LABELED-UNVERIFIED; `TAXONOMY_VERSION = 1`) ·
+#1679 DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962 — Stage-4 cascade filter
+#10, default-OFF `extreme_vol_stratum`: the 2024+ |daily move| >= 2%
+MUST-SURVIVE stratum; FAIL on negative stratum expectancy over >= 30 trades
+or variance ratio > 4.0; thin/zero strata ABSTAIN visibly, never reject) ·
+#1680 DEC-REGIME-FRAGILITY-GATE-001 (#1963 — cascade filter #11, default-OFF
+`regime_fragility`: >80%-of-positive-P&L regime concentration (exact integer
+4/5 cross-multiply) + cross-era expectancy sign-flip; evidence computation
+config-gated — flag-OFF byte- AND log-identical) · #1684
+DEC-REGIME-REJECT-TIER-001 (#1964 — the `?preset=regime_robust` /results
+read-time membership filter over the cascade join overlay; OPTION A shipped,
+OPTION B documented; activation operator-gated). ALL default-OFF / INERT —
+the frozen sweep goldens pass UNMODIFIED, fixtures byte-untouched; the
+cascade config never enters the #1715 tuple digest, so a future flag-ON is a
+semantics-only operator ruling (NO re-sweep, NO re-key); every threshold is
+a CONSERVATIVE UNPROVEN default pending the first flag-ON calibration sweep.
+The four member ledger entries renumbered #1957–#1960 → #1961–#1964 at the
+fold (main took #1957–#1959 via club-O; DEC-LEDGER-RENUMBER-001).
+Cascade/display tier only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries pointers, never the
+story — each member's full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1961–#1964.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3631,7 +3659,69 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `integration/club-regime`
+  (**CLUB REGIME merge vehicle** — the stack-fold of FOUR regime-robustness
+  member PRs as ONE merge event off main tip 184a48a4, in stack order:
+  **#1677** DEC-REGIME-TAXONOMY-001 (MIGRATION.md #1961) — the shared regime
+  taxonomy leaf `brutex/metrics/regime_taxonomy.py` (pure stdlib):
+  `TrendStratum` + `trend_stratum_from_lens_token` over the session-lens
+  BOS/CHoCH tokens, `VolBand` + `classify_vix_band` (edges 13/17/25),
+  `EraBoundary` + `ERA_BOUNDARIES` under the RegimeRow refusal pattern
+  (2020-01-01 verified · 2021-09-01 SEBI peak-margin LABELED-UNVERIFIED —
+  secondary-corroborated, primary circular not retrieved, named follow-up ·
+  2024-11-14 weekly-expiry rationalization verified via the expiry calendar)
+  + the COVID overlay; `TAXONOMY_VERSION = 1`; the sha256 vocabulary drift
+  pin locks the canonical constants. **#1679**
+  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962) — Stage-4 cascade filter
+  **#10** (`extreme_vol_stratum`, default-OFF on `CascadeConfig`):
+  `brutex/metrics/extreme_vol_stratum.py` classifies 2024+ sessions with
+  |daily move| >= 2.0% as the must-survive stratum; a finalist FAILS iff its
+  stratum expectancy < 0 over >= `MIN_STRATUM_TRADES = 30` trades or its
+  stratum-vs-rest variance ratio strictly exceeds 4.0; zero-trade
+  (`unproven_current_regime`) and thin (`insufficient_stratum_trades`)
+  strata ABSTAIN — recorded visibly on the verdict, never a rejection, never
+  a silent pass; per-stratum stats surfaced (`extreme_vol_stats`) for the
+  operator calibration sweep. **#1680** DEC-REGIME-FRAGILITY-GATE-001
+  (#1963, stacked on #1677 + #1679) — cascade filter **#11**
+  (`regime_fragility`, default-OFF): `brutex/metrics/regime_fragility.py` —
+  regime_concentration (>80% of positive P&L in ONE trend or era stratum;
+  the exact integer `pos*5 > total*4` cross-multiply, no float epsilon) +
+  era_break (expectancy sign flip across structural eras); UNKNOWN strata
+  excluded from the laws, counted in stats; `insufficient_strata` abstains;
+  the evidence threading (`compute_regime_evidence`) is CONFIG-GATED in
+  `brutex/engine/cascade_wire.py`, so flag-OFF computes nothing and emits
+  nothing — byte- AND log-identical (caplog-pinned). **#1684**
+  DEC-REGIME-REJECT-TIER-001 (#1964) — the `?preset=regime_robust` /results
+  read-time membership filter in `brutex/dashboard/sweep_results_view.py`:
+  excludes rows whose cascade verdict FAILED at the two regime stages
+  (producer-derived `REGIME_REJECT_STAGES`), counts abstains via the
+  producers' exported `ABSTAIN_STATUSES` (emit-on-present
+  `regime_rejected_count`/`regime_unproven_count`); ordering delegates to
+  the min_dd_first preset law — the artifact/preset vocabulary in
+  `brutex/ranking/presets.py` is UNTOUCHED; OPTION A shipped (exclude
+  decided regime FAILs only), OPTION B (also exclude unproven) documented
+  for the activation ruling. INERT LAW (all four): every flag default-OFF;
+  flag-OFF byte- and log-identical; the frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` sweep goldens pass UNMODIFIED with
+  fixtures byte-untouched; the cascade config NEVER enters the #1715 tuple
+  digest, so flipping the filters ON is a SEMANTICS-ONLY operator ruling —
+  no re-sweep, no re-key, cached Stage-1/2 results reused. HONEST: every
+  threshold (2.0% · 30 · 4.0 · 80% · the VIX band edges) is a CONSERVATIVE
+  UNPROVEN default — the named activation path is fold → first flag-ON sweep
+  → read the emitted stats → calibrate + rule OPTION A-vs-B (+ the #1684
+  activation DEC); deferred + named: the VIX-band axis (needs a
+  stamper-revival DEC — the cascade's re-simulated trades are UNSTAMPED by
+  the §2 Rule 3 five-site law), D4 in-sweep stratification, the SEBI primary
+  circular retrieval, unsupported-stratum attribution scoping. The union
+  surfaces at the fold were docs/MIGRATION.md (the four member entries
+  renumbered #1957–#1960 → #1961–#1964 — main took #1957–#1959 via club-O;
+  DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001) + ci.yml
+  (additive gate union). Cascade/display tier only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars. Each
+  member's full record lives in its MIGRATION.md entry — this blurb carries
+  the club summary, never the round-by-round story.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -11025,7 +11115,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `integration/club-regime`
+  (CLUB REGIME merge vehicle — the stack-fold of the four regime-robustness
+  member PRs as ONE merge event: #1677 DEC-REGIME-TAXONOMY-001 (MIGRATION.md
+  #1961, the shared trend/VIX/era taxonomy leaf) · #1679
+  DEC-REGIME-MUST-SURVIVE-STRATUM-001 (#1962, cascade filter #10 — the
+  default-OFF 2024+ extreme-vol must-survive stratum) · #1680
+  DEC-REGIME-FRAGILITY-GATE-001 (#1963, cascade filter #11 — the default-OFF
+  regime-concentration + era-break fragility gate) · #1684
+  DEC-REGIME-REJECT-TIER-001 (#1964, the `?preset=regime_robust` /results
+  read-time filter, operator-gated activation). ALL default-OFF / INERT —
+  frozen goldens byte-stable; activation is semantics-only (the cascade
+  config never enters the #1715 tuple digest); thresholds are CONSERVATIVE
+  UNPROVEN defaults pending the flag-ON calibration sweep. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1961–#1964 for the full blurbs)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
