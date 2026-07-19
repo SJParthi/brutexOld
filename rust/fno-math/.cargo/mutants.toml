@@ -34,5 +34,9 @@
 #                 calendar, domain types) NOT on the Track-1 engine execution
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
+#   metrics_fold.rs — the DEC-METRICS-RUST-COMPUTE-FOLD-001 fold mirror
+#                 (MIGRATION.md #1902); NOT in the weekly cargo-mutants scope —
+#                 its gate is the per-PR `cargo test` (the greeks/batch.rs
+#                 #1892 precedent); gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
 examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]

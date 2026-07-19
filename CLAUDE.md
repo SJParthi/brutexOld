@@ -3026,7 +3026,12 @@ hostile-review pass._
   coordinator-assigned band; gaps are legal per DEC-LEDGER-RENUMBER-001** —
   build lane W2, the metrics-depth pack (operator-approved P0 items 4/8/13),
   STACKED on PR #1605's `claude/rust-metrics-compute-fold-r2` head (#1902) —
-  the PR opens after #1605 lands. WHAT SHIPPED, per entry: **(#1974)**
+  POSTURE: the vehicle-PR-only creation freeze — NO standalone PR; the branch
+  merges main forward once wave-2 PR #1688 (carrying #1605 via
+  crate-vehicle-6) lands, then declares to the census for post-#1688 vehicle
+  slotting; #1605's two hostile-review MINORs are folded HERE as the carrier
+  (the #1976 CARRIER RECORD carries the story). WHAT SHIPPED, per entry:
+  **(#1974)**
   `loss_rate` FIRST-CLASS on `ResultMetrics` (`losers/n` — scratch trades in
   the denominator only, so `loss_rate ≠ 1 − win_rate`, property-pinned) +
   the per-mask EXIT-REASON COUNTERS on the trade-sim wire

@@ -239,7 +239,7 @@ def metrics_rust_fold_enabled() -> bool:
     if stripped in _FALSY:
         return False
     if stripped:
-        warn_fallback_once("flag_unrecognised", value=raw)
+        warn_fallback_once("flag_unrecognised", value=repr(raw))
         return False
     return METRICS_RUST_FOLD_DEFAULT
 

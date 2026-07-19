@@ -192,7 +192,10 @@ class TestFlagMatrix:
         warns = _events(logs, "metrics_rust_fold.fallback")
         assert len(warns) == 1
         assert warns[0]["reason"] == "flag_unrecognised"
-        assert warns[0]["value"] == "ture"
+        # repr()'d for log-repr uniformity with the module's own
+        # kernel_error/result_refused sites (the #1605 hostile-review
+        # MINOR-1, folded by the W2 carrier).
+        assert warns[0]["value"] == repr("ture")
 
 
 class TestVocabularyMirrorPin:
