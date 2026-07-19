@@ -55,6 +55,12 @@ Honest envelope (Golden Rule #10)
   ``axis_defaults_assumed`` (true), a disclosed limit.
 * The verdict annotates; it never re-ranks, rewrites or hides the stored
   artifact (R13). Retirement is the champions leg's annotation.
+* NEGATIVE-discovery-Sharpe quirk (round-1 #6, accepted-disclosed): with
+  a negative discovery Sharpe the ``0.70×`` floor sits ABOVE discovery
+  (``0.70 × -1.0 = -0.7 > -1.0``), so a trailing Sharpe equal to a
+  negative discovery reads DECAYED — faithful to the ONE lockbox
+  tolerance formula, and such inputs should never reach the leg (a
+  negative-Sharpe finalist cannot pass the ranking gates into top100).
 """
 
 from __future__ import annotations
@@ -188,8 +194,15 @@ def discover_top100_runs(results_root: Path, *, limit: int) -> tuple[DiscoveredR
 
     Presence-only discovery over the :func:`contract_run_roots` law
     (validation is :func:`load_top100`'s job); deterministic order
-    ``(mtime, path)`` descending; unreadable dirs are skipped silently
-    (the probe's own ``suppress(OSError)`` posture).
+    ``(top100 mtime, path)`` descending; unreadable dirs are skipped
+    silently (the probe's own ``suppress(OSError)`` posture).
+
+    The sort keys on the **top100.json FILE mtime** — the artifact is
+    IMMUTABLE once written (R13) — deliberately NOT the run-DIR mtime,
+    which the legs' own sidecar writes (``run-delta.json`` /
+    ``decay-diff.json``) mutate: a dir-mtime key let a prior night's
+    sidecar-touched dir outrank a later run (round-1 MINOR #2, fixed).
+    The path tie-break keeps the order deterministic on equal mtimes.
     """
     candidates: list[tuple[float, str, Path]] = []
     for root in contract_run_roots(results_root):
@@ -198,7 +211,7 @@ def discover_top100_runs(results_root: Path, *, limit: int) -> tuple[DiscoveredR
                 if not child.is_dir() or not (child / "top100.json").is_file():
                     continue
                 with contextlib.suppress(OSError):
-                    candidates.append((child.stat().st_mtime, str(child), child))
+                    candidates.append(((child / "top100.json").stat().st_mtime, str(child), child))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return tuple(
         DiscoveredRun(runs_dir=child.parent, run_id=child.name, mtime=mtime)
@@ -230,6 +243,20 @@ def entry_join_key(entry: Mapping[str, object]) -> str:
     ``mask_hex | direction | instrument | tf | sl | tp`` (the arm carries
     the canonical trade params persisted per entry; ``mode`` is constant
     within an artifact).
+
+    HONEST LIMIT (round-1 MINOR #3): the key OMITS the non-default
+    Stage-1A axis params (``fib_anchor`` / ``prior_n`` / the
+    ``PriceSource`` cells) because the top100 entry schema provably does
+    NOT carry them (verified against ``top100_artifact._entry_payload``
+    — the entry keys are exactly the binding contract set), so two
+    finalists differing ONLY in an axis COLLIDE on this key. Until the
+    schema carries the axis fragments (named follow-up
+    DEC-TOP100-AXIS-JOIN-KEY-001) every dict keyed on this function
+    rides the LOUD collision guard
+    (:func:`brutex.nightly.champions._entries_by_join_key` — count +
+    WARN + keep-first, never a silent overwrite). Today's production
+    engine is cardinality-1 DEFAULT-cell (CLAUDE.md #1681), so a real
+    artifact cannot mix axes — the guard is defense-in-depth.
     """
     arm = entry.get("arm")
     arm_map: Mapping[str, object] = arm if isinstance(arm, Mapping) else {}

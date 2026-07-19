@@ -73,7 +73,12 @@ def write_top100_fixture(
     *,
     mtime: float | None = None,
 ) -> Path:
-    """Write a loader-valid ``top100.json`` + stamp into ``sweep_runs/<id>/``."""
+    """Write a loader-valid ``top100.json`` + stamp into ``sweep_runs/<id>/``.
+
+    *mtime* (optional) is applied to the IMMUTABLE ``top100.json`` FILE —
+    the discovery sort key (round-1 MINOR #2) — for tests that pin
+    explicit orderings; natural write-order mtimes suffice otherwise.
+    """
     from brutex.engine.top100_artifact import (
         TOP100_FILENAME,
         TOP100_SCHEMA_VERSION,
@@ -101,7 +106,7 @@ def write_top100_fixture(
     }
     (run_dir / TOP100_STAMP_FILENAME).write_text(json.dumps(stamp), encoding="utf-8")
     if mtime is not None:
-        os.utime(run_dir, (mtime, mtime))
+        os.utime(run_dir / TOP100_FILENAME, (mtime, mtime))
     return run_dir
 
 

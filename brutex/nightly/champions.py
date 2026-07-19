@@ -32,6 +32,32 @@ SAME challenger). RETIREMENT is an ANNOTATION only (era-tagged
 join identity); a champion record is NEVER deleted — promotion moves the
 old champion into the era-tagged ``former`` history (R13: kept forever).
 
+Crash convergence — the STATE-LEADS / LEDGER-TRAILS law (round-1 MAJOR #1)
+--------------------------------------------------------------------------
+``champions/state.json`` is the AUTHORITATIVE durable snapshot;
+``champions/champions.jsonl`` is the TRAILING tamper-evident commit log.
+Per transition the leg persists state ATOMICALLY **first**
+(:func:`save_champions_state`) and only then appends the transition to
+the hash-chained ledger — so a crash / SIGKILL / write fault in the
+window between the two leaves the ledger **under-counting** by at most
+that one transition (state already reflects it; the next night neither
+re-attempts it nor duplicates its ledger line), and the ledger can NEVER
+over-assert a transition state did not materialize (the phantom-PROMOTED
+class is structurally dead). A lost ledger tail is an honest under-count
+— the ledger records nothing retroactively. Durability cost (disclosed):
+one fsync'd atomic ``state.json`` rewrite per transition ON TOP of the
+ledger's own per-append fsync (``AuditWriter``,
+DEC-AUDIT-FSYNC-DURABILITY-001 — cadence unchanged) — O(transitions)
+per night, bounded by the scope count.
+
+Each scope's transition processing is additionally ISOLATED (round-1
+NIT #4): a per-scope failure — e.g. a hostile artifact whose
+instrument/tf/direction carries the ledger-forbidden ``|`` delimiter
+byte (``AuditFieldError``) — is counted (``scope_errors``) + warned
+once, and every other scope proceeds; the nightly is never broken. Such
+a scope's state mutations may persist with NO ledger line (the trailing
+under-count law above — warned every night it recurs).
+
 run-delta.json (DEC-NIGHTLY-RUN-DELTA-001)
 ------------------------------------------
 The nightly COMPARE substrate between the prior night's artifact and
@@ -74,6 +100,7 @@ from brutex.nightly.decay_math import champion_dominates, trailing_fold
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from brutex.data.catalog import Catalog
     from brutex.data.models import CandleBar
     from brutex.engine.top100_artifact import Top100Artifact
     from brutex.notifications.sweep_alerts import SweepAlerter
@@ -225,6 +252,37 @@ def save_champions_state(results_root: Path, state: Mapping[str, object]) -> Pat
 # ── run-delta ───────────────────────────────────────────────────────────
 
 
+def _entries_by_join_key(
+    entries: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, Mapping[str, object]], int]:
+    """``join_key → entry`` keep-FIRST, with a LOUD collision count.
+
+    :func:`~brutex.nightly.decay.entry_join_key` omits the non-default
+    Stage-1A axis params because the top100 entry schema provably does
+    not carry them (round-1 MINOR #3; named follow-up
+    DEC-TOP100-AXIS-JOIN-KEY-001) — two finalists differing ONLY in an
+    axis would collide here. A collision is COUNTED + WARNED and the
+    FIRST (best-ranked — artifact entries are rank-ascending) entry
+    wins; never a silent last-wins overwrite.
+    """
+    by_key: dict[str, Mapping[str, object]] = {}
+    collisions = 0
+    for entry in entries:
+        key = entry_join_key(entry)
+        if key in by_key:
+            collisions += 1
+            continue
+        by_key[key] = entry
+    if collisions:
+        logger.warning(
+            "nightly.champions.join_key_collision",
+            collisions=collisions,
+            detail="distinct top100 entries share a join key (axis params are "
+            "not in the entry schema — DEC-TOP100-AXIS-JOIN-KEY-001); keep-first",
+        )
+    return by_key, collisions
+
+
 def _entry_headline(entry: Mapping[str, object]) -> dict[str, object]:
     """The compact per-entry headline carried in run-delta rows."""
     metrics = entry.get("metrics")
@@ -241,8 +299,13 @@ def _entry_headline(entry: Mapping[str, object]) -> dict[str, object]:
 
 
 def build_run_delta(prior: Top100Artifact | None, current: Top100Artifact) -> dict[str, object]:
-    """The entered/dropped/rank-shift compare, joined on the snapshot-free key."""
-    current_by_key = {entry_join_key(e): e for e in current.entries}
+    """The entered/dropped/rank-shift compare, joined on the snapshot-free key.
+
+    Both key maps ride the LOUD :func:`_entries_by_join_key` collision
+    guard (keep-first + count + WARN); the total collision count is
+    surfaced as the additive ``join_collisions`` payload key.
+    """
+    current_by_key, current_collisions = _entries_by_join_key(current.entries)
     if prior is None:
         return {
             "status": "no_prior",
@@ -252,8 +315,9 @@ def build_run_delta(prior: Top100Artifact | None, current: Top100Artifact) -> di
             "dropped": [],
             "rank_moves": [],
             "common": 0,
+            "join_collisions": current_collisions,
         }
-    prior_by_key = {entry_join_key(e): e for e in prior.entries}
+    prior_by_key, prior_collisions = _entries_by_join_key(prior.entries)
     entered = [_entry_headline(e) for key, e in current_by_key.items() if key not in prior_by_key]
     dropped = [_entry_headline(e) for key, e in prior_by_key.items() if key not in current_by_key]
     rank_moves: list[dict[str, object]] = []
@@ -275,10 +339,39 @@ def build_run_delta(prior: Top100Artifact | None, current: Top100Artifact) -> di
         "dropped": dropped,
         "rank_moves": rank_moves,
         "common": common,
+        "join_collisions": current_collisions + prior_collisions,
     }
 
 
 # ── pooled re-validation ────────────────────────────────────────────────
+
+
+class _SharedCatalog:
+    """ONE lazily-opened :class:`~brutex.data.catalog.Catalog` per leg.
+
+    Round-1 NIT #5: ``_challenge`` used to open a fresh catalog per
+    challenged scope; the leg now shares one lazily-opened handle across
+    every challenge (the decay leg's one-catalog shape) and closes it
+    once at the end. No behavior change — pure handle reuse.
+    """
+
+    def __init__(self, lake_root: Path) -> None:
+        self._lake_root = lake_root
+        self._catalog: Catalog | None = None
+
+    def get(self) -> Catalog:
+        """Open on first use; return the shared handle thereafter."""
+        if self._catalog is None:
+            from brutex.data.catalog import Catalog
+
+            self._catalog = Catalog.open(self._lake_root / "catalog.duckdb")
+        return self._catalog
+
+    def close(self) -> None:
+        """Close the handle if it was ever opened (idempotent)."""
+        if self._catalog is not None:
+            self._catalog.close()
+            self._catalog = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +570,7 @@ def run_champions_leg(
             "dropped": len(delta["dropped"]),  # type: ignore[arg-type]
             "rank_moves": len(delta["rank_moves"]),  # type: ignore[arg-type]
             "common": delta["common"],
+            "join_collisions": delta["join_collisions"],
             "path": str(delta_path),
         }
     except OSError as exc:
@@ -485,6 +579,7 @@ def run_champions_leg(
 
     # ── champion transitions ──
     state = load_champions_state(results_root)
+    state["schema_version"] = _STATE_SCHEMA_VERSION
     champions_raw = state.get("champions")
     champions: dict[str, object] = champions_raw if isinstance(champions_raw, dict) else {}
     state["champions"] = champions
@@ -496,155 +591,196 @@ def run_champions_leg(
         by_scope.setdefault(champion_scope_key(entry), []).append(entry)
 
     transitions: list[dict[str, object]] = []
+    scope_errors = 0
     ledger_dir = _champions_dir(results_root)
     ledger_dir.mkdir(parents=True, exist_ok=True)
-    with AuditWriter.open(ledger_dir / LEDGER_FILENAME, actor="champions", resume=True) as ledger:
+    shared_catalog = _SharedCatalog(lake_root)
+    try:
+        with AuditWriter.open(
+            ledger_dir / LEDGER_FILENAME, actor="champions", resume=True
+        ) as ledger:
 
-        def _record(action: str, scope: str, payload: dict[str, object]) -> None:
-            ledger.append(action=action, subject=f"champion:{scope}", payload=payload)
-            transitions.append({"action": action, "scope": scope, **payload})
+            def _record(action: str, scope: str, payload: dict[str, object]) -> None:
+                # STATE-LEADS / LEDGER-TRAILS (round-1 MAJOR #1): the
+                # mutated state is persisted ATOMICALLY first, THEN the
+                # transition is committed to the hash-chained ledger — a
+                # crash between the two leaves an honest ledger
+                # UNDER-count, never a phantom transition the state never
+                # materialized (see the module-docstring law).
+                save_champions_state(results_root, state)
+                ledger.append(action=action, subject=f"champion:{scope}", payload=payload)
+                transitions.append({"action": action, "scope": scope, **payload})
 
-        for scope in sorted(by_scope):
-            entries = by_scope[scope]
-            eligible = [e for e in entries if challenger_eligible(e)]
-            champ = champions.get(scope)
-            if champ is None:
-                if not eligible:
-                    continue  # no champion, nothing eligible — nothing to record
-                record = _champion_record_from_entry(
-                    eligible[0], sweep_run_id=current.run_id, now_iso=now_iso, era=1
-                )
-                champions[scope] = record
-                _record(
-                    _ACTION_SEEDED,
-                    scope,
-                    {"join_key": record["join_key"], "run_id": record["run_id"], "era": 1},
-                )
-                continue
-            if not isinstance(champ, dict):
-                # A hand-corrupted record: refuse to judge over junk — reseed
-                # honestly next night after the operator inspects the state.
-                logger.warning("nightly.champions.record_corrupt", scope=scope)
-                continue
-            # Decay retire-FLAG (annotation only — never a deletion).
-            if str(champ.get("join_key")) in decayed_keys and champ.get("retire_flag") is None:
-                champ["retire_flag"] = {"reason": "decayed", "flagged_utc": now_iso}
-                _record(
-                    _ACTION_RETIRE_FLAGGED,
-                    scope,
-                    {"join_key": champ["join_key"], "reason": "decayed"},
-                )
-            challenger = next(
-                (e for e in eligible if entry_join_key(e) != str(champ.get("join_key"))), None
-            )
-            if challenger is None:
-                champ["challenger"] = None
-                _record(
-                    _ACTION_RETAINED,
-                    scope,
-                    {"join_key": champ["join_key"], "reason": "no_challenger"},
-                )
-                continue
-            verdict = _challenge(
-                champ,
-                challenger,
-                lake_root=lake_root,
-                sweep_run_id=current.run_id,
-                from_date=from_date,
-                to_date=to_date,
-                now=now,
-            )
-            if verdict is None or not (
-                verdict.challenger_survives
-                and not verdict.challenger_provisional
-                and verdict.dominates
-            ):
-                champ["challenger"] = None
-                _record(
-                    _ACTION_RETAINED,
-                    scope,
-                    {
-                        "join_key": champ["join_key"],
-                        "reason": "challenger_did_not_dominate"
-                        if verdict is not None
-                        else "pooled_check_failed",
-                        "detail": verdict.detail if verdict is not None else "",
-                    },
-                )
-                continue
-            challenger_key = entry_join_key(challenger)
-            streak_state = champ.get("challenger")
-            streak = 1
-            if (
-                isinstance(streak_state, dict)
-                and streak_state.get("join_key") == challenger_key
-                and isinstance(streak_state.get("streak"), int)
-            ):
-                streak = int(streak_state["streak"]) + 1
-            if streak >= promote_nights:
-                former = champ.get("former")
-                former_list = former if isinstance(former, list) else []
-                era = int(champ.get("era", 1)) + 1
-                retired = {k: v for k, v in champ.items() if k != "former"}
-                retired["retired_utc"] = now_iso
-                retired["retired_reason"] = "superseded_by_promotion"
-                new_record = _champion_record_from_entry(
-                    challenger, sweep_run_id=current.run_id, now_iso=now_iso, era=era
-                )
-                new_record["former"] = [*former_list, retired]
-                champions[scope] = new_record
-                _record(
-                    _ACTION_PROMOTED,
-                    scope,
-                    {
-                        "join_key": challenger_key,
-                        "run_id": new_record["run_id"],
-                        "era": era,
-                        "streak": streak,
-                        "detail": verdict.detail,
-                    },
-                )
-                if alerter is not None:
-                    with contextlib.suppress(Exception):
-                        alerter.champion_promoted(
-                            scope=scope,
-                            run_id=str(new_record["run_id"]),
-                            rank=int(str(challenger.get("rank"))),
-                            detail=verdict.detail,
+            for scope in sorted(by_scope):
+                try:
+                    entries = by_scope[scope]
+                    eligible = [e for e in entries if challenger_eligible(e)]
+                    champ = champions.get(scope)
+                    if champ is None:
+                        if not eligible:
+                            continue  # no champion, nothing eligible — nothing to record
+                        record = _champion_record_from_entry(
+                            eligible[0], sweep_run_id=current.run_id, now_iso=now_iso, era=1
                         )
-            else:
-                champ["challenger"] = {
-                    "join_key": challenger_key,
-                    "streak": streak,
-                    "last_night_utc": now_iso,
-                }
-                _record(
-                    _ACTION_CHALLENGED,
-                    scope,
-                    {
-                        "join_key": challenger_key,
-                        "streak": streak,
-                        "needed": promote_nights,
-                        "detail": verdict.detail,
-                    },
-                )
+                        champions[scope] = record
+                        _record(
+                            _ACTION_SEEDED,
+                            scope,
+                            {"join_key": record["join_key"], "run_id": record["run_id"], "era": 1},
+                        )
+                        continue
+                    if not isinstance(champ, dict):
+                        # A hand-corrupted record: refuse to judge over junk — reseed
+                        # honestly next night after the operator inspects the state.
+                        logger.warning("nightly.champions.record_corrupt", scope=scope)
+                        continue
+                    # Decay retire-FLAG (annotation only — never a deletion).
+                    if (
+                        str(champ.get("join_key")) in decayed_keys
+                        and champ.get("retire_flag") is None
+                    ):
+                        champ["retire_flag"] = {"reason": "decayed", "flagged_utc": now_iso}
+                        _record(
+                            _ACTION_RETIRE_FLAGGED,
+                            scope,
+                            {"join_key": champ["join_key"], "reason": "decayed"},
+                        )
+                    challenger = next(
+                        (e for e in eligible if entry_join_key(e) != str(champ.get("join_key"))),
+                        None,
+                    )
+                    if challenger is None:
+                        champ["challenger"] = None
+                        _record(
+                            _ACTION_RETAINED,
+                            scope,
+                            {"join_key": champ["join_key"], "reason": "no_challenger"},
+                        )
+                        continue
+                    verdict = _challenge(
+                        champ,
+                        challenger,
+                        lake_root=lake_root,
+                        sweep_run_id=current.run_id,
+                        from_date=from_date,
+                        to_date=to_date,
+                        now=now,
+                        shared_catalog=shared_catalog,
+                    )
+                    if verdict is None or not (
+                        verdict.challenger_survives
+                        and not verdict.challenger_provisional
+                        and verdict.dominates
+                    ):
+                        champ["challenger"] = None
+                        _record(
+                            _ACTION_RETAINED,
+                            scope,
+                            {
+                                "join_key": champ["join_key"],
+                                "reason": "challenger_did_not_dominate"
+                                if verdict is not None
+                                else "pooled_check_failed",
+                                "detail": verdict.detail if verdict is not None else "",
+                            },
+                        )
+                        continue
+                    challenger_key = entry_join_key(challenger)
+                    streak_state = champ.get("challenger")
+                    streak = 1
+                    if (
+                        isinstance(streak_state, dict)
+                        and streak_state.get("join_key") == challenger_key
+                        and isinstance(streak_state.get("streak"), int)
+                    ):
+                        streak = int(streak_state["streak"]) + 1
+                    if streak >= promote_nights:
+                        former = champ.get("former")
+                        former_list = former if isinstance(former, list) else []
+                        era = int(champ.get("era", 1)) + 1
+                        retired = {k: v for k, v in champ.items() if k != "former"}
+                        retired["retired_utc"] = now_iso
+                        retired["retired_reason"] = "superseded_by_promotion"
+                        new_record = _champion_record_from_entry(
+                            challenger, sweep_run_id=current.run_id, now_iso=now_iso, era=era
+                        )
+                        new_record["former"] = [*former_list, retired]
+                        champions[scope] = new_record
+                        _record(
+                            _ACTION_PROMOTED,
+                            scope,
+                            {
+                                "join_key": challenger_key,
+                                "run_id": new_record["run_id"],
+                                "era": era,
+                                "streak": streak,
+                                "detail": verdict.detail,
+                            },
+                        )
+                        if alerter is not None:
+                            with contextlib.suppress(Exception):
+                                alerter.champion_promoted(
+                                    scope=scope,
+                                    run_id=str(new_record["run_id"]),
+                                    rank=int(str(challenger.get("rank"))),
+                                    detail=verdict.detail,
+                                )
+                    else:
+                        champ["challenger"] = {
+                            "join_key": challenger_key,
+                            "streak": streak,
+                            "last_night_utc": now_iso,
+                        }
+                        _record(
+                            _ACTION_CHALLENGED,
+                            scope,
+                            {
+                                "join_key": challenger_key,
+                                "streak": streak,
+                                "needed": promote_nights,
+                                "detail": verdict.detail,
+                            },
+                        )
+                except Exception as exc:
+                    # Round-1 NIT #4: a per-scope failure (e.g. a hostile
+                    # `|`-carrying scope key the ledger subject refuses)
+                    # is isolated — counted + one WARN, every other scope
+                    # proceeds, the nightly is unbroken.
+                    scope_errors += 1
+                    logger.warning(
+                        "nightly.champions.scope_error",
+                        scope=repr(scope),
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+    finally:
+        shared_catalog.close()
 
-    state["schema_version"] = _STATE_SCHEMA_VERSION
-    state_path = save_champions_state(results_root, state)
+    # The trailing convergence save (round-1 MAJOR #1): every committed
+    # transition already persisted state, so this only matters on a
+    # zero-transition night (creates/refreshes state.json) — a failure
+    # here is soft (state per-transition durability already happened).
+    try:
+        state_path: Path | None = save_champions_state(results_root, state)
+    except OSError as exc:
+        logger.warning("nightly.champions.state_save_failed", error=str(exc)[:200])
+        state_path = None
     block: dict[str, object] = {
         "status": "ok",
         "run_id": current.run_id,
         "promote_nights": promote_nights,
         "champions": len(champions),
         "transitions": transitions,
+        "scope_errors": scope_errors,
         "run_delta": delta_summary,
-        "state_path": str(state_path),
+        "state_path": None if state_path is None else str(state_path),
     }
     logger.info(
         "nightly.champions.done",
         run_id=current.run_id,
         champions=len(champions),
         transitions=len(transitions),
+        scope_errors=scope_errors,
     )
     return block
 
@@ -658,9 +794,13 @@ def _challenge(
     from_date: str | None,
     to_date: str | None,
     now: datetime,
+    shared_catalog: _SharedCatalog | None = None,
 ) -> _PooledVerdict | None:
-    """Load the scope's bars + run the pooled check (``None`` on any fault)."""
-    from brutex.data.catalog import Catalog
+    """Load the scope's bars + run the pooled check (``None`` on any fault).
+
+    *shared_catalog* is the leg's ONE lazily-opened catalog (round-1
+    NIT #5); ``None`` (direct callers) opens + closes a private one.
+    """
     from brutex.data.timeframes import spec_for_lake_label
     from brutex.engine.lake_slice import load_lake_slice
     from brutex.engine.stage1a import build_bar_bits
@@ -675,19 +815,19 @@ def _challenge(
     except ValueError:
         return None
     start, end = _window_bounds(from_date, to_date, now=now)
+    holder = _SharedCatalog(lake_root) if shared_catalog is None else shared_catalog
     try:
-        with Catalog.open(lake_root / "catalog.duckdb") as catalog:
-            bars = load_lake_slice(
-                lake_root=lake_root,
-                catalog=catalog,
-                exchange=coords[0],
-                segment=coords[1],
-                symbol=instrument,
-                interval=tf_label,
-                start=start,
-                end=end,
-                dedup_source=f"nightly.champions:{instrument}/{tf_label}",
-            )
+        bars = load_lake_slice(
+            lake_root=lake_root,
+            catalog=holder.get(),
+            exchange=coords[0],
+            segment=coords[1],
+            symbol=instrument,
+            interval=tf_label,
+            start=start,
+            end=end,
+            dedup_source=f"nightly.champions:{instrument}/{tf_label}",
+        )
         if not bars:
             return None
         bar_bits = build_bar_bits(bars)
@@ -713,6 +853,9 @@ def _challenge(
             error=str(exc)[:200],
         )
         return None
+    finally:
+        if shared_catalog is None:
+            holder.close()
 
 
 def _window_bounds(
