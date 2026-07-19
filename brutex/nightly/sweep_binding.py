@@ -245,11 +245,13 @@ def sweep_link_result(
 ) -> LinkResult:
     """Map a ``cmd_sweep_all`` exit code onto the SWEEP link (spec §4.3).
 
-    ``EXIT_OK`` → OK · ``EXIT_USER_ERROR`` → REFUSED (its own preflight
-    refusal; the stderr text is not capturable in-process, so the detail
-    points at the sweep audit) · ``EXIT_SWEEP_TUPLE_FAILED`` → FAILED with
-    ``exit_hint=6`` (the pass-through) · anything else → FAILED. *counts*
-    (``None`` = honestly unknown) fold into the outcome verbatim.
+    ``EXIT_OK`` → OK · ``EXIT_USER_ERROR`` → REFUSED (a preflight refusal OR a
+    run-end refusal — e.g. a corrupt finalist store reaching the cascade / a
+    cascade-sidecar disk-full, MIGRATION.md #1921/#1923; the stderr text is
+    not capturable in-process, so the detail points at stderr + the sweep
+    audit) · ``EXIT_SWEEP_TUPLE_FAILED`` → FAILED with ``exit_hint=6`` (the
+    pass-through) · anything else → FAILED. *counts* (``None`` = honestly
+    unknown) fold into the outcome verbatim.
     """
     folded = dict(counts) if counts is not None else {}
     if exit_code == EXIT_OK:
@@ -257,7 +259,10 @@ def sweep_link_result(
     if exit_code == EXIT_USER_ERROR:
         return LinkResult(
             status=LinkStatus.REFUSED,
-            detail=f"sweep preflight refused (exit 1) — see sweep audit {audit_path}",
+            detail=(
+                f"sweep refused (exit 1 — preflight or run-end refusal; "
+                f"see stderr) — see sweep audit {audit_path}"
+            ),
             counts=folded,
         )
     if exit_code == EXIT_SWEEP_TUPLE_FAILED:

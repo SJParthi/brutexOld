@@ -1254,6 +1254,75 @@ lake/schema/scope/vocab/rate change; `trade_sim.py` + the whole engine 100%
 line+branch on the ci.yml whole-engine gate; the per-fix record lives in the
 §1 Active-branch blurb + MIGRATION.md #1743 — this header carries the
 one-line summary, never the story).
+Earlier: 2026-07-09 (T2 SWEEP-HARDENING integration train, branch
+`integration/t2-sweep-hardening` — based on T1's `integration/t1-sweep-core` (NOT main; the
+train PR diff shows T1+T2 until T1 lands — expected, disclosed). Folded so far: **#1285
+DEC-SWEEP-SCALE-GUARDS-001** (#1717) + **#1305 DEC-SWEEP-KEEPAWAKE-001** (MIGRATION.md
+#1718, renumbered #1631 → #1636 → #1718 across the folds — every SWEEP entrypoint engages the macOS
+keep-awake guard: `cmd_sweep_all` wraps lake preload → grid → stage-3 → options-sim →
+cascade in ONE source-level `keep_awake("brutex sweep-all")` (the T2 composition: #1305's
+WIDER preload-covering span is THE wrap, superseting #1285's fix-3 span; T1's
+`sweep_run_core` G9 keep-awake nests inside it — harmless, independent caffeinates);
+`cmd_sweep` ("brutex sweep") + `cmd_sweep_daemon` ("brutex sweep-daemon", covering the
+between-cycle sleep) wrap their bodies; the dashboard sweep job inherits in-process, and
+#1285's `run_sweep_from_request` wrap is KEPT as a redundant-nested guard; best-effort,
+never raises; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py`) + **#1306
+DEC-BACKUP-RETENTION-KNOB-GUARD-001** (MIGRATION.md #1598 — #1306 landed INDEPENDENTLY
+on main while the train was in flight, so the interim #1637 train row is DEDUPED to
+main's #1598 (main wins; the DEC stays cited once) and the code auto-merged byte-identical — the three `BRUTEX_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}` retention knobs gain the <1
+loud-fallback guard so a 0/negative keep count can never silently DISABLE a restic
+retention tier through `forget --prune`; ops config leaf only, zero overlap with the sweep
+members — clean merge). #1285
+(MIGRATION.md #1717, renumbered #1615 → #1635 → #1717 across the folds — the
+sweep scale-guards pack, THREE fixes as ONE change set, required before the institutional
+k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM fix) —
+`sweep_mem_budget.resolve_mem_budget_bytes()` was a WHOLE-MACHINE figure (RAM×1/6 = 8 GiB on
+the §8 48 GB box) consumed once per tuple, but BLIND to the 8-worker `ProcessPoolExecutor`:
+8 concurrent k=5 tuples each retain ~5.21 GB (C(60,5)=5,461,512 masks × 1024 B/kept) ≈
+41.7 GB at once → OOM, and 5.21 GB sat JUST UNDER the undivided 8 GiB per-tuple gate so the
+bounded columnar rank NEVER engaged. DELIVERY MECHANISM DEDUPED TO MAIN at the 2026-07-11
+fold: main landed the SAME fix independently as DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(#1671 — `resolve_mem_budget_bytes(workers=)` divides the RAM-derived default INSIDE the
+resolver, the pool initializer exporting `BRUTEX_SWEEP_BUDGET_WORKERS` from
+`_WorkerContext.budget_workers`), so T2's call-site division
+(`per_worker_mem_budget_bytes` + the `sweep_concurrency=` threading) is DROPPED — main
+wins, a second division at the plan seam would DOUBLE-divide the budget — and the
+`BRUTEX_SWEEP_MEM_BUDGET_BYTES` override contract resolves to main's: a PER-WORKER
+figure, NEVER divided (the #1352 contract; T2's divided-TOTAL reading is superseded).
+T2's UNIQUE OOM pins survive re-pinned onto the landed resolver: 8×1 GiB concurrent
+retention ≤ RAM/2, the k=5 bounded-rank engagement flip
+(`test_engine_sweep_mem_budget.py::TestWorkerAwareBudgetScaleGuards`), the e2e
+fits→refused/bounded flip through the env seam
+(`test_engine_sweep_run_bounded.py::TestWorkerAwareBudget`), and the NEW
+no-double-division pin (`test_no_double_division_after_scale_guards_dedupe`).
+(2) k-aware SLA projection — `check_sweep_sla` gains OPTIONAL
+per-(instrument, tf, k) `TupleCostCell`s driving `project_weighted_grid_cost`: per-tuple
+weight = C(n_bits, k) × N_bars, projected = `per_tuple_seconds × Σ(weight×mult) /
+reference_weight` (reference = the mean weight of the SMALLEST-k cells), so the 30 s
+calibration maps to the current average small-k tuple, a k=1-only grid projects EXACTLY the
+flat model's order, a k=5-heavy MIXED grid projects orders higher (the ~91,000×
+C(60,1)→C(60,5) spread), and the refusal NAMES the dominant tuples. Without cells it is
+byte-for-byte the flat model. HONEST: grid-RELATIVE and STILL UNBENCHMARKED (Golden Rule
+#10). (3) keep_awake on the sweep entry points — the dashboard job body
+(`run_sweep_from_request`) wraps its span in the existing `keep_awake` context; at
+`cmd_sweep_all` the member's explicit wrap is SUBSUMED by T1's `sweep_run_core` G9
+keep-awake hook (same entry_label, same span — a train-fold re-derivation, disclosed), so
+a 2-4-day overnight sweep never sleeps mid-flight on EITHER entry point; best-effort,
+non-darwin is a logged no-op. In-train re-derivations: `run_one_tuple` carries BOTH T1's
+`diffcheck`/`store_quarantine` seams, threaded inside T1's G1 `_attempt()` retry body
+(the interim `sweep_concurrency=` threading was dropped at the #1671 dedupe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+REFERENCE_ONLY, no scope/vocab/rate change; touched engine modules 100% line+branch
+(seq-vs-parallel byte-identity goldens + suffix-independence gates pass unchanged);
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.
+Main fold 2026-07-09: PR #1352 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001) took ledger #1631,
+shifting the whole train tail to #1632–#1637 (renumbers noted in-entry); the 2026-07-11
+pre-stage fold-2 of the origin/main lander wave (live max #1711) renumbered the surviving
+rows again — T1 → #1712/#1714/#1715/#1716, T2 → #1717/#1718 (#1713 skipped, reserved for
+DEC-RUST-FIRST-MANDATE-001) — and DEDUPED the #1637 backup-retention row to main's
+independently-landed #1598.
+Review-round history is deliberately not narrated in this header — each member's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.)
 Earlier: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892
 (renumbered from the provisional #1724 at the club-R2 fold, then
 #1956 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
@@ -7633,6 +7702,29 @@ hostile-review pass._
   ci.yml gate + per-module gates green; cargo test --release 578 green,
   fmt/clippy clean; ruff/ruff-format clean; `mypy --strict` clean; pyright at
   the pre-change baseline; `node --check` clean on both touched JS files.)
+  Earlier: `integration/t2-sweep-hardening` (**T2 SWEEP-HARDENING integration
+  train** — based on T1's `integration/t1-sweep-core` (NOT main — the PR diff shows T1+T2
+  until T1 lands, expected + disclosed). Folded so far: #1285 DEC-SWEEP-SCALE-GUARDS-001
+  (MIGRATION.md #1717, renumbered #1615 → #1635 → #1717 across the folds) — the sweep scale-guards pack:
+  worker-aware rank-memory budget (the OOM fix — DELIVERY MECHANISM DEDUPED to main's landed
+  DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 #1671 at the 2026-07-11 fold: main's
+  `resolve_mem_budget_bytes(workers=)` + the pool-initializer `BRUTEX_SWEEP_BUDGET_WORKERS`
+  seam WIN; T2's `per_worker_mem_budget_bytes` call-site division + `sweep_concurrency=`
+  threading DROPPED — a second division would double-divide; the override contract resolves
+  to main's PER-WORKER-never-divided #1352 reading; T2's unique OOM/engagement pins survive
+  re-pinned + the NEW `test_no_double_division_after_scale_guards_dedupe` pin),
+  k-aware SLA projection (`TupleCostCell` + `project_weighted_grid_cost`),
+  keep_awake on the dashboard sweep job body; plus #1305 DEC-SWEEP-KEEPAWAKE-001
+  (MIGRATION.md #1718, renumbered #1631 → #1636 → #1718) — keep_awake on every sweep entrypoint
+  (`cmd_sweep_all` ONE wide source-level wrap covering the lake preload, with T1's
+  `sweep_run_core` G9 hook nested inside — a disclosed train-fold composition;
+  `cmd_sweep`; `cmd_sweep_daemon` incl. the between-cycle sleep; the dashboard job
+  inherits in-process and #1285's `run_sweep_from_request` wrap is kept
+  redundant-nested); plus #1306 DEC-BACKUP-RETENTION-KNOB-GUARD-001 (MIGRATION.md #1598 —
+  landed INDEPENDENTLY on main mid-flight; the interim #1637 train row DEDUPED to main's,
+  code auto-merged byte-identical) — the backup retention keep-knob <1 loud-fallback guard (ops
+  config leaf, clean merge). See the §1 header blurb for the full member one-liners.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
   Earlier: `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892** —
   entry number #1892 — renumbered from the provisional #1724 (= observed live-main max #1723 + 1
   at append) at the club-R2 integration fold, the free consecutive block #1956–#1797 vs the
@@ -12513,6 +12605,13 @@ hostile-review pass._
   ENGINE semantics corrected on hole-shaped feeds only — healthy contiguous
   feeds byte-identical, NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); matches §1's
   Active branch line — see §1 + MIGRATION.md #1743 for the full blurb)
+  Earlier: `integration/t2-sweep-hardening`
+  (T2 SWEEP-HARDENING integration train — based on `integration/t1-sweep-core`; folds #1285
+  DEC-SWEEP-SCALE-GUARDS-001 (#1717, renumbered #1615 → #1635 → #1717) + #1305
+  DEC-SWEEP-KEEPAWAKE-001 (#1718, renumbered #1631 → #1636 → #1718) + #1306
+  DEC-BACKUP-RETENTION-KNOB-GUARD-001 (landed INDEPENDENTLY on main as #1598 — the
+  train's interim #1637 row DEDUPED to main's, code byte-identical); see §1 Active branch
+  for the full blurb)
   Earlier: `claude/greeks-rust-batch`
   (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892 — renumbered from the
   provisional #1724 at the club-R2 fold, then #1956 → #1892 at the club
