@@ -746,6 +746,13 @@ class TestWholePathHealParity:
         from brutex.data.lake_heal import HealReport, heal_findings
         from brutex.data.lake_invariants import scan_lake_invariants
 
+        # EXPLICIT waved-OFF since the W-5 default flip: this golden pins
+        # the RENDER seam's ON/OFF byte parity THROUGH the Python heal core
+        # (its only render-consuming path) — the engaged waved crate heals
+        # natively and never reaches the render facade. The waved crate's
+        # own heal byte parity is the Wave-D heal differential.
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+
         def _drive(lake: Path, flag_on: bool) -> tuple[HealReport, dict[str, str], int]:
             _seed_poisoned_options_lake(lake)
             if flag_on:

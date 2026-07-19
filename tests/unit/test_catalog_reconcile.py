@@ -214,7 +214,13 @@ class TestReconcile:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             assert result == ReconcileResult(partitions_reconciled=0, bars_total=0, skipped=1)
 
-    def test_skips_zero_row_partition(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("waved_flag", ["0", "1"])
+    def test_skips_zero_row_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, waved_flag: str
+    ) -> None:
+        # BOTH arms explicitly (W-5): the "0" leg pins the PYTHON oracle's
+        # zero-row `return None` skip; the "1" leg the crate's `None` wire.
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", waved_flag)
         empty = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2021" / "01.parquet"
         empty.parent.mkdir(parents=True)
         pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
@@ -330,11 +336,12 @@ class TestWavedSeam:
     def test_flag_off_never_calls_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The never-routes bomb spy: flag OFF (the default) must not touch
-        # the routing function at all.
+        # The never-routes bomb spy: flag OFF must not touch the routing
+        # function at all. EXPLICIT "0" since the W-5 default flip (unset
+        # now resolves ON) — the OFF-arm teeth are unchanged.
         import brutex.data.catalog_reconcile as cr
 
-        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
 
         def _bomb(**kwargs: object) -> object:
             raise AssertionError("reconcile_file_via_rust must not run flag-OFF")

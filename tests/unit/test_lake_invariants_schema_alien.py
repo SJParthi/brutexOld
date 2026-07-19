@@ -37,6 +37,24 @@ from brutex.data.lake_invariants import (
 from brutex.data.partition import build_partition_path
 
 
+@pytest.fixture(autouse=True)
+def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
+
+    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
+    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
+    routes ``scan_lake_invariants`` through the crate — but THIS suite is
+    the verbatim PYTHON scanner's verification (the live oracle the burn-in
+    + every degrade serve; its white-box read-count spies / injected faults
+    / log-text pins are Python-arm implementation contracts the engaged
+    crate deliberately does not share — deviation D-20), so it runs under
+    the operator kill switch. The crate arm's gates are the scan
+    differential (``tests/integration/test_waved_scan_differential.py``,
+    27/27 engaged) + the waved seam suite's explicit flag-ON tests.
+    """
+    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+
+
 def _ts(minute: int) -> datetime:
     return datetime(2024, 6, 3, 4, minute, tzinfo=UTC)
 

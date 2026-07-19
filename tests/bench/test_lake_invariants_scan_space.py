@@ -40,6 +40,20 @@ pytest.importorskip("pyarrow")
 
 pytestmark = pytest.mark.bench
 
+
+@pytest.fixture(autouse=True)
+def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
+
+    Conscious W-5 reconciliation: these read-count / residency spies pin the
+    PYTHON scanner's implementation shape (pl.read_parquet call counts,
+    per-series residency), which the engaged crate arm deliberately does not
+    share — its read-count law is the scan differential's
+    ``last_rust_scan_reads()`` engagement census.
+    """
+    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+
+
 _SMALL_SYMBOLS = 2
 _BIG_SYMBOLS = 20
 _INTERVALS = ("1minute", "1day")

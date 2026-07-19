@@ -2,12 +2,13 @@
 
 The ONE shared facade for the Wave-D lake conversion
 (`timeframe_materialize` → `lake_heal` → `catalog_reconcile` →
-`lake_invariants`, in the ruled runbook order). When — and ONLY when —
-``BRUTEX_LAKE_WAVED_RUST`` is set truthy, the converted surfaces route
-through the ``brutex_lake`` crate's ``waved_*`` pyfunctions
-(``rust/brutex-lake/src/waved/``); this module owns the flag, the
-fail-closed guard layers, the process-local latches, and the per-surface
-burn-in cells. ONE facade for all four modules (the Wave-D design §D): the
+`lake_invariants`, in the ruled runbook order). While
+``BRUTEX_LAKE_WAVED_RUST`` resolves ON (DEFAULT since the W-5 flip —
+:data:`LAKE_WAVED_RUST_DEFAULT`; ``0`` is the per-process operator kill
+switch), the converted surfaces route through the ``brutex_lake`` crate's
+``waved_*`` pyfunctions (``rust/brutex-lake/src/waved/``); this module owns
+the flag, the fail-closed guard layers, the process-local latches, and the
+per-surface burn-in cells. ONE facade for all four modules (the Wave-D design §D): the
 four surfaces flip as one wave with one crate surface, so a shared latch is
 the atomic-pin doctrine — any guard trip is evidence the INSTALL is broken,
 the Python oracle serves, and (payoff ≈ 0 — uniformity, not speed)
@@ -99,15 +100,22 @@ carries the design-§F2 ``reads_performed`` counter
 pins rebind onto. A raising pause callback re-raises VERBATIM via the
 ``_PauseEscape`` parking wrap, never folded into the degrade set.
 
-## The flag — ``BRUTEX_LAKE_WAVED_RUST`` (DEFAULT OFF)
+## The flag — ``BRUTEX_LAKE_WAVED_RUST`` (DEFAULT ON since W-5)
 
 A truthy literal (``1/true/yes/on``) → ON; a falsy literal
-(``0/false/no/off``) → OFF; unset or whitespace-empty → the default (OFF);
-any OTHER value → OFF with one loud ``lake_rust_waved.fallback`` WARN
-(reason ``flag_unrecognised``) per process. The truthy/falsy vocabulary is
-a LOCAL twin of the render/resample facades' (equality-pinned in the unit
-suite) — NOT an import from the engine copy, because the engine package
-hard-imports the ``fno_math`` wheel and a lake read must never require it.
+(``0/false/no/off``) → OFF — the explicit operator KILL SWITCH, honoured
+regardless of the default; unset or whitespace-empty →
+:data:`LAKE_WAVED_RUST_DEFAULT` (``True`` since the W-5 flip — the
+one-constant revert lever, the ``SWEEP_RUST_METRICS_DEFAULT`` /
+DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 shape); any OTHER value → OFF with
+one loud ``lake_rust_waved.fallback`` WARN (reason ``flag_unrecognised``)
+per process — the fail-safe is OFF: under a default-ON seam a typo'd kill
+switch (``flase``, ``0ff``) must still KILL, never be silently ignored
+(the precedent's exact kill-switch semantics). The truthy/falsy vocabulary
+is a LOCAL twin of the render/resample facades' (equality-pinned in the
+unit suite) — NOT an import from the engine copy, because the engine
+package hard-imports the ``fno_math`` wheel and a lake read must never
+require it.
 
 ## The fail-closed layers (every failure serves the Python oracle)
 
@@ -174,10 +182,22 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_waved")
 
-#: The env flag. DEFAULT OFF — the Python cores stay the production path
-#: until the Wave-D parity gates license an operator-directed default flip
-#: behind its own DEC (honesty banner: payoff ≈ 0 — uniformity, not speed).
+#: The env flag over :data:`LAKE_WAVED_RUST_DEFAULT` (honesty banner:
+#: payoff ≈ 0 — uniformity, not speed).
 LAKE_WAVED_RUST_ENV: Final[str] = "BRUTEX_LAKE_WAVED_RUST"
+
+#: The ONE default-arm constant (the W-5 flip lever — the
+#: ``SWEEP_RUST_METRICS_DEFAULT`` / DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
+#: precedent): what :func:`lake_rust_waved_enabled` returns when the env
+#: flag is unset or whitespace-empty. ``True`` = the Wave-D crate cores
+#: serve by default — licensed by the FULL flag-ON parity battery (the
+#: four differentials over the poison corpus with loud-fail engagement
+#: censuses, the frozen goldens fixtures-byte-untouched, and the whole
+#: lane suite default-ON), every surface still burn-in self-checked with
+#: the shared-latch autorevert, and killable per process with
+#: ``BRUTEX_LAKE_WAVED_RUST=0`` (the ``_FALSY`` operator kill switch).
+#: Revert = this ONE constant.
+LAKE_WAVED_RUST_DEFAULT: Final[bool] = True
 
 #: The W-1 surface token (the per-surface burn-in cell + event key).
 SURFACE_READ_1M: Final[str] = "read_1m"
@@ -290,14 +310,20 @@ def env_flag_tristate(raw: str) -> bool | None:
 
 
 def lake_rust_waved_enabled() -> bool:
-    """Resolve ``BRUTEX_LAKE_WAVED_RUST`` (default OFF, junk fails loud-OFF).
+    """Resolve the waved flag over :data:`LAKE_WAVED_RUST_DEFAULT`.
 
-    * a :data:`_TRUTHY` value → ``True`` (the opt-in);
-    * a :data:`_FALSY` value → ``False`` (the explicit, silent OFF);
-    * unset / whitespace-empty → ``False`` (the default);
+    * a :data:`_TRUTHY` value → ``True``;
+    * a :data:`_FALSY` value → ``False`` — the explicit operator kill
+      switch, honoured regardless of the default;
+    * unset / whitespace-empty → :data:`LAKE_WAVED_RUST_DEFAULT` (the
+      one-constant flip lever — ``True`` since W-5);
     * any OTHER non-empty value → ``False`` with one loud
       ``lake_rust_waved.fallback`` WARN (reason ``flag_unrecognised``) per
-      process — a typo'd opt-in must be VISIBLE, never silently ignored.
+      process: the fail-safe is OFF — under a default-ON seam a typo'd
+      kill switch (``flase``, ``0ff``) must still KILL, never be silently
+      ignored (the ``sweep_rust_metrics_enabled`` precedent's exact
+      kill-switch semantics; the ``_FALSY`` vocabulary is the RECOGNISED
+      silent OFF, a garbage value's OFF is WARNED).
 
     Read per call (one ``os.environ`` probe against a whole-partition read)
     so parallel workers resolve their own inherited environment.
@@ -308,7 +334,8 @@ def lake_rust_waved_enabled() -> bool:
         return verdict
     if raw.strip():
         _warn_once("flag_unrecognised", value=raw)
-    return False
+        return False
+    return LAKE_WAVED_RUST_DEFAULT
 
 
 def rust_waved_disabled() -> bool:
@@ -372,9 +399,10 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
 def _resolve_crate() -> ModuleType | None:
     """Import guard (layer 1): return ``brutex_lake``, or latch OFF + ``None``.
 
-    An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
-    facade is default-OFF and opt-in, so an operator who set the flag
-    without installing the crate gets ONE loud WARN naming the remedy. A
+    An absent wheel (``ImportError``) latches ``crate_unavailable`` with
+    ONE loud WARN naming the remedy — every latch serves the Python oracle
+    (fail-closed), so a crate-less install keeps working under the W-5
+    default-ON flag exactly as it did default-OFF. A
     module that IMPORTS but lacks any :data:`_CRATE_API` callable (a name
     collision / a pre-Wave-D wheel / a hand-broken install) latches the
     SAME reason — the fail-closed contract is "never a new crash class", so
@@ -1567,6 +1595,7 @@ def scan_lake_via_rust(
 
 __all__ = [
     "BURN_IN_SAMPLES",
+    "LAKE_WAVED_RUST_DEFAULT",
     "LAKE_WAVED_RUST_ENV",
     "SURFACE_CONTENT_TOKEN",
     "SURFACE_READ_1M",

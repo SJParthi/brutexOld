@@ -54,6 +54,23 @@ from brutex.data.registry_store import RegistryStore
 from tests.fakes.lake_poison import poison_partition as _poison_partition
 from tests.fakes.lake_poison import stored_timestamps as _stored_timestamps
 
+
+@pytest.fixture(autouse=True)
+def _python_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this suite to the EXPLICIT flag-OFF (Python oracle) arm.
+
+    Conscious W-5 reconciliation (recorded in the Wave-D lane scratchpad):
+    since the ``BRUTEX_LAKE_WAVED_RUST`` default flipped ON, an unset env
+    routes the heal through the crate core — but THIS suite is the verbatim
+    PYTHON core's verification (the live degrade oracle every out-of-envelope
+    shape still serves; its 100% ci-gate coverage is the oracle's gate), so
+    it runs under the operator kill switch. The crate arm's gates are the
+    heal differential (``tests/integration/test_waved_heal_differential.py``,
+    default-ON) + the seam suite's explicit flag-ON tests.
+    """
+    monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+
+
 _NOW = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
 _RUN_ID = "heal-seam-test"
 _FETCHED = datetime(2026, 1, 1, tzinfo=UTC)

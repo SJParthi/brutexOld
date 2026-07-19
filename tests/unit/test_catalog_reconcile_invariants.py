@@ -173,6 +173,11 @@ class TestFreeClaim:
     def test_no_extra_read_calls(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The piggyback classifies the column reconcile ALREADY reads: the
         # pl.read_parquet call count is IDENTICAL with the check on and off.
+        # EXPLICIT flag-OFF since the W-5 default flip — this pins the
+        # PYTHON oracle's read shape (the engaged crate reads natively, so
+        # the pl.read_parquet spy would count zero); the crate arm's
+        # read-count law is pinned by the reconcile differential.
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
         _write(tmp_path, [_bar(_ts(1))])
         _plant_raw(_dest(tmp_path, month=7), [_ts(2), _ts(3, month=7), _ts(3, month=7)])
         calls: list[str] = []

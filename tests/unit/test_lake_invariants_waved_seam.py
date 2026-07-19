@@ -64,11 +64,13 @@ class TestWavedSeam:
     def test_flag_off_never_calls_the_facade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The never-routes bomb spy: flag OFF (the default) must not touch
-        # the routing function at all.
+        # The never-routes bomb spy: flag OFF must not touch the routing
+        # function at all. EXPLICIT "0" since the W-5 default flip (unset
+        # now resolves ON) — the OFF-arm teeth are unchanged, only the env
+        # spelling moved.
         from brutex.data import lake_rust_waved as lrw
 
-        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
 
         def _bomb(*_args: object, **_kwargs: object) -> object:
             raise AssertionError("scan_lake_via_rust must not run flag-OFF")
@@ -81,7 +83,8 @@ class TestWavedSeam:
     def test_flag_off_is_byte_identical_to_the_python_arm(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("BRUTEX_LAKE_WAVED_RUST", raising=False)
+        # EXPLICIT "0" since the W-5 default flip — the OFF-arm identity pin.
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
         _write_partition(tmp_path)
         assert _comparable(scan_lake_invariants(tmp_path)) == _comparable(
             _scan_lake_invariants_python(tmp_path)

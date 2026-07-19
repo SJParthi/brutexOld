@@ -56,7 +56,13 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _fresh_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.delenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, raising=False)
+    # EXPLICIT flag-OFF baseline since the W-5 default flip (unset now
+    # resolves ON): this suite was authored to pin the OFF arm + explicitly
+    # opted-in ON arms (each `setenv(..., "1")` per test), and the OFF-arm
+    # teeth (never-routes bomb spies, byte-identity) must stay pinned under
+    # the kill switch — the default-ON path is exercised by the waved
+    # differentials + the whole-suite default-ON battery.
+    monkeypatch.setenv(lake_rust_waved.LAKE_WAVED_RUST_ENV, "0")
     lake_rust_waved.reset_lake_rust_waved_for_tests()
     yield
     lake_rust_waved.reset_lake_rust_waved_for_tests()

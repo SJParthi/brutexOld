@@ -184,16 +184,23 @@ class TestFlagParsing:
             assert lrw.lake_rust_waved_enabled() is False
         assert logs == []
 
-    def test_unset_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unset_is_the_silent_default_constant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # W-5 flip: unset resolves to the ONE default-arm constant (True
+        # since DEC-RUST-LAKE-WAVED-001's flip commit; revert = the constant).
         monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
         with capture_logs() as logs:
-            assert lrw.lake_rust_waved_enabled() is False
+            assert lrw.lake_rust_waved_enabled() is lrw.LAKE_WAVED_RUST_DEFAULT
         assert logs == []
 
-    def test_whitespace_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_constant_is_on_since_the_w5_flip(self) -> None:
+        assert lrw.LAKE_WAVED_RUST_DEFAULT is True
+
+    def test_whitespace_is_the_silent_default_constant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "   ")
         with capture_logs() as logs:
-            assert lrw.lake_rust_waved_enabled() is False
+            assert lrw.lake_rust_waved_enabled() is lrw.LAKE_WAVED_RUST_DEFAULT
         assert logs == []
 
     def test_junk_is_loud_off_warned_once(self, monkeypatch: pytest.MonkeyPatch) -> None:

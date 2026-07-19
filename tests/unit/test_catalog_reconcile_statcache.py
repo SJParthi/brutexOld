@@ -174,6 +174,13 @@ class TestWarmLaunchReadCount:
         _write_month(lake, interval="1minute", year=2021, month=1, n=5)
         _write_month(lake, interval="1minute", year=2021, month=2, n=4)  # 2 partitions
 
+        # EXPLICIT flag-OFF since the W-5 default flip — the COLD counts pin
+        # the PYTHON oracle's read shape (one pl.read_parquet + one
+        # Path.read_bytes per partition; the engaged crate reads natively so
+        # both spies would count zero); the warm zero-read law under the
+        # crate arm is pinned by the reconcile differential's warm-hit test.
+        monkeypatch.setenv("BRUTEX_LAKE_WAVED_RUST", "0")
+
         read_parquet_calls: list[str] = []
         read_bytes_calls: list[str] = []
         real_read_parquet = pl.read_parquet

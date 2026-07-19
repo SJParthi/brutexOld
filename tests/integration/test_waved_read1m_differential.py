@@ -193,7 +193,11 @@ class TestFlagOffNeverRoutes:
     ) -> None:
         # The never-routes spy (the PR-1 bomb idiom): flag OFF must not call
         # the facade routing function at all — the builder resolves the
-        # flag per read and takes the verbatim Python arm.
+        # flag per read and takes the verbatim Python arm. EXPLICIT "0"
+        # since the W-5 default flip (unset now resolves ON) — the OFF-arm
+        # teeth are unchanged, only the env spelling moved.
+        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "0")
+
         def _bomb(**_kwargs: object) -> Any:
             raise AssertionError("flag OFF must never route through the waved seam")
 
