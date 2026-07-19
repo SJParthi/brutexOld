@@ -3494,8 +3494,13 @@ hostile-review pass._
   pinned BOTH ways; non-float metric fields scoped in the suite
   docstring. The recorded remainder is now 11 files (+ combo_mask
   support + the two retained halves). The slice-2c hostile-review round
-  is PENDING at the docs commit — recorded on #1957 when the verdict
-  lands. ENGINE UNCHANGED — zero hot-path/run-identity diffs; no new env
+  LANDED verdict SHIP (recorded on #1957 — zero BLOCKER/MAJOR/MINOR,
+  every count reproduced under execution; the ONE doc-completeness NIT —
+  the crate module doc's universal-identity under-claim — folded in the
+  review-fold commit: the module doc now discloses the bounded
+  `__format__`-vs-`__str__` identity + the dual paisa refusal zones,
+  comment-only, wheel byte-unchanged). ENGINE UNCHANGED — zero
+  hot-path/run-identity diffs; no new env
   vars; full record in MIGRATION.md #1957.)
   Earlier: `claude/rust-cascade-results`
   (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
@@ -10219,8 +10224,10 @@ hostile-review pass._
   hand-killed Rust mutants (2/7 sites not-attempted with reasons); the
   module's FIRST dedicated ci.yml stanza — 243 tests / 100.00%
   (104/22); the recorded remainder now 11 files; the slice-2c
-  hostile-review round pending — recorded on #1957 when the verdict
-  lands; ENGINE UNCHANGED — the sweep hot path + run identity take
+  hostile-review round LANDED SHIP (recorded on #1957 — zero
+  BLOCKER/MAJOR/MINOR; the one doc-completeness NIT — the crate
+  module-doc envelope under-claim — folded comment-only in the
+  review-fold commit); ENGINE UNCHANGED — the sweep hot path + run identity take
   ZERO diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1955 + #1956 + #1957 for the full blurbs)
   Earlier: `claude/rust-cascade-results`

@@ -39,7 +39,9 @@
 //!
 //! String-typed values NEVER cross into Rust: every interpolated fragment
 //! is stringified by CPython `str()` (`f"{x}"` ≡ `format(x, "")` ≡
-//! `str(x)`) and the output text is assembled with Python `str.join` over
+//! `str(x)` — an identity BOUNDED by the `__format__`-vs-`__str__`
+//! divergence class disclosed below, NOT universal over hostile objects)
+//! and the output text is assembled with Python `str.join` over
 //! a fragment list — so a lone-surrogate instrument / JSON-escape-minted
 //! label flows through byte-identically (the frozen
 //! `lone_surrogate_instrument` corpus case). Rust computes only the
@@ -56,6 +58,28 @@
 //! sign-bit ignored) — special-cased. `float("inf")` therefore renders
 //! `pool PBO=inf` exactly as the Python law did (uncaptured by the frozen
 //! corpus; pinned by a dedicated unit + cargo test instead).
+//!
+//! ## Disclosed divergence envelope (mirrors MIGRATION.md #1957)
+//!
+//! Each item is loud + corpus-unreachable — non-production shapes only:
+//!
+//! * **Paisa magnitude — TWO refusal zones, stated precisely.** A
+//!   beyond-±i64 `net_pnl_paisa` refuses `OverflowError` at the ONE
+//!   numeric extraction on the money law (the [`format_inr_paisa`] i64
+//!   input) where the old Python law still RENDERED — the genuine
+//!   divergence zone, `i64 < |paisa| < ~1e28` — AND at ~1e28+ paisa the
+//!   OLD Decimal law ITSELF refused (`InvalidOperation` — a different
+//!   type + threshold), so beyond i64 BOTH implementations eventually
+//!   refuse; neither zone is over-generalized into the other (pinned by
+//!   `TestDisclosedEnvelope`, with exactly-at-i64 parity held;
+//!   unreachable from the int64-validated `ResultRow`).
+//! * **`__format__`-vs-`__str__`.** An object overriding `__format__`
+//!   but NOT `__str__` diverges (the deleted f-string called
+//!   `__format__`; this crate's fragments interpolate `str()`) —
+//!   unreachable from JSON-minted labels / `ResultRow` str fields;
+//!   asserted BOTH WAYS in the differential suite so a future closure
+//!   flips the pin loudly. This is the bound on the decision-(iii)
+//!   marshalling identity above.
 
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
