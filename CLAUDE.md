@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-19 (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957,
+branch `claude/backup-rust-ops` — the backup DECISION-KERNEL first cut: the
+NEW `rust/brutex-ops` crate + the default-OFF `BRUTEX_BACKUP_RUST` facade
+(`brutex/backup/backup_rust.py`) route the pure decision laws of
+`brutex/backup/` through Rust — the dead-man verdict state machine
+(primitives-only FFI; details/datetimes/errors stay Python), the four
+template renderers (the `docs/runbooks/backup-templates/` goldens are the
+cross-language byte pin, cargo- AND pytest-pinned, fixtures BYTE-UNTOUCHED),
+and the restic `--json` parse/argv laws under the abstain-to-oracle law
+(serde-vs-CPython dialect divergences serve the Python oracle verbatim —
+byte-identical for EVERY input by construction). Per-law 16-call burn-in +
+ship-the-oracle autorevert; flag OFF byte-identical AND crate-untouched
+(bomb-spy-pinned); the retained Python implementations are the LIVE parity
+oracle (oracle retirement = a separate later lane). Honest envelope: expected
+payoff ≈ 0 — uniformity, not speed (the ADR-0020 banner); ships INERT — a
+default flip needs its own DEC. The DECISION-KERNEL shape, deliberately NOT
+the #1722 roadmap's wave-13 standalone binary. Ops tooling ONLY — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1957.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3523,7 +3543,60 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/backup-rust-ops`
+  (**DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957** — the backup
+  DECISION-KERNEL first cut on the DEC-FEED-RUST-CORE-001 (#1797) shape: NEW
+  crate `rust/brutex-ops` (pyo3 0.29 abi3-py312 behind the optional `python`
+  feature; serde_json core; build.rs FRAMING-v1 source digest; the
+  brutex-feed maturin mixed layout + stale-wheel handshake shim) + the NEW
+  default-OFF facade `brutex/backup/backup_rust.py` (`BRUTEX_BACKUP_RUST`;
+  local tristate flag twin equality-pinned vs `sweep_lookahead`; `_CRATE_API`
+  all-or-nothing handshake; per-LAW 16-call burn-in comparing FULL outcomes —
+  values OR the raised `BackupError` type+message, deadman floats bit-packed
+  via `struct.pack` — with ship-the-ORACLE autorevert + ONE shared latch; the
+  `USE_ORACLE` decided-degrade sentinel; refuse-poison thunks; degrade/panic
+  sets IMPORTED from `lake_rust_render`'s public stateless re-exports —
+  §11 COMMON; `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raise raw).
+  THREE law families route: (a) `deadman.evaluate_deadman` — Python
+  pre-computes the oracle's own `total_seconds()` deltas (exact integer-µs),
+  Rust returns `(arm, verdict, should_alert, hours, elapsed)`, Python
+  materialises the `DeadmanReport` through detail builders SHARED with the
+  oracle body (one source, both arms; the wrapper reads the clock ONCE —
+  spy-pinned); (b) the four `schedule_render` renderers — the
+  `docs/runbooks/backup-templates/` goldens are the CROSS-LANGUAGE byte pin
+  (cargo pins Rust == golden, the unmodified Python golden suite pins
+  Python == golden, the burn-in byte-compares Rust == Python; fixtures
+  BYTE-UNTOUCHED); (c) the `restic_runner` parse/argv twins under the
+  ABSTAIN LAW — any repr/json-message-embedding raise arm AND any
+  serde-vs-CPython dialect divergence (NaN/Infinity, lone surrogates,
+  `\x1c`-class whitespace) returns the ORACLE code and the facade serves
+  the Python oracle VERBATIM (byte-identical for EVERY input by
+  construction; ok-arm `time` strings parse Python-side via the oracle's own
+  `_parse_snapshot_time`). RECORDED DEVIATIONS: a per-facade machinery copy
+  (NOT `config.seam_core.ConfigRustSeam` — single-value-shaped +
+  `brutex_core`-hardcoded; the generalisation fold is a named follow-up) +
+  no version guard (std-Rust crate, no lockstep to attest — the money_rust
+  reasoning). PROOF (executed): cargo 43 green (36 unit + 3 golden byte pins
+  + 4 proptest) with fmt + clippy `-D warnings` clean; NEW pytest 166 passed
+  (facade standalone + three per-module seam suites + the hypothesis
+  differential vs the REAL wheel in the remaining=0 steady state); the
+  existing 422-test backup battery passes UNMODIFIED on the OFF arm AND
+  flag-ON against the real wheel (zero autoreverts); coverage 100.00%
+  line+branch the ci way — backup_rust 132/38 STANDALONE · deadman 259/92 ·
+  restic_runner 245/76 · schedule_render 33/2; ruff/ruff-format clean;
+  `mypy --strict brutex` 0 new vs the stash-verified baseline; pyright 0 new
+  on touched files. HONEST: expected payoff ≈ 0 — uniformity, not speed (the
+  ADR-0020 banner verbatim); once-per-run/tick call frequency, the engaged
+  path ADDS an env probe + FFI hop (+ the burn-in oracle recompute); ships
+  INERT — a default flip needs its own DEC. NAMED follow-ups:
+  state/plan/restore_drill pure laws NOT converted (repr-embedding error
+  strings — a lower-value seam); run/drill ORCHESTRATION stays Python (the
+  decision-kernel split); oracle deletion = a separate post-soak lane
+  (#1722 law); the seam_core fold; the doctor wheel-freshness stage; the
+  cargo CI lane + mutation.yml pair. Ops tooling ONLY — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; ONE new env var.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10769,7 +10842,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/backup-rust-ops`
+  (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957 — the backup DECISION-KERNEL
+  first cut: the NEW `rust/brutex-ops` crate + the default-OFF
+  `BRUTEX_BACKUP_RUST` facade routing the dead-man verdict state machine +
+  the four golden-pinned template renderers + the restic `--json` parse/argv
+  laws through Rust; primitives-only FFI, abstain-to-oracle on every
+  repr/dialect-divergent arm, per-law 16-call burn-in + ship-the-oracle
+  autorevert; flag OFF byte-identical AND crate-untouched (bomb-spy-pinned);
+  the retained Python implementations are the LIVE parity oracle; expected
+  payoff ≈ 0 — uniformity, not speed (ADR-0020 banner); ships INERT; ops
+  tooling ONLY — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1957 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
