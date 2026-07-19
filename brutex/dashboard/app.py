@@ -4759,9 +4759,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # LAST step) leaves a persistent sentinel the next run's
                 # step-D3 owed catchup completes. Best-effort + kill-switch
                 # coherent (mark_owed_for_pull marks nothing under
-                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
-                # failed pull); the runner clears the marker at the day's
-                # completed material verdict.
+                # BRUTEX_CROSSVERIFY=off / BRUTEX_CROSSVERIFY_PUBLISH=off /
+                # junk env — one WARN, never a failed pull); the runner
+                # clears the marker at the day's completed material verdict.
+                # HONEST (round-1 review MINOR-2): a launch that crosses
+                # midnight leaves THIS launch_day's marker while the tail
+                # runs config.day = the NEW day — benign + convergent: the
+                # tail clears nothing for launch_day, and the NEXT run's D3
+                # completes it idempotently (zero double-puts).
                 from brutex.crossverify.owed import mark_owed_for_pull
 
                 mark_owed_for_pull(lake_root, launch_day, source="dashboard-pipeline")

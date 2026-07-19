@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
+_Last updated: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962,
+branch `claude/rust-calendar-leaves` — PR-1 of the calendar-leaf Rust
+conversion: NEW standalone crate `rust/brutex-calendar` (pyo3 0.29
+abi3-py312, the brutex-feed house layout, catch_unwind FFI belts) hosting
+the PURE decision laws of the two calendar leaves — `classify_month_drift`
+(the exact veto → no-evidence → month-cap-first / year-cap-mutually-
+exclusive order, i128-widened sums), `validate_settle_evidence` (every
+refusal message BYTE-IDENTICAL incl. the ported C-accelerated
+`fromisoformat` quirks; parse-engine ABSTAIN → None on NaN/Infinity/
+lone-surrogate/>128-nesting so Python keeps its oracle) and
+`parse_observed_sidecar` (whole-overlay rejection, the version ==-punning,
+the canonical round-trip entry law) — pinned by 327 Python-generated
+goldens (155 settle · 123 iso · 31 observed · 18 classify; a mechanical
+law-digest staleness pin ties the corpus to the two Python law files) + a
+~10,100-trial live differential vs the Python laws (0 mismatches). Ships INERT: consumed by NOTHING — zero brutex/ Python,
+ci.yml or Makefile edits; the Python modules stay the production
+implementation; the facade flip + oracle deletion + CI wheel wiring are
+LATER PRs, and PR-2 (market_hours + auto_pull_gate) stacks on this crate
+by another session (append-only registration). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1962.)
+Earlier: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
 `integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
 scoped) as ONE merge event off main tip 3ee742b3, in binding order:
 **#1618** DEC-DATA-PARSER-DEAD-DELETE-001 (MIGRATION.md #1941 — delete the
@@ -72,6 +94,27 @@ ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1952.)
+Earlier: 2026-07-16 (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001,
+MIGRATION.md #1968, branch `claude/crossverify-owed-sentinel` — the owed-day
+sentinel HARDENING follow-up to the landed #1810 (the base change rode the
+club-T train, PR #1558; this delta is the round-1 hostile-review fold —
+SHIP ×2, zero BLOCKER/MAJOR): `mark_owed_for_pull` gains publish-gate PARITY
+with the D3 catchup (a staged-only `BRUTEX_CROSSVERIFY_PUBLISH=off` launch
+no longer writes a marker no automatic pass would ever clear — mark and
+auto-clearer AGREE; mark-side pin test), the owed scan gains the STRICT
+canonical-name law + the silent atomic-temp skip (refuter round 3 over
+LANDED main — a foreign-planted basic-ISO `20260714.json` was an IMMORTAL
+un-clearable owed day and double-listed beside its canonical twin, both
+pre-existing on #1810; a scan racing an in-flight mark's `.brutex-write-*`
+temp fired a spurious junk WARN — all fails-before-pinned), the
+midnight-crossing launch is documented benign/convergent at both mark
+sites, `mark_owed`'s broad except narrows to OSError (a genuine code bug
+now propagates loudly), and the scan-window floor boundary is exactly
+pinned. Sidecar-gate + scan-law + comments + tests only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1968; main's landed #1810 entry is
+byte-untouched.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
 branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
 NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
@@ -494,6 +537,21 @@ production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the per-item record
 lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
+Earlier: 2026-07-16 (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1964 —
+the ADR-0021 governance paperwork: the dual-vendor pull-orchestration design
+ADR (`docs/adr/0021-dual-vendor-pull-orchestration.md`, landed to main via
+PR #1555) flips Status PROPOSED → ACCEPTED on the operator's direct 2026-07-16
+approval, and the umbrella design DEC is LEDGERED — capability-driven
+per-vendor stage graphs · ONE lake root with per-vendor write domains (engine
+reads primary only, Golden Rule #4) · ONE additively-generalized sequencer
+(all-None = byte-identical legacy, pinned) · the StageOutcome protocol + the
+VendorPullProfile registry · options prebuild retired
+(DEC-OPTIONS-PREBUILD-RETIRE-001, MIGRATION.md #1831) · incrementality-gated
+feed-vendor auto-arm · the ratified per-domain restore-ordering law. Docs
+ONLY — zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1964 — this header carries the pointer,
+never the story.)
 Earlier: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001 +
 DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1896 + #1898, branch
 `claude/lake-read-inode-guard` — ONE stacked landing vehicle: the DEC-002
@@ -3816,7 +3874,92 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-lap8-lake-guards`
+- **Active branch:** `claude/rust-calendar-leaves`
+  (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962** — entry number
+  PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
+  calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
+  (pyo3 0.29 abi3-py312, the brutex-feed house layout — pure-Rust rlib core
+  + optional `python` feature, build.rs source-digest stamp, maturin mixed
+  layout behind the stale-wheel handshake shim; every FFI body under a
+  `catch_unwind` belt, the release profile deliberately keeps unwinding on)
+  hosting the PURE DECISION LAWS of the two calendar leaves. (1)
+  `classify_month_drift` (`src/drift.rs`) — the observed_sessions
+  admission/veto/cap core, decision order EXACT: veto FIRST
+  (`failed_windows_touching > 0`); no-evidence (`indices != 3` OR
+  `clean < MIN_CLEAN_SUCCESS_WINDOWS(1)` — the CONSTANT, not a kwarg);
+  month cap 3 judged FIRST (over ⇒ flagged=(), over_year stays False — the
+  mutual-exclusion law); year cap 8 only when the month cap is untripped;
+  sums i128-WIDENED (the Python unbounded-int law); day strings opaque
+  tokens — the future flip re-attaches the decision-inert passthroughs.
+  (2) `validate_settle_evidence` (`src/settle.rs`) — the FULL
+  `validate_evidence_payload` truth table (the
+  DEC-SETTLE-EVIDENCE-ADOPTION-001 #1793 validator is the law source),
+  every refusal message BYTE-IDENTICAL to the Python ValueError text via
+  hand-mirrored CPython `repr()` twins (`src/pyrepr.rs`) + a port of the
+  C-ACCELERATED v3.12.3 `_datetimemodule.c` `fromisoformat` (`src/pyiso.rs`
+  — probe-confirmed quirks preserved: the dangling-char-before-tz swallow,
+  compact `HHMMSSff` fractions, the `+05:75` minute-fold,
+  `±00:00:00.ffffff` zero-whole-seconds passing the UTC-exact gate, the
+  embedded-NUL C-terminator behavior, lowercase-z refused); parse-engine
+  divergence (NaN/Infinity/lone-surrogate/>128-nesting) = the ABSTAIN
+  `None` so Python keeps its oracle — never a silent divergence. (3)
+  `parse_observed_sidecar` (`src/drift.rs`) — the whole-overlay rejection
+  law (one bad entry rejects ALL), the version `==`-PUNNING replicated
+  (JSON true/1.0 match 1), entry dates via the canonical round-trip
+  equivalence (strict shape + real proleptic date — PROVEN ≡ `fromisoformat`
+  + `raw == day.isoformat()`); a serde parse failure raises ValueError (the
+  LOUD abstain). EVIDENCE: 327 fixtures generated FROM the live Python laws
+  (155 settle cases — messages byte-exact, 27 accepts · 123 fromisoformat
+  verdicts · 31 observed · 18 classify; generator committed at
+  `rust/brutex-calendar/tests/goldens/generate_goldens.py`) + a
+  ~10,100-trial random live differential vs the Python validators — 0
+  mismatches. HONEST ENVELOPE: ships INERT — consumed by NOTHING; zero
+  brutex/ Python edits, zero ci.yml/Makefile edits, no flag, no wiring;
+  the Python modules remain the production implementation unchanged; the
+  Python-side facade flip (default-ON `BRUTEX_CALENDAR_RUST`) + oracle
+  deletion + CI wheel wiring are LATER PRs; PR-2 (market_hours +
+  auto_pull_gate laws) stacks on this crate by another session (append-only
+  registration site, doc-commented); the reconcile-diff + prefix-grouping
+  laws deliberately LEFT in Python (dict-equality punning on arbitrary
+  evidence dicts — a documented exclusion); nse.py is a separate later
+  slice (PR #1513 coordination). REFUTER ROUND folded (refuter-confirmed
+  F1 unicode-table drift + F2 float-tie rounding, both message-byte-only —
+  no verdict/adopted drift in ~128k trials — fixed at ROOT: the GENERATED
+  CPython-3.12/Unicode-15.0 printability table replaces unicode-properties
+  + exact half-even shortest-float repr replaces `{:e}`; re-verified at
+  ≥100k-trial scale with ZERO mismatches, settle goldens 127 → 145 —
+  per-item record in MIGRATION.md #1962). T18 INDEPENDENT AUDIT folded
+  (verdict CLEAN — detached-worktree byte-identical regen + 4,400 fresh
+  hostile cases 0 mismatches; four non-blocking notes folded: the
+  law-digest STALENESS pin tests/law_digest_pin.rs — the two Python law
+  files hashed under the shared FRAMING v1 source-digest scheme, a law
+  edit without a corpus regen + re-pin fails cargo test loudly, out-of-repo
+  builds skip loudly; the accept-side golden top-up settle 145 → 155 /
+  fixtures 317 → 327, append-only byte-prefix-proven, the installed wheel
+  replayed through all 327; exact-count assert_eq! floors on all four
+  parity suites; the stale-count doc sweep). GATES: 43 cargo tests green;
+  cargo fmt --check / clippy --all-targets --locked -D warnings /
+  test --release --locked green; wheel rebuilt (cp312-abi3) + the refuter
+  harness rerun clean (the T18 fold touched no src/ — no further rebuild
+  needed, replay-verified on the installed wheel); the staleness pin FIRED
+  live on the second merge-forward (main's #1654 lap-8 fold hardened
+  observed_sessions.py's LOADER I/O tier — bounded regular-file-only
+  sidecar read; converted laws byte-untouched) and the ritual executed:
+  corpus regenerated BYTE-IDENTICAL (155/123/31/18, zero drift), digest
+  re-pinned, gates + the full refuter differential rerun on a rebuilt
+  wheel — 0 mismatches (record in MIGRATION.md #1962);
+  Python-side gate exposure = the ONE test-file edit — the #479
+  kernel-discovery build guard auto-found the crate, so
+  `tests/unit/test_run_builds_rust_kernels.py` registers `brutex_calendar`
+  OPTIONAL-INERT via the NEW facade-less variant (facade slot None, legal
+  ONLY with a DEC-cited reason in `INERT_FACADELESS_REASONS`; the ci-lane
+  pin on the `rust-brutex-calendar` job + the never-module-top-imported
+  inverse pin stay LIVE; the flip PR must re-point the registration at the
+  real guarded facade — guard file 31/31 green, ruff/pyright clean).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
+  no new env vars.)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
   scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
   #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1960) →
@@ -5313,6 +5456,20 @@ hostile-review pass._
   --strict brutex` clean (461 files); pyright 0 errors on touched files.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/dual-vendor-paperwork` (**DEC-DUAL-VENDOR-PIPELINE-001,
+  MIGRATION.md #1964** — the ADR-0021 governance paperwork:
+  `docs/adr/0021-dual-vendor-pull-orchestration.md` flips Status PROPOSED →
+  ACCEPTED (the operator landed the ADR on main via PR #1555 and gave direct
+  approval in the orchestration session, 2026-07-16) + the umbrella design
+  ledger entry over the eight ADR decisions (capability-driven per-vendor
+  stage graphs · per-vendor lake write domains, engine reads primary only ·
+  ONE additively-generalized sequencer · the StageOutcome protocol + the
+  VendorPullProfile registry · options prebuild retired,
+  DEC-OPTIONS-PREBUILD-RETIRE-001 #1831 · incrementality-gated feed-vendor
+  auto-arm · the ratified per-domain restore-ordering law). Docs ONLY — ZERO
+  code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; the per-item record lives in
+  MIGRATION.md #1964 — this header carries the pointer, never the story.)
   Earlier: `claude/lake-read-inode-guard`
   (**DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
   MIGRATION.md #1896 + #1898** — ONE stacked landing vehicle: the DEC-002
@@ -6212,7 +6369,15 @@ hostile-review pass._
   0 new; `node --check` green on universe.html; the pre-open fix round —
   the row-18 PR-body DEC-token rewording + the two CodeQL folds
   (string-target monkeypatch; the owed junk-name arm restructured with no
-  empty except, still LOUD) — is recorded in MIGRATION.md #1810.)
+  empty except, still LOUD) — is recorded in MIGRATION.md #1810. + the
+  hardening follow-up DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md
+  #1968 — publish-gate PARITY on `mark_owed_for_pull` (staged-only launches
+  no longer write markers the D3 catchup can never auto-clear), the STRICT
+  canonical marker-name law + the silent atomic-temp skip (a foreign
+  basic-ISO name is junk, never an immortal un-clearable owed day), the
+  midnight-cross honest-limit comments at both launcher mark sites,
+  `mark_owed`'s except narrowed Exception→OSError, and the exact scan-window
+  floor pin; sidecar-gate + scan-law + comments + tests only.)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
@@ -11446,7 +11611,26 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-lap8-lake-guards`
+- **Active feature branch:** `claude/rust-calendar-leaves`
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
+  calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
+  (pyo3 0.29 abi3-py312, brutex-feed layout, catch_unwind FFI belts)
+  hosting the PURE decision laws of the two calendar leaves —
+  `classify_month_drift` (exact veto → no-evidence → month-cap-first /
+  year-cap-mutually-exclusive order, i128-widened sums),
+  `validate_settle_evidence` (every refusal message BYTE-IDENTICAL incl.
+  the ported C-accelerated `fromisoformat` quirks; parse-engine ABSTAIN →
+  None so Python keeps its oracle) and `parse_observed_sidecar`
+  (whole-overlay rejection, version ==-punning, the canonical round-trip
+  entry law) — pinned by 327 Python-generated goldens (law-digest
+  staleness-pinned to the two Python law files) + a ~10,100-trial
+  live differential (0 mismatches); ships INERT — consumed by NOTHING,
+  zero brutex/ Python / ci.yml / Makefile edits; the facade flip + oracle
+  deletion + CI wiring are LATER PRs; PR-2 (market_hours + auto_pull_gate)
+  stacks on this crate (append-only registration); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1962 for the full blurb)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
   the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
   + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md
@@ -11919,6 +12103,12 @@ hostile-review pass._
   origin/main A/B); NO production caller binds the new seams — WS-C/WS-D;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1900 for the full blurb)
+  Earlier: `claude/dual-vendor-paperwork`
+  (DEC-DUAL-VENDOR-PIPELINE-001, MIGRATION.md #1964 — the ADR-0021 governance
+  paperwork — Status ACCEPTED + the umbrella design ledger entry; docs ONLY,
+  zero code; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
+  lives in MIGRATION.md #1964 — this header carries the pointer, never the
+  story; matches §1's Active branch line)
   Earlier: `claude/lake-read-inode-guard`
   (DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
   MIGRATION.md #1896 + #1898 — ONE stacked landing vehicle, the DEC-002
@@ -12170,7 +12360,14 @@ hostile-review pass._
   the day's completed material verdict (crash-convergent; honest
   non-trading/Muhurat skips clear, deferrals/failures keep), and owed days
   read LOUD on the /universe panel via the EMIT-ON-PRESENT `owed_days`
-  progress field (no-owed wire byte-identical, pinned); ENGINE UNCHANGED —
+  progress field (no-owed wire byte-identical, pinned); + the hardening
+  follow-up DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1968 —
+  publish-gate parity on `mark_owed_for_pull` (staged-only launches no
+  longer write markers the D3 catchup can never auto-clear), the STRICT
+  canonical marker-name law + the silent atomic-temp skip (a foreign
+  basic-ISO name is junk, never an immortal un-clearable owed day), the
+  midnight-cross honest-limit comments, `mark_owed`'s except narrowed
+  Exception→OSError, and the exact scan-window floor pin; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1810 for the full blurb)
   Earlier: `claude/sweep-lock-pull-concurrency`
