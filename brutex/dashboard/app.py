@@ -4434,10 +4434,24 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     all_cached=all,
                     select_kind=_select_bulk_targets,
                 )
-            rows, scope_excluded = _screen_historical_contracts(
-                rows,
-                explicit=contract is not None or contracts is not None or underlying is not None,
-            )
+            # P8 explicit-arm refusal (DEC-UNIVERSE-INDEX-ONLY-001): an explicit
+            # contract/contracts/underlying ask resolving ONLY out-of-scope
+            # registry rows fails loud, never a silent "no match". The 400
+            # mapping is scoped TIGHTLY to the screen call (the P7 arm's
+            # idiom at the direct single-symbol route) so an internal
+            # ValueError from the surrounding resolution/store reads keeps its
+            # loud-500 taxonomy instead of masquerading as a client error with
+            # its message reflected — HTTPException propagates verbatim
+            # through the threadpool await.
+            try:
+                rows, scope_excluded = _screen_historical_contracts(
+                    rows,
+                    explicit=contract is not None
+                    or contracts is not None
+                    or underlying is not None,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             if not rows:
                 return [], {}, scope_excluded
             return (
@@ -4448,11 +4462,6 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         try:
             selected, underlying_kinds, scope_excluded = await _run_lake(_resolve_direct_selection)
-        except ValueError as exc:
-            # P8 explicit-arm refusal (DEC-UNIVERSE-INDEX-ONLY-001): an explicit
-            # contract/contracts/underlying ask resolving ONLY out-of-scope
-            # registry rows fails loud, never a silent "no match".
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RegistryError as exc:
             # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading this
             # resolution WIDENED the concurrency window on ``RegistryStore.open``

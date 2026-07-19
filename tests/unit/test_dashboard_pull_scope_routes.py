@@ -473,6 +473,33 @@ class TestP8HistoricalRouteArms:
         _drain_if_started(client)
         assert pulled == []
 
+    def test_internal_valueerror_is_not_reclassified_as_400(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The 400 mapping is scoped to the P8 SCREEN only: an internal
+        ``ValueError`` raised elsewhere in the offloaded resolution (e.g. a
+        malformed registry row escaping the RegistryError normalization)
+        keeps the loud-500 code-bug taxonomy — its internal message is never
+        reflected as a client 400 detail (the merge-base except shape)."""
+        monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+        _pin_creds_present(monkeypatch)
+        _seed_registry(_lake_root(store), with_stock=False)
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("internal resolver defect — not a scope refusal")
+
+        monkeypatch.setattr(app_module, "_resolve_historical_contracts", _boom)
+        with TestClient(
+            build_app(DashboardState(), instrument_store=store),
+            raise_server_exceptions=False,
+        ) as raw_client:
+            resp = raw_client.post(
+                "/api/v1/universe/pull-historical",
+                params={"underlying": "NIFTY", "dry_run": "true"},
+            )
+        assert resp.status_code == 500, resp.text
+        assert "internal resolver defect" not in resp.text  # never reflected
+
     def test_index_underlying_unchanged(
         self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
