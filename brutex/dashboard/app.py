@@ -7047,6 +7047,15 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         def _work() -> dict[str, Any]:
+            """Build the missing-sessions payload on a threadpool worker.
+
+            The generation-keyed memo returns the session_dates-enriched spot
+            rows (recomputing via ``_recompute`` only on a cache miss / dirty
+            generation), then the pure
+            :func:`~brutex.dashboard.completeness.build_missing_sessions_payload`
+            projects them for the requested symbol/exchange/interval/range with
+            the IST audit clock injected. Returns the JSON-ready payload dict.
+            """
             rows = _missing_sessions_cache.get_or_compute(
                 "coverage_missing_sessions",
                 generation=_summary_cache.generation,

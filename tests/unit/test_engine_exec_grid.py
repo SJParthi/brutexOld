@@ -47,6 +47,7 @@ from brutex.engine.exec_grid import (
     exec_window_slice,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday (session close 15:30 IST)
 
@@ -74,7 +75,7 @@ def _bars(*hhmm: tuple[int, int], day: date = _DAY) -> list[CandleBar]:
     return [_bar(hh, mm, day=day) for hh, mm in hhmm]
 
 
-def _events(logs: list[dict[str, object]], event: str) -> list[dict[str, object]]:
+def _events(logs: list[EventDict], event: str) -> list[EventDict]:
     return [entry for entry in logs if entry["event"] == event]
 
 

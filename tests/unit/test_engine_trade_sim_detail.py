@@ -23,6 +23,7 @@ from brutex.engine.trade_sim import (
     simulate_trades,
     simulate_trades_with_exit_indices,
 )
+from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 
 _DAY = date(2024, 1, 2)
@@ -53,7 +54,7 @@ def _sim(
     tp: int | None = None,
     exits: list[bool] | None = None,
     sink: list[TradeDetail] | None = None,
-) -> list[object]:
+) -> list[ClosedTrade]:
     """tf==1 degenerate batch: the SAME bars are decision AND execution stream."""
     return simulate_trades(
         bars,

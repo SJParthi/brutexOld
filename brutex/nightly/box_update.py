@@ -933,6 +933,18 @@ def _smoke(ctx: _Ctx, imports: str = "import trading_core, fno_math") -> int:
 
 
 def _required_specs() -> tuple[WheelSpec, ...]:
+    """Return the wheel specs that MUST load for the box to be usable.
+
+    The subset of :data:`WHEEL_SET` whose ``required`` flag is set (the
+    load-bearing kernels — e.g. ``fno_math`` / ``trading_core``); an optional
+    wheel (``brutex-feed``) is excluded. Drives the §4.6 assert-green import
+    smoke and the rollback repair sweep.
+
+    Returns
+    -------
+    tuple[WheelSpec, ...]
+        The required wheel specs, in ``WHEEL_SET`` order.
+    """
     return tuple(s for s in WHEEL_SET if s.required)
 
 

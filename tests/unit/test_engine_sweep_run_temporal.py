@@ -433,7 +433,9 @@ class TestProjectorCapture:
 
         bar_bits = build_bar_bits(_BARS)
         never_fires = 1 << 59  # choch_bearish never fires on this fixture
-        metrics = evaluate_combo(_BARS, never_fires, direction=Side.BUY, tf_minutes=1)
+        metrics = evaluate_combo(
+            _BARS, never_fires, direction=Side.BUY, tf_minutes=1, exec_bars_1m=_BARS
+        )
         assert metrics.total_trades == 0
         row = ranked_combo_to_result_row(
             RankedCombo(mask=never_fires, metrics=metrics, composite_score=0.0),
@@ -445,6 +447,7 @@ class TestProjectorCapture:
             bars=_BARS,
             bar_bits=bar_bits,
             tf_minutes=1,
+            exec_bars_1m=_BARS,
             sl_paisa=80,
             tp_paisa=50,
             temporal=GOLDEN_TEMPORAL,

@@ -108,7 +108,9 @@ def test_exit_index_fast_path_beats_the_dict_build(monkeypatch: pytest.MonkeyPat
     reset_self_check_for_tests(remaining=0)
 
     def _dict_arm() -> ResultMetrics:
-        return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        return metrics_from_trades(
+            bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
     def _fast_arm() -> ResultMetrics:
         return metrics_from_trades(
@@ -116,6 +118,7 @@ def test_exit_index_fast_path_beats_the_dict_build(monkeypatch: pytest.MonkeyPat
             trades,
             start_equity_paisa=10_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_indices=exit_indices,
         )
 
@@ -159,7 +162,9 @@ def test_anti_vacuous_twin_a_demoted_fast_path_trips_the_floor(
     reset_self_check_for_tests(remaining=0)  # steady state, as in the gate above
 
     def _dict_arm() -> ResultMetrics:
-        return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        return metrics_from_trades(
+            bars, trades, start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+        )
 
     def _demoted_arm() -> ResultMetrics:
         return metrics_from_trades(
@@ -167,6 +172,7 @@ def test_anti_vacuous_twin_a_demoted_fast_path_trips_the_floor(
             trades,
             start_equity_paisa=10_000_000,
             tf_minutes=1,
+            exec_bars_1m=bars,
             exit_indices=demoting_indices,
         )
 

@@ -898,6 +898,26 @@ class _FillSensitivityResolver:
         self._exec_map_memo: dict[SweepTuple, ExecGridMap] = {}
 
     def _bar_bits_for(self, tuple_: SweepTuple, bars: Sequence[CandleBar]) -> Sequence[int]:
+        """Return this tuple's Stage-1A ``bar_bits``, memoised per :class:`SweepTuple`.
+
+        Builds the per-decision-bar truth-vectors once for the tuple's
+        proximity / fib-anchor / price-source coordinates (via
+        :func:`~brutex.engine.stage1a.build_bar_bits`) and caches them, so a
+        pool with many finalists sharing one tuple pays the build a single
+        time.
+
+        Parameters
+        ----------
+        tuple_
+            The sweep-cell coordinate whose indicator parameters key the build.
+        bars
+            The decision-TF bars for the finalist's ``(instrument, interval)``.
+
+        Returns
+        -------
+        Sequence[int]
+            The Stage-1A ``bar_bits`` aligned with ``bars``.
+        """
         cached = self._bar_bits_memo.get(tuple_)
         if cached is None:
             cached = build_bar_bits(
@@ -917,6 +937,29 @@ class _FillSensitivityResolver:
         bars: Sequence[CandleBar],
         minute_bars: Sequence[CandleBar],
     ) -> ExecGridMap:
+        """Return this tuple's :class:`ExecGridMap`, memoised per :class:`SweepTuple`.
+
+        Derives the decision→1m execution-grid mapping once for the tuple's
+        timeframe (via
+        :func:`~brutex.engine.exec_grid.build_exec_grid_map`) and caches it, so
+        every finalist sharing the tuple reuses the same map instead of
+        re-deriving it per fill-sensitivity re-simulation
+        (DEC-FILL-EXEC-GRID-1M-001).
+
+        Parameters
+        ----------
+        tuple_
+            The sweep-cell coordinate whose ``tf`` keys the mapping.
+        bars
+            The decision-TF bars (the signal domain).
+        minute_bars
+            The 1-minute execution stream (the fill/walk domain).
+
+        Returns
+        -------
+        ExecGridMap
+            The close-instant decision→1m fill mapping for this stream pair.
+        """
         cached = self._exec_map_memo.get(tuple_)
         if cached is None:
             cached = build_exec_grid_map(bars, minute_bars, tf_minutes=tuple_.tf.minutes)

@@ -99,7 +99,9 @@ class TestOffModeIsFree:
             compute_metrics([], equity, total_bars=len(bars))
 
         def _seam() -> None:
-            metrics_from_trades(bars, [], start_equity_paisa=10_000_000, tf_minutes=1)
+            metrics_from_trades(
+                bars, [], start_equity_paisa=10_000_000, tf_minutes=1, exec_bars_1m=bars
+            )
 
         _direct()
         _seam()  # warm-up both

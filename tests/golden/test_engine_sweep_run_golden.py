@@ -293,8 +293,12 @@ def test_worst_case_params_add_exactly_the_two_permanent_keys() -> None:
     params = _canonical_params()
     assert params == _PARAMS  # the oracle dict INCLUDES both permanent keys
     legacy = dict(params)
-    assert legacy.pop("fill_mode") == "worst_case"
-    assert legacy.pop("execution_grid") == "1m_next_bar"
+    # Pop OUTSIDE the assert (py/side-effect-in-assert): `python -O` strips
+    # asserts, which would elide the mutation the following two lines rely on.
+    fill_mode_value = legacy.pop("fill_mode")
+    execution_grid_value = legacy.pop("execution_grid")
+    assert fill_mode_value == "worst_case"
+    assert execution_grid_value == "1m_next_bar"
     assert "fill_mode" not in legacy
     assert "execution_grid" not in legacy
 
