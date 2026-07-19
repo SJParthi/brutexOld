@@ -3554,13 +3554,17 @@ hostile-review pass._
   100.00% (baseline 186 tests · twin_detect 156); clean-tree battery
   329. DISCLOSED envelope (carries the Phase-B set + one NEW pinned
   member): lone-surrogate run_ids in group_twins fail UTF-8 extraction;
-  beyond-±i64 entry-µs/pnl refuse OverflowError; a `Fraction(1,3)`
-  threshold diverges — the crate rounds-to-f64-then-compares vs the
-  oracle's exact-rational compare — pinned BOTH ways; the quiet-NaN
+  beyond-±i64 entry-µs/pnl refuse OverflowError; an exact-numeric
+  threshold (`Fraction`, `Decimal` — any exact-numeric with `__float__`)
+  diverges — the crate rounds-to-f64-then-compares vs the
+  oracle's exact compare — pinned BOTH ways for Fraction AND Decimal;
+  the quiet-NaN
   payload carry now TESTED (the Phase-B open note closed); raw-escape
   parity held everywhere. The recorded remainder is now 9 files. The
-  slice-2d hostile-review round is PENDING at the docs commit
-  (dispatched next; recorded on #1958 when the verdict lands — the
+  slice-2d hostile-review round LANDED verdict SHIP (zero
+  BLOCKER/MAJOR/MINOR; two doc-only NITs folded in the review-fold
+  commit — the baseline.rs quiet-NaN "untested"→TESTED reword + the
+  Decimal threshold-envelope twin — recorded on #1958 per the
   #1955–#1957 convention). ENGINE UNCHANGED — zero
   hot-path/run-identity diffs; no new env
   vars; full record in MIGRATION.md #1958.)
@@ -10312,8 +10316,9 @@ hostile-review pass._
   pin) + 3 not-attempted sites justified; the two pre-existing stanzas
   extended — baseline 186 / twin_detect 156 tests, 100.00% each; the
   recorded remainder now 9 files; the slice-2d hostile-review round
-  PENDING at the docs commit (recorded on #1958 when the verdict
-  lands); ENGINE UNCHANGED — the sweep hot path + run identity take
+  LANDED verdict SHIP (zero BLOCKER/MAJOR/MINOR; two doc-only NITs
+  folded — recorded on #1958); ENGINE UNCHANGED — the sweep hot path +
+  run identity take
   ZERO diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1955 + #1956 + #1957 + #1958 for the full
   blurbs)

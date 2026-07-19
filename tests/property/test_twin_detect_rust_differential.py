@@ -41,10 +41,12 @@ a future closure flips the pin loudly):
 * an ``entry_ts_us`` member beyond ±i64 fails extraction
   (``OverflowError``) where the deleted law compared unbounded ints — the
   epoch-µs domain is ±2.5e17 by the datetime years-1..9999 law;
-* a ``Fraction`` threshold passes the rich-compare envelope then extracts
-  via ``__float__`` (the crate compares against the rounded double) where
-  the deleted law's tier-2 ``>=`` compared exact-rationally — an
-  undocumented input class, corpus-free.
+* an exact-numeric threshold (``Fraction``, ``Decimal`` — any
+  exact-numeric type with ``__float__``) passes the rich-compare envelope
+  then extracts via ``__float__`` (the crate compares against the rounded
+  double) where the deleted law's tier-2 ``>=`` compared exactly — an
+  undocumented input class, corpus-free; pinned BOTH ways for Fraction
+  AND Decimal.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ import math
 import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from fractions import Fraction
 from typing import Final, cast
 
@@ -713,4 +716,30 @@ class TestDisclosedEnvelope:
         fam, _members = _oracle_group_twins(pool, jaccard_threshold=third)
         assert fam["b"] == "b"  # exact-rational compare: 1/3 double < 1/3
         merged = group_twins(pool, jaccard_threshold=third)  # type: ignore[arg-type]
+        assert merged.family_by_run_id["b"] == "a"  # rounded-double compare
+
+    def test_decimal_threshold_compares_rounded_where_the_oracle_was_exact(self) -> None:
+        # The Decimal twin of the Fraction pin — the SAME rounds-to-f64
+        # mechanism: float(Decimal("0.333…3")) rounds BELOW the exact
+        # decimal, so a jaccard of exactly that double merges crate-side
+        # while the deleted law's exact compare split.
+        dec_third = Decimal("0.33333333333333333333")
+        assert float(dec_third) < dec_third
+        pool = [
+            TwinCandidate(
+                run_id="a",
+                mask_bits=1,
+                fingerprint=fingerprint_seed(0),
+                entry_ts_us=frozenset({1, 2, 3}),
+            ),
+            TwinCandidate(
+                run_id="b",
+                mask_bits=2,
+                fingerprint=fingerprint_seed(1),
+                entry_ts_us=frozenset({1}),
+            ),
+        ]
+        fam, _members = _oracle_group_twins(pool, jaccard_threshold=dec_third)
+        assert fam["b"] == "b"  # exact compare: 1/3 double < the Decimal
+        merged = group_twins(pool, jaccard_threshold=dec_third)  # type: ignore[arg-type]
         assert merged.family_by_run_id["b"] == "a"  # rounded-double compare

@@ -63,8 +63,10 @@
 //!   print ASCII always);
 //! * a quiet-NaN price with a diagnostic PAYLOAD (`NaN123`) passes
 //!   through [`price_str`] verbatim — CPython `quantize` propagates the
-//!   payload too, but the exact payload-carry equivalence is untested
-//!   (unreachable: no lake price is NaN);
+//!   payload too, and the payload-carry EQUALITY is TESTED (the
+//!   `test_quiet_nan_payload_carry_matches` pin in
+//!   `tests/property/test_baseline_rust_differential.py`); still a
+//!   non-production shape (no lake price is NaN);
 //! * pre-1945 bar instants would diverge from tzdb IST history (the
 //!   `ist.rs` honesty envelope — the lake floor is 2020-01-01).
 

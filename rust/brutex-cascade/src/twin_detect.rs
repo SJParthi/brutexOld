@@ -56,7 +56,14 @@
 //!   where Python compared unbounded ints — epoch-µs instants are i64 by
 //!   the models-layer datetime domain (years 1..9999 ≈ ±2.5e17 µs);
 //! * a `pnl_paisa` beyond ±i64 fails extraction at the shim's serialize
-//!   marshalling — int64-paisa is the `CapturedTrade` contract.
+//!   marshalling — int64-paisa is the `CapturedTrade` contract;
+//! * an exact-numeric `jaccard_threshold` (`Fraction`, `Decimal` — any
+//!   exact-numeric type with `__float__`) passes the rich-compare
+//!   envelope then extracts via `__float__`, so the tier-2 `>=` compares
+//!   against the ROUNDED double where the deleted law compared exactly —
+//!   pinned BOTH ways for Fraction AND Decimal in the differential
+//!   suite's `TestDisclosedEnvelope` (the production threshold is the
+//!   module constant float; an undocumented input class, corpus-free).
 
 use std::collections::{BTreeSet, HashMap};
 
