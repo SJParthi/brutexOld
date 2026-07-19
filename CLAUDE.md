@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
+_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a,
+MIGRATION.md #1955, branch `claude/rust-cascade-results-s2` STACKED on the
+slice-1 head — the `cascade_wire` SERIALISATION + PARSE LAW family moves to
+`rust/brutex-cascade/src/cascade_wire.rs` under the same capture-first
+compressed cycle (the 64-case parity corpus FROZEN against the UNTOUCHED
+Python BEFORE conversion — 8 manifests · 6 reports · 44 parse payloads ·
+18 math cases, quirks frozen AS LAW incl. the `version: true` bool-pun
+parse + the raw IndexError/AttributeError escapes); the module becomes a
+type-face shim (per-family prefix guards verbatim; coercions delegated to
+CPython's OWN builtins invoked from the crate; the NEW general
+`dumps_sorted` json.dumps twin; `_per_bar_returns` division = the
+corpus-FORCED CPython true-division deviation), its orchestration/I-O
+half retained as documented wiring — the recorded later-slice work. The
+62-test frozen replay + 11 hypothesis differentials vs verbatim deleted-law
+copies + 263 pre-existing tests UNMODIFIED + 3 hand-killed Rust mutants;
+100.00% line+branch on the shim + the NEW dedicated ci.yml stanza. ENGINE
+UNCHANGED — the sweep hot path + run identity take ZERO diffs —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new env
+vars. This header carries the pointer, never the story — the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #1955.)
+Earlier: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
 branch `claude/rust-cascade-results` — the cascade/results-depth Rust
 conversion PHASE A: the NEW standalone `rust/brutex-cascade` crate (pyo3
 abi3-py312) hosts the `cascade_join` + `minute_path` + `combo_aggregates`
@@ -3268,7 +3288,84 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-cascade-results`
+- **Active branch:** `claude/rust-cascade-results-s2`
+  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a, MIGRATION.md #1955** —
+  STACKED on the slice-1 head ef021b8; the T14 lane's second slice: the
+  `cascade_wire` SERIALISATION + PARSE LAW family moves to
+  `rust/brutex-cascade/src/cascade_wire.rs` and the module becomes a
+  type-face shim over the crate. THE CYCLE (capture-first): the 64-case
+  parity corpus (8 manifests · 6 wire reports · 44 parse payloads · 18
+  math-trio cases) was FROZEN at f7ea834 against the UNTOUCHED Python law
+  BEFORE any conversion (`tests/golden/_cascade_wire_parity_corpus.py` →
+  `fixtures/cascade_rust_parity/cascade_wire.json`; the generator's
+  regeneration refusal became PER-FILE — slice-1 fixtures byte-frozen;
+  determinism proven across PYTHONHASHSEED subprocesses), deliberately
+  freezing the QUIRKS as law: `version: true` PARSES (the `True == 1`
+  rich-compare pun), a len-2 `proximity_bps` escapes as a RAW IndexError
+  and a non-dict spec entry as a RAW AttributeError (both cross the FFI as
+  those exact types), `int("9"*40)` stays a valid unbounded coercion, NaN
+  in `_max_drawdown_return_units` follows Python's `max()`
+  first-arg-on-unordered law. CONVERTED: the report projection family
+  (`_report_to_dict` · `wire_report_to_dict` · `serialize_wire_report`),
+  the manifest serialisation family (`_spec_to_dict` · `_stage3_to_dict` ·
+  `_lbt_to_dict` · `manifest_to_json` — the NEW general `dumps_sorted`
+  CPython-json.dumps twin in `pyjson.rs`: unbounded ints via the object's
+  own `str()`, floats via the object's own `repr()` + the exact
+  out-of-range refusal, UTF-8 String-Ord key sort ≡ code-point order), the
+  manifest PARSE family (the DEC-FILL-WORST-CASE-ONLY-001 fill-mode gate ·
+  `_spec_from_dict` · `_stage3_from_dict` · `_lbt_from_dict` ·
+  `_roll_schedules_from_payload`'s full shape law · the version gate · the
+  bars-context coercion — structural law in Rust, COERCIONS delegated to
+  CPython's OWN builtins invoked from the crate, mapping access via generic
+  `get_item` so real KeyError/TypeError/IndexError propagate; 2-tuple
+  unpack errors reproduce CPython's messages exactly), and the math trio
+  (`_finite` · `_per_bar_returns` · `_max_drawdown_return_units`;
+  `_per_bar_returns`'s division is the CORPUS-FORCED deviation — CPython's
+  exactly-rounded int true-division delegated to the interpreter, exact at
+  every magnitude, never a 2^53-bounded f64 approximation). The shim keeps
+  every dataclass/`__post_init__` raise/constant/`__all__` + the
+  per-family `(KeyError, TypeError, ValueError) → CascadeWireError` prefix
+  guards VERBATIM + the §11 COMMON delegations passed as data
+  (`price_source_params_fragment` · `FillMode.WORST_CASE.value` ·
+  `asdict(config)` · `NIFTY_FUTURES_SERIES_SYMBOL` import-identity).
+  RETAINED AS WIRING (honest scope): the orchestration/I-O half
+  (run_cascade_over_specs · build_candidate_input · candidates_for_spec ·
+  _make_mc_evaluate · build_leaderboard_trials · spec_from_store_rows ·
+  build_stage2_cascade_specs · the run/write/load/stamp I-O ·
+  check_replay_roll_schedule · _manifest_window_dt ·
+  cascade_config_for_sweep+to/from_dict) is NOT law and stays Python
+  UNTOUCHED — it drives trade_sim / metrics.cascade / the lake, the
+  recorded later-slice work. TESTS executed: the 62-test frozen parity
+  replay (bytes + dict + FULL error-string/type equality) · 11 hypothesis
+  differentials vs VERBATIM in-test copies of the deleted law (ZERO
+  divergences; `TestBeyondWordEnvelope` pins the beyond-word refusals,
+  true-division parity exercised to ±10^18 > 2^53 incl. the exact i64::MAX
+  boundary) · the 263 pre-existing stem-suite tests UNMODIFIED · 281
+  consumer spot-checks · THREE hand-applied Rust mutants EXECUTED KILLED
+  (drawdown-fold sign flip · strictly-increasing `<=`→`<` · dumps_sorted
+  key-sort drop; scratchpad mutants-s2.log; mutation.yml not wired for the
+  crate — the #1892 precedent, disclosed). GATES: `cascade_wire.py`
+  100.00% line+branch (491/130, zero pragmas) the ci.yml way + the NEW
+  dedicated stanza (251 tests); cargo fmt/clippy `--locked -D
+  warnings`/test `--release --locked` green (44 tests; Cargo.toml/lock
+  byte-untouched); ruff/ruff-format clean; `mypy --strict` clean on
+  touched files. DIVERGENCE ENVELOPE (each loud + corpus-unreachable):
+  roll ordinals beyond ±i128 refuse (`OverflowError`); `_per_bar_returns`
+  equity beyond ±i64 refuses at extraction (the deleted Python computed a
+  float); non-str dict keys refuse in `dumps_sorted`; lone surrogates fail
+  UTF-8 extraction; multi-defect payloads surface WHICHEVER defect the
+  original token order reached first (per-record orchestration preserved).
+  HONEST REMAINDER: the #1954 phase-B list (trade_sim-with-oracle ·
+  trade_capture · baseline · twin_detect · reference_series · session_lens
+  · metrics/cascade · candidate · margin_history · top100_artifact ·
+  trade_store · results_depth_pass · results_report) PLUS cascade_wire's
+  retained orchestration half — later slices under this same DEC.
+  SCOPE-LOCK honored (results_store / stage3_wire / stage3_refine*/grid/
+  select / exit_index / metrics-compute byte-untouched). ENGINE UNCHANGED —
+  the sweep hot path + run identity take ZERO diffs —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; NO new env vars.)
+  Earlier: `claude/rust-cascade-results`
   (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
   cascade/results-depth Rust conversion, PHASE A, under the operator's
   standing greenfield-conversion approval as relayed via the coordinator
@@ -9934,7 +10031,25 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-cascade-results`
+- **Active feature branch:** `claude/rust-cascade-results-s2`
+  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a, MIGRATION.md #1955 —
+  STACKED on the slice-1 head: the `cascade_wire` SERIALISATION + PARSE LAW
+  family moves to `rust/brutex-cascade/src/cascade_wire.rs` under the
+  capture-first cycle (the 64-case parity corpus frozen against the
+  untouched Python BEFORE conversion — quirks frozen AS LAW incl. the
+  `version: true` bool-pun parse + the raw IndexError/AttributeError
+  escapes); the module becomes a type-face shim (per-family prefix guards
+  verbatim; coercions via CPython's OWN builtins invoked from the crate;
+  the NEW general `dumps_sorted` json.dumps twin; `_per_bar_returns` =
+  the corpus-forced CPython true-division deviation), its
+  orchestration/I-O half retained as documented wiring — the recorded
+  later-slice work; 62-test frozen replay + 11 differentials vs verbatim
+  deleted-law copies + 263 pre-existing tests UNMODIFIED + 3 hand-killed
+  Rust mutants; 100.00% line+branch on the shim + the NEW dedicated ci.yml
+  stanza; ENGINE UNCHANGED — the sweep hot path + run identity take ZERO
+  diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
+  + MIGRATION.md #1955 for the full blurb)
+  Earlier: `claude/rust-cascade-results`
   (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954 — the T14
   cascade/results-depth Rust conversion PHASE A: the NEW
   `rust/brutex-cascade` crate (pyo3 abi3-py312, committed Cargo.lock) hosts
