@@ -236,13 +236,26 @@ class TestPins:
     def test_taxonomy_version_pin(self) -> None:
         assert TAXONOMY_VERSION == 1
 
-    def test_shipped_boundaries_all_verified(self) -> None:
-        # The 2026-07-19 session's search FOUND the peak-margin citation
-        # (SEBI/HO/MRD2/DCAP/CIR/P/2020/127, final 100% phase eff.
-        # 2021-09-01, secondary-corroborated), so the shipped table
-        # carries ZERO verified=False rows. A future unverified boundary
-        # must flip this pin CONSCIOUSLY.
-        assert [row.label for row in ERA_BOUNDARIES if not row.verified] == []
+    def test_shipped_verified_census_pin(self) -> None:
+        # Honesty census (DEC-ETC-REGIME-HISTORY-001: reconstruction is
+        # NOT verification): EXACTLY ONE shipped row is verified=False —
+        # the 2021-09-01 peak-margin boundary, whose circular id + phase
+        # dates are SECONDARY-corroborated only (primary SEBI circular
+        # PDF not retrieved). Flipping it back to verified=True requires
+        # the primary circular in hand — a CONSCIOUS change.
+        assert [row.label for row in ERA_BOUNDARIES if not row.verified] == [
+            "post_peak_margin_full"
+        ]
+        unverified = next(
+            row for row in ERA_BOUNDARIES if row.label == "post_peak_margin_full"
+        )
+        assert unverified.verified is False
+        assert unverified.source.startswith("UNVERIFIED — ")
+        # The honest source retains the circular id + phase dates.
+        assert "SEBI/HO/MRD2/DCAP/CIR/P/2020/127" in unverified.source
+        assert "primary circular not retrieved" in unverified.source
+        # The UNVERIFIED-stamp law still passes over the shipped table.
+        validate_era_boundaries(ERA_BOUNDARIES)
 
     def test_shipped_labels_pin(self) -> None:
         assert [row.label for row in ERA_BOUNDARIES] == [

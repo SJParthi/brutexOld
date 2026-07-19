@@ -44,12 +44,13 @@ Honest limits (Golden Rule #10)
 * ZERO consumers in this PR — the leaf ships INERT by construction; run
   identity, the 60-bit vocabulary, ranking and every engine surface are
   untouched.
-* The ``post_peak_margin_full`` era boundary (2021-09-01) is
-  citation-grounded to SEBI circular SEBI/HO/MRD2/DCAP/CIR/P/2020/127
-  via SECONDARY corroboration (multiple independent broker/market press
-  sources agree on the phase-in 25% Dec-2020 → 50% Mar-2021 → 75%
-  Jun-2021 → 100% Sep-2021); the primary SEBI PDF was not fetched in
-  this session — the source string states exactly that.
+* The ``post_peak_margin_full`` era boundary (2021-09-01) ships
+  ``verified=False`` — reconstruction is NOT verification (the
+  DEC-ETC-REGIME-HISTORY-001 precedent): the circular id + phase dates
+  (SEBI/HO/MRD2/DCAP/CIR/P/2020/127, phase-in 25% Dec-2020 → 100%
+  2021-09-01) are SECONDARY-corroborated only; the primary SEBI
+  circular PDF was not retrieved, so the row is honestly stamped
+  ``"UNVERIFIED — …"`` until it is.
 * The VIX band edges (13 / 17 / 25) and the era/crisis window dates are
   LABELING CONVENTIONS pending operator calibration — deliberately NOT
   winner-relative and NOT official regulatory windows (except where a
@@ -243,12 +244,10 @@ ERA_BOUNDARIES: Final[tuple[EraBoundary, ...]] = (
     EraBoundary(
         date(2021, 9, 1),
         "post_peak_margin_full",
-        "SEBI circular SEBI/HO/MRD2/DCAP/CIR/P/2020/127 (2020-07-20): "
-        "peak-margin phase-in 25% Dec-2020 -> 50% Mar-2021 -> 75% Jun-2021 "
-        "-> 100% effective 2021-09-01 (phase 4). Secondary-corroborated "
-        "across multiple independent broker/market-press sources "
-        "(2026-07-19 search); primary SEBI PDF not fetched this session.",
-        True,
+        "UNVERIFIED — secondary-corroborated "
+        "(SEBI/HO/MRD2/DCAP/CIR/P/2020/127, phase-in 25% Dec-2020 -> "
+        "100% 2021-09-01); primary circular not retrieved",
+        False,
     ),
     EraBoundary(
         date(2024, 11, 14),
