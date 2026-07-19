@@ -77,6 +77,19 @@ from typing import TYPE_CHECKING, Final, overload
 
 import structlog
 
+# Since DEC-PREBUILD-FRAME-WRITE-001 the env-flag vocabulary (the
+# truthy/falsy literal sets + the `env_flag_tristate` classifier) LIVES in
+# the wheel-free `brutex.config.env_flags` leaf (the prebuild frame-write
+# kill switch in `brutex.data` needs the same vocabulary WITHOUT importing
+# the engine package, whose `__init__` requires the compiled `fno_math`
+# wheel); this module re-exports the classifier byte-compatibly (in
+# `__all__`, identity-pinned by tests/unit/test_config_env_flags.py) so
+# every existing `from brutex.engine.sweep_lookahead import
+# env_flag_tristate` consumer (`rust_metrics` / `rust_stage1a` /
+# `sweep_apriori` / `results_depth_pass`) is untouched. The literal SETS
+# themselves are consumed only through the classifier — import them from
+# `brutex.config.env_flags` directly if a new consumer ever needs them.
+from brutex.config.env_flags import FALSY_LITERALS, TRUTHY_LITERALS, env_flag_tristate
 from brutex.feed.lookahead import LookAheadBarrier
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -91,56 +104,33 @@ _LOG = structlog.get_logger("brutex.engine.sweep_lookahead")
 #: the sweep hot path is byte-identical and cost-unchanged.
 SWEEP_LOOKAHEAD_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_LOOKAHEAD_GUARD"
 
-#: The accepted truthy literals (case-insensitive, whitespace-stripped).
-_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
-
-#: The accepted falsy literals (case-insensitive, whitespace-stripped) — the
-#: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY`. Defined
-#: HERE (the sweep env-flag vocabulary home, CLAUDE.md §11 COMMON) so a
-#: default-ON sibling flag (``brutex.engine.rust_metrics``,
-#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) can recognise an explicit OFF via
-#: :func:`env_flag_tristate`; this module's own default-OFF flag needs no
-#: falsy branch — anything non-truthy is already OFF.
-_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+#: Identity re-exports of the ONE env-flag vocabulary (the SAME frozenset
+#: objects as :mod:`brutex.config.env_flags` — aliases, never copies, so
+#: CLAUDE.md §11 COMMON holds): four leaf modules whose import posture
+#: forbids the engine package (``feed_rust`` / ``money_rust`` /
+#: ``strategies.combo_rust`` / ``nightly.box_update``) carry inline
+#: vocabulary twins mirror-PINNED against THIS module's historical
+#: vocabulary home (their suites assert
+#: ``<leaf>._TRUTHY == sweep_lookahead._TRUTHY``), so the private names
+#: are deliberately KEPT here after the DEC-PREBUILD-FRAME-WRITE-001 hoist.
+_TRUTHY: Final[frozenset[str]] = TRUTHY_LITERALS
+_FALSY: Final[frozenset[str]] = FALSY_LITERALS
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
+    # _FALSY/_TRUTHY are exported so static analysis counts the aliases as
+    # USED (CodeQL py/unused-global-variable, alerts 1287/1115): they are
+    # consumed cross-module by the mirror-pin suites (test_feed_rust /
+    # test_money_rust / test_strategies_combo_rust /
+    # test_nightly_box_update / test_lake_rust_render) — see the alias
+    # comment above; never delete without re-homing those pins.
+    "_FALSY",
+    "_TRUTHY",
     "GuardedBarWindow",
     "env_flag_tristate",
     "maybe_guard_bars",
     "sweep_lookahead_guard_enabled",
 ]
-
-
-def env_flag_tristate(raw: str) -> bool | None:
-    """Classify *raw* against the ONE sweep env-flag vocabulary.
-
-    The COMMON classifier for every sweep env flag (CLAUDE.md §11 — the
-    truthy/falsy literal sets live HERE, their vocabulary home, and the
-    default-ON sibling flag in :mod:`brutex.engine.rust_metrics` delegates to
-    this helper instead of copying the ``strip().lower()`` + membership
-    logic).
-
-    Parameters
-    ----------
-    raw
-        The raw env value (surrounding whitespace ignored,
-        case-insensitive).
-
-    Returns
-    -------
-    bool | None
-        ``True`` for a :data:`_TRUTHY` literal (``1/true/yes/on``),
-        ``False`` for a :data:`_FALSY` literal (``0/false/no/off``), and
-        ``None`` for anything else — unset/empty AND unrecognised both map
-        to ``None``; the CALLER owns the default + warn policy for those.
-    """
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    return None
 
 
 def sweep_lookahead_guard_enabled() -> bool:

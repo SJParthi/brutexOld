@@ -189,6 +189,11 @@ from brutex.data.greeks_revision import (
     revision_marker_path,
     touch_greeks_revision_marker,
 )
+from brutex.data.guarded_read import (
+    read_parquet_regular,
+    read_parquet_schema_regular,
+    read_regular_text,
+)
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
 from brutex.engine.sweep_checkpoint import (
@@ -419,7 +424,11 @@ class GreeksBackfillReport:
     (``stale_*`` / ``probe_failed``) rides along so one report answers both
     "what was found" and "what was done". ``resumed_from`` is the target index
     the run started at (``0`` = fresh); ``note`` is the completion headline the
-    dashboard job surfaces verbatim.
+    dashboard job surfaces verbatim. ``cancelled`` (DEC-JOB-CANCEL-CONTROL-001,
+    additive + defaulted — every pre-existing constructor call site is
+    byte-identical) is ``True`` iff the run stopped at a between-batches
+    boundary on the operator's cooperative Stop: an honest PARTIAL, never an
+    error — the checkpoint is kept and the next same-plan run resumes.
     """
 
     backfill_id: str
@@ -444,6 +453,7 @@ class GreeksBackfillReport:
     resumed_from: int
     dry_run: bool
     note: str
+    cancelled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """The JSON-friendly projection (the dashboard job's return shape)."""
@@ -470,6 +480,7 @@ class GreeksBackfillReport:
             "resumed_from": self.resumed_from,
             "dry_run": self.dry_run,
             "note": self.note,
+            "cancelled": self.cancelled,
         }
 
 
@@ -516,7 +527,7 @@ def _marker_last_writer(marker: Path, *, size: int) -> str:
     if size > MAX_CHECKPOINT_BYTES:
         return "unknown"
     try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(marker))
     except (OSError, ValueError, RecursionError):
         return "unknown"
     if not isinstance(payload, dict):
@@ -823,15 +834,24 @@ def _read_driver_frames(
     if with_stamp:
         needed.append("greeks_provenance_id")
     try:
-        schema = pl.read_parquet_schema(path)
+        # The footer probe rides the GUARDED seam (DEC-LAKE-READ-INODE-GUARD-001
+        # fix round — the diagnostic-arm class sweep): it opens the SAME inode
+        # the guarded read_parquet_regular below opens, and it runs FIRST, so a
+        # bare pl.read_parquet_schema(path) here would wedge in C-level
+        # fifo_open on a post-enumeration inode swap BEFORE the guard is ever
+        # reached. NotRegularFileError is an OSError → the existing fail-open
+        # None arm below absorbs it.
+        schema = read_parquet_schema_regular(path)
         if any(name not in schema for name in needed):
             return None
         has_timestamp = "timestamp" in schema
         columns = ["timestamp", *needed] if has_timestamp else needed
-        # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
-        # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
-        # contract dir must never glob-read a sibling's rows into this probe.
-        frame = pl.read_parquet(path, columns=columns, glob=False)
+        # Guarded literal read of ONE concrete month file
+        # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15 metachar
+        # law — held by construction inside read_parquet_regular — a
+        # `[`-carrying contract dir must never glob-read a sibling's rows into
+        # this probe; + DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+        frame = read_parquet_regular(path, columns=columns)
         view = _driver_row_view(frame, path) if has_timestamp else frame
     except (pl.exceptions.PolarsError, OSError):
         return None
@@ -1137,10 +1157,11 @@ def _probe_contract_staleness(
         emit_progress_beat()
         files_probed += 1
         try:
-            # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001) — the #1594 round-15 metachar law; see
-            # _read_driver_frames' twin comment.
-            series = pl.read_parquet(path, columns=["greeks_provenance_id"], glob=False)[
+            # Guarded literal read (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 —
+            # the #1594 round-15 metachar law, held by construction; see
+            # _read_driver_frames' twin comment; +
+            # DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+            series = read_parquet_regular(path, columns=["greeks_provenance_id"])[
                 "greeks_provenance_id"
             ]
         except pl.exceptions.ColumnNotFoundError:
@@ -1609,6 +1630,7 @@ def run_greeks_backfill(
     checkpoint_store: SweepCheckpointStore | None = None,
     enrich: Callable[..., GreeksEnrichReport] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    should_stop: Callable[[], bool] | None = None,
 ) -> GreeksBackfillReport:
     """Execute *plan* in bounded batches through the EXISTING enrich driver.
 
@@ -1683,6 +1705,28 @@ def run_greeks_backfill(
         :func:`~brutex.data.greeks_enrich.enrich_greeks_for_targets`.
     sleep
         The inter-batch sleeper (injected for deterministic tests).
+    should_stop
+        Optional zero-arg cooperative-cancel probe (DEC-JOB-CANCEL-CONTROL-001
+        — the Greeks-backfill arm of the DEC-JOB-COOPERATIVE-CANCEL-001
+        mechanism; the dashboard threads the job's
+        :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.cancel_requested`).
+        Consulted at the BETWEEN-BATCHES boundary ONLY — before each batch's
+        driver call, never mid-batch — so the in-flight batch always completes
+        its driver call, its clean-prefix checkpoint ``record`` and its
+        freshness-marker touch first: the durable state at a stop is
+        bit-identical to a graceful stop at that boundary. ``True`` stops the
+        run COOPERATIVELY: the loop breaks, the clean-completion checkpoint
+        unlink below is SKIPPED (the advisory checkpoint stays frozen at the
+        last fully-clean prefix, so the next same-plan run ADOPTS it — the
+        run's own marker touches are identity-exempt in the round-10 adoption
+        gate — and fast-resumes; correctness never depends on it, the stamps
+        make resume correct regardless), and the report returns with
+        ``cancelled=True`` + an honest CANCELLED note — never a raise, never
+        an error state, never a CRITICAL alert. HONEST latency (Golden Rule
+        #10): cooperative — cancel lands only once the in-flight batch
+        (default 25 contracts) finishes; a wedged driver call ignores it (the
+        stall watchdog stays that class's honest terminal). ``None`` (the
+        default — every pre-existing caller) is byte-identical to today.
 
     Returns
     -------
@@ -1767,7 +1811,43 @@ def run_greeks_backfill(
     total = len(plan.targets)
     tallies = _RunTallies()
     batches = 0
+    completed = resumed_from
+    cancelled = False
+    checkpoint_survives = False
     for batch_start in range(resumed_from, total, batch_size):
+        if should_stop is not None and should_stop():
+            # Cooperative operator cancel (DEC-JOB-CANCEL-CONTROL-001): probed
+            # at the BETWEEN-BATCHES boundary ONLY, so the in-flight batch has
+            # already landed its driver writes + checkpoint record + marker
+            # touch — the durable state is bit-identical to a graceful stop at
+            # this boundary. Deliberately NO checkpoint write here (nothing new
+            # to record) and NO unlink below (the frozen last-clean-prefix
+            # checkpoint is the resume accelerator). One loud WARN, then the
+            # honest cancelled report — never a raise (contrast the pull
+            # spines' PullCancelled, which must propagate past nested layers;
+            # this flat loop returns gracefully like the pipeline's
+            # stopped_after verdict).
+            cancelled = True
+            # Honest checkpoint state (hostile-review fix, #1748): "kept" is
+            # claimed only when a frozen file ACTUALLY survives on disk — a
+            # cancel before the first clean record (or after an errored-prefix
+            # freeze / a failed record) has no file, and says so. Probed ONCE
+            # here and reused by the report note below (nothing touches the
+            # file between this break and the note — the clean-completion
+            # unlink is skipped on the cancelled path).
+            checkpoint_survives = store.path.exists()
+            _LOG.warning(
+                "greeks_backfill.cancelled",
+                completed=completed,
+                total=total,
+                batches=batches,
+                checkpoint=(
+                    "kept (frozen at the last clean prefix) — the next run resumes"
+                    if checkpoint_survives
+                    else "none recorded — the next run re-scans (correct via the stamps)"
+                ),
+            )
+            break
         batch = plan.targets[batch_start : batch_start + batch_size]
         report = enrich_fn(
             targets=list(batch),
@@ -1835,23 +1915,50 @@ def run_greeks_backfill(
             on_progress(completed, total, tallies.bars_written, tallies.errored, label)
         if pause_s > 0 and completed < total:
             sleep(pause_s)
-    # Clean completion: the stamps are the durable done-record — delete the
-    # advisory checkpoint so a later (different-plan) run never even reads it.
-    try:
-        store.path.unlink(missing_ok=True)
-    except OSError as exc:
-        _LOG.warning(
-            "greeks_backfill.checkpoint_cleanup_failed",
-            path=str(store.path),
-            error=str(exc),
-        )
-    note = (
-        f"Greeks backfill {plan.backfill_id[:12]}: {tallies.enriched} contract(s) "
+    if not cancelled:
+        # Clean completion: the stamps are the durable done-record — delete the
+        # advisory checkpoint so a later (different-plan) run never even reads
+        # it. A CANCELLED run skips this on purpose (DEC-JOB-CANCEL-CONTROL-001):
+        # the checkpoint stays frozen at the last fully-clean prefix so the next
+        # same-plan run adopts it and fast-resumes (own-plan marker touches are
+        # identity-exempt in the round-10 adoption gate).
+        try:
+            store.path.unlink(missing_ok=True)
+        except OSError as exc:
+            _LOG.warning(
+                "greeks_backfill.checkpoint_cleanup_failed",
+                path=str(store.path),
+                error=str(exc),
+            )
+    tallies_clause = (
+        f"{tallies.enriched} contract(s) "
         f"re-stamped v2, {tallies.already_current} already current, "
         f"{tallies.errored} errored (re-runnable); {tallies.bars_written} bars written"
         + (f"; resumed from target {resumed_from}" if resumed_from > 0 else "")
         + _unfixable_note_clause(plan.scan.stale_unfixable)
     )
+    if cancelled:
+        # The honest cancelled headline (surfaced verbatim by the dashboard
+        # job's _finish_detail): the stop point + the resume promise FIRST,
+        # then the same tallies clause a completed run reports. The resume
+        # clause is BRANCHED on the on-disk truth (hostile-review fix, #1748):
+        # "checkpoint kept" describes the unlink-skip above and is claimed
+        # ONLY when a frozen file actually survives — on a cancel before the
+        # first clean record there is simply no file, and that arm says so
+        # honestly. Resume stays correct via the stamps either way (the
+        # checkpoint is only the accelerator).
+        resume_clause = (
+            "resumable (checkpoint kept; re-run to resume)"
+            if checkpoint_survives
+            else "resumable (no checkpoint recorded — the re-run re-scans; resume "
+            "correct via stored stamps)"
+        )
+        note = (
+            f"Greeks backfill {plan.backfill_id[:12]} CANCELLED by operator at "
+            f"contract {completed}/{total} — {resume_clause}: {tallies_clause}"
+        )
+    else:
+        note = f"Greeks backfill {plan.backfill_id[:12]}: {tallies_clause}"
     result = GreeksBackfillReport(
         backfill_id=plan.backfill_id,
         planned=total,
@@ -1875,6 +1982,7 @@ def run_greeks_backfill(
         resumed_from=resumed_from,
         dry_run=False,
         note=note,
+        cancelled=cancelled,
     )
     _LOG.info("greeks_backfill.done", **result.to_dict())
     return result

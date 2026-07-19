@@ -34,6 +34,8 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.data.guarded_read import open_regular_binary
+
 #: Lower bound for a tail request — at least one line is always returned
 #: when the file is non-empty.
 _MIN_LINES: Final[int] = 1
@@ -123,7 +125,7 @@ def _read_tail_bytes(path: Path, limit: int) -> bytes:
         A suffix of the file's bytes guaranteed to contain at least *limit*
         complete lines (or the whole file if it is shorter).
     """
-    with path.open("rb") as handle:
+    with open_regular_binary(path) as handle:
         handle.seek(0, 2)  # SEEK_END
         file_size = handle.tell()
         if file_size == 0:

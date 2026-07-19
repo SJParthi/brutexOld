@@ -2269,6 +2269,7 @@
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-format.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-portal-state.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
@@ -2443,7 +2444,7 @@
       <input id="swEnd" type="date">
     </label>
     <label>K-DEPTH
-      <input id="swK" type="number" min="1" max="5" placeholder="default">
+      <input id="swK" type="number" min="1" max="5" placeholder="extinction (default)" title="blank = Apriori-to-extinction default; a number = classic fixed-K sweep">
     </label>
     <label>DIRECTIONS
       <select id="swDirections">
@@ -2472,8 +2473,13 @@
   </div>
   <div class="oc-controls-row">
     <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
+    <!-- Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): shown while the
+         sweep reports running; POSTs /api/v1/sweep/cancel. The engine stops at
+         the TUPLE boundary (the in-flight tuple finishes its durable write +
+         checkpoint), so a cancelled run is a clean resumable checkpoint. -->
+    <button class="oc-cascade-btn" id="stop-sweep" type="button" hidden>⏹ Stop</button>
     <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
-    <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
+    <span class="oc-disabled-note" id="ocPreflight">exploration: Apriori-to-extinction (default) — each cell's k-ladder runs until no combo survives min-hits; a level exceeding the mask·bar budget (BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) refuses loudly and that cell's tuples at and above it are marked FAILED (raise the budget and re-run to explore deeper — the checkpoint re-runs exactly those). Enter an explicit K for the legacy fixed-K sweep (byte-identical to previous behavior). No time estimate is shown: extinction depth is data-dependent — every figure would be modeled, not measured; the run's audit artifacts carry the real per-level counts + timings.</span>
   </div>
   <div class="oc-msg" id="sweep-msg"></div>
   <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
@@ -2581,6 +2587,8 @@
         <div class="kpi-cell"><div class="k">Profit factor</div><div class="v" data-oc="r1_pf" data-explain="profit_factor">—</div></div>
         <div class="kpi-cell"><div class="k">Sharpe</div><div class="v" data-oc="r1_sharpe" data-explain="sharpe">—</div></div>
         <div class="kpi-cell"><div class="k">DSR</div><div class="v" data-oc="r1_dsr" data-explain="dsr">—</div></div>
+        <div class="kpi-cell"><div class="k">Worst streak %</div><div class="v" data-oc="r1_worst_streak_pct" data-explain="worst_streak_pnl">—</div></div>
+        <div class="kpi-cell"><div class="k">Underwater days</div><div class="v" data-oc="r1_uw_days" data-explain="longest_underwater">—</div></div>
         <div class="kpi-cell"><div class="k">Rank</div><div class="v" data-oc="r1_rank" data-explain="rank">—</div></div>
       </div>
       <div class="grid-2">
@@ -3012,6 +3020,10 @@
           <input id="scMinWin" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMinPf">Min PF</label>
           <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMinTrades">Min trades</label>
+          <input id="scMinTrades" type="number" step="1" placeholder="any"></div>
+        <div class="ctl"><label for="scMinDsr" title="floors the stored per-tuple DSR (tuple-N — an inflating under-count; DEC-RESULTS-TRUST-HONESTY-001)">Min DSR (tuple-N)</label>
+          <input id="scMinDsr" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
           <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
         <div class="ctl"><label for="scVixLo">VIX band ≥</label>
@@ -3180,9 +3192,14 @@
       <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
       <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
       <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>
+      <!-- DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the STORED
+           buy-&-hold benchmark of THIS run (R27 baseline artifact) — served
+           verbatim, never recomputed; awaiting/corrupt reads the honest detail. -->
+      <div class="story-cell"><div class="k">Benchmark — buy &amp; hold</div><div class="v" id="stBench">—</div></div>
     </div>
     <!-- R31: the per-combo VIX regime band, rendered on the card -->
     <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
+    <div class="note" id="stBenchDetail">benchmark: awaiting stored baseline artifact (R27)</div>
     <div class="note" id="stArith"></div>
   </section>
 
@@ -3225,6 +3242,49 @@
       <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
     </div>
     <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
+  </section>
+  <!-- Losing-streak resilience hero panel (the sibling sidecar block →
+       row.resilience.* + the max from row.metrics.max_consecutive_losses).
+       Every value is textContent-rendered; a NULL/absent record reads "—". -->
+  <section aria-label="Losing-streak resilience" id="stResilienceSection">
+    <h3>🥶 Losing-streak resilience — can you hold this strategy through a cold run?</h3>
+    <div class="story-grid">
+      <div class="story-cell" data-explain="max_consecutive_losses">
+        <div class="k">Worst cold streak</div>
+        <div class="v" id="stResWorstStreak">—</div>
+        <div class="sub" id="stResWorstStreakSub"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_streak_pnl">
+        <div class="k">Worst streak (by ₹)</div>
+        <div class="v" id="stResCost">—</div>
+        <div class="sub" id="stResCostSub"></div>
+      </div>
+      <div class="story-cell" data-explain="longest_underwater">
+        <div class="k">Longest underwater</div>
+        <div class="v" id="stResUnderwater">—</div>
+        <div class="sub" id="stResUnderwaterBadge"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_loss_month">
+        <div class="k">Worst month</div>
+        <div class="v" id="stResWorstMonth">—</div>
+        <div class="sub" id="stResWorstMonthSub"></div>
+      </div>
+      <div class="story-cell" data-explain="win_rate_year_spread">
+        <div class="k">Win-rate stability</div>
+        <div class="v" id="stResWinSpread">—</div>
+      </div>
+      <div class="story-cell" data-explain="resilience_guide">
+        <div class="k">Hold-through guide</div>
+        <div class="sub" id="stResGuide">—</div>
+      </div>
+    </div>
+    <div class="resilience-locate">
+      <label for="stResLossesIn">Where am I now?</label>
+      <input id="stResLossesIn" type="number" min="0" step="1" inputmode="numeric" placeholder="losses in a row">
+      <span>losses in →</span>
+      <span id="stResLocate" class="resilience-verdict na">enter a number</span>
+    </div>
+    <div class="note">Signal-only backtest · gross of brokerage &amp; taxes · per-unit (no sizing).</div>
   </section>
   </div>
 </aside>
@@ -3718,6 +3778,25 @@
       // zero extra sockets. Fires before the idle-return so "idle" renders
       // honestly.
       if (window.__bxHbSweep) window.__bxHbSweep(sp);
+      // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): this ALWAYS-ON
+      // renderer owns the attach case — the Stop button is visible exactly
+      // while a sweep reports running, even when this page never clicked Run.
+      // Runs BEFORE the idle-return so an idle snapshot re-hides the button
+      // and un-wedges a disabled one.
+      const stopAttach = document.getElementById('stop-sweep');
+      if (stopAttach && sp) {
+        stopAttach.hidden = !sp.running;
+        // Attach-case reset (DEC-JOB-COOPERATIVE-CANCEL-001 review fold): a
+        // Stop click disables the button + stamps "Stopping…", and the
+        // onRunSweepProgress settle reset only runs when THIS page clicked Run —
+        // so the always-on renderer restores the idle label once no sweep is
+        // running, never leaving a wedged dead disabled button for the
+        // NEXT sweep to un-hide.
+        if (!sp.running && stopAttach.disabled) {
+          stopAttach.disabled = false;
+          stopAttach.textContent = '⏹ Stop';
+        }
+      }
       if (!sp || sp.state === 'idle') return;  // nothing running yet
       const panel = document.getElementById('sweepProgressPanel');
       // Un-hide BEFORE the skip gate so the first running snapshot always
@@ -3933,6 +4012,7 @@
     const sweepMsg = document.getElementById('sweep-msg');
     const sweepBar = document.getElementById('sweep-bar');
     const sweepFill = document.getElementById('sweep-bar-fill');
+    const stopBtn = document.getElementById('stop-sweep');
     if (!sweepBtn || !sweepMsg) return;
     // Watching flag (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720):
     // the former THIRD /api/v1/sweep-progress poller (a 1.2 s setInterval with
@@ -3953,6 +4033,9 @@
         p.state + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
         ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) +
         ' · ' + rate + ' combos/sec';
+      // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly
+      // while the sweep reports running (covers attach-to-already-running).
+      if (stopBtn) stopBtn.hidden = !p.running;
     }
 
     function onRunSweepProgress(p) {
@@ -3960,8 +4043,17 @@
       renderSweep(p);
       if (!p.running && p.state !== 'idle') {
         watching = false; sweepBtn.disabled = false;
-        sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
-          ' survivor(s). The report above refreshes from the new run artifacts.';
+        // Cooperative Stop settle (DEC-JOB-COOPERATIVE-CANCEL-001): reset the
+        // Stop button on terminal settle, and name a cancelled run honestly
+        // instead of a fabricated ✅.
+        if (stopBtn) { stopBtn.hidden = true; stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop'; }
+        if (p.state === 'cancelled') {
+          sweepMsg.textContent = '⏹ Sweep cancelled — ' + (p.detail || 'stopped at the tuple boundary') +
+            '. Run again to resume from the checkpoint.';
+        } else {
+          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
+            ' survivor(s). The report above refreshes from the new run artifacts.';
+        }
       }
     }
     (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(onRunSweepProgress);
@@ -3970,6 +4062,31 @@
       sweepMsg.textContent = 'Could not read sweep progress (poll failure ×' + failures +
         ') — the shared poller keeps retrying.';
     });
+
+    if (stopBtn) {
+      stopBtn.onclick = async () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = '⏳ Stopping — finishing current tuple…';
+        try {
+          const r = await fetch('/api/v1/sweep/cancel', { method: 'POST' });
+          const j = await r.json();
+          if (!j.cancelling) {
+            // Continuation-v2 fix: the route's refusal payload carries an
+            // actionable `error` exactly when a sweep IS running but the
+            // cancel sidecar write failed (ENOSPC / read-only lake) — render
+            // it (textContent-only, the cascade handler's j.error precedent)
+            // instead of the factually false "No running sweep to cancel.".
+            sweepMsg.textContent = j.error
+              ? ('Cancel failed: ' + j.error + ' — fix the lake volume and retry')
+              : 'No running sweep to cancel.';
+            stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+          }
+        } catch (e) {
+          sweepMsg.textContent = 'Cancel request failed: ' + e;
+          stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+        }
+      };
+    }
 
     sweepBtn.onclick = async () => {
       sweepBtn.disabled = true;

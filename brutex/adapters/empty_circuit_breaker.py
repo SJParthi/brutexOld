@@ -122,6 +122,7 @@ __all__ = [
     "EmptySettleBreaker",
     "MassEmptySettleHalt",
     "resolve_empty_breaker",
+    "resolve_fraction_env",
     "resolve_int_env",
 ]
 
@@ -596,8 +597,15 @@ def resolve_int_env(env_name: str, default: int) -> int:
         return default
 
 
-def _resolve_fraction(env_name: str, default: float) -> float:
-    """Read a ``(0, 1]`` float env override; anything invalid falls back — **O(1)**."""
+def resolve_fraction_env(env_name: str, default: float) -> float:
+    """Read a ``(0, 1]`` float env override; anything invalid falls back — **O(1)**.
+
+    PUBLIC (CLAUDE.md §11 COMMON — promoted by DEC-ALLFILTERED-MASS-BREAKER-001):
+    shared with the mass all-filtered breaker's resolver
+    (:func:`brutex.adapters.all_filtered_breaker.resolve_all_filtered_breaker`)
+    so the fail-safe fraction parsing has ONE source of truth, exactly as
+    :func:`resolve_int_env` is shared with the error-storm breaker.
+    """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         return default
@@ -608,6 +616,11 @@ def _resolve_fraction(env_name: str, default: float) -> float:
     if not 0.0 < value <= 1.0:
         return default
     return value
+
+
+#: Private alias kept so existing internal callers are unchanged (the promotion
+#: renamed the public surface only — DEC-ALLFILTERED-MASS-BREAKER-001).
+_resolve_fraction = resolve_fraction_env
 
 
 def resolve_empty_breaker(

@@ -183,9 +183,12 @@ class InteriorRunsPayload:
     covered-date ordinals (order-preserving — membership is a set lookup
     crate-side) and ``interior_session_ordinals`` the ordered TRADING-session
     ordinals STRICTLY between the first and last covered date, walked with
-    the SAME :func:`~brutex.calendars.observed_sessions.is_trading_day_observed`
-    the oracle consults (the calendar stays Python — never re-implemented
-    in Rust).
+    the oracle's own two-gate law (the covered-breaks-static fold,
+    DEC-SEED-OBSERVED-OVERLAY-001): a COVERED date enters iff the STATIC
+    :func:`~brutex.calendars.nse.is_trading_day` says session, a NON-covered
+    date iff
+    :func:`~brutex.calendars.observed_sessions.is_trading_day_observed`
+    does (the calendar stays Python — never re-implemented in Rust).
     """
 
     covered_ordinals: tuple[int, ...]

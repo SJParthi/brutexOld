@@ -1,0 +1,383 @@
+# flip-soak-m4pro.yml — the parameterized FLIP-SOAK harness on the self-hosted M4-Pro.
+#
+# WHY (DEC-FLIP-SOAK-HARNESS-001 — MIGRATION.md #1894)
+# ------------------------------------------------------------------------
+# Every Rust-conversion default-ON flip ADR is gated on the standard soak
+# evidence bundle (grid-scale twin identity on the REAL lake + PROVEN
+# engagement + soak-drift cleanliness + honest wall-clock A/B + a committed
+# PASS.json — docs/soak/README.md). The real lake exists only on the
+# operator's M4-Pro, so the harness runs there — dispatched, never
+# scheduled: a flip soak is an operator decision tied to a specific slice
+# branch, not a cron.
+#
+# MAIN-RESIDENT BY DESIGN (the #1479 dispatchability lesson)
+# ----------------------------------------------------------
+# `workflow_dispatch` only surfaces workflows present on the DEFAULT branch
+# (GitHub platform behavior) — PR #1479's rust-enum-twin-run.yml lived only
+# on its slice branch, was therefore NEVER dispatchable, and its PR body's
+# evidence slot still reads "pending operator execution". THIS workflow is
+# flag-agnostic and lands on main ONCE; a dispatched run checks out the
+# slice branch under test via the `ref` input while the workflow definition
+# stays main-resident. Security posture for the ref input: the runner is
+# the operator's own Mac and dispatch requires repo write access — the same
+# trust as the operator running the terminal one-liner
+# (`bash scripts/soak/flip_soak.sh <FLAG> <lake-root>`); the workflow still
+# keeps `permissions: contents: read`, `persist-credentials: false`
+# (SEC13-1) and GitHub-owned SHA-pinned actions only (SEC12-1).
+#
+# DERIVED TIMING VIA THE `plan` JOB (the soak-selfhosted.yml SOAK-R6-1 law)
+# -------------------------------------------------------------------------
+# GHA expressions have NO arithmetic, so the duration derivation runs in
+# POSIX shell inside a cheap GitHub-hosted `plan` job whose validated
+# numeric outputs feed `timeout-minutes` via fromJSON(). Fixed slack is 90
+# (LARGER than soak-selfhosted's +30: two full twin arms + wheel rebuilds
+# precede the drift leg) + m/6 for the duration-linear teardown tail. The
+# 24 h GITHUB_TOKEN bound on self-hosted jobs (SEC9-1) demands
+# m + 90 + m/6 < 1440 → m <= ~1157 → ceiling 1100 (derived timeout 1373).
+#
+# RUNNER + POSTURE (bench-m4pro.yml / verify-m4pro.yml / soak-selfhosted.yml)
+# ---------------------------------------------------------------------------
+# `runs-on: [self-hosted, macos, m4pro]`; NO `pull_request` trigger and NO
+# push/schedule trigger at all (DEC-M4PRO-PR-TRIGGER-001 — an offline Mac
+# would hang PR mergeable state; a flip soak is dispatch-only by nature).
+# NON-required: never in ci-ok needs; DEC-PREMERGE-M4PRO-NONBLOCK-001's
+# posture means even a queued run can never refuse an unrelated merge — the
+# flip ADR, not CI, is the consumer of the PASS artifact. The single runner
+# also serves bench-m4pro (daily 11:00 UTC), verify-m4pro (daily 12:00 UTC)
+# and soak-selfhosted (Sun 02:00 UTC); a self-hosted runner executes one
+# job at a time, so QUEUEING is the serializer (cross-workflow locks do not
+# exist in GHA) — the runbook's dispatch window (12:30 UTC → 01:30 UTC,
+# never Sunday) is the operator law, plus this workflow's own concurrency
+# group below.
+#
+# WATCHDOG HONESTY (verbatim from soak-selfhosted.yml)
+# ----------------------------------------------------
+# The `failure() || cancelled()` issue filer below covers a STARTED run
+# whose runner stayed alive and whose token is still valid (the 1100-min
+# fence guarantees the token half). Two paths are STRUCTURALLY uncoverable
+# in-job: a never-started run (24 h queue auto-cancel on an offline Mac,
+# SOAK-R8-2) and a runner lost mid-soak (sleep/reboot/power, SOAK-R9-1) —
+# the ADR-0018 out-of-job watchdog remains the named follow-up, NOT built
+# here either.
+#
+# LAKE-MUTATION RAIL (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 reality)
+# ----------------------------------------------------------------
+# The same box runs the 01:30 IST nightly chain + the auto-pull scheduler +
+# crossverify — all lake WRITERS, and a pull legitimately runs concurrently
+# with a sweep's compute phase, so the harness never assumes an exclusive
+# lake. The script's per-arm data_snapshot_hash equality check maps a moved
+# lake to the RETRY_ENV_MOVED verdict (never a kernel FAIL); grids pin
+# CLOSED historical quarters; the runbook window avoids 01:30 IST.
+
+name: Flip soak (self-hosted M4-Pro)
+
+on:
+  workflow_dispatch:
+    inputs:
+      flag:
+        description: "The registry flag under test (scripts/soak/flag_registry.py — one flag at a time by law)"
+        required: true
+        type: choice
+        options:
+          - BRUTEX_SWEEP_RUST_ENUM
+          - BRUTEX_SWEEP_WORKER_KERNEL_CACHE
+      ref:
+        description: "Git ref (slice branch / SHA) to check out and soak — the workflow stays main-resident (#1479 lesson)"
+        required: true
+        default: "main"
+      soak_minutes:
+        description: "Drift-leg wall-clock minutes, 1..1100 (job timeout is this + 90 + this/6, which must stay under the 24-h GITHUB_TOKEN validity on self-hosted jobs — SEC9-1)"
+        required: false
+        default: "360"
+      grid_scale:
+        description: "Twin grid scale (smoke is NOT flip-qualifying — see flag_registry.GRID_SCALES)"
+        required: false
+        type: choice
+        default: "default"
+        options:
+          - smoke
+          - default
+          - full
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # ONE flip soak at a time repo-wide (not ref-scoped): the single M4-Pro
+  # runner is the real serializer; a second dispatch queues behind the
+  # first instead of cancelling a multi-hour run.
+  group: m4pro-flip-soak
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Cargo network resilience (CI-only flake hardening) — see ci.yml.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  plan:
+    name: Derive soak timing (shell arithmetic)
+    # GHA expressions cannot add or multiply (soak-selfhosted.yml header law),
+    # so the derivation runs in POSIX shell on a cheap GitHub-hosted VM — it
+    # must never queue behind an asleep self-hosted Mac.
+    runs-on: ubuntu-24.04
+    # Least-privilege: the plan job never checks out and never writes an issue,
+    # so it drops the top-level issues:write (only the flip-soak job's failure
+    # watchdog needs it) — a shell-arithmetic job holds a read-only token.
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      timeout_minutes: ${{ steps.derive.outputs.timeout_minutes }}
+      soak_minutes: ${{ steps.derive.outputs.soak_minutes }}
+    steps:
+      - name: Validate soak_minutes and derive timeout
+        id: derive
+        # Same env-indirection + strict digits-only fence as
+        # soak-selfhosted.yml's plan job (COMMON pattern): the input is DATA
+        # not code; anything non-numeric is REFUSED.
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
+        run: |
+          m=${SOAK_MINUTES//_/}
+          case "$m" in
+            ''|*[!0-9]*)
+              echo "::error::soak_minutes='$SOAK_MINUTES' is not a non-negative integer." >&2
+              exit 1
+              ;;
+          esac
+          # Magnitude fence BEFORE any arithmetic (SEC7-2): bash arithmetic
+          # is 64-bit and WRAPS — refuse on LENGTH first.
+          if [ "${#m}" -gt 5 ]; then
+            echo "::error::soak_minutes='$SOAK_MINUTES' is absurdly large (max 1100; the job's GITHUB_TOKEN dies at 24 h on self-hosted runners)." >&2
+            exit 1
+          fi
+          # Force DECIMAL (SOAK-R7-3): a leading zero would otherwise parse
+          # as octal inside $(( )).
+          m=$((10#$m))
+          # Literal-zero refusal (SOAK-R8-3/SEC8-1): a zero-minute dispatch
+          # would fake-green a 'flip soak' whose drift leg soaked nothing.
+          if [ "$m" -lt 1 ]; then
+            echo "::error::soak_minutes must be >= 1 — a zero-minute dispatch would report a fake-green flip soak." >&2
+            exit 1
+          fi
+          # Upper bound (SEC9-1, re-derived for this harness's +90 slack):
+          # timeout = m + 90 + m/6 must stay under 1440 min or the failure
+          # watchdog's GITHUB_TOKEN is dead when it fires → m <= ~1157 →
+          # ceiling 1100 (derived timeout 1373).
+          if [ "$m" -gt 1100 ]; then
+            echo "::error::soak_minutes=$m exceeds the flip-soak ceiling (1100): the derived timeout (m + 90 + m/6) must stay under the 24-h GITHUB_TOKEN validity so the failure watchdog can still authenticate (SEC9-1)." >&2
+            exit 1
+          fi
+          # Slack: +90 fixed (checkout + deps + TWO wheel builds + TWO full
+          # twin arms precede the drift leg) + m/6 for the duration-linear
+          # teardown (bounded summary + upload — the SOAK-R7-4 law).
+          timeout_minutes=$((m + 90 + m / 6))
+          echo "timeout_minutes=$timeout_minutes" >> "$GITHUB_OUTPUT"
+          echo "soak_minutes=$m" >> "$GITHUB_OUTPUT"
+          echo "Flip-soak plan: soak_minutes=$m timeout_minutes=$timeout_minutes"
+
+  flip-soak:
+    name: Flip soak (twin + drift, flag-parameterized)
+    needs: plan
+    # Gated to the registered self-hosted M4-Pro (bench-m4pro.yml labels).
+    # If the runner is offline the job queues, blocks no PR, and GitHub
+    # auto-cancels after 24 h with NO step running — the in-job watchdog
+    # cannot fire for a never-started run (SOAK-R8-2, disclosed above).
+    runs-on: [self-hosted, macos, m4pro]
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout the ref under test
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # The slice branch / SHA under test — the workflow definition
+          # itself stays main-resident (the #1479 dispatchability lesson).
+          ref: ${{ github.event.inputs.ref }}
+          # SEC13-1: never persist the job-scoped issues:write GITHUB_TOKEN
+          # into .git/config — later steps run third-party code (pip build
+          # backends + cargo build.rs) on the persistent self-hosted Mac.
+          persist-credentials: false
+
+      - name: Show runner identity + dispatch (real hardware proof)
+        env:
+          FLAG: ${{ github.event.inputs.flag }}
+          REF: ${{ github.event.inputs.ref }}
+          SCALE: ${{ github.event.inputs.grid_scale || 'default' }}
+          SOAK_MINUTES: ${{ needs.plan.outputs.soak_minutes }}
+        run: |
+          # Redact host detail: `uname -sm` (kernel + machine arch — the
+          # hardware proof this step exists for) NEVER `-a`, whose nodename +
+          # kernel-build string leak the operator box's hostname into a
+          # world-readable actions log.
+          echo "Runner: $(uname -sm)"
+          echo "Flag: $FLAG  Ref: $REF  Scale: $SCALE  Minutes: $SOAK_MINUTES"
+
+      - name: Guard — the real lake must be reachable
+        # The real lake exists ONLY on this box (rust-enum-twin-run.yml's
+        # guard, inherited). The runner daemon's environment must export
+        # BRUTEX_LAKE_ROOT; without it the terminal one-liner is the
+        # fallback: bash scripts/soak/flip_soak.sh <FLAG> <lake-root>
+        run: |
+          if [ -z "${BRUTEX_LAKE_ROOT:-}" ] || [ ! -d "${BRUTEX_LAKE_ROOT:-/nonexistent}" ]; then
+            echo "::error::BRUTEX_LAKE_ROOT is unset or not a directory on this runner. Export it in the runner daemon's environment, or run the terminal fallback: bash scripts/soak/flip_soak.sh <FLAG> <lake-root>" >&2
+            exit 1
+          fi
+          # Redact the path: the absolute lake root leaks the operator box's
+          # local directory layout into a world-readable log — print only that
+          # a reachable read-only lake was found (all writes are scratch).
+          echo "Lake root: reachable (read-only source; all writes are scratch)"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Verify runner Rust toolchain
+        # GitHub-owned-actions-ONLY on the persistent Mac (SEC12-1): the
+        # wheels build with the runner's OWN rustup/cargo, exactly like
+        # verify-m4pro.yml / bench-m4pro.yml / soak-selfhosted.yml.
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "cargo not found on the self-hosted runner PATH — install rustup" >&2
+            exit 1
+          fi
+          cargo --version
+          rustc --version
+
+      - name: Rebuild fno_math from the checked-out ref (stale-wheel hazard)
+        # The engagement gate closes the silently-Python-served vacuous-PASS
+        # class, but a wheel predating the checked-out ref would still test
+        # the WRONG kernel — rebuild both wheels from THIS tree (risk
+        # register #4). Belt-and-suspenders crates.io flake guard reused.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Rebuild trading_core from the checked-out ref
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Preflight — refuse when the runner disk cannot hold the twin trees (SOAK-R9-3 class)
+        # Two full twin result trees + per-window drift scratch land under
+        # $RUNNER_TEMP. Grid-scale result sizes are unprobed on the box
+        # (design §6 open question 1), so the bound is a conservative fixed
+        # 20 GiB — refuse LOUDLY up front rather than burn hours to ENOSPC.
+        run: |
+          required_kib=20971520
+          free_kib=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          case "$free_kib" in
+            ''|*[!0-9]*)
+              echo "::error::Disk preflight could not read free space under \$RUNNER_TEMP (df/awk yielded '$free_kib') — refusing to launch a multi-hour soak blind (SOAK-R10-1 class)." >&2
+              exit 1
+              ;;
+          esac
+          echo "Disk preflight: need ~${required_kib} KiB under \$RUNNER_TEMP, free ${free_kib} KiB"
+          if [ "$free_kib" -lt "$required_kib" ]; then
+            echo "::error::Insufficient disk for the flip soak (~20 GiB needed for the twin result trees + drift scratch under \$RUNNER_TEMP)." >&2
+            exit 1
+          fi
+
+      - name: Run the flip soak (twin leg + drift leg + PASS fold)
+        # FLIP_SOAK_ARM_CMD is a TEST-ONLY dry-mode seam (the fake-lake stub
+        # CLI) and is deliberately NEVER set here — production runs the real
+        # registry twin argv; setting it in production would soak a fake kernel.
+        # G2 belt-and-suspenders: the SAME derived bound as a per-step
+        # timeout, so even a silently no-op'd job-level expression cannot
+        # let the run outrun soak_minutes + 90 + m/6.
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+        env:
+          FLAG: ${{ github.event.inputs.flag }}
+          SCALE: ${{ github.event.inputs.grid_scale || 'default' }}
+          SOAK_MINUTES: ${{ needs.plan.outputs.soak_minutes }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/flip-soak"
+          bash scripts/soak/flip_soak.sh "$FLAG" "$BRUTEX_LAKE_ROOT" \
+            --minutes "$SOAK_MINUTES" \
+            --scale "$SCALE" \
+            --out-dir "$RUNNER_TEMP/flip-soak" \
+            --run-url "$RUN_URL"
+
+      - name: Summarize soak artifacts (bounded — SOAK-R7-4)
+        # NEVER upload the raw result trees (multi-GiB at grid scale): the
+        # bounded summary is the forensic companion; the durable evidence is
+        # the PASS.json the OPERATOR commits under docs/soak/ via a reviewed
+        # PR (docs/soak/README.md governance — the bench-baselines posture).
+        if: always()
+        run: |
+          src="$RUNNER_TEMP/flip-soak"
+          dst="$RUNNER_TEMP/flip-soak-summary"
+          mkdir -p "$dst"
+          if [ -d "$src" ]; then
+            ls -lR "$src" > "$dst/tree.txt" || true
+            for f in "$src"/*.json "$src"/*.log "$src"/*.manifest; do
+              [ -f "$f" ] || continue
+              {
+                echo "== $f (last 64 KiB) =="
+                tail -c 65536 "$f"
+              } > "$dst/tail-$(basename "$f").txt" || true
+            done
+          fi
+
+      - name: Upload flip-soak artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: flip-soak-evidence
+          path: ${{ runner.temp }}/flip-soak-summary/**
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Open issue on failure
+        # AL-SOAK-1: `|| cancelled()` because a timeout-killed job reports
+        # CANCELLED, not FAILED (the DEC-MUTATION-ALERT-CANCELLED-001
+        # pathology). Dedup-by-title (COMMON, reused from safety.yml /
+        # soak-selfhosted.yml).
+        if: failure() || cancelled()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const flag = context.payload.inputs ? context.payload.inputs.flag : 'unknown-flag';
+            const title = `flip-soak: failure for ${flag} on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,soak',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Flip soak failed for \`${flag}\` on ${context.sha} (twin FAIL / engagement gate / drift breach / RETRY_ENV_MOVED after retries / timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). This issue is the primary automatic signal — guaranteed only for a run that STARTED and kept its runner: a never-started run (24 h queue auto-cancel, SOAK-R8-2) or a runner lost mid-soak (SOAK-R9-1) executes no step and files nothing; the ADR-0018 out-of-job watchdog follow-up covers those paths.`,
+              labels: ['bug', 'soak', 'critical'],
+            });

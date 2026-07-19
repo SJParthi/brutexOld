@@ -119,6 +119,25 @@
   .empty .ei { font-size:30px; display:block; margin-bottom:10px; opacity:.65; }
   #status { padding:4px 24px 12px; font-size:12px; color:var(--muted); }
   .foot { padding:6px 24px 26px; font-size:11px; color:var(--muted); line-height:1.6; }
+  /* DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 — year strip chips + verdict badges + drill. */
+  .ystrip { display:inline-flex; gap:2px; align-items:center; }
+  .yc { display:inline-block; width:10px; height:14px; border-radius:2px; background:var(--muted); opacity:.35; }
+  .yc.pos { background:var(--green, #26a269); opacity:1; }
+  .yc.neg { background:var(--red, #e01b24); opacity:1; }
+  .yc.zero { background:transparent; border:1px solid var(--muted); opacity:.6; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; line-height:1.6; }
+  .badge.b-pass { color:var(--green, #26a269); border:1px solid currentColor; }
+  .badge.b-fail { color:var(--red, #e01b24); border:1px solid currentColor; }
+  .badge.b-abstain { color:var(--muted); border:1px dashed currentColor; }
+  .badge.b-amb { color:var(--yellow); border:1px solid currentColor; }
+  .badge.b-prov { color:var(--yellow); border:1px dashed currentColor; }
+  .tempo-btn { background:none; border:1px solid var(--muted); border-radius:6px; color:var(--text);
+    cursor:pointer; font-size:11px; padding:1px 7px; }
+  .tempo-cell { padding:10px 14px; }
+  .tempo-cell table { font-size:11px; margin:6px 0; border-collapse:collapse; }
+  .tempo-cell th, .tempo-cell td { padding:2px 8px; border:1px solid var(--muted); }
+  .tempo-note { color:var(--yellow); font-size:12px; padding:4px 0; }
+  .tempo-legend { padding:6px 24px 14px; font-size:11px; color:var(--muted); line-height:1.6; }
 
   a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
@@ -199,6 +218,27 @@
       <label for="fTop">Top N</label>
       <input id="fTop" type="number" min="1" max="500" value="50" />
     </div>
+    <!-- Serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a): operator
+         CONTROLS over a board already MIN_TRADES=30 pre-gated by construction.
+         Blank = inactive (the byte-identical legacy payload). A junk value is
+         a clean 400 from the route, surfaced by the error card. min CPCV is
+         honestly NOT offered — no per-row CPCV value is stored. -->
+    <div class="ctl">
+      <label for="fMinTrades">Min trades</label>
+      <input id="fMinTrades" type="number" min="0" step="1" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMinPf">Min PF</label>
+      <input id="fMinPf" type="number" min="0" step="any" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMinDsr" title="floors the TUPLE-scoped DSR column (see the legend)">Min DSR (tuple-N)</label>
+      <input id="fMinDsr" type="number" min="0" step="any" placeholder="any" />
+    </div>
+    <div class="ctl">
+      <label for="fMaxDd">Max |DD| %</label>
+      <input id="fMaxDd" type="number" min="0" step="any" placeholder="any" />
+    </div>
     <button class="refreshbtn" id="refreshBtn" title="Re-read the sweep leaderboard">&#x21bb; Refresh</button>
   </div>
 
@@ -237,6 +277,32 @@
     </div>
   </div></div>
 
+  <!-- DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 legend (substring-pinned by test — verbatim). -->
+  <div class="tempo-legend" id="tempoLegend">
+    Year/quarter/month buckets: IST exit-date attribution, per-trade-close equity.
+    Per-period max-DD is segmented within the period — a year's DD is NOT the max of
+    its months' and understates boundary-spanning drawdowns; the row's max-drawdown
+    column remains the authoritative risk figure. Half-year DD is not stored — shown
+    as —. Yr-gate chips are DISPLAY verdicts at current default thresholds derived
+    from stored buckets; the rank-time gate config of each run is recorded in the
+    sweep audit chain. Year-gating ADDS a calendar-aligned constraint on top of
+    DSR/CPCV/WFO — it does NOT remove curve-fitting (at defaults it passes ~50% of
+    pure noise over 7 years). — = no stored data / not judged.
+    DSR (tuple-N) is the persisted per-tuple Deflated Sharpe — deflated against ONE
+    grid cell's rank-time candidate count, an inflating under-count, so it is never
+    shown unlabeled; DSR @ search N is the Stage-4 cascade's own filter-#2 figure at
+    its recorded trial population (hover the cell for N + source; a "pool"-sourced
+    figure shares the under-count and pairs with the ~ provisional badge).
+    The Min trades / Min PF / Min DSR / Max |DD| floors are OPERATOR controls over a
+    board already min-trades-gated at rank time — Min DSR floors the tuple-N column.
+    A † on the rank marks a row failing a persisted hard door on serve-time re-check
+    (a legacy or non-gated store row) — marked, never dropped.
+    B&amp;H bench % is the STORED buy-&amp;-hold return of the combo's results-depth run
+    (the R27 baseline artifact) over the window in the tooltip — served verbatim, never
+    recomputed; a combo no depth run captured reads —. It is a same-window reference,
+    NOT the combo's own %return (the row's P&amp;L is absolute paisa, not %).
+  </div>
+
   <div class="foot">
     Read-only view of the per-tuple sweep stores under <code>&lt;lake&gt;/sweeps</code>
     (<code>ResultsStore</code>). Net&nbsp;P&amp;L is rendered in rupees (two decimals);
@@ -273,6 +339,10 @@ const fTf = document.getElementById("fTf");
 const fDirection = document.getElementById("fDirection");
 const fRankBy = document.getElementById("fRankBy");
 const fTop = document.getElementById("fTop");
+const fMinTrades = document.getElementById("fMinTrades");
+const fMinPf = document.getElementById("fMinPf");
+const fMinDsr = document.getElementById("fMinDsr");
+const fMaxDd = document.getElementById("fMaxDd");
 
 let ROWS = [];               // the current leaderboard rows (already ranked server-side)
 let sortKey = "rank";        // active client-side sort column
@@ -303,6 +373,16 @@ function pct(v) {
   const n = Number(v);
   if (!isFinite(n)) return "—";
   return (n * 100).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
+}
+/* Already-percent values (max_drawdown_pct is PERCENT-valued at the source —
+   the metrics fold multiplies by 100): append the sign only, NEVER re-scale
+   (pct() above is for 0-1 fractions like win_rate). Display-only truncation;
+   the sorted value stays the raw one. */
+function pctVal(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
 }
 
 /* Truthful heartbeat driver (fix R-2): "ok" green pulse ONLY on a live payload,
@@ -339,10 +419,77 @@ function cascadeBadge(r) {
   return '<span class="' + cls + '" title="' + esc(bits.join(" · ")) + '">' + esc(txt) + "</span>";
 }
 
+/* ── DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 cell renderers ──
+   XSS law: every payload string goes through esc() before any innerHTML; CSS
+   classes come ONLY from client-side literals chosen by boolean/sign checks
+   (a whitelist — no payload string is ever concatenated into a class name). */
+function yearStrip(r) {
+  const judged = r.temporal_judged_years;
+  if (!judged || !judged.length) return "—";
+  const cells = r.stats_by_year || {};
+  return '<span class="ystrip">' + judged.map((y) => {
+    const c = cells[y];
+    const n = c ? Number(c[0]) : 0;
+    const pnl = c ? Number(c[1]) : 0;
+    /* hollow 0-trade cell (its dd reads "—", never 0); green/red by pnl sign */
+    let cls = "zero";
+    if (n > 0 && pnl > 0) cls = "pos"; else if (n > 0 && pnl < 0) cls = "neg";
+    const tip = n > 0
+      ? esc(y) + ": " + num(n) + " trades · pnl " + num(pnl) + "p · dd " + num(c[3]) + "p"
+      : esc(y) + ": 0 trades · dd —";
+    return '<i class="yc ' + cls + '" title="' + tip + '"></i>';
+  }).join("") + "</span>";
+}
+function yearGateBadge(r) {
+  if (r.year_gate_abstained === true) {
+    return '<span class="badge b-abstain" title="temporal @ defaults — abstained (too few judged years)">abstain</span>';
+  }
+  if (r.year_gate_passed === true) {
+    return '<span class="badge b-pass" title="temporal @ defaults">pass</span>';
+  }
+  if (r.year_gate_passed === false) {
+    const reasons = (r.year_gate_reasons || []).map((t) => esc(t)).join(", ");
+    return '<span class="badge b-fail" title="temporal @ defaults — ' + reasons + '">fail</span>';
+  }
+  return "—"; /* pre-extension row — no stored temporal data */
+}
+/* DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected cascade DSR
+   cell — the cascade's own filter-#2 figure with its recorded N + source in
+   the tooltip. null = not judged by a cascade run (or a pre-change report) —
+   an honest "—", never a fabricated 0. */
+function cascadeDsrCell(r) {
+  if (r.cascade_dsr == null) return "—";
+  const n = r.cascade_dsr_n_trials == null ? "?" : num(r.cascade_dsr_n_trials);
+  const src = r.cascade_dsr_n_source ? esc(String(r.cascade_dsr_n_source)) : "unknown";
+  return '<span title="cascade filter-#2 DSR — deflated against N=' + n + ' (' + src + ')">'
+    + metric(r.cascade_dsr) + "</span>";
+}
+/* DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 1): the STORED buy-&-hold
+   benchmark of the combo's producing results-depth run (R27 baseline artifact,
+   served verbatim — never recomputed at serve). null = no depth run captured
+   this combo (or no stored baseline for its instrument) — an honest "—". */
+function benchCell(r) {
+  if (r.benchmark_return_pct == null) return "—";
+  const win = r.benchmark_window ? esc(String(r.benchmark_window)) : "window unknown";
+  return '<span title="buy &amp; hold over ' + win
+    + ' — stored by the results-depth pass, never recomputed">'
+    + pctVal(r.benchmark_return_pct) + "</span>";
+}
+/* NOTE (club S2 fold): 1459's marker-keyed cascadeBadge was DROPPED here —
+   main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 badge (above, server-built
+   status text) is the ONE cascade badge; the marker keys still feed
+   cascadeDsrCell ("DSR @ search N") — the datum the join does not carry. */
+
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
 const COLS = [
-  ["rank", "#", (r) => '<span class="rank">' + num(r.rank) + "</span>"],
+  /* The hard_gates_recheck belt (B2a): a "marked" row keeps its rank but is
+     flagged † — MARK, never drop (legacy/non-gated stores stay visible). The
+     marker is a client literal chosen by an exact string compare. */
+  ["rank", "#", (r) => '<span class="rank">' + num(r.rank)
+    + (r.hard_gates_recheck === "marked"
+      ? ' <span title="fails a persisted hard door on re-check (min-trades / PF / max-DD) — a legacy or non-gated store row">†</span>'
+      : "") + "</span>"],
   ["instrument", "Instrument", (r) => '<span class="sym">' + esc(r.instrument) + "</span>"],
   ["tf", "TF", (r) => esc(r.tf)],
   ["direction", "Dir", (r) => esc(r.direction)],
@@ -350,23 +497,45 @@ const COLS = [
     '<span class="pnl ' + (Number(r.net_pnl_rupees) >= 0 ? "pos" : "neg") + '">' + esc(r.net_pnl) + "</span>"],
   ["sharpe_ratio", "Sharpe", (r) => metric(r.sharpe_ratio)],
   ["sortino_ratio", "Sortino", (r) => metric(r.sortino_ratio)],
+  /* Risk + rank-axis visibility (DEC-RESULTS-TRUST-HONESTY-001, BLOCKER 6):
+     Calmar + expectancy were offered in the rank-by dropdown yet invisible as
+     columns; Max DD % is the row's percent risk figure (already-percent —
+     pctVal, never re-scaled). Expectancy renders in raw paisa (labeled) —
+     an exact int, never a re-rounded rupee figure. */
+  ["calmar_ratio", "Calmar", (r) => metric(r.calmar_ratio)],
   ["profit_factor", "PF", (r) => metric(r.profit_factor)],
   ["win_rate", "Win %", (r) => pct(r.win_rate)],
+  ["max_drawdown_pct", "Max DD %", (r) => pctVal(r.max_drawdown_pct)],
+  ["expectancy_paisa", "Expectancy (paisa)", (r) => num(r.expectancy_paisa)],
   ["total_trades", "Trades", (r) => num(r.total_trades)],
+  ["benchmark_return_pct", "B&H bench %", benchCell],
+  /* The honesty law (DEC-RESULTS-TRUST-HONESTY-001): the tuple-scoped DSR is
+     NEVER presented unlabeled — its header names the inflating tuple-N scope;
+     the cascade's corrected figure sits beside it as "DSR @ search N". */
+  ["deflated_sharpe", "DSR (tuple-N)", (r) => metric(r.deflated_sharpe)],
+  ["cascade_dsr", "DSR @ search N", cascadeDsrCell],
+  ["temporal_judged_years", "Years", yearStrip],
+  ["max_year_share", "Yr share", (r) => pct(r.max_year_share)],
+  ["year_gate_passed", "Yr gate", yearGateBadge],
   /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the three joined columns —
      the badge sorts by the raw status TOKEN (cascade_status); CPCV % and
      Composite (the RANKING composite from the aggs index) read "—" when
-     unjoined (EMIT-ON-PRESENT keys — absence is honest, never 0). */
+     unjoined (EMIT-ON-PRESENT keys — absence is honest, never 0). The ONE
+     Cascade badge (club S2 fold — 1459's duplicate marker badge dropped). */
   ["cascade_status", "Cascade", (r) => cascadeBadge(r)],
   ["cpcv_pass_pct", "CPCV %", (r) => metric(r.cpcv_pass_pct)],
   ["composite_score", "Composite", (r) => metric(r.composite_score)],
+  ["drill", "", (r) =>
+    '<button class="tempo-btn" data-run="' + esc(r.run_id) + '" title="per-period drill">▸</button>'],
   ["conditions", "Matched conditions", (r) =>
     r.conditions
       ? '<span class="cond" title="' + esc(r.conditions) + '">' + esc(r.conditions) + "</span>"
       : '<span class="cond none">(no conditions — enters every bar)</span>'],
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
-  "profit_factor", "win_rate", "total_trades", "cpcv_pass_pct", "composite_score"]);
+  "profit_factor", "win_rate", "total_trades", "cpcv_pass_pct", "composite_score",
+  "max_year_share", "deflated_sharpe", "cascade_dsr", "benchmark_return_pct",
+  "calmar_ratio", "max_drawdown_pct", "expectancy_paisa"]);
 
 /* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever
    (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously
@@ -518,10 +687,119 @@ function renderTable() {
   }
 }
 
+/* ── DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 row drill (▸ expander) ──
+   Fetches /api/v1/sweep/temporal once per (run_id, horizon) (client-cached),
+   renders quarter + month mini-tables + the server-derived half-year roll-up,
+   plus on-demand day/week drill buttons. EVERY node is built via
+   createElement/textContent ONLY — no payload string ever reaches innerHTML.
+   awaiting/absent payloads render their detail text in an amber note. */
+const TEMPO_CACHE = {};
+async function tempoFetch(runId, horizon) {
+  const key = runId + "|" + horizon;
+  if (TEMPO_CACHE[key]) return TEMPO_CACHE[key];
+  const url = "/api/v1/sweep/temporal?run_id=" + encodeURIComponent(runId)
+    + "&horizon=" + encodeURIComponent(horizon);
+  const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const p = await r.json();
+  TEMPO_CACHE[key] = p;
+  return p;
+}
+function tempoTable(title, cells, valueLabels) {
+  /* textContent-only mini-table: {period: [ints…]} → one row per period. */
+  const wrap = document.createElement("div");
+  const h = document.createElement("strong");
+  h.textContent = title;
+  wrap.appendChild(h);
+  const table = document.createElement("table");
+  const headRow = document.createElement("tr");
+  ["period"].concat(valueLabels).forEach((lbl) => {
+    const th = document.createElement("th");
+    th.textContent = lbl;
+    headRow.appendChild(th);
+  });
+  table.appendChild(headRow);
+  Object.keys(cells).sort().forEach((period) => {
+    const tr = document.createElement("tr");
+    const td0 = document.createElement("td");
+    td0.textContent = period;
+    tr.appendChild(td0);
+    (cells[period] || []).forEach((v) => {
+      const td = document.createElement("td");
+      td.textContent = num(v);
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+  return wrap;
+}
+function tempoNote(text) {
+  const note = document.createElement("div");
+  note.className = "tempo-note";
+  note.textContent = text; /* server detail text — textContent only (XSS law) */
+  return note;
+}
+function tempoAppendPayload(cell, payload, labels4, labels3) {
+  if (payload.status !== "ok") {
+    cell.appendChild(tempoNote((payload.status || "error") + ": " + (payload.detail || "")));
+    return;
+  }
+  cell.appendChild(tempoTable(payload.horizon, payload.cells || {}, labels4));
+  if (payload.half_year) {
+    cell.appendChild(tempoTable("half-year (derived; dd —)", payload.half_year, labels3));
+  }
+}
+async function tempoExpand(btn) {
+  const runId = btn.dataset.run || "";
+  const row = btn.closest("tr");
+  if (!row) return;
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains("tempo-row")) { next.remove(); return; }
+  const detail = document.createElement("tr");
+  detail.className = "tempo-row";
+  const cell = document.createElement("td");
+  cell.className = "tempo-cell";
+  cell.colSpan = COLS.length;
+  cell.textContent = "loading per-period stats…";
+  detail.appendChild(cell);
+  row.after(detail);
+  const CELL4 = ["trades", "pnl (paisa)", "wins", "max-dd (paisa)"];
+  const CELL3 = ["trades", "pnl (paisa)", "wins"];
+  try {
+    const quarter = await tempoFetch(runId, "quarter");
+    const month = await tempoFetch(runId, "month");
+    cell.textContent = "";
+    tempoAppendPayload(cell, quarter, CELL4, CELL3);
+    tempoAppendPayload(cell, month, CELL4, CELL3);
+    ["day", "week"].forEach((horizon) => {
+      const b = document.createElement("button");
+      b.className = "tempo-btn";
+      b.textContent = "load " + horizon + " drill";
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const p = await tempoFetch(runId, horizon);
+          tempoAppendPayload(cell, p, CELL3, CELL3);
+        } catch (e) {
+          cell.appendChild(tempoNote("drill failed (" + String(e && e.message || e) + ") — retry"));
+          b.disabled = false;
+        }
+      };
+      cell.appendChild(b);
+    });
+  } catch (e) {
+    cell.textContent = "";
+    cell.appendChild(tempoNote("drill failed (" + String((e && e.message) || e) + ") — click ▸ to retry"));
+  }
+}
+
 /* Delegated sort (one listener on the persistent #panel — no per-th onclick
    rebinding on every render; movers' proven pattern). */
 panel.addEventListener("click", (ev) => {
   const t = ev.target;
+  const btn = t && t.closest ? t.closest("button.tempo-btn[data-run]") : null;
+  if (btn && panel.contains(btn)) { tempoExpand(btn); return; }
   const th = t && t.closest ? t.closest("th[data-k]") : null;
   if (!th || !panel.contains(th)) return;
   const k = th.dataset.k;
@@ -541,6 +819,12 @@ async function load() {
   if (!isFinite(top) || top < 1) top = 50;
   if (top > 500) top = 500;
   params.set("top", String(top));
+  /* B2a serving-side floors: sent ONLY when non-blank (blank = the
+     byte-identical legacy request; the server validates the value). */
+  if (fMinTrades.value.trim()) params.set("min_trades", fMinTrades.value.trim());
+  if (fMinPf.value.trim()) params.set("min_pf", fMinPf.value.trim());
+  if (fMinDsr.value.trim()) params.set("min_dsr", fMinDsr.value.trim());
+  if (fMaxDd.value.trim()) params.set("max_abs_dd_pct", fMaxDd.value.trim());
   const url = "/api/v1/sweep/leaderboard?" + params.toString();
   try {
     const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
@@ -588,6 +872,12 @@ async function load() {
           + " cascade-FAILED row(s) flagged (ranked, never hidden)";
       }
     }
+    /* DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 header chips — textContent only. */
+    const tCov = board.temporal_coverage || {};
+    const cRep = board.cascade_report || {};
+    const tempoChips = " · temporal stats: " + num(tCov.rows_with_data || 0) + "/"
+      + num(tCov.rows_total || 0) + " rows · cascade report: "
+      + (cRep.present ? "✓ " + (cRep.groups == null ? "?" : num(cRep.groups)) + " group(s)" : "—");
     statusEl.textContent = board.available
       ? num((board.rows || []).length) + " of " + num(board.total_rows) + " combos shown · ranked by "
         + esc(board.rank_by) + " · " + num(board.store_count) + " sweep file(s)"
@@ -597,6 +887,7 @@ async function load() {
             + " run-id conflict(s) — duplicate run_ids with different metrics (first-wins, logged)"
           : "")
         + cascNote
+        + tempoChips
       : "no sweep has been run yet — run one from the dashboard";
     liveTxt.textContent = board.available ? "live · " + num((board.rows || []).length) + " rows" : "no data";
     setDot(board.available ? "ok" : "");
@@ -610,17 +901,19 @@ async function load() {
 }
 
 [fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
-/* ~200 ms trailing debounce for the Top-N NUMBER input
-   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the movers.html
-   #topn precedent): a spinner run fires a discrete `change` per click —
-   the debounce coalesces the burst into ONE fetch. The selects keep the
-   immediate load (a single discrete user action; nothing to coalesce). */
+/* ~200 ms trailing debounce for the Top-N NUMBER input + the four B2a floor
+   inputs (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the
+   movers.html #topn precedent; DEC-RESULTS-TRUST-HONESTY-001 floors join the
+   same class): a spinner run / typing burst fires a discrete `change` per
+   step — the debounce coalesces the burst into ONE fetch. The selects keep
+   the immediate load (a single discrete user action; nothing to coalesce). */
 const FTOP_DEBOUNCE_MS = 200;
 let fTopDebounceTimer = null;
-fTop.onchange = () => {
+const debouncedLoad = () => {
   clearTimeout(fTopDebounceTimer);
   fTopDebounceTimer = setTimeout(load, FTOP_DEBOUNCE_MS);
 };
+[fTop, fMinTrades, fMinPf, fMinDsr, fMaxDd].forEach((el) => { el.onchange = debouncedLoad; });
 document.getElementById("refreshBtn").onclick = load;
 /* First load waits for DOMContentLoaded so the deferred bx-ui.js helpers are
    available (defer scripts run before DOMContentLoaded); everything above also

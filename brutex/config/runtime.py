@@ -296,8 +296,12 @@ def read_runtime_file(*, path: Path | None = None) -> RuntimeInfo | None:
     source = path if path is not None else runtime_file_path()
     if not source.exists():
         return None
+    from brutex.data.guarded_read import (
+        read_regular_text,
+    )
+
     try:
-        raw = source.read_text(encoding="utf-8")
+        raw = read_regular_text(source)
     except OSError as exc:
         raise RuntimeFileError(f"Failed to read {source}: {exc}") from exc
     return RuntimeInfo.from_json(raw)

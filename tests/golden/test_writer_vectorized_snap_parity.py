@@ -102,6 +102,30 @@ _EDGE_CASES: list[float] = [
     1.00500000001,  # → 1.01
     0.004999999999999,  # 15-digit tail below half → 0.00
     0.005000000000001,  # 15-digit tail above half → 0.01
+    # ── 18-20-FRACTIONAL-digit sub-0.1 class (the round-3 review MAJOR,
+    # DEC-PREBUILD-FRAME-WRITE-001) ── a shortest float repr carries ≤ 17
+    # SIGNIFICANT digits, but a sub-0.1 value spends non-significant leading
+    # fractional ZEROS too, so the repr can reach 18-20 FRACTIONAL digits.
+    # The old ``_SNAP_PARSE_SCALE=17`` parse ROUNDED these at digit 17 —
+    # crossing the half-paisa boundary BEFORE the half-up step — so the fast
+    # lane stored 0.01/0.02/0.03 where legacy ``round_money(Decimal(str(x)))``
+    # stores 0.00/0.01/0.02. Each of these FAILED at scale 17; scale 20 parses
+    # them losslessly.
+    0.004999999999999996,  # 18 frac digits, just below 0.005 → 0.00 (17 gave 0.01)
+    0.014999999999999996,  # 18 frac digits, just below 0.015 → 0.01 (17 gave 0.02)
+    0.024999999999999998,  # nextafter(0.025, 0) → 0.02 (17 gave 0.03)
+    0.004999999999999999,  # nextafter(0.005, 0), the last float below the half → 0.00
+    0.014999999999999998,  # nextafter(0.015, 0) → 0.01
+    0.005000000000000001,  # nextafter(0.005, 1) — just ABOVE → 0.01 (no over-correction)
+    0.015000000000000001,  # nextafter(0.015, 1) → 0.02
+    -0.004999999999999996,  # negative twin → -0.00 (numeric parity; signed-zero edge doc'd)
+    # Sub-1e-4 values: polars prints FIXED notation ("0.0000999") where Python
+    # str goes scientific ("9.99e-05"), so the repr can exceed 20 fractional
+    # digits and the parse is VALUE-lossy (≤ 5e-21) — but provably SNAP-exact
+    # (no half-paisa boundary within reach). Pinned so the envelope stays honest.
+    9.99e-05,  # → 0.00 both paths
+    9.989999999999999e-05,  # nextafter(9.99e-5, 0): 21 frac digits, lossy parse → 0.00
+    1e-05,  # → 0.00 (the polars-vs-python repr-shape example)
 ]
 
 

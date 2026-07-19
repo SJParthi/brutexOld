@@ -1034,6 +1034,7 @@ def resolve_prev_oi(
     """
     import polars as pl
 
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
@@ -1044,7 +1045,7 @@ def resolve_prev_oi(
         # would otherwise pick a poisoned-era duplicate re-statement over the
         # first stored bar — warned, never silent.
         df, _dropped = dedup_bars_frame(
-            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
             source=f"movers_futures_oi:{exchange}/{segment}/{symbol}",
         )
         prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(

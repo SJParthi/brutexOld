@@ -142,6 +142,7 @@ from brutex.data.greeks_provenance import (
     pack_greeks_provenance,
     unpack_greeks_provenance,
 )
+from brutex.data.guarded_read import read_parquet_regular
 from brutex.data.lake_keys import spot_recovery_candidates
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.models import GREEKS_OVERLAY_FIELDS, FnoGreeksBar
@@ -1378,10 +1379,12 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     base_columns = ("timestamp", "open", "high", "low", "close", "volume", "open_interest")
     frames: list[pl.DataFrame] = []
     for file in files:
-        # glob=False: *file* is ONE concrete month path (DEC-SPOT-DERIVE-TS-
-        # RANGE-HARDENING-001, the #1594 round-15 metachar law) — a
-        # `[`-carrying contract dir must never glob-read its siblings' bars.
-        df = pl.read_parquet(file, glob=False)
+        # Guarded literal read: *file* is ONE concrete month path
+        # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15 metachar
+        # law — held by construction inside read_parquet_regular — a
+        # `[`-carrying contract dir must never glob-read its siblings' bars;
+        # + DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+        df = read_parquet_regular(file)
         missing = [name for name in GREEKS_OVERLAY_FIELDS if name not in df.columns]
         if missing:
             df = df.with_columns(
