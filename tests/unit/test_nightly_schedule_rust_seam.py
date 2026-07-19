@@ -39,8 +39,20 @@ if TYPE_CHECKING:
 
 
 class _BombModule(types.ModuleType):
+    """Records + refuses ANY attribute access (the CODEQL bomb shape).
+
+    ``__getattr__`` honours the special-method contract (AttributeError,
+    never AssertionError — the ``test_fno_symbol_rust.py`` precedent); the
+    TEETH are the ``touched`` ledger asserted EMPTY after the OFF-arm walk.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.touched: list[str] = []
+
     def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"flag-OFF path touched the crate: {name}")
+        self.touched.append(name)
+        raise AttributeError(f"flag-OFF path touched the crate: {name}")
 
 
 _PLIST_ENV = {
@@ -97,7 +109,8 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracles_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_ops", _BombModule("brutex_ops"))
+        bomb = _BombModule("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         assert parse_at("01:30") == _parse_at_python("01:30") == (1, 30)
         assert pmset_wake_command(1, 30) == _pmset_wake_command_python(1, 30, 5)
         now = datetime(2026, 7, 19, 2, 0, 0)
@@ -106,13 +119,16 @@ class TestFlagOffBombSpy:
         ) == _seconds_since_scheduled_fire_python(hour=1, minute=30, now_local=now)
         routed, oracle = _plist_pair()
         assert routed == oracle
+        assert bomb.touched == []
 
     def test_off_arm_junk_parse_raises_the_exact_message(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_ops", _BombModule("brutex_ops"))
+        bomb = _BombModule("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         with pytest.raises(ValueError, match=r"--at must be HH:MM \(24h\), got 'noon'"):
             parse_at("noon")
+        assert bomb.touched == []
 
 
 class TestFlagOnParity:

@@ -38,10 +38,22 @@ if TYPE_CHECKING:
 
 
 class _BombModule(types.ModuleType):
-    """A ``brutex_ops`` stand-in that explodes on ANY attribute access."""
+    """A ``brutex_ops`` stand-in that records + refuses ANY attribute access.
+
+    CODEQL shape (the ``test_fno_symbol_rust.py`` precedent): ``__getattr__``
+    honours the special-method contract (AttributeError, never
+    AssertionError). The TEETH are the ``touched`` ledger asserted EMPTY at
+    the end of the OFF-arm test — a wrongful touch fails even if a facade
+    probe swallows the raise via ``getattr(crate, name, None)``.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.touched: list[str] = []
 
     def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"flag-OFF path touched the crate: {name}")
+        self.touched.append(name)
+        raise AttributeError(f"flag-OFF path touched the crate: {name}")
 
 
 def _outcome(
@@ -117,7 +129,8 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracles_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_ops", _BombModule("brutex_ops"))
+        bomb = _BombModule("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         assert first_breaker(_GREEN_RUN) is first_breaker_python(_GREEN_RUN) is None
         assert first_breaker(_FAILED_RUN) is first_breaker_python(_FAILED_RUN)
         assert exit_code_for(_FAILED_RUN, ()) == exit_code_for_python(_FAILED_RUN, ()) == 1
@@ -129,9 +142,11 @@ class TestFlagOffBombSpy:
             nightly_id="n-1", events=_CLEAN_EVENTS, outcomes=_CLEAN_OUTCOMES
         )
         assert seamed is None and oracle is None
+        assert bomb.touched == []
 
     def test_off_arm_torn_stream_matches_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_ops", _BombModule("brutex_ops"))
+        bomb = _BombModule("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         seamed = audit_reconcile_tripwire(
             nightly_id="n-2", events=_TORN_EVENTS, outcomes=_CLEAN_OUTCOMES
         )
@@ -140,6 +155,7 @@ class TestFlagOffBombSpy:
         )
         assert seamed == oracle
         assert seamed is not None and seamed.name == "audit_reconcile"
+        assert bomb.touched == []
 
 
 class TestFlagOnParity:

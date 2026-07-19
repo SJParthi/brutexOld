@@ -32,8 +32,20 @@ if TYPE_CHECKING:
 
 
 class _BombModule(types.ModuleType):
+    """Records + refuses ANY attribute access (the CODEQL bomb shape).
+
+    ``__getattr__`` honours the special-method contract (AttributeError,
+    never AssertionError — the ``test_fno_symbol_rust.py`` precedent); the
+    TEETH are the ``touched`` ledger asserted EMPTY after the OFF-arm walk.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.touched: list[str] = []
+
     def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"flag-OFF path touched the crate: {name}")
+        self.touched.append(name)
+        raise AttributeError(f"flag-OFF path touched the crate: {name}")
 
 
 def _outcome(
@@ -143,9 +155,11 @@ class TestFlagOffBombSpy:
     def test_off_arm_matches_oracle_and_never_touches_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_ops", _BombModule("brutex_ops"))
+        bomb = _BombModule("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", bomb)
         for report in (_FULL_OK, _REFUSED_BLOCKED, _SKIPPED_BACKUP_WET, _SKIPPED_BACKUP_DRY):
             assert summary_lines(report) == _summary_lines_python(report)
+        assert bomb.touched == []
 
 
 class TestFlagOnParity:
@@ -166,10 +180,15 @@ class TestFlagOnParity:
         with capture_logs():
             lines, verdict = summary_lines(_FULL_OK)
         assert verdict == "OK"
+        # ONE deliberate two-part literal (hoisted out of the list so the
+        # concatenation is unambiguous — CodeQL implicit-concat-in-list).
+        expected_detail = (
+            "collision ok · disk ok · backup ok (12 files) · pull ok (375 bars) · "
+            "prebuild ok (19 built) · sweep ok (4 run · 2 skipped-cache · 0 failed)"
+        )
         assert lines == [
             "🌙 Nightly nightly-20260719T013000Z-abc123 — ✅ OK in 1:02.",
-            "collision ok · disk ok · backup ok (12 files) · pull ok (375 bars) · "
-            "prebuild ok (19 built) · sweep ok (4 run · 2 skipped-cache · 0 failed)",
+            expected_detail,
         ]
 
     def test_negative_duration_clamps_to_zero_both_arms(
