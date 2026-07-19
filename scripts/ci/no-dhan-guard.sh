@@ -28,6 +28,21 @@
 #      and can never be rewritten (renaming a decision ID would orphan every
 #      cross-reference). They are STRIPPED from each line before the scan, so a
 #      line whose ONLY `dhan` is inside a `DEC-...DHAN...` token passes.
+#   1b. The per-feed scope-map KEY `dhan` in its sanctioned CONFIG-TOKEN
+#      spellings ONLY — DEC-UNIVERSE-INDEX-ONLY-001 (MIGRATION.md #1934, the
+#      r6 confirmation-review fold): the coordinator-relayed directive-(B)
+#      per-feed scope map is `{groww: index4, dhan: index4}`
+#      (`brutex/config/feed_scope.py` `DEFAULT_FEED_SCOPES`), so the lowercase
+#      key `dhan` names a scope-KNOWN adapterless feed SLOT by ledgered design,
+#      never stale live-vendor wording. Stripped shapes (lowercase only, before
+#      the scan): the quoted key `"dhan"`, the backticked key reference
+#      (`dhan` / RST double-backtick), and the scope-binding forms
+#      `dhan=index4|full` / `dhan: index4|full` (the env-CSV + map notations).
+#      DELIBERATELY NARROW so the guard's stale-vendor-wording teeth survive:
+#      bare prose ("pull from dhan"), identifiers (`dhan_client` — mid-token
+#      never matches the backtick form), uppercase `DHAN`, and any
+#      non-scope-token binding (`dhan: the old vendor`) ALL still FAIL —
+#      pinned by tests/unit/test_no_dhan_guard.py.
 #   2. The historical/design-history docs under `docs/` — the decision ledger
 #      (`docs/MIGRATION.md`), the ADRs (`docs/adr/`), and the Track-1 spec +
 #      sibling design docs (`docs/TRACK1_*.md`, etc.). These record the Dhan
@@ -91,25 +106,30 @@ for f in "${files[@]}"; do
   if [[ "${f#./}" == "${SELF_REL}" ]]; then
     continue
   fi
-  # Strip every immutable decision-ID token (`DEC-<UPPER-WORDS>-NNN`) THEN scan
-  # for `dhan` (case-insensitive). This exempts both the DEC-DHAN-* family AND
+  # Strip every immutable decision-ID token (`DEC-<UPPER-WORDS>-NNN`) AND the
+  # exemption-1b sanctioned scope-map-KEY spellings, THEN scan for `dhan`
+  # (case-insensitive). The DEC strip exempts both the DEC-DHAN-* family AND
   # the migration IDs that carry the word mid-token (e.g.
   # DEC-GROWW-DHAN-REVERT-001, DEC-DHAN-GROWW-REMIGRATE-001) — a DEC-ID is a
-  # ledger citation, never the live vendor word itself, so removing all of them
-  # only ever hides `dhan` that lived inside an immutable ID. `grep -n` reports
-  # the original 1-based line numbers.
+  # ledger citation, never the live vendor word itself. The 1b strip removes
+  # ONLY the lowercase config-token shapes of the #1934 scope-map key
+  # (`"dhan"` · backticked `dhan` · `dhan=index4|full` / `dhan: index4|full`),
+  # so bare vendor prose, identifiers, and uppercase still fail. `grep -n`
+  # reports the original 1-based line numbers.
   while IFS= read -r match; do
     echo "${f#./}:${match}"
     hits=$((hits + 1))
-  done < <(sed -E 's/DEC-[A-Za-z0-9-]+//g' "$f" | grep -niE 'dhan' || true)
+  done < <(sed -E 's/DEC-[A-Za-z0-9-]+//g; s/"dhan"|`+dhan`+|dhan ?[=:] ?(index4|full)//g' "$f" | grep -niE 'dhan' || true)
 done
 
 if [[ "${hits}" -gt 0 ]]; then
   echo ""
   echo "❌ no-dhan-guard: found ${hits} forbidden 'dhan' occurrence(s) on the live surface."
   echo "   The live vendor is Groww — reword to Groww or vendor-neutral language."
-  echo "   (Immutable DEC-DHAN-* decision IDs are exempt and are stripped before scanning;"
-  echo "    historical docs under docs/ — MIGRATION.md, adr/, TRACK1_*.md — are not scanned.)"
+  echo "   (Immutable DEC-DHAN-* decision IDs and the #1934 scope-map key's sanctioned"
+  echo "    config-token spellings — \"dhan\" / backticked / dhan=index4|full — are exempt"
+  echo "    and are stripped before scanning; historical docs under docs/ — MIGRATION.md,"
+  echo "    adr/, TRACK1_*.md — are not scanned.)"
   exit 1
 fi
 

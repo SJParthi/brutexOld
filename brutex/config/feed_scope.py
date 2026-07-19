@@ -166,8 +166,8 @@ DEFAULT_FEED: Final[str] = "groww"
 
 #: The pre-laid scope DEFAULTS (the coordinator-relayed 2026-07-17 per-feed
 #: map — directive (B), coordinator paraphrase, never operator wording).
-#: Scope-KNOWN keys — NOT an activity claim: dhan has NO adapter in-tree and
-#: is NOT an ACTIVE feed until one registers (§2.5).
+#: Scope-KNOWN keys — NOT an activity claim: ``dhan`` has NO adapter in-tree
+#: and is NOT an ACTIVE feed until one registers (§2.5).
 DEFAULT_FEED_SCOPES: Final[Mapping[str, str]] = MappingProxyType(
     {"groww": SCOPE_INDEX4, "dhan": SCOPE_INDEX4}
 )
