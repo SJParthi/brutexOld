@@ -87,8 +87,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
-from brutex.feed.errors import LookAheadError
-from brutex.feed_rust import require_feed_kernel
+from brutex.feed.errors import FeedError, LookAheadError
+from brutex.feed_rust import MATERIALIZE_DECISION, require_feed_kernel
 
 #: Verdict vocabulary shared with the Rust ``BarrierCore``
 #: (DEC-FEED-RUST-MATERIALIZE-002) — mirror-pinned against the crate's
@@ -111,6 +111,24 @@ __all__ = [
     "LookAheadReport",
     "verify_with_barrier",
 ]
+
+
+def _poison_verdict_error(op: str, verdict: object) -> FeedError:
+    """Build the refuse-poison error for an OUT-OF-VOCABULARY verdict code.
+
+    Both dispatches below compare every code in the pinned verdict
+    vocabulary explicitly; a code outside it can only come from a
+    poisoned/stale wheel, and a poisoned wheel may only REFUSE — never
+    quietly pass a cursor move or permit a read (never weaker than P-06).
+    Same typed-``FeedError`` refusal convention as
+    :func:`brutex.feed_rust.validate_strict_scan`'s callers.
+    """
+    return FeedError(
+        f"the brutex_feed BarrierCore returned an out-of-vocabulary "
+        f"{op} verdict {verdict!r} — a poisoned/stale wheel can only "
+        f"refuse, never serve; rebuild it: run `maturin develop --release` "
+        f"inside rust/brutex-feed ({MATERIALIZE_DECISION})"
+    )
 
 
 class LookAheadBarrier:
@@ -197,21 +215,24 @@ class LookAheadBarrier:
         ValueError
             If *index* is negative or strictly less than the current
             cursor.
+        FeedError
+            If the core emits a verdict code outside the pinned
+            vocabulary (a poisoned/stale wheel — the refuse-poison law).
         """
         verdict = self._core.advance_to(index)
         if verdict == _ADVANCE_OK:
             return
         if verdict == _ADVANCE_NEGATIVE:
             raise ValueError(f"advance_to: bar index must be >= 0, got {index}")
-        # _ADVANCE_BACKWARDS — the last code in the pinned verdict
-        # vocabulary. An out-of-vocabulary code (a poisoned wheel) lands
-        # here too and refuses loudly rather than silently succeeding
-        # (the refuse-poison law — a broken core may only refuse, never
-        # quietly pass a cursor move).
-        raise ValueError(
-            f"advance_to: cursor cannot move backwards "
-            f"({index} < current {self._core.current_index})"
-        )
+        if verdict == _ADVANCE_BACKWARDS:
+            raise ValueError(
+                f"advance_to: cursor cannot move backwards "
+                f"({index} < current {self._core.current_index})"
+            )
+        # Exhaustive over the pinned vocabulary — anything else is a
+        # poisoned/stale wheel and may only REFUSE, never quietly pass a
+        # cursor move (the refuse-poison law).
+        raise _poison_verdict_error("advance_to", verdict)
 
     def access(self, index: int) -> int:
         """Validate (and record) a read of bar *index*; return it unchanged.
@@ -237,6 +258,10 @@ class LookAheadBarrier:
             *index* is strictly greater than the current cursor.
         ValueError
             If *index* is negative.
+        FeedError
+            If the core emits a verdict code outside the pinned
+            vocabulary (a poisoned/stale wheel — the refuse-poison law;
+            the read still REFUSES, so P-06 is never weakened).
         """
         verdict = self._core.access(index)
         if verdict == _ACCESS_OK:
@@ -248,14 +273,15 @@ class LookAheadBarrier:
             )
         if verdict == _ACCESS_NEGATIVE:
             raise ValueError(f"access: bar index must be >= 0, got {index}")
-        # _ACCESS_LOOKAHEAD — the last code in the pinned verdict
-        # vocabulary. An out-of-vocabulary code (a poisoned wheel) lands
-        # here too and refuses loudly rather than silently permitting the
-        # read (the refuse-poison law — never weaker than P-06).
-        raise LookAheadError(
-            f"bar index {index} > current {self._core.current_index}: "
-            f"look-ahead read forbidden (P-06 / FR-INT-004)"
-        )
+        if verdict == _ACCESS_LOOKAHEAD:
+            raise LookAheadError(
+                f"bar index {index} > current {self._core.current_index}: "
+                f"look-ahead read forbidden (P-06 / FR-INT-004)"
+            )
+        # Exhaustive over the pinned vocabulary — anything else is a
+        # poisoned/stale wheel and may only REFUSE, never quietly permit
+        # the read (the refuse-poison law — never weaker than P-06).
+        raise _poison_verdict_error("access", verdict)
 
     def guard(self, index: int, value: _T) -> _T:
         """Convenience: :meth:`access` the *index*, then return *value*.
