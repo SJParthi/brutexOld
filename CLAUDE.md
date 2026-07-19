@@ -3817,7 +3817,9 @@ hostile-review pass._
   **Door 6** (ONE shared verdict body under `passes_gates` +
   `gate_reasons`; FAIL-CLOSED on a None rate under an active knob; folds
   ACTIVE-ONLY into the tuple-digest identity fragment — the frozen default
-  digest `5b020e892247deac` byte-stable, an active knob re-keys the store
+  digest byte-stable (`7a0120c1123b44c6` since the #1976 census fold onto
+  main's worst-case-era re-lock; `5b020e892247deac` pre-fold), an active
+  knob re-keys the store
   address). **(#1976)** the 24-month TRAILING recency metrics (`trailing_
   sharpe_ratio` / `trailing_profit_factor` / `trailing_net_pnl_paisa`) +
   the whole-history exponential-DECAY composite (`decay_weighted_net_
@@ -3851,11 +3853,14 @@ hostile-review pass._
   scratches exist — a monotone ranking key, never reported P&L). GATES
   (executed): coverage 100.00% line+branch on all 13 discovered touched
   modules (the ci discovery method); cargo fmt/clippy `-D warnings`/test
-  --release --locked 601 passed (wheel rebuilt); goldens 540 passed
-  flag-OFF AND flag-ON with fixtures byte-untouched — `_GOLDEN_RUN_ID`
-  f588194f…d5921a UNCHANGED (run identity untouched) + the TWO audited
-  schema-additive content re-locks (`_GOLDEN_CONTENT_HASH` 2f335da9… +
-  the futures `_EXPECTED_STORE_HASH` 3eaa8b08…); ruff/ruff-format clean;
+  --release --locked 601 passed (wheel rebuilt; 633 post-fold); goldens
+  green flag-OFF AND flag-ON (897 passed each arm post-fold) —
+  `_GOLDEN_RUN_ID` 715212…62fc9 UNCHANGED (main's worst-case-era identity;
+  run identity untouched by this lane) + the TWO audited schema-additive
+  content re-locks, RE-DERIVED at the #1976 census fold with fresh
+  worst-case hand-audits (`_GOLDEN_CONTENT_HASH` 011a494c… + the futures
+  `_EXPECTED_STORE_HASH` 1022bebf…; pre-fold 2f335da9…/3eaa8b08… are
+  HISTORY); ruff/ruff-format clean;
   `mypy --strict` clean; pyright 0 errors on touched files. ENGINE
   results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; the ONE sanctioned ranking-gate
