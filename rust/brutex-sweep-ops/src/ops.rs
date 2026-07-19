@@ -139,11 +139,16 @@ pub fn heal_mismatch_decision(
 /// rolled forward a day when already past OR at-or-before `last_fire`
 /// (post-fire idempotence).
 ///
-/// The facade gates every numeric input to the exactly-representable f64
-/// integer range (|value| ≤ 2^52), under which the daily arm's f64
-/// arithmetic here is value-identical to the Python oracle's exact INT
-/// arithmetic (every intermediate is an integer < 2^53). Non-finite
-/// clock inputs are `Err` (defensive totality — the facade gates them).
+/// The facade gates every numeric input to `|value| <= 2^50`. Under that
+/// bound the daily arm's WIDEST intermediate — the 3-term sum
+/// `today_fire = day_start + second_of_day - tz`, where day_start is at most
+/// `|now| + |tz| <= 2 * 2^50`, giving `|today_fire| <= 4 * 2^50 = 2^52`,
+/// then two `+ SECONDS_PER_DAY` rollovers stay below 2^53 — is an
+/// exactly-representable integer, so this f64 arithmetic is value-identical
+/// to the Python oracle's exact INT arithmetic. A looser 2^52 gate would let
+/// the 3-term sum reach roughly `1.5 * 2^53`, where f64 rounds and the
+/// oracle bigint does not (DEC-RUST-SWEEP-OPS-001 review round 1). Non-finite
+/// clock inputs are `Err`, a defensive totality the facade also gates.
 pub fn schedule_next_fire(
     is_interval: bool,
     interval_seconds: i64,

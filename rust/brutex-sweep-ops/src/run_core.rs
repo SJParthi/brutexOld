@@ -9,9 +9,12 @@
 //! * `tuple_record_stride` — the D-9 TUPLE_DONE decimation stride. The
 //!   CPython oracle computes `math.ceil(max(0, t) / 10_000)` with TRUE
 //!   (f64) division, so the fold is mirrored in f64 here; the facade gates
-//!   `total_tuples` to the exactly-representable band |v| <= 2^52 where
-//!   `t as f64` is exact and IEEE division + ceil are bit-identical
-//!   cross-language (the slice-4 scheduler band law).
+//!   `total_tuples` to the shared |v| <= 2^50 band (the slice-4 scheduler
+//!   band law) where `t as f64` is exact and IEEE division + ceil are
+//!   bit-identical cross-language. (This single-division law is itself exact
+//!   well past that band — see the `stride_exact_band_edge` crate test — but
+//!   the facade uses ONE conservative band, sized for the scheduler's
+//!   tighter 3-term-sum need.)
 //! * `per_tuple_diffcheck_budget` — the R45 K-budget distribution
 //!   (design D-11): positive//positive floor division ≡ Rust integer `/`.
 //! * `grid_tuple_count` — the grid outer-product cardinality over
@@ -27,7 +30,9 @@ pub const DECIMATION_TARGET_RECORDS: f64 = 10_000.0;
 /// The D-9 TUPLE_DONE decimation stride: `max(1, ceil(max(0, t) / 10_000))`.
 ///
 /// f64 arithmetic BY DESIGN — the CPython oracle's `/` is true division;
-/// inputs are facade-gated to |v| <= 2^52 so the f64 mirror is exact.
+/// inputs are facade-gated to the shared |v| <= 2^50 band so the f64 mirror
+/// is exact (this single-division law is exact wider still — see
+/// `stride_exact_band_edge`).
 #[must_use]
 pub fn tuple_record_stride(total_tuples: i64) -> u64 {
     let clamped = total_tuples.max(0) as f64;
@@ -86,7 +91,10 @@ mod tests {
 
     #[test]
     fn stride_exact_band_edge() {
-        // 2^52 is exactly representable; ceil(2^52 / 1e4) hand-derived.
+        // 2^52 is exactly representable; ceil(2^52 / 1e4) hand-derived. This
+        // deliberately exceeds the facade's |v| <= 2^50 gate — the crate's
+        // single-division stride law is exact wider than the shared band the
+        // facade conservatively routes within (sized for the scheduler).
         let t: i64 = 1 << 52;
         let expected = ((t as f64) / 10_000.0).ceil() as u64;
         assert_eq!(tuple_record_stride(t), expected);

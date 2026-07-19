@@ -15,15 +15,18 @@
 //!
 //! Slice map (see the scoping doc's slice plan for the file-level breakdown):
 //! * `leaves`      — slice 1: pure leaf laws (run_layout · sweep_identity ·
-//!   sweep_stall_policy …). SHIPPING (this crate revision).
-//! * `audit_chain` — slice 2: the BLAKE3 hash-chain laws (sweep_audit). STUB.
-//! * `artifacts`   — slice 3: durable run-artifact laws (checkpoint ·
-//!   exit-status · liveness · quarantine · manifest · stamps …). STUB.
-//! * `ops`         — slice 4: process/lock ops decision laws (singleflight ·
-//!   scheduler · launch …). STUB.
-//! * `verify`      — slice 5: verify/heal/apriori/diffcheck pure cores. STUB.
-//! * `run_core`    — slice 6: driver/orchestrator/run-core pure derivations.
-//!   STUB.
+//!   sweep_stall_policy · sweep_progress · sweep_sla_guard ·
+//!   sweep_mem_budget · sweep_preflight · sweep_liveness). SHIPPING.
+//! * `audit_chain` — slice 2: the BLAKE3 hash-chain laws (sweep_audit ·
+//!   stage_stamp · chain_map · run_tripwires). SHIPPING.
+//! * `artifacts`   — slice 3: durable run-artifact laws (exit-status ·
+//!   quarantine · checkpoint). SHIPPING.
+//! * `ops`         — slice 4: process/lock ops decision laws (detach ·
+//!   heal · scheduler). SHIPPING.
+//! * `verify`      — slice 5: verify/apriori pure cores (recount ·
+//!   apriori join+prune). SHIPPING.
+//! * `run_core`    — slice 6: run-core/orchestrator pure derivations
+//!   (record-stride · diffcheck-budget · grid-tuple-count). SHIPPING.
 //!
 //! CARVED OUT (never in this crate): sweep_parallel · sweep_cache ·
 //! sweep_run · sweep_supervisor (in-flight PR ownership).

@@ -458,7 +458,7 @@ fn apriori_join_prune(
 
 /// `sweep_run_core.tuple_record_stride`'s D-9 decimation fold (see
 /// [`run_core::tuple_record_stride`]). f64-mirrored CPython true-division
-/// arithmetic; the facade gates inputs to the exact band |v| <= 2^52.
+/// arithmetic; the facade gates inputs to the shared exact band |v| <= 2^50.
 #[pyfunction]
 fn tuple_record_stride(total_tuples: i64) -> u64 {
     run_core::tuple_record_stride(total_tuples)

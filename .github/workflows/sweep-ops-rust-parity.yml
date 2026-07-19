@@ -27,7 +27,15 @@
 #      breaks the chain on the Rust arm) + sweep_exit_status /
 #      sweep_quarantine / sweep_checkpoint (slice 3 — the durable-artifacts
 #      family, incl. the corruption/crash-convergence batteries re-run
-#      flag-ON).
+#      flag-ON) + sweep_detach / sweep_heal / sweep_scheduler (slice 4 — the
+#      process/lock-ops family) with sweep_singleflight + the pull-concurrency
+#      regression as the lock-composition EXTRA GATE (the G6/G10 flock/OFD +
+#      #1785 sweep-vs-pull battery must pass UNMODIFIED flag-ON) + sweep_verify
+#      / sweep_apriori (slice 5 — the verify/apriori family) with the R45
+#      diffcheck AST-pin suite + the apriori parity golden as the EXTRA GATE +
+#      sweep_run_core / sweep_orchestrator (slice 6 — the #1712 unkillable-core
+#      battery re-run UNMODIFIED flag-ON; only the D-9 stride / R45 budget /
+#      grid-count folds route).
 #
 # NOT a required gate: it gates the FUTURE default-ON flip, which must cite
 # a fresh green run of this lane as a stated precondition — a red run here
@@ -50,19 +58,127 @@ on:
       - "feat/**"
       - "fix/**"
     paths:
+      # The routing seam (facade + crate + parity/fake harness).
       - "rust/brutex-sweep-ops/**"
       - "brutex/engine/sweep_ops_rust.py"
       - "tests/unit/test_engine_sweep_ops_rust.py"
       - "tests/fakes/sweep_ops_crate.py"
       - "tests/integration/test_sweep_ops_rust_parity.py"
+      # The routed OWNING modules + their UNMODIFIED stem suites — so a PR
+      # editing only a routed oracle re-runs the flag-ON verbatim legs (the
+      # data-rust-parity convention: list every routed module + its stems).
+      - "brutex/engine/run_layout.py"
+      - "tests/unit/test_engine_run_layout.py"
+      - "brutex/engine/sweep_identity.py"
+      - "tests/unit/test_engine_sweep_identity.py"
+      - "brutex/engine/sweep_stall_policy.py"
+      - "tests/unit/test_engine_sweep_stall_policy.py"
+      - "brutex/engine/sweep_progress.py"
+      - "tests/unit/test_engine_sweep_progress.py"
+      - "brutex/engine/sweep_sla_guard.py"
+      - "tests/unit/test_engine_sweep_sla_guard.py"
+      - "brutex/engine/sweep_mem_budget.py"
+      - "tests/unit/test_engine_sweep_mem_budget.py"
+      - "brutex/engine/sweep_preflight.py"
+      - "tests/unit/test_engine_sweep_preflight.py"
+      - "brutex/engine/sweep_liveness.py"
+      - "tests/unit/test_engine_sweep_liveness.py"
+      - "brutex/engine/sweep_audit.py"
+      - "tests/unit/test_engine_sweep_audit.py"
+      - "brutex/observability/stage_stamp.py"
+      - "tests/unit/test_observability_stage_stamp.py"
+      - "brutex/observability/chain_map.py"
+      - "tests/unit/test_observability_chain_map.py"
+      - "brutex/observability/run_tripwires.py"
+      - "tests/unit/test_observability_run_tripwires.py"
+      - "brutex/engine/sweep_exit_status.py"
+      - "tests/unit/test_engine_sweep_exit_status.py"
+      - "brutex/engine/sweep_quarantine.py"
+      - "tests/unit/test_engine_sweep_quarantine.py"
+      - "brutex/engine/sweep_checkpoint.py"
+      - "tests/unit/test_engine_sweep_checkpoint.py"
+      - "brutex/engine/sweep_detach.py"
+      - "tests/unit/test_engine_sweep_detach.py"
+      - "brutex/engine/sweep_heal.py"
+      - "tests/unit/test_engine_sweep_heal.py"
+      - "brutex/engine/sweep_scheduler.py"
+      - "tests/unit/test_engine_sweep_scheduler.py"
+      - "brutex/engine/sweep_verify.py"
+      - "tests/unit/test_engine_sweep_verify.py"
+      - "brutex/engine/sweep_apriori.py"
+      - "tests/unit/test_engine_sweep_apriori.py"
+      - "brutex/engine/sweep_run_core.py"
+      - "tests/unit/test_engine_sweep_run_core.py"
+      - "brutex/engine/sweep_orchestrator.py"
+      - "tests/unit/test_engine_sweep_orchestrator.py"
+      # The slice-4/5/6 EXTRA GATES the flag-ON leg runs (lock-composition +
+      # R45 diffcheck AST pin + apriori parity golden).
+      - "tests/unit/test_engine_sweep_singleflight.py"
+      - "tests/integration/test_sweep_pull_concurrency.py"
+      - "tests/unit/test_engine_sweep_diffcheck.py"
+      - "tests/golden/test_engine_sweep_apriori_parity.py"
       - ".github/workflows/sweep-ops-rust-parity.yml"
   pull_request:
     paths:
+      # The routing seam (facade + crate + parity/fake harness).
       - "rust/brutex-sweep-ops/**"
       - "brutex/engine/sweep_ops_rust.py"
       - "tests/unit/test_engine_sweep_ops_rust.py"
       - "tests/fakes/sweep_ops_crate.py"
       - "tests/integration/test_sweep_ops_rust_parity.py"
+      # The routed OWNING modules + their UNMODIFIED stem suites — so a PR
+      # editing only a routed oracle re-runs the flag-ON verbatim legs (the
+      # data-rust-parity convention: list every routed module + its stems).
+      - "brutex/engine/run_layout.py"
+      - "tests/unit/test_engine_run_layout.py"
+      - "brutex/engine/sweep_identity.py"
+      - "tests/unit/test_engine_sweep_identity.py"
+      - "brutex/engine/sweep_stall_policy.py"
+      - "tests/unit/test_engine_sweep_stall_policy.py"
+      - "brutex/engine/sweep_progress.py"
+      - "tests/unit/test_engine_sweep_progress.py"
+      - "brutex/engine/sweep_sla_guard.py"
+      - "tests/unit/test_engine_sweep_sla_guard.py"
+      - "brutex/engine/sweep_mem_budget.py"
+      - "tests/unit/test_engine_sweep_mem_budget.py"
+      - "brutex/engine/sweep_preflight.py"
+      - "tests/unit/test_engine_sweep_preflight.py"
+      - "brutex/engine/sweep_liveness.py"
+      - "tests/unit/test_engine_sweep_liveness.py"
+      - "brutex/engine/sweep_audit.py"
+      - "tests/unit/test_engine_sweep_audit.py"
+      - "brutex/observability/stage_stamp.py"
+      - "tests/unit/test_observability_stage_stamp.py"
+      - "brutex/observability/chain_map.py"
+      - "tests/unit/test_observability_chain_map.py"
+      - "brutex/observability/run_tripwires.py"
+      - "tests/unit/test_observability_run_tripwires.py"
+      - "brutex/engine/sweep_exit_status.py"
+      - "tests/unit/test_engine_sweep_exit_status.py"
+      - "brutex/engine/sweep_quarantine.py"
+      - "tests/unit/test_engine_sweep_quarantine.py"
+      - "brutex/engine/sweep_checkpoint.py"
+      - "tests/unit/test_engine_sweep_checkpoint.py"
+      - "brutex/engine/sweep_detach.py"
+      - "tests/unit/test_engine_sweep_detach.py"
+      - "brutex/engine/sweep_heal.py"
+      - "tests/unit/test_engine_sweep_heal.py"
+      - "brutex/engine/sweep_scheduler.py"
+      - "tests/unit/test_engine_sweep_scheduler.py"
+      - "brutex/engine/sweep_verify.py"
+      - "tests/unit/test_engine_sweep_verify.py"
+      - "brutex/engine/sweep_apriori.py"
+      - "tests/unit/test_engine_sweep_apriori.py"
+      - "brutex/engine/sweep_run_core.py"
+      - "tests/unit/test_engine_sweep_run_core.py"
+      - "brutex/engine/sweep_orchestrator.py"
+      - "tests/unit/test_engine_sweep_orchestrator.py"
+      # The slice-4/5/6 EXTRA GATES the flag-ON leg runs (lock-composition +
+      # R45 diffcheck AST pin + apriori parity golden).
+      - "tests/unit/test_engine_sweep_singleflight.py"
+      - "tests/integration/test_sweep_pull_concurrency.py"
+      - "tests/unit/test_engine_sweep_diffcheck.py"
+      - "tests/golden/test_engine_sweep_apriori_parity.py"
       - ".github/workflows/sweep-ops-rust-parity.yml"
   workflow_dispatch: {}
 

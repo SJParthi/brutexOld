@@ -212,7 +212,7 @@ run-identity-class ``grid_identity`` / ``_tuple_digest`` /
     ``brutex/engine/sweep_run_core.py``'s D-9 ``tuple_record_stride``
     fold. The Python oracle's ``math.ceil(t / 10_000)`` is TRUE (f64)
     division, so the crate mirrors it in f64 and the input gate holds
-    the operand to the exactly-representable |v| <= 2^52 band (the
+    the operand to the exactly-representable |v| <= 2^50 band (the
     slice-4 scheduler band law) where IEEE division + ceil are
     bit-identical cross-language.
 24. **Per-tuple diffcheck budget** (:func:`routed_diffcheck_budget`) —
@@ -282,6 +282,24 @@ implementation, the ``flight_recorder`` precedent).
   calls PER LAW compare the Rust value against the live oracle; ANY
   difference ships the ORACLE value and autoreverts the Rust path for the
   process (ERROR log — the #1531/#1532 pattern).
+
+## Panic-belt honesty (``panic = "abort"``; CLAUDE.md Golden Rule #10)
+
+The ``brutex_sweep_ops`` release wheel is built with ``panic = "abort"``
+(``rust/brutex-sweep-ops/Cargo.toml`` — the sibling ``brutex-feed``
+convention), so a Rust panic in the SHIPPED wheel ABORTS the host process
+before any Python handler can run: the ``_panic_belt_errors()`` /
+``crate_panic`` arm is therefore a DEV-BUILD (``cargo test`` / any
+default-``unwind`` build, where pyo3's ``catch_unwind`` surfaces a
+``pyo3_runtime.PanicException``) + defence-in-depth path, NOT a
+shipped-wheel rail (this crate carries no ``catch_unwind`` FFI wrapper —
+distinct from ``brutex-lake``, which builds WITHOUT ``panic = "abort"`` and
+maps panics to ``RuntimeError`` at its own boundary). It is retained, not
+removed, because the crate is TOTAL by construction — checked arithmetic
+(``overflow-checks = true``), a ``Result`` on every fallible arm, and
+exact-type / finite / band-gated inputs — so the practical panic risk is
+≈ nil and the belt guards only a doubly-broken future contract (a
+non-abort build, or a panic surfacing through an out-of-band pyo3 runtime).
 
 ## Honesty (ADR-0020 banner; CLAUDE.md Golden Rule #10)
 
@@ -559,11 +577,19 @@ _HEAL_ARTIFACT_SLOTS: Final[int] = 3
 _RESUME_TOKENS: Final[frozenset[str]] = frozenset(
     {"fresh_absent", "fresh_foreign", "already_complete", "resume"}
 )
-#: The exactly-representable f64 integer bound for scheduler operands: with
-#: every input |value| ≤ 2^52, the daily arm's crate f64 arithmetic is
-#: value-identical to the Python oracle's exact INT arithmetic (every
-#: intermediate stays an integer < 2^53) — beyond it, refuse to the oracle.
-_SCHEDULER_EXACT_BOUND: Final[float] = float(2**52)
+#: The exactly-representable f64 integer bound for scheduler operands. With
+#: every input |value| ≤ 2^50, the daily arm's WIDEST intermediate — the
+#: 3-term sum ``today_fire = day_start + second_of_day − tz`` — provably
+#: stays an EXACTLY-representable integer: ``day_start`` is bounded by
+#: ``|now| + |tz| ≤ 2·2^50`` (it is a multiple of ``SECONDS_PER_DAY``, itself
+#: exact), so ``|today_fire| ≤ 2·2^50 + 2^50 + 2^50 = 2^52``, and the two
+#: day-rollover ``+ SECONDS_PER_DAY`` steps keep every result under 2^53
+#: (spacing 1) — hence the crate's f64 arithmetic is value-identical to the
+#: Python oracle's exact INT arithmetic; beyond the bound, refuse to the
+#: oracle. (2^52 was TOO LOOSE — with day_start ~2^53 the 3-term sum could
+#: reach ~1.5·2^53 where f64 spacing is 2 and rounds, while the oracle's
+#: arbitrary-precision int does not; DEC-RUST-SWEEP-OPS-001 review round 1.)
+_SCHEDULER_EXACT_BOUND: Final[float] = float(2**50)
 #: The recount post-byte-diff verdict tokens (the crate ↔ wiring contract;
 #: `grid_corrupt` keys sweep_verify's heal-grade arm + the
 #: grid_corrupt_leaderboards side effect — both stay Python).
@@ -1806,9 +1832,12 @@ def routed_schedule_next_fire(
 
     Exact-type input gates: *is_interval* exact ``bool``; the three schedule
     fields exact ``int`` and the clock operands exact FINITE ``float``, each
-    within :data:`_SCHEDULER_EXACT_BOUND` (|value| ≤ 2^52) — inside that
-    range the crate's f64 daily arithmetic is value-identical to the Python
-    oracle's exact INT arithmetic. The OUTPUT gate reconstructs the daily
+    within :data:`_SCHEDULER_EXACT_BOUND` (|value| ≤ 2^50) — inside that
+    range every daily-arm intermediate (the 3-term ``day_start +
+    second_of_day − tz`` sum ≤ 2^52, then two ``+ SECONDS_PER_DAY`` rollovers
+    < 2^53) is an exactly-representable integer, so the crate's f64 daily
+    arithmetic is value-identical to the Python oracle's exact INT
+    arithmetic. The OUTPUT gate reconstructs the daily
     arm's ``int`` return TYPE (the fire epoch is ``json.dumps``-rendered
     into the daemon's audit payload — int vs float bytes differ), so the
     audit bytes stay identical either arm.
@@ -2043,7 +2072,7 @@ def routed_record_stride(total_tuples: int, *, python_law: Callable[[], int]) ->
     """The routed D-9 TUPLE_DONE decimation-stride fold (slice 6).
 
     Exact-type input gate: *total_tuples* an exact ``int`` within the
-    exactly-representable f64 band (|v| <= 2^52 — the shared
+    exactly-representable f64 band (|v| <= 2^50 — the shared
     :func:`_scheduler_int_refused` band law): the Python oracle's
     ``math.ceil(t / 10_000)`` is TRUE (f64) division, so the crate mirrors
     it in f64 and parity is IEEE-exact only inside the band; a count
@@ -2071,7 +2100,7 @@ def routed_diffcheck_budget(
     """The routed R45 per-tuple diffcheck-budget fold (slice 6, design D-11).
 
     Exact-type input gates: both operands exact ``int`` within the shared
-    |v| <= 2^52 band. Post-clamp both operands are positive, where the
+    |v| <= 2^50 band. Post-clamp both operands are positive, where the
     Python ``//`` floor division ≡ Rust integer division exactly. The R45
     never-adopt law is untouched — this distributes the K budget, the
     diffcheck itself stays the independent Python reference simulator.
