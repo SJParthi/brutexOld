@@ -102,6 +102,9 @@ from brutex.engine.results_store import (
     ResultsStore,
     ResultsStoreError,
 )
+from brutex.metrics.cascade import FilterStage
+from brutex.metrics.extreme_vol_stratum import ABSTAIN_STATUSES as _EXTREME_VOL_ABSTAINS
+from brutex.metrics.regime_fragility import ABSTAIN_STATUSES as _FRAGILITY_ABSTAINS
 from brutex.money import format_inr, paisa_to_rupees
 from brutex.ranking.presets import (
     DEFAULT_PRESET,
@@ -608,9 +611,9 @@ def _clamp_top_n(top_n: int) -> int:
 
 
 # ── DEC-REGIME-REJECT-TIER-001 (PROPOSAL — operator-gated) ──────────────────
-# The READ-TIME ``?preset=regime_robust`` rejection tier: ranks EXACTLY like
-# the DEFAULT preset (the min_dd_first law — DELEGATED to
-# ``PRESETS[DEFAULT_PRESET]``, never a copy) but EXCLUDES rows whose JOINED
+# The READ-TIME ``?preset=regime_robust`` rejection tier: orders via the
+# min_dd_first preset law (``PRESETS[DEFAULT_PRESET]`` — delegated, never
+# copied) but EXCLUDES rows whose JOINED
 # cascade verdict is a FAIL at one of the two regime-evidence stages
 # (``REGIME_REJECT_STAGES``). SEMANTIC OPTION A (shipped): ABSTAIN/unproven
 # verdict statuses (``REGIME_UNPROVEN_STATUSES`` on the additive
@@ -633,12 +636,20 @@ REGIME_ROBUST_PRESET: Final[str] = "regime_robust"
 
 #: The cascade ``rejected_at`` stage tokens the ``regime_robust`` preset
 #: excludes (a FAIL at any OTHER stage stays ranked — red-flagged as today).
-REGIME_REJECT_STAGES: Final[frozenset[str]] = frozenset({"extreme_vol_stratum", "regime_fragility"})
+#: Derived from the PRODUCER enum (:class:`brutex.metrics.cascade.FilterStage`)
+#: — never re-minted literals (CLAUDE.md §11 COMMON; hostile-review r1
+#: MINOR-1 fold).
+REGIME_REJECT_STAGES: Final[frozenset[str]] = frozenset(
+    {FilterStage.EXTREME_VOL_STRATUM.value, FilterStage.REGIME_FRAGILITY.value}
+)
 
 #: The honest-abstain statuses counted (NEVER excluded — option A) on the
-#: additive regime verdict fields.
+#: additive regime verdict fields. Derived from the producer modules' OWN
+#: ``ABSTAIN_STATUSES`` exports (:mod:`brutex.metrics.extreme_vol_stratum` +
+#: :mod:`brutex.metrics.regime_fragility`) — one vocabulary home each
+#: (CLAUDE.md §11 COMMON; hostile-review r1 MINOR-1 fold).
 REGIME_UNPROVEN_STATUSES: Final[frozenset[str]] = frozenset(
-    {"unproven_current_regime", "insufficient_stratum_trades", "insufficient_strata"}
+    {*_EXTREME_VOL_ABSTAINS, *_FRAGILITY_ABSTAINS}
 )
 
 

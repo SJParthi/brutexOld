@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from itertools import pairwise
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 #: First session of the "current regime" extreme-vol stratum (inclusive).
 STRATUM_START = date(2024, 1, 1)
@@ -68,6 +68,18 @@ StratumStatus = Literal[
     "unproven_current_regime",
     "insufficient_stratum_trades",
 ]
+
+#: The honest-ABSTAIN members of :data:`StratumStatus` — recorded verdicts
+#: that gate NOTHING (never a reject). Exported so read-time consumers (the
+#: /results ``regime_robust`` preset — the DEC-REGIME-REJECT-TIER-001
+#: proposal) derive their vocabulary from THIS producer module instead of
+#: re-minting literals (CLAUDE.md §11 COMMON). ``"unproven_current_regime"``
+#: is also minted by the cascade's no-input arm (``brutex.metrics.cascade``);
+#: the token's vocabulary home is THIS Literal.
+ABSTAIN_STATUSES: Final[tuple[str, ...]] = (
+    "unproven_current_regime",
+    "insufficient_stratum_trades",
+)
 
 
 def classify_extreme_sessions(daily_closes: Mapping[date, float]) -> frozenset[date]:
@@ -223,6 +235,7 @@ def evaluate_stratum(
 
 
 __all__ = [
+    "ABSTAIN_STATUSES",
     "EXTREME_DAILY_MOVE_PCT",
     "MIN_STRATUM_TRADES",
     "STRATUM_START",

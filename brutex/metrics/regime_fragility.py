@@ -100,6 +100,14 @@ _AXIS_ERA: Final[str] = "era"
 #: The verdict vocabulary (stable wire tokens).
 FragilityStatus = Literal["ok", "fail", "insufficient_strata"]
 
+#: The honest-ABSTAIN member of :data:`FragilityStatus` — recorded, never a
+#: reject; ``"insufficient_strata"`` is also minted by the cascade's
+#: no-input arm (``brutex.metrics.cascade``). Exported so read-time
+#: consumers (the /results ``regime_robust`` preset) derive their
+#: vocabulary from THIS producer module — one vocabulary home
+#: (CLAUDE.md §11 COMMON).
+ABSTAIN_STATUSES: Final[tuple[str, ...]] = ("insufficient_strata",)
+
 
 @dataclass(frozen=True, slots=True)
 class FragilityVerdict:
@@ -285,6 +293,7 @@ def evaluate_fragility(
 
 
 __all__ = [
+    "ABSTAIN_STATUSES",
     "MIN_STRATUM_TRADES",
     "REGIME_CONCENTRATION_MAX",
     "TAXONOMY_VERSION",
