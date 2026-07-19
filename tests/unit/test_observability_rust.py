@@ -1419,6 +1419,192 @@ class TestTripwireSeamEntryPoints:
         assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=7, platform="darwin") == 7
 
 
+class TestRunGateSupplementalPins:
+    """Run_gate remediation killers (DEC-RUST-OBSERVABILITY-TRIPWIRES-002 S6).
+
+    The ci.yml `run_tripwires` mutation run_gate (floor 0.75) mutates
+    `run_tripwires.py` under its runner. The S2-S4 seams ADDED the
+    oracle/materializer/bit-const mutant surface, and its kills need
+    EXACT-equality asserts (the FIX-ROUND-1 C3 lesson — mutmut's XX-wrap
+    keeps every inner substring intact, so a substring assert passes on a
+    wrapped template) which the PROTECTED 81-test file cannot gain (its
+    test list is frozen — restructure-not-new-tests applies to COVERAGE,
+    not to a mutation-score regression). MEASURED at the seam head
+    (CI-replica, mutmut 2.5.1, wheel-free): 406 mutants / 115 survived
+    under the 81 alone = 71.7% — BELOW the floor. Remedy = the
+    DEC-CONFIG-RUST-LEAVES-001 money.py precedent: the run_gate runner
+    ALSO drives THIS file, and this class carries the killers (direct
+    oracle calls + literal pins — wheel-free, flag-independent). The one
+    disclosed equivalent survivor: the FIRST `mask |=` in
+    `_reconcile_decide_python` (`mask` is still 0 there, so `|=` ≡ `=`).
+    """
+
+    def test_reconcile_bit_constants_exact(self) -> None:
+        # Bit i == predicate i in the pre-seam append order — the detail
+        # materializer + the crate mirror both key on these exact values.
+        assert run_tripwires._RECONCILE_BIT_NEGATIVE_IN_FLIGHT == 1
+        assert run_tripwires._RECONCILE_BIT_ENUMERATED_DRIFT == 2
+        assert run_tripwires._RECONCILE_BIT_SKIPPED_OVERFLOW == 4
+        assert run_tripwires._RECONCILE_BIT_SURVIVORS_OVERFLOW == 8
+        assert run_tripwires._RECONCILE_BIT_IN_FLIGHT_OVERFLOW == 16
+        assert run_tripwires._RECONCILE_BIT_BACKWARDS == 32
+        assert run_tripwires._RECONCILE_BIT_DONE_INCOMPLETE == 64
+
+    def test_reconcile_decide_all_seven_violations_fold(self) -> None:
+        # Every predicate true at once → the full 7-bit mask; a `mask =`
+        # (fold-dropping) mutant on any non-first arm loses an earlier bit.
+        mask = run_tripwires._reconcile_decide_python(-1, 90, 200, 500, 300, 100, 300, True)
+        assert mask == 0b1111111
+
+    @pytest.mark.parametrize(
+        ("mask", "kwargs", "expected"),
+        [
+            (1, {"in_flight": -1}, "in_flight -1 < 0"),
+            (
+                2,
+                {"enumerated": 90, "total": 100},
+                "snapshot enumerated 90 != armed total 100",
+            ),
+            (
+                4,
+                {"skipped": 5, "evaluated": 2},
+                "skipped 5 > evaluated 2 (skipped ⊆ evaluated)",
+            ),
+            (8, {"survivors": 3, "evaluated": 2}, "survivors 3 > evaluated 2"),
+            (
+                16,
+                {"evaluated": 90, "in_flight": 11, "total": 100},
+                "evaluated 90 + in_flight 11 > enumerated 100",
+            ),
+            (
+                32,
+                {"evaluated": 49, "prev_evaluated": 50},
+                "evaluated went backwards: 49 < 50",
+            ),
+            (
+                64,
+                {"evaluated": 2, "total": 100},
+                "run done but evaluated 2 != enumerated 100",
+            ),
+        ],
+    )
+    def test_reconcile_details_single_violation_exact(
+        self, mask: int, kwargs: dict[str, int], expected: str
+    ) -> None:
+        # EXACT equality (never a substring): kills the per-template
+        # XX-wrap garbles AND the `mask & → mask |` bit-test garbles (a
+        # `|`-test is always truthy, so extra templates would append).
+        defaults: dict[str, int | None] = {
+            "in_flight": 0,
+            "enumerated": 100,
+            "evaluated": 0,
+            "skipped": 0,
+            "survivors": 0,
+            "total": 100,
+            "prev_evaluated": None,
+        }
+        defaults.update(kwargs)
+        assert run_tripwires._reconcile_details(mask, **defaults) == expected  # type: ignore[arg-type]
+
+    def test_reconcile_details_joined_in_bit_order_exact(self) -> None:
+        detail = run_tripwires._reconcile_details(
+            1 | 64,
+            in_flight=-1,
+            enumerated=100,
+            evaluated=2,
+            skipped=0,
+            survivors=0,
+            total=100,
+            prev_evaluated=None,
+        )
+        assert detail == "in_flight -1 < 0; run done but evaluated 2 != enumerated 100"
+
+    def test_throughput_decide_zero_peak_arm_exact(self) -> None:
+        # `new_peak <= 0.0` (not `<`): the all-zero regime decides NOTHING
+        # — `below` carried untouched, floor exactly 0.0, code TW_NONE.
+        assert run_tripwires._throughput_decide_python(0.0, 0.0, 3, 0.5, 5) == (
+            0.0,
+            3,
+            0.0,
+            obs.TW_NONE,
+        )
+
+    def test_throughput_decide_positive_peak_boundary_exact(self) -> None:
+        # A positive peak ≤ 1.0 must NOT take the zero-peak arm; at-floor
+        # rate is the CLEAR arm with the exact floor value.
+        assert run_tripwires._throughput_decide_python(0.5, 0.5, 0, 0.4, 5) == (
+            0.5,
+            0,
+            0.2,
+            obs.TW_CLEAR,
+        )
+
+    def test_slope_decide_divides_never_multiplies(self) -> None:
+        # An evaluated-diff of 2 distinguishes `/` from `*` (the protected
+        # matrix only ever divides by 1, where they coincide).
+        assert run_tripwires._memory_slope_decide_python(1300, 3, 1100, 1, 150.0, 0, 1) == (
+            100.0,
+            0,
+            obs.TW_CLEAR,
+        )
+
+    def test_summary_classify_strict_zip_refuses_length_mismatch(self) -> None:
+        with pytest.raises(ValueError, match="zip"):
+            run_tripwires._summary_classify_python([1.0, 2.0], [True], 0.5)
+
+    def test_summary_classify_nonfinite_continues_never_breaks(self) -> None:
+        nan_codes, absurd_codes = run_tripwires._summary_classify_python(
+            [float("nan"), 1.0], [False, False], 0.5
+        )
+        assert nan_codes == [obs.TW_FIRE, obs.TW_CLEAR]
+        assert absurd_codes == [obs.TW_NONE, obs.TW_NONE]
+
+    def test_on_tuple_summary_strict_zip_over_routed_code_arrays(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The seam belt: a length-mismatched routed code array (only a
+        # poisoned facade could mint one — the output gate refuses it from
+        # a crate) must raise into the I-3 blanket, never silently truncate
+        # the screen walk.
+        monkeypatch.setattr(
+            obs, "routed_tripwire_summary", lambda *a, **k: ([obs.TW_CLEAR], [obs.TW_NONE])
+        )
+        monitor, events = _tw_monitor()
+        with capture_logs() as logs:
+            monitor.on_tuple_summary({"a": 1.0, "b": 2.0})
+        warns = [e for e in logs if e["event"] == "run_tripwires.observe_failed"]
+        assert [(w["method"], w["error_type"]) for w in warns] == [
+            ("on_tuple_summary", "ValueError")
+        ]
+        assert events == []
+
+    def test_on_stage_strict_zip_over_routed_missing_mask(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(obs, "routed_tripwire_stage", lambda *a, **k: [])
+        monitor, events = _tw_monitor()
+        with capture_logs() as logs:
+            monitor.on_stage("cascade", stamps_present=frozenset())
+        warns = [e for e in logs if e["event"] == "run_tripwires.observe_failed"]
+        assert [(w["method"], w["error_type"]) for w in warns] == [("on_stage", "ValueError")]
+        assert events == []
+
+    def test_env_knob_names_exact(self) -> None:
+        # The from_env contract — a garbled knob name silently orphans the
+        # operator's env value.
+        assert run_tripwires.ENV_RECONCILE_INTERVAL_S == (
+            "BRUTEX_SWEEP_TRIPWIRE_RECONCILE_INTERVAL_S"
+        )
+        assert run_tripwires.ENV_THROUGHPUT_FLOOR == "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_FLOOR"
+        assert run_tripwires.ENV_THROUGHPUT_DWELL == "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_DWELL"
+        assert run_tripwires.ENV_RSS_BUDGET_FRACTION == (
+            "BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION"
+        )
+        assert run_tripwires.ENV_MEMORY_SLOPE_BYTES == "BRUTEX_SWEEP_TRIPWIRE_MEMORY_SLOPE_BYTES"
+        assert run_tripwires.ENV_MEMORY_DWELL == "BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL"
+        assert run_tripwires.ENV_ABSURD_PNL_PAISA == "BRUTEX_SWEEP_TRIPWIRE_ABSURD_PNL_PAISA"
+
+
 class TestInputGates:
     """Exact-type refuse-poison INPUT gates route exotic numerics to the oracle."""
 
