@@ -199,7 +199,7 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
     # every call serves the Python oracle, byte-identical). Deliberately NOT a
     # turnkey build prerequisite: never module-top imported, in NO cargo
     # workspace, built ONLY by its own CI lane
-    # (.github/workflows/ops-rust-parity.yml — the #1957 review-round fold,
+    # (.github/workflows/ops-rust-parity.yml — the #1960 review-round fold,
     # which also closed the review's MINOR-1 no-CI-lane finding). A module-top
     # `import brutex_ops` anywhere in brutex/ would reclassify it REQUIRED —
     # the inverse pin below forbids exactly that.

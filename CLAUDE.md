@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957,
+_Last updated: 2026-07-19 (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1960,
 branch `claude/backup-rust-ops` — the backup DECISION-KERNEL first cut: the
 NEW `rust/brutex-ops` crate + the default-OFF `BRUTEX_BACKUP_RUST` facade
 (`brutex/backup/backup_rust.py`) route the pure decision laws of
@@ -37,7 +37,7 @@ default flip needs its own DEC. The DECISION-KERNEL shape, deliberately NOT
 the #1722 roadmap's wave-13 standalone binary. Ops tooling ONLY — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the full record lives in
-the §1 Active-branch blurb + MIGRATION.md #1957.)
+the §1 Active-branch blurb + MIGRATION.md #1960.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3544,7 +3544,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/backup-rust-ops`
-  (**DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957** — the backup
+  (**DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1960** — the backup
   DECISION-KERNEL first cut on the DEC-FEED-RUST-CORE-001 (#1797) shape: NEW
   crate `rust/brutex-ops` (pyo3 0.29 abi3-py312 behind the optional `python`
   feature; serde_json core; build.rs FRAMING-v1 source digest; the
@@ -10843,7 +10843,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/backup-rust-ops`
-  (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1957 — the backup DECISION-KERNEL
+  (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1960 — the backup DECISION-KERNEL
   first cut: the NEW `rust/brutex-ops` crate + the default-OFF
   `BRUTEX_BACKUP_RUST` facade routing the dead-man verdict state machine +
   the four golden-pinned template renderers + the restic `--json` parse/argv
@@ -10853,7 +10853,7 @@ hostile-review pass._
   the retained Python implementations are the LIVE parity oracle; expected
   payoff ≈ 0 — uniformity, not speed (ADR-0020 banner); ships INERT; ops
   tooling ONLY — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
-  Active branch line — see §1 + MIGRATION.md #1957 for the full blurb)
+  Active branch line — see §1 + MIGRATION.md #1960 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
