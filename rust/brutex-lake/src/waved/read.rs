@@ -76,7 +76,7 @@ fn ticks_per_second(unit: TimeUnit) -> i64 {
 }
 
 /// Encode a DataFrame to uncompressed Arrow IPC bytes (`resample.rs` idiom).
-fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
+pub(super) fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
     IpcWriter::new(&mut buf).finish(df)?;
     Ok(buf)

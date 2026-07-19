@@ -61,6 +61,8 @@ from brutex_lake._brutex_lake import (
     resample_1m_ipc,
     resample_all_ipc,
     waved_has_stored_1m_bars,
+    waved_heal_batch,
+    waved_lake_content_token,
     waved_month_partition_files,
     waved_read_1m_ipc,
 )
@@ -81,6 +83,8 @@ __all__ = [
     "resample_1m_ipc",
     "resample_all_ipc",
     "waved_has_stored_1m_bars",
+    "waved_heal_batch",
+    "waved_lake_content_token",
     "waved_month_partition_files",
     "waved_read_1m_ipc",
 ]

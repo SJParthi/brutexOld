@@ -29,6 +29,7 @@
 //!   modules per the Wave-D design §H; they register ADDITIVELY below the
 //!   W-1 functions in `lib.rs`, never in place of them.
 
+pub mod heal;
 pub mod read;
 
 /// One per-session bad-tick WARN record the Python shell replays through

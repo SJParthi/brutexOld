@@ -580,6 +580,11 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
         waved::read::waved_month_partition_files,
         m
     )?)?;
+    // ADR-0020 Wave-D W-2 (`BRUTEX_LAKE_WAVED_RUST` — the lake_heal mutation
+    // core + the content-token twin). Appended AFTER the W-1 registrations
+    // (§4.1 additive merge law); W-3/W-4 append below in their own PRs.
+    m.add_function(wrap_pyfunction!(waved::heal::waved_heal_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(waved::heal::waved_lake_content_token, m)?)?;
     Ok(())
 }
 

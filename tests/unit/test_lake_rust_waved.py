@@ -66,8 +66,20 @@ def _ipc(df: pl.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def _fake_crate(*, pinned: Any = pl.__version__, read: Any = None) -> types.ModuleType:
-    """Build a fake ``brutex_lake`` module with injectable behaviour."""
+def _fake_crate(
+    *,
+    pinned: Any = pl.__version__,
+    read: Any = None,
+    heal: Any = None,
+    token: Any = None,
+) -> types.ModuleType:
+    """Build a fake ``brutex_lake`` module with injectable behaviour.
+
+    Carries the FULL W-1 + W-2 :data:`brutex.data.lake_rust_waved._CRATE_API`
+    surface (the all-or-nothing import guard — a fake missing any name would
+    latch ``crate_unavailable`` and every engaged-path test would silently
+    exercise the oracle arm instead).
+    """
     module = types.ModuleType("brutex_lake")
     module.pinned_polars_version = (  # type: ignore[attr-defined]
         pinned if callable(pinned) else (lambda: pinned)
@@ -77,7 +89,25 @@ def _fake_crate(*, pinned: Any = pl.__version__, read: Any = None) -> types.Modu
     module.waved_read_1m_ipc = read  # type: ignore[attr-defined]
     module.waved_has_stored_1m_bars = lambda base: False  # type: ignore[attr-defined]
     module.waved_month_partition_files = lambda base, months: []  # type: ignore[attr-defined]
+    if heal is None:
+        heal = lambda lake_root, quarantine_root, findings, on_event: _EMPTY_HEAL_OUTCOME()  # noqa: E731
+    module.waved_heal_batch = heal  # type: ignore[attr-defined]
+    if token is None:
+        token = lambda lake_root: ("0" * 64, [])  # noqa: E731
+    module.waved_lake_content_token = token  # type: ignore[attr-defined]
     return module
+
+
+def _EMPTY_HEAL_OUTCOME() -> dict[str, object]:  # noqa: N802 — outcome factory, dict-shaped constant
+    """A fresh empty-batch heal outcome dict (the crate wire shape)."""
+    return {
+        "healed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "quarantined_files": 0,
+        "actions": [],
+        "touched_minute": [],
+    }
 
 
 def _install_crate(monkeypatch: pytest.MonkeyPatch, module: types.ModuleType | None) -> None:
@@ -719,3 +749,271 @@ class TestSteadyState:
         events = lrw._parse_bad_tick_events(two)
         assert [e["session"] for e in events] == ["2024-01-01", "2024-01-02"]
         assert lrw._parse_bad_tick_events("[]") == []
+
+
+# ── W-2: the heal-batch surface ─────────────────────────────────────────────
+
+
+def _heal_call(
+    monkeypatch: pytest.MonkeyPatch,
+    module: types.ModuleType | None,
+    *,
+    findings: list[dict[str, Any]] | None = None,
+    on_event: Any = None,
+) -> dict[str, Any] | None:
+    _install_crate(monkeypatch, module)
+    monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
+    return lrw.heal_batch_via_rust(
+        lake_root="/lake",
+        quarantine_root="/lake/.quarantine/x",
+        findings=[] if findings is None else findings,
+        on_event=(lambda kind, payload: None) if on_event is None else on_event,
+    )
+
+
+class TestHealBatchSurface:
+    """The §B2 heal seam — pre-mutation degrade only, everything else LOUD."""
+
+    def test_absent_crate_returns_none_and_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _heal_call(monkeypatch, None) is None
+        assert lrw.rust_waved_disabled()
+
+    def test_missing_w2_api_returns_none_and_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        crate = _fake_crate()
+        delattr(crate, "waved_heal_batch")
+        assert _heal_call(monkeypatch, crate) is None
+        assert lrw.rust_waved_disabled()
+
+    def test_degrade_verdict_returns_none_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate(heal=lambda *a: {"degrade": "unported_algorithm: X"})
+        with capture_logs() as logs:
+            assert _heal_call(monkeypatch, crate) is None
+        falls = [e for e in logs if e["event"] == "lake_rust_waved.fallback"]
+        assert [e["reason"] for e in falls] == ["heal_degrade"]
+        assert falls[0]["degrade_reason"] == "unported_algorithm: X"
+        assert not lrw.rust_waved_disabled()  # pre-mutation degrade never latches
+
+    def test_good_outcome_is_returned_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        outcome = _EMPTY_HEAL_OUTCOME()
+        crate = _fake_crate(heal=lambda *a: outcome)
+        assert _heal_call(monkeypatch, crate) is outcome
+
+    def test_non_dict_outcome_is_refuse_poison_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        crate = _fake_crate(heal=lambda *a: ["not", "a", "dict"])
+        with pytest.raises(RuntimeError, match="refuse-poison"):
+            _heal_call(monkeypatch, crate)
+
+    def test_wrong_outcome_keys_are_refuse_poison_loud(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate(heal=lambda *a: {"healed": 1})
+        with pytest.raises(RuntimeError, match="outcome keys refused"):
+            _heal_call(monkeypatch, crate)
+
+    def test_crate_exception_propagates_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*args: Any) -> dict[str, Any]:
+            raise OSError(28, "No space left on device")
+
+        crate = _fake_crate(heal=_boom)
+        with pytest.raises(OSError, match="No space left"):
+            _heal_call(monkeypatch, crate)
+
+    def test_arguments_cross_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, Any] = {}
+
+        def _capture(
+            lake_root: str, quarantine_root: str, findings: Any, on_event: Any
+        ) -> dict[str, Any]:
+            seen.update(
+                lake_root=lake_root,
+                quarantine_root=quarantine_root,
+                findings=findings,
+                on_event=on_event,
+            )
+            return _EMPTY_HEAL_OUTCOME()
+
+        sentinel_findings = [{"kind": "IntraFileDup"}]
+        sentinel_cb = lambda kind, payload: None  # noqa: E731
+        _heal_call(
+            monkeypatch,
+            _fake_crate(heal=_capture),
+            findings=sentinel_findings,
+            on_event=sentinel_cb,
+        )
+        assert seen["lake_root"] == "/lake"
+        assert seen["quarantine_root"] == "/lake/.quarantine/x"
+        assert seen["findings"] is sentinel_findings
+        assert seen["on_event"] is sentinel_cb
+
+
+# ── W-2: the content-token surface ──────────────────────────────────────────
+
+
+def _token_call(
+    monkeypatch: pytest.MonkeyPatch,
+    module: types.ModuleType | None,
+    *,
+    on_skip: Any = None,
+    oracle: Any = None,
+) -> str:
+    _install_crate(monkeypatch, module)
+    monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
+    skips: list[tuple[str, str, str]] = []
+    return lrw.lake_content_token_via_rust(
+        lake_root="/lake",
+        on_skip=(lambda e, p, err: skips.append((e, p, err))) if on_skip is None else on_skip,
+        oracle=(lambda: "oracle-token") if oracle is None else oracle,
+    )
+
+
+class TestContentTokenSurface:
+    """The §C-5 token twin — the full W-1 read-surface doctrine."""
+
+    def test_absent_crate_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _token_call(monkeypatch, None) == "oracle-token"
+        assert lrw.rust_waved_disabled()
+
+    def test_degrade_error_serves_oracle_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(lake_root: str) -> tuple[str, list[Any]]:
+            raise RuntimeError("crate fault")
+
+        with capture_logs() as logs:
+            assert _token_call(monkeypatch, _fake_crate(token=_boom)) == "oracle-token"
+        assert any(
+            e["event"] == "lake_rust_waved.fallback" and e["reason"] == "token_error" for e in logs
+        )
+        assert not lrw.rust_waved_disabled()
+
+    def test_memory_error_escapes_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _oom(lake_root: str) -> tuple[str, list[Any]]:
+            raise MemoryError
+
+        with pytest.raises(MemoryError):
+            _token_call(monkeypatch, _fake_crate(token=_oom))
+
+    def test_panic_exception_latches_and_serves_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polars.exceptions as pl_exc
+
+        def _panic(lake_root: str) -> tuple[str, list[Any]]:
+            raise pl_exc.PanicException("boom")
+
+        assert _token_call(monkeypatch, _fake_crate(token=_panic)) == "oracle-token"
+        assert lrw.rust_waved_disabled()
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            "not-a-tuple",
+            ("only-one",),
+            (123, []),
+            ("tok", "not-a-list"),
+        ],
+        ids=["non_tuple", "wrong_arity", "non_str_token", "non_list_events"],
+    )
+    def test_refuse_poison_shapes_serve_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, result: Any
+    ) -> None:
+        with capture_logs() as logs:
+            assert _token_call(monkeypatch, _fake_crate(token=lambda lr: result)) == "oracle-token"
+        assert any(
+            e["event"] == "lake_rust_waved.fallback" and e["reason"] == "token_result_refused"
+            for e in logs
+        )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            "not-a-dict",
+            {"event": "e", "path": "p"},
+            {"event": "e", "path": "p", "error": 5},
+            {"event": "e", "path": "p", "error": "x", "extra": "y"},
+        ],
+        ids=["non_dict", "missing_key", "non_str_value", "extra_key"],
+    )
+    def test_poisoned_skip_channel_serves_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, item: Any
+    ) -> None:
+        with capture_logs() as logs:
+            token = _token_call(monkeypatch, _fake_crate(token=lambda lr: ("t" * 64, [item])))
+        assert token == "oracle-token"
+        assert any(
+            e["event"] == "lake_rust_waved.fallback" and e["reason"] == "token_events_refused"
+            for e in logs
+        )
+
+    def test_burn_in_match_counts_down_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=1)
+        crate = _fake_crate(token=lambda lr: ("same-token", []))
+        with capture_logs() as logs:
+            token = _token_call(monkeypatch, crate, oracle=lambda: "same-token")
+        assert token == "same-token"
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_CONTENT_TOKEN] == 0
+        assert any(
+            e["event"] == "lake_rust_waved.burn_in_complete"
+            and e["surface"] == lrw.SURFACE_CONTENT_TOKEN
+            for e in logs
+        )
+        assert not lrw.rust_waved_disabled()
+
+    def test_burn_in_mismatch_autoreverts_and_ships_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=lrw.BURN_IN_SAMPLES)
+        crate = _fake_crate(token=lambda lr: ("rust-token", []))
+        with capture_logs() as logs:
+            token = _token_call(monkeypatch, crate, oracle=lambda: "python-token")
+        assert token == "python-token"
+        assert lrw.rust_waved_disabled()
+        assert any(
+            e["event"] == "lake_rust_waved.autoreverted" and e["reason"] == "burn_in_token_mismatch"
+            for e in logs
+        )
+
+    def test_burn_in_never_replays_skip_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=lrw.BURN_IN_SAMPLES)
+        crate = _fake_crate(token=lambda lr: ("same", [{"event": "e", "path": "p", "error": "x"}]))
+        replayed: list[tuple[str, str, str]] = []
+        token = _token_call(
+            monkeypatch,
+            crate,
+            on_skip=lambda e, p, err: replayed.append((e, p, err)),
+            oracle=lambda: "same",
+        )
+        assert token == "same"
+        assert replayed == []  # the oracle ran + warned itself — never doubled
+
+    def test_steady_state_replays_skips_and_skips_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        crate = _fake_crate(
+            token=lambda lr: (
+                "tok",
+                [
+                    {"event": "lake_heal.token_stat_skipped", "path": "/p1", "error": "e1"},
+                    {"event": "lake_heal.token_walk_skipped", "path": "/p2", "error": "e2"},
+                ],
+            )
+        )
+        replayed: list[tuple[str, str, str]] = []
+
+        def _bomb() -> str:
+            raise AssertionError("oracle must not run in steady state")
+
+        token = _token_call(
+            monkeypatch,
+            crate,
+            on_skip=lambda e, p, err: replayed.append((e, p, err)),
+            oracle=_bomb,
+        )
+        assert token == "tok"
+        assert replayed == [
+            ("lake_heal.token_stat_skipped", "/p1", "e1"),
+            ("lake_heal.token_walk_skipped", "/p2", "e2"),
+        ]

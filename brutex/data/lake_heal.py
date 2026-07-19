@@ -78,7 +78,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, cast
 
 import structlog
 
@@ -114,10 +114,15 @@ from brutex.data.lake_invariants import (
     utc_aware,
 )
 from brutex.data.lake_manifest import invalidate_manifest
-from brutex.data.lake_stats_manifest import KIND_BARS, KIND_OPTIONS, remove_dataset_stats
+from brutex.data.lake_stats_manifest import (
+    KIND_BARS,
+    KIND_OPTIONS,
+    remove_dataset_stats,
+    stats_manifest_enabled,
+)
 from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
-from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult
+from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult, WriteResult
 from brutex.data.partition import (
     BAR_DIR_NAME,
     PARTITION_PATH_COMPONENTS,
@@ -1349,6 +1354,257 @@ def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
     return _heal_schema_alien(finding, state)
 
 
+# ── the Wave-D Rust heal seam (DEC-RUST-LAKE-WAVED-001, design §B2) ──────────
+
+
+def _serialize_rust_findings(
+    ordered: Sequence[_HealableFinding],
+) -> list[dict[str, object]] | None:
+    """Project *ordered* into the crate's plain-dict finding wire (deviation D-10).
+
+    ``None`` when the batch carries ANY kind outside the W-2 engaged set
+    (``IntraFileDup`` / ``OptionIntraFileDup`` / ``SchemaAlienFile``) — the
+    crate's read-only preflight would degrade such a batch anyway; the
+    short-circuit skips the FFI round-trip AND never serializes the
+    differently-shaped unported dataclasses (``LegacyKeyDrift`` has a
+    ``drifted_dir``, not a ``path``). The crate-side kind check stays as
+    defense in depth.
+    """
+    out: list[dict[str, object]] = []
+    for finding in ordered:
+        if isinstance(finding, IntraFileDup):
+            coords = finding.coords
+            out.append(
+                {
+                    "kind": "IntraFileDup",
+                    "path": str(finding.path),
+                    "exchange": coords.exchange,
+                    "segment": coords.segment,
+                    "symbol": coords.symbol,
+                    "interval": coords.interval,
+                    "year": coords.year,
+                    "month": coords.month,
+                    "has_coords": True,
+                }
+            )
+        elif isinstance(finding, OptionIntraFileDup):
+            out.append(
+                {
+                    "kind": "OptionIntraFileDup",
+                    "path": str(finding.path),
+                    "series": finding.series,
+                    "has_coords": False,
+                }
+            )
+        elif isinstance(finding, SchemaAlienFile):
+            record: dict[str, object] = {
+                "kind": "SchemaAlienFile",
+                "path": str(finding.path),
+                "reason": finding.reason,
+                "series": finding.series or "",
+                "has_coords": finding.coords is not None,
+            }
+            if finding.coords is not None:
+                record.update(
+                    {
+                        "exchange": finding.coords.exchange,
+                        "segment": finding.coords.segment,
+                        "symbol": finding.coords.symbol,
+                        "interval": finding.coords.interval,
+                        "year": finding.coords.year,
+                        "month": finding.coords.month,
+                    }
+                )
+            out.append(record)
+        else:
+            return None
+    return out
+
+
+def _rust_heal_epoch_us(us: int) -> datetime:
+    """A UTC-aware datetime from epoch µs — exact integer arithmetic.
+
+    The crate's bars envelope admits only ``us``-unit UTC-aware timestamps
+    (``read_bars_file``), so the reconstruction is lossless by construction
+    (``fromtimestamp(us / 1e6)`` would round through a float — never used).
+    """
+    return _EPOCH_UTC + timedelta(microseconds=us)
+
+
+#: The Unix epoch, UTC-aware (the µs-reconstruction anchor).
+_EPOCH_UTC: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _rust_heal_on_event(state: _BatchState) -> Callable[[str, dict[str, Any]], None]:
+    """Build the ONE ``on_event(kind, payload)`` replay channel for the crate batch.
+
+    Wave-D house laws i-iii: the crate streams STRUCTURED side-effect records
+    and this closure replays each through the SAME Python surface the
+    verbatim loop uses — the pinned structlog WARN sites (with the #907
+    ``repr()`` law applied exactly where the Python arm applies it), the
+    best-effort hash-chained audit sink (:func:`_audit_append`), the catalog
+    upsert/delete (Golden Rule #4 — via the writer's own
+    ``make_catalog_entry`` so the ``year``/``month`` derivation stays ONE
+    law), the writers' stats-manifest hooks and the dataset-manifest
+    invalidation. ZERO new laws: every handler DELEGATES; the two private
+    hook accesses are documented friend access (the §11 no-copy alternative
+    — re-minting the probe-first gating here would be the forbidden second
+    copy). An unknown kind raises loudly (refuse-poison — a foreign crate
+    must never silently drop a side effect). O-cost note: the
+    ``option_stats_record`` replay re-reads the just-rewritten file once to
+    feed the verbatim ``_record_option_stats`` law (anomaly-gated — one
+    bounded read per actually-healed options file; skipped entirely when the
+    stats manifest is disabled).
+    """
+
+    def _write_result(payload: dict[str, Any], *, dest: Path) -> WriteResult:
+        return WriteResult(
+            path=dest,
+            row_count=int(payload["rows"] if "rows" in payload else payload["row_count"]),
+            raw_hash=str(payload["raw_hash"]),
+            first_ts=_rust_heal_epoch_us(int(payload["first_ts_us"])),
+            last_ts=_rust_heal_epoch_us(int(payload["last_ts_us"])),
+            bytes_written=0,  # unread by both consumers (stats hook + catalog entry)
+            bars_added=0,  # a heal never adds bars (Golden Rule #1)
+            conflicts=(),
+            file_rewritten=True,
+        )
+
+    def handle(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "beat":
+            emit_progress_beat()
+        elif kind == "log":
+            fields = {
+                key: value
+                for key, value in payload.items()
+                if key not in ("event", "partition_repr")
+            }
+            event = str(payload["event"])
+            if payload.get("partition_repr"):
+                # The #907 law: an options-arm partition token embeds the RAW
+                # vendor-derived series dir name — repr()'d at the LOG site
+                # exactly as the Python arm does (HealAction/audit copies raw).
+                fields["partition"] = repr(str(fields["partition"]))
+            if event == "lake_heal.partition_error":
+                fields["error"] = repr(str(fields["error"]))
+            _LOG.warning(event, **fields)
+        elif kind == "audit":
+            _audit_append(
+                state.audit,
+                action=str(payload["action"]),
+                subject=str(payload["subject"]),
+                payload=dict(payload["payload"]),
+            )
+        elif kind == "file_removed_move":
+            # The `_quarantine_move` manifest twin-hooks, verbatim order.
+            invalidate_manifest(state.lake_root)
+            _remove_dataset_stats_for(state.lake_root, Path(str(payload["path"])))
+        elif kind == "catalog_upsert":
+            if state.catalog is not None:
+                dest = state.lake_root.joinpath(
+                    BAR_DIR_NAME,
+                    str(payload["exchange"]),
+                    str(payload["segment"]),
+                    str(payload["symbol"]),
+                    str(payload["interval"]),
+                    f"{int(payload['year']):04d}",
+                    f"{int(payload['month']):02d}.parquet",
+                )
+                entry = state.writer.make_catalog_entry(
+                    exchange=str(payload["exchange"]),
+                    segment=str(payload["segment"]),
+                    symbol=str(payload["symbol"]),
+                    interval=str(payload["interval"]),
+                    result=_write_result(payload, dest=dest),
+                )
+                state.catalog.upsert(entry)
+        elif kind == "catalog_delete":
+            if state.catalog is not None:
+                state.catalog.delete_partition(
+                    exchange=str(payload["exchange"]),
+                    segment=str(payload["segment"]),
+                    symbol=str(payload["symbol"]),
+                    interval=str(payload["interval"]),
+                    year=int(payload["year"]),
+                    month=int(payload["month"]),
+                )
+        elif kind == "bars_stats_record":
+            dest = Path(str(payload["path"]))
+            # Friend access to the writer's OWN stats hook — the ONE
+            # probe-first gating law (DEC-LAKE-STATS-MANIFEST-001); a re-mint
+            # here would be the forbidden second copy (§11 COMMON).
+            state.writer._record_stats_hook(  # pyright: ignore[reportPrivateUsage]
+                dest, _write_result(payload, dest=dest)
+            )
+        elif kind == "option_stats_record":
+            if stats_manifest_enabled():
+                import polars as pl
+
+                from brutex.data.option_parquet_writer import (
+                    _record_option_stats,  # pyright: ignore[reportPrivateUsage]
+                )
+
+                dest = Path(str(payload["path"]))
+                _record_option_stats(
+                    state.lake_root, dest=dest, frame=pl.read_parquet(dest, glob=False)
+                )
+        else:
+            raise WriterError(f"unknown waved heal replay event kind {kind!r}")
+
+    return handle
+
+
+def _rust_heal_route(
+    ordered: tuple[_HealableFinding, ...], state: _BatchState
+) -> tuple[int, int, int] | None:
+    """Route the batch mutation core through the Wave-D crate (flag-ON only).
+
+    Returns ``(healed, skipped, errors)`` with *state* mutated exactly as the
+    verbatim per-finding loop would (actions, quarantined-file count, the
+    touched-``1minute`` recall driver), or ``None`` = run the verbatim Python
+    loop (flag OFF / crate not ready / an out-of-envelope batch — ALL
+    zero-mutation states, certified by the crate's read-only preflight). The
+    §B2 asymmetry: NO burn-in, NO degrade around the engaged call — any
+    exception out of it is LOUD (mutation may have happened; the healer is
+    idempotent-convergent, so the posture is the documented Python re-run
+    next batch/boot). ``lake_write_guard`` wraps the call so the crate's
+    real ``OSError(ENOSPC)`` maps to ``LakeWriteHalt("disk_full")`` exactly
+    as the writers' own guards do on the Python arm.
+    """
+    from brutex.data.lake_rust_waved import heal_batch_via_rust, lake_rust_waved_enabled
+
+    if not lake_rust_waved_enabled():
+        return None
+    serialized = _serialize_rust_findings(ordered)
+    if serialized is None:
+        return None
+    with lake_write_guard():
+        outcome = heal_batch_via_rust(
+            lake_root=str(state.lake_root),
+            quarantine_root=str(state.quarantine_root),
+            findings=serialized,
+            on_event=_rust_heal_on_event(state),
+        )
+    if outcome is None:
+        return None
+    for action in cast("list[dict[str, Any]]", outcome["actions"]):
+        state.actions.append(HealAction(**action))
+    state.quarantined_files += cast(int, outcome["quarantined_files"])
+    for entry in cast("list[list[Any]]", outcome["touched_minute"]):
+        exchange, segment, symbol, months = entry
+        state.touch(
+            str(exchange),
+            str(segment),
+            str(symbol),
+            {(int(year), int(month)) for year, month in months},
+        )
+    return (
+        cast(int, outcome["healed"]),
+        cast(int, outcome["skipped"]),
+        cast(int, outcome["errors"]),
+    )
+
+
 def _prune_empty_dirs(root: Path) -> None:
     """Remove *root*'s now-empty subdirs bottom-up, then *root* itself if empty."""
     if not root.is_dir():
@@ -1925,37 +2181,49 @@ def heal_findings(
             files_scanned=files_scanned,
             mode=resolved,
         )
-    for finding in ordered:
-        # Liveness beat per healed finding (DEC-HEAL-SCAN-LIVENESS-BEATS-001):
-        # each heal is a quarantine-copy + partition rewrite — seconds on a big
-        # month file — and the batch runs on the beat-watched pull worker.
-        emit_progress_beat()
-        try:
-            did_heal = _heal_one(finding, state)
-        except LakeWriteHalt:
-            raise  # disk-full/OOM = pull-wide graceful stop, never swallowed
-        except _PER_FINDING_HEAL_ERRORS as exc:
-            errors += 1
-            _LOG.warning(
-                "lake_heal.partition_error",
-                finding=type(finding).__name__,
-                partition=_finding_token(finding),
-                # repr() — round-16 NIT: an OptionWriterError message embeds
-                # the RAW vendor-derived options/<series>/ path (containment
-                # refusals + the unclassifiable-partition verdicts interpolate
-                # the dest), so the raw exception text re-entered THIS
-                # attacker-triggerable site around the round-9 token guard; a
-                # newline/ANSI series name must not forge log lines here
-                # (#907). Other lake_heal error= fields keep the repo-wide
-                # raw-exception-message convention (operator-controlled or
-                # catalogued subjects).
-                error=repr(str(exc)),
-            )
-            continue
-        if did_heal:
-            healed += 1
-        else:
-            skipped += 1
+    # The Wave-D Rust seam (DEC-RUST-LAKE-WAVED-001 §B2): flag-ON, an
+    # engaged-set batch's MUTATION CORE runs in the crate with every side
+    # effect replayed through `_rust_heal_on_event`; `None` = every
+    # zero-mutation fallback state (flag OFF — the default, byte-identical —
+    # crate not ready, or a batch the crate's read-only preflight degrades),
+    # and the verbatim Python loop below runs exactly as today.
+    rust_counts = _rust_heal_route(ordered, state) if ordered else None
+    if rust_counts is not None:
+        healed, skipped, errors = rust_counts
+    else:
+        for finding in ordered:
+            # Liveness beat per healed finding
+            # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): each heal is a
+            # quarantine-copy + partition rewrite — seconds on a big month
+            # file — and the batch runs on the beat-watched pull worker.
+            emit_progress_beat()
+            try:
+                did_heal = _heal_one(finding, state)
+            except LakeWriteHalt:
+                raise  # disk-full/OOM = pull-wide graceful stop, never swallowed
+            except _PER_FINDING_HEAL_ERRORS as exc:
+                errors += 1
+                _LOG.warning(
+                    "lake_heal.partition_error",
+                    finding=type(finding).__name__,
+                    partition=_finding_token(finding),
+                    # repr() — round-16 NIT: an OptionWriterError message
+                    # embeds the RAW vendor-derived options/<series>/ path
+                    # (containment refusals + the unclassifiable-partition
+                    # verdicts interpolate the dest), so the raw exception
+                    # text re-entered THIS attacker-triggerable site around
+                    # the round-9 token guard; a newline/ANSI series name
+                    # must not forge log lines here (#907). Other lake_heal
+                    # error= fields keep the repo-wide raw-exception-message
+                    # convention (operator-controlled or catalogued
+                    # subjects).
+                    error=repr(str(exc)),
+                )
+                continue
+            if did_heal:
+                healed += 1
+            else:
+                skipped += 1
     recall_report: RecallReport | None = None
     if recall and state.touched_minute:
         # Session-close-aware forming-session cutoff (DEC-DAILY-CUTOFF-
@@ -2195,7 +2463,32 @@ def lake_content_token(lake_root: Path) -> str:
     A directory raced away mid-walk is likewise skipped loudly
     (``lake_heal.token_walk_skipped`` — the old ``rglob`` suppressed the
     same race silently), deterministically hashing the surviving entries.
+
+    Wave-D Rust seam (DEC-RUST-LAKE-WAVED-001 §C-5): flag-ON, the walk
+    routes through the crate twin with the full W-1 read-surface doctrine —
+    degrade-to-oracle, burn-in token compare, skip events replayed through
+    the SAME two pinned WARN sites via :func:`_replay_token_skip` (the
+    ``repr()`` law applied here, where the events are owned). Flag OFF (the
+    default) is byte-identical — the verbatim Python walk below.
     """
+    from brutex.data.lake_rust_waved import lake_content_token_via_rust, lake_rust_waved_enabled
+
+    if lake_rust_waved_enabled():
+        return lake_content_token_via_rust(
+            lake_root=str(lake_root),
+            on_skip=_replay_token_skip,
+            oracle=lambda: _lake_content_token_python(lake_root),
+        )
+    return _lake_content_token_python(lake_root)
+
+
+def _replay_token_skip(event: str, path: str, error: str) -> None:
+    """Replay one crate walk-skip through the pinned WARN sites (the repr law)."""
+    _LOG.warning(event, path=repr(path), error=repr(error))
+
+
+def _lake_content_token_python(lake_root: Path) -> str:
+    """The verbatim Python content-token walk — the live Wave-D parity oracle."""
     hasher = hashlib.sha256()
     for tree in (BAR_DIR_NAME, OPTIONS_DIR_NAME):
         base = lake_root / tree
