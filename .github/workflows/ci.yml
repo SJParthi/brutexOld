@@ -2710,8 +2710,11 @@ jobs:
           else
             echo "(brutex.engine.margin_history test file not present yet — gate inactive)"
           fi
+          # DEC-RUST-CASCADE-RESULTS-001 slice 2b: the top100_artifact type-face
+          # shim over the Rust-hosted build/render/gate/load laws — 100% from
+          # its stem suites + the frozen parity replay + the differential.
           if compgen -G "tests/unit/test_engine_top100_artifact.py" > /dev/null; then
-            pytest --cov=brutex.engine.top100_artifact --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_top100_artifact.py
+            pytest --cov=brutex.engine.top100_artifact --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_top100_artifact.py tests/golden/test_top100_artifact_golden.py tests/integration/test_oneclick_top100_writer_reader.py tests/golden/test_top100_artifact_rust_parity_golden.py tests/property/test_top100_artifact_rust_differential.py
           else
             echo "(brutex.engine.top100_artifact test file not present yet — gate inactive)"
           fi
