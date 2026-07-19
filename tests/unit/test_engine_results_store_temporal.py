@@ -456,3 +456,67 @@ class TestAppendEnrichmentRule:
         stored = final.get(_rid(1))
         assert stored is not None
         assert stored.stats_by_month_json == encode_period_stats(_MONTHS)
+
+
+class TestCombinedEnrichmentBackfillSeam:
+    """R5 NIT-1 (MIGRATION.md #1976): ONE ``append`` carrying BOTH a temporal
+    enrichment AND a W2 ``None`` → value backfill — the combined seam the two
+    family suites each pin only half of (a pre→post-extension backfill +
+    temporal enrichment in one redo). The COMBINED return law (the documented
+    D16 + backfill contract on :meth:`ResultsStore.append`): ``True`` iff a
+    BACKFILLABLE upgrade occurred — a temporal-ONLY enrichment reports
+    ``False`` even though the stored bytes changed, so the mixed append must
+    report ``True`` on its backfill half while still enriching in place."""
+
+    def test_combined_temporal_enrichment_and_growth_backfill_in_one_append(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "a.parquet"
+        store = ResultsStore(path=path)
+        assert store.append(_row(1)) is True  # quartet + W2 fields all None
+        with capture_logs() as logs:
+            upgraded = store.append(_row(1, with_temporal=True, kelly_fraction=0.25))
+        # (c) the combined return law: True — a backfillable upgrade occurred
+        # (a temporal-only enrichment would have reported False per D16).
+        assert upgraded is True
+        assert len(store) == 1
+        # (a) the temporal half enriched in place + logged (emit-on-present).
+        enriched = [e for e in logs if e["event"] == "results_store.temporal_enriched"]
+        assert len(enriched) == 1
+        assert enriched[0]["run_id"] == _rid(1)
+        assert tuple(enriched[0]["enriched_fields"]) == tuple(_TEMPORAL_COLUMNS)
+        # (b) the W2 None → value backfill landed + logged per family.
+        backfills = [e for e in logs if e["event"] == "results_store.growth_backfill"]
+        assert len(backfills) == 1
+        assert tuple(backfills[0]["backfilled_fields"]) == ("kelly_fraction",)
+        stored = store.get(_rid(1))
+        assert stored is not None
+        assert stored.stats_by_year_json == encode_period_stats(_YEARS)
+        assert stored.kelly_fraction == 0.25
+        # (d) a follow-up flush/load round-trips BOTH halves exactly.
+        store.flush()
+        loaded = ResultsStore.load(path)
+        got = loaded.get(_rid(1))
+        assert got is not None
+        assert got == stored
+        assert got.stats_by_month_json == encode_period_stats(_MONTHS)
+        assert got.kelly_fraction == 0.25
+
+    def test_growth_value_conflict_is_not_masked_by_a_temporal_enrichment(self) -> None:
+        """The reviewer's traced edge — the SAME combined shape but the W2
+        field differs value-vs-value: the per-family typed conflict (the
+        growth-family plain :class:`ResultsStoreError`, never the VIX class)
+        raises AND the co-riding temporal diff neither masks it nor lands
+        partially — the stored row is byte-untouched (the merge is atomic:
+        assignment happens only after every family's merge succeeds)."""
+        store = ResultsStore(path=Path("/unused.parquet"))
+        original = _row(1, kelly_fraction=0.25)
+        store.append(original)
+        with pytest.raises(ResultsStoreError, match="growth-metric conflict"):
+            store.append(_row(1, with_temporal=True, kelly_fraction=0.5))
+        stored = store.get(_rid(1))
+        assert stored is not None
+        assert stored == original  # atomic: no partial temporal enrichment landed
+        assert stored.stats_by_year_json is None
+        assert stored.temporal_judged_years_json is None
+        assert stored.kelly_fraction == 0.25
