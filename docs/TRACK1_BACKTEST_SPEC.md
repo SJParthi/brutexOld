@@ -275,6 +275,21 @@ spot timeline by timestamp alignment.
   - SL ∈ [5, 200] paisa, 40 steps
   - TP ∈ [10, 500] paisa, 50 steps
   - Total grid: **2,000 cells per mask**
+  - **SUPERSEDED-IN-PART — DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001
+    (2026-07-18/19, MIGRATION.md #1978, the operator's 2026-07-18
+    approve-all winning-completeness P0 ruling, item 7):** the literal
+    [5,200]/[10,500] bounds — and this section's / §Stage-3's "constants,
+    never data-derived" clause — remain the DEFAULT (absent config is
+    byte-identical), but the axes may now be PARAMETERIZED PER INSTRUMENT,
+    scaled by the instrument's median daily range
+    (`brutex/engine/stage3_scale.py::derive_scaled_axes` — exact integer
+    law, deterministic, computed from the sweep's own loaded bars) while
+    keeping the SAME 40 × 50 = 2,000-cell shape. Motivation: on SENSEX the
+    literal 200-paisa ceiling is a ₹2 stop ≈ 0.002% of the index (the
+    Mode-A literals correspond to a 4-rupee median daily range — the
+    r=400-paisa identity anchor). Historical text above is kept verbatim
+    per the supersession convention; the default-OFF arming knob is
+    `BRUTEX_STAGE3_INSTRUMENT_SCALE`.
 - **Mode B** — signal-driven exit:
   - Exit on opposite signal, or candle reversal pattern, or forced 15:20 IST.
   - Cardinality: 1 cell per mask (no grid).
@@ -442,6 +457,11 @@ _Historical algorithm (never wire — ADR-0006 Final Verdict):_
   TP ∈ [10,500] paisa — constants, never data-derived) and **snapped to
   the 5/10-paisa ticks BEFORE every evaluation and BEFORE hashing**
   (identity = the unchanged 9-field combo hash on quantized int params).
+  [The "constants, never data-derived" clause is SUPERSEDED-IN-PART by
+  DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001 (MIGRATION.md #1978, operator
+  approve-all ruling 2026-07-18): DEFAULT-OFF instrument-scaled axes —
+  same 40×50 shape, tick derived from the median daily range — see the
+  §"Mode A" amendment note above; absent config stays byte-identical.]
   - Dimension d = 2 · Population λ = 6 · Parents μ = 3 · σ₀ = 0.3
   - MaxFEvals per restart = 200; **hard per-mask cap = 3 restarts
     (≤600 evals/mask, ≤6M total at K=10,000)**

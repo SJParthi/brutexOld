@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-19 (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 +
+DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, MIGRATION.md #1977–#1978, branch
+`claude/w3-search-space-axes` — LANE W3 of the 2026-07-18 operator
+approve-all winning-completeness ruling (items 6 + 7): the QUARANTINED
+low-support rescue lane (second Stage-1B floor 8; masks with hits ∈ [8, 30)
+simulate through the normal trade-sim path, tagged `low_support=True`,
+validated by the n<30-honest battery — the BORN-RUST exact binomial tail
+`fno_math.stats_binom_tail_log_sf` p < 1e-4 · blake3-seeded MC permutation ·
+rescue-floor lockbox; DSR/CPCV honestly BYPASSED — and surfaced ONLY in the
+additive `provisional_specialists` top100 section, NEVER main-ranked; the
+apriori-freeze survival clause consciously superseded-when-armed with the
+parity invariant RE-DERIVED + golden-pinned at floor 8, `sweep_apriori.py`
+byte-untouched) + the instrument-scaled Stage-3 SL/TP axes (median-daily-range
+exact-integer derivation keeping the SAME 40×50 = 2,000-cell shape — Mode-A
+is the r=400-paisa identity anchor; SENSEX's absurd ₹2 ceiling becomes ₹450 at
+r=90,000 — + the ~5-cell log-spaced coarse nightly axis; the spec's "locked,
+never data-derived" Mode-A clause consciously superseded-in-part, historical
+text kept). BOTH default-OFF (fail-loud knobs `BRUTEX_RESCUE_MIN_HITS` ·
+`BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`); OFF =
+byte-identical, frozen goldens unmodified. ENGINE UNCHANGED when OFF —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1977–#1978 — this header carries the pointer, never
+the story.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
@@ -3297,7 +3320,73 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+- **Active branch:** `claude/w3-search-space-axes` (**DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 +
+  DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, MIGRATION.md #1977–#1978 — LANE W3 (search-space axes) of the
+  2026-07-18 operator approve-all winning-completeness P0 ruling ("Approve all dude okay" — the 16-item
+  list; items 6 + 7; ledger band #1977–#1978 per the ruling's lane partition; renumber-at-fold law stands
+  per DEC-LEDGER-RENUMBER-001).** **ITEM 6 — the QUARANTINED low-support rescue lane (#1977):** a SECOND
+  Stage-1B support floor (`RESCUE_MIN_HITS_DEFAULT = 8`; the fail-loud env knob `BRUTEX_RESCUE_MIN_HITS` —
+  unset/blank/0 = OFF, [1,30) = armed, junk = loud ValueError): masks whose hits land in [8, MIN_TRADES=30)
+  are RESCUED — NEW leaf `brutex/engine/rescue_lane.py`'s `run_rescue_lane` builds `bar_bits` once, counts
+  support via the EXISTING batched Stage-1B popcount kernel `combo_mask.count_supermasks` (the REUSE law —
+  O(masks·bars/64), NO new counting path, spy-pinned exactly-one-batched-call), band-filters boundary-exact
+  (hits==8 IN, hits==30 OUT — pinned), simulates through the NORMAL `metrics_for_mask` trade-sim core, and
+  validates with the n<30-HONEST battery (DSR/CPCV honestly BYPASSED — the PSR effective-N asymptotics +
+  S=16 CPCV fold counts are structurally invalid below ~30 trades, documented): (1) the BORN-RUST exact
+  binomial sign-test tail — NEW `rust/fno-math/src/stats/binom.rs` `stats_binom_tail_log_sf(n,k,p)`
+  (log-space, O(n)/call, Result-never-panic; additive registration across lib.rs/shim/.pyi/
+  EXPECTED_BUILD.json/facade golden; crate version + Cargo.lock byte-untouched; cross-language parity
+  bounded honestly by the tests-side exact-Fraction oracle at p=0.5 (1e-10 log-units) + the op-for-op
+  transcription over hostile n/k/p (1e-9 — the disclosed libm envelope), never a bit-identity claim) at
+  p < 1e-4; (2) the EXISTING `monte_carlo_permutation_test` (B=1000) seeded `rescue_mc_seed(candidate_id)`
+  = blake3 mod 2³¹ — Golden Rule #4, bit-deterministic; (3) the EXISTING `lockbox_evaluation` at the
+  rescue floor `lockbox_min_trades=5` (a W3-DEFAULT standing in for an un-ruled operator value,
+  disclosed — the 500-trade production floor would auto-fail every n<30 candidate); `mc_skip_if_failed`
+  stages the B×O(bars) MC cost behind the two cheap gates (the STAGED-COMPUTE safeguard). Rescued rows are
+  tagged `low_support=True` and surface ONLY in the additive emit-on-present `provisional_specialists`
+  top100 section (`Top100Artifact` field + `build_top100(provisional_specialists=)` + presence-tolerant
+  `load_top100` — the cascade_join precedent; None ⇒ NO key ⇒ pre-change artifacts byte-identical,
+  pinned) — NEVER main-ranked, never in main-result run identity. CONSCIOUS SUPERSESSION (the operator
+  ruling): the apriori-freeze-contract survival clause (F₁ hits >= 30) is superseded-WHEN-ARMED — the
+  Apriori floor TRACKS the effective lower floor via the ONE law `effective_apriori_min_hits` (the frozen
+  `sweep_apriori.py` BYTE-UNTOUCHED, the floor flows through its existing `min_hits` parameter) and the
+  pruned ≡ unpruned parity invariant is RE-DERIVED + golden-pinned at floor 8
+  (`tests/golden/test_engine_sweep_apriori_floor8_parity.py` — byte-identical stores ON vs OFF, k∈{1,2,3},
+  anti-vacuous). STRUCTURAL OFF PIN: no production module imports rescue_lane (test-pinned) — the
+  production binding into `cmd_sweep_all` is the CLUB-FOLD step (sweep_run.py/cli.py contended by PR #1479
+  + lane W2 + the B3-2/T13 carves; the staged-sequencer-seams precedent), so an unarmed sweep provably
+  executes zero rescue opcodes. **ITEM 7 — instrument-scaled Stage-3 SL/TP axes (#1978):** NEW leaf
+  `brutex/engine/stage3_scale.py` — `median_daily_range_paisa(bars)` (per-IST-session max(high)−min(low)
+  exact 2-dp paisa ints, LOWER median — deterministic; O(bars) once, zero vendor I/O) → `derive_scaled_axes`
+  (`sl_tick = max(1, ceil(r/(2·40)))`, `tp_tick = max(1, ceil(5r/(4·50)))`, axes `[tick, steps·tick]` —
+  STRUCTURALLY the same 40×50 = 2,000-cell Mode-A shape for EVERY r, hypothesis-pinned over [1, 10¹²]);
+  Mode-A is EXACTLY the r=400-paisa instance (the pinned identity anchor — the motivation in one number:
+  Mode-A models a ₹4 median daily range; SENSEX-class r=90,000 turns the absurd ₹2 ceiling into ₹450);
+  the spec's "constants, never data-derived" Mode-A clause consciously SUPERSEDED-IN-PART (both spec sites
+  annotated, history kept verbatim). Run identity: scaled (SL, TP) ints ALREADY re-key
+  `canonical_trade_params` through the existing `sl_paisa`/`tp_paisa` fields (sanctioned greenfield —
+  pinned: distinct params, identical key set); the additive default-OMIT provenance fragment
+  `instrument_axis_params_fragment` (Mode-A ⇒ {} — baseline identities byte-identical BY CONSTRUCTION;
+  the price_source precedent) ships with its one-line `canonical_trade_params` merge DEFERRED to the club
+  fold (sweep_run.py triply contended — provably identity-neutral at default, test-pinned). The ~5-cell
+  log-spaced COARSE axis (`COARSE_SCALE_LADDER` ×¼..×4; `coarse_sltp_cells` sl = ceil(r·m/4), tp = 2·sl —
+  the 2:1 W3-default, disclosed) enters the nightly key list via `nightly_sweep_kwargs(...,
+  sltp_scale_cells=…)` (default None ⇒ forwarded sl/tp BYTE-IDENTICAL key-for-key, pinned; armed ⇒ exactly
+  the two CSVs override) behind `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`; per-instrument staging = the
+  DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged-invocation precedent. RUST DISCLOSURE (recorded deviation): the
+  scaling law is O(1)-per-instrument config derivation, not a hot path, and the stage3 grid math is owned
+  by the LIVE B2-2 `rust/brutex-refine` lane — the Rust mirror rides B2-2 (no parallel crate-skeleton
+  edit). COMPUTE DISCLOSURE (both DECs): rescue multiplies simulated masks by the band fraction
+  f = |hits∈[8,30)| / |hits≥30| (RescueLaneResult carries the measured counts; + staged B×O(bars) MC per
+  surviving candidate); the coarse axis multiplies an ARMED instrument's nightly cells ×≤5; BOTH OFF by
+  default ⇒ cost UNCHANGED. GATES (measured in the PR body): new modules 100.00% line+branch the ci.yml
+  way; frozen goldens (run-identity + apriori parity + vocab) UNMODIFIED fixtures byte-untouched; cargo
+  fmt/clippy -D warnings/test --release --locked green (binom kernel 10 in-crate tests); ruff/ruff-format/
+  `mypy --strict`/pyright clean; the 7-type battery (unit/integration/property/golden/bench + hand-applied
+  mutants on the floor/band/fragment laws). ENGINE UNCHANGED when OFF — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; new env vars `BRUTEX_RESCUE_MIN_HITS` +
+  `BRUTEX_STAGE3_INSTRUMENT_SCALE` + `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`, all fail-loud.)
+  Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
   first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
@@ -10159,7 +10248,35 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-u128-enum-kernel`
+- **Active feature branch:** `claude/w3-search-space-axes`
+  (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 + DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001,
+  MIGRATION.md #1977–#1978 — LANE W3 of the 2026-07-18 operator approve-all
+  ruling, items 6 + 7: the QUARANTINED low-support rescue lane (second
+  Stage-1B floor 8 — `brutex/engine/rescue_lane.py`: hits ∈ [8, 30) simulate
+  through the normal trade-sim path via the reused popcount kernel +
+  `metrics_for_mask` + `build_candidate_input`, tagged `low_support=True`,
+  validated by the n<30-honest battery — BORN-RUST
+  `fno_math.stats_binom_tail_log_sf` exact binomial tail p < 1e-4 ·
+  blake3-seeded MC B=1000 · rescue-floor lockbox; DSR/CPCV honestly
+  bypassed — and surfaced ONLY in the additive `provisional_specialists`
+  top100 section, never main-ranked; apriori survival clause consciously
+  superseded-when-armed via `effective_apriori_min_hits`, the frozen
+  `sweep_apriori.py` byte-untouched, parity RE-DERIVED + golden-pinned at
+  floor 8; structural OFF pin — no production module imports the lane, the
+  `cmd_sweep_all` binding is the club-fold step) + the instrument-scaled
+  Stage-3 SL/TP axes (`brutex/engine/stage3_scale.py` —
+  median-daily-range exact-integer derivation keeping the SAME 40×50 shape;
+  Mode-A = the r=400-paisa identity anchor; the spec's "never data-derived"
+  clause consciously superseded-in-part with history kept; the default-OMIT
+  axis fragment's `canonical_trade_params` merge deferred to the club fold —
+  identity-neutral at default, pinned; the ~5-cell coarse nightly axis via
+  `nightly_sweep_kwargs(sltp_scale_cells=…)`, default None byte-identical).
+  BOTH default-OFF behind fail-loud knobs (`BRUTEX_RESCUE_MIN_HITS` ·
+  `BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`);
+  OFF = byte-identical, frozen goldens unmodified; ENGINE UNCHANGED when
+  OFF — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1977–#1978 for the full blurb)
+  Earlier: `claude/rust-u128-enum-kernel`
   (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
