@@ -85,6 +85,7 @@ import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
 from brutex.calendars.nse import IST_FIXED_OFFSET, SESSION_OPEN_IST, has_muhurat_session
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
 from brutex.data.session import ist_offset_duration
@@ -561,6 +562,14 @@ def derive_daily_for_targets(
                 before=before,
                 resample_fn=resample_fn,
             )
+        except LakeWriteHalt:
+            # A full-disk / OOM at the 1-day write boundary is a pull-WIDE
+            # global stop, NOT a per-target DATA error — re-raise so the run
+            # halts gracefully instead of counting a false-success `errored`
+            # and continuing (the crossverify daily arm + lake_heal recall daily
+            # arm both reach here). Mirrors the sibling escape guards in
+            # lake_heal._rebuild_tf_months + crossverify.prebuild_leg.
+            raise
         except Exception as exc:
             errored += 1
             _LOG.warning(

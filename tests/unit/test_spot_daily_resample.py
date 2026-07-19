@@ -16,6 +16,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.models import CandleBar
 from brutex.data.spot_daily_resample import (
     DailyDeriveReport,
@@ -418,6 +419,82 @@ def test_derive_targets_quarantines_per_target_error() -> None:
         targets=[_target("BADSYM")],
         build_read_1m=_boom,
         build_write_1day=lambda _t: len,
+        before=_BEFORE,
+    )
+    assert report == DailyDeriveReport(derived=0, no_minute=0, errored=1, bars=0)
+
+
+def test_derive_targets_lakewritehalt_propagates_not_swallowed() -> None:
+    """A full-disk / OOM at the 1-day write boundary HALTS the pull, never a
+    false-success `errored` count.
+
+    ``LakeWriteHalt`` is the pull-WIDE global stop (disk-full / OOM); the bare
+    per-target ``except Exception`` must re-raise it (mirroring the sibling
+    escape guards in ``lake_heal._rebuild_tf_months`` +
+    ``crossverify.prebuild_leg``) instead of quarantining it as a per-target
+    DATA error and continuing — otherwise a full disk reads as an ok pass.
+    """
+
+    def _write_halts(_bars: Sequence[CandleBar]) -> int:
+        raise LakeWriteHalt("disk_full")
+
+    with pytest.raises(LakeWriteHalt):
+        derive_daily_for_targets(
+            # A non-empty slice so the resampler yields a bar and the writer
+            # (which halts) is actually invoked.
+            targets=[_target("NSE-NIFTY")],
+            build_read_1m=lambda _t: lambda: _frame((date(2025, 11, 28), 14000.0)),
+            build_write_1day=lambda _t: _write_halts,
+            before=_BEFORE,
+        )
+
+
+def test_derive_targets_lakewritehalt_aborts_batch_before_later_targets() -> None:
+    """The global-stop re-raise aborts the whole batch — a later target is
+    never processed once one target hits ``LakeWriteHalt`` — while a genuine
+    per-target DATA error (``ValueError``) STILL isolates and counts as
+    ``errored`` (per-target isolation of NON-global errors is preserved)."""
+    seen: list[str] = []
+
+    def _read(target: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+        seen.append(target.symbol)
+        return lambda: _frame((date(2025, 11, 28), 14000.0))
+
+    def _write(target: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+        if target.symbol == "NSE-NIFTY":
+
+            def _halt(_bars: Sequence[CandleBar]) -> int:
+                raise LakeWriteHalt("disk_full")
+
+            return _halt
+
+        def _data_error(_bars: Sequence[CandleBar]) -> int:  # pragma: no cover
+            raise ValueError("corrupt slice")
+
+        return _data_error
+
+    with pytest.raises(LakeWriteHalt):
+        derive_daily_for_targets(
+            targets=[_target("NSE-NIFTY"), _target("NSE-BANKNIFTY")],
+            build_read_1m=_read,
+            build_write_1day=_write,
+            before=_BEFORE,
+        )
+    # The first target aborted the batch — the second was never reached.
+    assert seen == ["NSE-NIFTY"]
+
+
+def test_derive_targets_data_error_at_write_still_isolates() -> None:
+    """A NON-global write error (``ValueError``) STILL counts as ``errored``
+    and continues — the fix must not widen the escape past ``LakeWriteHalt``."""
+
+    def _write(_bars: Sequence[CandleBar]) -> int:
+        raise ValueError("corrupt slice — not a global stop")
+
+    report = derive_daily_for_targets(
+        targets=[_target("NSE-NIFTY")],
+        build_read_1m=lambda _t: lambda: _frame((date(2025, 11, 28), 14000.0)),
+        build_write_1day=lambda _t: _write,
         before=_BEFORE,
     )
     assert report == DailyDeriveReport(derived=0, no_minute=0, errored=1, bars=0)
