@@ -31,8 +31,11 @@ CPython's OWN builtins invoked from the crate; the NEW general
 `dumps_sorted` json.dumps twin; `_per_bar_returns` division = the
 corpus-FORCED CPython true-division deviation), its orchestration/I-O
 half retained as documented wiring — the recorded later-slice work. The
-62-test frozen replay + 11 hypothesis differentials vs verbatim deleted-law
-copies + 263 pre-existing tests UNMODIFIED + 3 hand-killed Rust mutants;
+62-test frozen replay + 23 hypothesis differentials vs verbatim deleted-law
+copies + 178 pre-existing stem-suite tests UNMODIFIED + 3 hand-killed Rust
+mutants; the second-review FIX ROUND folded (the stage3 per-cell
+parse-order fix + the `float.__repr__` dumps arm — executed
+fail-before/pass-after; MIGRATION.md #1955);
 100.00% line+branch on the shim + the NEW dedicated ci.yml stanza. ENGINE
 UNCHANGED — the sweep hot path + run identity take ZERO diffs —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new env
@@ -3310,8 +3313,11 @@ hostile-review pass._
   the manifest serialisation family (`_spec_to_dict` · `_stage3_to_dict` ·
   `_lbt_to_dict` · `manifest_to_json` — the NEW general `dumps_sorted`
   CPython-json.dumps twin in `pyjson.rs`: unbounded ints via the object's
-  own `str()`, floats via the object's own `repr()` + the exact
-  out-of-range refusal, UTF-8 String-Ord key sort ≡ code-point order), the
+  own `str()`, floats via `float.__repr__` semantics (a fresh `PyFloat`
+  from the extracted double — the fix-round MINOR-2 correction; the first
+  cut's object-`repr()` emitted invalid JSON for a float subclass like
+  np.float64) + the exact out-of-range refusal, UTF-8 String-Ord key sort
+  ≡ code-point order), the
   manifest PARSE family (the DEC-FILL-WORST-CASE-ONLY-001 fill-mode gate ·
   `_spec_from_dict` · `_stage3_from_dict` · `_lbt_from_dict` ·
   `_roll_schedules_from_payload`'s full shape law · the version gate · the
@@ -3336,25 +3342,43 @@ hostile-review pass._
   cascade_config_for_sweep+to/from_dict) is NOT law and stays Python
   UNTOUCHED — it drives trade_sim / metrics.cascade / the lake, the
   recorded later-slice work. TESTS executed: the 62-test frozen parity
-  replay (bytes + dict + FULL error-string/type equality) · 11 hypothesis
-  differentials vs VERBATIM in-test copies of the deleted law (ZERO
-  divergences; `TestBeyondWordEnvelope` pins the beyond-word refusals,
+  replay (bytes + dict + FULL error-string/type equality) · 23 hypothesis
+  differentials vs VERBATIM in-test copies of the deleted law (the
+  fix-round stage3/lbt hostile-parse batteries — multi-defect CROSS-CELL
+  shapes + the two deterministic first-offending-cell probes, 5 executed
+  FAILING pre-fix — and the `float.__repr__` guard trio joined the
+  original 11; ZERO divergences post-fix; `TestBeyondWordEnvelope` pins
+  the beyond-word refusals,
   true-division parity exercised to ±10^18 > 2^53 incl. the exact i64::MAX
-  boundary) · the 263 pre-existing stem-suite tests UNMODIFIED · 281
+  boundary) · the 178 pre-existing stem-suite tests (166+6+2+4)
+  UNMODIFIED · 281
   consumer spot-checks · THREE hand-applied Rust mutants EXECUTED KILLED
   (drawdown-fold sign flip · strictly-increasing `<=`→`<` · dumps_sorted
   key-sort drop; scratchpad mutants-s2.log; mutation.yml not wired for the
   crate — the #1892 precedent, disclosed). GATES: `cascade_wire.py`
-  100.00% line+branch (491/130, zero pragmas) the ci.yml way + the NEW
-  dedicated stanza (251 tests); cargo fmt/clippy `--locked -D
+  100.00% line+branch (490/130, zero pragmas) the ci.yml way + the NEW
+  dedicated stanza (263 tests); cargo fmt/clippy `--locked -D
   warnings`/test `--release --locked` green (44 tests; Cargo.toml/lock
   byte-untouched); ruff/ruff-format clean; `mypy --strict` clean on
-  touched files. DIVERGENCE ENVELOPE (each loud + corpus-unreachable):
+  touched files. FIX ROUND folded (the second independent deep review —
+  verdict FIX-FIRST, every finding executed-proven then fixed, per-item
+  record in MIGRATION.md #1955): MINOR-1 — the stage3 multi-cell parse
+  order was DIVERGENT (the crate coerced ALL cells before the shim's enum
+  validation, so a later cell's numeric error beat an earlier cell's
+  enum/`__post_init__` error) — `stage3_coerce` now takes the
+  `Stage3CellRecord`/`FibAnchorKind`/`PriceSource` constructors as data
+  and performs the FULL per-cell construction inside the crate loop, so
+  the FIRST offending cell's error surfaces exactly as the deleted law's
+  (`_lbt_from_dict` checked — pattern-free); MINOR-2 — the `dumps_sorted`
+  float arm above; NIT-2 — the "263 pre-existing" miscount corrected to
+  the measured 178. DIVERGENCE ENVELOPE (each loud + corpus-unreachable):
   roll ordinals beyond ±i128 refuse (`OverflowError`); `_per_bar_returns`
   equity beyond ±i64 refuses at extraction (the deleted Python computed a
   float); non-str dict keys refuse in `dumps_sorted`; lone surrogates fail
   UTF-8 extraction; multi-defect payloads surface WHICHEVER defect the
-  original token order reached first (per-record orchestration preserved).
+  original per-record AND per-cell token order reached first — the claim
+  the review round falsified for the stage3 cross-cell loop and the
+  per-cell fix made TRUE AGAIN by construction, differential-pinned.
   HONEST REMAINDER: the #1954 phase-B list (trade_sim-with-oracle ·
   trade_capture · baseline · twin_detect · reference_series · session_lens
   · metrics/cascade · candidate · margin_history · top100_artifact ·
@@ -10043,9 +10067,12 @@ hostile-review pass._
   the NEW general `dumps_sorted` json.dumps twin; `_per_bar_returns` =
   the corpus-forced CPython true-division deviation), its
   orchestration/I-O half retained as documented wiring — the recorded
-  later-slice work; 62-test frozen replay + 11 differentials vs verbatim
-  deleted-law copies + 263 pre-existing tests UNMODIFIED + 3 hand-killed
-  Rust mutants; 100.00% line+branch on the shim + the NEW dedicated ci.yml
+  later-slice work; 62-test frozen replay + 23 differentials vs verbatim
+  deleted-law copies + 178 pre-existing stem-suite tests UNMODIFIED + 3
+  hand-killed Rust mutants; the second-review FIX ROUND folded (the stage3
+  per-cell parse-order fix + the `float.__repr__` dumps arm — executed
+  fail-before/pass-after); 100.00% line+branch on the shim + the NEW
+  dedicated ci.yml
   stanza; ENGINE UNCHANGED — the sweep hot path + run identity take ZERO
   diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
   + MIGRATION.md #1955 for the full blurb)
