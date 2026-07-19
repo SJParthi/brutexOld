@@ -1,0 +1,785 @@
+{
+  "finite": [
+    {
+      "expect_repr": "0.0",
+      "name": "none"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "nan"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "inf"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "neg_inf"
+    },
+    {
+      "expect_repr": "-0.0",
+      "name": "neg_zero"
+    },
+    {
+      "expect_repr": "1.5",
+      "name": "plain"
+    },
+    {
+      "expect_repr": "1e+308",
+      "name": "big_finite"
+    }
+  ],
+  "manifests": [
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "minimal"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":[{\"complete\":true,\"instrument\":\"NIFTY\",\"n_finite\":8,\"n_trials\":10,\"sum_sharpe\":1.5,\"sum_sharpe_sq\":2.25,\"tf_label\":\"1minute\"},{\"complete\":false,\"instrument\":\"BANKNIFTY\",\"n_finite\":0,\"n_trials\":4,\"sum_sharpe\":0.0,\"sum_sharpe_sq\":0.0,\"tf_label\":\"1minute\"}],\"roll_schedules\":[[\"NSE-NIFTY-FUT\",[739000,739030,739061]]],\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]},{\"direction_label\":\"bear\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NSE-NIFTY-FUT\",\"prior_n\":3,\"proximity_bps\":[10,20,30],\"sl_paisa\":50,\"start_equity_paisa\":10000000,\"tf_label\":\"5minute\",\"tf_minutes\":5,\"tp_paisa\":100,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000002\",5],[\"0000000000000000000000000000000000000000000000000000000000000003\",7]]}],\"stage3\":{\"enabled\":true,\"refined_cells\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"instrument\":\"NIFTY\",\"k\":1,\"proximity_bps\":null,\"rel_path\":null,\"sl_paisa\":80,\"tf_label\":\"1minute\",\"tp_paisa\":50},{\"direction_label\":\"bear\",\"fib_anchor\":\"prev_day\",\"instrument\":\"NIFTY\",\"k\":3,\"proximity_bps\":[5,10,15],\"rel_path\":\"cells/nifty-1m-bear.parquet\",\"sl_paisa\":85,\"tf_label\":\"1minute\",\"tp_paisa\":60}],\"train_snapshot_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "full_stage3_lbt_roll"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"ema_source\":\"hlc3\",\"fib_anchor\":\"rolling_weekly\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"vwap_source\":\"open\",\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":{\"enabled\":true,\"refined_cells\":[{\"direction_label\":\"bull\",\"ema_source\":\"open\",\"fib_anchor\":\"weekly_static\",\"instrument\":\"NIFTY\",\"k\":1,\"proximity_bps\":null,\"rel_path\":null,\"sl_paisa\":80,\"tf_label\":\"1minute\",\"tp_paisa\":50,\"vwap_source\":\"close\"}],\"train_snapshot_hash\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "non_default_sources"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NSE-NIFTY-\\u2122\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"5min-\\u03c0\",\"tf_minutes\":5,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "unicode_labels"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":45,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]},{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":90,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "sl_tp_one_sided"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "empty_specs"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0],[\"0000000000000000000000000000000000000000000000000000000000000002\",1152921504606846975]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "winners_mask_extremes"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":1e-09,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":0.1,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":-0.25,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        "roundtrip_ok": true
+      },
+      "name": "config_float_overrides"
+    }
+  ],
+  "max_drawdown": [
+    {
+      "expect_repr": "0.0",
+      "name": "empty"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "monotonic_up"
+    },
+    {
+      "expect_repr": "0.6",
+      "name": "mixed"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "neg_zero_sum"
+    },
+    {
+      "expect_repr": "0.0",
+      "name": "nan_in_series"
+    },
+    {
+      "expect_repr": "0.20000000000000004",
+      "name": "all_negative"
+    }
+  ],
+  "parses": [
+    {
+      "expect": {
+        "error_str": "cascade manifest is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "raw_not_json"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest must be a JSON object",
+        "error_type": "CascadeWireError"
+      },
+      "name": "raw_json_array_root"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "valid_minimal"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":[{\"complete\":true,\"instrument\":\"NIFTY\",\"n_finite\":8,\"n_trials\":10,\"sum_sharpe\":1.5,\"sum_sharpe_sq\":2.25,\"tf_label\":\"1minute\"},{\"complete\":false,\"instrument\":\"BANKNIFTY\",\"n_finite\":0,\"n_trials\":4,\"sum_sharpe\":0.0,\"sum_sharpe_sq\":0.0,\"tf_label\":\"1minute\"}],\"roll_schedules\":[[\"NSE-NIFTY-FUT\",[739000,739030,739061]]],\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]},{\"direction_label\":\"bear\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NSE-NIFTY-FUT\",\"prior_n\":3,\"proximity_bps\":[10,20,30],\"sl_paisa\":50,\"start_equity_paisa\":10000000,\"tf_label\":\"5minute\",\"tf_minutes\":5,\"tp_paisa\":100,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000002\",5],[\"0000000000000000000000000000000000000000000000000000000000000003\",7]]}],\"stage3\":{\"enabled\":true,\"refined_cells\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"instrument\":\"NIFTY\",\"k\":1,\"proximity_bps\":null,\"rel_path\":null,\"sl_paisa\":80,\"tf_label\":\"1minute\",\"tp_paisa\":50},{\"direction_label\":\"bear\",\"fib_anchor\":\"prev_day\",\"instrument\":\"NIFTY\",\"k\":3,\"proximity_bps\":[5,10,15],\"rel_path\":\"cells/nifty-1m-bear.parquet\",\"sl_paisa\":85,\"tf_label\":\"1minute\",\"tp_paisa\":60}],\"train_snapshot_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "valid_full"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: 'bars_context'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "missing_bars_context"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: 'specs'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "missing_specs"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: 'sweep_id'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "missing_sweep_id"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: 'cascade_config'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "missing_cascade_config"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: 'tf_minutes'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "spec_missing_tf_minutes"
+    },
+    {
+      "expect": {
+        "error_str": "invalid stage3 record in manifest: 'sl_paisa'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "stage3_cell_missing_sl_paisa"
+    },
+    {
+      "expect": {
+        "error_str": "invalid leaderboard_trials record in manifest: 'n_trials'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "lbt_missing_n_trials"
+    },
+    {
+      "expect": {
+        "error_str": "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): fill_mode=None \u2014 worst_case is the only fill model; re-run the sweep to produce a worst-case manifest",
+        "error_type": "CascadeWireError"
+      },
+      "name": "fill_mode_absent"
+    },
+    {
+      "expect": {
+        "error_str": "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): fill_mode='precise' \u2014 worst_case is the only fill model; re-run the sweep to produce a worst-case manifest",
+        "error_type": "CascadeWireError"
+      },
+      "name": "fill_mode_precise"
+    },
+    {
+      "expect": {
+        "error_str": "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): fill_mode='junk' \u2014 worst_case is the only fill model; re-run the sweep to produce a worst-case manifest",
+        "error_type": "CascadeWireError"
+      },
+      "name": "fill_mode_junk"
+    },
+    {
+      "expect": {
+        "error_str": "unsupported cascade manifest version 99 (expected 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "version_99"
+    },
+    {
+      "expect": {
+        "error_str": "unsupported cascade manifest version None (expected 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "version_none"
+    },
+    {
+      "expect": {
+        "error_str": "unsupported cascade manifest version '1' (expected 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "version_str_1"
+    },
+    {
+      "expect": {
+        "json": "{\"bars_context\":{\"end\":\"2021-02-01\",\"exchange\":\"NSE\",\"segment\":\"INDEX\",\"start\":\"2021-01-01\"},\"cascade_config\":{\"cpcv_min_pass_rate\":0.5,\"cpcv_n_groups\":16,\"cpcv_n_test_groups\":8,\"dsr_min\":0.95,\"lockbox_default_window_days\":182,\"lockbox_min_trades\":500,\"max_consecutive_losses\":10,\"max_drawdown_pct\":30.0,\"mc_alpha\":0.01,\"mc_n_permutations\":1000,\"min_profit_factor\":1.2,\"min_total_trades\":30,\"min_win_loss_ratio\":2.0,\"min_win_rate\":0.25,\"n_resamples\":1000,\"pbo_max\":0.5,\"pbo_n_splits\":16,\"run_hard_gates\":true,\"rw_alpha\":0.05,\"seed\":715827882,\"spa_alpha\":0.05,\"wfo_min_pass_rate\":0.75,\"wfo_step\":63,\"wfo_test_size\":126,\"wfo_train_size\":252},\"leaderboard_trials\":null,\"roll_schedules\":null,\"specs\":[{\"direction_label\":\"bull\",\"fib_anchor\":\"prev_day\",\"fill_mode\":\"worst_case\",\"instrument\":\"NIFTY\",\"prior_n\":3,\"proximity_bps\":null,\"sl_paisa\":null,\"start_equity_paisa\":10000000,\"tf_label\":\"1minute\",\"tf_minutes\":1,\"tp_paisa\":null,\"winners\":[[\"0000000000000000000000000000000000000000000000000000000000000001\",0]]}],\"stage3\":null,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "version_true_bool_pun"
+    },
+    {
+      "expect": {
+        "error_str": "'str' object has no attribute 'get'",
+        "error_type": "AttributeError"
+      },
+      "name": "spec_entry_string"
+    },
+    {
+      "expect": {
+        "error_str": "'int' object has no attribute 'get'",
+        "error_type": "AttributeError"
+      },
+      "name": "spec_entry_int"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: not enough values to unpack (expected 2, got 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_row_len1"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: too many values to unpack (expected 2)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_row_len3"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: cannot unpack non-iterable int object",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_row_int"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: invalid literal for int() with base 10: 'b'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_row_str2"
+    },
+    {
+      "expect": {
+        "error_str": "invalid cascade tuple spec in manifest: invalid literal for int() with base 10: 'abc'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_run_id_int_abc"
+    },
+    {
+      "expect": {
+        "error_str": "CascadeTupleSpec winner mask 9999999999999999999999999999999999999999 out of range [0, 1152921504606846975]",
+        "error_type": "CascadeWireError"
+      },
+      "name": "winners_huge_mask_string"
+    },
+    {
+      "expect": {
+        "error_str": "list index out of range",
+        "error_type": "IndexError"
+      },
+      "name": "proximity_len2"
+    },
+    {
+      "expect": {
+        "error_str": "invalid stage3 record in manifest: string indices must be integers, not 'str'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "stage3_cells_string"
+    },
+    {
+      "expect": {
+        "error_str": "Stage3CellRecord.direction_label must be 'bull' or 'bear', got 'sideways'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "stage3_cell_direction_sideways"
+    },
+    {
+      "expect": {
+        "error_str": "invalid leaderboard trial stats: n_finite (6) cannot exceed n_trials (5)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "lbt_n_finite_exceeds_n_trials"
+    },
+    {
+      "expect": {
+        "error_str": "invalid leaderboard_trials record in manifest: could not convert string to float: 'x'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "lbt_sum_sharpe_string"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: non-int roll_schedule ordinal True",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_ordinal_bool"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: non-int roll_schedule ordinal 739000.9",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_ordinal_float"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: non-int roll_schedule ordinal '739000'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_ordinal_int_string"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: duplicate entry for instrument 'NSE-NIFTY-FUT' \u2014 an internally contradictory manifest cannot pick a schedule (dict() would silently adopt the last); the manifest is corrupt \u2014 re-run `brutex sweep-all` to mint a fresh one",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_duplicate_instrument"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: instrument 'NSE-NIFTY' is not the NIFTY-futures series alias \u2014 a roll schedule may exist for (and only for) the futures alias (presence \u27fa alias); the manifest is corrupt \u2014 re-run `brutex sweep-all` to mint a fresh one",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_non_alias_instrument"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: schedule for 'NSE-NIFTY-FUT' must be a non-empty strictly increasing tuple of non-negative day ordinals, got [5, 5]",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_non_increasing"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: schedule for 'NSE-NIFTY-FUT' must be a non-empty strictly increasing tuple of non-negative day ordinals, got [-1, 3]",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_negative_ordinal"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: schedule for 'NSE-NIFTY-FUT' must be a non-empty strictly increasing tuple of non-negative day ordinals, got []",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_empty_schedule"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: cannot unpack non-iterable int object",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_row_int"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: not enough values to unpack (expected 2, got 1)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_row_len1"
+    },
+    {
+      "expect": {
+        "error_str": "invalid roll_schedules in manifest: too many values to unpack (expected 2)",
+        "error_type": "CascadeWireError"
+      },
+      "name": "roll_row_len3"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: string indices must be integers, not 'str'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "bars_context_string"
+    },
+    {
+      "expect": {
+        "error_str": "cascade manifest missing/invalid field: 'end'",
+        "error_type": "CascadeWireError"
+      },
+      "name": "bars_context_missing_end"
+    }
+  ],
+  "per_bar_returns": [
+    {
+      "expect_reprs": [],
+      "name": "empty"
+    },
+    {
+      "expect_reprs": [
+        "-0.9"
+      ],
+      "name": "single"
+    },
+    {
+      "expect_reprs": [
+        "-0.9",
+        "-0.15",
+        "0.25",
+        "-0.2"
+      ],
+      "name": "mixed_signs"
+    },
+    {
+      "expect_reprs": [
+        "9999.0",
+        "1e-12",
+        "-9000.000000000002"
+      ],
+      "name": "big_paisa"
+    },
+    {
+      "expect_reprs": [
+        "0.0",
+        "0.0",
+        "0.0"
+      ],
+      "name": "flat"
+    }
+  ],
+  "reports": [
+    {
+      "expect": {
+        "dict": {
+          "groups": [],
+          "n_input": 0,
+          "n_survived": 0,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[],\"n_input\":0,\"n_survived\":0,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "empty_groups"
+    },
+    {
+      "expect": {
+        "dict": {
+          "groups": [
+            {
+              "instrument": "NIFTY",
+              "report": {
+                "dsr_n_source": "pool",
+                "dsr_n_trials": null,
+                "dsr_trial_variance": null,
+                "n_input": 0,
+                "n_survived": 0,
+                "pool_pbo": null,
+                "stage_survivors": {},
+                "survivor_ids": [],
+                "verdicts": []
+              },
+              "tf": "1minute"
+            }
+          ],
+          "n_input": 0,
+          "n_survived": 0,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[{\"instrument\":\"NIFTY\",\"report\":{\"dsr_n_source\":\"pool\",\"dsr_n_trials\":null,\"dsr_trial_variance\":null,\"n_input\":0,\"n_survived\":0,\"pool_pbo\":null,\"stage_survivors\":{},\"survivor_ids\":[],\"verdicts\":[]},\"tf\":\"1minute\"}],\"n_input\":0,\"n_survived\":0,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "single_empty_report"
+    },
+    {
+      "expect": {
+        "dict": {
+          "groups": [
+            {
+              "instrument": "BANKNIFTY",
+              "report": {
+                "dsr_n_source": "leaderboard",
+                "dsr_n_trials": 42,
+                "dsr_trial_variance": 2.5,
+                "n_input": 4,
+                "n_survived": 2,
+                "pool_pbo": 0.25,
+                "stage_survivors": {
+                  "cpcv": 2,
+                  "deflated_sharpe": 3,
+                  "hard_gates": 3
+                },
+                "survivor_ids": [
+                  "cand-pass",
+                  "cand-prov"
+                ],
+                "verdicts": [
+                  {
+                    "candidate_id": "cand-pass",
+                    "composite_score": 1.25,
+                    "cpcv_pass_rate": 0.5,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  },
+                  {
+                    "candidate_id": "cand-hard",
+                    "composite_score": null,
+                    "cpcv_pass_rate": null,
+                    "detail": "total_trades 3 < 30",
+                    "passed": false,
+                    "provisional": false,
+                    "rejected_at": "hard_gates"
+                  },
+                  {
+                    "candidate_id": "cand-cpcv",
+                    "composite_score": null,
+                    "cpcv_pass_rate": 0.25,
+                    "detail": "cpcv 0.2500 < 0.5",
+                    "passed": false,
+                    "provisional": false,
+                    "rejected_at": "cpcv"
+                  },
+                  {
+                    "candidate_id": "cand-prov",
+                    "composite_score": 0.75,
+                    "cpcv_pass_rate": 1.0,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": true,
+                    "rejected_at": null
+                  }
+                ]
+              },
+              "tf": "5minute"
+            },
+            {
+              "instrument": "NIFTY",
+              "report": {
+                "dsr_n_source": "pool",
+                "dsr_n_trials": null,
+                "dsr_trial_variance": null,
+                "n_input": 0,
+                "n_survived": 0,
+                "pool_pbo": 0.5,
+                "stage_survivors": {},
+                "survivor_ids": [],
+                "verdicts": []
+              },
+              "tf": "1minute"
+            }
+          ],
+          "n_input": 4,
+          "n_survived": 2,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[{\"instrument\":\"BANKNIFTY\",\"report\":{\"dsr_n_source\":\"leaderboard\",\"dsr_n_trials\":42,\"dsr_trial_variance\":2.5,\"n_input\":4,\"n_survived\":2,\"pool_pbo\":0.25,\"stage_survivors\":{\"cpcv\":2,\"deflated_sharpe\":3,\"hard_gates\":3},\"survivor_ids\":[\"cand-pass\",\"cand-prov\"],\"verdicts\":[{\"candidate_id\":\"cand-pass\",\"composite_score\":1.25,\"cpcv_pass_rate\":0.5,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null},{\"candidate_id\":\"cand-hard\",\"composite_score\":null,\"cpcv_pass_rate\":null,\"detail\":\"total_trades 3 < 30\",\"passed\":false,\"provisional\":false,\"rejected_at\":\"hard_gates\"},{\"candidate_id\":\"cand-cpcv\",\"composite_score\":null,\"cpcv_pass_rate\":0.25,\"detail\":\"cpcv 0.2500 < 0.5\",\"passed\":false,\"provisional\":false,\"rejected_at\":\"cpcv\"},{\"candidate_id\":\"cand-prov\",\"composite_score\":0.75,\"cpcv_pass_rate\":1.0,\"detail\":\"ok\",\"passed\":true,\"provisional\":true,\"rejected_at\":null}]},\"tf\":\"5minute\"},{\"instrument\":\"NIFTY\",\"report\":{\"dsr_n_source\":\"pool\",\"dsr_n_trials\":null,\"dsr_trial_variance\":null,\"n_input\":0,\"n_survived\":0,\"pool_pbo\":0.5,\"stage_survivors\":{},\"survivor_ids\":[],\"verdicts\":[]},\"tf\":\"1minute\"}],\"n_input\":4,\"n_survived\":2,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "multi_group"
+    },
+    {
+      "expect": {
+        "dict": {
+          "groups": [
+            {
+              "instrument": "NIFTY",
+              "report": {
+                "dsr_n_source": "leaderboard",
+                "dsr_n_trials": 42,
+                "dsr_trial_variance": 2.5,
+                "n_input": 4,
+                "n_survived": 2,
+                "pool_pbo": 0.25,
+                "stage_survivors": {
+                  "cpcv": 2,
+                  "deflated_sharpe": 3,
+                  "hard_gates": 3
+                },
+                "survivor_ids": [
+                  "cand-pass",
+                  "cand-prov"
+                ],
+                "verdicts": [
+                  {
+                    "candidate_id": "cand-pass",
+                    "composite_score": 1.25,
+                    "cpcv_pass_rate": 0.5,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  },
+                  {
+                    "candidate_id": "cand-hard",
+                    "composite_score": null,
+                    "cpcv_pass_rate": null,
+                    "detail": "total_trades 3 < 30",
+                    "passed": false,
+                    "provisional": false,
+                    "rejected_at": "hard_gates"
+                  },
+                  {
+                    "candidate_id": "cand-cpcv",
+                    "composite_score": null,
+                    "cpcv_pass_rate": 0.25,
+                    "detail": "cpcv 0.2500 < 0.5",
+                    "passed": false,
+                    "provisional": false,
+                    "rejected_at": "cpcv"
+                  },
+                  {
+                    "candidate_id": "cand-prov",
+                    "composite_score": 0.75,
+                    "cpcv_pass_rate": 1.0,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": true,
+                    "rejected_at": null
+                  }
+                ]
+              },
+              "tf": "1minute"
+            }
+          ],
+          "n_input": 4,
+          "n_survived": 2,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[{\"instrument\":\"NIFTY\",\"report\":{\"dsr_n_source\":\"leaderboard\",\"dsr_n_trials\":42,\"dsr_trial_variance\":2.5,\"n_input\":4,\"n_survived\":2,\"pool_pbo\":0.25,\"stage_survivors\":{\"cpcv\":2,\"deflated_sharpe\":3,\"hard_gates\":3},\"survivor_ids\":[\"cand-pass\",\"cand-prov\"],\"verdicts\":[{\"candidate_id\":\"cand-pass\",\"composite_score\":1.25,\"cpcv_pass_rate\":0.5,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null},{\"candidate_id\":\"cand-hard\",\"composite_score\":null,\"cpcv_pass_rate\":null,\"detail\":\"total_trades 3 < 30\",\"passed\":false,\"provisional\":false,\"rejected_at\":\"hard_gates\"},{\"candidate_id\":\"cand-cpcv\",\"composite_score\":null,\"cpcv_pass_rate\":0.25,\"detail\":\"cpcv 0.2500 < 0.5\",\"passed\":false,\"provisional\":false,\"rejected_at\":\"cpcv\"},{\"candidate_id\":\"cand-prov\",\"composite_score\":0.75,\"cpcv_pass_rate\":1.0,\"detail\":\"ok\",\"passed\":true,\"provisional\":true,\"rejected_at\":null}]},\"tf\":\"1minute\"}],\"n_input\":4,\"n_survived\":2,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "stage_variants"
+    },
+    {
+      "expect": {
+        "dict": {
+          "groups": [
+            {
+              "instrument": "NIFTY",
+              "report": {
+                "dsr_n_source": "pool",
+                "dsr_n_trials": null,
+                "dsr_trial_variance": null,
+                "n_input": 4,
+                "n_survived": 4,
+                "pool_pbo": null,
+                "stage_survivors": {
+                  "hard_gates": 4
+                },
+                "survivor_ids": [
+                  "cs-none",
+                  "cs-plain",
+                  "cs-negzero",
+                  "cs-big"
+                ],
+                "verdicts": [
+                  {
+                    "candidate_id": "cs-none",
+                    "composite_score": null,
+                    "cpcv_pass_rate": null,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  },
+                  {
+                    "candidate_id": "cs-plain",
+                    "composite_score": 1.5,
+                    "cpcv_pass_rate": null,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  },
+                  {
+                    "candidate_id": "cs-negzero",
+                    "composite_score": -0.0,
+                    "cpcv_pass_rate": null,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  },
+                  {
+                    "candidate_id": "cs-big",
+                    "composite_score": 1e+16,
+                    "cpcv_pass_rate": null,
+                    "detail": "ok",
+                    "passed": true,
+                    "provisional": false,
+                    "rejected_at": null
+                  }
+                ]
+              },
+              "tf": "1minute"
+            }
+          ],
+          "n_input": 4,
+          "n_survived": 4,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[{\"instrument\":\"NIFTY\",\"report\":{\"dsr_n_source\":\"pool\",\"dsr_n_trials\":null,\"dsr_trial_variance\":null,\"n_input\":4,\"n_survived\":4,\"pool_pbo\":null,\"stage_survivors\":{\"hard_gates\":4},\"survivor_ids\":[\"cs-none\",\"cs-plain\",\"cs-negzero\",\"cs-big\"],\"verdicts\":[{\"candidate_id\":\"cs-none\",\"composite_score\":null,\"cpcv_pass_rate\":null,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null},{\"candidate_id\":\"cs-plain\",\"composite_score\":1.5,\"cpcv_pass_rate\":null,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null},{\"candidate_id\":\"cs-negzero\",\"composite_score\":-0.0,\"cpcv_pass_rate\":null,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null},{\"candidate_id\":\"cs-big\",\"composite_score\":1e+16,\"cpcv_pass_rate\":null,\"detail\":\"ok\",\"passed\":true,\"provisional\":false,\"rejected_at\":null}]},\"tf\":\"1minute\"}],\"n_input\":4,\"n_survived\":4,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "composite_specials"
+    },
+    {
+      "expect": {
+        "dict": {
+          "groups": [
+            {
+              "instrument": "NIFTY",
+              "report": {
+                "dsr_n_source": "pool",
+                "dsr_n_trials": null,
+                "dsr_trial_variance": null,
+                "n_input": 1,
+                "n_survived": 0,
+                "pool_pbo": null,
+                "stage_survivors": {
+                  "monte_carlo": 0
+                },
+                "survivor_ids": [],
+                "verdicts": [
+                  {
+                    "candidate_id": "uni-\u2122",
+                    "composite_score": null,
+                    "cpcv_pass_rate": null,
+                    "detail": "\u03c0-\u0434\u0435\u0442\u0430\u043b\u0438 \u2122",
+                    "passed": false,
+                    "provisional": false,
+                    "rejected_at": "monte_carlo"
+                  }
+                ]
+              },
+              "tf": "3minute"
+            }
+          ],
+          "n_input": 1,
+          "n_survived": 0,
+          "sweep_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": 1
+        },
+        "dict_matches_json": true,
+        "json": "{\"groups\":[{\"instrument\":\"NIFTY\",\"report\":{\"dsr_n_source\":\"pool\",\"dsr_n_trials\":null,\"dsr_trial_variance\":null,\"n_input\":1,\"n_survived\":0,\"pool_pbo\":null,\"stage_survivors\":{\"monte_carlo\":0},\"survivor_ids\":[],\"verdicts\":[{\"candidate_id\":\"uni-\\u2122\",\"composite_score\":null,\"cpcv_pass_rate\":null,\"detail\":\"\\u03c0-\\u0434\\u0435\\u0442\\u0430\\u043b\\u0438 \\u2122\",\"passed\":false,\"provisional\":false,\"rejected_at\":\"monte_carlo\"}]},\"tf\":\"3minute\"}],\"n_input\":1,\"n_survived\":0,\"sweep_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}"
+      },
+      "name": "unicode_detail"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -154,9 +155,9 @@ def capture_minute_path() -> dict[str, Any]:
     equity: list[dict[str, Any]] = []
     for case in equity_cases():
         bars = case["bars"]
-        index = None if bars is None else MinuteIndex.from_bars(bars)
+        eq_index = None if bars is None else MinuteIndex.from_bars(bars)
         points, status = session_equity_series(
-            index,
+            eq_index,
             case["trades"],
             sessions=case["sessions"],
             start_equity_paisa=case["start_equity_paisa"],
@@ -235,25 +236,117 @@ def capture_combo_aggregates() -> dict[str, Any]:
     return {"nearest_rank": ranks, "float_stats": stats, "aggregates": aggregates}
 
 
-def main() -> int:
-    if FIXTURE_DIR.exists() and any(FIXTURE_DIR.iterdir()) and os.environ.get(_REGEN_ENV) != "1":
-        sys.stderr.write(
-            f"REFUSED: fixtures already exist under {FIXTURE_DIR} — the pre-conversion\n"
-            f"capture is the oracle. Set {_REGEN_ENV}=1 only for a DELIBERATE,\n"
-            "ledgered re-baseline (DEC-RUST-CASCADE-RESULTS-001).\n"
+def capture_cascade_wire() -> dict[str, Any]:
+    """Freeze the cascade_wire serialisation / parse / math-trio laws (slice 2a)."""
+    from brutex.engine.cascade_wire import (
+        _finite,
+        _max_drawdown_return_units,
+        _per_bar_returns,
+        manifest_from_json,
+        manifest_to_json,
+        serialize_wire_report,
+        wire_report_to_dict,
+    )
+
+    from tests.golden._cascade_wire_parity_corpus import (
+        finite_cases,
+        manifest_cases,
+        max_drawdown_cases,
+        parse_payload_cases,
+        per_bar_returns_cases,
+        wire_report_cases,
+    )
+
+    manifests: list[dict[str, Any]] = []
+    for name, manifest in manifest_cases():
+        blob = manifest_to_json(manifest)
+        manifests.append(
+            {
+                "name": name,
+                "expect": {
+                    "json": blob.decode("utf-8"),
+                    "roundtrip_ok": manifest_from_json(blob) == manifest,
+                },
+            }
         )
-        return 2
-    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    payloads = {
-        "cascade_join.json": capture_cascade_join(),
-        "minute_path.json": capture_minute_path(),
-        "combo_aggregates.json": capture_combo_aggregates(),
+
+    reports: list[dict[str, Any]] = []
+    for name, report in wire_report_cases():
+        blob = serialize_wire_report(report)
+        parsed = json.loads(blob)
+        reports.append(
+            {
+                "name": name,
+                "expect": {
+                    "json": blob.decode("utf-8"),
+                    "dict": parsed,
+                    # Floats survive the json round-trip exactly (repr law), so
+                    # dict-vs-bytes equality is a lossless supplementary pin.
+                    "dict_matches_json": wire_report_to_dict(report) == parsed,
+                },
+            }
+        )
+
+    parses: list[dict[str, Any]] = []
+    for name, payload in parse_payload_cases():
+        case: dict[str, Any] = {"name": name}
+        try:
+            manifest = manifest_from_json(payload)
+        except BaseException as exc:  # capture the VERBATIM law,
+            # whatever it raises (several junk shapes escape as raw
+            # AttributeError / IndexError, NOT CascadeWireError — that IS the law).
+            case["expect"] = {"error_type": type(exc).__name__, "error_str": str(exc)}
+        else:
+            case["expect"] = {"json": manifest_to_json(manifest).decode("utf-8")}
+        parses.append(case)
+
+    # Math trio: floats frozen as repr strings (nan/inf/-0.0 are not JSON-native).
+    finite = [{"name": name, "expect_repr": repr(_finite(value))} for name, value in finite_cases()]
+    returns = [
+        {"name": name, "expect_reprs": [repr(r) for r in _per_bar_returns(equity, start)]}
+        for name, equity, start in per_bar_returns_cases()
+    ]
+    drawdowns = [
+        {"name": name, "expect_repr": repr(_max_drawdown_return_units(series))}
+        for name, series in max_drawdown_cases()
+    ]
+    return {
+        "manifests": manifests,
+        "reports": reports,
+        "parses": parses,
+        "finite": finite,
+        "per_bar_returns": returns,
+        "max_drawdown": drawdowns,
     }
-    for filename, payload in payloads.items():
+
+
+def main() -> int:
+    # PER-FILE refusal (slice 2a): each family whose fixture already exists is
+    # skipped LOUDLY unless the regen env is set — so a later slice can add its
+    # own capture file while the earlier slices' fixtures stay byte-frozen.
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    builders: dict[str, Callable[[], Any]] = {
+        "cascade_join.json": capture_cascade_join,
+        "minute_path.json": capture_minute_path,
+        "combo_aggregates.json": capture_combo_aggregates,
+        "cascade_wire.json": capture_cascade_wire,
+    }
+    regen = os.environ.get(_REGEN_ENV) == "1"
+    wrote = 0
+    for filename, build in builders.items():
         path = FIXTURE_DIR / filename
+        if path.exists() and not regen:
+            sys.stderr.write(
+                f"REFUSED: fixture {path} already exists — the pre-conversion capture\n"
+                f"is the oracle. Set {_REGEN_ENV}=1 only for a DELIBERATE, ledgered\n"
+                "re-baseline (DEC-RUST-CASCADE-RESULTS-001).\n"
+            )
+            continue
+        payload = build()
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         sys.stdout.write(f"wrote {path}\n")
-    return 0
+        wrote += 1
+    return 0 if wrote else 2
 
 
 if __name__ == "__main__":
