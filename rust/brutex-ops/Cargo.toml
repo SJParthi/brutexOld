@@ -1,0 +1,62 @@
+# brutex-ops — the ops/automation Rust conversion crate (nightly lane first).
+#
+# DEC-NIGHTLY-RUST-CORE-001. Re-hosts the PURE decision kernels of the
+# nightly chain (brutex/nightly/) behind the default-OFF facade
+# `brutex/nightly/nightly_rust.py`: the R42 break/exit-code law + the
+# audit-reconcile tripwire (chain.py), the verdict/summary Telegram body
+# builder (report.py), and the launchd plist render + HH:MM parse +
+# pmset-wake / since-fire calendar arithmetic (schedule.py). The verbatim
+# Python bodies are RETAINED as the live parity oracle (the
+# lake_rust_resample `_*_python` extraction pattern) — every kernel is
+# token-for-token mirrored, and any divergence autoreverts to the oracle
+# via the facade's burn-in bit-compare.
+#
+# Pure std-Rust — NO third-party dependency beyond pyo3 (no polars, no
+# regex; the one regex law, parse_at's `^([01]?\d|2[0-3]):([0-5]\d)$`, is
+# hand-rolled over ASCII bytes with a loud non-ASCII refusal so the Python
+# oracle keeps deciding any Unicode-digit exotica). There is therefore NO
+# wheel↔crate version lockstep to attest — the facade deliberately has no
+# version guard (the lake_rust_stats deviation, documented there).
+#
+# APPEND-ONLY structure (the brutex-lake §4.1 concurrent-sibling law):
+# src/lib.rs is module registration ONLY; each ops lane owns its own
+# src/<lane>.rs. Sibling lanes (the named backup/restore ordering-law
+# follow-up DEC-NIGHTLY-RUST-CORE-002, or a future backup ops lane) append
+# their own `mod x;` + registration lines — keep-both merges by design.
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math + rust/trading-core + rust/brutex-lake are standalone too;
+# ci.yml's cargo jobs target crate dirs explicitly).
+
+[package]
+name = "brutex-ops"
+version = "0.1.0"
+edition = "2024"
+# Pure std + pyo3 0.29; edition 2024 needs >= 1.85 — comfortably under
+# ci.yml's RUST_VERSION (1.93.1). No third-party MSRV pressure (contrast
+# brutex-lake's polars-driven 1.95 pin).
+rust-version = "1.85"
+description = "BruteX ops Rust kernels — the nightly chain's pure decision laws (break/exit-code, audit reconcile, Telegram summary, launchd plist render), token-for-token mirrors of brutex/nightly/ behind a default-OFF facade (DEC-NIGHTLY-RUST-CORE-001)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published to crates.io (the fno-math precedent).
+publish = false
+
+[lib]
+name = "brutex_ops"
+path = "src/lib.rs"
+# cdylib so Python's `import brutex_ops._brutex_ops` finds the built
+# extension; rlib so `cargo test` links the pure-Rust kernels.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# PyO3 + maturin bridge — the exact sibling-crate configuration
+# (rust/fno-math / rust/brutex-lake): abi3-py312 per CLAUDE.md §4's
+# Python 3.12 baseline.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+
+# Release profile: the cargo DEFAULT, deliberately (the brutex-lake PR-4
+# posture): NO `panic = "abort"` — a kernel panic must surface across the
+# FFI as pyo3's catchable PanicException so the facade's panic belt
+# degrades to the Python oracle, never a process abort mid-nightly.
