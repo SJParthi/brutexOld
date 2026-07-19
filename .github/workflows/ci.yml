@@ -246,8 +246,9 @@ jobs:
     name: Build Rust wheels (shared, cache-keyed)
     runs-on: ubuntu-24.04
     # 30 → 45 at the DEC-RUST-LAKE-WAVED-001 W-6a merge: the brutex-lake
-    # crate's rev-pinned polars graph is a ~10+ min COLD build on top of the
-    # four kernels (cargo-cached across runs; the disclosed CI cold cost).
+    # crate's rev-pinned polars graph is an estimated ~10+ min COLD build
+    # (CI-unverified until the first remote run) on top of the four kernels
+    # (cargo-cached across runs; the disclosed CI cold cost).
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -269,8 +270,9 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Cache the brutex-lake cargo build (cache miss only)
         # DEC-RUST-LAKE-WAVED-001 W-6a: the brutex-lake crate compiles the
-        # whole rev-pinned polars graph (~10+ min cold — the disclosed CI
-        # cold cost), so a wheelhouse-cache MISS still restores the cargo
+        # whole rev-pinned polars graph (an estimated ~10+ min cold — the
+        # disclosed CI cold cost, CI-unverified until the first remote
+        # run), so a wheelhouse-cache MISS still restores the cargo
         # target dir across runs via the crate content hash.
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

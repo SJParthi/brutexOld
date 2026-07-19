@@ -31,10 +31,15 @@
 # a fresh green run of this lane as a stated precondition — a red run here
 # blocks re-engaging the flag, never an unrelated merge.
 #
-# COST HONESTY: the crate is stdlib-pure (no polars graph) — a cold run
-# compiles in ~seconds, so no cargo cache is carried (the lake lane's cache
-# machinery earns its keep against a ~6.5 min polars build; here it would
-# be pure config surface).
+# COST HONESTY: the brutex-data crate is stdlib-pure (no polars graph) — a
+# cold cargo run compiles in ~seconds. Since DEC-RUST-LAKE-WAVED-001 W-6a
+# the lake_keys/lake_invariants parity legs ADDITIONALLY need the
+# brutex_lake wheel at runtime (the Python lake scan/heal cores are
+# deleted — scan_lake_invariants refuses loudly without it), so this lane
+# now carries the ci.yml brutex-lake rust-cache (shared-key
+# `brutex-lake-wheel` — a hit when any ci.yml job built it; the polars
+# graph is an estimated ~10+ min cold / ~1 min on a hit, CI-unverified
+# until the first remote run).
 
 name: data-rust-parity
 
@@ -123,23 +128,42 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install brutex (data extra) + the brutex-data wheel
-        # Belt-and-suspenders crates.io flake guard on the maturin build
+      - name: Cache the brutex-lake cargo build (rev-pinned polars graph)
+        # DEC-RUST-LAKE-WAVED-001 W-6a: scan_lake_invariants / lake_heal
+        # now REQUIRE the brutex_lake wheel at runtime (the Python cores
+        # are deleted), so the parity legs below need it installed. Same
+        # shared cache key as ci.yml's wheel-needing jobs — a hit whenever
+        # any ci.yml job built the crate at this content hash.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-lake -> target
+          shared-key: brutex-lake-wheel
+          key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
+
+      - name: Install brutex (data extra) + the brutex-data + brutex-lake wheels
+        # Belt-and-suspenders crates.io flake guard on the maturin builds
         # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        # brutex-lake joined at the DEC-RUST-LAKE-WAVED-001 W-6a endgame
+        # (the lake parity legs refuse loudly without it).
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[data,dev]"
           pip install maturin
-          n=0
-          until pip install ./rust/brutex-data; do
-            n=$((n+1))
-            if [ "$n" -ge 3 ]; then
-              echo "pip install ./rust/brutex-data failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "pip install ./rust/brutex-data failed (attempt $n) — retrying in 10s" >&2
-            sleep 10
-          done
+          install_with_retry() {
+            crate="$1"
+            n=0
+            until pip install "$crate"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip install $crate failed after 3 attempts" >&2
+                return 1
+              fi
+              echo "pip install $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
+          }
+          install_with_retry ./rust/brutex-data
+          install_with_retry ./rust/brutex-lake
 
       - name: Facade matrix + 3-arm golden corpus + hypothesis differential
         # With the wheel installed, the corpus's flag-ON arm and the
