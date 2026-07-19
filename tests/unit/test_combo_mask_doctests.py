@@ -14,9 +14,18 @@ import doctest
 
 from brutex.engine import combo_mask
 
+from tests.fakes.doctest_isolation import quiet_structlog
+
 
 def test_combo_mask_module_doctests_all_pass() -> None:
-    results = doctest.testmod(combo_mask, verbose=False)
+    # quiet_structlog: a fire-and-forget daemon from an EARLIER test in the
+    # same process (the lake-heal L3 StartupSweeper — detached by design) can
+    # complete while testmod has swapped sys.stdout, landing its structlog
+    # INFO lines inside an example's captured "Got" output (CI run
+    # 29668853084 shard 2 — the exact observed failure). The helper silences
+    # cross-thread structlog writes for the capture window only.
+    with quiet_structlog():
+        results = doctest.testmod(combo_mask, verbose=False)
     assert results.failed == 0, f"{results.failed} doctest failure(s) in combo_mask"
     # Teeth: the module genuinely carries doctests (an empty run would be a
     # silent no-op gate, not a gate).

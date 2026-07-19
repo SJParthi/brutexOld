@@ -1,0 +1,33 @@
+# Type stubs for the brutex_ops PyO3 bridge (DEC-BACKUP-RUST-OPS-001).
+# Primitives-only FFI surface — see python/brutex_ops/__init__.py.
+
+SOURCE_DIGEST: str
+__version__: str
+__build_crate_version__: str
+__source_digest__: str
+
+def evaluate_deadman_decision(
+    state_error_present: bool,
+    state_present: bool,
+    now_minus_success_s: float | None,
+    now_minus_running_s: float | None,
+    now_minus_alert_s: float | None,
+    threshold_hours: float,
+    realert_hours: float,
+    skew_tolerance_s: float,
+    max_runtime_hours: float,
+) -> tuple[int, str, bool, float | None, float]: ...
+def render_backup_plist() -> str: ...
+def render_deadman_plist() -> str: ...
+def render_drill_plist() -> str: ...
+def render_cron_lines() -> str: ...
+def parse_backup_summary_snapshot_id(stdout: str) -> tuple[int, str | None]: ...
+def parse_snapshots_latest_decision(stdout: str) -> tuple[int, str | None, str | None]: ...
+def parse_ls_file_paths(stdout: str) -> list[str] | None: ...
+def parse_ls_snapshot_time_decision(stdout: str) -> tuple[int, str | None]: ...
+def build_backup_argv(
+    binary: str,
+    paths: list[str],
+    excludes: list[str],
+    tags: list[str],
+) -> list[str]: ...
