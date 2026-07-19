@@ -796,6 +796,8 @@ def _overfit_gate(
 def _temporal_survivors(
     candidates: Sequence[tuple[int, ResultMetrics]],
     temporal: TemporalGateInput,
+    *,
+    max_sl_hit_rate: float | None = None,
 ) -> list[tuple[int, ResultMetrics]]:
     """Hard doors + the temporal year gate in ONE pass (the gate-ON arm only).
 
@@ -807,10 +809,22 @@ def _temporal_survivors(
     ``observe`` counts would-be kills and filters nothing; a whole-gate
     abstention keeps everything and records it on ``temporal.stats``).
 
+    ``max_sl_hit_rate`` is the opt-in Door-6 ceiling
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), threaded VERBATIM into the
+    same ``passes_gates`` call — the temporal arm judges the identical door set
+    the ``temporal=None`` arm judges (kw-only, default ``None`` so the landed
+    two-argument call shape is byte-identical). This also keeps the BATCH arm
+    in verdict parity with the BOUNDED arm, whose gate bits were recorded at
+    append time WITH the ceiling (``SurvivorColumns(max_sl_hit_rate=…)``): a
+    Door-6 reject dies at the DOORS, before the triple lookup and before
+    :func:`~brutex.ranking.temporal.apply_temporal_gate` ever sees it, so it is
+    never counted as a temporal kill on either arm.
+
     Fail-loud wiring guard (Golden Rule #1): the config being active REQUIRES a
     triple per candidate — a length mismatch or a ``None`` triple on a
     gate-passing survivor raises :class:`ValueError` naming the mask, never a
-    silent pass-all.
+    silent pass-all (a ``None`` triple on a door-rejected candidate — Door 6
+    included — stays unobservable, exactly like every other door reject).
     """
     if temporal.triples is None:
         raise ValueError(
@@ -827,7 +841,7 @@ def _temporal_survivors(
     survivors: list[tuple[int, ResultMetrics]] = []
     survivor_triples: list[TemporalTriple] = []
     for index, (mask, m) in enumerate(candidates):
-        if not passes_gates(m):
+        if not passes_gates(m, max_sl_hit_rate=max_sl_hit_rate):
             continue
         triple = temporal.triples[index]
         if triple is None:
@@ -892,8 +906,12 @@ def rank_combos(
         Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
         Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob). ``None`` (the
         default) leaves every gate verdict byte-identical; an active ceiling
-        is threaded into :func:`passes_gates` (fail-closed on an absent
-        ``sl_hit_rate``).
+        is threaded into :func:`passes_gates` on BOTH arms — the
+        ``temporal=None`` survivor filter AND :func:`_temporal_survivors`
+        (fail-closed on an absent ``sl_hit_rate``). Under an active *temporal*
+        gate a Door-6 reject dies at the hard doors, BEFORE the temporal
+        predicates — never a temporal kill — matching the bounded rank, whose
+        gate bits carry the same ceiling from append time.
 
     Returns
     -------
@@ -921,13 +939,17 @@ def rank_combos(
     # Hard doors → temporal (survivors filter) → overfit (full candidate pool).
     # The temporal=None default arm is LITERALLY the pre-change line (plus the
     # opt-in Door-6 ceiling threading) — the temporal machinery is never
-    # invoked (the gate-OFF zero-work spy pin).
+    # invoked (the gate-OFF zero-work spy pin). BOTH arms thread the SAME
+    # Door-6 ceiling into the SAME ``passes_gates`` body, so an active
+    # ``max_sl_hit_rate`` can never be silently skipped under an active
+    # temporal gate (batch ≡ bounded verdict parity — the bounded arm's gate
+    # bits were recorded with the ceiling at ``SurvivorColumns.append``).
     if temporal is None:
         survivors = [
             (mask, m) for mask, m in candidates if passes_gates(m, max_sl_hit_rate=max_sl_hit_rate)
         ]
     else:
-        survivors = _temporal_survivors(candidates, temporal)
+        survivors = _temporal_survivors(candidates, temporal, max_sl_hit_rate=max_sl_hit_rate)
 
     # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable
     # annotation is never evaluated at runtime, so mutmut's ``| None`` → ``& None``
