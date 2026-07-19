@@ -96,11 +96,22 @@ disk-full/OOM) must keep propagating past every per-finding isolation.
 ## 5. Out-of-corpus runtime classes + adjacent-scope rows
 
 **Runtime-injection classes (NOT on-disk shapes — deliberately out of the
-corpus, already pinned by `tests/unit/test_lake_heal.py`):** the mid-heal
-swap / TOCTOU family (LH `test_option_nested_dtype_swap_mid_heal_*`,
-monkeypatched merge-spy re-plants) and the `PanicException`-at-L3 class
-(LH `test_run_sync_survives_panic_exception`). A Rust twin inherits these
-obligations through the UNIT suites, not through this harness.
+corpus; each subclass pinned OUTSIDE this harness at its own seam):**
+(a) the mid-heal swap / TOCTOU family rides the `on_event` replay channel
+(`tests/unit/test_lake_heal.py`
+`test_option_nested_dtype_swap_mid_heal_isolated_batch_continues` — the
+re-plant fires between crate events; the finding isolates, the batch
+continues); (b) panic survival is pinned at L3
+(`test_run_sync_survives_panic_exception`) and at the FFI belt (the
+facade suite's panic-belt arms, `tests/unit/test_lake_rust_waved.py`);
+(c) the walk-stat fault (a raced-away / unstattable `*.parquet` entry
+under the content-token walk) is pinned by the ON-DISK
+`TestLakeContentToken.test_unstattable_entry_skipped_loudly_on_disk`
+(`tests/unit/test_lake_heal.py` — a real mode-0o444 fault the crate walk
+hits; root-skipped, CI runners execute it) plus the crate-side
+`content_token_unstattable_entry_skipped_deterministically` cargo test
+(`rust/brutex-lake/src/waved/heal.rs`). The Rust arm inherits these
+obligations through those suites, not through this harness.
 
 **Adjacent-scope rows (other modules own them; corpus optional):** FIFO /
 non-regular inode + oversized 16 MiB shard + deep-JSON nesting bomb +
