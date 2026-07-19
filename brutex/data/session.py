@@ -32,6 +32,16 @@ Applied at the **pull/ingest boundary** (before the lake write) so bad
 bars never enter the lake — and reused by every write path (CLAUDE.md §11
 COMMON). The resamplers derive every timeframe from the stored (already
 boundary-filtered) 1-minute, so this single choke point covers all 21 TFs.
+
+**Observed-overlay stance (DEC-SEED-OBSERVED-OVERLAY-001, deliberate
+non-change):** :func:`filter_to_trading_session` stays overlay-BLIND — it
+judges via the plain derived calendar, never the
+DEC-CALENDAR-OBSERVED-SESSIONS-001 drift overlay. The overlay is remove-only,
+date-granular, evidence-gated on ZERO-bar days, and SELF-HEALING: a vendor bar
+arriving on an overlaid day is exactly the evidence that heals the stale
+entry, so an overlay-aware filter would drop the very bars that prove the
+entry stale and wedge the healer. The overlay reaches ONLY the completeness
+detectors + the cold-start seed continuity gate.
 """
 
 from __future__ import annotations
@@ -39,14 +49,26 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from typing import Final
-from zoneinfo import ZoneInfo
+from typing import TYPE_CHECKING, Final
 
-from brutex.calendars.nse import TradingSession, get_session, is_holiday_data_available
+from brutex.calendars.nse import (
+    IST,
+    IST_OFFSET_MINUTES,
+    SESSION_CLOSE_IST,
+    SESSION_OPEN_IST,
+    TradingSession,
+    get_session,
+    is_holiday_data_available,
+)
 from brutex.data.models import CandleBar
 
-#: India Standard Time (NSE/BSE wall clock).
-IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    import polars as pl
+
+# India Standard Time (NSE/BSE wall clock) — re-exported (see ``__all__``) from
+# the ONE canonical root :data:`brutex.calendars.nse.IST`
+# (DEC-TIMESTAMP-IST-SINGLESOURCE-001; this module's former second
+# ``ZoneInfo("Asia/Kolkata")`` mint is collapsed onto it, byte-identical).
 
 
 def format_ist_clock(value: str | datetime | None) -> str | None:
@@ -74,11 +96,36 @@ def format_ist_clock(value: str | datetime | None) -> str | None:
     return ist.strftime("%Y-%m-%d %H:%M:%S")
 
 
-#: Regular session open — 09:15:00 IST (inclusive).
-SESSION_OPEN: Final[time] = time(9, 15)
+#: Regular session open — 09:15:00 IST (inclusive). DERIVED from the ONE
+#: canonical root :data:`brutex.calendars.nse.SESSION_OPEN_IST`
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001); the NAME stays importable here
+#: (cross-module consumers bind ``session.SESSION_OPEN`` by name).
+SESSION_OPEN: Final[time] = SESSION_OPEN_IST
 
-#: Regular session close — 15:30:00 IST (exclusive).
-SESSION_CLOSE: Final[time] = time(15, 30)
+#: Regular session close — 15:30:00 IST (exclusive). DERIVED from the ONE
+#: canonical root :data:`brutex.calendars.nse.SESSION_CLOSE_IST`
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001); the NAME stays importable here.
+SESSION_CLOSE: Final[time] = SESSION_CLOSE_IST
+
+
+def ist_offset_duration() -> pl.Expr:
+    """The fixed UTC→IST offset (+05:30) as a polars duration expression.
+
+    The ONE polars-family representation of the canonical
+    :data:`brutex.calendars.nse.IST_UTC_OFFSET` offset root
+    (DEC-TIMESTAMP-IST-SINGLESOURCE-001) — every frame-level
+    ``ts_utc + 05:30`` IST wall-clock shift imports THIS helper instead of
+    re-minting its own ``pl.duration(hours=5, minutes=30)``. The hours/minutes
+    split is DERIVED from :data:`~brutex.calendars.nse.IST_OFFSET_MINUTES` so
+    the built expression tree is byte-identical to the historical literal
+    form. Local polars import: dataclass-only consumers of this module never
+    pay the polars import (the house local-import idiom).
+    """
+    import polars as pl
+
+    hours, minutes = divmod(IST_OFFSET_MINUTES, 60)
+    return pl.duration(hours=hours, minutes=minutes)
+
 
 #: Trading symbols EXEMPT from the 09:15–15:30 IST session filter. **GIFT Nifty**
 #: trades on NSE IX (GIFT City) for ~21 hours, far outside the NSE regular
@@ -257,6 +304,11 @@ def filter_to_trading_session(bars: Sequence[CandleBar]) -> SessionFilterResult:
                 off_session += 1
             continue
         if ist_date not in session_by_date:
+            # Deliberately the PLAIN get_session — never the observed overlay
+            # (DEC-SEED-OBSERVED-OVERLAY-001 stance pin, module docstring): the
+            # remove-only self-healing overlay is healed BY bars arriving on an
+            # overlaid day, so an overlay-aware filter would drop the healing
+            # evidence itself.
             session_by_date[ist_date] = get_session(ist_date)
         session = session_by_date[ist_date]
         if session is None:
@@ -286,5 +338,6 @@ __all__ = [
     "in_session",
     "is_all_filtered",
     "is_session_exempt",
+    "ist_offset_duration",
     "observe_all_filtered",
 ]

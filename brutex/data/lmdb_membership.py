@@ -75,6 +75,22 @@ class LmdbMapFullError(LmdbMembershipError):
     """
 
 
+class LmdbCorruptEnvError(LmdbMembershipError):
+    """The LMDB environment could not be opened — corrupt / invalid ``data.mdb``.
+
+    Raised by :meth:`LmdbMembership.open` when the underlying ``lmdb.open``
+    fires an ``lmdb.Error`` (e.g. ``lmdb.InvalidError`` / ``MDB_INVALID`` on a
+    truncated or byte-XOR'd ``data.mdb``). Typed at this generic leaf so the ONE
+    caller that KNOWS the store is a losslessly-rebuildable accelerator — the
+    sweep dedup cache (:meth:`brutex.engine.sweep_cache.SweepCache.open`) —
+    quarantines the corrupt directory aside and rebuilds a fresh empty store
+    (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1920). The other leaf
+    consumer (the option-dedup EXACT tier) is NOT a rebuildable accelerator, so
+    auto-quarantine is deliberately NOT baked in here — this leaf only names the
+    fault; the consumer decides the recovery policy.
+    """
+
+
 def resolve_positive_int_env(
     env_var: str,
     explicit: int | None = None,
@@ -171,18 +187,31 @@ class LmdbMembership:
             If the explicit *map_size_mb* or the env-var value is not a
             positive integer (see :func:`resolve_positive_int_env` — loud,
             never a silent fallback).
+        LmdbCorruptEnvError
+            If ``lmdb.open`` raises an ``lmdb.Error`` — a corrupt / invalid
+            ``data.mdb`` (e.g. a truncated or byte-XOR'd environment). The
+            fault is typed here, NEVER a raw ``lmdb.Error``, so the SweepCache
+            consumer can quarantine + rebuild the accelerator
+            (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001).
         """
         resolved = resolve_positive_int_env(SWEEP_CACHE_MAP_MB_ENV, map_size_mb)
         size_mb = DEFAULT_MAP_SIZE_MB if resolved is None else resolved
         path.parent.mkdir(parents=True, exist_ok=True)
-        env = lmdb.open(
-            str(path),
-            map_size=size_mb * 1024 * 1024,
-            max_dbs=1,
-            subdir=True,
-            create=True,
-            lock=True,
-        )
+        try:
+            env = lmdb.open(
+                str(path),
+                map_size=size_mb * 1024 * 1024,
+                max_dbs=1,
+                subdir=True,
+                create=True,
+                lock=True,
+            )
+        except lmdb.Error as exc:
+            raise LmdbCorruptEnvError(
+                f"cannot open LMDB membership environment at {path}: {exc} — the "
+                f"membership set is a rebuildable dedup accelerator; quarantine the "
+                f"directory and reopen to rebuild"
+            ) from exc
         return cls(path=path, env=env)
 
     def __enter__(self) -> Self:
@@ -210,9 +239,11 @@ class LmdbMembership:
 
         The deterministic worst case — using the set after :meth:`close`.
         A map-full write fault is surfaced as the actionable domain error
-        :class:`LmdbMapFullError` (see :meth:`add` / :meth:`add_many`); every
-        OTHER genuine LMDB I/O fault (corruption, bad fd) still propagates
-        natively as ``lmdb.Error`` for the orchestrator's infra-fault handling.
+        :class:`LmdbMapFullError` (see :meth:`add` / :meth:`add_many`), and an
+        OPEN-time corruption fault as :class:`LmdbCorruptEnvError` (see
+        :meth:`open`). Every OTHER genuine post-open LMDB I/O fault (a bad fd, a
+        mid-cursor read fault) still propagates natively as ``lmdb.Error`` for
+        the caller's infra-fault handling.
         """
         if self._closed:
             raise LmdbMembershipError("operation on a closed LmdbMembership set")
@@ -313,6 +344,7 @@ class LmdbMembership:
 __all__ = [
     "DEFAULT_MAP_SIZE_MB",
     "SWEEP_CACHE_MAP_MB_ENV",
+    "LmdbCorruptEnvError",
     "LmdbMapFullError",
     "LmdbMembership",
     "LmdbMembershipError",

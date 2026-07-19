@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from brutex.calendars.nse import IST_UTC_OFFSET
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
@@ -69,7 +70,9 @@ _LOG = structlog.get_logger(__name__)
 #: India Standard Time offset (UTC+5:30) in seconds — the natural anchor for a
 #: "nightly, after the incremental vendor pull" daily schedule on an IST market.
 #: The CLI passes this so ``daily@02:30`` means 02:30 **IST**, not 02:30 UTC.
-IST_OFFSET_SECONDS: Final[int] = 5 * 3600 + 30 * 60  # 19_800
+#: DERIVED from the ONE canonical :data:`brutex.calendars.nse.IST_UTC_OFFSET`
+#: root (DEC-TIMESTAMP-IST-SINGLESOURCE-001), never a second literal.
+IST_OFFSET_SECONDS: Final[int] = int(IST_UTC_OFFSET.total_seconds())  # 19_800
 
 #: Seconds in a calendar day (no leap-seconds — epoch arithmetic is UTC-linear).
 _SECONDS_PER_DAY: Final[int] = 86_400

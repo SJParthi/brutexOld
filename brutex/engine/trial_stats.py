@@ -67,6 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.results_store import _atomic_write
 from brutex.models import BruteXError
 from brutex.ranking.overfit import _MIN_FINITE_SHARPES
@@ -436,7 +437,7 @@ def read_tuple_trial_stats(path: Path) -> TupleTrialStats:
     if not path.exists():
         raise TrialStatsError(f"trial-stats sidecar not found at {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(path))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise TrialStatsError(f"trial-stats sidecar at {path} is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):

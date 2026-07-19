@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.backup import (
     MANIFEST_NAME,
     BackupManifest,
@@ -137,9 +138,15 @@ class NightlyPlan:
     skip_backup: bool = False
     skip_sweep: bool = False
     dry_run: bool = False
+    #: The pre-chain box-update leg's outcome block (DEC-BOX-AUTODEPLOY-LANE-001
+    #: §5/§6 step 5 — threaded at CONSTRUCTION, the plan is frozen); ``None`` =
+    #: the leg never ran (disabled kill switch pre-resolution / dry-run / no leg).
+    box_update: Mapping[str, object] | None = None
+    #: The §12 env-preflight block; ``None`` = the pre-flight never ran.
+    env_preflight: Mapping[str, object] | None = None
 
 
-def _default_keep_awake(reason: str) -> AbstractContextManager[None]:
+def _default_keep_awake(reason: str) -> AbstractContextManager[bool]:
     """Return a no-op keep-awake context manager for the given reason."""
     return keep_awake(reason)
 
@@ -151,7 +158,7 @@ class NightlySeams:
     build_pipeline: Callable[..., HeadlessPipeline] = build_headless_pipeline
     run_sweep: Callable[..., int] | None = None  # None → cli.cmd_sweep_all (call-time import)
     alerter: SweepAlerter | None = None  # None → SweepAlerter() lazy singleton
-    keep_awake_cm: Callable[[str], AbstractContextManager[None]] = _default_keep_awake
+    keep_awake_cm: Callable[[str], AbstractContextManager[bool]] = _default_keep_awake
     credentials: Callable[[], Any] | None = None  # None → resolve_groww_aws_credentials
     copy_file: Callable[[Path, Path], None] | None = None
     disk_usage: Callable[[str], Any] = shutil.disk_usage
@@ -467,9 +474,7 @@ def _run_locked(
         # disk and fired a FALSE tripwire every healthy night (review round 2).
         try:
             own_manifest = result.snapshot_path / MANIFEST_NAME
-            manifest = BackupManifest.from_dict(
-                json.loads(own_manifest.read_text(encoding="utf-8"))
-            )
+            manifest = BackupManifest.from_dict(json.loads(read_regular_text(own_manifest)))
             on_disk = sum(
                 1 for p in result.snapshot_path.rglob("*") if p.is_file() and p != own_manifest
             )
@@ -559,7 +564,8 @@ def _run_locked(
         absent_artifacts = probe.absent
         if "run_manifest" in probe.found:
             with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
-                manifest = json.loads(Path(probe.paths["run_manifest"]).read_text(encoding="utf-8"))
+                raw_manifest = read_regular_text(Path(probe.paths["run_manifest"]))
+                manifest = json.loads(raw_manifest)
                 dedup = manifest["dedup_skips"]
                 if isinstance(dedup, int) and counts is not None:
                     counts = {**counts, "skipped_dedup_manifest": dedup}
@@ -710,7 +716,7 @@ def _own_audit_events(path: Path, nightly_id: str) -> list[tuple[str, str | None
     """
     events: list[tuple[str, str | None]] = []
     with contextlib.suppress(OSError):
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in read_regular_text(path).splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:
@@ -747,8 +753,18 @@ def _assemble_report(
     absent_artifacts: tuple[str, ...],
     extra_notes: tuple[str, ...],
 ) -> NightlyReport:
-    """Assemble the NightlyReport from the collected link outcomes."""
+    """Assemble the NightlyReport from the collected link outcomes.
+
+    The box-update / env-preflight blocks ride the PLAN (construction-time
+    threading, DEC-BOX-AUTODEPLOY-LANE-001 §6 step 5) into the report; a
+    box-update status outside ``{up_to_date, disabled}`` appends the ONE
+    §5 summary line via the honesty-notes mechanism (the cheapest carrier —
+    zero new alert methods).
+    """
     notes = [R48_DIVERGENCE_NOTE, *extra_notes]
+    box_note = _box_update_note(plan.box_update)
+    if box_note is not None:
+        notes.append(box_note)
     return NightlyReport(
         schema_version=REPORT_SCHEMA_VERSION,
         nightly_id=nightly_id,
@@ -764,6 +780,30 @@ def _assemble_report(
         absent_artifacts=absent_artifacts,
         honesty_notes=tuple(notes),
         dry_run=plan.dry_run,
+        box_update=plan.box_update,
+        env_preflight=plan.env_preflight,
+    )
+
+
+def _box_update_note(block: Mapping[str, object] | None) -> str | None:
+    """The §5 one-line box-update summary (silent on up_to_date/disabled/absent)."""
+    if block is None:
+        return None
+    status = str(block.get("status", "unknown"))
+    if status in ("up_to_date", "disabled"):
+        return None
+
+    def _sha7(key: str) -> str:
+        value = block.get(key)
+        return str(value)[:7] if isinstance(value, str) and value else "?"
+
+    wheels = block.get("wheels")
+    wheel_list = wheels if isinstance(wheels, list) else []
+    ok_count = sum(1 for w in wheel_list if isinstance(w, dict) and w.get("result") == "ok")
+    gate = str(block.get("gate", "skipped"))
+    return (
+        f"📦 box-update: {status} {_sha7('from_sha')}→{_sha7('to_sha')} · "
+        f"wheels ok {ok_count}/{len(wheel_list)} · gate {gate}"
     )
 
 

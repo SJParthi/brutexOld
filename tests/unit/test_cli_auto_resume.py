@@ -35,6 +35,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -240,6 +241,39 @@ class TestIncidentClassRegression:
         assert popen_calls == [], "zero subprocess spawns while the store is held"
 
 
+def _call_gate_tracking_threads(
+    lake_root: Path,
+    log: object,
+    *,
+    intent_store: object = None,
+    resume_pipeline: Callable[[], None] | None = None,
+    resume_legacy: Callable[[], object] | None = None,
+) -> list[object]:
+    """Call the boot launcher and return any NEW threads it spawned (join-bounded).
+
+    The DETERMINISTIC no-fire oracle for the disabled-gate tests
+    (DEC-AUTO-RESUME-DEFAULT-OFF-001 review round 1, minor 7): a disabled master
+    gate must return SYNCHRONOUSLY — before any daemon-thread spawn — so the
+    oracle is "zero new threads". Any thread that IS spawned (e.g. under an
+    either-gate-enables mutant) is joined with a bounded timeout FIRST, so the
+    caller's decide/resume-spy assertions can never race a live daemon body.
+    Mirrors the REAL launcher signature (incl. the in-process *resume_legacy*
+    seam — DEC-AUTO-RESUME-INPROCESS-001). No sleeps.
+    """
+    before = set(threading.enumerate())
+    cli._start_auto_resume_on_boot(
+        lake_root,
+        log,
+        intent_store=intent_store,
+        resume_pipeline=resume_pipeline,
+        resume_legacy=resume_legacy,
+    )
+    spawned_threads = [t for t in threading.enumerate() if t not in before]
+    for thread in spawned_threads:
+        thread.join(timeout=10.0)
+    return list(spawned_threads)
+
+
 class TestIntentDecisionPointAtBootSeam:
     """DEC-PULL-INTENT-RESUME-001 — the extended ``_start_auto_resume_on_boot``:
     ONE decision point, driven end-to-end through the REAL daemon-thread seam
@@ -305,7 +339,9 @@ class TestMasterGateDefaultOff:
     explicitly opts in with ``BRUTEX_AUTO_RESUME=1``. FAILS-BEFORE / PASSES-AFTER:
     without the gate the intent boot fires the pipeline resume (pinned by
     :class:`TestIntentDecisionPointAtBootSeam`); with the gate default-OFF the
-    SAME boot fires nothing.
+    SAME boot fires nothing. Every disabled-path test rides the deterministic
+    :func:`_call_gate_tracking_threads` oracle (zero new threads + bounded
+    join — review round 1, minor 7; no sleeps).
     """
 
     @staticmethod
@@ -322,9 +358,9 @@ class TestMasterGateDefaultOff:
         With the master gate unset (the default), a durable ``.pull_intent.json``
         on disk must NOT trigger a resume: ``maybe_resume_on_boot`` is never
         invoked, no pull launches (neither the pipeline seam nor the legacy
-        in-process resume fires), and exactly one
+        in-process resume fires), and EXACTLY ONE
         ``auto_resume.disabled_by_default`` line is logged. The gate returns
-        SYNCHRONOUSLY (no daemon thread is spawned).
+        SYNCHRONOUSLY (zero new threads — deterministic).
         """
         from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
 
@@ -341,7 +377,7 @@ class TestMasterGateDefaultOff:
         resume_legacy = mock.Mock()
         log = mock.Mock()
 
-        cli._start_auto_resume_on_boot(
+        new_threads = _call_gate_tracking_threads(
             tmp_path,
             log,
             intent_store=store,
@@ -349,12 +385,47 @@ class TestMasterGateDefaultOff:
             resume_legacy=resume_legacy,
         )
 
+        assert new_threads == [], "the disabled gate must return before any thread spawn"
         decide.assert_not_called()  # the resume decision never even ran
         resume_pipeline.assert_not_called()  # the pipeline arm did not fire
         resume_legacy.assert_not_called()  # the legacy in-process arm did not fire
         logged = [c.args[0] for c in log.info.call_args_list]
-        assert "auto_resume.disabled_by_default" in logged
+        assert logged.count("auto_resume.disabled_by_default") == 1
         assert "auto_resume.verdict" not in logged  # the daemon-thread body never ran
+
+    def test_master_unset_with_legacy_subgate_armed_never_spawns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EXACT up.sh-provisioned env (sub-gate armed, master unset) fires NOTHING.
+
+        up.sh pre-arms ``BRUTEX_AUTO_RESUME_ON_BOOT=1`` (so ONE master flip
+        restores the prior behaviour) — this pins that the pre-armed sub-gate
+        alone, even over an OUTSTANDING ledger, fires no legacy IN-PROCESS
+        resume (DEC-AUTO-RESUME-INPROCESS-001 — the seam a spawned daemon
+        would invoke) and never reaches the resume decision. KILLS the
+        either-gate-enables mutant (a gate passing when the master OR the
+        legacy sub-gate is truthy): under that mutant the daemon thread spawns
+        and — after the helper's bounded join — the decide spy has fired, so
+        this test fails deterministically on the zero-new-threads oracle and
+        the spies. No sleeps.
+        """
+        import brutex.data.window_ledger_store as ledger_store
+
+        self._clear_gates(monkeypatch)
+        monkeypatch.setenv("BRUTEX_AUTO_RESUME_ON_BOOT", "1")  # exactly what up.sh persists
+        monkeypatch.setattr(ledger_store, "load_window_ledger", lambda _root: _OutstandingLedger())
+        decide = mock.Mock()
+        monkeypatch.setattr("brutex.orchestrator.auto_resume.maybe_resume_on_boot", decide)
+        resume_legacy = mock.Mock()
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(tmp_path, log, resume_legacy=resume_legacy)
+
+        assert new_threads == [], "the disabled gate must return before any thread spawn"
+        decide.assert_not_called()  # the ledger decision never ran
+        resume_legacy.assert_not_called()  # the legacy in-process resume did not fire
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1
 
     def test_master_enabled_runs_existing_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -379,10 +450,15 @@ class TestMasterGateDefaultOff:
         )
         assert fired.wait(timeout=10.0), "master gate ON ⇒ the intent resume must fire"
 
-    def test_master_explicit_zero_disables(
+    def test_master_explicit_zero_disables_with_honest_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An explicit ``BRUTEX_AUTO_RESUME=0`` disables just like unset (no launch)."""
+        """An explicit ``BRUTEX_AUTO_RESUME=0`` disables and logs the DELIBERATE state.
+
+        Review round 1 (minor 6): an explicit falsy value is a deliberate
+        operator choice — it logs ``auto_resume.disabled`` carrying the raw
+        ``env_value``, NOT the unset-default ``auto_resume.disabled_by_default``.
+        """
         from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
 
         self._clear_gates(monkeypatch)
@@ -393,16 +469,30 @@ class TestMasterGateDefaultOff:
         )
         resume_pipeline = mock.Mock()
         log = mock.Mock()
-        cli._start_auto_resume_on_boot(
+
+        new_threads = _call_gate_tracking_threads(
             tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
         )
-        resume_pipeline.assert_not_called()
-        assert "auto_resume.disabled_by_default" in [c.args[0] for c in log.info.call_args_list]
 
-    def test_master_junk_value_disables(
+        assert new_threads == []
+        resume_pipeline.assert_not_called()
+        disabled = [c for c in log.info.call_args_list if c.args[0] == "auto_resume.disabled"]
+        assert len(disabled) == 1
+        assert disabled[0].kwargs["env_value"] == "0"
+        info_events = [c.args[0] for c in log.info.call_args_list]
+        assert "auto_resume.disabled_by_default" not in info_events
+
+    def test_master_junk_value_disables_loudly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A junk master value falls to the safe default-OFF (sibling-resolver parity)."""
+        """A junk master value still disables (fail-safe) but is LOUD, never silent.
+
+        Review round 1 (minor 6): an unrecognised token is a probable typo — it
+        logs ONE WARNING ``auto_resume.junk_value_disabled`` carrying the raw
+        value, so the operator who wrote ``BRUTEX_AUTO_RESUME=maybe`` learns why
+        auto-resume never armed instead of reading the misleading
+        ``disabled_by_default`` line.
+        """
         from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
 
         self._clear_gates(monkeypatch)
@@ -413,8 +503,131 @@ class TestMasterGateDefaultOff:
         )
         resume_pipeline = mock.Mock()
         log = mock.Mock()
-        cli._start_auto_resume_on_boot(
+
+        new_threads = _call_gate_tracking_threads(
             tmp_path, log, intent_store=store, resume_pipeline=resume_pipeline
         )
+
+        assert new_threads == []
         resume_pipeline.assert_not_called()
-        assert "auto_resume.disabled_by_default" in [c.args[0] for c in log.info.call_args_list]
+        junk = [
+            c for c in log.warning.call_args_list if c.args[0] == "auto_resume.junk_value_disabled"
+        ]
+        assert len(junk) == 1
+        assert junk[0].kwargs["env_value"] == "maybe"
+        info_events = [c.args[0] for c in log.info.call_args_list]
+        assert "auto_resume.disabled_by_default" not in info_events
+
+
+class TestDisabledPendingIntentVisibility:
+    """DEC-AUTO-RESUME-DEFAULT-OFF-001 review round 1 (MAJOR 2) — no silent rot.
+
+    With the master gate at its default OFF, a leftover ``.pull_intent.json``
+    must SURFACE — one ``auto_resume.disabled_with_pending_intent`` WARNING plus
+    the critical :class:`~brutex.dashboard.pull_intent.ResumeBanner` payload
+    with the three remediations — instead of sitting invisible until someone
+    flips the gate months later. Best-effort by contract: a probe/banner error
+    logs ``auto_resume.intent_probe_failed`` and boot continues.
+    """
+
+    def test_pending_intent_warns_and_sets_critical_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Intent present + gate disabled ⇒ ONE WARNING + the critical banner payload."""
+        from brutex.dashboard.pull_intent import PullIntentStore, persist_intent_for_launch
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        store = PullIntentStore(tmp_path)
+        persist_intent_for_launch(
+            store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+        )
+        log = mock.Mock()
+
+        new_threads = _call_gate_tracking_threads(
+            tmp_path, log, intent_store=store, resume_pipeline=mock.Mock()
+        )
+
+        assert new_threads == []
+        warned = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "auto_resume.disabled_with_pending_intent"
+        ]
+        assert len(warned) == 1
+        assert warned[0].kwargs["path"] == str(store.path)
+        payload = store.banner.snapshot()
+        assert payload is not None, "the pending-intent banner must be set"
+        assert payload["level"] == "critical"
+        # The honest, actionable remediations — all three named.
+        assert "BRUTEX_AUTO_RESUME=1" in payload["message"]
+        assert "delete the intent file" in payload["message"]
+        assert "manually" in payload["message"]
+        assert "interrupted" in payload["message"]
+
+    def test_no_intent_stays_quiet_and_sets_no_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No intent on disk ⇒ the existing quiet disabled log only — no WARN, no banner."""
+        from brutex.dashboard.pull_intent import PullIntentStore
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        store = PullIntentStore(tmp_path)  # nothing persisted
+        log = mock.Mock()
+
+        _call_gate_tracking_threads(tmp_path, log, intent_store=store, resume_pipeline=mock.Mock())
+
+        assert log.warning.call_args_list == []
+        assert store.banner.snapshot() is None
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1
+
+    def test_no_store_probes_lake_root_and_warns_without_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With NO intent store (its boot construction failed) the path probe still warns.
+
+        The probe derives ``<lake>/.pull_intent.json`` from the lake root
+        directly; there is no banner surface without a store, so the WARNING is
+        the honest maximum — never a crash, never silence.
+        """
+        from brutex.dashboard.pull_intent import PULL_INTENT_FILENAME
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        (tmp_path / PULL_INTENT_FILENAME).write_text("{}", encoding="utf-8")
+        log = mock.Mock()
+
+        _call_gate_tracking_threads(tmp_path, log, intent_store=None, resume_pipeline=None)
+
+        warned = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "auto_resume.disabled_with_pending_intent"
+        ]
+        assert len(warned) == 1
+        assert warned[0].kwargs["path"] == str(tmp_path / PULL_INTENT_FILENAME)
+
+    def test_probe_error_never_breaks_boot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising probe (exploding store) logs ``intent_probe_failed`` — boot continues."""
+
+        class _ExplodingStore:
+            @property
+            def path(self) -> Path:
+                raise RuntimeError("boom-intent-path")
+
+        monkeypatch.delenv("BRUTEX_AUTO_RESUME", raising=False)
+        log = mock.Mock()
+
+        # Must NOT raise — the guard converts the failure into one warning line.
+        _call_gate_tracking_threads(
+            tmp_path, log, intent_store=_ExplodingStore(), resume_pipeline=None
+        )
+
+        failed = [
+            c for c in log.warning.call_args_list if c.args[0] == "auto_resume.intent_probe_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].kwargs["error_type"] == "RuntimeError"
+        logged = [c.args[0] for c in log.info.call_args_list]
+        assert logged.count("auto_resume.disabled_by_default") == 1

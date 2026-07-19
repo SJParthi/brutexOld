@@ -20,6 +20,17 @@ credential leaking into a log file.
 
 Everything is pure + injectable (the search paths AND the target ``env``
 mapping), so the unit tests run with zero side effects on the real process env.
+
+Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35
+milestone 3): when — and ONLY when — ``BRUTEX_CORE_RUST_DOTENV`` is set
+truthy, the LINE-PARSE law routes through the default-OFF,
+burn-in-checked, fail-closed, value-REDACTING
+:mod:`brutex.config.dotenv_rust` facade to the ``rust/brutex-core``
+crate. The flag-OFF default is the verbatim ``_parse_dotenv_python``
+oracle below — behavior-identical AND crate-untouched (bomb-crate
+spy-pinned); file reads + the never-override apply law stay Python
+either way. Honesty banner (ADR-0020, mandatory verbatim): expected
+payoff ≈ 0 — conversion is for uniformity, not speed.
 """
 
 from __future__ import annotations
@@ -30,6 +41,8 @@ from pathlib import Path
 from typing import Final
 
 import structlog
+
+from brutex.config.dotenv_rust import dotenv_rust_enabled, route_parse_dotenv
 
 #: The conventional dotenv filename.
 DEFAULT_DOTENV_NAME: Final[str] = ".env"
@@ -64,6 +77,17 @@ def parse_dotenv(text: str) -> dict[str, str]:
     -------
     dict[str, str]
         Parsed key/value pairs (later duplicate keys override earlier ones).
+    """
+    if not dotenv_rust_enabled():
+        return _parse_dotenv_python(text)
+    return route_parse_dotenv(text, _parse_dotenv_python)
+
+
+def _parse_dotenv_python(text: str) -> dict[str, str]:
+    """The verbatim :func:`parse_dotenv` body — the LIVE oracle.
+
+    Token-for-token the pre-seam public body (DEC-CONFIG-RUST-LEAVES-001);
+    every flag-OFF / ineligible / degraded / burn-in call serves this.
     """
     out: dict[str, str] = {}
     for raw in text.splitlines():
@@ -104,7 +128,11 @@ def load_dotenv_file(path: Path) -> dict[str, str]:
     """
     if not path.is_file():
         return {}
-    return parse_dotenv(path.read_text(encoding="utf-8"))
+    from brutex.data.guarded_read import (
+        read_regular_text,
+    )
+
+    return parse_dotenv(read_regular_text(path))
 
 
 def apply_dotenv(values: Mapping[str, str], *, env: MutableMapping[str, str]) -> tuple[str, ...]:

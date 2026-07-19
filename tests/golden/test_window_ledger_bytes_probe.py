@@ -31,6 +31,23 @@ If a future pyarrow/polars bump ever makes any of these assertions flip
 that materially re-opens the G10 decision: re-run the spike probe and update
 the escalation. That is the pin's purpose, not a flake.
 
+**RECONCILE (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918):**
+the G10 decision has since been RULED + SHIPPED as the CONVERSION — the
+default-OFF ``BRUTEX_LAKE_RUST_LEDGER_RENDER`` render seam under the
+ROW-EQUIVALENCE + reader-parity standard (the operator ruling of 2026-07-16
+as relayed via the coordinator; byte-identity stays measured-infeasible,
+golden re-baseline stays forbidden). The divergence class this file pins is
+therefore no longer an OPEN decision but the shipped conversion's DOCUMENTED
+envelope: the flag-ON writer's bytes ARE the polars-native class measured
+here, and the reader-parity + state-convergence gates
+(``tests/integration/test_window_ledger_rust_reader_parity.py`` /
+``..._state_convergence.py``) are the standard's teeth. This probe keeps
+pinning the PYARROW ORACLE arm (the flag-OFF production default) — the
+fixture below pins its own env hermetically so a runner exporting the flag
+can never flip the probed writer arm — and a future byte-EQUALITY flip
+still fails loudly (it would falsify the measured-infeasible record and
+re-open the priced `DEC-LAKE-EXACT-PIN-001` option).
+
 Whitebox: drives the private ``_rows_to_table`` / ``_read_ledger_file_rows``
 seams (the surfaces under probe — the DEC-P0-017 convention).
 """
@@ -40,11 +57,14 @@ seams (the surfaces under probe — the DEC-P0-017 convention).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
 import pyarrow.parquet as pq
+import pytest
+from brutex.data import lake_rust_ledger_render
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
@@ -55,6 +75,22 @@ from brutex.data.window_ledger_store import (
 )
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _pyarrow_oracle_arm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the probed writer to the PYARROW ORACLE arm (module docstring).
+
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001: the production writer is now
+    flag-gated — a runner exporting ``BRUTEX_LAKE_RUST_LEDGER_RENDER=1``
+    would make ``_production_parquet`` render POLARS bytes and invert every
+    divergence assertion below. The probe's subject is the ORACLE arm, so
+    the env is cleared + the facade latch reset hermetically here.
+    """
+    monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
+    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+    yield
+    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
 
 
 def _key(security_id: str) -> WindowKey:

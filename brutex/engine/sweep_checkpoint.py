@@ -39,13 +39,19 @@ that fixed order, not a content address.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Any, Final
 
+import structlog
+
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.models import BruteXError
+
+_LOG = structlog.get_logger("brutex.engine.sweep_checkpoint")
 
 #: Schema version stamped on every checkpoint so a future format change is
 #: detectable on load rather than silently mis-parsed.
@@ -268,8 +274,10 @@ class SweepCheckpointStore:
         Raises
         ------
         SweepCheckpointError
-            If the file exists but is unreadable, oversized, malformed, or
-            carries this ``sweep_id`` with a mismatched ``total_combos``.
+            If the file exists but is unreadable, undecodable (invalid UTF-8 —
+            on-disk bitrot / an external truncation, NOT a torn write from this
+            atomic writer), oversized, malformed, or carries this ``sweep_id``
+            with a mismatched ``total_combos``.
         """
         if not self._path.exists():
             return None
@@ -284,9 +292,29 @@ class SweepCheckpointStore:
                 "refusing to read it (corruption/tampering)"
             )
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses): this load
+            # runs while the greeks-backfill holds the lake-root pull
+            # single-flight lock — a planted FIFO (defense a) or a wedged
+            # volume (defense b) here would block EVERY later pull, so the
+            # read rides the fd-level S_ISREG gate + the wall-clock deadline.
+            # NotRegularFileError/ReadStallError are OSError subclasses and
+            # fold into the existing SweepCheckpointError contract below.
+            raw = read_regular_text_deadline(self._path, what="sweep checkpoint read")
         except OSError as exc:
             raise SweepCheckpointError(f"Failed to read checkpoint {self._path}: {exc}") from exc
+        except (UnicodeDecodeError, ValueError) as exc:
+            # Invalid UTF-8 bytes on disk. NOT a torn write from THIS writer —
+            # ``save`` is tmp→fsync→``os.replace`` (``_atomic_write``), so a
+            # kill -9 mid-``save`` leaves the OLD intact file, never a half-file.
+            # The real triggers are on-disk bitrot or an EXTERNAL truncation /
+            # a non-brutex writer clobbering the path. ``read_text`` then raises
+            # ``UnicodeDecodeError`` (a ``ValueError``), which — like the
+            # malformed-JSON branch below — must map to the typed error, never
+            # escape RAW past a consumer's narrow ``SweepCheckpointError`` catch
+            # and fire a false halt alert (Golden Rule #1 / #10).
+            raise SweepCheckpointError(
+                f"Undecodable checkpoint bytes at {self._path}: {exc}"
+            ) from exc
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, RecursionError) as exc:
@@ -310,6 +338,97 @@ class SweepCheckpointStore:
             )
         self._last_index = checkpoint.last_completed_index
         return checkpoint
+
+    def load_or_quarantine(
+        self,
+        *,
+        now: Callable[[], float] = time,
+        log: Any = _LOG,
+    ) -> SweepCheckpoint | None:
+        """Load the checkpoint, or QUARANTINE a corrupt one and start FRESH.
+
+        The resilient resume loader (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G12):
+        a corrupt on-disk checkpoint must never ABORT a multi-day sweep with a
+        CRITICAL alert. On a clean/absent checkpoint this is byte-identical to
+        :meth:`load` (returns the adopted checkpoint or ``None`` — every
+        ``record`` then continues from the adopted high-water mark exactly as
+        today). On any :class:`SweepCheckpointError` it:
+
+        1. renames the offending checkpoint FILE to a sibling
+           ``<name>.corrupt-<ns>`` (forensic preservation — never unlinked; a
+           name collision from a same-nanosecond re-run gets a ``-<counter>``
+           suffix so it never clobbers a prior quarantine),
+        2. logs a LOUD ``sweep.checkpoint_ignored`` WARNING (the ignore-loudly
+           pattern of :func:`brutex.data.greeks_backfill`), and
+        3. returns ``None`` so the driver starts fresh from index 0 — exactly
+           the no-file path (``load`` raises BEFORE it ever adopts
+           ``last_completed_index``, so ``next_index`` reads ``0`` after a
+           refused/corrupt load, never a half-adopted resume point).
+
+        Only the checkpoint FILE is quarantined — NEVER the quarantine sidecar
+        (``.sweep_quarantine.json``) or the dedup cache. A rename that itself
+        fails (``OSError``) is logged ``sweep.checkpoint_quarantine_failed`` and
+        STILL returns ``None`` — a rename failure must never re-abort the sweep.
+        ``now`` is injectable for deterministic tests.
+
+        Parameters
+        ----------
+        now
+            Zero-arg epoch-seconds source for the ``.corrupt-<ns>`` stamp
+            (defaults to :func:`time.time`); injected for deterministic tests.
+        log
+            The structlog logger for the WARNING (defaults to this module's).
+
+        Returns
+        -------
+        SweepCheckpoint | None
+            The adopted checkpoint (clean load), or ``None`` (no file, a
+            different-sweep file, or a corrupt file that was quarantined).
+        """
+        try:
+            return self.load()
+        except SweepCheckpointError as exc:
+            quarantine_path = self._quarantine_corrupt_checkpoint(now=now, log=log)
+            log.warning(
+                "sweep.checkpoint_ignored",
+                path=str(self._path),
+                quarantine_path=(str(quarantine_path) if quarantine_path is not None else None),
+                error=str(exc),
+                action="fresh start (re-run the deterministic combo order from 0)",
+            )
+            return None
+
+    def _quarantine_corrupt_checkpoint(
+        self,
+        *,
+        now: Callable[[], float],
+        log: Any,
+    ) -> Path | None:
+        """Rename the corrupt checkpoint FILE aside, returning the sibling path.
+
+        Collision-safe (``-<counter>`` suffix if a same-nanosecond quarantine
+        already exists) and rename-``OSError``-tolerant (logs
+        ``sweep.checkpoint_quarantine_failed`` and returns ``None``, so the
+        caller still starts fresh). Never touches any file other than this
+        store's checkpoint path.
+        """
+        stamp = int(now() * 1e9)
+        target = self._path.with_name(f"{self._path.name}.corrupt-{stamp}")
+        counter = 0
+        while target.exists():
+            counter += 1
+            target = self._path.with_name(f"{self._path.name}.corrupt-{stamp}-{counter}")
+        try:
+            self._path.rename(target)
+        except OSError as exc:
+            log.warning(
+                "sweep.checkpoint_quarantine_failed",
+                path=str(self._path),
+                target=str(target),
+                error=str(exc),
+            )
+            return None
+        return target
 
     def discard_adoption(self) -> None:
         """Reset the in-memory high-water mark to "nothing completed" (``-1``).
