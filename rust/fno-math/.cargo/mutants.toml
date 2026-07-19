@@ -74,3 +74,4 @@ examine_globs = [
     "src/mask_word.rs",
     "src/stats/*.rs",
 ]
+

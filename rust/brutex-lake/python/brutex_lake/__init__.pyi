@@ -15,7 +15,9 @@ def render_parquet_from_ipc(ipc_bytes: bytes) -> bytes:
     at the FFI boundary — a panic never crosses raw).
     """
 
-def merge_decision_from_ipc(stored_ipc: bytes, batch_ipc: bytes, keep_first: bool) -> list[int]:
+def merge_decision_from_ipc(
+    stored_ipc: bytes, batch_ipc: bytes, keep_first: bool
+) -> list[int]:
     """Decide the merge fold — one action code per batch row (ADR-0020 PR-3).
 
     ``0=skip · 1=insert · 2=overwrite · 3=conflict`` against the stored
