@@ -145,7 +145,7 @@ class NightlyPlan:
     env_preflight: Mapping[str, object] | None = None
 
 
-def _default_keep_awake(reason: str) -> AbstractContextManager[None]:
+def _default_keep_awake(reason: str) -> AbstractContextManager[bool]:
     """Return a no-op keep-awake context manager for the given reason."""
     return keep_awake(reason)
 
@@ -157,7 +157,7 @@ class NightlySeams:
     build_pipeline: Callable[..., HeadlessPipeline] = build_headless_pipeline
     run_sweep: Callable[..., int] | None = None  # None → cli.cmd_sweep_all (call-time import)
     alerter: SweepAlerter | None = None  # None → SweepAlerter() lazy singleton
-    keep_awake_cm: Callable[[str], AbstractContextManager[None]] = _default_keep_awake
+    keep_awake_cm: Callable[[str], AbstractContextManager[bool]] = _default_keep_awake
     credentials: Callable[[], Any] | None = None  # None → resolve_groww_aws_credentials
     copy_file: Callable[[Path, Path], None] | None = None
     disk_usage: Callable[[str], Any] = shutil.disk_usage
