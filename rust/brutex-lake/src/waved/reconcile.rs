@@ -90,6 +90,10 @@ pub fn reconcile_file_impl(
     path: &str,
     classify_home: Option<(i32, u32)>,
 ) -> PolarsResult<Option<FileReconcile>> {
+    // Inode gate BEFORE the read (DEC-LAKE-READ-INODE-GUARD-001 on the
+    // Wave-D arm): `fs::read` on a planted FIFO blocks forever in `open(2)`.
+    super::ensure_regular_file(std::path::Path::new(path))
+        .map_err(|reason| polars_err!(ComputeError: "cannot read {}: {}", path, reason))?;
     let bytes = std::fs::read(path)
         .map_err(|err| polars_err!(ComputeError: "cannot read {}: {}", path, err))?;
     let df = ParquetReader::new(std::io::Cursor::new(&bytes))

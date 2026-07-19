@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
@@ -103,6 +104,8 @@ from brutex.adapters.groww.vendor_floor import (
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
+    CancelCheck,
+    PullCancelled,
     PullStep,
     PullVerdict,
     StepOrderMonitor,
@@ -780,6 +783,12 @@ class BulkSpotReport:
     """MAX absolute keep-first close delta across the pull's conflicts — exact
     Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
     conflict was recorded."""
+    cancelled: bool = False
+    """True iff the pull stopped at a window boundary on an operator cooperative
+    cancel (DEC-JOB-COOPERATIVE-CANCEL-001): every settled window's row is
+    durably in the ledger (the ``finally`` drains + persists), unissued windows
+    stay PLANNED/FAILED, and the next pull idempotently resumes ONLY those —
+    an honest partial, never an ``error``."""
 
     @property
     def ok(self) -> bool:
@@ -830,8 +839,11 @@ class BulkSpotReport:
 
         Turns the raw tallies into one operator instruction so a token-stuck or
         retry-residual pull never sits silent — ``auth_expired`` (regenerate the
-        token), ``transient_residual`` (re-pull / auto-retry finishes),
-        ``known_gap_only`` (reference symbols with no intraday), or ``clean``.
+        token), ``cancelled`` (the operator's Stop — re-run to resume the honest
+        partial; DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3, never a
+        fabricated green ``clean``), ``transient_residual`` (re-pull / auto-retry
+        finishes), ``known_gap_only`` (reference symbols with no intraday), or
+        ``clean``.
 
         An EXPLICIT synthetic dry-run's verdict is re-labeled through
         :func:`~brutex.adapters.ingest_common.mark_synthetic`
@@ -848,6 +860,12 @@ class BulkSpotReport:
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
             mass_empty_cause=self.mass_empty_cause,
+            # DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3 (MAJOR): a cancelled
+            # pull previously fell through to the GREEN ``clean`` kind — the
+            # "✅ Pull complete. / No action needed." banner + the durable G5
+            # journal ``verdict="clean"`` after an operator Stop. The dedicated
+            # ``cancelled`` kind is the honest amber "re-run to resume" partial.
+            cancelled=self.cancelled,
             settled_skipped=self.settled_skipped,
         )
         if self.dry_run:
@@ -855,8 +873,29 @@ class BulkSpotReport:
         return verdict
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route."""
+        """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route.
+
+        EMIT-ON-CANCEL ``note`` (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3):
+        a cancelled pull's payload carries a one-line honest note so the
+        background job's completion headline (``pull_jobs._finish_detail`` reads
+        a Mapping's non-empty ``"note"``) says CANCELLED instead of the bare
+        back-compat ``"done"``. An uncancelled payload is byte-identical (no
+        ``note`` key at all — the emit-on-false projection convention).
+        """
+        verdict = self.verdict
+        note: dict[str, Any] = (
+            {
+                "note": (
+                    "pull CANCELLED at operator request — an honest partial: settled "
+                    "windows are durable, un-pulled windows stay pending; re-run the "
+                    "pull to resume the remainder"
+                )
+            }
+            if self.cancelled
+            else {}
+        )
         return {
+            **note,
             "dry_run": self.dry_run,
             "start_date": self.start_date,
             "end_date": self.end_date,
@@ -866,12 +905,13 @@ class BulkSpotReport:
             "total_no_data": self.total_no_data,
             "windows_skipped": self.windows_skipped,
             "ledger_load_failed": self.ledger_load_failed,
+            "cancelled": self.cancelled,
             "conflicts": self.conflicts,
             "vendor_dup_rows_dropped": self.vendor_dup_rows_dropped,
             # JSON-safe: the exact Decimal renders as its string (never a float
             # round-trip — CLAUDE.md §4 money rule); None stays null.
             "max_close_delta": None if self.max_close_delta is None else str(self.max_close_delta),
-            "verdict": self.verdict.to_dict(),
+            "verdict": verdict.to_dict(),
             "symbols": [
                 {
                     "symbol": s.symbol,
@@ -1634,10 +1674,20 @@ def pull_all_spot(
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
     step_monitor: StepOrderMonitor | None = None,
+    should_stop: CancelCheck | None = None,
     ledger: WindowLedger | None = None,
     market_closed: Callable[[], bool] | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe threaded down to the per-WINDOW fetch boundary: a cancel mid-
+    pull raises :class:`~brutex.adapters.ingest_common.PullCancelled` out of the
+    spine, which is CAUGHT here (like the quota / mass-empty global stops) —
+    the ``final_cancelled`` latch halts the remaining step groups, the existing
+    ``finally`` drains the pipeline + persists the ledger, and the report reads
+    ``cancelled=True`` (an honest partial; NO CRITICAL Telegram alert — the
+    operator asked for it). ``None`` (every legacy caller) is byte-identical.
 
     **Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001):** the
     instrument list is ALWAYS partitioned into ordered (INDICES-SPOT,
@@ -1886,6 +1936,17 @@ def pull_all_spot(
                 pull_id=pid,
                 note="window ledger reload FAILED — running full re-verify pull (no skip)",
             )
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
+        # cold-start reconcile so the seed's continuity gate and the fetch-time
+        # completeness detectors judge ONE consistent overlay snapshot (a mid-pull
+        # sidecar rewrite by the drift CLI is deliberately not re-read) — and
+        # threaded into the detectors' margin arithmetic + the seed gate ONLY (an
+        # observed holiday is not a data hole) — NEVER into window planning or the
+        # session filter. A dry-run threads the empty overlay (the
+        # ``detect_completeness_gaps`` gating pattern); ``load_observed_holidays``
+        # never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         if ledger is not None and daily_requested:
             # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
             # the ledger is empty but the lake may already hold years of bars. Seed
@@ -1909,6 +1970,7 @@ def pull_all_spot(
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=_observed_holidays,
             )
             # PLAN the remaining (genuinely-absent) windows — ``WindowLedger.plan``
             # is itself absent-only, so a just-seeded SUCCESS row stays settled.
@@ -1973,6 +2035,19 @@ def pull_all_spot(
         # raises ``MarketHoursHalt`` (a global stop) — caught below, the committed work
         # kept + the pull deferred to the next out-of-hours run.
         _market_closed = None if dry_run else market_closed
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the storm-breaker precedent above): resolved HERE and
+        # threaded into EVERY phase / until-clean round / retry pass, so the trip
+        # LATCHES pull-wide — a per-pass fresh instance let a sub-floor retry
+        # round settle windows the trip alarm promised were halted. Resolved
+        # unconditionally (unlike the storm breaker): a dry-run's windows are
+        # ineligible by construction (the `detect_completeness_gaps=not dry_run`
+        # threading below → never observed — review round 5: this entrypoint
+        # previously omitted the kwarg entirely, so the REAL bulk pull's windows
+        # were equally ineligible and the breaker was structurally inert on the
+        # primary production path), so the instance stays inert there —
+        # byte-identical settles.
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
         # pool factory hands every leaf a no-op pace (`build_live_pool` without a
@@ -2006,12 +2081,9 @@ def pull_all_spot(
             end=end.date(),
             floors=load_vendor_floors(floor_store, [i.symbol_name for i in instruments]),
         )
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
-        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
-        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+        # (The observed-sessions overlay was loaded ONCE above, before the
+        # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
+        # ``_observed_holidays`` snapshot feeds the fetch-time detectors below.)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2070,6 +2142,10 @@ def pull_all_spot(
         # set when a phase raises MassEmptySettleHalt — drives the loud, needs-operator
         # ``mass_empty_halt`` verdict naming the counts + the likely causes.
         final_mass_empty_cause: str | None = None
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): set when a
+        # phase raises PullCancelled — halts the remaining step groups gracefully
+        # (the finally still drains + persists the ledger); NEVER an alert.
+        final_cancelled = False
         # Market-hours deferral latch (DEC-GROWW-MARKET-HOURS-GUARD-001): set when a
         # phase raises MarketHoursHalt mid-round OR the until-clean loop stopped between
         # rounds because the market opened — the pull is DEFERRED (committed work kept,
@@ -2128,7 +2204,7 @@ def pull_all_spot(
             convention above is deliberately NOT reused for the event).
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
-            nonlocal final_mass_empty_cause, final_market_hours_blocked
+            nonlocal final_mass_empty_cause, final_cancelled, final_market_hours_blocked
             passes: list[SpotIngestWithRetry] = []
             # Group-scoped until-clean + step-attributed writes
             # (DEC-PULL-SIX-STEP-ORDER-001): the outstanding read below folds ONLY
@@ -2172,15 +2248,20 @@ def pull_all_spot(
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
                     # #1031 interior-gap / trailing-truncation demotions — armed
-                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001) —
-                    # resolved once above.
+                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001; the
+                    # #1442 review-round-5 fix converged on main's resolved-once
+                    # flag) — a live pull thereby ALSO feeds the mass
+                    # all-filtered breaker (its spot eligibility requires this
+                    # flag — DEC-ALLFILTERED-MASS-BREAKER-001).
                     detect_completeness_gaps=_detect_gaps,
                     # Pre-settle TODAY minute-completeness gate
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
+                    should_stop=should_stop,
                     market_closed=_market_closed,
                 )
                 passes.append(res)
@@ -2278,6 +2359,27 @@ def pull_all_spot(
                     res = _one_pass(auto_retry)
                     final_still_failed += res.report.still_failed_windows
                     final_auth_aborted = final_auth_aborted or res.report.auth_aborted
+            except PullCancelled as exc:
+                # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the
+                # spine raised at a WINDOW boundary — everything already committed
+                # survives (bars via the sink, window records via the throttled
+                # flush + the outer finally's drain + ledger persist), every
+                # unissued window stays PLANNED/FAILED and is idempotently
+                # re-pulled by the NEXT pull. Latch + stop the remaining groups;
+                # deliberately NO Telegram alert (the operator asked for this) and
+                # never an ``error`` terminal — the report reads cancelled=True.
+                final_cancelled = True
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                _LOG.warning(
+                    "universe.pull_all.cancelled",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note=(
+                        "operator cancel at the window boundary — committed work kept; "
+                        "the next pull resumes the remaining windows"
+                    ),
+                )
             except MarketHoursHalt as exc:
                 # A window worker raised MarketHoursHalt mid-round (DEC-GROWW-MARKET-
                 # HOURS-GUARD-001): the pull crossed into the NSE market-hours window and
@@ -2484,6 +2586,7 @@ def pull_all_spot(
                     final_auth_aborted
                     or final_quota_exhausted
                     or final_mass_empty_cause is not None
+                    or final_cancelled
                     or final_market_hours_blocked
                 ):
                     reason = (
@@ -2493,6 +2596,8 @@ def pull_all_spot(
                         if final_quota_exhausted
                         else "mass_empty_halt"
                         if final_mass_empty_cause is not None
+                        else "cancelled"
+                        if final_cancelled
                         else "market_hours"
                     )
                     _LOG.warning(
@@ -2531,7 +2636,12 @@ def pull_all_spot(
                 # ``clean`` folds the group's TERMINAL quarantine count
                 # (``_GroupSettle.quarantined`` — the F&O ``failed_pairs``
                 # term; ``still_failed`` alone is the pairs-side transient
-                # residual and reads 0 over a quarantined symbol).
+                # residual and reads 0 over a quarantined symbol) AND every
+                # global-stop latch — including the operator-cancel latch
+                # (continuation-v2 fix: ``PullCancelled`` is consumed inside
+                # ``_run_phase``, so the truncated group's unissued windows
+                # stay PLANNED with ``group_failed == 0`` and the settle
+                # previously read a false ``clean=True``).
                 _LOG.info(
                     "pull.step.settled",
                     step=step.label,
@@ -2542,6 +2652,7 @@ def pull_all_spot(
                         and not final_auth_aborted
                         and not final_quota_exhausted
                         and final_mass_empty_cause is None
+                        and not final_cancelled
                         and not final_market_hours_blocked
                     ),
                     bars=group_settle.bars,
@@ -2586,6 +2697,7 @@ def pull_all_spot(
                     final_auth_aborted
                     or final_quota_exhausted
                     or final_mass_empty_cause is not None
+                    or final_cancelled
                     or final_market_hours_blocked
                 ):
                     _LOG.warning(
@@ -2594,6 +2706,7 @@ def pull_all_spot(
                         auth_aborted=final_auth_aborted,
                         quota_exhausted=final_quota_exhausted,
                         mass_empty_halt=final_mass_empty_cause is not None,
+                        cancelled=final_cancelled,
                         market_hours_blocked=final_market_hours_blocked,
                     )
                 else:
@@ -2627,6 +2740,10 @@ def pull_all_spot(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                             symbol_windows=_floor_windows,
+                            # The SAME per-pull overlay snapshot the fetch-time
+                            # detectors read (DEC-SEED-OBSERVED-OVERLAY-001 —
+                            # hoisted once, above the daily reconcile).
+                            observed=_observed_holidays,
                         )
                         # Pre-plan ledger snapshot — pairs with the pre-pull spans
                         # above so this pull's own settles can never false-flag.
@@ -2692,14 +2809,32 @@ def pull_all_spot(
             # reads clean 1-minute. SUCCESS-path only (``fetch_phases_ok``);
             # LakeWriteHalt re-raises inside (graceful pull-halt), any other
             # heal error is swallowed — it can never fail the pull.
-            if fetch_phases_ok and not dry_run:  # pragma: no cover — raw lake I/O glue
-                _heal_after_pull(
-                    instruments=instruments,
-                    lake_root=lake_root,
-                    start=start.date(),
-                    end=end.date(),
-                    pull_id=pid,
-                )
+            # OPERATOR CANCEL (continuation-v2 fix — the SPOT twin of the F&O
+            # round-2 ``cancelled_tail`` withholding in ``historical_pull``):
+            # ``PullCancelled`` is consumed inside ``_run_phase``, so execution
+            # reaches ``fetch_phases_ok = True`` and the O(pulled-scope) heal
+            # previously ran AFTER the operator's Stop — contradicting the
+            # "finishing current window, then stop" latency contract. On cancel
+            # the heal is WITHHELD with one loud WARN (never a data loss: the
+            # next pull's L2 heal — plus L1/L3 — covers the slice).
+            if fetch_phases_ok and not dry_run:
+                if final_cancelled:
+                    _LOG.warning(
+                        "pull.cancel_heal_skipped",
+                        pull_id=pid,
+                        note=(
+                            "operator cancel — post-drain L2 lake heal withheld; "
+                            "the next pull's L2 heal (plus L1/L3) covers the slice"
+                        ),
+                    )
+                else:  # pragma: no cover — raw lake I/O glue
+                    _heal_after_pull(
+                        instruments=instruments,
+                        lake_root=lake_root,
+                        start=start.date(),
+                        end=end.date(),
+                        pull_id=pid,
+                    )
             # ALWAYS persist the ledger — a crash / abort / mid-round quota death
             # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
@@ -2805,6 +2940,7 @@ def pull_all_spot(
             windows_skipped=sum(pr.skipped_windows for pr in phase_reports),
             ledger_load_failed=ledger_reload_failed,
             mass_empty_cause=final_mass_empty_cause,
+            cancelled=final_cancelled,
             # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the
             # per-pull ledger instance counted every window THIS pull newly settled
             # SKIPPED (fast-settle + streak promotion + degraded accept-gap), so the
@@ -3076,6 +3212,14 @@ def pull_candles(
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate ONCE for the
         # whole pull. Only the 1-minute phase runs; ``1day`` is derived after the pull.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE both
+        # reconciles (daily here + the minute-path one below) so the seed's
+        # continuity gate and the fetch-time detectors judge ONE consistent overlay
+        # snapshot; threaded into the detectors' margin arithmetic + the seed gate
+        # ONLY — NEVER into window planning or the session filter. A dry-run threads
+        # the empty overlay; the loader never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         if ledger is not None and daily_requested:
             # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS
             # for this symbol's lake-enclosed windows so the upcoming is_skippable
@@ -3097,6 +3241,7 @@ def pull_candles(
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=_observed_holidays,
             )
             plan_windows(
                 ledger,
@@ -3150,6 +3295,16 @@ def pull_candles(
         # live pull (a dry-run threads ``None`` — the ``detect_completeness_gaps``
         # gating below).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4) — the single-symbol twin of the pull_all_spot wiring:
+        # resolved once and threaded into BOTH phase invocations so the latch is
+        # pull-scoped, never per driver invocation. Resolved unconditionally: a
+        # dry-run's windows are ineligible by construction (the
+        # `detect_completeness_gaps=not dry_run` threading below → never
+        # observed — review round 5: this site previously hardcoded the flag
+        # True, so a dry-run's weekend-start synthetic windows WERE observed as
+        # all-filtered, contradicting the dry-run-never-feeds contract).
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner + learned-floor planning clamp
         # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
         # pull_all_spot wiring: armed only for a real pull, probing through the
@@ -3175,12 +3330,8 @@ def pull_candles(
             end=end.date(),
             floors=load_vendor_floors(floor_store, (symbol,)),
         )
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
-        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
-        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+        # (The observed-sessions overlay was loaded ONCE above, before the reconciles
+        # — DEC-SEED-OBSERVED-OVERLAY-001; the SAME snapshot feeds the detectors.)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -3243,13 +3394,17 @@ def pull_candles(
                     # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
                     # 1-minute window with a confirmed interior hole / trailing truncation is
-                    # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
-                    # false-red on the synthetic adapter's first-day-only bars.
-                    detect_completeness_gaps=True,
+                    # re-pulled; a dry-run threads False EXPLICITLY so its synthetic first-day-only
+                    # bars never false-red NOR feed the mass all-filtered breaker (review round 5:
+                    # this site hardcoded True since #1230, so a dry-run's weekend-start synthetic
+                    # windows were demoted AND observed as all-filtered — the stale "leaves this
+                    # OFF (the default)" wording papered over it; the CLI cmd_fetch pattern).
+                    detect_completeness_gaps=not dry_run,
                     # Pre-settle TODAY minute-completeness gate
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )
@@ -3323,6 +3478,7 @@ def pull_candles(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                             symbol_windows=_floor_windows,
+                            observed=_observed_holidays,
                         )
                         plan_windows(
                             ledger,

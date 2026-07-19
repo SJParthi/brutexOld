@@ -178,6 +178,9 @@ class TestWarmLaunchReadCount:
         _write_month(lake, interval="1minute", year=2021, month=1, n=5)
         _write_month(lake, interval="1minute", year=2021, month=2, n=4)  # 2 partitions
 
+        # W-6a merge note: the per-file body is crate-owned
+        # (reconcile_file_via_rust) — spy THAT seam; the #1948-era
+        # read_parquet/read_regular_bytes seams no longer exist on this path.
         calls: list[str] = []
         real = cr.reconcile_file_via_rust
 

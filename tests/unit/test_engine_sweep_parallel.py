@@ -2390,3 +2390,631 @@ class TestBrokenProcessPoolQuarantine:
                 driver.run()
         actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
         assert "SUPERVISOR_ABORT" in actions
+
+
+class TestWorkerCorruptStoreContained:
+    """DB-02 parallel twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+    A CORRUPT / old-schema finalist store raised at its LOAD boundary inside a
+    worker is CONTAINED as a failed marker (surfaced through the supervisor's
+    ``TUPLE_FAILED`` lane, whose error string names the store path) instead of
+    crashing the worker → the whole grid. Only the G14 ``ResultsStoreSchemaError``
+    is caught, NOT its parent ``ResultsStoreError``.
+    """
+
+    def test_corrupt_store_quarantined_and_recovered_in_worker(self, tmp_path: Path) -> None:
+        """Club-S1 composition (T1 G1 over DB-02): quarantine-retry WINS in-worker.
+
+        On the landed T1 shape (DEC-SWEEP-UNKILLABLE-CORE-001 G1) the worker
+        QUARANTINES a corrupt on-disk finalist store and retries ONCE, so the
+        tuple RECOVERS instead of failing — DB-02's ResultsStoreSchemaError
+        containment (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001) remains the belt
+        BEHIND the quarantine (pinned by
+        ``test_schema_error_past_quarantine_returns_failed_marker`` below).
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=out))
+        tuple_ = next(iter_sweep_tuples(grid))
+        # Corrupt the tuple's finalist store so its LOAD raises ResultsStoreSchemaError.
+        store_path = tuple_store_path(out, tuple_, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        with capture_logs() as logs:
+            result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        # G1 recovered the tuple — never a failed marker, never a worker crash.
+        assert result.summary is not None
+        assert result.failed_error is None
+        assert any(e.get("event") == "sweep_quarantine.tuple_trio" for e in logs)
+
+    def test_schema_error_past_quarantine_returns_failed_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DB-02 belt: a schema error the G1 quarantine cannot fix is CONTAINED.
+
+        Simulates the quarantine-unfixable shape (e.g. the retry ALSO hitting a
+        corrupt store, or a schema fault raised from the store factory) by
+        making ``run_one_tuple`` raise ``ResultsStoreSchemaError`` directly —
+        the worker returns a failed marker (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001,
+        MIGRATION.md #1921), never a crash → whole-grid abort.
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=out))
+        tuple_ = next(iter_sweep_tuples(grid))
+
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        def _raise(*args: object, **kwargs: object) -> object:
+            raise ResultsStoreSchemaError(f"unreadable results store at {out}/x.parquet: boom")
+
+        monkeypatch.setattr(mod, "run_one_tuple", _raise)
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is None
+        assert result.failed_error is not None
+        assert "ResultsStoreSchemaError" in result.failed_error
+
+    def test_corrupt_store_recovered_in_real_spawn_pool(self, tmp_path: Path) -> None:
+        grid = _grid()  # 4 tuples via BUY/SELL × k={1,2}
+        out = tmp_path / "out"
+        victim = next(iter_sweep_tuples(grid))
+        store_path = tuple_store_path(out, victim, grid)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+        _run_parallel(tmp_path, grid, workers=2)
+        entries = read_sup_entries(tmp_path / "sup.jsonl")
+        actions = [e.action for e in entries]
+        # Club-S1 composition (T1 G1 over DB-02): the corrupt store is
+        # QUARANTINED in-worker and the tuple retried to SUCCESS — the grid
+        # FINISHES with ZERO failed tuples and no whole-grid abort (the DB-02
+        # containment belt behind the quarantine is pinned at the worker level
+        # by test_schema_error_past_quarantine_returns_failed_marker; the
+        # remediation-WARN parity discriminator is pinned by
+        # test_non_schema_failed_marker_fires_no_corrupt_warn's TRUE-branch twin
+        # in the sequential-grid suite, test_engine_sweep_orchestrator.py).
+        assert "SUPERVISOR_COMPLETE" in actions
+        assert not [e for e in entries if e.action == "TUPLE_FAILED"]
+
+    def test_non_schema_failed_marker_fires_no_corrupt_warn(self, tmp_path: Path) -> None:
+        """The parity arm's FALSE branch: a plain failed marker stays generic.
+
+        Drives ``_apply_outcome``'s failed lane directly with a
+        SweepComboError-shaped marker (the worker's other failed class) and
+        asserts the remediation WARN does NOT fire — only the pre-existing
+        ``sweep_parallel.tuple_failed`` — so the discriminator can never
+        over-trigger on an ordinary combo failure.
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        tuple_ = next(iter_sweep_tuples(grid))
+        outcome = mod._Outcome(
+            index=0,
+            tuple_=tuple_,
+            kind="failed",
+            summary=None,
+            failed_error="SweepComboError: boom",
+            audit_records=(),
+        )
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+            acc = mod._Accumulator()
+            with capture_logs() as logs:
+                driver._apply(outcome, acc)
+        assert acc.tuples_failed == 1
+        assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
+        assert not any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
+
+    def test_schema_failed_marker_fires_corrupt_warn(self, tmp_path: Path) -> None:
+        """The parity arm's TRUE branch: a ResultsStoreSchemaError-prefixed failed
+        marker fires the PARALLEL-lane DB-02 remediation WARN.
+
+        The FALSE-branch twin is ``test_non_schema_failed_marker_fires_no_corrupt_warn``.
+        A worker serialises a quarantine-unfixable ``ResultsStoreSchemaError`` as
+        ``"ResultsStoreSchemaError: <msg>"`` (the object never crosses the pickle
+        boundary), so ``_apply``'s parent-side discriminator
+        (``error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX)``) fires the SAME
+        heal-instruction ``sweep_grid.tuple_store_corrupt`` WARN the sequential /
+        supervisor sites emit (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md
+        #1921) — the parallel lane's own TRUE branch, previously unpinned.
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        tuple_ = next(iter_sweep_tuples(grid))
+        outcome = mod._Outcome(
+            index=0,
+            tuple_=tuple_,
+            kind="failed",
+            summary=None,
+            failed_error=(
+                f"{mod._STORE_CORRUPT_ERROR_PREFIX}unreadable results store "
+                f"at {out}/x.parquet: boom"
+            ),
+            audit_records=(),
+        )
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+            acc = mod._Accumulator()
+            with capture_logs() as logs:
+                driver._apply(outcome, acc)
+        assert acc.tuples_failed == 1
+        # the pre-existing generic failed WARN still fires ...
+        assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
+        # ... AND the DB-02 remediation WARN fires with the heal instruction.
+        corrupt = [e for e in logs if e.get("event") == "sweep_grid.tuple_store_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0].get("remediation") == mod.TUPLE_STORE_CORRUPT_REMEDIATION
+
+
+class TestStoreCorruptPrefixIsComplete:
+    """R2-review-round-2 SHOULD-FIX 2: the cross-process corrupt-store prefix is COMPLETE.
+
+    ``_apply_outcome``'s remediation WARN keys on
+    ``error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX)`` — a STRING coupling
+    across the spawn boundary, since a worker serialises its caught exception as
+    ``f"{type(exc).__name__}: {exc}"`` and the exception OBJECT never crosses the
+    pickle boundary. The exact ``"ResultsStoreSchemaError: "`` prefix is a COMPLETE
+    discriminator ONLY while ``ResultsStoreSchemaError`` has no subclasses: a
+    subclass would serialise under its OWN ``__name__`` and SILENTLY drop the
+    heal-instruction WARN. This pin fails loudly the moment such a subclass is
+    introduced (forcing either a widened discriminator or a conscious decision).
+    """
+
+    def test_results_store_schema_error_has_no_subclasses(self) -> None:
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        assert ResultsStoreSchemaError.__subclasses__() == [], (
+            "ResultsStoreSchemaError gained a subclass — the parallel-lane "
+            "startswith(_STORE_CORRUPT_ERROR_PREFIX) discriminator "
+            "(sweep_parallel._apply_outcome) would silently drop the DB-02 "
+            "remediation WARN for it; widen the prefix match or split the class."
+        )
+
+    def test_prefix_matches_the_worker_serialisation_shape(self) -> None:
+        """The prefix EXACTLY matches ``f"{type(exc).__name__}: "`` for the class."""
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        exc = ResultsStoreSchemaError("unreadable results store at /x: boom")
+        serialised = f"{type(exc).__name__}: {exc}"
+        assert serialised.startswith(mod._STORE_CORRUPT_ERROR_PREFIX)
+        assert mod._STORE_CORRUPT_ERROR_PREFIX == "ResultsStoreSchemaError: "
+
+
+class TestParallelCooperativeCancel:
+    """The parallel driver's dispatch-gate cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001).
+
+    On a cancel request the driver STOPS DISPATCHING but DRAINS every in-flight
+    tuple to its durable boundary, so the checkpoint holds the contiguous clean
+    prefix and a resume behaves EXACTLY like a resume after a graceful stop —
+    the resumed tree is byte-identical to an uninterrupted control run.
+    """
+
+    def test_none_probe_run_has_no_cancelled_action(self, tmp_path: Path) -> None:
+        """should_stop=None (every legacy caller): no CANCELLED action, normal complete."""
+        grid = _grid()
+        _run_parallel(tmp_path, grid, workers=2)
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert "SUPERVISOR_CANCELLED" not in actions
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+
+    def test_wired_but_never_firing_probe_completes(self, tmp_path: Path) -> None:
+        """A wired probe that always reads False is a normal COMPLETE (the False arm)."""
+        grid = _grid()
+        out = tmp_path / "out"
+        probes: list[int] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: probes.append(1) or False,
+            )
+        assert summary.cancelled is False
+        assert probes  # the probe was consulted
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert actions[-1] == "SUPERVISOR_COMPLETE"
+        assert "SUPERVISOR_CANCELLED" not in actions
+
+    def test_cancel_immediately_runs_nothing(self, tmp_path: Path) -> None:
+        """A pre-armed cancel dispatches ZERO tuples and returns cancelled=True."""
+        grid = _grid()
+        out = tmp_path / "out"
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: True,
+            )
+            assert summary.cancelled is True
+            assert summary.tuples_run == 0
+            assert guards.checkpoint.next_index == 0
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert actions[-1] == "SUPERVISOR_CANCELLED"
+        assert "SUPERVISOR_COMPLETE" not in actions
+
+    def test_cancel_drains_then_resume_equals_uninterrupted(self, tmp_path: Path) -> None:
+        """THE CORE GUARANTEE (parallel): cancel drains to a clean checkpoint; resume ≡ control.
+
+        The probe fires after the first outer-iteration dispatch, so any in-flight
+        tuples are DRAINED (their durable store writes land + parent-side apply
+        runs), the checkpoint holds exactly the contiguous clean prefix
+        (next_index == tuples_run), and a fresh-object resume completes the grid
+        to a byte-identical tree vs a never-cancelled control run.
+        """
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+
+        # ── Arm A: cancel after the first dispatch, then RESUME ──
+        a = tmp_path / "a"
+        a.mkdir()
+        calls: list[int] = []
+        with (
+            AuditWriter.open(a / "ingest.jsonl") as ingest,
+            _guards(a, grid) as guards,
+        ):
+            first = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=a / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: bool(calls.append(1) is None and len(calls) >= 2),
+            )
+        assert first.cancelled is True
+        # The cancel landed MID-grid (fix round 4 — the old `tuples_run <= total`
+        # was vacuously true, so a future dispatch-bound change could silently
+        # degenerate this into a control-vs-control comparison): some tuples ran
+        # BEFORE the stop, and at least one was left for the resume. Verified
+        # valid today — 4 tuples, workers=2 → pool_size=1, max_inflight=2, the
+        # probe fires on outer iteration 2 with 2/4 run.
+        assert 0 < first.tuples_run < total
+        # The contiguous clean prefix: every drained tuple was checkpointed.
+        # Resume with fresh objects over the SAME durable files (a process restart).
+        with (
+            AuditWriter.open(a / "ingest.jsonl", resume=True) as ing2,
+            SweepAuditWriter.open(a / "sup.jsonl", resume=True) as sup2,
+            SweepCache.open(a / "cache", bloom_capacity=10_000) as cache2,
+        ):
+            ckpt2 = SweepCheckpointStore(
+                path=a / "ckpt.json",
+                sweep_id=grid_identity(grid),
+                total_combos=total,
+            )
+            guards2 = SweepGuards(
+                audit=sup2,
+                progress=SweepProgress(),
+                checkpoint=ckpt2,
+                cache=cache2,
+                watchdog=SweepWatchdog(),
+            )
+            resumed = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=a / "out",
+                ingest_audit=ing2,
+                guards=guards2,
+                workers=2,
+            )
+        assert resumed.cancelled is False
+
+        # ── Arm B: the uninterrupted control run ──
+        b = tmp_path / "b"
+        b.mkdir()
+        with (
+            AuditWriter.open(b / "ingest.jsonl") as c_ing,
+            _guards(b, grid) as c_guards,
+        ):
+            control = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=b / "out",
+                ingest_audit=c_ing,
+                guards=c_guards,
+                workers=2,
+            )
+        assert control.cancelled is False
+
+        # THE BYTES: cancelled+resumed tree == uninterrupted tree, file for file.
+        assert _tree(a / "out") == _tree(b / "out")
+
+
+class TestParallelOnProgress:
+    """The ``on_progress`` seam — the sequential seam's parallel twin.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001 review fold (fails-before): ``run_parallel_grid``
+    took NO progress hook, so ``cmd_sweep_all``'s parallel arm never published the
+    ``/api/v1/sweep-progress`` file bridge — the dashboard's Stop button (keyed on
+    the bridge's ``running``) never showed on the flagship multi-day parallel
+    sweep. FOLD RECONCILE (#1445 run-core G3 exact-count law WINS): a CLEAN run
+    ticks EXACTLY once per applied slot — no leading ``start`` tick (the
+    run-core's G4 reset-at-launch writes the ``running=True`` bridge baseline at
+    core enter) and no trailing ``finish`` tick (``cmd_sweep_all`` publishes the
+    ``done`` snapshot after the driver returns). The in-driver ``cancelled`` /
+    ``error`` terminals — the cancel semantics this DEC actually adds — stand.
+    """
+
+    def test_clean_run_ticks_exactly_once_per_applied_slot(self, tmp_path: Path) -> None:
+        grid = _grid()  # 1 instrument × 1 tf × 2 dirs × 2 k = 4 tuples
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                on_progress=snaps.append,
+            )
+        assert summary.cancelled is False
+        total = count_sweep_tuples(grid)
+        # The #1445 G3 exact-count law: one tick per applied slot — never a
+        # leading evaluated=0 start tick, never a duplicated finish terminal.
+        assert len(snaps) == total
+        assert [snap.evaluated for snap in snaps] == list(range(1, total + 1))
+        for snap in snaps:
+            assert snap.state == "running"
+            assert snap.running is True
+            assert snap.enumerated == total
+
+    def test_streams_cancelled_terminal(self, tmp_path: Path) -> None:
+        grid = _grid()
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                should_stop=lambda: True,  # cancel at the FIRST dispatch gate
+                on_progress=snaps.append,
+            )
+        assert summary.cancelled is True
+        assert snaps, "the cancelled terminal must publish even on an immediate cancel"
+        assert snaps[-1].state == "cancelled"
+        assert snaps[-1].running is False
+
+    def test_streams_error_terminal_on_abort(self, tmp_path: Path) -> None:
+        grid = _grid()
+        snaps: list[Any] = []
+
+        def _raising_bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+            raise RuntimeError("simulated parent-side bars_for failure")
+
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            pytest.raises(RuntimeError, match="simulated parent-side bars_for failure"),
+        ):
+            mod.run_parallel_grid(
+                grid,
+                bars_for=_raising_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                on_progress=snaps.append,
+            )
+        # The bridge receives the honest ERROR terminal — never a frozen
+        # last-running tick (the phantom-live class the staleness decay bounds).
+        assert snaps, "the error terminal must publish even on a pre-dispatch abort"
+        assert snaps[-1].state == "error"
+        assert snaps[-1].running is False
+
+    def test_cache_skip_prefix_batches_publishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resumed/cached prefix publishes O(1) per drain, NOT once per skipped tuple.
+
+        Fix round 4 (fails-before): `_advance` → `_publish_progress` fired one
+        fsync'd bridge write PER parent-synchronous skip apply, so a
+        resume/cache-skip storm over a big grid wrote the bridge file once per
+        skipped tuple in a tight loop — contradicting the sequential arm's
+        explicit single-publish resume batch. A fully-cached second run must now
+        publish at most a couple of end-of-drain flushes (with per-tuple
+        publishes this run emits total = 4 snapshots; the start/finish ticks
+        were removed by the #1445 G3 exact-count fold reconcile), and the LAST
+        snapshot still carries the FULL cumulative skip count (no tick is
+        lost — only the write cadence is batched).
+        """
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the publish-batching cadence over cache SKIPS is what this
+        # test pins; guard-ON behaviour is pinned in
+        # test_engine_sweep_parallel_store_guard.py (merge-fold adaptation, the
+        # test_cache_skip_short_circuits_a_completed_tuple idiom).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
+        grid = _grid()  # 4 tuples
+        total = count_sweep_tuples(grid)
+        # First run populates the cache + results (no hook needed).
+        _run_parallel(tmp_path / "first", grid, workers=3)
+        # Second run against the SHARED cache dir: every tuple cache-skips.
+        snaps: list[Any] = []
+        with (
+            AuditWriter.open(tmp_path / "i2.jsonl") as ing,
+            SweepAuditWriter.open(tmp_path / "s2.jsonl") as sup,
+            SweepCache.open(tmp_path / "first" / "cache", bloom_capacity=10_000) as cache,
+        ):
+            ckpt = SweepCheckpointStore(
+                path=tmp_path / "ck2.json",
+                sweep_id=grid_identity(grid),
+                total_combos=total,
+            )
+            guards = SweepGuards(
+                audit=sup,
+                progress=SweepProgress(),
+                checkpoint=ckpt,
+                cache=cache,
+                watchdog=SweepWatchdog(),
+            )
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out2",
+                ingest_audit=ing,
+                guards=guards,
+                workers=3,
+                on_progress=snaps.append,
+            )
+        assert summary.skipped_cache == total
+        # THE TEETH: strictly fewer publishes than one-per-skipped-tuple (the
+        # pre-batching cadence was exactly total), and O(1) per drain — with
+        # workers=3 (pool_size=2, heap_cap=4) today's driver drains the whole
+        # 4-tuple skip prefix in one pass: ONE flush.
+        assert snaps, "the batched drain flush must publish the cumulative skips"
+        assert len(snaps) < total
+        assert len(snaps) <= 2
+        # Nothing is lost: the batched flush carries the cumulative skip count.
+        assert snaps[-1].state == "running"
+        assert snaps[-1].skipped == total
+
+    def test_default_none_publishes_nothing(self, tmp_path: Path) -> None:
+        """``on_progress=None`` (every pre-existing caller) — byte-identical no-op."""
+        grid = _grid()
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+        assert summary.cancelled is False
+
+    def test_parallel_run_writes_sweep_progress_file(self, tmp_path: Path) -> None:
+        # Integration (merge-fold adaptation, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001
+        # ⇄ DEC-JOB-COOPERATIVE-CANCEL-001): wiring the REAL ``publish_progress``
+        # bridge as the hook, a PARALLEL run writes the dashboard's
+        # ``sweep-progress.json`` per applied tuple; under the #1445 G3
+        # exact-count fold the driver deliberately publishes NO trailing finish
+        # tick — the DONE terminal is published by ``cmd_sweep_all``'s parallel
+        # arm right after the driver returns (mirrored here), so the bridge
+        # still lands on a terminal DONE snapshot — the G3 gap stays closed on
+        # the parallel path.
+        from brutex.engine.sweep_supervisor import publish_progress, read_progress
+
+        grid = _grid()
+        progress_path = tmp_path / "progress" / "sweep-progress.json"
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+                on_progress=lambda snap: publish_progress(progress_path, snap),
+            )
+            assert progress_path.exists()
+            # In-driver ticks alone leave the bridge mid-run (no finish tick).
+            assert read_progress(progress_path)["state"] == "running"
+            # The production call-site publish (cmd_sweep_all's parallel arm):
+            # progress.finish() already ran in-driver, so ONE post-return
+            # publish carries the DONE terminal to the bridge.
+            assert summary.cancelled is False
+            publish_progress(progress_path, guards.progress.snapshot())
+        assert read_progress(progress_path)["state"] == "done"
+
+    def test_raising_hook_is_fenced_and_the_run_completes(self, tmp_path: Path) -> None:
+        # G11: a progress hook that ALWAYS raises (a disk-full / read-only-mount
+        # publish) never aborts the multi-day sweep — swallowed + WARN-logged,
+        # the grid still finishes and the checkpoint advances.
+        grid = _grid()
+        out = tmp_path / "out"
+
+        def _boom(_snap: Any) -> None:
+            raise OSError("read-only file system")
+
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            capture_logs() as logs,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+                on_progress=_boom,
+            )
+            assert guards.checkpoint.next_index > 0
+        assert summary.tuples_run > 0
+        assert any(e["event"] == "sweep.progress.publish_failed" for e in logs)
+
+
+class TestParallelCorruptCheckpointResume:
+    """G12: the parallel driver quarantines a corrupt checkpoint + starts fresh."""
+
+    def test_corrupt_checkpoint_resume_starts_fresh_and_completes(self, tmp_path: Path) -> None:
+        grid = _grid()
+        # Plant a genuinely corrupt resume checkpoint at the store's path.
+        (tmp_path / "ckpt.json").write_text("{corrupt-parallel-resume", encoding="utf-8")
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            capture_logs() as logs,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+            )
+            assert guards.checkpoint.next_index > 0
+        assert summary.skipped_resume == 0  # fresh start — nothing resumed
+        assert summary.tuples_run > 0
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+        assert list(tmp_path.glob("ckpt.json.corrupt-*"))  # forensic quarantine kept

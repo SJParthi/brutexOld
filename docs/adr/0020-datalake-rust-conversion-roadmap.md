@@ -295,6 +295,26 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
    deliberately NOT wired into run identity) and BOTH sit downstream of
    writer output — which is why the burn-in gate ships the ORACLE value on
    any mismatch and autoreverts.
+5. **FACADE NO-CYCLE LAW (appended 2026-07-17, caught on PR #1628 /
+   DEC-DATA-RUST-PURELAW-001).** GOAL: the facade↔module import graph is
+   ACYCLIC, mechanically pinned (an AST leaf-import test and/or
+   fresh-interpreter import-order pins). TWO compliant shapes: **(a)**
+   facade→module one-directional — any back-reference from the module is a
+   type-import under `if TYPE_CHECKING:` only; **(b)** module→facade — the
+   module imports the facade at module scope and the facade is a PURE
+   INJECTION-ONLY LEAF that imports its routed module NOWHERE (not even
+   under `TYPE_CHECKING` — that shape still trips CodeQL's module-level
+   cyclic-import query): the module passes its oracle callables/constructor
+   at call-time and any back-typing goes through a local structural
+   Protocol, AST-pinned so the import can never return. Reference
+   implementations: shape (b) = the `brutex/data/fno_symbol_rust.py` seam
+   post-fix (`SymbolParts` structural Protocol + the injected
+   `python_law`/`strike_law`/`build_parts` triple + the fresh-interpreter
+   import-order pins and AST source pin in
+   `tests/unit/test_fno_symbol_rust.py`); shape (b)-style precedent = the
+   T35 brutex-core facades. Rationale: a module-scope import cycle passes
+   local tests (import order happens to be favourable under pytest) but
+   trips CodeQL and breaks import-order robustness in fresh interpreters.
 
 ## 8. Consequences
 
@@ -443,7 +463,7 @@ for Wave C per §3). Flag OFF (the default) is byte- and
 call-graph-identical, bomb-spy-pinned; the default-ON flip needs its own
 DEC.
 
-## 12. Wave-D shipped surface (2026-07-19 — appended when the Wave-D lane completed; DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1954)
+## 12. Wave-D shipped surface (2026-07-19 — appended when the Wave-D lane completed; DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1969)
 
 The four Wave-D convertible rows are **DONE — and past the roadmap's own
 end state**: `timeframe_materialize` (row 16), `lake_heal` (row 7),

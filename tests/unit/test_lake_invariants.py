@@ -18,7 +18,10 @@ touched), and every ``lake.invariant.*`` log event's fields.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import os
+import signal
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -255,6 +258,29 @@ def _option_key_frame(rows: Sequence[tuple[str | None, datetime | None]]) -> pl.
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
     return [e for e in logs if e["event"] == name]
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 10) -> Generator[None]:
+    """Fail LOUDLY if the scan blocks — the fails-before shape is a FIFO hang.
+
+    The house SIGALRM idiom (the #1614 round-6 / #1896 precedent): a planted
+    FIFO previously wedged the scan FOREVER in C-level ``fifo_open`` (not even
+    SIGALRM-interruptible once blocked in the open(2)), so the watchdog's job
+    is to convert a regression back to that shape into a loud test failure
+    instead of a hung suite.
+    """
+
+    def _boom(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"scan blocked > {seconds}s — the planted-inode hang is back")
+
+    previous = signal.signal(signal.SIGALRM, _boom)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _series(values: Sequence[datetime | None]) -> pl.Series:
@@ -871,6 +897,61 @@ class TestOptionsTree:
         assert report.option_files_scanned == 0
         assert report.option_files_skipped == 1
         assert len(_events(logs, "lake.invariant.scan_skip")) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Planted-FIFO scan survival (DEC-LAKE-READ-INODE-GUARD-001 fix round)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPlantedFifoScanSurvival:
+    """SCAN-LEVEL planted-FIFO regressions — the tests that would have caught
+    the residual hang (DEC-LAKE-READ-INODE-GUARD-001 fix round, MIGRATION.md
+    #1896).
+
+    The Phase-1 guard covered the PRIMARY read (``_read_key_columns`` rides
+    ``read_parquet_regular``), but the except-arm DIAGNOSTIC
+    (``_missing_columns_reason``) re-opened the SAME path via a bare
+    ``pl.read_parquet_schema(path)`` — so a FIFO at the canonical partition
+    depth passed the loop's parse/symlink gates, the guard raised fast, and
+    the re-probe then wedged the WHOLE scan forever in C-level ``fifo_open``
+    (SIGKILL-only). Both scan loops (bars + options) reach that arm; each
+    case here drives the FULL ``scan_lake_invariants`` over a planted FIFO
+    under the hang watchdog and pins the honest degrade: the scan COMPLETES,
+    the FIFO is a COUNTED skip with ONE ``scan_skip`` event, healthy sibling
+    files still scan, and NO finding is fabricated for the FIFO.
+    """
+
+    def test_fifo_bars_partition_scan_completes_counted(self, tmp_path: Path) -> None:
+        _write_bars(tmp_path, [_bar(_ts(1))])  # healthy NIFTY sibling
+        fifo = _dest(tmp_path, symbol="BANKNIFTY")
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(fifo)
+        with _hang_watchdog(), capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 1  # the healthy NIFTY file
+        assert report.files_skipped == 1  # the FIFO — counted, never read
+        assert report.findings == ()  # nothing fabricated for the FIFO
+        skips = _events(logs, "lake.invariant.scan_skip")
+        assert len(skips) == 1
+        assert "BANKNIFTY" in str(skips[0]["path"])
+
+    def test_fifo_options_partition_scan_completes_counted(self, tmp_path: Path) -> None:
+        healthy = tmp_path / "options" / "SERIES" / "2024-06.parquet"
+        _plant_option_raw(healthy, [("CE", _ts(1))])
+        fifo_dir = tmp_path / "options" / "SERIES2"
+        fifo_dir.mkdir(parents=True)
+        fifo = fifo_dir / "2024-06.parquet"
+        os.mkfifo(fifo)
+        with _hang_watchdog(), capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path, include_options=True)
+        assert report.option_files_scanned == 1  # the healthy SERIES file
+        assert report.option_files_skipped == 1  # the FIFO — counted, never read
+        assert report.findings == ()  # nothing fabricated for the FIFO
+        skips = _events(logs, "lake.invariant.scan_skip")
+        assert len(skips) == 1
+        # The options-tree skip path rides repr() (the round-8 log-injection fold).
+        assert skips[0]["path"] == repr(str(fifo))
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1508,8 +1589,19 @@ class TestOptionForeignScan:
         for skip in skips:
             error = skip["error"]
             assert isinstance(error, str)
+            # DEC-LAKE-READ-INODE-GUARD-001: the targeted sibling read now
+            # rides the fd-validated `read_parquet_regular` seam — polars is
+            # handed the OPEN handle, so the vendor-influenceable ESC/newline
+            # path never appears in its error message AT ALL (a strictly
+            # STRONGER property than the round-17 repr-escaped embed the old
+            # `assert "\\x1b" in error` positive pin asserted). The no-raw
+            # control-char law keeps its teeth verbatim.
             assert "\x1b" not in error
             assert "\n" not in error
+            # W-6a merge note: main's repr()-wrapped-prefix pin is superseded
+            # on the Wave-D arm — the crate error embeds NO path text at all
+            # (the strictly stronger property asserted above), so there is no
+            # repr-wrapped leading quote to pin.
 
 
 class TestOptionKeyDtypeGate:

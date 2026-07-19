@@ -382,6 +382,10 @@ pub fn read_1m_impl(
 
     let mut frames: Vec<DataFrame> = Vec::with_capacity(paths.len());
     for path in &paths {
+        // Inode gate BEFORE the open (DEC-LAKE-READ-INODE-GUARD-001 on the
+        // Wave-D arm): a planted FIFO otherwise blocks forever in `open(2)`.
+        super::ensure_regular_file(std::path::Path::new(path))
+            .map_err(|reason| polars_err!(ComputeError: "cannot open {}: {}", path, reason))?;
         let file = std::fs::File::open(path)
             .map_err(|err| polars_err!(ComputeError: "cannot open {}: {}", path, err))?;
         frames.push(ParquetReader::new(file).finish()?);

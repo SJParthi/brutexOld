@@ -160,7 +160,7 @@ tree-state equality via a `relpath → sha256` map over both healed lakes
   shapes — series-dir/root symlinks, dangling links — have deliberately
   unpinned counter semantics here; the finding-set equality is the tooth).
 
-## 9. Completion note (2026-07-19 — DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1954)
+## 9. Completion note (2026-07-19 — DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1969)
 
 The readiness record this runbook exists for is SATISFIED: the Wave-D
 conversion (`claude/rust-lake-waved-001`) bound the Rust scan as `impl_b`

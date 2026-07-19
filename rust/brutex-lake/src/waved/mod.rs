@@ -40,6 +40,27 @@ pub mod read;
 pub mod reconcile;
 pub mod scan;
 
+/// Refuse a NON-REGULAR inode BEFORE any `open(2)` — the crate-side
+/// DEC-LAKE-READ-INODE-GUARD-001 law (merged onto the Wave-D arm at the
+/// lap-8 lake-guards fold): opening a planted FIFO read-only blocks in
+/// C-level `fifo_open` until a writer appears (not even SIGALRM reaches
+/// it), so every per-file read gate must stat FIRST and error on anything
+/// that is not a regular file. `std::fs::metadata` follows symlinks, so a
+/// symlink→FIFO resolves to the FIFO's file type and is refused too; the
+/// stat→open TOCTOU window is the same disclosed #1594-envelope residual
+/// the Python guard carried. A stat FAILURE is returned verbatim (the
+/// caller's existing io-fault classification owns it).
+pub fn ensure_regular_file(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(()),
+        Ok(meta) => Err(format!(
+            "not a regular file (file type {:?})",
+            meta.file_type()
+        )),
+        Err(err) => Err(format!("cannot stat: {err}")),
+    }
+}
+
 /// One per-session bad-tick WARN record the Python shell replays through
 /// `brutex.data.bad_tick.emit_bad_tick_warn` (the SINGLE emission seam —
 /// the `rust/brutex-feed` `scan_bars` precedent): the crate returns warn

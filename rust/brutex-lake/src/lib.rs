@@ -129,6 +129,16 @@ pub mod window_ledger;
 // `brutex/data/lake_rust_waved.py`): the heal/scan/read surface, one module
 // file per conversion step under src/waved/. ADDITIVE (§4.1 merge law).
 pub mod waved;
+// ADR-0020 G10 CONVERT — the window-ledger parquet RENDER
+// (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, MIGRATION.md #1918; row-equivalence
+// standard, never bytes — the #1917 spike record). ADDITIVE registration.
+pub mod window_ledger_render;
+// SLICE T24 PR-1 — the cold data-integrity detector pure laws
+// (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948): the
+// raw-integrity blake2b digest + the interior bar-less run walker + the
+// partial-window truncation verdict. ADDITIVE registration (§4.1 sibling
+// merge law); own module file.
+pub mod detectors;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -246,7 +256,7 @@ pub const DEFAULTS_ROW_GROUP_SPLIT: usize = 122_880;
 /// At every version bump the lockstep ritual re-derives it by hand
 /// (docs/runbooks/lake-rust-render-lockstep.md §2) and the options parity
 /// corpus is the mechanical drift detector.
-fn defaults_writer_options() -> ParquetWriteOptions {
+pub(crate) fn defaults_writer_options() -> ParquetWriteOptions {
     let mut statistics = StatisticsOptions::empty();
     statistics.min_value = true;
     statistics.max_value = true;
@@ -374,7 +384,7 @@ fn libzstd_version_string() -> String {
 /// constructs the `PyBytes` result back UNDER the GIL inside its OWN panic
 /// guard (review-round fold: a result-buffer allocation panic previously
 /// escaped as `pyo3_runtime.PanicException`).
-fn render_at_ffi_boundary(
+pub(crate) fn render_at_ffi_boundary(
     py: Python<'_>,
     ipc_bytes: &[u8],
     render: fn(&[u8]) -> PolarsResult<Vec<u8>>,
@@ -602,6 +612,30 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // cores are deleted; per-finding/per-file isolation is crate-owned).
     // Appended AFTER every earlier waved registration (§4.1 additive law).
     m.add_function(wrap_pyfunction!(waved::heal::waved_endgame_witness, m)?)?;
+    // ADR-0020 G10 CONVERT (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001) — the
+    // window-ledger parquet render; the facade
+    // `brutex/data/lake_rust_ledger_render.py` engages it behind the
+    // default-OFF BRUTEX_LAKE_RUST_LEDGER_RENDER with a SYMBOL handshake on
+    // this name (a pre-G10 wheel latches `crate_stale`) PLUS the polars
+    // version guard (the render IS polars — unlike the G8 pure laws).
+    // Appended additively, never reordering the siblings (§4.1).
+    m.add_function(wrap_pyfunction!(
+        window_ledger_render::render_ledger_parquet_from_ipc,
+        m
+    )?)?;
+    // SLICE T24 PR-1 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001) — the detector
+    // pure laws; the facade `brutex/data/detectors_rust.py` engages them
+    // behind three default-OFF flags via the all-or-nothing SYMBOL
+    // handshake over exactly these three names (polars-free laws — never
+    // the polars version guard). Appended AFTER the G8 pair, never
+    // reordering it (§4.1 — the concurrent-sibling additive-registration
+    // merge law).
+    m.add_function(wrap_pyfunction!(detectors::raw_integrity_blake2b_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(detectors::interior_barless_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        detectors::classify_partial_window_verdict,
+        m
+    )?)?;
     Ok(())
 }
 

@@ -1,0 +1,10 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-STRATEGIES-RUST-COMBO-001; the brutex_feed / fno_math / trading_core R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_strategies._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-strategies surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is NOT caught by this handshake — the catches for that class are the baked `__source_digest__` (FRAMING v1, DEC-RUST-SOURCE-DIGEST-TWIN-001), the facade's 16-call burn-in, the cargo escaper matrix + shared-literal cross-crate corpus, the frozen cross-language payload golden and the wheel-ON hypothesis differential (the scan law's detect-half and the escaper's non-ASCII branches get zero runtime burn-in coverage — disclosed; wheel-ON differential legs are named flip-DEC preconditions).",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "SOURCE_DIGEST",
+    "__version__",
+    "canonical_json",
+    "first_unit_separator"
+  ]
+}

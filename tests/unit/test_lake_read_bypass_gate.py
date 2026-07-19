@@ -5,11 +5,16 @@ dedup gate (:mod:`brutex.data.lake_read`). This grep-based gate (the house
 banned-pattern-scan style, ``scripts/ci/scan-banned-patterns.sh``) makes
 bypassing it STRUCTURALLY impossible for every parquet-read spelling the
 repo's stack exposes: polars ``read_parquet(`` / ``scan_parquet(``, DuckDB-SQL
-``read_parquet(`` / the legacy alias ``parquet_scan(``, and pyarrow
-``read_table(`` / ``ParquetFile(``. A call site appearing in a file OUTSIDE
-the explicit allowlist fails CI, so the author must either route through
-:mod:`brutex.data.lake_read` or consciously extend the allowlist (with a dedup
-wiring + a reason) in the same PR — never silently.
+``read_parquet(`` / the legacy alias ``parquet_scan(``, pyarrow
+``read_table(`` / ``ParquetFile(``, and the fd-guarded seam spellings
+``read_parquet_regular(`` / ``read_parquet_glob_regular(`` (the
+DEC-LAKE-READ-INODE-GUARD-001 helpers in :mod:`brutex.data.guarded_read`,
+which perform the raw polars read on behalf of their callers — the caller
+file must therefore still carry its own allowlist entry, preserving the
+per-file accountability this gate exists for). A call site appearing in a
+file OUTSIDE the explicit allowlist fails CI, so the author must either
+route through :mod:`brutex.data.lake_read` or consciously extend the
+allowlist (with a dedup wiring + a reason) in the same PR — never silently.
 
 The allowlist is FILE-level with a mandatory reason per entry; a stale entry
 (file no longer matches) ALSO fails, so the list can never rot.
@@ -19,8 +24,13 @@ through an exotic indirection (a bare-path DuckDB ``FROM 'x.parquet'`` string
 literal, a pandas ``pd.read_parquet`` (pandas is banned brutex/-wide by
 scan-banned-patterns.sh check #7), or an aliased/getattr-built call) cannot be caught by
 grep; those spellings are ALSO banned by this decision and are left to
-review. The five function names above cover every reader the repo actually
-uses (verified by the sweep that built this allowlist).
+review. The function names above cover every reader the repo actually
+uses (verified by the sweep that built this allowlist + the
+DEC-LAKE-READ-INODE-GUARD-001 re-sweep that added the guarded spellings).
+The SCHEMA-ONLY probes — ``read_parquet_schema(`` and its guarded twin
+``read_parquet_schema_regular(`` — are deliberately OUTSIDE the gate
+(the pre-existing envelope, now stated): they read Parquet METADATA only
+and can never serve a bar row, so dedup identity does not apply.
 """
 
 from __future__ import annotations
@@ -32,7 +42,8 @@ from typing import Final
 #: The banned raw-read pattern — every polars / DuckDB-SQL / pyarrow parquet
 #: read spelling the repo's stack exposes (see the module-docstring envelope).
 _RAW_READ_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b(?:read_parquet|scan_parquet|parquet_scan|read_table|ParquetFile)\s*\("
+    r"\b(?:read_parquet_glob_regular|read_parquet_regular|read_parquet"
+    r"|scan_parquet_regular|scan_parquet|parquet_scan|read_table|ParquetFile)\s*\("
 )
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -42,6 +53,14 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 #: gate in the same function, or a documented non-bar-lake / write-side use).
 ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/lake_read.py": "the chokepoint itself (docstrings + SQL fragments)",
+    "brutex/data/guarded_read.py": (
+        "the COMMON fd-validated read SEAM (DEC-LAKE-READ-INODE-GUARD-001) — "
+        "read_parquet_regular/read_parquet_glob_regular perform the ONE raw "
+        "pl.read_parquet on behalf of their callers (polars is handed the "
+        "validated OPEN handle); the seam serves whatever its caller's dedup "
+        "wiring dictates, and every CALLER file still needs its own entry "
+        "here because the guarded spellings are themselves in _RAW_READ_RE"
+    ),
     "brutex/data/parquet_writer.py": (
         "write-side merge read; keep-first collapse + the pq.ParquetFile footer "
         "row-count probe (metadata-only, no bar rows served) — DEC-LAKE-WRITE-UNIQUE-001"
@@ -111,6 +130,12 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/engine/resilience_streaks.py": (
+        "reads its OWN stamp-validated <stem>.resilience.parquet sidecar (+ the "
+        "run_id-keyed trades sidecar for the adoption backfill) — run_id-keyed "
+        "engine artifacts under sweep_runs/, not lake bars; dedup identity does "
+        "not apply (DEC-SWEEP-RESULTS-DEPTH-001, losing-streak resilience)"
+    ),
     "brutex/dashboard/oneclick_artifacts.py": (
         "display-zone read of the results-depth EQUITY sidecar "
         "(<stem>.equity.parquet under sweep_runs/, run_id-keyed — the "
@@ -130,8 +155,38 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
     ),
+    "brutex/data/lake_rust_ledger_render.py": (
+        "burn-in ROW-EQUIVALENCE readback — pq.read_table over the IN-MEMORY "
+        "just-rendered WINDOW-LEDGER parquet bytes (the rust arm vs the pyarrow "
+        "oracle, io.BytesIO — never a lake file, never bar/options rows); the "
+        "window_ledger_store sidecar class one seam over "
+        "(DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001)"
+    ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"
+    ),
+    "brutex/acceptance/independent.py": (
+        "the ONE AST-FENCED independent movers-truth oracle "
+        "(DEC-OPERATOR-ACCEPTANCE-VERIFY-001, the DEC-SURFACE-TRIAL-001 "
+        "precedent): every compared /movers cell is re-derived from the RAW "
+        "month parquet with glob=False + hand-rolled math (keep-first dedup "
+        "re-stated as a LAW, hand IST/bucket-anchor/%CHNG). Routing it through "
+        "lake_read would import a production seam and DEFEAT the independence "
+        "guarantee the fence (test_acceptance_independent_fence.py — no "
+        "brutex.* callable import) exists to enforce"
+    ),
+    "brutex/acceptance/sampling.py": (
+        "wired: month_bounded_read feeds the raw glob=False read (metachar-named "
+        "dir literal, #1594-R15) into dedup_bars_frame IMMEDIATELY, exactly as "
+        "the tf_autoderive.read_lake_bars_frame all-months arm does"
+    ),
+    "brutex/acceptance/selftest.py": (
+        "poison-twin builder — surgical read-modify-write on the SYNTHETIC "
+        "self-test twin lake (written with the real production writers) to "
+        "inject duplicate / foreign-month / x10 / pre-open / value poisons the "
+        "checks must DETECT; a dedup-gated read would strip the very duplicate "
+        "row it plants (the teeth-before-trust smoke), never a real-lake read "
+        "(DEC-OPERATOR-ACCEPTANCE-VERIFY-001)"
     ),
 }
 
@@ -177,6 +232,16 @@ class TestLakeReadBypassGate:
         # pyarrow — the reviewer-proved bypass spellings (hostile-review F1)
         assert _RAW_READ_RE.search("pq.read_table(bars_path)")
         assert _RAW_READ_RE.search("pq.ParquetFile(dest)")
+        # the fd-guarded seam spellings (DEC-LAKE-READ-INODE-GUARD-001 /
+        # DEC-LAKE-READ-INODE-GUARD-002) — a caller routing its raw read
+        # through guarded_read stays in-gate
+        assert _RAW_READ_RE.search("read_parquet_regular(path, columns=cols)")
+        assert _RAW_READ_RE.search('read_parquet_glob_regular(base + "/**/*.parquet")')
+        assert _RAW_READ_RE.search('scan_parquet_regular(files, missing_columns="insert")')
+        # the SCHEMA-ONLY probes stay OUTSIDE the gate (metadata, no bar rows
+        # served — the pre-existing pl.read_parquet_schema envelope)
+        assert not _RAW_READ_RE.search("pl.read_parquet_schema(path)")
+        assert not _RAW_READ_RE.search("read_parquet_schema_regular(path)")
         # word boundaries — no false positives on lookalikes
         assert not _RAW_READ_RE.search("a_read_parquet(x)")
         assert not _RAW_READ_RE.search("my_read_table(x)")

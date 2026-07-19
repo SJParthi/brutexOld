@@ -602,6 +602,12 @@ fn parse_partition(
 /// never a glob; a projected-out missing column errors like polars-python's
 /// `ColumnNotFoundError`).
 fn read_columns(path: &Path, columns: &[&str]) -> PolarsResult<DataFrame> {
+    // Inode gate BEFORE the open (DEC-LAKE-READ-INODE-GUARD-001 on the
+    // Wave-D arm): a planted FIFO blocks forever in `open(2)`, so a
+    // non-regular inode must be a fast counted scan_skip, never a hang.
+    super::ensure_regular_file(path).map_err(
+        |reason| polars_err!(ComputeError: "cannot open {}: {}", path.display(), reason),
+    )?;
     let file = std::fs::File::open(path)
         .map_err(|err| polars_err!(ComputeError: "cannot open {}: {}", path.display(), err))?;
     let df = ParquetReader::new(file)
@@ -619,6 +625,9 @@ fn read_columns(path: &Path, columns: &[&str]) -> PolarsResult<DataFrame> {
 /// whether a failed read is the alien missing-column class — the reason
 /// string is BYTE-EXACT (`missing column(s): a, b` in scan-column order).
 fn missing_columns_reason(path: &Path, columns: &[&str]) -> Option<String> {
+    // Same inode gate as `read_columns` — the #1896 residual was exactly
+    // this except-arm DIAGNOSTIC re-opening the refused path.
+    super::ensure_regular_file(path).ok()?;
     let file = std::fs::File::open(path).ok()?;
     let schema = ParquetReader::new(file).schema().ok()?;
     let missing: Vec<&str> = columns

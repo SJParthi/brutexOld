@@ -81,14 +81,15 @@ MUHURAT_EXCLUSION_DATES: frozenset[date] = frozenset({
 
 ---
 
-## 4. NSE/BSE Holiday Calendar 2021-2026
+## 4. NSE/BSE Holiday Calendar 2020-2026
 
-Loaded from a TOML file (`brutex/microstructure/calendar_2021_2026.toml`)
-generated from the official NSE/BSE PDFs. Property P-22 asserts no
-bar timestamp falls on a holiday.
+Hardcoded verified date lists in `brutex/calendars/nse.py`
+(`ALL_HOLIDAYS`, split per exchange), sourced from the official NSE/BSE
+circulars. Property P-22 asserts no bar timestamp falls on a holiday.
 
 | Year | Holidays | Source |
 |---|---|---|
+| 2020 | 12 | NSE official (DEC-CALENDAR-2020-DATA-001; 2 Nov dates tagged UNVERIFIED in-source) |
 | 2021 | 18 | NSE official |
 | 2022 | 16 | NSE official |
 | 2023 | 15 | NSE official |
@@ -96,8 +97,9 @@ bar timestamp falls on a holiday.
 | 2025 | 14 | NSE official |
 | 2026 | TBD (partial year) | NSE official |
 
-The calendar fuzz target (`cargo fuzz` target #4) tests the TOML
-parser against malformed inputs.
+(The original design loaded a `calendar_2021_2026.toml` parsed at
+runtime with a fuzz target; the shipped calendar is the hardcoded,
+test-pinned Python list above — no TOML parser exists.)
 
 ---
 
@@ -110,10 +112,11 @@ NIFTY 50 is reconstituted semi-annually:
 - **September 30** (effective from October first trading day after F&O
   expiry)
 
-In the 2021-05-15 → 2026-05-15 window, there are **~10 reconstitution
-events**. The index series Groww publishes is **chain-linked** through
-these — the level is continuous, no artificial gap from composition
-change.
+In the rolling 2020-01-01 → today window (the data-pull floor
+`GROWW_HISTORY_FLOOR`, DEC-PULL-FLOOR-2020-001, MIGRATION.md #722),
+there are **~2 reconstitution events per year**. The index series Groww
+publishes is **chain-linked** through these — the level is continuous,
+no artificial gap from composition change.
 
 **Treatment:**
 
@@ -141,16 +144,50 @@ NSE/BSE have market-wide and instrument-wide circuit breakers.
 
 ### 7.1 Market-wide (rare; NIFTY 50 ±10%, ±15%, ±20%)
 
-- March 2020 (BEFORE Track 1 window of 2021-05-15+) — known event
-- April 2025 (April 7) — 10% breaker, trading halted 45 min — IN
-  window
+The market-wide breaker framework is SEBI Circular
+SMDRPD/Policy/Cir-37/2001 (2001-06-28) as modified by CIR/MRD/DP/25/2013
+(2013-09-03 — dynamic bands off the previous close, triggered by BSE
+Sensex or Nifty 50, whichever breaches first); canonical exchange page
+nseindia.com/products-services/equity-market-circuit-breakers (verified
+2026-07-11).
 
-**Treatment:** Drop the entire trading day from the dataset. Property
-P-22 asserts no bar timestamp on excluded days.
+- 2020-03-13 — 10% lower-band halt at 09:20 IST (Nifty −10.07% to
+  8,625); 45-min halt + 15-min pre-open call auction; continuous trading
+  resumed 10:20 IST; **normal 15:30 close** (Sensex closed +1,325 at
+  34,103) — IN window (pull floor 2020-01-01, MIGRATION.md #722);
+  annotated in `brutex/calendars/nse.py` `CIRCUIT_HALT_SESSIONS`
+  (verified 2026-07-11:
+  https://www.business-standard.com/article/markets/nifty-hits-lower-circuit-amid-global-sell-off-trading-halted-for-45-mins-120031300188_1.html
+  · https://www.businesstoday.in/markets/stocks/story/sensex-nifty-crash-circuit-breaker-rules-252013-2020-03-13).
+- 2020-03-23 — 10% lower-band halt at 09:58 IST; resumed after the
+  standard 45-min-halt + 15-min-pre-open sequence (~10:58 IST — derived
+  from that sequence, the literal minute is not press-printed); **normal
+  15:30 close** (Sensex −13.15%, Nifty 7,610.25 — the worst-ever
+  single-day fall, recorded at the regular close) — annotated (verified
+  2026-07-11:
+  https://www.business-standard.com/article/markets/sensex-hits-10-lower-circuit-trading-halted-for-45-minutes-120032300237_1.html
+  · https://www.businesstoday.in/markets/market-perspective/story/sensex-hits-circuit-breaker-of-10-trading-halted-on-bse-nse-252823-2020-03-23).
+- April 7, 2025 was a large gap-down day (~−5% intraday worst, normal
+  15:30 close, Nifty closed 22,161.60, −3.24%) — the earlier claim in
+  this document of a market-wide breaker halt that day is **REFUTED**
+  (verified 2026-07-11:
+  https://groww.in/blog/sensex-and-nifty-live-updates-today-april-7-2025
+  · https://www.business-standard.com/markets/news/market-crash-what-are-circuit-filters-for-the-sensex-and-nifty-explained-125040700243_1.html);
+  the market-wide breaker has not triggered since March 2020. Unknown
+  future halt days are discovered by the `prebuild.daily_range_extreme`
+  detector, never asserted.
 
-Halt detection: any bar where the daily range > 9% triggers a manual
-review at ingest. Specific halt dates are added to the calendar
-exclusion list.
+**Treatment (DEC-HALT-DAY-TREATMENT-001): ANNOTATE, never drop.** Stored
+bars are never deleted (house law, DEC-LAKE-HEAL-001 — strictly
+row-removing heals only, never value-editing; the halt-day bars are
+real, well-formed prints). Known halt dates live in
+`brutex/calendars/nse.py` `CIRCUIT_HALT_SESSIONS`; the session-density
+census (`brutex/data/session_density.py`) reads them as
+expected-irregular (INFO, never WARN) and any un-annotated session with
+(high − low) / low ≥ 9% raises `prebuild.daily_range_extreme` for manual
+review at the pipeline prebuild — if a future halt is confirmed by an
+NSE/SEBI circular, its date is ADDED to `CIRCUIT_HALT_SESSIONS` with the
+citation. P-22 remains holidays-only.
 
 ### 7.2 Instrument-wide (intraday)
 
@@ -160,6 +197,37 @@ circuit breakers don't directly affect Track 1 data, but the source
 candle may show an unusually flat 1-min bar where most constituents
 halted. This is rare and acceptable — Track 1 strategies are
 price-action based and a flat bar simply doesn't fire any conditions.
+
+### 7.3 2021-02-24 NSE exchange outage (extended session)
+
+NOT a circuit breaker — a telecom/SDN infrastructure failure
+(DEC-EXTENDED-SESSION-OUTAGE-001). Verified timeline (2026-07-11, SEBI
+press releases:
+https://www.sebi.gov.in/media/press-releases/mar-2021/trading-halt-at-nse-on-february-24-2021_49603.html
+· https://www.sebi.gov.in/media/press-releases/feb-2021/trading-halt-at-nse-on-february-24-2021_49287.html
+· https://taxguru.in/sebi/sebi-clarifies-trading-halt-nse-february-24-2021.html
+· https://www.moneylife.in/article/nse-trading-halt-rbi-says-failure-at-nse-clearing-led-to-outage-on-24th-february/63276.html):
+
+- NSE data feeds stopped updating at **10:08 IST**; NSE halted **F&O at
+  11:40** and the **cash market at 11:43** citing issues with the links
+  with telecom service providers.
+- NSE notified the market at **15:17** that trading would resume; a
+  **15-minute pre-open call auction ran 15:30–15:45**, and **continuous
+  trading resumed at 15:45** (not 15:30 — the corrected timeline).
+- **Trading hours were extended to 17:00 IST at NSE, BSE AND MSEI.** BSE
+  functioned normally all day and traded continuously 09:15–17:00 (so
+  SENSEX has a full extended day), while NSE indices have an interior
+  ~11:40 → 15:45 dead zone with no bars.
+
+**Treatment:** modeled as `brutex/calendars/nse.py` `EXTENDED_SESSIONS`
+(the session HOURS — one (09:15, 17:00) pair, which captures BSE exactly
+and NSE's envelope) + the session-density census annotation (the NSE
+midday hole is a DATA fact, deliberately not calendar-modeled). Real
+15:30–16:59 bars on this date are ADMITTED by the calendar-aware ingest
+session filter; the forced exit that day is **16:50 IST** (the session
+close − 10 min law of `forced_exit_time_for_session` — the same rule
+Muhurat sessions already follow), a sanctioned single-date
+engine-visible delta pinned by fails-before trade-sim tests.
 
 ---
 
