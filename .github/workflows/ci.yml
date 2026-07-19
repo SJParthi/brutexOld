@@ -128,8 +128,9 @@ jobs:
   # ──────────────────────── docs-only paths filter ────────────────────────
   detect-changes:
     # DEC-CI-DOCS-PATHS-FILTER-001: pure-git docs-only diff detection.
-    # docs_only=true ONLY when EVERY changed file is under docs/ or has a
-    # `.md` basename. ANY failure / unknown event / unresolvable SHA /
+    # docs_only=true ONLY when EVERY changed file has a `.md` basename
+    # (markdown-only; non-md files — including docs/ artifacts — run the
+    # full gate set). ANY failure / unknown event / unresolvable SHA /
     # empty diff ⇒ docs_only=false — FAIL CLOSED: the full gate graph runs
     # exactly as today. Anticipated degrade paths exit 0 (a transient git
     # hiccup runs the FULL gates rather than redding the run); an
