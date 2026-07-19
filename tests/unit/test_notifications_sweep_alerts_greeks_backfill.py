@@ -174,6 +174,25 @@ class TestGreeksBackfillComplete:
         # The honest house wording anchors the cancelled-key comment site.
         assert "does NO notifier-side suppression" in source
 
+    def test_cancelled_head_carries_scope_excluded_clause(self) -> None:
+        """The merge-union combination neither side pinned (DEC-JOB-CANCEL-
+        CONTROL-001 × DEC-UNIVERSE-INDEX-ONLY-001, stage-4 NOTE 3): a
+        mid-scan CANCEL with scope exclusions keeps BOTH the ⏹ head AND the
+        emit-on-nonzero scope clause — the clause is head-independent, riding
+        after "bars written" — and the census is honestly PARTIAL (only what
+        the scan saw before the stop; the count is the report's, verbatim)."""
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        report = FakeBackfillReport(enriched=2, planned=5, cancelled=True, scope_excluded=3)
+        assert alerter.greeks_backfill_complete(report) is True
+        (event,) = fake.published
+        assert "⏹ Greeks backfill CANCELLED by operator" in event.message
+        assert event.dedupe_key == f"greeks-backfill:{'a' * 12}:cancelled"
+        assert escape_markdown_v2("scope-excluded=3 (DEC-UNIVERSE-INDEX-ONLY-001)") in event.message
+        # The clause rides the tail (after "bars written"), never the head.
+        message = event.message
+        assert message.index("bars written") < message.index("scope")
+
     def test_cancelled_clauses_still_ride_along(self) -> None:
         """A cancelled run with errored/unfixable contracts keeps those honest
         clauses appended to the ⏹ head (a Stop never hides real failures)."""
