@@ -83,4 +83,4 @@ Binding perf numbers live in EXACTLY two places: **DESIGN_FINAL §9/§9.1**
 ## Audience
 
 Independent cross-container audit: Verifier A / Verifier B + the
-coordinator. Do not merge this branch on the design pack alone.
+coordinator.
