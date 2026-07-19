@@ -19,6 +19,22 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
   the named follow-up ``DEC-RUST-OBSERVABILITY-STAMP-PARSE-003``, and hashlib.sha256
   is already native (streaming a Path into Rust would violate the
   scalars-only FFI discipline).
+* **Laws T2-T6 + T9** (``DEC-RUST-OBSERVABILITY-TRIPWIRES-002``) — the
+  PURE decision cores of ``run_tripwires``'s ``TripwireMonitor``: the D-9
+  count-reconciliation bitmask (T2), the throughput floor/dwell watch
+  (T3), the RSS budget + growth-slope arms (T4a/T4b), the batch
+  NaN/absurd summary screen (T5), the stage-prerequisite membership mask
+  (T6) and the ``normalized_ru_maxrss_bytes`` platform micro-law (T9).
+  The dynamic ``_in_breach`` set NEVER crosses the FFI — every routed
+  tripwire law returns per-key codes from the ONE
+  :data:`TW_NONE`/:data:`TW_CLEAR`/:data:`TW_FIRE` vocabulary and the
+  UNTOUCHED Python ``_edge_fire``/``_clear`` own membership + re-arm; the
+  detail f-strings, ``sorted``, ``repr``, the SUSPECT latch, the RSS
+  probe and every enable/interval/state-existence gate stay Python.
+  These routed fns are TOTAL over ``Exception`` — every degrade path
+  logs its own event and RETURNS the oracle value, so the tripwire
+  observation bodies' I-3 blanket ``except Exception`` can never observe
+  a facade-internal failure (the layering law).
 
 ## The fail-closed layers (in order)
 
@@ -77,7 +93,14 @@ CATCH the ``MemoryError`` — an ``Exception`` subclass — log "… raised; loo
 continues" and keep ticking, identically on both arms; a direct
 ``Watchdog.check_once``/``SLADetector.check_once`` caller outside
 ``MonitorLoop`` sees the raw raise. For law D it propagates out of
-``validate_stage_stamp``/``_parse_stamp`` exactly as today.
+``validate_stage_stamp``/``_parse_stamp`` exactly as today. For the
+tripwire laws T2-T6 driven through ``TripwireMonitor.on_progress``/
+``on_tuple_summary``/``on_stage``, the observation bodies' blanket
+``except Exception`` (the I-3 fail-soft law) CATCHES the re-raised
+``MemoryError`` — an ``Exception`` subclass — and folds it to ONE
+``observe_failed`` WARN, identically on both arms: the OOM-landing law
+INVERTS relative to law A (stated + pinned, the C5 lesson). A direct
+``normalized_ru_maxrss_bytes`` caller (T9) sees the raw raise.
 
 ## Import-edge decision (the LOCAL twins)
 
@@ -128,9 +151,11 @@ through the caller-passed factories (no-consumer-import AST-pinned).
 Expected payoff ≈ 0 — the conversion is for uniformity, not speed. Every
 routed law is nanosecond-scale in Python and the FFI hop is a small
 SLOWDOWN, acceptable because the seams run per monitor tick / per validate
-call (never a hot mask path) and ship DEFAULT-OFF. ONE lane flag covers all
-five laws (task-mandated; a poisoned-crate autorevert latches ALL five
-together — the window_ledger single-latch precedent, wider here). Flag-ON
+call / per reconcile sample (never a hot mask path) and ship DEFAULT-OFF.
+ONE lane flag + ONE handshake now covers all TWELVE laws (task-mandated; a
+stale wheel or a poisoned-crate autorevert latches the tripwire laws AND
+the A-D detector/stamp laws together — the window_ledger single-latch
+precedent, wider again here; disclosed). Flag-ON
 recomposes law A's frozen dataclasses EQUAL but not IDENTICAL to the
 oracle's (no consumer relies on identity; flag-OFF preserves it). The
 warn-once/latch memos are deliberately UNLOCKED check-then-add — the
@@ -148,6 +173,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar, runtime_checkab
 import structlog
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
 _LOG = structlog.get_logger(__name__)
@@ -170,6 +196,20 @@ _LAW_SLA: Final[str] = "sla"
 _LAW_STAMP_SHAPE: Final[str] = "stamp_shape"
 #: The law-D2 (stamp verdict) burn-in budget key.
 _LAW_STAMP_VERDICT: Final[str] = "stamp_verdict"
+#: The law-T2 (count reconciliation) burn-in budget key.
+_LAW_TW_RECONCILE: Final[str] = "tw_reconcile"
+#: The law-T3 (throughput floor/dwell) burn-in budget key.
+_LAW_TW_THROUGHPUT: Final[str] = "tw_throughput"
+#: The law-T4a (memory budget) burn-in budget key.
+_LAW_TW_BUDGET: Final[str] = "tw_budget"
+#: The law-T4b (memory slope) burn-in budget key.
+_LAW_TW_SLOPE: Final[str] = "tw_slope"
+#: The law-T5 (summary NaN/absurd screen) burn-in budget key.
+_LAW_TW_SUMMARY: Final[str] = "tw_summary"
+#: The law-T6 (stage-prereq membership) burn-in budget key.
+_LAW_TW_STAGE: Final[str] = "tw_stage"
+#: The law-T9 (ru_maxrss platform law) burn-in budget key.
+_LAW_TW_RSS: Final[str] = "tw_rss"
 
 #: Flag vocabulary — a LOCAL twin of ``lake_rust_render._TRUTHY``
 #: (equality-pinned by test; module docstring's import-edge decision).
@@ -197,10 +237,21 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
     _LAW_SLA: BURN_IN_SAMPLES,
     _LAW_STAMP_SHAPE: BURN_IN_SAMPLES,
     _LAW_STAMP_VERDICT: BURN_IN_SAMPLES,
+    _LAW_TW_RECONCILE: BURN_IN_SAMPLES,
+    _LAW_TW_THROUGHPUT: BURN_IN_SAMPLES,
+    _LAW_TW_BUDGET: BURN_IN_SAMPLES,
+    _LAW_TW_SLOPE: BURN_IN_SAMPLES,
+    _LAW_TW_SUMMARY: BURN_IN_SAMPLES,
+    _LAW_TW_STAGE: BURN_IN_SAMPLES,
+    _LAW_TW_RSS: BURN_IN_SAMPLES,
 }
 
 #: The crate callables the lane needs — the ALL-OR-NOTHING symbol handshake
-#: surface. A wheel missing any is a pre-lane install (``crate_stale``).
+#: surface. A wheel missing any is a pre-lane install (``crate_stale``) —
+#: including a PRE-002 (0.1.x) wheel that carries the five A-D law fns but
+#: none of the seven tripwire laws: the whole lane (A-D included) degrades
+#: to oracles with one loud WARN naming the rebuild remedy (the widened
+#: single-latch blast radius, disclosed in the module docstring).
 #: ``PanicException`` (a class — callable) is DELIBERATELY part of the
 #: handshake: the panic belt resolves the crate's OWN per-extension panic
 #: class (:func:`_panic_belt_errors`), so a stale pre-fix wheel that lacks
@@ -213,6 +264,13 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "sla_decide",
     "stamp_shape_index",
     "stamp_verdict",
+    "tripwire_reconcile_counts",
+    "tripwire_throughput_watch",
+    "tripwire_memory_budget",
+    "tripwire_memory_slope",
+    "tripwire_summary_classify",
+    "tripwire_stage_missing",
+    "tripwire_ru_maxrss_bytes",
     "PanicException",
 )
 
@@ -252,6 +310,62 @@ _LOOP_TIERS: Final[frozenset[str]] = frozenset({"ok", "warned", "critical"})
 #: token would otherwise crash ``StampVerdict(token)`` with a ValueError the
 #: pure path can never produce.
 _STAMP_VERDICT_TOKENS: Final[frozenset[str]] = frozenset({"ok", "hash_mismatch"})
+
+#: The tripwire per-key "no decision" code — neither fire nor clear
+#: (defined ONCE here, mirrored as crate consts; every tripwire output gate
+#: checks membership — DEC-RUST-OBSERVABILITY-TRIPWIRES-002 §3.7).
+TW_NONE: Final[int] = 0
+
+#: The tripwire per-key CLEAR code — the consumer ``_clear``s (re-arms).
+TW_CLEAR: Final[int] = 1
+
+#: The tripwire per-key FIRE-CANDIDATE code — the consumer ``_edge_fire``s
+#: (the once-per-edge decision stays in the untouched Python edge law).
+TW_FIRE: Final[int] = 2
+
+#: The closed tripwire code vocabulary (output-gate membership).
+_TW_CODES: Final[frozenset[int]] = frozenset({TW_NONE, TW_CLEAR, TW_FIRE})
+
+#: The law-T4a code vocabulary — the budget arm always decides (fire OR
+#: clear; a NONE from the crate is a poisoned install).
+_TW_FIRE_OR_CLEAR: Final[frozenset[int]] = frozenset({TW_CLEAR, TW_FIRE})
+
+#: i64 range gate bounds (exact-type int inputs must fit the crate's i64).
+_I64_MIN: Final[int] = -(2**63)
+
+#: One past i64::MAX (the exclusive upper bound of the int gates).
+_I64_MAX_EXCL: Final[int] = 2**63
+
+#: The dwell-counter input cap — ``counter < i64::MAX`` so the crate's
+#: ``checked_add(1)`` can never hit its Err arm through the facade (the
+#: overflow refusal stays a reachable-by-direct-call belt, spec §3.2).
+_TW_COUNTER_CAP: Final[int] = 2**63 - 1
+
+#: The T4b slope-diff exactness fence: CPython ``int / int`` is the
+#: correctly-rounded double of the true rational while the crate converts
+#: each diff to f64 FIRST — the two agree exactly iff both diffs are ≤ 2^53
+#: in magnitude, so larger diffs route to the oracle (a correctness fence
+#: absurdly beyond production — 9 PB RSS delta / 9e15 tuples per sample).
+_TW_SLOPE_DIFF_CAP: Final[int] = 2**53
+
+#: The T2 bitmask vocabulary ceiling (7 predicates → mask < 2**7).
+_TW_MASK_EXCL: Final[int] = 2**7
+
+#: The T2 bit-5 mask (evaluated-went-backwards) — set with NO prev sample
+#: is impossible-by-law, so the output gate refuses it (poisoned crate).
+_TW_BIT_BACKWARDS: Final[int] = 32
+
+#: The law-T3 crate wire width (``(new_peak, new_below, floor, code)``).
+_TW_THROUGHPUT_TUPLE_LEN: Final[int] = 4
+
+#: The law-T4a crate wire width (``(budget, code)``).
+_TW_BUDGET_TUPLE_LEN: Final[int] = 2
+
+#: The law-T4b crate wire width (``(slope, new_high, code)``).
+_TW_SLOPE_TUPLE_LEN: Final[int] = 3
+
+#: The law-T5 crate wire width (``(nan_codes, absurd_codes)``).
+_TW_SUMMARY_TUPLE_LEN: Final[int] = 2
 
 
 @runtime_checkable
@@ -508,7 +622,7 @@ def rust_observability_disabled() -> bool:
 
 
 def reset_observability_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
-    """Reset latch + ALL five per-law burn-in budgets + warn memo.
+    """Reset latch + ALL twelve per-law burn-in budgets + warn memo.
 
     ``remaining=0`` puts the process in the post-burn-in steady state (the
     Rust value ships with no oracle in the path — the differential suites
@@ -1119,9 +1233,590 @@ def routed_stamp_verdict(
     return rust_value
 
 
+# ── The tripwire laws (DEC-RUST-OBSERVABILITY-TRIPWIRES-002) ──────────────
+
+
+def _is_gated_int(value: object) -> bool:
+    """Exact-type i64-range int gate — a ``bool`` (int subclass) is refused.
+
+    Python compares ints with EXACT arbitrary precision; the crate's i64 is
+    bounded — anything outside routes to the oracle (which computes the
+    honest unbounded answer exactly as today).
+    """
+    return type(value) is int and _I64_MIN <= value < _I64_MAX_EXCL
+
+
+def _is_gated_counter(value: object, *, minimum: int) -> bool:
+    """A dwell counter/threshold int gate — ``minimum <= value < 2**63 - 1``.
+
+    The upper bound keeps the crate's ``checked_add(1)`` structurally
+    unreachable through the facade (spec §3.2); ``dwell`` callers pass
+    ``minimum=1`` (the config law), counters pass ``minimum=0``.
+    """
+    return type(value) is int and minimum <= value < _TW_COUNTER_CAP
+
+
+def _tw_reconcile_result_ok(value: object, *, prev_missing: bool) -> bool:
+    """T2 output gate — an exact-int bitmask inside the 7-bit vocabulary.
+
+    Bit 5 (evaluated-went-backwards) set while NO prev sample exists is
+    impossible-by-law — refused (a poisoned/foreign crate can only degrade,
+    never mint a phantom violation). Named helper with unique line texts —
+    the FIX-ROUND-1 mutmut ghost-pattern law.
+    """
+    if type(value) is not int or not 0 <= value < _TW_MASK_EXCL:
+        return False
+    return not (prev_missing and value & _TW_BIT_BACKWARDS)
+
+
+def _tw_throughput_result_ok(value: object) -> bool:
+    """T3 output gate — the exact ``(float, int, float, int-code)`` 4-tuple."""
+    if type(value) is not tuple or len(value) != _TW_THROUGHPUT_TUPLE_LEN:
+        return False
+    th_peak, th_below, th_floor, th_code = value
+    return (
+        type(th_peak) is float
+        and type(th_below) is int
+        and type(th_floor) is float
+        and type(th_code) is int
+        and th_code in _TW_CODES
+    )
+
+
+def _tw_budget_result_ok(value: object) -> bool:
+    """T4a output gate — the exact ``(float, int-code)`` pair; the budget
+    arm always DECIDES, so a ``TW_NONE`` code is refused."""
+    if type(value) is not tuple or len(value) != _TW_BUDGET_TUPLE_LEN:
+        return False
+    bd_budget, bd_code = value
+    return type(bd_budget) is float and type(bd_code) is int and bd_code in _TW_FIRE_OR_CLEAR
+
+
+def _tw_slope_result_ok(value: object) -> bool:
+    """T4b output gate — the exact ``(float, int, int-code)`` triple."""
+    if type(value) is not tuple or len(value) != _TW_SLOPE_TUPLE_LEN:
+        return False
+    sl_slope, sl_high, sl_code = value
+    return (
+        type(sl_slope) is float
+        and type(sl_high) is int
+        and type(sl_code) is int
+        and sl_code in _TW_CODES
+    )
+
+
+def _tw_code_list_ok(codes: object, expected_len: int) -> bool:
+    """One T5 code array — an exact list of exact-int vocabulary codes of
+    the EXPECTED length (a truncated array would silently skip screens)."""
+    if type(codes) is not list or len(codes) != expected_len:
+        return False
+    return all(type(code) is int and code in _TW_CODES for code in codes)
+
+
+def _tw_summary_result_ok(value: object, *, expected_len: int) -> bool:
+    """T5 output gate — ``(nan_codes, absurd_codes)``, both input-aligned."""
+    if type(value) is not tuple or len(value) != _TW_SUMMARY_TUPLE_LEN:
+        return False
+    sm_nan_codes, sm_absurd_codes = value
+    return _tw_code_list_ok(sm_nan_codes, expected_len) and _tw_code_list_ok(
+        sm_absurd_codes, expected_len
+    )
+
+
+def _tw_stage_result_ok(value: object, *, expected_len: int) -> bool:
+    """T6 output gate — an exact required-aligned list of exact bools."""
+    if type(value) is not list or len(value) != expected_len:
+        return False
+    return all(type(flag) is bool for flag in value)
+
+
+def _tw_rss_result_ok(value: object) -> bool:
+    """T9 output gate — an exact int (a bool from a foreign crate refused)."""
+    return type(value) is int
+
+
+def _pack_throughput(v: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The T3 canonical burn-in pack (``struct.pack`` float legs — §7)."""
+    th_pk_peak, th_pk_below, th_pk_floor, th_pk_code = v
+    return (
+        struct.pack("<d", th_pk_peak),
+        int(th_pk_below),
+        struct.pack("<d", th_pk_floor),
+        int(th_pk_code),
+    )
+
+
+def _pack_budget(v: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The T4a canonical burn-in pack."""
+    bd_pk_budget, bd_pk_code = v
+    return (struct.pack("<d", bd_pk_budget), int(bd_pk_code))
+
+
+def _pack_slope(v: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The T4b canonical burn-in pack."""
+    sl_pk_slope, sl_pk_high, sl_pk_code = v
+    return (struct.pack("<d", sl_pk_slope), int(sl_pk_high), int(sl_pk_code))
+
+
+def _pack_summary(v: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The T5 canonical burn-in pack (int codes — no float legs)."""
+    sm_pk_nan, sm_pk_absurd = v
+    return (
+        tuple(int(code) for code in sm_pk_nan),
+        tuple(int(code) for code in sm_pk_absurd),
+    )
+
+
+def routed_tripwire_reconcile(
+    in_flight: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    total: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+    *,
+    python_law: Callable[[int, int, int, int, int, int, int | None, bool], int],
+) -> int:
+    """The routed law T2 — the count-reconciliation violation bitmask.
+
+    Bit i == predicate i in the ``_reconcile_counts`` append order; the
+    consumer materializes the detail templates + the ``values`` dict from
+    the SAME scalars and applies ``_edge_fire``/``_clear``. EVERY path
+    returns a bitmask in ``[0, 2**7)`` (oracle on flag-OFF / latched /
+    gate-refused / degraded / burn-in-mismatch arms).
+    """
+
+    def _oracle() -> int:
+        return python_law(
+            in_flight, enumerated, evaluated, skipped, survivors, total, prev_evaluated, is_done
+        )
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (
+        _is_gated_int(in_flight)
+        and _is_gated_int(enumerated)
+        and _is_gated_int(evaluated)
+        and _is_gated_int(skipped)
+        and _is_gated_int(survivors)
+        and _is_gated_int(total)
+        and (prev_evaluated is None or _is_gated_int(prev_evaluated))
+        and type(is_done) is bool
+    ):
+        # Exact-type gate: Python compares arbitrary-precision ints EXACTLY
+        # (an out-of-i64 counter must keep today's exact compare), and a
+        # junk duck field must raise in the ORACLE's verbatim comparisons so
+        # the consumer's I-3 blanket folds it to observe_failed as today.
+        _warn_once("tw_reconcile_input_refused", evaluated_type=type(evaluated).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_reconcile_counts(
+            in_flight, enumerated, evaluated, skipped, survivors, total, prev_evaluated, is_done
+        )
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_reconcile_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        # The escape set (the errors.py doctrine) ABOVE the panic belt. NB
+        # the consumer's I-3 blanket except CATCHES a re-raised MemoryError
+        # (an Exception subclass) — the documented OOM-landing inversion.
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_reconcile_result_ok(rust_value, prev_missing=prev_evaluated is None):
+        _warn_once("tw_reconcile_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    mask = int(rust_value)  # exact-int by the gate; int-of-int is identity
+    if _BURN_IN_REMAINING[_LAW_TW_RECONCILE] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_RECONCILE, (mask,), (int(oracle),), rust_value=mask, python_value=oracle
+        ):
+            return oracle
+    return mask
+
+
+def routed_tripwire_throughput(
+    rate: float,
+    peak: float,
+    below: int,
+    fraction: float,
+    dwell: int,
+    *,
+    python_law: Callable[[float, float, int, float, int], tuple[float, int, float, int]],
+) -> tuple[float, int, float, int]:
+    """The routed law T3 — ``(new_peak, new_below, floor, code)``.
+
+    Called only when ``fraction != 0`` (the consumer's Python pre-gate,
+    which also preserves the ``snapshot.combos_per_sec`` read order); the
+    consumer writes the state scalars back and applies fire/clear per the
+    code. EVERY path returns the 4-tuple.
+    """
+
+    def _oracle() -> tuple[float, int, float, int]:
+        return python_law(rate, peak, below, fraction, dwell)
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (
+        type(rate) is float
+        and type(peak) is float
+        and _is_gated_counter(below, minimum=0)
+        and type(fraction) is float
+        and _is_gated_counter(dwell, minimum=1)
+    ):
+        _warn_once("tw_throughput_input_refused", rate_type=type(rate).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_throughput_watch(rate, peak, below, fraction, dwell)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_throughput_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_throughput_result_ok(rust_value):
+        _warn_once("tw_throughput_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    th_new_peak, th_new_below, th_floor, th_code = rust_value
+    if _BURN_IN_REMAINING[_LAW_TW_THROUGHPUT] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_THROUGHPUT,
+            _pack_throughput(tuple(rust_value)),
+            _pack_throughput(tuple(oracle)),
+            rust_value=list(rust_value),
+            python_value=list(oracle),
+        ):
+            return oracle
+    return (th_new_peak, th_new_below, th_floor, th_code)
+
+
+def routed_tripwire_memory_budget(
+    rss: int,
+    ram_total: int,
+    fraction: float,
+    *,
+    python_law: Callable[[int, int, float], tuple[float, int]],
+) -> tuple[float, int]:
+    """The routed law T4a — ``(budget, code)``.
+
+    Called only when the budget watch is enabled, RAM is known and the
+    Python-side RSS probe succeeded (the consumer's gates). EVERY path
+    returns the pair; the code is always a fire-or-clear decision.
+    """
+
+    def _oracle() -> tuple[float, int]:
+        return python_law(rss, ram_total, fraction)
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (_is_gated_int(rss) and _is_gated_int(ram_total) and type(fraction) is float):
+        _warn_once("tw_budget_input_refused", rss_type=type(rss).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_memory_budget(rss, ram_total, fraction)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_budget_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_budget_result_ok(rust_value):
+        _warn_once("tw_budget_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    bd_budget, bd_code = rust_value
+    if _BURN_IN_REMAINING[_LAW_TW_BUDGET] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_BUDGET,
+            _pack_budget(tuple(rust_value)),
+            _pack_budget(tuple(oracle)),
+            rust_value=list(rust_value),
+            python_value=list(oracle),
+        ):
+            return oracle
+    return (bd_budget, bd_code)
+
+
+def routed_tripwire_memory_slope(
+    rss: int,
+    evaluated: int,
+    prev_rss: int,
+    prev_evaluated: int,
+    slope_threshold: float,
+    slope_high: int,
+    dwell: int,
+    *,
+    python_law: Callable[[int, int, int, int, float, int, int], tuple[float, int, int]],
+) -> tuple[float, int, int]:
+    """The routed law T4b — ``(slope, new_high, code)``.
+
+    Called only when the slope watch is enabled, the probe succeeded and
+    ``prev is not None and evaluated > prev_evaluated`` (the consumer's
+    state-existence + progress gates; the ``_prev_mem`` stamp stays with
+    the consumer). The 2^53 diff gates are the converts-first exactness
+    fence (:data:`_TW_SLOPE_DIFF_CAP`). EVERY path returns the triple.
+    """
+
+    def _oracle() -> tuple[float, int, int]:
+        return python_law(
+            rss, evaluated, prev_rss, prev_evaluated, slope_threshold, slope_high, dwell
+        )
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (
+        _is_gated_int(rss)
+        and _is_gated_int(evaluated)
+        and _is_gated_int(prev_rss)
+        and _is_gated_int(prev_evaluated)
+        and type(slope_threshold) is float
+        and _is_gated_counter(slope_high, minimum=0)
+        and _is_gated_counter(dwell, minimum=1)
+        and abs(rss - prev_rss) <= _TW_SLOPE_DIFF_CAP
+        and 0 < evaluated - prev_evaluated <= _TW_SLOPE_DIFF_CAP
+    ):
+        _warn_once("tw_slope_input_refused", rss_type=type(rss).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_memory_slope(
+            rss, evaluated, prev_rss, prev_evaluated, slope_threshold, slope_high, dwell
+        )
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_slope_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_slope_result_ok(rust_value):
+        _warn_once("tw_slope_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    sl_slope, sl_new_high, sl_code = rust_value
+    if _BURN_IN_REMAINING[_LAW_TW_SLOPE] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_SLOPE,
+            _pack_slope(tuple(rust_value)),
+            _pack_slope(tuple(oracle)),
+            rust_value=list(rust_value),
+            python_value=list(oracle),
+        ):
+            return oracle
+    return (sl_slope, sl_new_high, sl_code)
+
+
+def routed_tripwire_summary(
+    values: list[float],
+    screened: list[bool],
+    absurd_threshold: float,
+    *,
+    python_law: Callable[[list[float], list[bool], float], tuple[list[int], list[int]]],
+) -> tuple[list[int], list[int]]:
+    """The routed law T5 — ``(nan_codes, absurd_codes)``, input-aligned.
+
+    The consumer owns the ``sorted(tallies)`` iteration, the ``float()``
+    coercion (whose raise IS the I-3 fail-soft input), the screened-name
+    membership, the breach-key strings and the detail templates; the codes
+    drive its ``_edge_fire``/``_clear`` walk in input order. EVERY path
+    returns two length-preserving code lists.
+    """
+
+    def _oracle() -> tuple[list[int], list[int]]:
+        return python_law(values, screened, absurd_threshold)
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (
+        type(values) is list
+        and type(screened) is list
+        and len(values) == len(screened)
+        and type(absurd_threshold) is float
+        and all(type(value) is float for value in values)
+        and all(type(flag) is bool for flag in screened)
+    ):
+        # Belt — the consumer's float() coercion guarantees exact floats;
+        # the gate guards any future caller that skips it.
+        _warn_once("tw_summary_input_refused", threshold_type=type(absurd_threshold).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_summary_classify(values, screened, absurd_threshold)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_summary_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_summary_result_ok(rust_value, expected_len=len(values)):
+        # A truncated/length-mismatched code array would silently skip
+        # screens — refused wholesale (spec §3.5).
+        _warn_once("tw_summary_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    sm_nan_codes, sm_absurd_codes = rust_value
+    if _BURN_IN_REMAINING[_LAW_TW_SUMMARY] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_SUMMARY,
+            _pack_summary(tuple(rust_value)),
+            _pack_summary(tuple(oracle)),
+            rust_value=list(rust_value),
+            python_value=list(oracle),
+        ):
+            return oracle
+    return (sm_nan_codes, sm_absurd_codes)
+
+
+def routed_tripwire_stage(
+    required_sorted: list[str],
+    present: list[str],
+    *,
+    python_law: Callable[[list[str], list[str]], list[bool]],
+) -> list[bool]:
+    """The routed law T6 — the per-token MISSING mask over the pre-sorted
+    required list.
+
+    The consumer owns the map get + unknown-stage early return, the
+    ``sorted(required)`` (codepoint sort ≡ Rust UTF-8 byte order), the
+    missing fold + list-repr detail, and fire/clear. A lone-surrogate token
+    fails pyo3 conversion (``UnicodeEncodeError ⊂ ValueError``) → the
+    degrade set → the oracle. The smallest law in the lane — carried for
+    uniformity, independently droppable (spec §10.3).
+    """
+
+    def _oracle() -> list[bool]:
+        return python_law(required_sorted, present)
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (
+        type(required_sorted) is list
+        and type(present) is list
+        and all(type(token) is str for token in required_sorted)
+        and all(type(member) is str for member in present)
+    ):
+        # Exact-str gate: today a junk (non-str) member is INERT in the
+        # Python set diff — the oracle preserves that; str subclasses could
+        # override __eq__ and must keep Python semantics.
+        _warn_once("tw_stage_input_refused", required_len=len(required_sorted))
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_stage_missing(required_sorted, present)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_stage_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_stage_result_ok(rust_value, expected_len=len(required_sorted)):
+        _warn_once("tw_stage_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    missing_mask = list(rust_value)
+    if _BURN_IN_REMAINING[_LAW_TW_STAGE] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_STAGE,
+            tuple(bool(flag) for flag in missing_mask),
+            tuple(bool(flag) for flag in oracle),
+            rust_value=missing_mask,
+            python_value=list(oracle),
+        ):
+            return oracle
+    return missing_mask
+
+
+def routed_ru_maxrss_bytes(
+    ru_maxrss: int,
+    platform: str,
+    *,
+    python_law: Callable[[int, str], int],
+) -> int:
+    """The routed law T9 — the ``ru_maxrss`` platform unit micro-law.
+
+    ``darwin`` → bytes verbatim; anything else → KiB × 1024. An
+    out-of-i64 reading (or the crate's ``checked_mul`` overflow refusal)
+    routes/degrades to the oracle's unbounded-int product — the honest
+    value (the ``episodes + 1`` containment precedent). EVERY path returns
+    an int.
+    """
+
+    def _oracle() -> int:
+        return python_law(ru_maxrss, platform)
+
+    if not observability_rust_enabled() or rust_observability_disabled():
+        return _oracle()
+    if not (_is_gated_int(ru_maxrss) and type(platform) is str):
+        _warn_once("tw_rss_input_refused", ru_maxrss_type=type(ru_maxrss).__name__)
+        return _oracle()
+    crate = _resolve_crate()
+    if crate is None:
+        return _oracle()
+    try:
+        rust_value = crate.tripwire_ru_maxrss_bytes(ru_maxrss, platform)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("tw_rss_error", error_detail=repr(exc))
+        return _oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return _oracle()
+    if not _tw_rss_result_ok(rust_value):
+        _warn_once("tw_rss_result_refused", result_type=type(rust_value).__name__)
+        return _oracle()
+    _log_engaged_once(crate)
+    rss_bytes = int(rust_value)  # exact-int by the gate; int-of-int is identity
+    if _BURN_IN_REMAINING[_LAW_TW_RSS] > 0:
+        oracle = _oracle()
+        if not _burn_in_check(
+            _LAW_TW_RSS, (rss_bytes,), (int(oracle),), rust_value=rss_bytes, python_value=oracle
+        ):
+            return oracle
+    return rss_bytes
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "OBSERVABILITY_RUST_ENV",
+    "TW_CLEAR",
+    "TW_FIRE",
+    "TW_NONE",
     "LoopCheckOnceLaw",
     "LoopStateFactory",
     "LoopVerdictFactory",
@@ -1134,9 +1829,16 @@ __all__ = [
     "observability_rust_enabled",
     "reset_observability_rust_for_tests",
     "routed_loop_check_once",
+    "routed_ru_maxrss_bytes",
     "routed_sla_decide",
     "routed_stamp_shape_index",
     "routed_stamp_verdict",
+    "routed_tripwire_memory_budget",
+    "routed_tripwire_memory_slope",
+    "routed_tripwire_reconcile",
+    "routed_tripwire_stage",
+    "routed_tripwire_summary",
+    "routed_tripwire_throughput",
     "routed_watchdog_decide",
     "rust_observability_disabled",
 ]

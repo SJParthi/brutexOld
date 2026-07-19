@@ -31,6 +31,7 @@ import importlib.util
 import inspect
 import itertools
 import json
+import math
 import re
 import struct
 import sys
@@ -49,6 +50,7 @@ from brutex.observability.loop_watchdog import (
     _check_once_python,
     check_once,
 )
+from brutex.observability.run_tripwires import normalized_ru_maxrss_bytes
 from brutex.observability.sla import (
     SLADetector,
     SLAEvent,
@@ -159,6 +161,15 @@ def _fake_crate(**overrides: object) -> types.ModuleType:
         "sla_decide": _sla_decide_python,
         "stamp_shape_index": _stamp_shape_index_python,
         "stamp_verdict": _stamp_verdict_python,
+        # The tripwire crate fns share the routed-law signatures, so the
+        # test-local law oracles ARE the delegating fakes (burn-in clean).
+        "tripwire_reconcile_counts": _tw_reconcile_law,
+        "tripwire_throughput_watch": _tw_throughput_law,
+        "tripwire_memory_budget": _tw_budget_law,
+        "tripwire_memory_slope": _tw_slope_law,
+        "tripwire_summary_classify": _tw_summary_law,
+        "tripwire_stage_missing": _tw_stage_law,
+        "tripwire_ru_maxrss_bytes": _tw_rss_law,
         "PanicException": _FakeCratePanic,
         "__version__": "0.1.0-fake",
     }
@@ -223,6 +234,148 @@ def _call_verdict(python_law: Any = _stamp_verdict_python) -> str:
     return obs.routed_stamp_verdict(
         "h", "h", "s", "s", "r", None, None, None, python_law=python_law
     )
+
+
+# ── Test-local tripwire law oracles (DEC-RUST-OBSERVABILITY-TRIPWIRES-002) ──
+#
+# Spec-faithful INDEPENDENT implementations of the routed tripwire-law
+# signatures (deliberately literal-coded — never reading the facade's TW_*
+# consts, so a garbled facade constant diverges loudly). The S2-S4 seams
+# will feed `run_tripwires.py`'s own `_*_python` oracles through the same
+# signatures; until then these are BOTH the fake-crate delegates and the
+# differential oracles.
+
+
+def _tw_reconcile_law(
+    in_flight: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    total: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+) -> int:
+    mask = 0
+    if in_flight < 0:
+        mask |= 1
+    if enumerated != total:
+        mask |= 2
+    if skipped > evaluated:
+        mask |= 4
+    if survivors > evaluated:
+        mask |= 8
+    if evaluated + in_flight > total:
+        mask |= 16
+    if prev_evaluated is not None and evaluated < prev_evaluated:
+        mask |= 32
+    if is_done and evaluated != total:
+        mask |= 64
+    return mask
+
+
+def _tw_throughput_law(
+    rate: float, peak: float, below: int, fraction: float, dwell: int
+) -> tuple[float, int, float, int]:
+    new_peak = max(peak, rate)  # the argument-order mirror (NaN rate keeps peak)
+    if new_peak <= 0.0:
+        return (new_peak, below, 0.0, 0)
+    floor = fraction * new_peak
+    if rate < floor:
+        new_below = below + 1
+        return (new_peak, new_below, floor, 2 if new_below == dwell else 0)
+    return (new_peak, 0, floor, 1)
+
+
+def _tw_budget_law(rss: int, ram_total: int, fraction: float) -> tuple[float, int]:
+    budget = fraction * float(ram_total)
+    return (budget, 2 if float(rss) > budget else 1)
+
+
+def _tw_slope_law(
+    rss: int,
+    evaluated: int,
+    prev_rss: int,
+    prev_evaluated: int,
+    slope_threshold: float,
+    slope_high: int,
+    dwell: int,
+) -> tuple[float, int, int]:
+    slope = (rss - prev_rss) / (evaluated - prev_evaluated)
+    if slope > slope_threshold:
+        new_high = slope_high + 1
+        return (slope, new_high, 2 if new_high == dwell else 0)
+    return (slope, 0, 1)
+
+
+def _tw_summary_law(
+    values: list[float], screened: list[bool], absurd_threshold: float
+) -> tuple[list[int], list[int]]:
+    nan_codes: list[int] = []
+    absurd_codes: list[int] = []
+    for value, is_screened in zip(values, screened, strict=True):
+        if not math.isfinite(value):
+            nan_codes.append(2)
+            absurd_codes.append(0)
+            continue
+        nan_codes.append(1)
+        if is_screened:
+            absurd_codes.append(2 if abs(value) > absurd_threshold else 1)
+        else:
+            absurd_codes.append(0)
+    return (nan_codes, absurd_codes)
+
+
+def _tw_stage_law(required_sorted: list[str], present: list[str]) -> list[bool]:
+    return [token not in present for token in required_sorted]
+
+
+def _tw_rss_law(ru_maxrss: int, platform: str) -> int:
+    # The REAL production law (protected file, imported not edited) — the
+    # exact oracle the S3 seam will route through this signature.
+    return normalized_ru_maxrss_bytes(ru_maxrss=ru_maxrss, platform=platform)
+
+
+def _call_tw_reconcile(python_law: Any = _tw_reconcile_law) -> int:
+    """Canonical routed T2 call — in_flight −1 ⇒ bitmask 1 (bit 0)."""
+    return obs.routed_tripwire_reconcile(-1, 10, 5, 0, 0, 10, None, False, python_law=python_law)
+
+
+def _call_tw_throughput(python_law: Any = _tw_throughput_law) -> tuple[float, int, float, int]:
+    """Canonical routed T3 call — the dwell FIRE edge (100.0, 5, 20.0, 2).
+
+    Pairwise-UNEQUAL slots (100.0 vs 20.0; 5 vs 2) so a pack/unpack index
+    garble fabricates a visible divergence (the FIX-ROUND-1 asymmetric
+    burn-in fixture discipline).
+    """
+    return obs.routed_tripwire_throughput(10.0, 100.0, 4, 0.2, 5, python_law=python_law)
+
+
+def _call_tw_budget(python_law: Any = _tw_budget_law) -> tuple[float, int]:
+    """Canonical routed T4a call — one byte over budget ⇒ (500.0, FIRE)."""
+    return obs.routed_tripwire_memory_budget(501, 1000, 0.5, python_law=python_law)
+
+
+def _call_tw_slope(python_law: Any = _tw_slope_law) -> tuple[float, int, int]:
+    """Canonical routed T4b call — the dwell FIRE edge (100.0, 5, 2)."""
+    return obs.routed_tripwire_memory_slope(2000, 20, 1000, 10, 50.0, 4, 5, python_law=python_law)
+
+
+def _call_tw_summary(python_law: Any = _tw_summary_law) -> tuple[list[int], list[int]]:
+    """Canonical routed T5 call — mixed batch ([1, 2, 1], [0, 0, 2])."""
+    return obs.routed_tripwire_summary(
+        [1.0, float("nan"), 99.0], [False, True, True], 10.0, python_law=python_law
+    )
+
+
+def _call_tw_stage(python_law: Any = _tw_stage_law) -> list[bool]:
+    """Canonical routed T6 call — one missing, one present ([True, False])."""
+    return obs.routed_tripwire_stage(["stage2", "stage3"], ["stage3"], python_law=python_law)
+
+
+def _call_tw_rss(python_law: Any = _tw_rss_law) -> int:
+    """Canonical routed T9 call — 1024 KiB on linux ⇒ 1_048_576 bytes."""
+    return obs.routed_ru_maxrss_bytes(1024, "linux", python_law=python_law)
 
 
 class _LawCase(NamedTuple):
@@ -299,9 +452,90 @@ _LAW_CASES: Final[tuple[_LawCase, ...]] = (
         "junk",
         "hash_mismatch",
     ),
+    _LawCase(
+        "tw_reconcile",
+        "tripwire_reconcile_counts",
+        _call_tw_reconcile,
+        lambda: _call_tw_reconcile(_oracle_bomb),
+        lambda: 1,
+        True,  # bool bitmask (int subclass) — refused
+        64,  # shape-valid wrong mask (bit 6 vs the oracle's bit 0)
+    ),
+    _LawCase(
+        "tw_throughput",
+        "tripwire_throughput_watch",
+        _call_tw_throughput,
+        lambda: _call_tw_throughput(_oracle_bomb),
+        lambda: (100.0, 5, 20.0, 2),
+        (100.0, 5, 20.0, 3),  # out-of-vocabulary code — refused
+        (100.0, 5, 20.0, 0),  # shape-valid wrong code
+    ),
+    _LawCase(
+        "tw_budget",
+        "tripwire_memory_budget",
+        _call_tw_budget,
+        lambda: _call_tw_budget(_oracle_bomb),
+        lambda: (500.0, 2),
+        (500.0, 0),  # TW_NONE — the budget arm always decides; refused
+        (500.0, 1),  # shape-valid wrong code
+    ),
+    _LawCase(
+        "tw_slope",
+        "tripwire_memory_slope",
+        _call_tw_slope,
+        lambda: _call_tw_slope(_oracle_bomb),
+        lambda: (100.0, 5, 2),
+        (100.0, 5.0, 2),  # float high — refused
+        (100.0, 5, 0),  # shape-valid wrong code
+    ),
+    _LawCase(
+        "tw_summary",
+        "tripwire_summary_classify",
+        _call_tw_summary,
+        lambda: _call_tw_summary(_oracle_bomb),
+        lambda: ([1, 2, 1], [0, 0, 2]),
+        ([1, 2, 1], [0, 0]),  # truncated absurd array — refused
+        ([1, 1, 1], [0, 0, 2]),  # shape-valid wrong nan codes
+    ),
+    _LawCase(
+        "tw_stage",
+        "tripwire_stage_missing",
+        _call_tw_stage,
+        lambda: _call_tw_stage(_oracle_bomb),
+        lambda: [True, False],
+        [True, 1],  # int flag — refused
+        [False, False],  # shape-valid wrong mask
+    ),
+    _LawCase(
+        "tw_rss",
+        "tripwire_ru_maxrss_bytes",
+        _call_tw_rss,
+        lambda: _call_tw_rss(_oracle_bomb),
+        lambda: 1_048_576,
+        True,  # bool — refused
+        7,  # shape-valid wrong bytes
+    ),
 )
 
 _LAW_IDS: Final[tuple[str, ...]] = tuple(case.law for case in _LAW_CASES)
+
+#: Every burn-in budget key — the A-D five + the seven tripwire laws
+#: (== _LAW_IDS; kept a separate literal so a `_LAW_CASES` edit cannot
+#: silently shrink the reset-seam pins).
+_ALL_LAW_KEYS: Final[tuple[str, ...]] = (
+    "loop",
+    "watchdog",
+    "sla",
+    "stamp_shape",
+    "stamp_verdict",
+    "tw_reconcile",
+    "tw_throughput",
+    "tw_budget",
+    "tw_slope",
+    "tw_summary",
+    "tw_stage",
+    "tw_rss",
+)
 
 
 def _raiser(exc: BaseException) -> Callable[..., NoReturn]:
@@ -614,9 +848,7 @@ class TestResetSeam:
         obs.reset_observability_rust_for_tests()
         assert obs.rust_observability_disabled() is False
         assert not obs._OBSERVABILITY_MEMO
-        fresh = dict.fromkeys(
-            ("loop", "watchdog", "sla", "stamp_shape", "stamp_verdict"), obs.BURN_IN_SAMPLES
-        )
+        fresh = dict.fromkeys(_ALL_LAW_KEYS, obs.BURN_IN_SAMPLES)
         assert fresh == obs._BURN_IN_REMAINING
 
     def test_reset_remaining_zero_is_the_steady_state(self) -> None:
@@ -638,9 +870,7 @@ class TestResetSeam:
         assert not fresh._DISABLED_REASON  # empty latch = live
         assert fresh.rust_observability_disabled() is False
         assert not fresh._OBSERVABILITY_MEMO
-        budgets = dict.fromkeys(
-            ("loop", "watchdog", "sla", "stamp_shape", "stamp_verdict"), fresh.BURN_IN_SAMPLES
-        )
+        budgets = dict.fromkeys(_ALL_LAW_KEYS, fresh.BURN_IN_SAMPLES)
         assert budgets == fresh._BURN_IN_REMAINING
 
     def test_warn_once_suppresses_repeats(self) -> None:
@@ -917,6 +1147,469 @@ def _call_loop_warn_edge(state: WatchdogState, *, python_law: Any) -> WatchdogVe
         state_factory=WatchdogState,
         verdict_factory=WatchdogVerdict,
     )
+
+
+class _StrSub(str):
+    """A str subclass — could override ``__eq__``; the T6 exact-str gate refuses it."""
+
+
+def _tw_slope_sentinel(
+    rss: int,
+    evaluated: int,
+    prev_rss: int,
+    prev_evaluated: int,
+    slope_threshold: float,
+    slope_high: int,
+    dwell: int,
+) -> tuple[float, int, int]:
+    """A sentinel T4b oracle for refused-arm pins whose REAL law would divide
+    by zero (the consumer's progress gate normally excludes those shapes —
+    the facade must still serve the oracle VERBATIM on the refusal arm)."""
+    return (-7.0, -7, -7)
+
+
+def _tw_summary_sentinel(
+    values: list[float], screened: list[bool], absurd_threshold: float
+) -> tuple[list[int], list[int]]:
+    """A sentinel T5 oracle for the length-mismatch refusal (the REAL law's
+    strict zip would raise — today's I-3 fail-soft input, preserved)."""
+    return ([-7], [-7])
+
+
+#: (id, routed call, the ORACLE's expected value, the warn-once reason) — one
+#: row per tripwire input-gate refusal class. The out-of-i64 / counter-cap
+#: rows pin the UNBOUNDED-int honesty: Python computes the exact answer the
+#: crate's i64 cannot, so the gate must serve it, never truncate.
+_TW_INPUT_REFUSALS: Final[tuple[tuple[str, Callable[[], object], object, str], ...]] = (
+    (
+        "reconcile_out_of_i64_counter",
+        lambda: obs.routed_tripwire_reconcile(
+            2**63, 10, 5, 0, 0, 10, None, False, python_law=_tw_reconcile_law
+        ),
+        16,  # evaluated + in_flight > total — the exact unbounded-int compare
+        "tw_reconcile_input_refused",
+    ),
+    (
+        "reconcile_bool_prev_evaluated",
+        lambda: obs.routed_tripwire_reconcile(
+            0, 10, 5, 0, 0, 10, True, False, python_law=_tw_reconcile_law
+        ),
+        0,
+        "tw_reconcile_input_refused",
+    ),
+    (
+        "reconcile_int_is_done",
+        lambda: obs.routed_tripwire_reconcile(
+            0, 10, 5, 0, 0, 10, None, cast("bool", 1), python_law=_tw_reconcile_law
+        ),
+        64,  # truthy-int is_done drives the oracle's done-mismatch bit
+        "tw_reconcile_input_refused",
+    ),
+    (
+        "throughput_int_rate",
+        lambda: obs.routed_tripwire_throughput(
+            cast("float", 10), 100.0, 4, 0.2, 5, python_law=_tw_throughput_law
+        ),
+        (100.0, 5, 20.0, 2),
+        "tw_throughput_input_refused",
+    ),
+    (
+        "throughput_negative_below",
+        lambda: obs.routed_tripwire_throughput(
+            10.0, 100.0, -1, 0.2, 5, python_law=_tw_throughput_law
+        ),
+        (100.0, 0, 20.0, 0),
+        "tw_throughput_input_refused",
+    ),
+    (
+        "throughput_zero_dwell",
+        lambda: obs.routed_tripwire_throughput(
+            10.0, 100.0, 4, 0.2, 0, python_law=_tw_throughput_law
+        ),
+        (100.0, 5, 20.0, 0),
+        "tw_throughput_input_refused",
+    ),
+    (
+        "throughput_below_at_counter_cap",
+        lambda: obs.routed_tripwire_throughput(
+            10.0, 100.0, 2**63 - 1, 0.2, 5, python_law=_tw_throughput_law
+        ),
+        (100.0, 2**63, 20.0, 0),  # the unbounded increment — checked_add unreachable
+        "tw_throughput_input_refused",
+    ),
+    (
+        "budget_bool_rss",
+        lambda: obs.routed_tripwire_memory_budget(
+            cast("int", True), 1000, 0.5, python_law=_tw_budget_law
+        ),
+        (500.0, 1),
+        "tw_budget_input_refused",
+    ),
+    (
+        "budget_int_fraction",
+        lambda: obs.routed_tripwire_memory_budget(
+            501, 1000, cast("float", 1), python_law=_tw_budget_law
+        ),
+        (1000.0, 1),
+        "tw_budget_input_refused",
+    ),
+    (
+        "slope_rss_diff_past_exactness_fence",
+        lambda: obs.routed_tripwire_memory_slope(
+            2**53 + 1, 20, 0, 10, 50.0, 4, 5, python_law=_tw_slope_law
+        ),
+        ((2**53 + 1) / 10, 5, 2),  # Python's correctly-rounded int/int division
+        "tw_slope_input_refused",
+    ),
+    (
+        "slope_no_progress",
+        lambda: obs.routed_tripwire_memory_slope(
+            2000, 10, 1000, 10, 50.0, 4, 5, python_law=_tw_slope_sentinel
+        ),
+        (-7.0, -7, -7),
+        "tw_slope_input_refused",
+    ),
+    (
+        "slope_evaluated_diff_past_exactness_fence",
+        lambda: obs.routed_tripwire_memory_slope(
+            2000, 2**53 + 11, 1000, 10, 50.0, 4, 5, python_law=_tw_slope_law
+        ),
+        (1000 / (2**53 + 1), 0, 1),
+        "tw_slope_input_refused",
+    ),
+    (
+        "summary_length_mismatch",
+        lambda: obs.routed_tripwire_summary(
+            [1.0, 2.0], [False], 10.0, python_law=_tw_summary_sentinel
+        ),
+        ([-7], [-7]),
+        "tw_summary_input_refused",
+    ),
+    (
+        "summary_int_value",
+        lambda: obs.routed_tripwire_summary(
+            cast("list[float]", [1]), [False], 10.0, python_law=_tw_summary_law
+        ),
+        ([1], [0]),
+        "tw_summary_input_refused",
+    ),
+    (
+        "summary_int_screened_flag",
+        lambda: obs.routed_tripwire_summary(
+            [1.0], cast("list[bool]", [1]), 10.0, python_law=_tw_summary_law
+        ),
+        ([1], [1]),  # the oracle treats the truthy int as screened — preserved
+        "tw_summary_input_refused",
+    ),
+    (
+        "stage_int_required_token",
+        lambda: obs.routed_tripwire_stage(
+            cast("list[str]", ["a", 2]), [], python_law=_tw_stage_law
+        ),
+        [True, True],
+        "tw_stage_input_refused",
+    ),
+    (
+        "stage_str_subclass_member",
+        lambda: obs.routed_tripwire_stage(["a"], [_StrSub("a")], python_law=_tw_stage_law),
+        [False],  # Python's own membership semantics, preserved verbatim
+        "tw_stage_input_refused",
+    ),
+    (
+        "rss_bool_ru_maxrss",
+        lambda: obs.routed_ru_maxrss_bytes(cast("int", True), "linux", python_law=_tw_rss_law),
+        1024,
+        "tw_rss_input_refused",
+    ),
+    (
+        "rss_out_of_i64",
+        lambda: obs.routed_ru_maxrss_bytes(2**63, "linux", python_law=_tw_rss_law),
+        2**63 * 1024,  # the oracle's unbounded-int product
+        "tw_rss_input_refused",
+    ),
+    (
+        "rss_bytes_platform",
+        lambda: obs.routed_ru_maxrss_bytes(1, cast("str", b"linux"), python_law=_tw_rss_law),
+        1024,
+        "tw_rss_input_refused",
+    ),
+)
+
+
+class TestTripwireInputGates:
+    """The tripwire exact-type / i64 / counter-cap / 2^53 INPUT gates.
+
+    Every refusal serves the ORACLE with one named warn and NEVER touches
+    the crate (import bombed); refusals never latch.
+    """
+
+    @pytest.mark.parametrize(
+        "case", _TW_INPUT_REFUSALS, ids=[entry[0] for entry in _TW_INPUT_REFUSALS]
+    )
+    def test_gate_refuses_to_oracle_without_crate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        case: tuple[str, Callable[[], object], object, str],
+    ) -> None:
+        _flag_on(monkeypatch)
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        _, call, expected, reason = case
+        with capture_logs() as logs:
+            assert call() == expected
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == reason
+        assert obs.rust_observability_disabled() is False  # a refusal never latches
+
+
+class TestTripwireGateBoundaryAcceptance:
+    """The ACCEPT side of every routed tripwire gate BOUNDARY.
+
+    Each legal-boundary input must take the CRATE path — proven by the
+    burn-in budget decrement (the oracle/refusal arms never decrement) plus
+    ZERO fallback warns. These are the named killers for the routed-level
+    gate-argument mutants (`minimum=0→1` / `1→2`, `<=`→`<`, `0 <`→`1 <`,
+    `abs(rss - prev)`→`abs(rss + prev)`) the helper truth tables cannot see.
+    """
+
+    def test_throughput_below_zero_and_dwell_one_are_routed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # below == 0 (minimum=0 boundary) AND dwell == 1 (minimum=1
+        # boundary) in ONE call — either refusal mutant fails this.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_tripwire_throughput(
+                10.0, 100.0, 0, 0.2, 1, python_law=_tw_throughput_law
+            )
+        assert result == (100.0, 1, 20.0, 2)  # first below-floor sample fires at dwell 1
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
+        assert obs._BURN_IN_REMAINING["tw_throughput"] == obs.BURN_IN_SAMPLES - 1
+
+    def test_slope_all_low_boundaries_are_routed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # slope_high == 0, dwell == 1, |rss − prev_rss| == 2**53 EXACTLY
+        # (the closed fence) and evaluated − prev_evaluated == 1 (the open
+        # progress floor) in ONE call — any of the four boundary mutants
+        # flips this to a refusal.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_tripwire_memory_slope(
+                2**53, 11, 0, 10, 50.0, 0, 1, python_law=_tw_slope_law
+            )
+        assert result == (float(2**53), 1, 2)  # fires at dwell 1
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
+        assert obs._BURN_IN_REMAINING["tw_slope"] == obs.BURN_IN_SAMPLES - 1
+
+    def test_slope_evaluated_diff_at_fence_is_routed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # evaluated − prev_evaluated == 2**53 EXACTLY (the closed fence).
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_tripwire_memory_slope(
+                1000, 2**53 + 10, 0, 10, 50.0, 4, 5, python_law=_tw_slope_law
+            )
+        assert result == (1000 / 2**53, 0, 1)
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
+        assert obs._BURN_IN_REMAINING["tw_slope"] == obs.BURN_IN_SAMPLES - 1
+
+    def test_slope_large_equal_rss_values_are_routed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # rss == prev_rss == 2**52 + 1: the DIFF is 0 (accepted) while the
+        # SUM is past the fence — the `abs(rss + prev_rss)` operator mutant
+        # refuses exactly this shape.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        with capture_logs() as logs:
+            result = obs.routed_tripwire_memory_slope(
+                2**52 + 1, 20, 2**52 + 1, 10, 50.0, 0, 5, python_law=_tw_slope_law
+            )
+        assert result == (0.0, 0, 1)
+        assert [e for e in logs if e["event"] == "observability_rust.fallback"] == []
+        assert obs._BURN_IN_REMAINING["tw_slope"] == obs.BURN_IN_SAMPLES - 1
+
+
+class TestTripwireGateHelpers:
+    """Direct truth tables over the tripwire input/output gate helpers."""
+
+    def test_is_gated_int_boundaries(self) -> None:
+        assert obs._is_gated_int(0) is True
+        assert obs._is_gated_int(-(2**63)) is True
+        assert obs._is_gated_int(2**63 - 1) is True
+        assert obs._is_gated_int(2**63) is False
+        assert obs._is_gated_int(-(2**63) - 1) is False
+        assert obs._is_gated_int(True) is False
+        assert obs._is_gated_int(0.0) is False
+
+    def test_is_gated_counter_boundaries(self) -> None:
+        assert obs._is_gated_counter(1, minimum=1) is True
+        assert obs._is_gated_counter(0, minimum=1) is False
+        assert obs._is_gated_counter(0, minimum=0) is True
+        assert obs._is_gated_counter(-1, minimum=0) is False
+        assert obs._is_gated_counter(2**63 - 2, minimum=0) is True
+        assert obs._is_gated_counter(2**63 - 1, minimum=0) is False
+        assert obs._is_gated_counter(True, minimum=0) is False
+
+    @pytest.mark.parametrize(
+        ("mask", "prev_missing", "ok"),
+        [
+            (0, True, True),
+            (64, True, True),
+            (95, True, True),  # every bit EXCEPT bit 5 — legal without prev
+            (127, False, True),
+            (32, True, False),  # bit 5 without a prev sample — impossible-by-law
+            (127, True, False),
+            (-1, False, False),
+            (128, False, False),
+            (True, False, False),  # bool bitmask (int subclass)
+            (1.0, False, False),
+        ],
+    )
+    def test_reconcile_result_gate(self, mask: object, prev_missing: bool, ok: bool) -> None:
+        assert obs._tw_reconcile_result_ok(mask, prev_missing=prev_missing) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [
+            ((100.0, 5, 20.0, 2), True),
+            ((100.0, 0, 20.0, 0), True),
+            ((100.0, 5, 20.0, 3), False),
+            ((100.0, 5, 20.0, True), False),
+            ((100.0, True, 20.0, 2), False),
+            ((100.0, 5, 20, 2), False),
+            ((100, 5, 20.0, 2), False),
+            ((100.0, 5, 20.0), False),
+            ([100.0, 5, 20.0, 2], False),
+        ],
+    )
+    def test_throughput_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_throughput_result_ok(value) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [
+            ((500.0, 1), True),
+            ((500.0, 2), True),
+            ((500.0, 0), False),  # TW_NONE — the budget arm always decides
+            ((500, 1), False),
+            ((500.0, True), False),
+            ((500.0, 1, 0), False),
+            ([500.0, 1], False),
+        ],
+    )
+    def test_budget_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_budget_result_ok(value) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [
+            ((100.0, 5, 2), True),
+            ((100.0, 0, 1), True),
+            ((100.0, 5, 3), False),
+            ((100.0, 5.0, 2), False),
+            ((100.0, 5, True), False),
+            ((100, 5, 2), False),
+            ((100.0, 5), False),
+            ([100.0, 5, 2], False),
+        ],
+    )
+    def test_slope_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_slope_result_ok(value) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [
+            (([1, 2], [0, 1]), True),
+            (([1, 2], [0]), False),
+            (([1, 2, 0], [0, 1]), False),
+            (((1, 2), [0, 1]), False),
+            (([1, 3], [0, 1]), False),
+            (([1, True], [0, 1]), False),
+            (([1, 2], [0, 1], []), False),
+            ([[1, 2], [0, 1]], False),
+        ],
+    )
+    def test_summary_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_summary_result_ok(value, expected_len=2) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [
+            ([True, False], True),
+            ([], False),
+            ([True], False),
+            ([True, 1], False),
+            ((True, False), False),
+        ],
+    )
+    def test_stage_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_stage_result_ok(value, expected_len=2) is ok
+
+    @pytest.mark.parametrize(
+        ("value", "ok"),
+        [(5, True), (0, True), (-5, True), (True, False), (5.0, False), ("5", False)],
+    )
+    def test_rss_result_gate(self, value: object, ok: bool) -> None:
+        assert obs._tw_rss_result_ok(value) is ok
+
+
+class TestTripwireOutputGates:
+    """Routed-level output refusals BEYOND the shared per-law poison arm."""
+
+    def test_reconcile_bit5_without_prev_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A poisoned crate minting the evaluated-went-backwards bit while NO
+        # prev sample exists (impossible-by-law) is refused wholesale — a
+        # foreign crate can degrade, never fire a phantom violation.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(tripwire_reconcile_counts=lambda *a: 32))
+        with capture_logs() as logs:
+            assert _call_tw_reconcile() == 1  # the oracle's bit-0 mask
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == "tw_reconcile_result_refused"
+        assert obs.rust_observability_disabled() is False
+
+    def test_reconcile_bit5_with_prev_is_legal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch)
+        obs.reset_observability_rust_for_tests(remaining=0)  # steady state
+        _install(monkeypatch, _fake_crate(tripwire_reconcile_counts=lambda *a: 32))
+        result = obs.routed_tripwire_reconcile(
+            0, 10, 5, 0, 0, 10, 10, False, python_law=_oracle_bomb
+        )
+        assert result == 32  # evaluated 5 < prev 10 — the crate value ships
+
+    @pytest.mark.parametrize("mask", [-1, 128, 2**63])
+    def test_reconcile_out_of_vocabulary_mask_refused(
+        self, monkeypatch: pytest.MonkeyPatch, mask: int
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(tripwire_reconcile_counts=lambda *a: mask))
+        assert _call_tw_reconcile() == 1
+        assert "tw_reconcile_result_refused" in obs._OBSERVABILITY_MEMO
+
+    def test_summary_inflated_code_array_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The truncated twin rides the shared poison arm; the INFLATED array
+        # (input-aligned law broken the other way) must refuse too.
+        _flag_on(monkeypatch)
+        _install(
+            monkeypatch,
+            _fake_crate(tripwire_summary_classify=lambda *a: ([1, 2, 1, 1], [0, 0, 2, 0])),
+        )
+        assert _call_tw_summary() == ([1, 2, 1], [0, 0, 2])
+        assert "tw_summary_result_refused" in obs._OBSERVABILITY_MEMO
+
+    def test_pre_tripwire_wheel_latches_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A -001-era wheel (all five detector/stamp fns, NO tripwire fns)
+        # fails the all-or-nothing handshake — EVERY law (the A-D five
+        # included) stays on the oracle; the crate_stale detail names the
+        # missing tripwire symbol. The -002 crate_stale teeth.
+        _flag_on(monkeypatch)
+        crate = _fake_crate()
+        delattr(crate, "tripwire_reconcile_counts")
+        _install(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert _call_sla() == (True, True)
+        assert obs._DISABLED_REASON[0] == "crate_stale"
+        events = [e for e in logs if e["event"] == "observability_rust.rust_path_disabled"]
+        assert "tripwire_reconcile_counts" in events[0]["error_detail"]
 
 
 class TestRoutedLawMatrix:
@@ -1369,8 +2062,17 @@ class TestContractPins:
             "sla_decide",
             "stamp_shape_index",
             "stamp_verdict",
+            "tripwire_reconcile_counts",
+            "tripwire_throughput_watch",
+            "tripwire_memory_budget",
+            "tripwire_memory_slope",
+            "tripwire_summary_classify",
+            "tripwire_stage_missing",
+            "tripwire_ru_maxrss_bytes",
             "PanicException",  # the panic-belt anchor — the crate_stale teeth
         )
+        # The tripwire code vocabulary — defined ONCE facade-side (§3.7).
+        assert (obs.TW_NONE, obs.TW_CLEAR, obs.TW_FIRE) == (0, 1, 2)
 
     def test_check_once_and_oracle_share_signature_and_defaults(self) -> None:
         # The defaults are DUPLICATED across the router and the moved law
@@ -1775,3 +2477,259 @@ class TestRealWheelDifferential:
         assert routed == "ok"
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
         assert warns[0]["reason"] == "stamp_verdict_error"
+
+    _I64_INTS = st.integers(min_value=-(2**63), max_value=2**63 - 1)
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        in_flight=_I64_INTS,
+        enumerated=_I64_INTS,
+        evaluated=_I64_INTS,
+        skipped=_I64_INTS,
+        survivors=_I64_INTS,
+        total=_I64_INTS,
+        prev_evaluated=st.none() | _I64_INTS,
+        is_done=st.booleans(),
+    )
+    def test_tw_reconcile_differential(
+        self,
+        in_flight: int,
+        enumerated: int,
+        evaluated: int,
+        skipped: int,
+        survivors: int,
+        total: int,
+        prev_evaluated: int | None,
+        is_done: bool,
+    ) -> None:
+        # The FULL i64 lattice — the bit-4 sum (`evaluated + in_flight`) can
+        # exceed i64 both ways; the crate's i128 widening must match
+        # Python's unbounded compare bit-for-bit (oracle bombed).
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_reconcile(
+                in_flight,
+                enumerated,
+                evaluated,
+                skipped,
+                survivors,
+                total,
+                prev_evaluated,
+                is_done,
+                python_law=_oracle_bomb,
+            )
+        assert routed == _tw_reconcile_law(
+            in_flight, enumerated, evaluated, skipped, survivors, total, prev_evaluated, is_done
+        )
+
+    def test_tw_reconcile_small_lattice_exhaustive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._require_wheel(monkeypatch)
+        vals = (-1, 0, 1, 2)
+        for in_flight, evaluated, total in itertools.product(vals, repeat=3):
+            for prev_evaluated in (None, 0, 2):
+                for is_done in (False, True):
+                    routed = obs.routed_tripwire_reconcile(
+                        in_flight,
+                        1,
+                        evaluated,
+                        1,
+                        1,
+                        total,
+                        prev_evaluated,
+                        is_done,
+                        python_law=_oracle_bomb,
+                    )
+                    assert routed == _tw_reconcile_law(
+                        in_flight, 1, evaluated, 1, 1, total, prev_evaluated, is_done
+                    )
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        rate=_FLOATS,
+        peak=_FLOATS,
+        below=st.integers(min_value=0, max_value=10) | st.sampled_from([2**63 - 2]),
+        fraction=_FLOATS,
+        dwell=st.integers(min_value=1, max_value=10) | st.sampled_from([2**63 - 2]),
+    )
+    def test_tw_throughput_differential(
+        self, rate: float, peak: float, below: int, fraction: float, dwell: int
+    ) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_throughput(
+                rate, peak, below, fraction, dwell, python_law=_oracle_bomb
+            )
+        oracle = _tw_throughput_law(rate, peak, below, fraction, dwell)
+        assert obs._pack_throughput(tuple(routed)) == obs._pack_throughput(tuple(oracle))
+
+    def test_tw_throughput_nan_rate_keeps_peak(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `max(peak, rate)` with a NaN rate KEEPS the peak (the Python
+        # argument-order law) — the crate mirrors it, never NaN-poisons.
+        self._require_wheel(monkeypatch)
+        routed = obs.routed_tripwire_throughput(
+            float("nan"), 100.0, 0, 0.2, 5, python_law=_oracle_bomb
+        )
+        assert routed == (100.0, 0, 20.0, 1)  # NaN < floor is False → the clear arm
+
+    def test_tw_throughput_below_at_cap_minus_one_serves_through_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The Ok boundary sibling of the counter-cap input refusal: at
+        # 2**63 − 2 the crate's increment still fits i64 and SERVES.
+        self._require_wheel(monkeypatch)
+        routed = obs.routed_tripwire_throughput(
+            0.5, 100.0, 2**63 - 2, 0.2, 5, python_law=_oracle_bomb
+        )
+        assert routed == (100.0, 2**63 - 1, 20.0, 0)
+
+    @settings(max_examples=200, deadline=None)
+    @given(rss=_I64_INTS, ram_total=_I64_INTS, fraction=_FLOATS)
+    def test_tw_budget_differential(self, rss: int, ram_total: int, fraction: float) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_memory_budget(
+                rss, ram_total, fraction, python_law=_oracle_bomb
+            )
+        oracle = _tw_budget_law(rss, ram_total, fraction)
+        assert obs._pack_budget(tuple(routed)) == obs._pack_budget(tuple(oracle))
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        prev_rss=st.integers(min_value=-(2**53), max_value=2**53),
+        rss_diff=st.integers(min_value=-(2**53), max_value=2**53),
+        prev_evaluated=st.integers(min_value=0, max_value=2**53),
+        ev_diff=st.integers(min_value=1, max_value=2**53),
+        slope_threshold=_FLOATS,
+        slope_high=st.integers(min_value=0, max_value=1000),
+        dwell=st.integers(min_value=1, max_value=1000),
+    )
+    def test_tw_slope_differential(
+        self,
+        prev_rss: int,
+        rss_diff: int,
+        prev_evaluated: int,
+        ev_diff: int,
+        slope_threshold: float,
+        slope_high: int,
+        dwell: int,
+    ) -> None:
+        # The gate-passing domain: both diffs inside the 2^53 exactness
+        # fence, positive progress — the crate's exact-f64 division must
+        # equal Python's correctly-rounded int/int true division.
+        rss = prev_rss + rss_diff
+        evaluated = prev_evaluated + ev_diff
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_memory_slope(
+                rss,
+                evaluated,
+                prev_rss,
+                prev_evaluated,
+                slope_threshold,
+                slope_high,
+                dwell,
+                python_law=_oracle_bomb,
+            )
+        oracle = _tw_slope_law(
+            rss, evaluated, prev_rss, prev_evaluated, slope_threshold, slope_high, dwell
+        )
+        assert obs._pack_slope(tuple(routed)) == obs._pack_slope(tuple(oracle))
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        pairs=st.lists(st.tuples(_FLOATS, st.booleans()), max_size=8),
+        absurd_threshold=_FLOATS,
+    )
+    def test_tw_summary_differential(
+        self, pairs: list[tuple[float, bool]], absurd_threshold: float
+    ) -> None:
+        values = [pair[0] for pair in pairs]
+        screened = [pair[1] for pair in pairs]
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_summary(
+                values, screened, absurd_threshold, python_law=_oracle_bomb
+            )
+        assert routed == _tw_summary_law(values, screened, absurd_threshold)
+
+    def test_tw_summary_threshold_boundary_strict_gt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # |value| EXACTLY at the threshold is NOT absurd (strict `>`); one
+        # ulp above fires — the boundary law pinned through the crate.
+        self._require_wheel(monkeypatch)
+        one_ulp_over = math.nextafter(10.0, math.inf)
+        routed = obs.routed_tripwire_summary(
+            [10.0, -10.0, one_ulp_over], [True, True, True], 10.0, python_law=_oracle_bomb
+        )
+        assert routed == ([1, 1, 1], [1, 1, 2])
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        required_sorted=st.lists(_D2_STR, max_size=6),
+        present=st.lists(_D2_STR, max_size=6),
+    )
+    def test_tw_stage_differential(self, required_sorted: list[str], present: list[str]) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_tripwire_stage(required_sorted, present, python_law=_oracle_bomb)
+        assert routed == _tw_stage_law(required_sorted, present)
+
+    def test_tw_stage_lone_surrogate_degrades_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A lone surrogate cannot cross the pyo3 &str edge — the degrade set
+        # serves the oracle's Python-side membership answer.
+        self._require_wheel(monkeypatch)
+        with capture_logs() as logs:
+            routed = obs.routed_tripwire_stage(["\ud800"], [], python_law=_tw_stage_law)
+        assert routed == [True]
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == "tw_stage_error"
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        ru_maxrss=_I64_INTS | st.sampled_from([2**53, 2**62, 2**63 - 1, -(2**63)]),
+        platform=st.sampled_from(["darwin", "linux", "win32", "", "Darwin"]),
+    )
+    def test_tw_rss_differential(self, ru_maxrss: int, platform: str) -> None:
+        # python_law is the REAL production law here (not bombed): an
+        # in-i64 input whose ×1024 product overflows takes the crate's
+        # checked_mul ValueError → the degrade set → the oracle — equality
+        # must hold across BOTH the crate-served and degraded arms.
+        with pytest.MonkeyPatch.context() as mp:
+            self._require_wheel(mp)
+            routed = obs.routed_ru_maxrss_bytes(ru_maxrss, platform, python_law=_tw_rss_law)
+        assert routed == _tw_rss_law(ru_maxrss, platform)
+
+    def test_tw_rss_platform_law_through_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._require_wheel(monkeypatch)
+        assert obs.routed_ru_maxrss_bytes(1024, "darwin", python_law=_oracle_bomb) == 1024
+        assert obs.routed_ru_maxrss_bytes(1024, "linux", python_law=_oracle_bomb) == 1_048_576
+        assert obs.routed_ru_maxrss_bytes(1024, "Darwin", python_law=_oracle_bomb) == 1_048_576
+
+    def test_tw_rss_checked_mul_overflow_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An in-i64 reading whose ×1024 product overflows i64: the crate's
+        # checked_mul refuses with ValueError → the degrade set serves the
+        # oracle's unbounded-int product (the episodes+1 containment
+        # precedent). One warn, no latch, no autorevert.
+        self._require_wheel(monkeypatch)
+        with capture_logs() as logs:
+            result = obs.routed_ru_maxrss_bytes(2**62, "linux", python_law=_tw_rss_law)
+        assert result == 2**62 * 1024
+        warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
+        assert warns[0]["reason"] == "tw_rss_error"
+        assert "overflow" in warns[0]["error_detail"]
+        assert obs.rust_observability_disabled() is False
+        assert [e for e in logs if e["event"] == "observability_rust.autoreverted"] == []
+
+    def test_wheel_tripwire_err_arms_raise_value_error(self) -> None:
+        # The Err arms STRUCTURALLY unreachable through the facade (the
+        # counter-cap input gates + the length-equality gate sit in front) —
+        # pinned at the wheel surface so the crate-side refusal messages
+        # stay ValueError, never a new exception class.
+        wheel = pytest.importorskip("brutex_observability")
+        with pytest.raises(ValueError, match="overflow"):
+            wheel.tripwire_throughput_watch(0.5, 100.0, 2**63 - 1, 0.2, 5)
+        with pytest.raises(ValueError, match="overflow"):
+            wheel.tripwire_memory_slope(2000, 20, 1000, 10, 0.0, 2**63 - 1, 5)
+        with pytest.raises(ValueError, match="mismatch"):
+            wheel.tripwire_summary_classify([1.0], [True, False], 10.0)
