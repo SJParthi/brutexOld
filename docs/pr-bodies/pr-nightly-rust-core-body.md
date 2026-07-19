@@ -24,7 +24,7 @@
 ## Decision ID
 
 - **Decision ID(s):** DEC-NIGHTLY-RUST-CORE-001 (this PR) ·
-  DEC-NIGHTLY-RUST-CORE-002 (the NAMED follow-up — backup/restore ordering,
+  `DEC-NIGHTLY-RUST-CORE-002` (the NAMED follow-up — backup/restore ordering,
   `deadman_verdict`, the probes floor law, run.py orchestration + bindings:
   deliberately stay Python).
 - **MIGRATION.md row(s):** #1957 (provisional — renumber-at-landing per
@@ -104,7 +104,7 @@ $ .venv/bin/mypy --strict brutex → clean (496 files; the single stage3_refine 
 ### Out of scope
 
 - backup/restore ordering laws, `deadman_verdict`, the probes floor law,
-  run.py orchestration, production bindings → **DEC-NIGHTLY-RUST-CORE-002**.
+  run.py orchestration, production bindings → **`DEC-NIGHTLY-RUST-CORE-002`**.
 - No CI parity lane for the wheel in this first cut (the wheel-free faithful
   fake + the importorskip goldens carry the load — disclosed).
 - No default flip; no engine/Groww/rate/scope change of any kind.
@@ -168,7 +168,7 @@ refuse-to-guess classes and a refuted DST hypothesis, and confirmed the
 oracle extraction is byte-identical. Findings folded on this branch:
 
 - **1 MINOR:** the no-CI-parity-lane gap — already disclosed in the Honest
-  envelope; follow-up material under DEC-NIGHTLY-RUST-CORE-002.
+  envelope; follow-up material under `DEC-NIGHTLY-RUST-CORE-002`.
 - **2 NITs (both fixed):** the MIGRATION.md #1957 wording on the sub-law FFI
   faces (pinned DIRECTLY by cargo, TRANSITIVELY by the Python nets — reworded
   to that truth) + a thread-safety design note beside the facade's
