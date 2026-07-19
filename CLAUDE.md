@@ -22,7 +22,7 @@ _Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a,
 MIGRATION.md #1955, branch `claude/rust-cascade-results-s2` STACKED on the
 slice-1 head — the `cascade_wire` SERIALISATION + PARSE LAW family moves to
 `rust/brutex-cascade/src/cascade_wire.rs` under the same capture-first
-compressed cycle (the 64-case parity corpus FROZEN against the UNTOUCHED
+compressed cycle (the 76-case parity corpus (62-test replay) FROZEN against the UNTOUCHED
 Python BEFORE conversion — 8 manifests · 6 reports · 44 parse payloads ·
 18 math cases, quirks frozen AS LAW incl. the `version: true` bool-pun
 parse + the raw IndexError/AttributeError escapes); the module becomes a
@@ -3293,8 +3293,8 @@ hostile-review pass._
   STACKED on the slice-1 head ef021b8; the T14 lane's second slice: the
   `cascade_wire` SERIALISATION + PARSE LAW family moves to
   `rust/brutex-cascade/src/cascade_wire.rs` and the module becomes a
-  type-face shim over the crate. THE CYCLE (capture-first): the 64-case
-  parity corpus (8 manifests · 6 wire reports · 44 parse payloads · 18
+  type-face shim over the crate. THE CYCLE (capture-first): the 76-case
+  parity corpus — 62-test replay — (8 manifests · 6 wire reports · 44 parse payloads · 18
   math-trio cases) was FROZEN at f7ea834 against the UNTOUCHED Python law
   BEFORE any conversion (`tests/golden/_cascade_wire_parity_corpus.py` →
   `fixtures/cascade_rust_parity/cascade_wire.json`; the generator's
@@ -10035,7 +10035,7 @@ hostile-review pass._
   (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a, MIGRATION.md #1955 —
   STACKED on the slice-1 head: the `cascade_wire` SERIALISATION + PARSE LAW
   family moves to `rust/brutex-cascade/src/cascade_wire.rs` under the
-  capture-first cycle (the 64-case parity corpus frozen against the
+  capture-first cycle (the 76-case parity corpus (62-test replay) frozen against the
   untouched Python BEFORE conversion — quirks frozen AS LAW incl. the
   `version: true` bool-pun parse + the raw IndexError/AttributeError
   escapes); the module becomes a type-face shim (per-family prefix guards
