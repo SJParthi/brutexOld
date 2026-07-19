@@ -178,6 +178,10 @@ _CI_K_SAMPLES = 8
 #: platform-reproduced (#1960), so the pycma-era cross-runner bimodality
 #: class does not apply to the CELL SET (Sharpe VALUES still flow through
 #: Python/libm — the law pin below stays the fleet-wide assertion).
+#: Measured first pass 129.0 s uninstrumented on the 4-vCPU sandbox
+#: (MC runs on 5 candidates — heavier than club-O's MC-on-1 ~20 s shape;
+#: ~2.3x margin to the 300 s strict budget, ~7x to the 900 s coverage
+#: allowance; Golden Rule #10).
 _PINNED_CODE_COMMIT_SHA: Final[str] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
