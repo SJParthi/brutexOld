@@ -1,7 +1,8 @@
 """The ``regime_robust`` /results preset (`DEC-REGIME-REJECT-TIER-001` PROPOSAL).
 
-READ-TIME rejection tier, SEMANTIC OPTION A: the preset ranks EXACTLY like the
-DEFAULT preset (the min_dd_first law, delegated) but EXCLUDES rows whose joined
+READ-TIME rejection tier, SEMANTIC OPTION A: the preset orders via the
+min_dd_first preset law (``PRESETS[DEFAULT_PRESET]`` — delegated, never
+copied) but EXCLUDES rows whose joined
 cascade verdict is a FAIL at a regime-evidence stage
 (``extreme_vol_stratum`` / ``regime_fragility``); honest-abstain statuses are
 INCLUDED but counted. The default (no-preset) payload stays byte-identical
@@ -32,6 +33,10 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.engine.cascade_wire import CascadeWireReport, write_report
 from brutex.metrics.cascade import CandidateVerdict, CascadeReport, FilterStage
+from brutex.metrics.extreme_vol_stratum import ABSTAIN_STATUSES as EXTREME_VOL_ABSTAINS
+from brutex.metrics.extreme_vol_stratum import evaluate_stratum
+from brutex.metrics.regime_fragility import ABSTAIN_STATUSES as FRAGILITY_ABSTAINS
+from brutex.metrics.regime_fragility import evaluate_fragility
 from brutex.ranking.presets import DEFAULT_PRESET
 
 from tests.unit.test_sweep_results_view import _row, _run_id, _write_store
@@ -227,3 +232,70 @@ class TestAbsentReportHonesty:
         )
         assert robust.regime_rejected_count == 0
         assert robust.regime_unproven_count == 0
+
+
+class TestProducerTokenSingleSourcing:
+    """MINOR-1 fold: the preset vocabulary derives from the PRODUCER modules."""
+
+    def test_reject_stages_derive_from_filter_stage_enum(self) -> None:
+        assert {
+            FilterStage.EXTREME_VOL_STRATUM.value,
+            FilterStage.REGIME_FRAGILITY.value,
+        } == REGIME_REJECT_STAGES
+        assert {stage.value for stage in FilterStage} >= REGIME_REJECT_STAGES
+
+    def test_unproven_statuses_derive_from_producer_abstains(self) -> None:
+        assert set(EXTREME_VOL_ABSTAINS) | set(FRAGILITY_ABSTAINS) == REGIME_UNPROVEN_STATUSES
+
+    def test_filters_emit_exactly_the_derived_abstains(self) -> None:
+        """Cross-module tooth: drive the two REAL filters into every abstain arm."""
+        emitted = {
+            evaluate_stratum([], [100, -50]).status,  # 0 stratum trades
+            evaluate_stratum([100], [100, -50]).status,  # 0 < n < MIN_STRATUM_TRADES
+            evaluate_fragility([100], trend_tokens=None, era_labels=None).status,
+        }
+        assert emitted == set(EXTREME_VOL_ABSTAINS) | set(FRAGILITY_ABSTAINS)
+        assert emitted == REGIME_UNPROVEN_STATUSES
+
+
+class TestLeaderboardRoute:
+    """MINOR-2 fold: the REAL /api/v1/sweep/leaderboard route serves the preset."""
+
+    def test_regime_robust_route_counts_present_default_absent(self, tmp_path: Path) -> None:
+        pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
+        pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
+        from datetime import date
+
+        from brutex.dashboard.app import DashboardState, build_app
+        from brutex.data.instrument_store import InstrumentStore
+        from fastapi.testclient import TestClient
+
+        from tests.unit.test_surface_trial_results import _nifty
+
+        _seed_rows(tmp_path, seeds=[1, 2, 3, 4, 5, 6, 7])
+        write_report(tmp_path / "sweeps", _regime_report())
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        try:
+            store.upsert_many(
+                [_nifty()], snapshot_date=date(2024, 1, 2), run_id="r1", csv_source_sha256="0" * 64
+            )
+            app = build_app(DashboardState(), instrument_store=store)
+            with TestClient(app) as client:
+                resp = client.get("/api/v1/sweep/leaderboard?preset=regime_robust")
+                assert resp.status_code == 200
+                payload = resp.json()
+                assert payload["preset"] == REGIME_ROBUST_PRESET
+                assert payload["regime_rejected_count"] == 2
+                assert payload["regime_unproven_count"] == 3
+                served = [r["run_id"] for r in payload["rows"]]
+                assert _run_id(2) not in served  # fail @ extreme_vol_stratum
+                assert _run_id(3) not in served  # fail @ regime_fragility
+                # The SAME app instance's default (no-preset) payload: no
+                # regime keys, every row served — the cached scan never
+                # cross-serves the preset membership.
+                default = client.get("/api/v1/sweep/leaderboard").json()
+                assert "regime_rejected_count" not in default
+                assert "regime_unproven_count" not in default
+                assert default["total_rows"] == 7
+        finally:
+            store.close()
