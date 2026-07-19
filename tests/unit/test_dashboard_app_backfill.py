@@ -32,6 +32,7 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import (
     DashboardState,
     _collect_store_stats,
@@ -263,8 +264,36 @@ def test_contracts_empty_when_no_lake_root(nolake_client: TestClient) -> None:
     assert resp.json() == {"contracts": [], "limit": 500}
 
 
-def test_index_constituents_unavailable_when_no_lake_root(nolake_client: TestClient) -> None:
-    """/index-constituents degrades honestly (source=unavailable) without a cache root."""
+def test_index_constituents_scope_excluded_under_shipped_default(
+    nolake_client: TestClient,
+) -> None:
+    """A5b (DEC-UNIVERSE-INDEX-ONLY-001): the shipped index4 default reads the
+    dormancy payload — honest 200, zero network, BEFORE any cache/lake probe
+    (the live picker never offers picks the P7 pull screens would refuse)."""
+    resp = nolake_client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "members": [],
+        "source": "scope_excluded",
+        "as_of": None,
+        "note": (
+            "universe scope excludes stocks — index-constituent "
+            "picking is dormant (DEC-UNIVERSE-INDEX-ONLY-001)"
+        ),
+    }
+
+
+def test_index_constituents_unavailable_when_no_lake_root(
+    nolake_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/index-constituents degrades honestly (source=unavailable) without a cache root.
+
+    EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration Law 2):
+    constituent picking is STOCK machinery, dormant under the shipped index4
+    default (the guard arm above); the no-lake-root degrade is reachable only
+    under a stock-admitting scope.
+    """
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
     resp = nolake_client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"})
     assert resp.status_code == 200
     assert resp.json() == {
