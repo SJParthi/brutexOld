@@ -21,10 +21,36 @@ Flush is byte-deterministic; sha256 at regeneration time
 asserted — the pin is LOGICAL field values, the house golden philosophy). Do
 NOT regenerate again: a future column extension must load THIS file with its
 new fields as honest ``None`` (the optional-column LAW), exactly as the
-pre-extension fixture guards this one. The sibling club-generated
-``results_store_pre_temporal_v1.parquet`` (same regeneration event) is the
-byte oracle for the emit-on-present all-``None`` arm in
-``tests/unit/test_engine_results_store_temporal.py``.
+pre-extension fixture guards this one.
+
+W2 RE-INTEGRATION (2026-07-19, the #1580 collision fold — MIGRATION.md #1976;
+the sanctioned additive-only re-lock, the #1749 precedent): the W2
+metrics-depth lane's 8 ALWAYS-written nullable Float64 columns (the growth
+trio + ``sl_hit_rate`` + the recency four — appended strictly AFTER the
+temporal quartet's landed position, the coordinator's landed-first-wins
+ruling) re-appended to the writer, so a reflush of :func:`_expected_rows`
+no longer lands on the v1 bytes. Per the do-NOT-regenerate law above the v1
+file is BYTE-UNTOUCHED and stays the frozen LOAD oracle — it now genuinely
+guards the optional-column law for W2's 8 (absent columns load as honest
+``None``, pinned below) — and the byte-determinism pin moved onto the NEW
+sibling ``results_store_temporal_v2.parquet``, minted 2026-07-19 as a
+reviewed act through the COMBINED production writer via the documented
+generation law (append :func:`_expected_rows` → ``flush()`` — the law the
+reflush test enforces forever; sha256
+``e3d6d02aa109dfbdd15c2b7d9a94225f08883c8117f8f362dc29ddd718c1b9eb``, 10 512
+bytes, NOT asserted). The v1→v2 delta is HAND-AUDITED schema-additive-only
+(and permanently machine-pinned by ``test_v2_delta_vs_v1_is_exactly_the_
+appended_w2_families`` below): v2's columns == v1's 32 columns in the SAME
+order + EXACTLY the 8 (all Float64, ALL-null — no W2 value exists for the
+hand-built literal rows), and ``v2.drop(the 8)`` is schema- AND value-equal
+to v1. The sibling ``results_store_pre_temporal_v2.parquet`` (SAME
+regeneration event; sha256
+``9a3122e19204602a8b35ea478b0aca69fe7baa697e245330a709c43bd69b1ad7``, 9 259
+bytes; v1 frozen at
+``8852565285aa69979fcd3c946cc003aa3d24a57d76d2242228e4c890ec56d312``) is the
+new byte oracle for the emit-on-present all-``None`` arm in
+``tests/unit/test_engine_results_store_temporal.py``, delta-audited by the
+same pin below.
 """
 
 from __future__ import annotations
@@ -38,6 +64,34 @@ from brutex.engine.results_store import ResultRow, ResultsStore
 
 #: The committed capture-ON store file (a REAL flush output, frozen).
 _FIXTURE: Path = Path(__file__).parent / "fixtures" / "results_store_temporal_v1.parquet"
+
+#: The W2-era byte-determinism twin (module docstring): the SAME literals
+#: flushed through the COMBINED writer (temporal quartet at its landed
+#: position + W2's 8 appended after, all-null here).
+_FIXTURE_V2: Path = Path(__file__).parent / "fixtures" / "results_store_temporal_v2.parquet"
+
+#: The all-``None`` arm's v1/v2 pair (the unit suite's byte oracle) —
+#: delta-audited here beside the temporal pair.
+_PRE_TEMPORAL_V1: Path = (
+    Path(__file__).parent / "fixtures" / "results_store_pre_temporal_v1.parquet"
+)
+_PRE_TEMPORAL_V2: Path = (
+    Path(__file__).parent / "fixtures" / "results_store_pre_temporal_v2.parquet"
+)
+
+#: The 8 W2 always-written nullable Float64 columns, in their ruled appended
+#: order (GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS — mirrored
+#: literally so a constant reorder cannot silently re-derive this pin).
+_W2_COLUMNS: list[str] = [
+    "loss_rate",
+    "kelly_fraction",
+    "log_growth_at_half_kelly",
+    "sl_hit_rate",
+    "trailing_sharpe_ratio",
+    "trailing_profit_factor",
+    "trailing_net_pnl_paisa",
+    "decay_weighted_net_paisa",
+]
 
 #: The exact canonical column strings row 1 was generated with (hand-locked).
 _YEAR_JSON = '{"2021":[27,-140000,13,200000],"2022":[13,16550,5,40000]}'
@@ -119,6 +173,8 @@ def _expected_rows() -> tuple[ResultRow, ...]:
 def test_fixture_is_committed() -> None:
     assert _FIXTURE.is_file()
     assert _FIXTURE.stat().st_size > 0
+    assert _FIXTURE_V2.is_file()
+    assert _FIXTURE_V2.stat().st_size > 0
 
 
 def test_temporal_store_loads_field_for_field() -> None:
@@ -152,14 +208,54 @@ def test_temporal_locked_literals() -> None:
     assert null_arm.temporal_judged_years_json is None
 
 
+def test_v1_loads_w2_fields_as_honest_none() -> None:
+    """The optional-column LAW, now live for W2's 8 on the frozen v1 file: a
+    store written BEFORE the growth/exit-quality/recency columns loads each of
+    them as honest ``None`` — never a fabricated value, never a corrupt
+    verdict (the same guard the pre-extension fixture provides one generation
+    earlier)."""
+    pytest.importorskip("polars")
+    loaded = ResultsStore.load(_FIXTURE)
+    assert len(loaded) == 2
+    for row in loaded.rows():
+        for name in _W2_COLUMNS:
+            assert getattr(row, name) is None, name
+
+
 def test_temporal_flush_reproduces_the_fixture_bytes(tmp_path: Path) -> None:
     """Byte-determinism across the extension: re-flushing the literals lands on
-    the committed bytes (polars/zstd-build sensitive — the same caveat class as
-    the pre-extension fixture's generation note; the field pins above are the
-    version-robust contract)."""
+    the committed V2 bytes (polars/zstd-build sensitive — the same caveat class
+    as the pre-extension fixture's generation note; the field pins above are
+    the version-robust contract). Repointed v1 → v2 at the W2 re-integration
+    (module docstring — the combined writer always appends W2's 8, so the v1
+    bytes are unreproducible by construction; v1 stays the frozen LOAD
+    oracle, byte-untouched)."""
     pytest.importorskip("polars")
     store = ResultsStore(path=tmp_path / "regen.parquet")
     for row in _expected_rows():
         store.append(row)
     store.flush()
-    assert (tmp_path / "regen.parquet").read_bytes() == _FIXTURE.read_bytes()
+    assert (tmp_path / "regen.parquet").read_bytes() == _FIXTURE_V2.read_bytes()
+
+
+def test_v2_delta_vs_v1_is_exactly_the_appended_w2_families() -> None:
+    """The PERMANENT machine form of the 2026-07-19 regeneration hand audit
+    (module docstring; the #1749 additive-only re-lock law), for BOTH v1/v2
+    fixture pairs — the temporal pair here and the unit suite's pre-temporal
+    byte-oracle pair: v2's schema is v1's schema + EXACTLY the 8 W2 nullable
+    Float64 columns appended LAST (all-null — the hand-built literal rows
+    carry no W2 values), and dropping them yields a frame schema- AND
+    value-equal to v1 (every old column byte/value-equal in the same order —
+    ``.equals`` alone is dtype-insensitive, hence the explicit schema
+    compare)."""
+    pl = pytest.importorskip("polars")
+    for v1_path, v2_path in ((_FIXTURE, _FIXTURE_V2), (_PRE_TEMPORAL_V1, _PRE_TEMPORAL_V2)):
+        v1 = pl.read_parquet(v1_path)
+        v2 = pl.read_parquet(v2_path)
+        assert v2.columns == v1.columns + _W2_COLUMNS, v2_path.name
+        for name in _W2_COLUMNS:
+            assert v2.schema[name] == pl.Float64, name
+            assert v2[name].null_count() == v2.height, name
+        stripped = v2.drop(_W2_COLUMNS)
+        assert stripped.schema == v1.schema, v2_path.name
+        assert stripped.equals(v1), v2_path.name
