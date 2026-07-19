@@ -12,6 +12,7 @@ pin, and the verification-census pin on the shipped table.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date
 
 import pytest
@@ -21,6 +22,9 @@ from brutex.metrics.regime_taxonomy import (
     ERA_BOUNDARIES,
     EXTREME_VOL_OVERLAY_START,
     TAXONOMY_VERSION,
+    VIX_HIGH_MAX,
+    VIX_LOW_MAX,
+    VIX_MID_MAX,
     EraBoundary,
     StratumKey,
     TrendStratum,
@@ -117,6 +121,14 @@ class TestCovidOverlay:
         assert is_covid_2020_overlay(date(2020, 2, 14)) is False
         assert is_covid_2020_overlay(date(2020, 7, 1)) is False
 
+    def test_window_edges_inclusive_literal(self) -> None:
+        # HARDCODED-LITERAL inside edges (never the module constants):
+        # narrowing COVID_2020_END to 2020-06-29 — or shifting the start
+        # LATER — must FAIL here even though the constant-relative edge
+        # test above would still pass (the hostile-review attack).
+        assert is_covid_2020_overlay(date(2020, 2, 15)) is True
+        assert is_covid_2020_overlay(date(2020, 6, 30)) is True
+
     def test_interior_true(self) -> None:
         assert is_covid_2020_overlay(date(2020, 3, 23)) is True
 
@@ -130,6 +142,11 @@ class TestExtremeVolOverlay:
 
     def test_extreme_true_at_start_edge(self) -> None:
         assert in_extreme_vol_overlay(EXTREME_VOL_OVERLAY_START, 25.0) is True
+
+    def test_extreme_true_at_start_edge_literal(self) -> None:
+        # HARDCODED-LITERAL inside edge (never the module constant): a
+        # LATER-shifted EXTREME_VOL_OVERLAY_START must FAIL here.
+        assert in_extreme_vol_overlay(date(2024, 1, 1), 25.0) is True
 
     def test_non_extreme_vix_false(self) -> None:
         assert in_extreme_vol_overlay(date(2025, 1, 1), 24.99) is False
@@ -263,3 +280,31 @@ class TestPins:
             "post_peak_margin_full",
             "post_weekly_rationalization",
         ]
+
+    def test_vocabulary_drift_pin(self) -> None:
+        """Any taxonomy vocabulary change moves this digest — bump
+        TAXONOMY_VERSION and re-pin consciously (the bump-law teeth).
+
+        The canonical string folds every vocabulary surface the module
+        docstring's versioning law names: the version itself, the three
+        VIX band edges, both enum vocabularies (name + value, definition
+        order), the full era table (start, label, verified), and both
+        crisis-overlay windows. A silent edit to ANY of them — without a
+        conscious TAXONOMY_VERSION bump + re-pin — fails here.
+        """
+        canonical = "\x1f".join(
+            [
+                f"version={TAXONOMY_VERSION}",
+                f"vix_edges={VIX_LOW_MAX!r}|{VIX_MID_MAX!r}|{VIX_HIGH_MAX!r}",
+                "vol_bands=" + ";".join(f"{m.name}={m.value!r}" for m in VolBand),
+                "trend_strata=" + ";".join(f"{m.name}={m.value!r}" for m in TrendStratum),
+                "eras="
+                + ";".join(
+                    f"{row.start.isoformat()}|{row.label}|{row.verified}" for row in ERA_BOUNDARIES
+                ),
+                f"covid={COVID_2020_START.isoformat()}..{COVID_2020_END.isoformat()}",
+                f"extreme_vol_start={EXTREME_VOL_OVERLAY_START.isoformat()}",
+            ]
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        assert digest == "aeece3ed1230e048bdfda976a40f50141a558764ff7438c3a36779a89b2b3bfb"
