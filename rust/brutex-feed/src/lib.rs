@@ -23,10 +23,30 @@
 //! copies (plus the optional `ts_us` list the caller builds when the screen
 //! is on) — a transient O(n_bars) cost, dominated by the pre-existing
 //! `to_pylist()` materialization the read path already pays in BOTH arms.
+//!
+//! ## `DEC-FEED-RUST-MATERIALIZE-002` — the wheel-REQUIRED extension
+//!
+//! The T17 lane retires the two-arm seam: the Python oracle bodies of
+//! `arrow_table_to_bars` / `LookAheadBarrier` / the `series_load` decision
+//! helpers are DELETED and this crate becomes REQUIRED for feed
+//! materialization. Append-only additions ([`materialize::scan_bars_strict`]
+//! — the finiteness-first strict scan; [`lookahead::BarrierState`] — the
+//! P-06 barrier state machine; [`series`] — the sweep-slice decision
+//! arithmetic). The original [`scan_bars`] ships FROZEN (its own tests +
+//! the shim handshake keep it; nothing in production consults it any more).
 
+pub mod lookahead;
+pub mod materialize;
 pub mod scan;
+pub mod series;
 
+pub use lookahead::{
+    ACCESS_LOOKAHEAD, ACCESS_NEGATIVE, ACCESS_NO_CURSOR, ACCESS_OK, ADVANCE_BACKWARDS,
+    ADVANCE_NEGATIVE, ADVANCE_OK, BarrierState,
+};
+pub use materialize::{STOP_NONFINITE, STOP_NONPOSITIVE, StrictOutcome, scan_bars_strict};
 pub use scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, WarnEvent, scan_bars};
+pub use series::{SessionDay, boundary_monotonic_break, expected_bar_instant, ownership_cut};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
 /// baked at build time by `build.rs` under the shared FRAMING v1 of

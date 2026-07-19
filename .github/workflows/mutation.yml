@@ -233,10 +233,11 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
-      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
-        # The feed_rust mutmut pair's wheel-gated FFI/engagement tests need
-        # the kernel importable to kill their mutants (absent wheel = those
-        # tests skip and the corresponding mutants would falsely survive).
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-MATERIALIZE-002)
+        # The wheel is REQUIRED for the feed_rust + feed/replay mutmut pairs:
+        # DEC-FEED-RUST-MATERIALIZE-002 deleted the Python oracle bodies, so
+        # an absent wheel makes those suites FAIL loudly (never skip) and the
+        # mutation loop could not run at all.
         # Belt-and-suspenders crates.io flake guard (see fno-math step).
         run: |
           n=0
@@ -556,8 +557,10 @@ jobs:
             # field is the module's 3-file discovery set (55 tests, min
             # baseline ~2.5-3.7 s local — inside the [1200, 20000] ms regime);
             # the 30 s wrap cap is MANDATORY, not optional: `_bars_from_scan`'s
-            # warn-drain and the oracle loop carry spin-capable loop mutants
-            # (the audit-mutant-173 wedge class). Measured 152 mutants
+            # warn-drain and the null-gate/decision-extraction loops carry
+            # spin-capable loop mutants (the audit-mutant-173 wedge class; the
+            # former Python oracle loop was DELETED by
+            # DEC-FEED-RUST-MATERIALIZE-002). Measured 152 mutants
             # (mutmut 2.5.1 list_mutations on this tree) ≈ ~6 min at the
             # ~2.3 s/mutant CI pace — noting honestly that the budget
             # arithmetic block above pre-dates the post-#1597 pair additions

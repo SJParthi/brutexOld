@@ -45,6 +45,39 @@ ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; one new env var `BRUTEX_SWEEP_OPS_RUST` (default OFF). This header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1964.)
+Earlier: 2026-07-19 (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1965,
+branch `claude/feed-rust-materialize` — the feed MATERIALIZATION layer
+converts to Rust and the Python oracle bodies are DELETED (the zero-Python
+endgame for `brutex/feed`): the `brutex_feed` wheel becomes REQUIRED for
+feed materialization — crate 0.1.0 → 0.2.0 APPEND-ONLY (the frozen
+DEC-FEED-RUST-CORE-001 `scan_bars` untouched): the finiteness-FIRST
+`scan_bars_strict` strict scan, the P-06 `BarrierState` barrier core, the
+series_load decision arithmetic (`expected_bar_instant` · `ownership_cut`
+· `boundary_monotonic_break`) over exact epoch-µs integers; `feed_rust.py`
+REWRITTEN to the wheel-required seam (`require_feed_kernel` ·
+`require_materialize_flags` — the retired-axis law, the
+`BRUTEX_FILL_MODE`/DEC-FILL-WORST-CASE-ONLY-001 precedent: a SET falsy
+`BRUTEX_FEED_MATERIALIZE_RUST` OR the retired `BRUTEX_FEED_RUST` refuses
+loudly naming the DEC — · `validate_strict_scan`; the two-arm degrade
+machinery DELETED — every former degrade token is now a loud typed
+refusal); replay's retained oracle loop + dispatch deleted,
+`arrow_table_to_bars` always routes the strict kernel with the
+materialization helpers keeping the run-identity-critical expressions in
+ONE place — bxsnap2 bytes preserved by construction (the frozen parity +
+snapshot-hash goldens pass with fixtures BYTE-UNTOUCHED);
+`LookAheadBarrier` a thin exception-materializing wrapper over
+`BarrierCore`; the series_load decision seams Rust-verdicted (calendar
+I/O + abstain arms + orchestration stay Python — the honest residue).
+SUPERSEDES DEC-FEED-RUST-CORE-001's default-OFF/degrade contract (the
+crate + FFI discipline stand; closes/moots DEC-FEED-RUST-FLIP-001 — the
+flip happened here, refusal-law instead of burn-in per the operator's
+compressed no-soak cycle); expected payoff ≈ 0 — conversion is for
+uniformity, not speed; named follow-up
+DEC-FEED-EPOCH-RESAMPLER-RETIRE-001 (resampler.py retirement). ENGINE
+results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; run identity untouched. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1965.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3709,6 +3742,151 @@ hostile-review pass._
   lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; one new env var
   `BRUTEX_SWEEP_OPS_RUST` (default OFF); the per-item record lives in this blurb +
   MIGRATION.md #1964 — this header carries the pointer, never the story.)
+  Earlier: `claude/feed-rust-materialize`
+  (**DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1965** — entry #1965 above
+  the live tail #1956; the renumber-at-landing law stands, the DEC-ID is the
+  stable handle per DEC-LEDGER-RENUMBER-001 — the feed MATERIALIZATION layer
+  converts to Rust and the Python oracle bodies are DELETED (the zero-Python
+  endgame for `brutex/feed`): the `brutex_feed` wheel becomes REQUIRED for
+  feed materialization. HONESTY BANNER (ADR-0020, verbatim): expected payoff
+  ≈ 0 — conversion is for uniformity, not speed (no speedup claimed, none
+  measured; the strict scan replaces the deleted oracle loop AND the former
+  O(rows) Python isfinite pre-gate on the kernel path; the barrier adds one
+  constant FFI hop per access — bench linearity + ratio gates green).
+  SUPERSEDES DEC-FEED-RUST-CORE-001's default-OFF/degrade contract (#1797 —
+  the crate + the FFI discipline it established STAND) and closes/moots its
+  named follow-up DEC-FEED-RUST-FLIP-001 (the flip happened HERE,
+  refusal-law instead of burn-in per the operator's compressed no-soak
+  cycle). CRATE (`rust/brutex-feed` 0.1.0 → 0.2.0, APPEND-ONLY — the frozen
+  DEC-FEED-RUST-CORE-001 `scan_bars` untouched): `src/materialize.rs`
+  `scan_bars_strict` — the finiteness-FIRST strict scan (per row, per field
+  open→high→low→close, isfinite-before-positivity, typed stop kind
+  0=non-positive/1=non-finite, the unchanged bad-tick screen law; a cargo
+  differential proptest pins strict ≡ frozen scan over the all-finite
+  plane); `src/lookahead.rs` `BarrierState` — the P-06 barrier state machine
+  (verdict codes out, exception materialization stays Python);
+  `src/series.rs` `expected_bar_instant` + `ownership_cut` +
+  `boundary_monotonic_break` — the series_load decision arithmetic over
+  exact epoch-µs integers; `python.rs` registrations append-only, the shim
+  `_EXPECTED_COMPILED_SYMBOLS` + `EXPECTED_BUILD.json` grow to 8 symbols;
+  cargo 71 tests green (10 lookahead + 12 materialize + 16 series + 26 scan
+  + 4 scan proptest + 3 digest parity), fmt + clippy `--all-targets`
+  (default AND `--features python`) `--locked -D warnings` clean. THE
+  DELETE: `brutex/feed_rust.py` REWRITTEN to the wheel-required seam —
+  `require_feed_kernel` (a loud typed FeedError naming the maturin
+  remediation on a missing/stale wheel), `require_materialize_flags` (the
+  retired-axis law — the `BRUTEX_FILL_MODE`/DEC-FILL-WORST-CASE-ONLY-001
+  precedent: a SET falsy `BRUTEX_FEED_MATERIALIZE_RUST` OR the retired
+  `BRUTEX_FEED_RUST` asks for the deleted Python arm and REFUSES loudly
+  naming the DEC; junk refuses too; unset/empty/truthy proceed),
+  `validate_strict_scan` (the refuse-poison structural gate returning the
+  NAMED violated-law token — a poisoned wheel can only refuse, never
+  serve); the two-arm machinery (`feed_rust_enabled` /
+  `resolve_feed_kernel` / `validate_scan` / the `warn_degrade_once`
+  registry) DELETED — with the oracle gone there is nothing to degrade to,
+  every former degrade token is now a loud typed refusal.
+  `brutex/feed/replay.py`: the retained Python oracle loop + the two-arm
+  dispatch + `_scan_via_kernel_or_none` DELETED; `arrow_table_to_bars`
+  always routes `_bars_via_strict_kernel` — the null gate on the six
+  consulted columns (a null is a typed corrupt-column ValueError,
+  SUPERSEDING the deleted oracle's accidental raw TypeError escapes — a
+  documented pre-existing escape, never a contract), the canonical-schema
+  fast path (decisions consume the SAME float lists Python materializes
+  from) vs non-canonical decision COPIES (f64 casts / exact epoch-µs;
+  materialization keeps the ORIGINAL `to_pylist` objects so an int-price
+  hostile table still materializes `Decimal(str(5))` — the deleted
+  oracle's exact bytes), the envelope refusal (a consulted ts outside
+  [epoch 0, 9999-12-31T00:00:00Z) with the screen on is a loud FeedError —
+  the fixed +05:30 civil-date law is only provable there; planted/
+  out-of-band data only, real bars are post-2020 by `GROWW_HISTORY_FLOOR`),
+  the kernel-fault wrap (FeedError; MemoryError/KeyboardInterrupt/
+  SystemExit re-raise RAW) + the poison refusal naming the violated law;
+  the materialization helpers (`_build_bar` / `_emit_warn` /
+  `_bars_from_scan` / the two error-message builders) keep the
+  run-identity-critical expressions in ONE place — bxsnap2 bytes preserved
+  BY CONSTRUCTION. `brutex/feed/lookahead.py`: `LookAheadBarrier` is a thin
+  exception-materializing wrapper over the wheel's `BarrierCore` (verdict
+  codes 0-3; every pinned message byte + exception TYPE —
+  LookAheadError/ValueError — Python-owned and unchanged); the Python
+  state machine deleted; P-06 semantics, record=True/False modes and the
+  O(1)-per-op + O(1)-memory-in-record=False claims preserved (integer
+  comparisons in Rust + one constant FFI hop);
+  `verify_with_barrier`/`LookAheadReport` unchanged.
+  `brutex/feed/series_load.py`: the three decision seams run in Rust —
+  `_expected_bar_time_in_window` keeps the calendar I/O + both abstain arms
+  (out-of-coverage day → True; unknown interval label → True) in Python and
+  gets the geometric verdict from `expected_bar_instant` over exact
+  epoch-µs session instants (verdict-equivalent to the deleted
+  early-return day walk — proof recorded in the docstring; the ONE
+  disclosed delta is walk COST not verdict: every day of the
+  contract-span-bounded intersection is resolved before the kernel call,
+  where the deleted walk stopped at the first qualifying day); the
+  IST-date ownership cut runs as the fixed +05:30 day-ordinal law (an
+  out-of-envelope stored ts is a loud FuturesSeriesError refusal,
+  planted-data-only); the boundary-monotonicity verdict via
+  `boundary_monotonic_break`; orchestration (Catalog/reconcile/
+  futures-series/calendar I/O, the window intersection arithmetic feeding
+  the Python Catalog API, error/log materialization) stays Python — the
+  honest residue. `brutex/feed/errors.py` + `__init__.py` UNCHANGED (the
+  exception types + re-export surface ARE the import surface);
+  `brutex/feed/resampler.py` NOT ported, NOT deleted — `resample_bars` is
+  production-dead (the #1492 G3 AST pin) but `INTERVAL_SECONDS`/
+  `RESAMPLEABLE_INTERVALS` are production-live (cli.py ×4 +
+  dashboard/sweep_runner.py); whole-module retirement is the named
+  follow-up DEC-FEED-EPOCH-RESAMPLER-RETIRE-001. PARITY (executed): the
+  frozen bxsnap2 parity + snapshot-hash goldens pass with fixtures
+  BYTE-UNTOUCHED; the pass-UNMODIFIED families green on the deleted tree
+  (237 passed: barrier unit+property+golden, series_load 36, feed replay
+  integration + the bad-tick screen, lake_replay, sweep-lookahead,
+  suffix-independence, market-structure lookahead); the five seam suites
+  REWRITTEN to the wheel-required contract (their old pins pinned the
+  deleted two-arm degrade lattice — the ONE sanctioned pin-rewrite class
+  of this lane, disclosed); `tests/property/test_feed_rust_parity.py`
+  retains the DELETED oracle loop VERBATIM as the frozen IN-TEST reference
+  (the tf_resampler frozen-oracle idiom) and hypothesis-differentials the
+  unified path against it (bars str()-level, exception triple,
+  log-sequence equality). BEHAVIOR DELTAS (SIX after the refuter
+  round — each hostile/planted-input-only, sanctioned + disclosed):
+  wheel-absent materialization fails LOUD (boot without the wheel still
+  works — imports stay wheel-lazy, the requirement bites at the first
+  materialization/barrier construction); null consulted columns → typed
+  corrupt-column ValueError (refuter wording correction: on the ONE
+  null-`volume`-on-a-screen-SKIPPED-row sub-case the deleted oracle
+  silently SERVED 2 bars — refuse-harder, silent-serve→typed-refusal,
+  not raw-escape→typed); out-of-envelope timestamps with the screen on →
+  the loud envelope refusal (refuter wording correction: the NAIVE
+  pre-1970 stamp was oracle-RAISED — raise-vs-raise-differently inside
+  the same trigger class, never serve→refuse); SET-falsy/junk
+  `BRUTEX_FEED_RUST`/`BRUTEX_FEED_MATERIALIZE_RUST` → a loud refusal; the
+  decision-plane f64 rounding on hostile >2^53 integer-price tables
+  (materialized values unchanged; decisions could differ from exact-int
+  comparisons — the disclosed residue); and the REFUTER-FOUND delta (6) —
+  a planted `decimal128(20,2)`-price table with the screen ON: the
+  deleted oracle CRASHED (raw Decimal×float TypeError inside
+  BadTickScreen), the new kernel SERVES and skips-and-WARNs on a ≥4x
+  decimal jump — accidental-crash → plausibly-correct serve;
+  planted-dtype-only, no production writer emits decimal128 price
+  columns. REFUTER ROUND folded (docs-only ledger amendment over gate
+  widening — the per-item record lives in MIGRATION.md #1965): Claim A
+  (P-06 barrier parity) UNREFUTED over 19,933 differential ops — the
+  ≥2^63 / bool-index / float-index observations each stricter-or-equal,
+  degenerate-input-only (`advance_to(2**63)` old-silent-succeed → new
+  OverflowError — a loud raise, never a silent look-ahead); Claim B
+  letter-refuted on the ONE decimal128 shape → delta (6) + the two
+  wording corrections, canonical-plane parity-clean over ~3,000 executed
+  cases; Claim C (the >2^53 residue is unreachable from a healthy
+  production lake) STANDS over REAL-writer lakes; the Decimal-price
+  junk-typed-gate refusal stays the backticked unminted follow-up
+  `DEC-FEED-DECIMAL-PRICE-GATE-001`. CI: the brutex_feed wheel joins
+  the property job's install subset (test_lookahead_properties.py + the
+  parity module now construct wheel-required barriers). GATES: touched
+  modules 100% line+branch on their ci.yml gates (feed_rust standalone;
+  lookahead via its 3-file gate; series_load via its file; replay via the
+  discovery stem set); ruff/ruff-format clean; `mypy --strict` 0 new (the
+  stage3_refine cma import error is the documented env-only baseline);
+  pyright 0 new on touched files. ENGINE results UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched (bxsnap2 goldens byte-identical).)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -11118,6 +11296,28 @@ hostile-review pass._
   is the NAMED follow-up DEC-SWEEP-OPS-RUST-FLIP-001 (stacked PR, own DEC);
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1964 for the full blurb)
+  Earlier: `claude/feed-rust-materialize`
+  (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1965 — the feed
+  MATERIALIZATION layer converts to Rust and the Python oracle bodies are
+  DELETED (the zero-Python endgame for `brutex/feed`): the `brutex_feed`
+  wheel becomes REQUIRED for feed materialization — crate 0.1.0 → 0.2.0
+  APPEND-ONLY (the frozen `scan_bars` untouched: the finiteness-FIRST
+  `scan_bars_strict` + the P-06 `BarrierState` core + the series_load
+  decision arithmetic over exact epoch-µs integers); `feed_rust.py`
+  REWRITTEN to the wheel-required seam (`require_feed_kernel` ·
+  `require_materialize_flags` — the retired-axis law: a SET
+  falsy/retired-flag value refuses loudly naming the DEC ·
+  `validate_strict_scan`); the two-arm degrade machinery + replay's
+  retained oracle loop DELETED — every former degrade token is now a loud
+  typed refusal, the materialization helpers keep the
+  run-identity-critical expressions in ONE place (bxsnap2 bytes preserved
+  by construction; the frozen goldens pass with fixtures BYTE-UNTOUCHED);
+  `LookAheadBarrier` a thin wrapper over `BarrierCore`; SUPERSEDES
+  DEC-FEED-RUST-CORE-001's default-OFF/degrade contract (closes/moots
+  DEC-FEED-RUST-FLIP-001); expected payoff ≈ 0 — uniformity, not speed;
+  named follow-up DEC-FEED-EPOCH-RESAMPLER-RETIRE-001; ENGINE results
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1965 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·

@@ -1,268 +1,258 @@
-"""``BRUTEX_FEED_RUST`` flag + kernel resolution + refuse-poison validation
-(the LEAF half of ``DEC-FEED-RUST-CORE-001``).
+"""The wheel-REQUIRED feed-materialization seam (DEC-FEED-RUST-MATERIALIZE-002).
 
-The optional ``brutex_feed`` Rust wheel carries the DECISION plane of
-:func:`brutex.feed.replay.arrow_table_to_bars` (positivity refusal order +
-the bad-tick keep/skip screen) as ONE pure function returning INTEGERS ONLY.
-This module owns everything about *whether and how* the seam may consult it:
+The ``brutex_feed`` Rust wheel carries the DECISION plane of the feed
+package — the strict scan behind
+:func:`brutex.feed.replay.arrow_table_to_bars` (finiteness + positivity
+refusal order + the bad-tick keep/skip screen), the P-06
+``LookAheadBarrier`` state machine, and the ``series_load`` decision
+arithmetic — each returning INTEGERS ONLY while Python keeps ALL
+materialization (``Decimal``/``CandleBar``/error f-strings/structlog
+WARNs), so run identity (``bxsnap2``, CLAUDE.md Golden Rule #4) is
+byte-preserved by construction.
 
-* ``feed_rust_enabled`` — the default-OFF opt-in flag (Pattern A: ONLY an
-  explicit truthy value enables; unset/empty/falsy/junk are all OFF, with a
-  warn-once courtesy on non-empty junk so an operator typo is surfaced).
-* ``resolve_feed_kernel`` — the lazy wheel import with the named degrade
-  tokens (``wheel_missing`` / ``wheel_stale``) — a missing or stale wheel can
-  only ever mean "use the byte-identical Python oracle", never a failure.
-* ``validate_scan`` — the refuse-poison structural gate over the kernel's
-  output (the ``rust_metrics._valid_drawdown`` precedent): a stale/corrupt
-  wheel whose output violates ANY shape law degrades loudly to the oracle,
-  never serves.
-* ``warn_degrade_once`` / ``reset_for_tests`` — the per-process per-reason
-  warn-once registry shared by every degrade site.
+This module owns the seam law:
 
-LEAF DISCIPLINE (verified import cycle): ``brutex.engine.sweep_lookahead``
-imports ``brutex.feed.lookahead`` at module scope, so this module — imported
-by ``brutex.feed.replay`` — must NOT import ``env_flag_tristate`` from the
-engine (or anything from ``brutex.engine`` / ``brutex.costs`` /
-``brutex.dashboard`` / ``brutex.data`` / ``brutex.feed``). It carries its own
-inline ``_TRUTHY`` / ``_FALSY`` vocabulary (the ``bad_tick.py`` inline
-precedent), mirror-pinned against ``sweep_lookahead``'s sets by a test.
+* :func:`require_feed_kernel` — the ONE loud resolver. The Python oracle
+  bodies were DELETED (the T17 zero-Python endgame), so a missing/stale
+  wheel is a typed :class:`~brutex.feed.errors.FeedError` naming the
+  rebuild remediation — never a silent degrade, never a fabricated bar.
+* :func:`require_materialize_flags` — the retired-axis flag law (the
+  ``BRUTEX_FILL_MODE`` precedent, DEC-FILL-WORST-CASE-ONLY-001): a SET
+  ``BRUTEX_FEED_MATERIALIZE_RUST`` or legacy ``BRUTEX_FEED_RUST`` value
+  that asks for the deleted Python arm (explicit falsy) — or that cannot
+  be interpreted (junk) — REFUSES loudly naming the DEC; unset/empty and
+  explicit truthy proceed.
+* :func:`validate_strict_scan` — the refuse-poison structural gate over
+  the strict kernel's output (the ``rust_metrics._valid_drawdown``
+  precedent): a stale/corrupt wheel whose output violates ANY shape law
+  makes the caller RAISE — a poisoned wheel can only refuse, never serve.
 
-Ships INERT: the flag is default-OFF, read per call (no global latch), and
-every existing suite passes unmodified with the flag unset. The one-constant
-default flip is the LATER `DEC-FEED-RUST-FLIP-001` (burn-in + autorevert per
-the DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 precedent).
+SUPERSEDES the DEC-FEED-RUST-CORE-001 two-arm machinery that lived here
+(``feed_rust_enabled`` / ``resolve_feed_kernel`` / ``validate_scan`` /
+the ``warn_degrade_once`` registry): with the oracle deleted there is
+nothing to degrade TO, so every former degrade token is now a loud typed
+refusal at its seam.
+
+LEAF DISCIPLINE (verified import cycle): ``brutex.feed.__init__`` imports
+``replay`` which imports THIS module, so module scope stays stdlib-only
+(no ``brutex.*`` / third-party edge — the inline ``_TRUTHY``/``_FALSY``
+vocabulary is the ``bad_tick.py`` precedent, mirror-pinned against
+``sweep_lookahead``'s sets by a test). The typed ``FeedError`` refusals
+import ``brutex.feed.errors`` LAZILY in-function — cycle-safe because
+every caller reaches them only after the package is fully imported.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Final, Protocol, cast
+from typing import Final
 
-import structlog
-
-_LOG = structlog.get_logger(__name__)
-
-#: The opt-in environment flag (default OFF — Pattern A).
+#: The RETIRED DEC-FEED-RUST-CORE-001 opt-in flag. Both its arms collapsed
+#: into the wheel-required strict path; a SET falsy/junk value now refuses
+#: loudly (see :func:`require_materialize_flags`).
 FEED_RUST_ENV: Final[str] = "BRUTEX_FEED_RUST"
 
-#: ONE structlog event per degrade reason per process (``reason=`` field).
-FEED_RUST_FALLBACK_EVENT: Final[str] = "feed_rust.fallback"
+#: The T17 materialization flag (DEC-FEED-RUST-MATERIALIZE-002) — ON is
+#: the only shipping arm; a SET falsy/junk value refuses loudly.
+MATERIALIZE_RUST_ENV: Final[str] = "BRUTEX_FEED_MATERIALIZE_RUST"
 
-#: ONE structlog event per process for a non-empty unrecognised flag value.
-FEED_RUST_FLAG_EVENT: Final[str] = "feed_rust.flag_unrecognised"
+#: The lane's decision id — woven into every wheel-required refusal.
+MATERIALIZE_DECISION: Final[str] = "DEC-FEED-RUST-MATERIALIZE-002"
+
+#: The ONE named remediation for a missing/stale wheel.
+WHEEL_REMEDIATION: Final[str] = (
+    "run `maturin develop --release` inside rust/brutex-feed with the "
+    "project venv active (or `make setup`)"
+)
 
 #: Inline flag vocabulary (LEAF discipline — see the module docstring; the
 #: mirror-pin test asserts byte-equality with ``sweep_lookahead``'s sets).
 _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 
-#: Warn-once registry: reasons (and the flag-junk token) already logged by
-#: this process. Reset via :func:`reset_for_tests`.
-_WARNED: Final[set[str]] = set()
-
-#: Structural arities of the kernel result (the frozen FFI shape).
+#: Structural arities of the strict kernel result (the frozen FFI shape).
 _RESULT_ARITY: Final[int] = 3
-_STOP_ARITY: Final[int] = 2
+_STRICT_STOP_ARITY: Final[int] = 3
 _EVENT_ARITY: Final[int] = 5
 
-#: Highest positivity-stop field index (0/1/2/3 = open/high/low/close).
+#: Highest stop field index (0/1/2/3 = open/high/low/close).
 _MAX_FIELD_INDEX: Final[int] = 3
 
 #: One kernel warn event: ``(emit_at_row, session_first_row, skipped,
 #: first_prev_row, first_skip_row)`` — integer row coordinates only.
 ScanEvent = tuple[int, int, int, int, int]
 
-#: The kernel's outcome: ``(kept_rows, warn_events, positivity_stop)``.
-ScanResult = tuple[list[int], list[ScanEvent], tuple[int, int] | None]
+#: The STRICT kernel's stop coordinate: ``(row, field, kind)`` — kind is
+#: :data:`STOP_NONPOSITIVE` or :data:`STOP_NONFINITE`.
+StrictStop = tuple[int, int, int]
+
+#: The strict kernel's outcome (DEC-FEED-RUST-MATERIALIZE-002):
+#: ``(kept_rows, warn_events, stop)``.
+StrictScanResult = tuple[list[int], list[ScanEvent], StrictStop | None]
+
+#: Strict-stop kind: a non-positive price (Python raises the verbatim
+#: ``_positivity_error``).
+STOP_NONPOSITIVE: Final[int] = 0
+
+#: Strict-stop kind: a non-finite price (Python raises the verbatim
+#: ``_nonfinite_error``).
+STOP_NONFINITE: Final[int] = 1
 
 
-class _ScanKernel(Protocol):
-    """The ``brutex_feed.scan_bars`` callable (typed via the wheel's stub)."""
+def _feed_error(message: str) -> Exception:
+    """Build a :class:`brutex.feed.errors.FeedError` via a LAZY import.
 
-    def __call__(
-        self,
-        ts_us: list[int],
-        opens: list[float],
-        highs: list[float],
-        lows: list[float],
-        closes: list[float],
-        screen_enabled: bool,
-        max_ratio: float,
-        /,
-    ) -> ScanResult | None:
-        """Scan the raw columns; ``None`` = abstain (degrade to the oracle)."""
-        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
-
-
-def reset_for_tests() -> None:
-    """Clear the per-process warn-once registry (test isolation seam)."""
-    _WARNED.clear()
-
-
-def warn_degrade_once(reason: str, **fields: object) -> None:
-    """Log ONE :data:`FEED_RUST_FALLBACK_EVENT` per *reason* per process.
-
-    ``kernel_error`` (the defensive belt around a raising kernel) logs at
-    ERROR level; every other degrade reason is a WARNING. Repeat degrades for
-    an already-logged reason are silent — a wheel-less box polling the feed
-    must never log-storm.
+    The leaf discipline forbids a MODULE-scope ``brutex.feed`` import
+    (``brutex.feed.__init__`` imports ``replay`` which imports THIS module
+    — a module-scope edge here would be a cycle); an in-FUNCTION import is
+    cycle-safe because every caller reaches this only after the package is
+    fully imported. The exception TYPE matters: consumers catch the typed
+    ``FeedError`` family, never a bare RuntimeError.
     """
-    # Deliberately unlocked check-then-add (the rust_metrics warn-once
-    # precedent): two threads racing the same reason can at worst BOTH log
-    # it once (an at-most-double line, never a storm and never a miss) —
-    # a lock here would buy nothing the log dedup downstream doesn't.
-    if reason in _WARNED:
-        return
-    _WARNED.add(reason)
-    if reason == "kernel_error":
-        _LOG.error(FEED_RUST_FALLBACK_EVENT, reason=reason, **fields)
-    else:
-        _LOG.warning(FEED_RUST_FALLBACK_EVENT, reason=reason, **fields)
+    from brutex.feed.errors import FeedError
+
+    return FeedError(message)
 
 
-def feed_rust_enabled(raw: str | None = None) -> bool:
-    """Return whether the Rust feed kernel is ENABLED (default ``False``).
+def require_materialize_flags() -> None:
+    """The retired-axis flag law — refuse a value asking for the dead arm.
 
-    Pattern A (the ``sweep_lookahead_guard_enabled`` law): ONLY an explicit
-    truthy literal (``1``/``true``/``yes``/``on``, case-insensitive,
-    whitespace-stripped) enables; unset, empty, explicit-falsy and junk are
-    all OFF — an unrecognised value must never silently enable an alternate
-    execution path (fail-safe default). A NON-EMPTY unrecognised value
-    additionally gets one :data:`FEED_RUST_FLAG_EVENT` warning per process
-    (the ``rust_metrics`` courtesy — an operator typo is surfaced, not
-    silently ignored).
+    DEC-FEED-RUST-MATERIALIZE-002 deleted the Python feed-materialization
+    oracle bodies, so there is no alternate arm any flag could select:
 
-    Parameters
-    ----------
-    raw
-        Explicit value to interpret (tests). ``None`` reads
-        :data:`FEED_RUST_ENV` from the environment — per call, no global
-        latch.
+    * UNSET / empty / explicit truthy — proceed (the shipping Rust arm);
+    * explicit FALSY — the value asks for the deleted Python arm: a loud
+      typed :class:`~brutex.feed.errors.FeedError` naming the DEC and the
+      remediation (unset the variable);
+    * JUNK — uninterpretable: the same loud refusal (fail-loud beats a
+      silently ignored operator intent — the ``BRUTEX_FILL_MODE``
+      retired-axis precedent).
+
+    Both the lane flag (:data:`MATERIALIZE_RUST_ENV`) and the retired
+    DEC-FEED-RUST-CORE-001 flag (:data:`FEED_RUST_ENV`) are checked —
+    the legacy flag's falsy/unset arm used to mean "the Python oracle",
+    which no longer exists; its truthy arm meant "the Rust kernel", now
+    the only arm, so truthy is a harmless no-op.
     """
-    value = os.environ.get(FEED_RUST_ENV) if raw is None else raw
-    if value is None:
-        return False
-    stripped = value.strip().lower()
-    if stripped in _TRUTHY:
-        return True
-    if stripped == "" or stripped in _FALSY:
-        return False
-    if FEED_RUST_FLAG_EVENT not in _WARNED:
-        _WARNED.add(FEED_RUST_FLAG_EVENT)
-        _LOG.warning(FEED_RUST_FLAG_EVENT, env=FEED_RUST_ENV, value=value)
-    return False
+    for env in (MATERIALIZE_RUST_ENV, FEED_RUST_ENV):
+        value = os.environ.get(env)
+        if value is None:
+            continue
+        stripped = value.strip().lower()
+        if stripped == "" or stripped in _TRUTHY:
+            continue
+        asks = (
+            "asks for the DELETED Python feed-materialization arm"
+            if stripped in _FALSY
+            else "is unrecognised (and no alternate arm exists to select)"
+        )
+        raise _feed_error(
+            f"{env}={value!r} {asks}: the Python oracle bodies were removed "
+            f"by {MATERIALIZE_DECISION} and feed materialization is "
+            f"Rust-only — unset {env} (truthy/unset proceed)"
+        )
 
 
-def resolve_feed_kernel() -> _ScanKernel | None:
-    """Return ``brutex_feed.scan_bars``, or ``None`` (warn-once) when absent.
+def require_feed_kernel() -> object:
+    """Return the ``brutex_feed`` wheel module, or raise LOUDLY.
 
-    The import is LAZY and in-function so this module — and everything that
-    imports it, including the repo-wide doctest walker — imports cleanly with
-    NO wheel present. A missing wheel (ImportError, including the shim's own
-    stale-wheel handshake refusal, or the AttributeError shape a partially
-    initialised module can raise) degrades as ``wheel_missing``; an
-    importable wheel missing the ``scan_bars`` symbol degrades as
-    ``wheel_stale``.
+    DEC-FEED-RUST-MATERIALIZE-002: the Python feed-materialization oracle
+    bodies are deleted, so the wheel is REQUIRED — a missing/stale wheel
+    is a typed :class:`~brutex.feed.errors.FeedError` naming the
+    remediation, never a silent degrade and never a fabricated bar. The
+    retired-axis flag law runs FIRST so a set-falsy flag refuses with its
+    own named message even on a wheel-less box.
     """
+    require_materialize_flags()
     try:
         import brutex_feed
-    except (ImportError, AttributeError):
-        warn_degrade_once("wheel_missing")
-        return None
-    kernel = getattr(brutex_feed, "scan_bars", None)
-    if kernel is None:
-        warn_degrade_once("wheel_stale")
-        return None
-    return cast("_ScanKernel", kernel)
+    except (ImportError, AttributeError) as exc:
+        raise _feed_error(
+            f"the brutex_feed Rust wheel is REQUIRED for feed "
+            f"materialization ({MATERIALIZE_DECISION} deleted the Python "
+            f"oracle bodies) but it failed to import: {exc} — "
+            f"{WHEEL_REMEDIATION}"
+        ) from exc
+    return brutex_feed
 
 
-def _invalid(n_rows: int, detail: str) -> bool:
-    """Refuse a poisoned kernel result: warn once, return ``False``."""
-    warn_degrade_once("kernel_invalid", n_rows=n_rows, detail=detail)
-    return False
-
-
-def validate_scan(result: object, n_rows: int) -> bool:
-    """Refuse-poison gate over a kernel result (``rust_metrics`` precedent).
+def validate_strict_scan(result: object, n_rows: int) -> str | None:
+    """Refuse-poison gate over a STRICT kernel result — ``None`` = valid,
+    else the NAMED violated-law token (woven into the caller's raise).
 
     Structural laws (proven for every well-formed input by the crate's own
-    property suite — a violation here can only mean a stale/corrupt wheel):
-
-    * the result is a 3-tuple ``(kept_rows, warn_events, positivity_stop)``;
-    * ``kept_rows`` — ints, strictly ascending, each in ``[0, n_rows)``;
-    * ``warn_events`` — 5-int tuples, strictly ascending by ``emit_at_row``
-      with ``emit_at_row <= n_rows``, ``session_first_row in [0, n_rows)``,
-      ``skipped >= 1``, ``0 <= first_prev_row < first_skip_row < n_rows``;
-    * ``positivity_stop`` — ``None`` or ``(row, field)`` with
-      ``row in [0, n_rows)`` and ``field in [0, 3]``; when present, every
-      kept row AND every warn anchor is strictly before ``row`` (no boundary
-      flush at the stop row, no finish event) — and every event's
-      ``session_first_row`` / ``first_prev_row`` / ``first_skip_row`` is
-      likewise strictly before ``row`` (the scan truncated there, so no
-      recorded coordinate can reference the stop row or beyond).
-
-    Negative or out-of-range indices are refused OUTRIGHT — a negative index
-    would silently wrap Python list selection. Any violation emits one
-    ``kernel_invalid`` warn and the caller degrades to the oracle.
+    test suite — a violation here can only mean a stale/corrupt wheel):
+    the 3-tuple shape; ``kept_rows`` ints strictly ascending in
+    ``[0, n_rows)``; ``warn_events`` 5-int tuples strictly ascending by
+    ``emit_at_row`` (a finish event anchors AT ``n_rows``) with the
+    row-coordinate range laws; ``stop`` ``None`` or ``(row, field, kind)``
+    with ``row in [0, n_rows)``, ``field in [0, 3]`` and ``kind`` in
+    ``{STOP_NONPOSITIVE, STOP_NONFINITE}`` — and, when present, the
+    truncation law (nothing recorded at/after the stop row). Negative or
+    out-of-range indices are refused OUTRIGHT — a negative index would
+    silently wrap Python list selection. The wheel-required caller RAISES
+    on a non-``None`` token (a poisoned wheel can only refuse, never
+    serve).
     """
     if not (isinstance(result, tuple) and len(result) == _RESULT_ARITY):
-        return _invalid(n_rows, "result_shape")
+        return "result_shape"
     kept, warns, stop = result
     if not (isinstance(kept, list) and isinstance(warns, list)):
-        return _invalid(n_rows, "column_shape")
+        return "column_shape"
     if stop is None:
         kept_bound = n_rows
         emit_bound = n_rows + 1  # a finish event anchors AT n_rows
         row_bound = n_rows
     else:
-        if not (isinstance(stop, tuple) and len(stop) == _STOP_ARITY):
-            return _invalid(n_rows, "stop_shape")
-        stop_row, stop_field = stop
-        if not (isinstance(stop_row, int) and isinstance(stop_field, int)):
-            return _invalid(n_rows, "stop_types")
+        if not (isinstance(stop, tuple) and len(stop) == _STRICT_STOP_ARITY):
+            return "stop_shape"
+        stop_row, stop_field, stop_kind = stop
+        if not all(isinstance(v, int) for v in (stop_row, stop_field, stop_kind)):
+            return "stop_types"
         if not (0 <= stop_row < n_rows and 0 <= stop_field <= _MAX_FIELD_INDEX):
-            return _invalid(n_rows, "stop_range")
-        # Stop truncation law: nothing recorded at/after the stop row —
-        # kept rows, warn anchors, AND every event row coordinate
-        # (session_first_row / first_prev_row / first_skip_row).
+            return "stop_range"
+        if stop_kind not in (STOP_NONPOSITIVE, STOP_NONFINITE):
+            return "stop_kind"
         kept_bound = stop_row
         emit_bound = stop_row
         row_bound = stop_row
     prev_kept = -1
     for idx in kept:
         if not isinstance(idx, int):
-            return _invalid(n_rows, "kept_type")
+            return "kept_type"
         if idx <= prev_kept or idx >= kept_bound:
-            return _invalid(n_rows, "kept_order")
+            return "kept_order"
         prev_kept = idx
     prev_emit = -1
     for event in warns:
         if not (isinstance(event, tuple) and len(event) == _EVENT_ARITY):
-            return _invalid(n_rows, "event_shape")
+            return "event_shape"
         emit, session_first, skipped, first_prev, first_skip = event
         if not all(isinstance(v, int) for v in event):
-            return _invalid(n_rows, "event_types")
+            return "event_types"
         if emit <= prev_emit or emit >= emit_bound:
-            return _invalid(n_rows, "event_order")
+            return "event_order"
         if not 0 <= session_first < row_bound:
-            return _invalid(n_rows, "session_first_range")
+            return "session_first_range"
         if skipped < 1:
-            return _invalid(n_rows, "skipped_floor")
+            return "skipped_floor"
         if not 0 <= first_prev < first_skip < row_bound:
-            return _invalid(n_rows, "offender_range")
+            return "offender_range"
         prev_emit = emit
-    return True
+    return None
 
 
 __all__ = [
     "FEED_RUST_ENV",
-    "FEED_RUST_FALLBACK_EVENT",
-    "FEED_RUST_FLAG_EVENT",
+    "MATERIALIZE_DECISION",
+    "MATERIALIZE_RUST_ENV",
+    "STOP_NONFINITE",
+    "STOP_NONPOSITIVE",
+    "WHEEL_REMEDIATION",
     "ScanEvent",
-    "ScanResult",
-    "feed_rust_enabled",
-    "reset_for_tests",
-    "resolve_feed_kernel",
-    "validate_scan",
-    "warn_degrade_once",
+    "StrictScanResult",
+    "StrictStop",
+    "require_feed_kernel",
+    "require_materialize_flags",
+    "validate_strict_scan",
 ]

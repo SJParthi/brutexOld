@@ -56,11 +56,21 @@ state, and when OFF the sweep receives its original bars object unchanged
 
 **O(1) discipline (CLAUDE.md Rule #5):** every :meth:`LookAheadBarrier.access`
 / :meth:`LookAheadBarrier.advance_to` call is **O(1) per operation** — a couple
-of integer comparisons and (optionally) one list append. This is emphatically
-*not* an "O(1)-total" claim: a full sweep touches ``Σ`` bars and is inherently
-``O(Σ)``. With ``record=False`` (the default for the always-on sweep guard) the
-barrier holds **O(1) memory**; ``record=True`` retains the touched-index trail
-and is meant only for the *bounded* manual-recheck slice and the property tests.
+of integer comparisons in the Rust core plus one constant-cost FFI hop (and, in
+record mode, one Vec push). This is emphatically *not* an "O(1)-total" claim: a
+full sweep touches ``Σ`` bars and is inherently ``O(Σ)``. With ``record=False``
+(the default for the always-on sweep guard) the barrier holds **O(1) memory**;
+``record=True`` retains the touched-index trail and is meant only for the
+*bounded* manual-recheck slice and the property tests.
+
+**DEC-FEED-RUST-MATERIALIZE-002 (the T17 zero-Python endgame):** the barrier's
+STATE MACHINE (cursor + trail + every verdict) runs EXCLUSIVELY in the
+``brutex_feed`` Rust wheel (``BarrierCore`` — verdict codes out, never
+exceptions); this class survives as the thin exception-MATERIALIZING wrapper,
+so the exception TYPE (:class:`~brutex.feed.errors.LookAheadError` /
+``ValueError``) and every pinned message byte stay Python-owned and unchanged.
+The wheel is REQUIRED: constructing a barrier on a wheel-less box raises a
+typed :class:`~brutex.feed.errors.FeedError` naming the rebuild remediation.
 
 ## No global mutable state
 
@@ -75,9 +85,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
-from brutex.feed.errors import LookAheadError
+from brutex.feed.errors import FeedError, LookAheadError
+from brutex.feed_rust import MATERIALIZE_DECISION, require_feed_kernel
+
+#: Verdict vocabulary shared with the Rust ``BarrierCore``
+#: (DEC-FEED-RUST-MATERIALIZE-002) — mirror-pinned against the crate's
+#: constants by the wheel FFI tests.
+_ADVANCE_OK = 0
+_ADVANCE_NEGATIVE = 1
+_ADVANCE_BACKWARDS = 2
+_ACCESS_OK = 0
+_ACCESS_NO_CURSOR = 1
+_ACCESS_NEGATIVE = 2
+_ACCESS_LOOKAHEAD = 3
 
 #: Pass-through value type for :meth:`LookAheadBarrier.guard` — the barrier
 #: validates the *index* and returns the caller's *value* unchanged, so the
@@ -89,6 +111,24 @@ __all__ = [
     "LookAheadReport",
     "verify_with_barrier",
 ]
+
+
+def _poison_verdict_error(op: str, verdict: object) -> FeedError:
+    """Build the refuse-poison error for an OUT-OF-VOCABULARY verdict code.
+
+    Both dispatches below compare every code in the pinned verdict
+    vocabulary explicitly; a code outside it can only come from a
+    poisoned/stale wheel, and a poisoned wheel may only REFUSE — never
+    quietly pass a cursor move or permit a read (never weaker than P-06).
+    Same typed-``FeedError`` refusal convention as
+    :func:`brutex.feed_rust.validate_strict_scan`'s callers.
+    """
+    return FeedError(
+        f"the brutex_feed BarrierCore returned an out-of-vocabulary "
+        f"{op} verdict {verdict!r} — a poisoned/stale wheel can only "
+        f"refuse, never serve; rebuild it: run `maturin develop --release` "
+        f"inside rust/brutex-feed ({MATERIALIZE_DECISION})"
+    )
 
 
 class LookAheadBarrier:
@@ -117,41 +157,45 @@ class LookAheadBarrier:
     replays without leaking the prior run's cursor or trail.
     """
 
-    __slots__ = ("_current_index", "_record", "_touched")
+    __slots__ = ("_core",)
 
     def __init__(self, *, record: bool = True) -> None:
-        self._record = record
-        self._current_index = -1
-        self._touched: list[int] = []
+        # DEC-FEED-RUST-MATERIALIZE-002: the state machine lives in the
+        # REQUIRED brutex_feed wheel (a missing wheel is a loud typed
+        # FeedError at construction — never a silent Python fallback; the
+        # Python core was deleted at the flip).
+        self._core: _BarrierCoreLike = require_feed_kernel().BarrierCore(  # type: ignore[attr-defined]
+            record
+        )
 
     # ── Introspection ─────────────────────────────────────────────
 
     @property
     def current_index(self) -> int:
         """Current bar index ``N``. ``-1`` before the first :meth:`advance_to`."""
-        return self._current_index
+        return self._core.current_index
 
     @property
     def records(self) -> bool:
         """Whether this barrier retains the touched-index trail."""
-        return self._record
+        return self._core.records
 
     @property
     def touched_indices(self) -> tuple[int, ...]:
         """Every *permitted* index passed to :meth:`access`, in call order.
 
         A rejected look-ahead index (one ``> N`` that raised) is NOT
-        recorded — the append happens only after the bounds check passes,
+        recorded — the core appends only after the bounds check passes,
         so a FAIL never poisons the trail. Empty when ``record=False``
         (the barrier still validated each access, it just did not retain
         the trail).
         """
-        return tuple(self._touched)
+        return tuple(self._core.touched())
 
     @property
     def max_touched(self) -> int | None:
         """Largest *permitted* index touched, or ``None`` if nothing was recorded."""
-        return max(self._touched) if self._touched else None
+        return self._core.max_touched()
 
     # ── Cursor + access ───────────────────────────────────────────
 
@@ -171,15 +215,24 @@ class LookAheadBarrier:
         ValueError
             If *index* is negative or strictly less than the current
             cursor.
+        FeedError
+            If the core emits a verdict code outside the pinned
+            vocabulary (a poisoned/stale wheel — the refuse-poison law).
         """
-        if index < 0:
+        verdict = self._core.advance_to(index)
+        if verdict == _ADVANCE_OK:
+            return
+        if verdict == _ADVANCE_NEGATIVE:
             raise ValueError(f"advance_to: bar index must be >= 0, got {index}")
-        if index < self._current_index:
+        if verdict == _ADVANCE_BACKWARDS:
             raise ValueError(
                 f"advance_to: cursor cannot move backwards "
-                f"({index} < current {self._current_index})"
+                f"({index} < current {self._core.current_index})"
             )
-        self._current_index = index
+        # Exhaustive over the pinned vocabulary — anything else is a
+        # poisoned/stale wheel and may only REFUSE, never quietly pass a
+        # cursor move (the refuse-poison law).
+        raise _poison_verdict_error("advance_to", verdict)
 
     def access(self, index: int) -> int:
         """Validate (and record) a read of bar *index*; return it unchanged.
@@ -205,25 +258,30 @@ class LookAheadBarrier:
             *index* is strictly greater than the current cursor.
         ValueError
             If *index* is negative.
+        FeedError
+            If the core emits a verdict code outside the pinned
+            vocabulary (a poisoned/stale wheel — the refuse-poison law;
+            the read still REFUSES, so P-06 is never weakened).
         """
-        if self._current_index < 0:
+        verdict = self._core.access(index)
+        if verdict == _ACCESS_OK:
+            return index
+        if verdict == _ACCESS_NO_CURSOR:
             raise LookAheadError(
-                f"no bar reached yet (cursor={self._current_index}); "
+                f"no bar reached yet (cursor={self._core.current_index}); "
                 f"any read at index {index} is a look-ahead (P-06)"
             )
-        if index < 0:
+        if verdict == _ACCESS_NEGATIVE:
             raise ValueError(f"access: bar index must be >= 0, got {index}")
-        if index > self._current_index:
+        if verdict == _ACCESS_LOOKAHEAD:
             raise LookAheadError(
-                f"bar index {index} > current {self._current_index}: "
+                f"bar index {index} > current {self._core.current_index}: "
                 f"look-ahead read forbidden (P-06 / FR-INT-004)"
             )
-        # Record ONLY a *permitted* access — appended AFTER the bounds check so a
-        # rejected future index can never poison the ``touched_indices`` trail
-        # (and thus ``max_touched`` / a report's ``max_index_touched``) on a FAIL.
-        if self._record:
-            self._touched.append(index)
-        return index
+        # Exhaustive over the pinned vocabulary — anything else is a
+        # poisoned/stale wheel and may only REFUSE, never quietly permit
+        # the read (the refuse-poison law — never weaker than P-06).
+        raise _poison_verdict_error("access", verdict)
 
     def guard(self, index: int, value: _T) -> _T:
         """Convenience: :meth:`access` the *index*, then return *value*.
@@ -240,8 +298,45 @@ class LookAheadBarrier:
         Called by the runner/driver before every replay so the barrier
         carries no state across deterministic re-runs.
         """
-        self._current_index = -1
-        self._touched.clear()
+        self._core.reset()
+
+
+class _BarrierCoreLike(Protocol):
+    """Structural protocol of the verdict-coded Rust ``BarrierCore``.
+
+    The wheel is REQUIRED — no Python core exists
+    (DEC-FEED-RUST-MATERIALIZE-002); the Protocol exists for typing only.
+    """
+
+    @property
+    def current_index(self) -> int:
+        """Current cursor value ``N`` (``-1`` before the first advance)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def records(self) -> bool:
+        """Whether the core retains the touched-index trail."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    def touched(self) -> list[int]:
+        """Every permitted index passed to :meth:`access`, in call order."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    def max_touched(self) -> int | None:
+        """Largest permitted index touched, or ``None`` if none recorded."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    def advance_to(self, index: int) -> int:
+        """Advance the cursor; return an ``_ADVANCE_*`` verdict code."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    def access(self, index: int) -> int:
+        """Validate a read of *index*; return an ``_ACCESS_*`` verdict code."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    def reset(self) -> None:
+        """Restore the just-constructed form (cursor ``-1``, empty trail)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 @dataclass(frozen=True, slots=True)
