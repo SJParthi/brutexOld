@@ -1596,6 +1596,36 @@ class TestCascadeSpecsFamilyCarriage:
         assert warned[0]["n_masks"] == 2
         assert warned[0]["n_distinct_families"] == 2
 
+    def test_disabled_leg_cell_never_poisons_the_family_map(self, tmp_path: Path) -> None:
+        # Structurally unreachable for REAL refined cells (they never carry a
+        # disabled leg — Stage3CellRecord's > 0 law); the defensive-totality
+        # arm: a hand-built sl/tp-less cell contributes NOTHING to the family
+        # map (its shared mask never gains a phantom pair) and its own spec
+        # carries family_sl_tp=None.
+        normal = self._cell(tmp_path / "n.parquet", [_row_for("3" * 64, mask=5)], sl=80, tp=50)
+        legless_path = tmp_path / "legless.parquet"
+        store = ResultsStore(path=legless_path)
+        store.append(_row_for("4" * 64, mask=5))
+        store.flush()
+        legless = Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=None,
+                tp_paisa=None,
+                proximity=None,
+            ),
+            path=legless_path,
+            rows=1,
+        )
+        spec_normal, spec_legless = cascade_specs_for_refined_cells([normal, legless], grid=_grid())
+        # Mask 5 is SHARED, yet the normal cell's family stays its OWN pair
+        # only — the legless cell was skipped, never a (None, None) member.
+        assert spec_normal.family_sl_tp == ((80, 50),)
+        assert spec_legless.family_sl_tp is None
+
     def test_pipeline_cells_carry_consistent_families(
         self, pipeline: tuple[Path, Stage3PassReport]
     ) -> None:
