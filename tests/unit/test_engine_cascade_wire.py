@@ -2779,7 +2779,7 @@ class TestRunCascadeOverSpecsEmbargo:
         return spy
 
     def test_auto_embargo_resolves_per_pool_tf(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.metrics.cascade as cascade_module
+        from brutex.metrics import cascade as cascade_module
 
         seen: list[dict[str, object]] = []
         monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))
@@ -2792,7 +2792,7 @@ class TestRunCascadeOverSpecsEmbargo:
         assert [entry["embargo_bars"] for entry in seen] == [375]
 
     def test_wfo_embargo_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.metrics.cascade as cascade_module
+        from brutex.metrics import cascade as cascade_module
 
         seen: list[dict[str, object]] = []
         monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))

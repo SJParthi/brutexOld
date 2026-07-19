@@ -16,6 +16,7 @@ whitebox tests, DEC-P0-017).
 
 from __future__ import annotations
 
+import importlib
 import math
 from typing import ClassVar
 
@@ -345,8 +346,10 @@ class TestEmbargoInvariance:
         from brutex.metrics import rust_stats
 
         try:
-            import fno_math
+            fno_math = importlib.import_module("fno_math")
         except ImportError:
+            fno_math = None
+        if fno_math is None:
             pytest.skip("fno_math wheel absent — the CPCV kernel cannot engage")
         if not callable(getattr(fno_math, "stats_cpcv_pass_count", None)):
             pytest.skip(

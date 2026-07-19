@@ -1036,7 +1036,7 @@ class TestEmbargoThreading:
     """``embargo_bars`` reaches BOTH engines; ``None`` is byte-identical to 0."""
 
     def test_embargo_reaches_cpcv_and_wfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.metrics.cascade as cascade_module
+        from brutex.metrics import cascade as cascade_module
 
         seen: dict[str, list[int]] = {"cpcv": [], "wfo": []}
         real_cpcv = cascade_module.cpcv_pass_rate
