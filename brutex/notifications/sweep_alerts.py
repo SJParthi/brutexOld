@@ -836,6 +836,77 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def strategy_decayed(self, *, run_id: str, decayed: int, checked: int, detail: str) -> bool:
+        """Alert that the nightly R48 decay leg flagged decayed finalists (WARN).
+
+        DEC-NIGHTLY-DECAY-R48-001 (LANE W5). Fired at most once per nightly
+        run by :func:`brutex.nightly.decay.run_decay_leg` when any finalist's
+        trailing metrics breach the lockbox tolerance law (trailing Sharpe
+        below the 0.70× discovery floor / trailing max-DD above the 1.50×
+        ceiling). ONE aggregated push per run (the ``dedupe_key`` is the
+        sweep run id, so a same-night manual re-run coalesces) — never one
+        alert per entry (log-volume discipline, DEC-SWEEP-LOG-VOLUME-GUARD-001
+        posture). Observe-only: the decayed entries are RETIRE-FLAGGED
+        annotations in ``decay-diff.json`` + the champions state — nothing is
+        deleted or re-ranked (R13). Best-effort, fire-and-forget, silent
+        no-op when Telegram is disabled (the :meth:`pull_halted` law).
+
+        Parameters
+        ----------
+        run_id
+            The judged sweep run's grid identity.
+        decayed, checked
+            The breach count / the judged entry count (non-secret ints).
+        detail
+            A short bounded sample naming the worst offenders.
+        """
+        message = escape_markdown_v2(
+            f"📉 Strategy decay: {decayed} of {checked} judged top100 finalist(s) "
+            f"DECAYED on the trailing window (run {run_id[:12]}…): {detail}. "
+            "They are retire-flagged (annotation only — see decay-diff.json + "
+            "the champions ledger); re-run the sweep to rediscover."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key=f"strategy-decayed:{run_id}",
+        )
+
+    def champion_promoted(self, *, scope: str, run_id: str, rank: int, detail: str) -> bool:
+        """Alert that a challenger was PROMOTED to champion (INFO).
+
+        DEC-CHAMPION-CHALLENGER-001 (LANE W5). Fired by
+        :func:`brutex.nightly.champions.run_champions_leg` on a promotion —
+        the challenger dominated the champion (pooled cascade re-validation +
+        strictly higher lockbox Sharpe with max-DD no worse) for the required
+        consecutive nights. The old champion is era-tagged into the record's
+        ``former`` history, never deleted. Best-effort, fire-and-forget,
+        silent no-op when Telegram is disabled.
+
+        Parameters
+        ----------
+        scope
+            The champion scope key (``instrument/tf/direction``).
+        run_id
+            The promoted entry's per-combo run identity.
+        rank
+            The promoted entry's artifact rank.
+        detail
+            The domination compare summary (bounded).
+        """
+        message = escape_markdown_v2(
+            f"🏆 Champion promoted [{scope}]: rank {rank} (combo {run_id[:12]}…) "
+            f"after the required consecutive dominating nights — {detail}. The "
+            "prior champion is era-tagged in champions/state.json (never deleted)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=TelegramSeverity.INFO,
+            message=message,
+            dedupe_key=f"champion-promoted:{scope}:{run_id}",
+        )
+
     def loop_stalled(self, *, stalled_s: float, threshold_s: float) -> bool:
         """Alert that the dashboard EVENT LOOP is stalled (CRITICAL).
 

@@ -89,6 +89,8 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 __all__ = [
+    "DEFAULT_MDD_TOLERANCE",
+    "DEFAULT_SHARPE_TOLERANCE",
     "LOCKBOX_DEFAULT_MIN_TRADES",
     "LOCKBOX_DEFAULT_WINDOW_DAYS",
     "LockboxResult",
@@ -126,6 +128,18 @@ _DEFAULT_SHARPE_TOLERANCE: Final[float] = 0.30
 
 #: Lockbox max-drawdown must stay within 50% of training (spec line 454).
 _DEFAULT_MDD_TOLERANCE: Final[float] = 0.50
+
+#: PUBLIC aliases of the two tolerance defaults — the ONE source consumers
+#: outside this module derive from (CLAUDE.md §11 COMMON; never a re-typed
+#: literal). Added by DEC-NIGHTLY-DECAY-R48-001: the nightly decay verdict
+#: (``brutex.nightly.decay_math``) reuses EXACTLY the lockbox degradation
+#: law — trailing Sharpe below ``(1 - DEFAULT_SHARPE_TOLERANCE) ×``
+#: discovery (the 0.70× floor) / trailing max-DD above
+#: ``(1 + DEFAULT_MDD_TOLERANCE) ×`` discovery (the 1.50× ceiling).
+DEFAULT_SHARPE_TOLERANCE: Final[float] = _DEFAULT_SHARPE_TOLERANCE
+
+#: Public alias of :data:`_DEFAULT_MDD_TOLERANCE` (see above).
+DEFAULT_MDD_TOLERANCE: Final[float] = _DEFAULT_MDD_TOLERANCE
 
 
 class LockboxStatus(Enum):

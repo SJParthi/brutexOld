@@ -308,6 +308,17 @@ def _contract_run_roots(results_root: Path) -> tuple[Path, ...]:
     )
 
 
+def contract_run_roots(results_root: Path) -> tuple[Path, ...]:
+    """PUBLIC face of the run-roots law (DEC-NIGHTLY-DECAY-R48-001).
+
+    The decay/champions legs (:mod:`brutex.nightly.decay` /
+    :mod:`brutex.nightly.champions`) discover ``sweep_runs/<id>/`` artifact
+    dirs under EXACTLY the probe's three candidate roots — one law, imported
+    not re-typed (CLAUDE.md §11 COMMON).
+    """
+    return _contract_run_roots(results_root)
+
+
 def probe_contract_artifacts(results_root: Path, *, since_utc: float) -> ContractProbe:
     """Probe the newest ``sweep_runs/<sweep_run_id>/`` dir for P2/P3 artifacts.
 
