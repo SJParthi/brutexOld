@@ -229,9 +229,20 @@ fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String, policy: StrPolicy) -
         let mut pairs: Vec<(String, Bound<'_, PyAny>)> = Vec::with_capacity(d.len());
         for (key, value) in d.iter() {
             if !key.is_instance_of::<PyString>() {
+                // The label names the PUBLIC ENTRY the walk was invoked
+                // through (review-round NIT: it was hardcoded
+                // "dumps_sorted" even when reached via
+                // `dumps_sorted_surrogatepass`); the disclosed-unreachable
+                // producer surface differs per entry too.
+                let (entry, surface) = match policy {
+                    StrPolicy::RefuseSurrogates => ("dumps_sorted", "cascade_wire projection"),
+                    StrPolicy::EscapeSurrogates => {
+                        ("dumps_sorted_surrogatepass", "top100_artifact payload")
+                    }
+                };
                 return Err(PyTypeError::new_err(format!(
-                    "dumps_sorted: non-str dict key {} (disclosed divergence — \
-                     unreachable from the cascade_wire projection builders)",
+                    "{entry}: non-str dict key {} (disclosed divergence — \
+                     unreachable from the {surface} builders)",
                     crate::capture_repr(&key)
                 )));
             }

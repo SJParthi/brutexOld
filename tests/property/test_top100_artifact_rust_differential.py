@@ -615,6 +615,25 @@ _json_trees = st.recursive(
     ),
     max_leaves=20,
 )
+#: Finite-float twin of ``_json_trees`` for strategies that RENDER during
+#: GENERATION (a `.map(_oracle_dumps)` draw would raise `allow_nan=False`'s
+#: ValueError inside hypothesis on an inf/nan leaf under the default profile).
+#: The inf/nan render arm stays covered by the `_outcome`-wrapped dumps
+#: differentials above — this twin only feeds document-producing maps.
+_finite_json_trees = st.recursive(
+    st.one_of(
+        st.none(),
+        st.booleans(),
+        _json_ints,
+        st.floats(allow_nan=False, allow_infinity=False),
+        _json_text,
+    ),
+    lambda children: st.one_of(
+        st.lists(children, max_size=4),
+        st.dictionaries(_json_keys, children, max_size=4),
+    ),
+    max_leaves=20,
+)
 
 
 class TestDumpsDifferential:
@@ -655,7 +674,7 @@ class TestDumpsDifferential:
 class TestLoadsObjectDifferential:
     """``_loads_object`` ≡ the verbatim deleted law over hostile documents."""
 
-    @given(doc=st.one_of(_json_trees.map(_oracle_dumps), st.text(max_size=20)))
+    @given(doc=st.one_of(_finite_json_trees.map(_oracle_dumps), st.text(max_size=20)))
     def test_matches_the_deleted_law(self, doc: str) -> None:
         got = _outcome(lambda: _loads_object(doc), canon=_canon)
         want = _outcome(lambda: _oracle_loads_object(doc), canon=_canon)
