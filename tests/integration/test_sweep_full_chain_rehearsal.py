@@ -53,7 +53,7 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
-pytest.importorskip("cma")
+pytest.importorskip("brutex_refine")
 
 #: D-6 traceability — test name → requirement/gap tokens (R38 rehearsal file).
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {

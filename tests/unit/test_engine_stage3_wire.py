@@ -82,7 +82,7 @@ from structlog.testing import capture_logs
 if TYPE_CHECKING:
     from brutex.metrics.compute import ResultMetrics
 
-pytest.importorskip("cma")  # the optimize extra — installed in the CI unit job
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -578,18 +578,21 @@ class TestHelpers:
 
 
 class TestEnsureRuntime:
-    def test_returns_versions_when_optimize_extra_present(self) -> None:
-        pycma_version, numpy_version = ensure_stage3_runtime()
-        assert pycma_version and numpy_version
+    def test_returns_versions_when_rust_wheel_present(self) -> None:
+        optimizer_version, optimizer_build = ensure_stage3_runtime()
+        assert optimizer_version.startswith("brutex-refine-")
+        assert optimizer_build  # the baked crate-source digest
 
-    def test_missing_optimizer_raises_with_install_hint(
+    def test_unavailable_runtime_raises_with_build_hint(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from brutex.engine.refine_rust import RefineRustUnavailableError
+
         def _boom() -> tuple[str, str]:
-            raise ImportError("No module named 'cma'")
+            raise RefineRustUnavailableError("the brutex_refine wheel is not importable")
 
         monkeypatch.setattr("brutex.engine.stage3_wire.optimizer_versions", _boom)
-        with pytest.raises(Stage3WireError, match="optimize"):
+        with pytest.raises(Stage3WireError, match="DEC-RUST-STAGE3-REFINE-001"):
             ensure_stage3_runtime()
 
 

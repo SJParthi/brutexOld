@@ -1208,14 +1208,9 @@ class TestStage3WireSeam:
         assert report.enabled is False
 
     def test_enabled_pass_resolves_stamper_for_exactly_once(self, tmp_path: Path) -> None:
-        # Pre-import cma with its matplotlib-less UserWarning suppressed (the
-        # repo's filterwarnings=error would otherwise escalate the import-time
-        # warning; the stage3 suites do this via module-level importorskip).
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            pytest.importorskip("cma")
+        # The Stage-3 optimizer is the brutex_refine Rust wheel
+        # (DEC-RUST-STAGE3-REFINE-001) — skip only when it is not built.
+        pytest.importorskip("brutex_refine")
         calls: list[int] = []
 
         def _counting() -> TradeReferenceStamper | None:

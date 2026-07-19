@@ -439,8 +439,8 @@ class TestScanDifferential:
             "mask_run_id": "x\x1fy",
             "budget": budget,
             "seed": 7,
-            "pycma_version": "3.3.0",
-            "numpy_version": "2.0.0",
+            "optimizer_version": "brutex-refine-0.0.0",
+            "optimizer_build": "d" * 64,
         }
         monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "0")
         cr.reset_combo_rust_for_tests()

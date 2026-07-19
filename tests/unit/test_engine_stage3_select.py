@@ -10,21 +10,23 @@ iteration order, and the real-Parquet disk round-trip through
 ``load_results_tree`` (missing root raises; empty tree yields {}).
 
 DEC-SWEEP-STREAMING-RANK-002 (#1294) replaced the accumulate-then-two-pass-sort
-core with a bounded per-key top-K heap; ``_group_survivors_reference`` below is
-a VERBATIM copy of the pre-#1294 implementation and the golden-equality suite
+core with a bounded per-key top-K heap, and DEC-RUST-STAGE3-REFINE-001 moved
+that heap into the ``brutex_refine`` Rust wheel (``SelectSession``);
+``_group_survivors_reference`` below is a VERBATIM copy of the pre-#1294
+pure-Python implementation and the golden-equality suite
 (:class:`TestGoldenEqualityVsReference`) pins byte-identical output (``repr``
 string equality — key order AND per-board row order AND every row field) over
 adversarial fixtures: equal-Sharpe tie clusters larger than K, duplicate
 run_ids (full ties AND differing Sharpe), fewer-than-K / exactly-K / K+1,
-multiple leaderboards, extreme-finite Sharpe, and seeded random permutations.
+multiple leaderboards, extreme-finite Sharpe, and seeded random permutations —
+the cross-language differential oracle for the wheel-backed selection.
 ``NaN`` Sharpe is OUT of the domain — ``ResultRow`` rejects non-finite metrics
-at construction (pinned here), so neither implementation ever sees one.
-
-Per-file convention: the private ``_HeapEntry`` comparator is unit-tested
-directly, so the file silences ``reportPrivateUsage`` at the top.
+at construction (pinned here), so neither implementation ever sees one. The
+comparator tie-break laws the retired private ``_HeapEntry`` unit tests
+pinned (Sharpe desc → run_id asc → insertion order; signed-zero equality) are
+now pinned twice: crate-side in ``rust/brutex-refine/src/select.rs``'s unit
+matrix, and end-to-end here through the public API.
 """
-
-# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -33,14 +35,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.engine.refine_rust import REFINE_RUST_ENV, RefineRustUnavailableError
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.engine.stage3_select import (
     DEFAULT_STAGE3_TOP_K,
     LeaderboardKey,
-    _HeapEntry,
     group_survivors,
     select_stage3_survivors,
 )
+
+pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
 
 
 def _rid(seed: int) -> str:
@@ -245,108 +249,48 @@ def _assert_byte_identical(
     assert repr(new) == repr(ref)  # the serialized byte pin
 
 
-class TestHeapEntryOrdering:
-    """The bounded-heap comparator: ``<`` means "ranks strictly worse than"."""
+class TestTieBreakLawsViaPublicApi:
+    """The comparator laws through the PUBLIC selection (the retired private
+    ``_HeapEntry`` pins, re-expressed end-to-end; the crate's unit matrix in
+    ``rust/brutex-refine/src/select.rs`` pins the same laws Rust-side)."""
 
-    @staticmethod
-    def _entry(sharpe: float, run_id: str, seq: int) -> _HeapEntry:
-        return _HeapEntry(sharpe=sharpe, run_id=run_id, seq=seq, row=_row())
-
-    def test_smaller_sharpe_is_worse(self) -> None:
-        assert self._entry(1.0, _rid(1), 0) < self._entry(2.0, _rid(1), 0)
-        assert not self._entry(2.0, _rid(1), 0) < self._entry(1.0, _rid(1), 0)
-
-    def test_equal_sharpe_larger_run_id_is_worse(self) -> None:
-        # run_id ASC is preferred, so among equal-lowest-Sharpe entries the
-        # LARGEST run_id sits at the min-heap root and is evicted first.
-        assert self._entry(1.0, _rid(9), 0) < self._entry(1.0, _rid(1), 0)
-        assert not self._entry(1.0, _rid(1), 0) < self._entry(1.0, _rid(9), 0)
-
-    def test_full_tie_later_insertion_is_worse(self) -> None:
-        # Duplicate (sharpe, run_id): the old stable sort kept EARLIER
-        # insertions first — so the LATER seq must rank worse (evicted first).
-        assert self._entry(1.0, _rid(1), 5) < self._entry(1.0, _rid(1), 2)
-        assert not self._entry(1.0, _rid(1), 2) < self._entry(1.0, _rid(1), 5)
-
-    def test_signed_zero_sharpe_compares_equal(self) -> None:
-        # -0.0 != 0.0 is False, so the comparator falls through to run_id —
-        # exactly like sorted(), which also treats them as equal keys.
-        assert self._entry(-0.0, _rid(9), 0) < self._entry(0.0, _rid(1), 0)
-
-    # ── Ordering-protocol completeness (CodeQL py/incomplete-ordering) ──
-    # functools.total_ordering derives __le__/__gt__/__ge__ from __lt__ +
-    # the dataclass __eq__ (the sweep_parallel._Outcome discipline). The
-    # total-order identities (a<=b ≡ not b<a; a>b ≡ b<a) hold ONLY because
-    # unique seq makes the order strict + total — pinned per key tier below.
-    #
-    # Discipline: every operator is OBSERVED into a plain bool by
-    # _relations() and the whole truth-table asserted at once. Chaining
-    # operator ASSERTS on one pair (assert a == b; assert a <= b; …) is
-    # statically provable under standard total-order semantics — CodeQL
-    # py/redundant-comparison — yet EARNING those semantics at runtime is
-    # the very property under test, so the table must be observed as data,
-    # never implied by an earlier assert on the same operands.
-
-    # _relations() truth-tables — (==, !=, <, <=, >, >=) for (left, right).
-    _EQUAL = (True, False, False, True, False, True)
-    _WORSE = (False, True, True, True, False, False)  # left strictly worse
-    _BETTER = (False, True, False, False, True, True)  # left strictly better
-
-    @staticmethod
-    def _relations(
-        left: _HeapEntry, right: _HeapEntry
-    ) -> tuple[bool, bool, bool, bool, bool, bool]:
-        """Observe all six rich comparisons of ``(left, right)`` as data."""
-        return (
-            left == right,
-            left != right,
-            left < right,
-            left <= right,
-            left > right,
-            left >= right,
-        )
-
-    def _ordered_pairs(self) -> list[tuple[_HeapEntry, _HeapEntry]]:
-        """(worse, better) pairs exercising EVERY tie-break tier of the key."""
-        return [
-            (self._entry(1.0, _rid(1), 0), self._entry(2.0, _rid(1), 0)),  # sharpe
-            (self._entry(1.0, _rid(9), 0), self._entry(1.0, _rid(1), 0)),  # run_id
-            (self._entry(1.0, _rid(1), 5), self._entry(1.0, _rid(1), 2)),  # seq
+    def test_signed_zero_sharpe_compares_equal_falls_to_run_id(self) -> None:
+        # -0.0 == 0.0 (IEEE), so the run_id tie-break decides — and ResultRow
+        # canonicalises -0.0 to +0.0 anyway (pinned by the extreme-value
+        # golden suite below); the law holds either way.
+        rows = [
+            _row(run_id=_rid(9), sharpe_ratio=-0.0),
+            _row(run_id=_rid(1), sharpe_ratio=0.0),
         ]
+        boards = group_survivors(rows, top_k=1)
+        (board,) = boards.values()
+        assert [r.run_id for r in board] == [_rid(1)]  # run_id asc wins
 
-    def test_reflexivity_on_field_equal_twins(self) -> None:
-        # Distinct objects, identical fields: == is dataclass field equality,
-        # so every operator must read equal-not-ordered — in BOTH operand
-        # orders (reflexivity of ==/<=/>=, irreflexivity of </>).
-        a = self._entry(1.0, _rid(1), 3)
-        twin = self._entry(1.0, _rid(1), 3)
-        assert self._relations(a, twin) == self._EQUAL
-        assert self._relations(twin, a) == self._EQUAL
+    def test_equal_sharpe_largest_run_id_evicted_first(self) -> None:
+        rows = [
+            _row(run_id=_rid(5), sharpe_ratio=1.0),
+            _row(run_id=_rid(2), sharpe_ratio=1.0),
+            _row(run_id=_rid(1), sharpe_ratio=1.0),
+        ]
+        boards = group_survivors(rows, top_k=2)
+        (board,) = boards.values()
+        assert [r.run_id for r in board] == [_rid(1), _rid(2)]  # rid(5) evicted
 
-    def test_derived_operators_agree_with_lt_on_every_tier(self) -> None:
-        # For each strictly-ordered pair, EVERY derived operator must agree
-        # with the total-order identities: a>b ≡ b<a, a<=b ≡ not b<a,
-        # a>=b ≡ not a<b. The two observed rows jointly pin antisymmetry
-        # (< holds in exactly ONE direction) and strict-pair inequality.
-        for worse, better in self._ordered_pairs():
-            assert self._relations(worse, better) == self._WORSE
-            assert self._relations(better, worse) == self._BETTER
+    def test_full_tie_earlier_insertion_kept(self) -> None:
+        rows = [
+            _row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=100),
+            _row(run_id=_rid(1), sharpe_ratio=1.0, net_pnl_paisa=101),
+        ]
+        boards = group_survivors(rows, top_k=1)
+        (board,) = boards.values()
+        assert [r.net_pnl_paisa for r in board] == [100]  # the earlier twin
 
-    def test_incomparability_coincides_with_equality_via_unique_seq(self) -> None:
-        # not(a<b) and not(b<a) ⇒ a == b — true on the production domain
-        # ONLY because seq is unique per input row: any two distinct entries
-        # differ somewhere in the (sharpe, run_id, seq) key, so the sole
-        # incomparable case is the field-equal twin. Observed as one vector
-        # so equality is ASSERTED alongside the two strict directions, never
-        # statically implied by them.
-        a = self._entry(1.0, _rid(1), 3)
-        twin = self._entry(1.0, _rid(1), 3)
-        assert (a < twin, twin < a, a == twin) == (False, False, True)
-        # Differing ONLY in seq (a full (sharpe, run_id) tie): totality —
-        # exactly one strict direction holds (the LATER insertion is worse,
-        # the stable-sort tie rule) and the pair is never equal.
-        b = self._entry(1.0, _rid(1), 4)
-        assert (a < b, b < a, a == b, a != b) == (False, True, False, True)
+    def test_disabled_rust_runtime_refuses_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # DEC-RUST-STAGE3-REFINE-001: the Python selection math is DELETED —
+        # a falsy flag is a loud typed refusal, never a silent fallback.
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            group_survivors([_row()], top_k=1)
 
 
 class TestGoldenEqualityVsReference:

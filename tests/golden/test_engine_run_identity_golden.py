@@ -70,54 +70,59 @@ def _assert_pinned(name: str, produced: str, payload: str, frozen: str) -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 _REFINE_FROZEN: dict[str, str] = {
-    "default": "7b12c0c4e8a094ce61bf8cf1f321e1da9f0dd67f32b849a272fe409db1e6646d",
-    "varied_budget": "d45b6a118543b4304d2104847098ae968c798419f8f022413b507de297fae764",
-    "varied_seed": "14d6f6b8c820e1b47368a1fe14271a25b22b0cd7e395980739fd4ee9ab0e5c1b",
-    "varied_versions": "0d2c04cb450ac199c12e54b0a2ca7fafb2e2712df4615b8fde4986d17518c7c8",
+    # RE-LOCKED under DEC-RUST-STAGE3-REFINE-001 (greenfield ruling — no
+    # stored v1 identities exist): the v2 formula folds the brutex-refine
+    # crate version tag + its baked source digest instead of the retired
+    # (pycma, numpy) pair, under the bumped ``stage3-refine-v2`` label.
+    "default": "c66e6c6cf100d308cce20b3ed998d4d75f8879550ed54ee22dd07b4809584e3a",
+    "varied_budget": "0843a7f101e3f167ebf59e81db74061d7249faf2f477b7d9b778de02cde1f013",
+    "varied_seed": "2b956f34316e87d89151044ead5d8d58bd54a2db975fa6ca275d1a88e066a1d3",
+    "varied_versions": "a30b656e4b823572c492160aa54153c61e7a3493252213de9e290ed55e05f2c4",
 }
 
 #: Hand-assembled payload bytes per case — the documented ``blake3(mask_run_id
-#: ‖ optimizer-config ‖ seed ‖ budget ‖ library versions)`` encoding under the
-#: ``stage3-refine-v1`` label, ``budget.canonical()`` written out literally.
+#: ‖ optimizer-config ‖ seed ‖ budget ‖ optimizer version + build digest)``
+#: encoding under the ``stage3-refine-v2`` label, ``budget.canonical()``
+#: written out literally.
 _REFINE_PAYLOADS: dict[str, str] = {
     "default": _SEP.join(
         (
-            "stage3-refine-v1",
+            "stage3-refine-v2",
             _MASK_RUN_ID,
             "fevals=200;restarts=3;sigma0=0.3",
             "seed=7",
-            "cma=4.0.0",
-            "numpy=2.1.0",
+            "optimizer=brutex-refine-1.0.0",
+            "build=" + "a" * 64,
         )
     ),
     "varied_budget": _SEP.join(
         (
-            "stage3-refine-v1",
+            "stage3-refine-v2",
             _MASK_RUN_ID,
             "fevals=50;restarts=2;sigma0=0.5",
             "seed=7",
-            "cma=4.0.0",
-            "numpy=2.1.0",
+            "optimizer=brutex-refine-1.0.0",
+            "build=" + "a" * 64,
         )
     ),
     "varied_seed": _SEP.join(
         (
-            "stage3-refine-v1",
+            "stage3-refine-v2",
             _MASK_RUN_ID,
             "fevals=200;restarts=3;sigma0=0.3",
             "seed=123456789",
-            "cma=4.0.0",
-            "numpy=2.1.0",
+            "optimizer=brutex-refine-1.0.0",
+            "build=" + "a" * 64,
         )
     ),
     "varied_versions": _SEP.join(
         (
-            "stage3-refine-v1",
+            "stage3-refine-v2",
             _MASK_RUN_ID,
             "fevals=200;restarts=3;sigma0=0.3",
             "seed=7",
-            "cma=3.3.0",
-            "numpy=1.26.4",
+            "optimizer=brutex-refine-2.0.0",
+            "build=" + "b" * 64,
         )
     ),
 }
@@ -127,29 +132,29 @@ _REFINE_CALLS: dict[str, Callable[[], str]] = {
         mask_run_id=_MASK_RUN_ID,
         budget=RefineBudget(),
         seed=7,
-        pycma_version="4.0.0",
-        numpy_version="2.1.0",
+        optimizer_version="brutex-refine-1.0.0",
+        optimizer_build="a" * 64,
     ),
     "varied_budget": lambda: refinement_run_id(
         mask_run_id=_MASK_RUN_ID,
         budget=RefineBudget(max_fevals=50, max_restarts=2, sigma0=0.5),
         seed=7,
-        pycma_version="4.0.0",
-        numpy_version="2.1.0",
+        optimizer_version="brutex-refine-1.0.0",
+        optimizer_build="a" * 64,
     ),
     "varied_seed": lambda: refinement_run_id(
         mask_run_id=_MASK_RUN_ID,
         budget=RefineBudget(),
         seed=123456789,
-        pycma_version="4.0.0",
-        numpy_version="2.1.0",
+        optimizer_version="brutex-refine-1.0.0",
+        optimizer_build="a" * 64,
     ),
     "varied_versions": lambda: refinement_run_id(
         mask_run_id=_MASK_RUN_ID,
         budget=RefineBudget(),
         seed=7,
-        pycma_version="3.3.0",
-        numpy_version="1.26.4",
+        optimizer_version="brutex-refine-2.0.0",
+        optimizer_build="b" * 64,
     ),
 }
 
