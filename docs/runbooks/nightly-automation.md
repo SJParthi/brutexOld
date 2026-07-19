@@ -254,11 +254,20 @@ merge-integration.
 
 ## Honest envelope (Golden Rule #10)
 
-1. **R48 decay diff NOT built** — deferred to v1.1 by the explicit operator
-   phase directive. This is a recorded DIVERGENCE from the living
-   requirements, which home R48 (A-approved) in P6 — the file's v1.1 deferral
-   is R49. The P3 `top100.json` presence probe is the documented v1.1 seam;
-   every `NightlyReport.honesty_notes` carries the divergence sentence.
+1. **R48 decay diff BUILT** (DEC-NIGHTLY-DECAY-R48-001, LANE W5 — the
+   v1.1 deferral is LIFTED per the operator's winning-P0 ruling): a
+   post-chain, fail-open REPORT-LEVEL leg (never a chain link — the
+   box-update #1939 pattern) re-simulates the newest `top100.json`
+   finalists over the trailing ~63 sessions and applies the lockbox
+   tolerance law (trailing Sharpe < 0.70× discovery / trailing max-DD >
+   1.5× discovery ⇒ DECAYED; low-N ABSTAINS honestly). Verdicts land in
+   `sweep_runs/<id>/decay-diff.json` (additive sidecar — the artifact is
+   NEVER rewritten/re-ranked, R13), the report's `decay` block + one
+   `📉` honesty-note line, ONE aggregated `strategy_decayed` Telegram
+   WARN per run, and retire-FLAG annotations on the champions state
+   (DEC-CHAMPION-CHALLENGER-001). Kill switch `BRUTEX_NIGHTLY_DECAY`
+   (default ON, fail-loud junk); every `NightlyReport.honesty_notes`
+   still carries the R48 status sentence (now the BUILT wording).
 2. Manual-sweep detection is a HEURISTIC until P2's results-root flock lands
    (§6) — it can false-negative a wedged sweep (wasted compute, never
    corruption) and false-positive a just-killed one (refuse-on-doubt).

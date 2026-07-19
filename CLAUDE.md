@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-19 (DEC-NIGHTLY-DECAY-R48-001 +
+DEC-CHAMPION-CHALLENGER-001 + DEC-NIGHTLY-RUN-DELTA-001, MIGRATION.md
+#1981–#1983, branch `claude/decay-champion-lane` (LANE W5, CLUB-ONLY) — the
+R48 strategy-decay detection leg + the champion/challenger promotion ledger
++ the nightly run-delta: two post-chain fail-open REPORT-LEVEL nightly legs
+(the #1939 pattern — never chain links) re-judge the newest `top100.json`
+finalists over the trailing ~63 sessions under the ONE lockbox tolerance
+law (trailing Sharpe < 0.70× discovery / max-DD > 1.5× ⇒ DECAYED; low-N
+abstains; born-Rust verdict/fold kernels in `rust/fno-math/src/decay.rs`
+with the sequential Python oracle as the live burn-in fallback) and drive
+a durable per-(instrument, tf, direction) champion state whose EVERY
+transition appends to the hash-chained `champions/champions.jsonl` ledger
+(pooled Stage-4 cascade re-validation + strict domination; auto-promote
+after 3 consecutive dominating nights; retirement = era-tagged annotation
+only) + the snapshot-free `run-delta.json` compare. ADDITIVE sidecars —
+the artifact is never rewritten/re-ranked; flags
+`BRUTEX_NIGHTLY_DECAY`/`BRUTEX_NIGHTLY_CHAMPIONS`/`BRUTEX_DECAY_RUST`
+default ON (in-branch flip recorded). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1981–#1983 — this header carries the pointer, never
+the story.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3523,7 +3544,68 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/decay-champion-lane` (**DEC-NIGHTLY-DECAY-R48-001 +
+  DEC-CHAMPION-CHALLENGER-001 + DEC-NIGHTLY-RUN-DELTA-001, MIGRATION.md #1981–#1983 —
+  LANE W5, CLUB-ONLY DRAFT PR (never merged directly)** — the R48 strategy-decay leg +
+  the champion/challenger promotion ledger + the nightly run-delta. **ITEM 11 (#1981):**
+  a post-chain fail-open REPORT-LEVEL nightly leg (`brutex/nightly/decay.py`, the #1939
+  box-update pattern — never a chain link; `BRUTEX_NIGHTLY_DECAY` default ON fail-loud)
+  re-simulates the newest `sweep_runs/<id>/top100.json` finalists over the trailing
+  ~63 sessions on the EXISTING trade-sim seam (`load_lake_slice` → `build_bar_bits` →
+  `mask_to_entry_signals` → `simulate_trades`; returns = pnl/`DEFAULT_START_EQUITY_PAISA`)
+  and applies the ONE lockbox tolerance law (the NEW public
+  `lockbox.DEFAULT_SHARPE_TOLERANCE`/`DEFAULT_MDD_TOLERANCE` aliases — trailing Sharpe
+  < 0.70× discovery OR trailing max-DD > 1.5× discovery ⇒ DECAYED; < `DECAY_MIN_TRADES`=10
+  trailing trades ⇒ honest ABSTAIN, never DECAYED); verdict + fold math BORN-RUST
+  (`rust/fno-math/src/decay.rs`: `decay_trailing_fold` · `decay_verdict` ·
+  `champion_dominates` — 17 cargo tests incl. ULP-boundary pins; full wheel-surface
+  handshake; Cargo.toml/lock byte-untouched) behind `brutex/nightly/decay_math.py`
+  (`BRUTEX_DECAY_RUST` default ON, junk = fail-safe OFF + warn-once; 16-call burn-in
+  bit-compare + ship-the-ORACLE autorevert latch + refuse-poison code gate; the oracle is
+  PURE SEQUENTIAL Python so the Rust transcription is op-for-op bit-exact — hypothesis
+  differentials pin Rust ≡ oracle; the ULP divergence vs numpy `sharpe_of_returns`
+  disclosed immaterial to a 30%-tolerance verdict). Verdicts land ATOMICALLY in the
+  ADDITIVE `decay-diff.json` sidecar (the artifact bytes NEVER rewritten/re-ranked — R13,
+  byte-compare-pinned), the report's additive `decay` block + one `📉` honesty-note line,
+  ONE aggregated `strategy_decayed` Telegram WARN per run (dedupe on run_id), and
+  retire-FLAG annotations on the champions state. The false `R48_DIVERGENCE_NOTE` is
+  rewritten BUILT + the runbook row reconciled. **ITEM 12 (#1982 + #1983):**
+  `brutex/nightly/champions.py` (`BRUTEX_NIGHTLY_CHAMPIONS` default ON) — durable
+  `champions/state.json` per scope key `instrument/tf/direction` (separator `/` NEVER
+  `|` — the ledger `subject` preimage forbids `|`, an in-session executed defect fixed at
+  the key law); every transition (SEEDED/CHALLENGED/PROMOTED/RETAINED/RETIRE_FLAGGED)
+  appended to the hash-chained `champions/champions.jsonl` (`AuditWriter` actor
+  `"champions"`, Golden Rule #8, `verify_chain`-pinned); challenger = tonight's best
+  cascade-`"pass"` NON-provisional entry with a different join identity; domination =
+  the pooled {champion ∪ challenger} Stage-4 cascade re-run (`build_candidate_input` ×2 →
+  `run_stage4_cascade`) — the challenger must SURVIVE non-provisionally AND read strictly
+  higher lockbox Sharpe with max-DD no worse (the born-Rust `champion_dominates` over the
+  kernel fold of each `CandidateInput.lockbox_returns`; an undefined Sharpe = no claim);
+  promotion after `CHAMPION_PROMOTE_NIGHTS`=3 CONSECUTIVE dominating nights (same
+  identity; different challenger resets the streak; `BRUTEX_CHAMPION_PROMOTE_NIGHTS`
+  fail-loud override) era-tags the old champion into `former` (NEVER deleted) + ONE
+  `champion_promoted` INFO; retirement is ANNOTATION only. run-delta.json (#1983): the
+  entered/dropped/rank-moves compare joined on the SNAPSHOT-FREE
+  mask‖direction‖instrument‖tf‖sl‖tp key (`entry_join_key` — the ONE law shared by decay
+  verdicts + champion streak identity + the delta join; `data_snapshot_hash` +
+  `code_commit_sha` excluded because they re-key nightly). PROOF (executed): the R48
+  fail-before/pass-after golden (bull finalist DECAYED + flagged + alerted, artifact
+  byte-untouched; bear twin HEALTHY, no alert) + the 4-night seed→challenge×2→PROMOTE
+  transition-chain golden with the ledger chain verified [SEEDED, CHALLENGED, CHALLENGED,
+  PROMOTED] (deterministic pooled-verdict double — a FULL-REAL promotion needs a
+  cascade-passing dataset, the REAL pooled path proven separately as the honest RETAINED
+  over the planted fixture lake); wet nightly runs thread both blocks into report.json,
+  dry-runs never run the legs. FLAGS default ON (the greenfield in-branch flip, recorded);
+  OFF arms are the kill switches. HONEST: the pooled re-run judges the DEFAULT Stage-1A
+  cell (`axis_defaults_assumed` disclosed); O(finalists × window bars) per night, never
+  O(1); diff/ledger glue is Python over the Rust kernels (Rust-optional, disclosed);
+  W2's trailing_* ResultRow columns deliberately NOT added (fold seam disclosed). GATES:
+  `decay_math.py` 100.00% (200/68, 53 tests) · `decay.py` 100.00% (213/44, 34) ·
+  `champions.py` 100.00% (303/66, 46) + the touched chain/run/alerts/lockbox/
+  sweep_binding suites re-locked; cargo fmt/clippy `-D warnings`/test green (628);
+  frozen engine/sweep goldens byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10769,7 +10851,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/decay-champion-lane`
+  (DEC-NIGHTLY-DECAY-R48-001 + DEC-CHAMPION-CHALLENGER-001 +
+  DEC-NIGHTLY-RUN-DELTA-001, MIGRATION.md #1981–#1983 — LANE W5, CLUB-ONLY
+  DRAFT PR: the R48 strategy-decay detection leg (post-chain fail-open
+  report-level; born-Rust verdict/fold kernels in `rust/fno-math/src/decay.rs`
+  behind `brutex/nightly/decay_math.py`'s burn-in/autorevert seam; the ONE
+  lockbox tolerance law — trailing Sharpe < 0.70× discovery / max-DD > 1.5×
+  ⇒ DECAYED, low-N abstains; additive `decay-diff.json` sidecar + `📉` note +
+  ONE `strategy_decayed` WARN; artifact bytes never rewritten — R13) + the
+  champion/challenger promotion machine per `instrument/tf/direction` scope
+  (hash-chained `champions/champions.jsonl` ledger, pooled Stage-4 cascade
+  re-validation + strict domination, promote after 3 consecutive dominating
+  nights, era-tagged annotation-only retirement) + the snapshot-free
+  `run-delta.json` compare; flags `BRUTEX_NIGHTLY_DECAY` /
+  `BRUTEX_NIGHTLY_CHAMPIONS` / `BRUTEX_DECAY_RUST` default ON (in-branch
+  flip recorded); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1981–#1983 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
