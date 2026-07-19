@@ -10,6 +10,7 @@ anchor-shift decay monotonicity — each over hypothesis-drawn trade streams.
 
 from __future__ import annotations
 
+import importlib
 import math
 import os
 from collections.abc import Generator
@@ -229,9 +230,12 @@ def test_window_split_net_is_additive(pnls: list[int], data: st.DataObject) -> N
 
 
 def _compute_rust_or_skip() -> ModuleType:
+    fno_math: ModuleType | None
     try:
-        import fno_math
+        fno_math = importlib.import_module("fno_math")
     except ImportError:  # pragma: no cover - wheel-present envs never hit it
+        fno_math = None
+    if fno_math is None:  # pragma: no cover - wheel-present envs never hit it
         pytest.skip("fno_math wheel not installed")
     if getattr(fno_math, "metrics_fold_recency", None) is None:  # pragma: no cover
         pytest.skip("stale fno_math wheel — no metrics_fold_recency")

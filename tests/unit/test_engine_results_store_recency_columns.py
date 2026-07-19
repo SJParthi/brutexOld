@@ -145,7 +145,8 @@ class TestRecencyBackfill:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row())
         with capture_logs() as logs:
-            assert store.append(_row(**_FAMILY)) is True
+            backfilled = store.append(_row(**_FAMILY))
+            assert backfilled is True
         stored = store.get(_rid(1))
         assert stored is not None
         assert stored.decay_weighted_net_paisa == _FAMILY["decay_weighted_net_paisa"]
@@ -156,7 +157,8 @@ class TestRecencyBackfill:
     def test_value_to_none_is_a_directional_no_op(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row(**_FAMILY))
-        assert store.append(_row()) is False  # less-informed redo never erases
+        redo_appended = store.append(_row())
+        assert redo_appended is False  # less-informed redo never erases
         stored = store.get(_rid(1))
         assert stored is not None
         assert stored.trailing_sharpe_ratio == _FAMILY["trailing_sharpe_ratio"]

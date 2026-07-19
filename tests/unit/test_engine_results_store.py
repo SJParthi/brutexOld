@@ -870,14 +870,16 @@ class TestSlHitRateColumn:
     def test_directional_backfill_none_to_value(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row())
-        assert store.append(_row(sl_hit_rate=0.25)) is True  # upgraded
+        upgraded = store.append(_row(sl_hit_rate=0.25))
+        assert upgraded is True
         assert store.get(_rid(1)) is not None
         assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
 
     def test_less_informed_redo_never_erases(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row(sl_hit_rate=0.25))
-        assert store.append(_row()) is False  # directional no-op
+        redo_appended = store.append(_row())
+        assert redo_appended is False  # directional no-op
         assert store.get(_rid(1)).sl_hit_rate == 0.25  # type: ignore[union-attr]
 
     def test_value_vs_value_conflict_raises_plain_error(self) -> None:

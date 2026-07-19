@@ -26,6 +26,7 @@ import math
 from typing import ClassVar
 
 import pytest
+from brutex.ranking import streaks as streaks_mod
 from brutex.ranking.streaks import STREAK_DOOR_ALPHA, max_loss_streak_quantile
 from hypothesis import given
 from hypothesis import strategies as st
@@ -245,8 +246,6 @@ class TestSeedAdjustmentBelt:
     """
 
     def _with_ceil(self, monkeypatch: pytest.MonkeyPatch, offset: int) -> int:
-        import brutex.ranking.streaks as streaks_mod
-
         real_ceil = math.ceil
 
         def skewed_ceil(x: float) -> int:

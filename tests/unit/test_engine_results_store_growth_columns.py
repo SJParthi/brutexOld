@@ -167,8 +167,10 @@ class TestGrowthFlushLoad:
 class TestGrowthBackfill:
     def test_identical_reappend_is_noop(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
-        assert store.append(_row(**_TRIO)) is True
-        assert store.append(_row(**_TRIO)) is False
+        first_appended = store.append(_row(**_TRIO))
+        assert first_appended is True
+        reappended = store.append(_row(**_TRIO))
+        assert reappended is False
 
     def test_none_to_value_backfills_and_logs(self) -> None:
         # The pre-extension-store redo shape: the stored row (loaded None)
@@ -176,7 +178,8 @@ class TestGrowthBackfill:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row())
         with capture_logs() as logs:
-            assert store.append(_row(**_TRIO)) is True
+            backfilled = store.append(_row(**_TRIO))
+            assert backfilled is True
         events = [e for e in logs if e["event"] == "results_store.growth_backfill"]
         assert len(events) == 1
         assert set(events[0]["backfilled_fields"]) == set(GROWTH_FIELDS)
@@ -189,7 +192,8 @@ class TestGrowthBackfill:
     def test_value_to_none_never_erases(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row(**_TRIO))
-        assert store.append(_row()) is False  # less informed — a silent no-op
+        redo_appended = store.append(_row())
+        assert redo_appended is False  # less informed — a silent no-op
         merged = store.get(_rid(1))
         assert merged is not None
         assert merged.loss_rate == _TRIO["loss_rate"]
@@ -210,7 +214,8 @@ class TestGrowthBackfill:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row())
         with capture_logs() as logs:
-            assert store.append(_row(vix_mean=13.0, **_TRIO)) is True
+            backfilled = store.append(_row(vix_mean=13.0, **_TRIO))
+            assert backfilled is True
         events = {e["event"] for e in logs}
         assert "results_store.vix_backfill" in events
         assert "results_store.growth_backfill" in events
