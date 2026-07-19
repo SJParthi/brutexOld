@@ -3885,7 +3885,8 @@ hostile-review pass._
   100.00% line+branch standalone on NEW ci.yml stanzas; window_ledger
   (357/108) + window_ledger_store (451/120) + the db_view 24-file gate +
   the doctor gate + the three movers modules + `pull_controller.py`
-  (634/148) + auto_pull (24/6, the discovery-mapped stem suite) ALL
+  (642/154 — the r5 empty-?kind= refusal helper folded) + auto_pull
+  (24/6, the discovery-mapped stem suite) ALL
   100.00% on their gates; ruff/ruff-format clean; `mypy
   --strict` clean (521 files). HONEST: ONE new env var, zero new routes; the R9 census
   still reads every stored stock series' footers (output-only exclusion,
