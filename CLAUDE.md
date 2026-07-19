@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1957,
+branch `claude/rust-calendar-leaves` — PR-1 of the calendar-leaf Rust
+conversion: NEW standalone crate `rust/brutex-calendar` (pyo3 0.29
+abi3-py312, the brutex-feed house layout, catch_unwind FFI belts) hosting
+the PURE decision laws of the two calendar leaves — `classify_month_drift`
+(the exact veto → no-evidence → month-cap-first / year-cap-mutually-
+exclusive order, i128-widened sums), `validate_settle_evidence` (every
+refusal message BYTE-IDENTICAL incl. the ported C-accelerated
+`fromisoformat` quirks; parse-engine ABSTAIN → None on NaN/Infinity/
+lone-surrogate/>128-nesting so Python keeps its oracle) and
+`parse_observed_sidecar` (whole-overlay rejection, the version ==-punning,
+the canonical round-trip entry law) — pinned by 299 Python-generated
+goldens + a ~10,100-trial live differential vs the Python laws
+(0 mismatches). Ships INERT: consumed by NOTHING — zero brutex/ Python,
+ci.yml or Makefile edits; the Python modules stay the production
+implementation; the facade flip + oracle deletion + CI wheel wiring are
+LATER PRs, and PR-2 (market_hours + auto_pull_gate) stacks on this crate
+by another session (append-only registration). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
+header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1957.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
@@ -3243,7 +3264,61 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-day-freshness-guard`
+- **Active branch:** `claude/rust-calendar-leaves`
+  (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1957** — entry number
+  PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
+  calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
+  (pyo3 0.29 abi3-py312, the brutex-feed house layout — pure-Rust rlib core
+  + optional `python` feature, build.rs source-digest stamp, maturin mixed
+  layout behind the stale-wheel handshake shim; every FFI body under a
+  `catch_unwind` belt, the release profile deliberately keeps unwinding on)
+  hosting the PURE DECISION LAWS of the two calendar leaves. (1)
+  `classify_month_drift` (`src/drift.rs`) — the observed_sessions
+  admission/veto/cap core, decision order EXACT: veto FIRST
+  (`failed_windows_touching > 0`); no-evidence (`indices != 3` OR
+  `clean < MIN_CLEAN_SUCCESS_WINDOWS(1)` — the CONSTANT, not a kwarg);
+  month cap 3 judged FIRST (over ⇒ flagged=(), over_year stays False — the
+  mutual-exclusion law); year cap 8 only when the month cap is untripped;
+  sums i128-WIDENED (the Python unbounded-int law); day strings opaque
+  tokens — the future flip re-attaches the decision-inert passthroughs.
+  (2) `validate_settle_evidence` (`src/settle.rs`) — the FULL
+  `validate_evidence_payload` truth table (the
+  DEC-SETTLE-EVIDENCE-ADOPTION-001 #1793 validator is the law source),
+  every refusal message BYTE-IDENTICAL to the Python ValueError text via
+  hand-mirrored CPython `repr()` twins (`src/pyrepr.rs`) + a port of the
+  C-ACCELERATED v3.12.3 `_datetimemodule.c` `fromisoformat` (`src/pyiso.rs`
+  — probe-confirmed quirks preserved: the dangling-char-before-tz swallow,
+  compact `HHMMSSff` fractions, the `+05:75` minute-fold,
+  `±00:00:00.ffffff` zero-whole-seconds passing the UTC-exact gate, the
+  embedded-NUL C-terminator behavior, lowercase-z refused); parse-engine
+  divergence (NaN/Infinity/lone-surrogate/>128-nesting) = the ABSTAIN
+  `None` so Python keeps its oracle — never a silent divergence. (3)
+  `parse_observed_sidecar` (`src/drift.rs`) — the whole-overlay rejection
+  law (one bad entry rejects ALL), the version `==`-PUNNING replicated
+  (JSON true/1.0 match 1), entry dates via the canonical round-trip
+  equivalence (strict shape + real proleptic date — PROVEN ≡ `fromisoformat`
+  + `raw == day.isoformat()`); a serde parse failure raises ValueError (the
+  LOUD abstain). EVIDENCE: 299 fixtures generated FROM the live Python laws
+  (127 settle messages byte-exact · 123 fromisoformat verdicts · 31
+  observed · 18 classify; generator committed at
+  `rust/brutex-calendar/tests/goldens/generate_goldens.py`) + a
+  ~10,100-trial random live differential vs the Python validators — 0
+  mismatches. HONEST ENVELOPE: ships INERT — consumed by NOTHING; zero
+  brutex/ Python edits, zero ci.yml/Makefile edits, no flag, no wiring;
+  the Python modules remain the production implementation unchanged; the
+  Python-side facade flip (default-ON `BRUTEX_CALENDAR_RUST`) + oracle
+  deletion + CI wheel wiring are LATER PRs; PR-2 (market_hours +
+  auto_pull_gate laws) stacks on this crate by another session (append-only
+  registration site, doc-commented); the reconcile-diff + prefix-grouping
+  laws deliberately LEFT in Python (dict-equality punning on arbitrary
+  evidence dicts — a documented exclusion); nse.py is a separate later
+  slice (PR #1513 coordination). GATES: 37 cargo tests green; cargo fmt
+  --check / clippy --all-targets -D warnings / test --release green; wheel
+  built (cp312-abi3); zero Python-side gate exposure (no Python files
+  touched). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
+  no new env vars.)
+  Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard + the B-3 derived-intraday null-OI
@@ -9841,7 +9916,25 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/rust-calendar-leaves`
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1957 — PR-1 of the
+  calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
+  (pyo3 0.29 abi3-py312, brutex-feed layout, catch_unwind FFI belts)
+  hosting the PURE decision laws of the two calendar leaves —
+  `classify_month_drift` (exact veto → no-evidence → month-cap-first /
+  year-cap-mutually-exclusive order, i128-widened sums),
+  `validate_settle_evidence` (every refusal message BYTE-IDENTICAL incl.
+  the ported C-accelerated `fromisoformat` quirks; parse-engine ABSTAIN →
+  None so Python keeps its oracle) and `parse_observed_sidecar`
+  (whole-overlay rejection, version ==-punning, the canonical round-trip
+  entry law) — pinned by 299 Python-generated goldens + a ~10,100-trial
+  live differential (0 mismatches); ships INERT — consumed by NOTHING,
+  zero brutex/ Python / ci.yml / Makefile edits; the facade flip + oracle
+  deletion + CI wiring are LATER PRs; PR-2 (market_hours + auto_pull_gate)
+  stacks on this crate (append-only registration); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1957 for the full blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample

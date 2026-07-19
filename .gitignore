@@ -143,6 +143,11 @@ Cargo.lock
 # application BINARY crate: its lockfile is tracked for reproducible builds
 # (Golden Rule #4) + the security-audit Cargo.lock trigger.
 !rust/brutexd/Cargo.lock
+# brutex-calendar (the calendar-leaf decision-law crate,
+# DEC-RUST-CALENDAR-LEAVES-001) is likewise an application extension crate:
+# track its lockfile for reproducibility (Golden Rule #4) + the
+# security-audit Cargo.lock trigger.
+!rust/brutex-calendar/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

@@ -141,6 +141,8 @@ fn parse_observed_sidecar(payload_json: Vec<u8>) -> PyResult<Option<Vec<String>>
     .map_err(|_| panic_err("parse_observed_sidecar"))?
 }
 
+// Append-only: PR-2 (market_hours + auto_pull_gate) stacks additional
+// modules here — append, never reorder.
 #[pymodule]
 fn _brutex_calendar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
