@@ -54,7 +54,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge">Product Scoreboard · Jun 2026 · ledger #979</div>
+    <div class="badge">Product Scoreboard · Jun 2026 · ledger #979 · assurance-verified 2026-07-18</div>
     <h1>BruteX</h1>
     <p class="tag">A research engine that records <b>every single minute</b> of India's index &amp; F&amp;O
       market history (2020 → today), shows you <b>what's actually moving</b> right now, and brute-force
@@ -219,6 +219,34 @@
     <span class="pill near">NEAR</span> near-term / designed ·
     <span class="pill big">MAJOR</span> major initiative or shelved experiment.</p>
 
+  <h2>🔎 Independent assurance verification <small>— evidence-based re-verification, 2026-07-18</small></h2>
+  <p class="tag" style="font-size:15px">A deep, parallel assurance pass re-ran the quality gates <b>read-only</b> at
+    the mega-club integration tip (detached HEAD <code>c220870641</code>, PR #1621 — one CI-workflow/ledger/one-unit-test
+    commit behind <code>origin/main</code> <code>415e863ec</code>, PR #1631; a delta affecting no executed gate).
+    Every number below is an <b>executed</b> pass-count —
+    and the gates this environment can't run are recorded honestly as <b>not-yet-green</b>, never faked green.</p>
+  <p class="theme">✅ Verified green — executed this pass</p>
+  <table>
+    <tr><th>Area</th><th>What was run</th><th>Result</th></tr>
+    <tr><td class="feat">Static analysis + formatting</td><td class="why"><code>ruff check</code> + <code>ruff format --check</code> on brutex + tests</td><td class="ref">all passed · 1785 files formatted</td></tr>
+    <tr><td class="feat">Type safety</td><td class="why"><code>mypy --strict brutex</code> · <code>pyright brutex</code></td><td class="ref">476 files clean · 0 errors</td></tr>
+    <tr><td class="feat">Security</td><td class="why"><code>bandit -r brutex -l</code></td><td class="ref">0 issues (all severities)</td></tr>
+    <tr><td class="feat">Reproducibility (blake3 run identity)</td><td class="why">frozen run-id / content-hash goldens + snapshot-hash mutation &amp; determinism</td><td class="ref">golden 556 passed (4 optional-crate skips)</td></tr>
+    <tr><td class="feat">No look-ahead</td><td class="why">feed-boundary guard + P-06 index barrier + sweep suffix-independence</td><td class="ref">68 passed + P-06 property teeth</td></tr>
+    <tr><td class="feat">Audit hash-chain</td><td class="why">tamper-detection + valid-chain verify</td><td class="ref">374 passed (6 named break-detection)</td></tr>
+    <tr><td class="feat">O(1) speed (robust shared-CI tier)</td><td class="why"><code>pytest tests/bench</code> ratio ceilings — no bare-O(1) hides an O(files) read</td><td class="ref">389 passed / 12 self-hosted-skipped / 0 failed (+ corroborating 286/0)</td></tr>
+    <tr><td class="feat">Edge-case resilience (7 classes)</td><td class="why">poison-lake reads, heal/quarantine, ingest gates, engine-sweep resilience, dashboard-read degrades, write-halt/OOM, deadlines</td><td class="ref">~1,375 assertions, 0 failed — no undocumented gap</td></tr>
+    <tr><td class="feat">Property / smoke / redteam / stress</td><td class="why">the remaining test types</td><td class="ref">550 / 28 / 175 / 35 passed</td></tr>
+    <tr><td class="feat">Whole-tree 100% coverage gate</td><td class="why">CI-exact unit+coverage gate re-run locally in full + CI run 29626883403's "Unit tests + coverage (100% gate)" job (newest main ci.yml run, main @ <code>415e863ec</code>)</td><td class="ref">✅ 100.00% line+branch MEASURED — 63,689 stmts/0 miss · 16,626 branches/0 partial; 27,587 passed / 0 failed; "Required test coverage of 100% reached"; CI coverage job success</td></tr>
+  </table>
+  <p class="theme">🟡 Honestly not-yet-green — NOT claimed</p>
+  <table>
+    <tr><th>Area</th><th>Honest state</th><th>Status</th></tr>
+    <tr><td class="feat">Mutation gate (weekly)</td><td class="why">The scheduled run named as the completion proof (2026-07-13) FAILED; 0 green scheduled runs on record. Stays open until a green scheduled run lands (#1597).</td><td><span class="pill mid">🟡 weekly gate — not green</span></td></tr>
+    <tr><td class="feat">Multi-hour soak</td><td class="why">Self-hosted weekly tier (<code>soak-selfhosted.yml</code>, #1580) — not runnable here, not re-measured.</td><td><span class="pill mid">🟡 self-hosted weekly</span></td></tr>
+    <tr><td class="feat">Strict 1.1× M4-Pro O(1) tier + absolute floors</td><td class="why">Self-hosted-only (<code>bench-m4pro.yml</code>), post-merge + non-blocking by design (#1753) — not re-measured here.</td><td><span class="pill mid">🟡 self-hosted-only</span></td></tr>
+  </table>
+
   <h2>🛡️ The bar every change clears <small>— why you can trust it</small></h2>
   <div class="trust">
     <div class="card"><b>100% tested.</b> Line + branch coverage on every touched module, plus property, golden, stress &amp; mutation tests.</div>
@@ -228,9 +256,11 @@
 
   <p class="foot">Honesty footer: every Finished row above traces to a real, merged <code>docs/MIGRATION.md</code>
     ledger entry (refreshed through #979). The Current rows are <b>open PRs, not merged</b> (#943 / #944, their ledger
-    #980 not yet on main). The Up-next and Future rows are <b>planned, not built</b>. The brute-force engine trades 3
-    indices (NIFTY / BANKNIFTY / SENSEX); the ~750-name lake is reference data, never changed silently. Generated from
-    the decision ledger — if a row and the ledger disagree, the ledger wins.</p>
+    #980 not yet on main). The Up-next and Future rows are <b>planned, not built</b>. The 2026-07-18 assurance section
+    records <b>executed</b> pass-counts and, honestly, the <b>not-yet-green</b> weekly / self-hosted gates (DEC-O1-GUARANTEE-VERIFY-001
+    / #2012) — never a fabricated all-green sheet. The brute-force engine trades 3 indices (NIFTY / BANKNIFTY / SENSEX);
+    the ~750-name lake is reference data, never changed silently. Generated from the decision ledger — if a row and the
+    ledger disagree, the ledger wins.</p>
 
 </div>
 </body>

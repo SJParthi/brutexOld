@@ -114,6 +114,7 @@ import structlog
 
 from brutex.data.guarded_read import read_regular_text
 from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_identity import (
@@ -127,6 +128,7 @@ from brutex.engine.sweep_orchestrator import (
     SweepTuple,
     TupleDiffCheck,
     count_sweep_tuples,
+    hit_memo_cell_key,
     iter_sweep_tuples,
     run_one_tuple,
 )
@@ -310,6 +312,18 @@ class SupervisedGridSummary:
         hole is always visible; delete the sidecar entries (after relieving the
         memory pressure) and resume to genuinely recompute them. Always ``0`` on
         the sequential path (only the parallel driver quarantines).
+    tuples_failed_apriori_budget
+        The SUBSET of ``tuples_failed`` whose failure was the deterministic
+        Apriori mask·bar breaker
+        (:class:`~brutex.engine.sweep_run.SweepAprioriBudgetError`,
+        DEC-SWEEP-APRIORI-DEFAULT-001): a budget trip is target-invariant, so
+        the SAME cell's every deeper-k tuple re-trips identically — counted
+        DISTINCTLY so the CLI/Telegram done-line can name the ONE remediation
+        (raise ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` — or pass an explicit
+        ``--k`` — and re-run; the frozen checkpoint re-runs exactly the
+        refused tuples). Defaulted ``0`` (the ``tuples_quarantined_prior``
+        precedent) so every existing constructor/consumer is unchanged;
+        always ``0`` on a legacy (non-apriori) run.
     cancelled
         ``True`` iff the run stopped at a tuple boundary on an operator
         cooperative-cancel request (DEC-JOB-COOPERATIVE-CANCEL-001 — the
@@ -343,6 +357,7 @@ class SupervisedGridSummary:
     persisted: int
     tuples_failed: int
     tuples_quarantined_prior: int = 0
+    tuples_failed_apriori_budget: int = 0
     cancelled: bool = False
     store_guard_forced: int = 0
 
@@ -441,13 +456,9 @@ def grid_identity(grid: SweepGridConfig) -> str:
         The 64-char lowercase BLAKE3 hex digest of the grid identity.
     """
     canonical = json.dumps(_grid_descriptor(grid), sort_keys=True, separators=(",", ":"))
-    # The typed intermediate keeps the pre-commit hook's wheel-less mypy env
-    # (blake3 absent → ``hexdigest()`` degrades to Any) from raising a phantom
-    # ``no-any-return`` when a merge commit puts this file in the checked set —
-    # the exact #575/#579 env-dependent class the hook config documents. The
-    # venv-faithful ci.yml gate types this identically (str = str, no cast).
-    digest: str = blake3.blake3(canonical.encode("utf-8")).hexdigest()
-    return digest
+    # str(...) keeps this typed str where the blake3 stubs are absent (the
+    # isolated pre-commit mypy env — the #575 hook-portability precedent).
+    return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())
 
 
 def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, Any]:
@@ -847,24 +858,42 @@ def run_supervised_grid(
     guards.checkpoint.load_or_quarantine()
     resume_from = guards.checkpoint.next_index
 
+    # Resolved ONCE per supervised run (DEC-SWEEP-APRIORI-DEFAULT-001): gates
+    # the EMIT-ON-apriori START/COMPLETE payload keys + the per-cell hit-count
+    # memo threading — a legacy run's payloads stay byte-identical.
+    apriori_on = apriori_enabled()
     guards.progress.start(enumerated=total, detail=subject)
-    guards.audit.append(
-        action=_ACTION_START,
-        subject=subject,
-        payload={
-            "sweep_id": sweep_id,
-            "tuples_total": total,
-            "resume_from": resume_from,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    start_payload: dict[str, Any] = {
+        "sweep_id": sweep_id,
+        "tuples_total": total,
+        "resume_from": resume_from,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    if apriori_on:
+        # The per-run MODE record (DEC-SWEEP-APRIORI-DEFAULT-001) — consumed
+        # by sweep-verify's recorded-mode gate; absence == legacy (which also
+        # classifies every pre-flip tree correctly).
+        start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    overfit_fragment = _gate_config_fragment(grid)
+    if overfit_fragment is not None and "overfit" in overfit_fragment:
+        # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001)
+        # — consumed by sweep-verify's recorded-overfit reconcile
+        # (recorded_overfit_from_audit) so `sweep-verify --recount` re-derives
+        # the gate-folded store addresses instead of reading a grid_mismatch
+        # FALSE-POSITIVE on every healthy overfit-gated tree. ONLY the overfit
+        # leg is persisted — the stage3 leg already rides its own
+        # STAGE_3_PASS_START record (recorded_stage3_from_audit), so persisting
+        # it here would double-record it. EMIT-ON-active: absence == legacy,
+        # keeping every ungated/legacy payload byte-identical.
+        start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
+    guards.audit.append(action=_ACTION_START, subject=subject, payload=start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
@@ -925,6 +954,7 @@ def run_supervised_grid(
     skipped_resume = resume_count - len(forced)
     cache_forced = 0
     tuples_failed = 0
+    tuples_failed_apriori_budget = 0
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -948,6 +978,12 @@ def run_supervised_grid(
     # Stage-1A bar window per distinct (instrument, tf, proximity, prior_n) across
     # its direction/K/sl/tp tuples; None disables reuse (legacy per-tuple rebuild).
     kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
+
+    # Per-cell hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001): ONE single-cell
+    # memo beside the kernel cache — keyed on the bar_bits determinants
+    # (hit_memo_cell_key), reset on a cell change, threaded ONLY when the
+    # Apriori mode is on (legacy runs pass None — structurally untouched).
+    hit_memo_state: tuple[tuple[Any, ...], dict[int, int]] | None = None
 
     stop_event = threading.Event()
     wd_thread: threading.Thread | None = None
@@ -1097,6 +1133,18 @@ def run_supervised_grid(
             # `except Exception` (record-then-reraise ABORT) still handles every
             # genuinely-fatal error, including the PLAIN ResultsStoreError
             # run-identity conflict.
+            hit_count_memo: dict[int, int] | None = None
+            if apriori_on:
+                cell_key = hit_memo_cell_key(
+                    tuple_,
+                    grid,
+                    roll_schedule_by_instrument.get(tuple_.instrument)
+                    if roll_schedule_by_instrument is not None
+                    else None,
+                )
+                if hit_memo_state is None or hit_memo_state[0] != cell_key:
+                    hit_memo_state = (cell_key, {})
+                hit_count_memo = hit_memo_state[1]
             try:
                 summary = run_one_tuple(
                     grid,
@@ -1111,6 +1159,7 @@ def run_supervised_grid(
                     store_quarantine=store_quarantine,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=reference_stamper,
+                    hit_count_memo=hit_count_memo,
                 )
             except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
                 # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921):
@@ -1119,7 +1168,20 @@ def run_supervised_grid(
                 # never a whole-grid abort. Only the G14 ResultsStoreSchemaError is
                 # caught, NOT its parent ResultsStoreError (a run-identity conflict /
                 # missing-polars fault keeps the documented global abort).
+                # Local import (review fix round 1 m8): the EXACT class, not a
+                # name-string compare — a look-alike `SweepAprioriBudgetErrorX`
+                # must never count as a budget trip. Function-local like the
+                # generator's own lazy import (no new module-top edge).
+                from brutex.engine.sweep_run import SweepAprioriBudgetError
+
                 tuples_failed += 1
+                if isinstance(exc, SweepAprioriBudgetError):
+                    # The DISTINCT budget-trip counter
+                    # (DEC-SWEEP-APRIORI-DEFAULT-001): a trip is
+                    # target-invariant — the cell's deeper-k tuples re-trip
+                    # identically — so the done-line can name the ONE
+                    # remediation apart from generic tuple failures.
+                    tuples_failed_apriori_budget += 1
                 had_failure = True
                 _advance(current=label, survived=False, skipped=False)
                 error = f"{type(exc).__name__}: {exc}"
@@ -1213,7 +1275,7 @@ def run_supervised_grid(
                 total_forced=len(forced) + cache_forced,
             )
         if not cancelled:
-            payload = {
+            payload: dict[str, Any] = {
                 "sweep_id": sweep_id,
                 "tuples_total": total,
                 "tuples_run": tuples_run,
@@ -1228,6 +1290,10 @@ def run_supervised_grid(
                 "ranked": ranked,
                 "persisted": persisted,
             }
+            if apriori_on:
+                # EMIT-ON-apriori (DEC-SWEEP-APRIORI-DEFAULT-001): legacy COMPLETE
+                # payloads stay byte-identical (frozen-key-set pinned).
+                payload["tuples_failed_apriori_budget"] = tuples_failed_apriori_budget
             if forced or cache_forced:
                 # Additive EMIT-ON-NONZERO (chain-safe; the zero-forced payload is
                 # byte-identical to pre-guard).
@@ -1271,6 +1337,7 @@ def run_supervised_grid(
         ranked=ranked,
         persisted=persisted,
         tuples_failed=tuples_failed,
+        tuples_failed_apriori_budget=tuples_failed_apriori_budget,
         cancelled=cancelled,
         store_guard_forced=len(forced) + cache_forced,
     )

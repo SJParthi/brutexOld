@@ -308,6 +308,14 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
             stage3_top_k=1,
             stage3_fevals=4,
             stage3_restarts=1,
+            # Insulate the runtime-feasibility rehearsal from #1459's
+            # production-default overfit_gate flip (False->True,
+            # DEC-RESULTS-TRUST-HONESTY-001). r38 TIMES the full refine
+            # path and asserts stage-3 refine writes REAL cells -- it is
+            # NOT an overfit-gate test; #1459's production default (gate-ON)
+            # stays intact + untouched. Per the coordinator r38 reconcile
+            # ruling (option b).
+            overfit_gate=False,
         )
 
 

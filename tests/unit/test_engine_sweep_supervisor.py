@@ -1935,3 +1935,162 @@ class TestCooperativeCancel:
             assert guards.checkpoint.next_index == 0  # frozen — the failed tuple redoes
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert actions == ["SUPERVISOR_START", "TUPLE_FAILED", "SUPERVISOR_CANCELLED"]
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The supervised driver's apriori wiring: EMIT-ON-apriori START/COMPLETE
+# payload keys, the DISTINCT tuples_failed_apriori_budget counter, and the
+# per-cell hit-count memo threading (reset on a cell change; None on legacy).
+
+
+class TestSupervisorAprioriWiring:
+    @staticmethod
+    def _run_with_fake(
+        tmp_path: Path,
+        grid: SweepGridConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: object,
+    ) -> tuple[SupervisedGridSummary, list[object]]:
+        """Run the supervised grid with *fake* in run_one_tuple's place."""
+        memos: list[object] = []
+
+        def _spy(grid_: object, tuple_: object, **kwargs: object) -> object:
+            memos.append(kwargs["hit_count_memo"])
+            return fake(grid_, tuple_, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr("brutex.engine.sweep_supervisor.run_one_tuple", _spy)
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        return summary, memos
+
+    def test_legacy_payloads_carry_no_apriori_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert memos == [None, None]
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "apriori" not in start.payload
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert "tuples_failed_apriori_budget" not in complete.payload
+
+    def test_apriori_start_mode_record_and_complete_counter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert len(memos) == 2
+        assert isinstance(memos[0], dict)
+        assert memos[0] is memos[1]  # ONE memo across the cell's k-ladder
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["apriori"] == {
+            "enabled": True,
+            "max_mask_bars": DEFAULT_MAX_MASK_BARS,
+        }
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 0
+
+    def test_overfit_gated_start_records_gate_config_overfit_leg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 (MIGRATION.md #1851): an
+        overfit-gated grid's SUPERVISOR_START payload records the #1336
+        overfit fragment ``[dsr_min, weight, default_skew,
+        default_excess_kurtosis]`` under ``gate_config`` — the MINT side of
+        the recount recovery channel `recorded_overfit_from_audit` reads."""
+        from brutex.ranking import OverfitGateConfig
+
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=0.9))
+        self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["gate_config"] == {"overfit": [0.9, 0.05, 0.0, 0.0]}
+
+    def test_ungated_start_carries_no_gate_config_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EMIT-ON-active absence pin (#1851): an UNGATED grid writes NO
+        ``gate_config`` key — absent == legacy, never a recorded default."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1])
+        self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "gate_config" not in start.payload
+
+    def test_memo_resets_on_a_cell_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)], k_values=[1, 2])
+        _summary, memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        assert len(memos) == 4
+        assert memos[0] is memos[1]
+        assert memos[2] is memos[3]
+        assert memos[0] is not memos[2]
+
+    def test_budget_trip_counts_distinctly_beside_generic_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EXACT-isinstance classifier (review fix round 1 m8): a LOOK-ALIKE
+        class name (``SweepAprioriBudgetErrorX``) is never miscounted."""
+        from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2, 3])
+
+        def _fake(_grid: object, tuple_: object, **_kwargs: object) -> object:
+            k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
+            if k == 2:
+                raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
+            if k == 3:
+                raise SweepComboError("generic combo failure")
+            return None
+
+        summary, _memos = self._run_with_fake(tmp_path, grid, monkeypatch, _fake)
+        assert summary.tuples_failed == 3
+        assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 1
+
+    def test_summary_field_defaults_zero(self) -> None:
+        summary = SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=1,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=1,
+            ranked=0,
+            persisted=0,
+            tuples_failed=0,
+        )
+        assert summary.tuples_failed_apriori_budget == 0
+        assert summary.tuples_quarantined_prior == 0
