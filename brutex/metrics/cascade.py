@@ -169,6 +169,37 @@ _COMPOSITE_WEIGHTS: Final[dict[str, float]] = {
 _PCT_FULL_SCALE = 100.0
 
 
+def validate_single_event_pct(value: float | None) -> float | None:
+    """The ONE validation law for the single-event sensitivity knob.
+
+    ``None`` (OFF) passes through; otherwise the value must be a non-bool
+    finite number strictly between 0 and 100 (percent). Junk raises
+    :class:`ValueError` naming BOTH the config field and its CLI flag
+    (``--single-event-max-best-day-pct``), so the eager ``cmd_sweep_all``
+    parse and :meth:`CascadeConfig.__post_init__` share exactly this one law
+    (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001, review round 1 — junk must
+    refuse BEFORE any compute, never after a completed multi-day sweep).
+    """
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        # The finite check is LOAD-BEARING in this exclusion form: a NaN
+        # compares False against BOTH bounds below, so without it a NaN
+        # would silently pass (mutation-killed, review round 1).
+        or not math.isfinite(value)
+        or float(value) <= 0.0
+        or float(value) >= _PCT_FULL_SCALE
+    ):
+        raise ValueError(
+            "single_event_max_best_day_pct (--single-event-max-best-day-pct) "
+            "must be None (OFF) or a finite percent strictly between 0 and "
+            f"100, got {value!r} (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001)"
+        )
+    return value
+
+
 class FilterStage(Enum):
     """The pipeline stage at which a candidate was rejected (or that it passed)."""
 
@@ -353,21 +384,12 @@ class CascadeConfig:
     single_event_max_best_day_pct: float | None = None
 
     def __post_init__(self) -> None:
-        """Validate the single-event knob up front (fail loud, Golden Rule #1)."""
-        x = self.single_event_max_best_day_pct
-        if x is None:
-            return
-        if (
-            isinstance(x, bool)
-            or not isinstance(x, (int, float))
-            or not math.isfinite(x)
-            or not 0.0 < float(x) < _PCT_FULL_SCALE
-        ):
-            raise ValueError(
-                "CascadeConfig.single_event_max_best_day_pct must be None (OFF) or a "
-                f"finite percent strictly between 0 and 100, got {x!r} "
-                "(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001)"
-            )
+        """Validate the single-event knob up front (fail loud, Golden Rule #1).
+
+        DELEGATES to :func:`validate_single_event_pct` — the ONE law shared
+        with the eager ``cmd_sweep_all`` CLI parse (review round 1).
+        """
+        validate_single_event_pct(self.single_event_max_best_day_pct)
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""

@@ -7941,6 +7941,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001 (review round 1): validate
+    # the --single-event-max-best-day-pct knob EAGERLY via the ONE
+    # validate_single_event_pct law CascadeConfig.__post_init__ delegates to —
+    # junk (0, 100, -5, nan, inf) is a clean pre-sweep user-config error,
+    # never a ValueError first discovered at the automatic Stage-4 site AFTER
+    # the whole multi-day sweep has computed. Both dispatch paths funnel
+    # through this entry, so one eager pass covers both.
+    from brutex.metrics.cascade import validate_single_event_pct
+
+    try:
+        validate_single_event_pct(single_event_max_best_day_pct)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 1 of 2 ──
     # Resolve the run-end results-depth kill switch EAGERLY: a junk
     # BRUTEX_RESULTS_DEPTH is a clean pre-sweep user-config error, never a
@@ -8821,8 +8836,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
                 # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: the default-OFF
                 # single-event knob rides the cascade config ONLY when set —
-                # None forwards no override, so the default manifest bytes are
-                # unchanged (artifact-level only; run identity untouched).
+                # None forwards no override. Precisely: run identity + the
+                # CascadeReport are byte-identical at defaults; the manifest
+                # `cascade_config` block gains an additive
+                # `"single_event_max_best_day_pct": null` field
+                # (backward-compatible load; auto==manual golden green).
                 cascade_config=cascade_config_for_sweep(
                     sweep_id,
                     overrides=(

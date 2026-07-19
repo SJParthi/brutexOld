@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import random
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +27,7 @@ from brutex.metrics.cascade import (
     FilterStage,
     _single_event_verdict,
     run_stage4_cascade,
+    validate_single_event_pct,
 )
 
 # pyright: reportPrivateUsage=none
@@ -295,3 +297,82 @@ def test_measured_fluke_remain_pct_matches_c2() -> None:
         day_sums[d] = day_sums.get(d, 0.0) + r
     remain_pct = (total - max(day_sums.values())) / total * 100.0
     assert remain_pct == pytest.approx(0.3, abs=0.1)
+
+
+class TestValidateSingleEventPct:
+    """The ONE eager-validation law (review round 1) — pure, shared with the CLI."""
+
+    def test_none_passes_through(self) -> None:
+        assert validate_single_event_pct(None) is None
+
+    def test_valid_value_passes_through(self) -> None:
+        assert validate_single_event_pct(5.0) == 5.0
+
+    @pytest.mark.parametrize(
+        "junk", [0.0, 100.0, -5.0, float("nan"), float("inf"), float("-inf"), True]
+    )
+    def test_junk_ladder_refused_naming_the_flag(self, junk: object) -> None:
+        with pytest.raises(ValueError, match="--single-event-max-best-day-pct"):
+            validate_single_event_pct(junk)  # type: ignore[arg-type]
+
+    def test_post_init_delegates_to_the_one_law(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[object] = []
+        real = cascade_mod.validate_single_event_pct
+
+        def _spy(value: float | None) -> float | None:
+            seen.append(value)
+            return real(value)
+
+        monkeypatch.setattr(cascade_mod, "validate_single_event_pct", _spy)
+        CascadeConfig(seed=7, single_event_max_best_day_pct=7.5)
+        assert seen == [7.5]
+
+
+class TestCliEagerValidation:
+    """cmd_sweep_all refuses a junk knob BEFORE any compute (review round 1 MAJOR)."""
+
+    def test_junk_knob_clean_early_exit_before_compute(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import brutex.engine.results_depth_pass as rdp
+        from brutex import cli as cli_mod
+
+        def _bomb() -> bool:
+            raise AssertionError("sweep body reached — eager validation failed")
+
+        # The results-depth resolve is the very next eager step after the new
+        # validation block (and the lake preload/grid sit far beyond it) — the
+        # bomb proves the clean exit happens BEFORE any compute.
+        monkeypatch.setattr(rdp, "resolve_results_depth_enabled", _bomb)
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        rc = cli_mod.cmd_sweep_all(
+            lake_root=lake,
+            catalog_path=None,
+            results_root=tmp_path / "sweeps",
+            exchange="NSE",
+            segment="INDEX",
+            symbols="NIFTY",
+            intervals="5minute",
+            start="2024-01-02",
+            end="2024-01-03",
+            directions="BUY",
+            k="1",
+            conditions="0,1",
+            sl="none",
+            tp="none",
+            top=5,
+            mode="A",
+            max_tuples=None,
+            max_combos=None,
+            data_snapshot_hash=None,
+            single_event_max_best_day_pct=0.0,
+            options_sim=False,
+        )
+        assert rc == cli_mod.EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "sweep-all config error" in err
+        assert "--single-event-max-best-day-pct" in err
