@@ -258,10 +258,10 @@ pub fn summary_lines_impl(
     let mut parts: Vec<String> = Vec::new();
     for (link, status_token, blocked_by) in links {
         let mut status = status_token.clone();
-        if status_token == "blocked" {
-            if let Some(blocker) = blocked_by {
-                status = format!("blocked({blocker})");
-            }
+        if status_token == "blocked"
+            && let Some(blocker) = blocked_by
+        {
+            status = format!("blocked({blocker})");
         }
         if link == "backup" && status_token != "blocked" {
             status.push_str(&format!(
