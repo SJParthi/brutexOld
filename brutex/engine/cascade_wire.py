@@ -1448,45 +1448,24 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
 
 def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
     """Rebuild a :class:`Stage3ManifestRecord` from :func:`_stage3_to_dict` output."""
-    # The Rust walk coerces every cell field in the original token order; the
-    # additive-parse defaulting (rel_path None passthrough, absent enum tokens
-    # → prev-day / (HLC3, CLOSE)) + the dataclass construction (whose
-    # __post_init__ CascadeWireError raises pass the guard untouched) stay
-    # HERE, inside the verbatim prefix guard.
+    # The Rust walk performs the FULL per-cell construction in the original
+    # PER-CELL order (fix round, MINOR-1): each cell's coercions, its
+    # FibAnchorKind/PriceSource validations + additive-parse defaulting
+    # (None → PREV_DAY / (HLC3, CLOSE)) AND the Stage3CellRecord construction
+    # itself (whose __post_init__ CascadeWireError raises pass the guard
+    # untouched) all run before the NEXT cell — the constructors cross the
+    # seam as DATA (the CPython-delegation idiom), so on a multi-defect
+    # payload the FIRST offending cell's error surfaces exactly as the
+    # deleted law's. The Stage3ManifestRecord construction stays HERE, inside
+    # the verbatim prefix guard.
     try:
-        raw = require_cascade_rust().stage3_coerce(data)
-        cells = tuple(
-            Stage3CellRecord(
-                instrument=cell["instrument"],
-                tf_label=cell["tf_label"],
-                direction_label=cell["direction_label"],
-                k=cell["k"],
-                sl_paisa=cell["sl_paisa"],
-                tp_paisa=cell["tp_paisa"],
-                proximity_bps=cell["proximity_bps"],
-                rel_path=cell["rel_path"],
-                fib_anchor=(
-                    FibAnchorKind.PREV_DAY
-                    if cell["fib_anchor"] is None
-                    else FibAnchorKind(cell["fib_anchor"])
-                ),
-                vwap_source=(
-                    PriceSource.HLC3
-                    if cell["vwap_source"] is None
-                    else PriceSource(cell["vwap_source"])
-                ),
-                ema_source=(
-                    PriceSource.CLOSE
-                    if cell["ema_source"] is None
-                    else PriceSource(cell["ema_source"])
-                ),
-            )
-            for cell in raw["cells"]
+        raw = require_cascade_rust().stage3_coerce(
+            data, Stage3CellRecord, FibAnchorKind, PriceSource
         )
         return Stage3ManifestRecord(
             enabled=raw["enabled"],
             train_snapshot_hash=raw["train_snapshot_hash"],
-            refined_cells=cells,
+            refined_cells=tuple(raw["cells"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid stage3 record in manifest: {exc}") from exc

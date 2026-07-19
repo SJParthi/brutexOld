@@ -422,10 +422,19 @@ fn spec_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound
     cascade_wire::spec_coerce(py, data)
 }
 
-/// `_stage3_from_dict`'s coercion walk (construction is the shim's).
+/// `_stage3_from_dict`'s parse walk — FULL per-cell construction (coercions,
+/// the passed-in `FibAnchorKind`/`PriceSource` validations AND the passed-in
+/// `Stage3CellRecord` construction, all before the next cell — fix round,
+/// MINOR-1); the `Stage3ManifestRecord` construction is the shim's.
 #[pyfunction]
-fn stage3_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
-    cascade_wire::stage3_coerce(py, data)
+fn stage3_coerce<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    cell_cls: &Bound<'py, PyAny>,
+    fib_cls: &Bound<'py, PyAny>,
+    price_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::stage3_coerce(py, data, cell_cls, fib_cls, price_cls)
 }
 
 /// `_lbt_from_dict`'s coercion walk (construction is the shim's).

@@ -568,14 +568,23 @@ pub fn spec_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<B
     Ok(out)
 }
 
-/// `_stage3_from_dict`'s coercion walk (dataclass construction is the
-/// shim's). Per-cell coercions run in the original's exact token order
-/// (the `proximity_bps` getitem FIRST, then the construction kwargs);
-/// `train_snapshot_hash` / `enabled` follow the original's post-loop
-/// evaluation order.
+/// `_stage3_from_dict`'s parse walk — the FULL per-cell construction in the
+/// original PER-CELL order (fix round, MINOR-1): each cell's coercions, its
+/// enum validations (via the shim-passed `FibAnchorKind` / `PriceSource`
+/// constructors — the CPython-delegation idiom) AND the `Stage3CellRecord`
+/// construction itself (whose `__post_init__` raises propagate) ALL run
+/// before the NEXT cell is touched, so on a multi-defect payload the FIRST
+/// offending cell's error surfaces byte-identically to the deleted law.
+/// Within a cell the original token order holds (the `proximity_bps`
+/// getitem FIRST, then the construction kwargs); `train_snapshot_hash` /
+/// `enabled` follow the original's post-loop evaluation order and the
+/// `Stage3ManifestRecord` construction stays the shim's.
 pub fn stage3_coerce<'py>(
     py: Python<'py>,
     data: &Bound<'py, PyAny>,
+    cell_cls: &Bound<'py, PyAny>,
+    fib_cls: &Bound<'py, PyAny>,
+    price_cls: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let b = Builtins::new(py)?;
     let cells = PyList::empty(py);
@@ -607,34 +616,40 @@ pub fn stage3_coerce<'py>(
                 b.str_(&cell.get_item("rel_path")?)?
             },
         )?;
+        // The additive-parse enum defaulting + validation, PER CELL: an
+        // absent/None token takes the class default member (PREV_DAY /
+        // (HLC3, CLOSE) — attribute fetch, cannot raise for the real enums);
+        // a present token is str-coerced then constructed, so a bad token's
+        // ValueError fires HERE, before the next cell (the original law).
         let fib = mapping_get(&cell, "fib_anchor")?;
         cd.set_item(
             "fib_anchor",
             if fib.is_none() {
-                fib
+                fib_cls.getattr("PREV_DAY")?
             } else {
-                b.str_(&cell.get_item("fib_anchor")?)?
+                fib_cls.call1((b.str_(&cell.get_item("fib_anchor")?)?,))?
             },
         )?;
         let vwap = mapping_get(&cell, "vwap_source")?;
         cd.set_item(
             "vwap_source",
             if vwap.is_none() {
-                vwap
+                price_cls.getattr("HLC3")?
             } else {
-                b.str_(&cell.get_item("vwap_source")?)?
+                price_cls.call1((b.str_(&cell.get_item("vwap_source")?)?,))?
             },
         )?;
         let ema = mapping_get(&cell, "ema_source")?;
         cd.set_item(
             "ema_source",
             if ema.is_none() {
-                ema
+                price_cls.getattr("CLOSE")?
             } else {
-                b.str_(&cell.get_item("ema_source")?)?
+                price_cls.call1((b.str_(&cell.get_item("ema_source")?)?,))?
             },
         )?;
-        cells.append(cd)?;
+        // Construct the record IN the loop — `__post_init__` raises included.
+        cells.append(cell_cls.call((), Some(&cd))?)?;
     }
     let hash_raw = data.get_item("train_snapshot_hash")?;
     let enabled = b.bool_(&data.get_item("enabled")?)?;

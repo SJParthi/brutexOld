@@ -92,9 +92,13 @@ pub fn dumps_pairs(pairs: &[(String, i128)]) -> String {
 ///
 /// * `str` — [`push_json_string`] (the `py_encode_basestring_ascii` twin);
 /// * `int` — the object's own decimal text (`str(int)`, unbounded-exact);
-/// * `float` — CPython `repr` (shortest round-trip), with the
+/// * `float` — `float.__repr__(o)` semantics exactly as CPython `json.dumps`
+///   (the shortest-round-trip repr of the VALUE, rendered via a fresh
+///   `PyFloat` from the extracted double — NEVER the object's own `repr`,
+///   so a float subclass like np.float64 serialises as its value), with the
 ///   `allow_nan=False` gate raising the VERBATIM
-///   `ValueError("Out of range float values are not JSON compliant: {o!r}")`;
+///   `ValueError("Out of range float values are not JSON compliant: {o!r}")`
+///   (the refusal message keeps the OBJECT's repr — CPython's `%R`);
 /// * `bool` / `None` — literals (`PyBool` checked BEFORE `PyInt`);
 /// * `list` / `tuple` — element walk;
 /// * `dict` — **str keys only**, sorted by Rust `String` `Ord` (byte order ==
@@ -131,7 +135,15 @@ fn write_json_value(v: &Bound<'_, PyAny>, out: &mut String) -> PyResult<()> {
                 crate::capture_repr(v)
             )));
         }
-        out.push_str(v.repr()?.to_cow()?.as_ref());
+        // `float.__repr__(o)` semantics, NEVER the object's own `repr()`
+        // (fix round, MINOR-2): CPython `json.dumps` renders every float
+        // through `float.__repr__` unconditionally, so a float SUBCLASS with
+        // an overridden repr (np.float64's exact shape) must serialise as
+        // its VALUE — repr of a FRESH `PyFloat` carrying the extracted
+        // double IS `float.__repr__`'s output (it formats the stored C
+        // double, nothing else). The object's own repr would emit invalid
+        // JSON (`np.float64(1.5)`).
+        out.push_str(PyFloat::new(v.py(), f).repr()?.to_cow()?.as_ref());
     } else if v.is_instance_of::<PyList>() || v.is_instance_of::<PyTuple>() {
         out.push('[');
         for (i, item) in v.try_iter()?.enumerate() {

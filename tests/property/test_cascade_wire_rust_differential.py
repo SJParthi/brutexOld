@@ -39,17 +39,25 @@ from brutex.engine.cascade_wire import (
     CascadeManifest,
     CascadeTupleSpec,
     CascadeWireError,
+    CascadeWireReport,
     LeaderboardTrialsRecord,
+    Stage3CellRecord,
     Stage3ManifestRecord,
     _finite,
+    _lbt_from_dict,
+    _lbt_to_dict,
     _max_drawdown_return_units,
     _per_bar_returns,
     _roll_schedules_from_payload,
     _spec_from_dict,
     _spec_to_dict,
+    _stage3_from_dict,
+    _stage3_to_dict,
     cascade_config_to_dict,
     manifest_from_json,
     manifest_to_json,
+    serialize_wire_report,
+    wire_report_to_dict,
 )
 from brutex.execution.fill_mode import FillMode
 from brutex.strategies.types import FibAnchorKind, PriceSource, price_source_params_fragment
@@ -57,7 +65,15 @@ from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from hypothesis import given
 from hypothesis import strategies as st
 
-from tests.golden._cascade_wire_parity_corpus import _lbt, _manifest, _rid, _spec, _stage3_cell
+from tests.golden._cascade_wire_parity_corpus import (
+    _lbt,
+    _manifest,
+    _report,
+    _rid,
+    _spec,
+    _stage3_cell,
+    _verdict,
+)
 
 _MAX_MASK = (1 << TOTAL_CONDITIONS) - 1
 _I64_MAX = 2**63 - 1
@@ -124,6 +140,71 @@ def _oracle_spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
+
+
+def _oracle_stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
+    """VERBATIM pre-conversion ``_stage3_from_dict`` (the per-cell construction law)."""
+    raw = cast(dict[str, Any], data)
+    try:
+        cells: list[Stage3CellRecord] = []
+        for cell in raw["refined_cells"]:
+            proximity = cell["proximity_bps"]
+            cells.append(
+                Stage3CellRecord(
+                    instrument=str(cell["instrument"]),
+                    tf_label=str(cell["tf_label"]),
+                    direction_label=str(cell["direction_label"]),
+                    k=int(cell["k"]),
+                    sl_paisa=int(cell["sl_paisa"]),
+                    tp_paisa=int(cell["tp_paisa"]),
+                    proximity_bps=(
+                        None
+                        if proximity is None
+                        else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
+                    ),
+                    rel_path=(None if cell.get("rel_path") is None else str(cell["rel_path"])),
+                    fib_anchor=(
+                        FibAnchorKind.PREV_DAY
+                        if cell.get("fib_anchor") is None
+                        else FibAnchorKind(str(cell["fib_anchor"]))
+                    ),
+                    vwap_source=(
+                        PriceSource.HLC3
+                        if cell.get("vwap_source") is None
+                        else PriceSource(str(cell["vwap_source"]))
+                    ),
+                    ema_source=(
+                        PriceSource.CLOSE
+                        if cell.get("ema_source") is None
+                        else PriceSource(str(cell["ema_source"]))
+                    ),
+                )
+            )
+        hash_raw = raw["train_snapshot_hash"]
+        return Stage3ManifestRecord(
+            enabled=bool(raw["enabled"]),
+            train_snapshot_hash=None if hash_raw is None else str(hash_raw),
+            refined_cells=tuple(cells),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid stage3 record in manifest: {exc}") from exc
+
+
+def _oracle_lbt_from_dict(data: dict[str, object]) -> LeaderboardTrialsRecord:
+    """VERBATIM pre-conversion ``_lbt_from_dict`` (coercion + construction)."""
+    raw = cast(dict[str, Any], data)
+    try:
+        return LeaderboardTrialsRecord(
+            instrument=str(raw["instrument"]),
+            tf_label=str(raw["tf_label"]),
+            n_trials=int(raw["n_trials"]),
+            n_finite=int(raw["n_finite"]),
+            sum_sharpe=float(raw["sum_sharpe"]),
+            sum_sharpe_sq=float(raw["sum_sharpe_sq"]),
+            complete=bool(raw["complete"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid leaderboard_trials record in manifest: {exc}") from exc
 
 
 def _oracle_roll_schedules_from_payload(
@@ -507,6 +588,247 @@ def _lbt_records(draw: st.DrawFn) -> LeaderboardTrialsRecord:
     )
 
 
+# ────────────── stage3 / lbt hostile-parse machinery (fix round) ─────────────
+
+_STAGE3_CELL_KEYS: tuple[str, ...] = (
+    "instrument",
+    "tf_label",
+    "direction_label",
+    "k",
+    "sl_paisa",
+    "tp_paisa",
+    "proximity_bps",
+    "rel_path",
+    "fib_anchor",
+    "vwap_source",
+    "ema_source",
+)
+#: Post-coercion poison — tokens that PASS ``str()``/``int()`` but fail the
+#: enum constructors or ``__post_init__``, so multi-defect CROSS-CELL payloads
+#: exercise WHICH cell's error surfaces (the per-cell interleaving law).
+_CELL_POISON: tuple[object, ...] = ("BOGUS", "sideways", 0, -1, "/abs/path", "")
+_STAGE3_RECORD_JUNK: tuple[tuple[str, object], ...] = (
+    ("refined_cells", "junk"),
+    ("refined_cells", 7),
+    ("refined_cells", [None]),
+    ("refined_cells", [[]]),
+    ("refined_cells", _DELETE),
+    ("train_snapshot_hash", _DELETE),
+    ("train_snapshot_hash", ["x"]),
+    ("enabled", _DELETE),
+)
+_LBT_KEYS: tuple[str, ...] = (
+    "instrument",
+    "tf_label",
+    "n_trials",
+    "n_finite",
+    "sum_sharpe",
+    "sum_sharpe_sq",
+    "complete",
+)
+
+_cell_mutations = st.tuples(
+    st.integers(min_value=0, max_value=2),
+    st.sampled_from(_STAGE3_CELL_KEYS),
+    st.one_of(
+        st.just(_DELETE),
+        st.sampled_from(_JUNK_SCALARS),
+        st.sampled_from(_CELL_POISON),
+        st.sampled_from(_PROX_JUNK),
+    ),
+)
+_lbt_mutations = st.tuples(
+    st.sampled_from(_LBT_KEYS),
+    st.one_of(st.just(_DELETE), st.sampled_from(_JUNK_SCALARS)),
+)
+
+
+@st.composite
+def _stage3_parse_bases(draw: st.DrawFn) -> Stage3ManifestRecord:
+    """An ENABLED 1-3-cell Stage-3 record — the hostile-parse mutation base."""
+    cells = tuple(
+        _stage3_cell(
+            tf_label=draw(st.sampled_from(["1minute", "5minute"])),
+            direction_label=draw(st.sampled_from(["bull", "bear"])),
+            k=draw(st.integers(min_value=0, max_value=5)),
+            proximity_bps=draw(_proximity),
+            rel_path=draw(st.one_of(st.none(), st.just("cells/a.parquet"))),
+            fib_anchor=draw(_fib_anchors),
+            vwap_source=draw(_price_sources),
+            ema_source=draw(_price_sources),
+        )
+        for _ in range(draw(st.integers(min_value=1, max_value=3)))
+    )
+    return Stage3ManifestRecord(
+        enabled=True,
+        train_snapshot_hash=_rid(draw(st.integers(min_value=0, max_value=2**64))),
+        refined_cells=cells,
+    )
+
+
+def _two_cell_stage3_payload() -> dict[str, Any]:
+    """A valid 2-cell serialized stage3 payload (the deterministic probe base)."""
+    record = Stage3ManifestRecord(
+        enabled=True,
+        train_snapshot_hash="b" * 64,
+        refined_cells=(_stage3_cell(), _stage3_cell(tf_label="5minute")),
+    )
+    return cast("dict[str, Any]", copy.deepcopy(_stage3_to_dict(record)))
+
+
+def _mutated_stage3_payload(
+    record: Stage3ManifestRecord,
+    cell_mutations: list[tuple[int, str, object]],
+    record_mutations: list[tuple[str, object]],
+) -> dict[str, object]:
+    """The CURRENT serializer's payload for *record* with mutations applied."""
+    payload = cast("dict[str, Any]", copy.deepcopy(_stage3_to_dict(record)))
+    for key, value in record_mutations:
+        if value is _DELETE:
+            payload.pop(key, None)
+        else:
+            payload[key] = copy.deepcopy(value)
+    cells = payload.get("refined_cells")
+    if isinstance(cells, list) and cells:
+        for index, key, value in cell_mutations:
+            cell = cells[index % len(cells)]
+            if not isinstance(cell, dict):
+                continue
+            if value is _DELETE:
+                cell.pop(key, None)
+            else:
+                cell[key] = copy.deepcopy(value)
+    return cast("dict[str, object]", payload)
+
+
+class TestStage3FromDictDifferential:
+    """``_stage3_from_dict`` ≡ the verbatim deleted law over hostile payloads.
+
+    Multi-defect CROSS-CELL shapes are generated deliberately: the deleted
+    law constructed each cell FULLY (coercions, enum validation AND the
+    ``Stage3CellRecord`` construction with its ``__post_init__`` raises)
+    before touching the next cell, so WHICH cell's error surfaces is part of
+    the frozen law — the fix-round MINOR-1 gap (the first-cut
+    coerce-all-cells-first crate walk reported the LATER cell's error and
+    was refuted by execution; the crate now constructs per-cell).
+    """
+
+    @given(
+        record=_stage3_parse_bases(),
+        cell_mutations=st.lists(_cell_mutations, min_size=0, max_size=4),
+        record_mutations=st.lists(st.sampled_from(_STAGE3_RECORD_JUNK), min_size=0, max_size=1),
+    )
+    def test_matches_the_deleted_law(
+        self,
+        record: Stage3ManifestRecord,
+        cell_mutations: list[tuple[int, str, object]],
+        record_mutations: list[tuple[str, object]],
+    ) -> None:
+        payload = _mutated_stage3_payload(record, cell_mutations, record_mutations)
+        got = _outcome(lambda: _stage3_from_dict(copy.deepcopy(payload)))
+        want = _outcome(lambda: _oracle_stage3_from_dict(copy.deepcopy(payload)))
+        assert got == want
+
+    @given(record=_stage3_parse_bases())
+    def test_unmutated_payload_round_trips_equal(self, record: Stage3ManifestRecord) -> None:
+        assert _stage3_from_dict(_stage3_to_dict(record)) == record
+
+    def test_first_offending_cell_enum_error_surfaces(self) -> None:
+        """The fix-round MINOR-1 executed probe: cell[0] bad enum + cell[1] bad int.
+
+        The FIRST offending cell's error is the law — pre-fix the crate
+        coerced ALL cells before the enum validation and reported cell[1]'s
+        ``int()`` failure instead.
+        """
+        payload = _two_cell_stage3_payload()
+        payload["refined_cells"][0]["fib_anchor"] = "BOGUS"
+        payload["refined_cells"][1]["k"] = "notanint"
+        got = _outcome(lambda: _stage3_from_dict(copy.deepcopy(payload)))
+        want = _outcome(lambda: _oracle_stage3_from_dict(copy.deepcopy(payload)))
+        assert got == want
+        assert got == (
+            "exc",
+            CascadeWireError,
+            "invalid stage3 record in manifest: 'BOGUS' is not a valid FibAnchorKind",
+        )
+
+    def test_first_offending_cell_post_init_error_surfaces(self) -> None:
+        """cell[0]'s ``__post_init__`` CascadeWireError beats cell[1]'s coercion.
+
+        The construction itself is per-cell in the original law, so even the
+        UNWRAPPED ``__post_init__`` raise of an earlier cell wins over a later
+        cell's coercion failure.
+        """
+        payload = _two_cell_stage3_payload()
+        payload["refined_cells"][0]["direction_label"] = "sideways"
+        payload["refined_cells"][1]["sl_paisa"] = "junk"
+        got = _outcome(lambda: _stage3_from_dict(copy.deepcopy(payload)))
+        want = _outcome(lambda: _oracle_stage3_from_dict(copy.deepcopy(payload)))
+        assert got == want
+        assert got == (
+            "exc",
+            CascadeWireError,
+            "Stage3CellRecord.direction_label must be 'bull' or 'bear', got 'sideways'",
+        )
+
+    def test_non_dict_payload_parity(self) -> None:
+        """A non-dict stage3 entry raises the REAL TypeError, wrapped (frozen)."""
+        payload = cast("dict[str, object]", ["not", "a", "dict"])
+        got = _outcome(lambda: _stage3_from_dict(payload))
+        want = _outcome(lambda: _oracle_stage3_from_dict(payload))
+        assert got == want
+        assert got[0] == "exc"
+        assert got[1] is CascadeWireError
+
+
+class TestLbtFromDictDifferential:
+    """``_lbt_from_dict`` ≡ the verbatim deleted law over hostile payloads.
+
+    Single-record per call at the manifest parse (``tuple(_lbt_from_dict(item)
+    for item in ...)``), so no cross-record interleaving exists — the battery
+    pins the within-record coercion order + the guard semantics.
+    """
+
+    @given(record=_lbt_records(), mutations=st.lists(_lbt_mutations, min_size=0, max_size=3))
+    def test_matches_the_deleted_law(
+        self, record: LeaderboardTrialsRecord, mutations: list[tuple[str, object]]
+    ) -> None:
+        payload = cast("dict[str, Any]", copy.deepcopy(_lbt_to_dict(record)))
+        for key, value in mutations:
+            if value is _DELETE:
+                payload.pop(key, None)
+            else:
+                payload[key] = copy.deepcopy(value)
+        got = _outcome(lambda: _lbt_from_dict(copy.deepcopy(payload)))
+        want = _outcome(lambda: _oracle_lbt_from_dict(copy.deepcopy(payload)))
+        assert got == want
+
+    @given(record=_lbt_records())
+    def test_unmutated_payload_round_trips_equal(self, record: LeaderboardTrialsRecord) -> None:
+        assert _lbt_from_dict(_lbt_to_dict(record)) == record
+
+    def test_post_init_invariant_violation_passes_the_guard_raw(self) -> None:
+        """``n_finite > n_trials`` — the ``__post_init__`` raise is UNWRAPPED."""
+        payload = cast("dict[str, Any]", copy.deepcopy(_lbt_to_dict(_lbt())))
+        payload["n_trials"] = 5
+        payload["n_finite"] = 6
+        got = _outcome(lambda: _lbt_from_dict(copy.deepcopy(payload)))
+        want = _outcome(lambda: _oracle_lbt_from_dict(copy.deepcopy(payload)))
+        assert got == want
+        assert got[0] == "exc"
+        assert got[1] is CascadeWireError
+        assert not str(got[2]).startswith("invalid leaderboard_trials")
+
+    def test_non_dict_payload_parity(self) -> None:
+        """A non-dict lbt entry raises the REAL TypeError, wrapped (frozen)."""
+        payload = cast("dict[str, object]", ["not", "a", "dict"])
+        got = _outcome(lambda: _lbt_from_dict(payload))
+        want = _outcome(lambda: _oracle_lbt_from_dict(payload))
+        assert got == want
+        assert got[0] == "exc"
+        assert got[1] is CascadeWireError
+
+
 @st.composite
 def _valid_manifests(draw: st.DrawFn) -> CascadeManifest:
     """A valid CascadeManifest varying every optional leg + config overrides."""
@@ -619,3 +941,65 @@ class TestBeyondWordEnvelope:
         assert _packed(_per_bar_returns([_I64_MAX], _I64_MAX)) == _packed(
             _oracle_per_bar_returns([_I64_MAX], _I64_MAX)
         )
+
+
+class TestDumpsFloatReprLaw:
+    """``dumps_sorted`` floats render via ``float.__repr__`` (fix-round MINOR-2).
+
+    CPython ``json.dumps`` renders every float through ``float.__repr__(o)``
+    — never the OBJECT's own ``repr`` — so a float SUBCLASS carrying a
+    non-JSON ``repr`` (np.float64's exact shape) must serialise as its VALUE.
+    Pre-fix the crate rendered the object's ``repr()`` and emitted INVALID
+    JSON (``np.float64(1.5)`` in the byte stream).
+    """
+
+    @staticmethod
+    def _report_with_score(score: float) -> CascadeWireReport:
+        return CascadeWireReport(
+            sweep_id="c" * 64,
+            groups=(
+                (
+                    "NIFTY",
+                    "1minute",
+                    _report(
+                        verdicts=(_verdict("cand-pass", composite_score=score),),
+                        survivor_ids=("cand-pass",),
+                        n_input=1,
+                        n_survived=1,
+                    ),
+                ),
+            ),
+        )
+
+    def test_float_subclass_renders_like_json_dumps(self) -> None:
+        class NumpyLikeFloat(float):
+            """The np.float64 hazard shape: a float subclass, non-JSON repr."""
+
+            def __repr__(self) -> str:
+                return f"np.float64({float.__repr__(self)})"
+
+        report = self._report_with_score(NumpyLikeFloat(1.5))
+        rendered = serialize_wire_report(report)
+        reference = json.dumps(
+            wire_report_to_dict(report), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        assert rendered == reference
+        assert b'"composite_score":1.5' in rendered
+        json.loads(rendered)  # valid JSON — the pre-fix output was not
+
+    def test_numpy_float64_renders_like_json_dumps(self) -> None:
+        np = pytest.importorskip("numpy")
+        report = self._report_with_score(np.float64(1.5))
+        rendered = serialize_wire_report(report)
+        reference = json.dumps(
+            wire_report_to_dict(report), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        assert rendered == reference
+        assert b'"composite_score":1.5' in rendered
+        json.loads(rendered)
+
+    @given(value=st.floats(allow_nan=False, allow_infinity=False))
+    def test_plain_floats_byte_unchanged(self, value: float) -> None:
+        """Plain floats keep the exact CPython shortest-repr bytes."""
+        rendered = serialize_wire_report(self._report_with_score(value))
+        assert f'"composite_score":{float.__repr__(value)}'.encode() in rendered
