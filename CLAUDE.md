@@ -18,8 +18,8 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b,
-MIGRATION.md #1955 + #1956, branch `claude/rust-cascade-results-s2` STACKED on the
+_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c,
+MIGRATION.md #1955 + #1956 + #1957, branch `claude/rust-cascade-results-s2` STACKED on the
 slice-1 head — the `cascade_wire` SERIALISATION + PARSE LAW family moves to
 `rust/brutex-cascade/src/cascade_wire.rs` under the same capture-first
 compressed cycle (the 76-case parity corpus (62-test replay) FROZEN against the UNTOUCHED
@@ -43,11 +43,21 @@ build/render/gate/load laws crate-hosted behind a byte-exact type-face shim
 (file I/O + presets/ranking stay shim-side; the DISTINCT
 `dumps_sorted_surrogatepass` pyjson entry), 30 zero-divergence
 differentials + 5/5 hand-killed mutants, the latently-RED pre-existing
-top100 ci stanza widened → 218 tests / 100.00%. ENGINE
+top100 ci stanza widened → 218 tests / 100.00%. SLICE 2c (same branch,
+MIGRATION.md #1957): `results_report`'s RENDER-LAW family (sort
+aliases/resolution · `_format_deflated`/`_format_conditions` ·
+`render_leaderboard` + the NEW pure-INTEGER `format_inr_paisa` money twin ·
+the provisional note · the sidecar-group + cascade-sidecar render · the
+show-report text assembly) crate-hosted under the same capture-first cycle
+(the 100-case corpus / 102-test replay frozen FIRST); the store-coupled
+I/O half DELIBERATELY stays shim-side Python — the sanctioned
+partial-conversion scoping; 76 zero-divergence differentials + 5/5
+hand-killed mutants + the module's FIRST dedicated ci.yml stanza
+(243 tests / 100.00%). ENGINE
 UNCHANGED — the sweep hot path + run identity take ZERO diffs —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new env
 vars. This header carries the pointer, never the story — the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1955 + #1956.)
+lives in the §1 Active-branch blurb + MIGRATION.md #1955 + #1956 + #1957.)
 Earlier: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
 branch `claude/rust-cascade-results` — the cascade/results-depth Rust
 conversion PHASE A: the NEW standalone `rust/brutex-cascade` crate (pyo3
@@ -3299,8 +3309,8 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-cascade-results-s2`
-  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b, MIGRATION.md #1955 +
-  #1956** —
+  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c, MIGRATION.md
+  #1955 + #1956 + #1957** —
   STACKED on the slice-1 head ef021b8; the T14 lane's second slice: the
   `cascade_wire` SERIALISATION + PARSE LAW family moves to
   `rust/brutex-cascade/src/cascade_wire.rs` and the module becomes a
@@ -3440,9 +3450,53 @@ hostile-review pass._
   envelope: gate-int extraction beyond ±i64 refuses OverflowError
   (int64-validated records — unreachable); `_dumps` has NO int-width
   envelope (CPython-delegated ints, probed beyond 2**200). The slice-2b
-  hostile-review round is PENDING at the docs commit — recorded on #1956
-  when the verdict lands. ENGINE UNCHANGED — zero hot-path/run-identity
-  diffs; no new env vars; full record in MIGRATION.md #1956.)
+  hostile-review round LANDED post-docs: verdict SHIP, 1 MINOR + 3 NITs
+  folded in the review-fold commit — recorded on #1956.
+  SLICE 2c (same branch, MIGRATION.md #1957 — the `results_report`
+  conversion, 590 LOC → a byte-exact type-face shim over
+  `rust/brutex-cascade/src/results_report.rs`; a recorded PARTIAL
+  conversion, told plainly): the RENDER-LAW family converts — sort
+  aliases/resolution (`SORT_ALIASES`/`_resolve_sort_field`) ·
+  `_format_deflated`/`_format_conditions` · `render_leaderboard` + the
+  NEW pure-INTEGER `format_inr_paisa` money twin (sign/quotient/grouping
+  math, exact beyond 2^53, i64::MIN-proven — never a float) ·
+  `_provisional_note` · the sidecar-group + cascade-sidecar render · the
+  `results_show_report` text assembly — while the store-coupled half
+  (discover/load/merge/quarantine/audit-hash/stage3-rel-paths)
+  DELIBERATELY stays shim-side Python over the carved-out results_store
+  public API (the sanctioned I/O-stays-shim clause; the old plan's
+  results_report-LAST-behind-Arrow-IPC ordering was overridden soundly —
+  the render family has no store/Arrow dependency, so nothing was built
+  out of order). CAPTURE-FIRST at bed612533: the 100-case corpus /
+  102-test replay frozen against the untouched Python (6× generator
+  refusal; PYTHONHASHSEED determinism; a 16-item frozen-quirk list —
+  TEXT laws, not JSON laws). The port at 537624361: decision (iii)
+  fragment assembly — strings never enter Rust `String`s, lone
+  surrogates carry byte-identically; decision (iv) mirror CPython —
+  `float(pbo)` runs builtins.float crate-side ("inf" renders `PBO=inf`
+  exactly as before) and `py_fixed` was probed byte-equal over 300k
+  bit-pattern doubles + exact ties, NaN special-cased; the replay +
+  55-test unit suite green UNMODIFIED on the FIRST post-wheel run; shim
+  coverage 100.00% (104/22). Differentials at 430329de7: the 76-test
+  suite vs the verbatim bed612533 oracle — ZERO divergences (py_fixed
+  over EVERY f64 bit pattern incl. NaN payloads; format_inr over the
+  FULL i64 domain + 19 boundary pins; 6 multi-defect construction-order
+  pins; green under both hypothesis profiles); 5/5 hand-applied Rust
+  mutants KILLED (U1–U5; 2/7 sites recorded not-attempted with reasons);
+  ci.yml gains the module's FIRST dedicated stanza (previously
+  discovery-gate-only; a unit-only stanza would have been latently RED
+  at 95.24%) — the exact command 243 passed / 100.00% line+branch
+  (104/22). DISCLOSED envelope: the paisa magnitude law has TWO refusal
+  zones — beyond-±i64 pnl refuses OverflowError at extraction where the
+  old Python still rendered, AND at ~1e28+ paisa the OLD Decimal law
+  itself refused (InvalidOperation) — both zones stated precisely,
+  neither over-generalized; the `__format__`-not-`__str__` divergence
+  pinned BOTH ways; non-float metric fields scoped in the suite
+  docstring. The recorded remainder is now 11 files (+ combo_mask
+  support + the two retained halves). The slice-2c hostile-review round
+  is PENDING at the docs commit — recorded on #1957 when the verdict
+  lands. ENGINE UNCHANGED — zero hot-path/run-identity diffs; no new env
+  vars; full record in MIGRATION.md #1957.)
   Earlier: `claude/rust-cascade-results`
   (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
   cascade/results-depth Rust conversion, PHASE A, under the operator's
@@ -10110,8 +10164,8 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-cascade-results-s2`
-  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b, MIGRATION.md #1955 +
-  #1956 —
+  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c, MIGRATION.md
+  #1955 + #1956 + #1957 —
   STACKED on the slice-1 head: the `cascade_wire` SERIALISATION + PARSE LAW
   family moves to `rust/brutex-cascade/src/cascade_wire.rs` under the
   capture-first cycle (the 76-case parity corpus (62-test replay) frozen against the
@@ -10143,10 +10197,32 @@ hostile-review pass._
   hand-killed Rust mutants (the PREFER-drop mutant's initial survival =
   a genuine gap, closed then re-killed), the latently-RED pre-existing
   top100 ci stanza widened → 218 tests / 100.00% (132/16); cargo 46;
-  the slice-2b hostile-review round pending — recorded on #1956 when the
-  verdict lands; ENGINE UNCHANGED — the sweep hot path + run identity take
+  the slice-2b hostile-review round landed SHIP (1 MINOR + 3 NITs folded —
+  recorded on #1956). SLICE 2c (same branch, MIGRATION.md #1957):
+  `results_report` (590 LOC) — a recorded PARTIAL conversion: the
+  RENDER-LAW family (sort aliases/resolution · the `_format_deflated`/
+  `_format_conditions` twins · `render_leaderboard` + the NEW
+  pure-integer `format_inr_paisa` money twin · the provisional note ·
+  the sidecar renders · the show-report text assembly) crate-hosted
+  under the same capture-first cycle (the 100-case corpus / 102-test
+  replay frozen at bed612533 BEFORE conversion — TEXT laws: CPython
+  fixed formatting + the exact-Decimal money grouping frozen as law),
+  while the store-coupled I/O half stays DELIBERATELY shim-side Python
+  over the carved-out results_store public API (the sanctioned
+  I/O-stays-shim clause; the old results_report-LAST plan ordering
+  overridden soundly — no store/Arrow dependency in the render family);
+  strings never enter Rust (fragment assembly — lone surrogates carry
+  byte-identically); the replay + the 55-test unit suite UNMODIFIED
+  green on the first post-wheel run; 76 zero-divergence hypothesis
+  differentials vs the verbatim frozen oracle (every f64 bit pattern;
+  the full i64 money domain; 6 multi-defect order pins); 5/5
+  hand-killed Rust mutants (2/7 sites not-attempted with reasons); the
+  module's FIRST dedicated ci.yml stanza — 243 tests / 100.00%
+  (104/22); the recorded remainder now 11 files; the slice-2c
+  hostile-review round pending — recorded on #1957 when the verdict
+  lands; ENGINE UNCHANGED — the sweep hot path + run identity take
   ZERO diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1955 + #1956 for the full blurbs)
+  see §1 + MIGRATION.md #1955 + #1956 + #1957 for the full blurbs)
   Earlier: `claude/rust-cascade-results`
   (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954 — the T14
   cascade/results-depth Rust conversion PHASE A: the NEW
