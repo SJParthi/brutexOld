@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-17 (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md
-#1946, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
+#1962, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
 ADR-0020 conversion: the DAILY residues (`fno_daily_resample` +
 `spot_daily_resample` cores) gain a Rust route behind the NEW independent
 default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY` facade
@@ -33,7 +33,7 @@ real-wheel parity suite at CandleBar+Decimal-repr strength + whole-prebuild
 sha256 A/B (daily-ON and both-ON). Honesty banner verbatim: "expected payoff
 ≈ 0 — conversion is for uniformity, not speed". ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
-blurb + MIGRATION.md #1946 — this header carries the pointer, never the
+blurb + MIGRATION.md #1962 — this header carries the pointer, never the
 story.)
 Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
 provisional, branch `claude/rust-observability-lane` — the observability
@@ -75,8 +75,8 @@ REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; ONE
 new env var (`BRUTEX_OBSERVABILITY_RUST`). This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
 blurb + MIGRATION.md #1961.)
-Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957
-(renumbered #1954 → #1955 → #1957 — the last hop at the 2026-07-18
+Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960
+(renumbered #1954 → #1955 → #1960 — the last hop at the 2026-07-18
 merge-reconcile, main took #1955 for DEC-STRATEGIES-RUST-COMBO-001;
 DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001), branch
 `claude/notify-rust-core` — the notification PURE laws convert to Rust
@@ -99,7 +99,7 @@ speed; ships INERT, a default flip needs its own DEC. NEW non-required
 notify-rust-parity.yml lane + the facade mutmut pair; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
-§1 Active-branch blurb + MIGRATION.md #1957.)
+§1 Active-branch blurb + MIGRATION.md #1960.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3606,7 +3606,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-slice-t11-resample` (**DEC-LAKE-RUST-RESAMPLE-DAILY-001,
-  MIGRATION.md #1946** — T11 "resample tails" (phase A+B) of the ADR-0020
+  MIGRATION.md #1962** — T11 "resample tails" (phase A+B) of the ADR-0020
   conversion, closing the #1913-named follow-ups (daily residues ·
   session-fold · batch adoption). **ARM 1 (daily residues, NEW independent
   flag):** `fno_daily_resample.resample_1m_to_fno_daily` +
@@ -3802,8 +3802,8 @@ hostile-review pass._
   lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes; ONE new env var.)
   Earlier: `claude/notify-rust-core`
-  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957** — renumbered
-  #1954 → #1955 → #1957: first per the coordinator ledger allocation, then at
+  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960** — renumbered
+  #1954 → #1955 → #1960: first per the coordinator ledger allocation, then at
   the 2026-07-18 merge-reconcile (main took #1955 for
   DEC-STRATEGIES-RUST-COMBO-001); the DEC-ID is the stable handle per
   DEC-LEDGER-RENUMBER-001 — slice 1 of the notifications Rust lane: the
@@ -11143,7 +11143,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-slice-t11-resample`
-  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1946 — T11 "resample
+  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1962 — T11 "resample
   tails" of the ADR-0020 conversion, closing the #1913-named follow-ups:
   the daily residues (`fno_daily_resample` + `spot_daily_resample` frame
   cores) route through the NEW `rust/brutex-lake/src/resample_daily.rs`
@@ -11160,7 +11160,7 @@ hostile-review pass._
   and both-ON); cargo 81 passed, crate stays 0.1.0, Cargo.lock untouched;
   honesty banner verbatim — payoff ≈ 0, uniformity not speed; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1946 for the full blurb)
+  see §1 + MIGRATION.md #1962 for the full blurb)
   Earlier: `claude/rust-observability-lane`
   (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
   #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
@@ -11195,8 +11195,8 @@ hostile-review pass._
   cargo-mutants wiring; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line — see §1 + MIGRATION.md #1961 for the full blurb)
   Earlier: `claude/notify-rust-core`
-  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1957 — renumbered
-  #1954 → #1955 → #1957, the last hop at the 2026-07-18 merge-reconcile
+  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960 — renumbered
+  #1954 → #1955 → #1960, the last hop at the 2026-07-18 merge-reconcile
   (main took #1955 for DEC-STRATEGIES-RUST-COMBO-001; the DEC-ID is the
   stable handle per DEC-LEDGER-RENUMBER-001) — the
   notification PURE laws convert to
@@ -11213,7 +11213,7 @@ hostile-review pass._
   parity hazards — named follow-up DEC-NOTIFY-RUST-BUILDERS-002);
   expected payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1957 for the full blurb)
+  see §1 + MIGRATION.md #1960 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
