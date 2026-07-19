@@ -31,15 +31,18 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
   UNTOUCHED Python ``_edge_fire``/``_clear`` own membership + re-arm; the
   detail f-strings, ``sorted``, ``repr``, the SUSPECT latch, the RSS
   probe and every enable/interval/state-existence gate stay Python.
-  Degrade discipline (the executed truth — review round 1): a
-  degrade-set or panic-belt exception RETURNS the oracle value (each
-  such path logs its own event); ``MemoryError`` / ``KeyboardInterrupt``
-  / ``SystemExit`` re-raise RAW (the escape trio, documented below);
-  any OTHER exception (e.g. a ``KeyError`` from a poisoned crate,
-  outside the degrade set) PROPAGATES to the caller, where the tripwire
-  observation bodies' I-3 blanket ``except Exception`` folds it to
-  ``observe_failed`` — the safety story is that COMPOSITION, not facade
-  totality over ``Exception``.
+  These routed fns are TOTAL over ``Exception`` — every ``Exception``,
+  degrade-set member or panic-belt catch alike (the belt's ``Exception``
+  member is the catch-all, :func:`_panic_belt_errors`, so even a
+  ``KeyError`` from a poisoned crate latches ``crate_panic`` and serves
+  the oracle), logs its own event and RETURNS the oracle value — EXCEPT
+  that ``MemoryError`` re-raises RAW (the escape clause, documented
+  below; the documented OOM-landing INVERSION — the tripwire observation
+  bodies' I-3 blanket ``except Exception`` catches it and folds it to
+  ``observe_failed``, identical on both arms).
+  ``KeyboardInterrupt``/``SystemExit`` are non-``Exception``
+  ``BaseException`` classes and propagate (the escape trio's other two
+  members).
 
 ## The fail-closed layers (in order)
 

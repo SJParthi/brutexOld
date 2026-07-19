@@ -45,8 +45,10 @@ the run_gate runner grows to ALSO drive the seam suite (the money.py
 multi-file precedent, budget 2100→3200 — the round-1 headroom fold,
 floor 0.75 unchanged); cargo-mutants over src/tripwires.rs
 de-survivored by restructure/tests, never exclusions; the facade
-mutmut pair stands at 596/596 killed; review round 1 SHIP+SHIP — the
-four non-blocking findings folded in-branch. ADR-0020 banner
+mutmut pair stands at 596/596 killed; review round 1 SHIP+SHIP
+(findings folded); round 2 FIX-FIRST (the round-1 docstring-fold
+regression — the false facade-propagation claim — reverted to the
+corrected totality wording); round 3 (the clean round) pending. ADR-0020 banner
 verbatim: expected payoff ≈ 0 — conversion is for uniformity, not
 speed; ships INERT — a default flip needs its own DEC + soak, oracle
 deletion only via the H.2 rail (DEC-OBSERVABILITY-ORACLE-DELETE-001).
@@ -3682,8 +3684,10 @@ hostile-review pass._
   removed-by-form site no longer generates a mutant). GATES
   (executed): cargo fmt/clippy `-D warnings`
   --locked/test --release --locked green ×2 feature sets (106 tests);
-  facade stanza BOTH arms 100.00% (609/190, 0 missed) — wheel-present 373
-  passed, wheel-absent 345 passed + 28 skipped; the flag-ON twin battery
+  facade stanza BOTH arms 100.00% (609/190, 0 missed) — the definitive
+  round-2 two-file-stanza counts: wheel-present 404 passed, wheel-absent
+  345 passed + 29 skipped (the earlier 373 / +28 was the unit-file-only
+  selection — reconciled in MIGRATION.md #1962); the flag-ON twin battery
   623 passed; the protected 38-file battery 1141 passed, 1 skipped (the
   pre-existing env-only cma); the four A-D consumer stanzas unchanged
   100.00% (sla 92/16 · watchdog 71/8 · loop_watchdog 190/46 · stage_stamp
@@ -3696,11 +3700,17 @@ hostile-review pass._
   checked_add Err arms pinned at the wheel surface · the
   snapshot-counter single-read re-order · the coerce-before-screen
   whole-tick abort · the run_gate-resolved seam-apply mutant classes).
-  REVIEW ROUND 1 folded (SHIP+SHIP, zero blockers — per-finding record
-  in MIGRATION.md #1962): the byte-identity scoping (MINOR), the
-  facade-docstring totality reword (docstring-only; the facade stanza
-  re-measured 100.00% both arms), the run_gate 2600→3200 headroom bump,
-  and the full cargo-mutants re-run at head (248 tested, 0 missed).
+  REVIEW RECORD: round 1 SHIP+SHIP, zero blockers (findings folded —
+  per-finding record in MIGRATION.md #1962): the byte-identity scoping
+  (MINOR), a facade-docstring reword (since REVERTED — see round 2), the
+  run_gate 2600→3200 headroom bump, and the full cargo-mutants re-run at
+  head (248 tested, 0 missed); round 2 FIX-FIRST (1 MINOR — the round-1
+  docstring fold's false "KeyError propagates / COMPOSITION not
+  totality" claim, refuted against the panic belt's `Exception`
+  catch-all and REVERTED to the corrected totality wording at the
+  docstring + the #1962 I-3 clause; 1 NIT — the stanza prose counts
+  reconciled to the definitive two-file re-run), docstring/ledger-only —
+  the 596/596 mutmut record stands; round 3 (the clean round) pending.
   HONEST (ADR-0020 banner verbatim): expected payoff ≈ 0 — conversion is
   for uniformity, not speed; every routed law is sub-microsecond Python
   on a gated path and the engaged arm ADDS an FFI hop; ships INERT — a
