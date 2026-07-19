@@ -3392,7 +3392,8 @@ hostile-review pass._
   re-shapes it); futures-sweep/price-source/tuple-digest re-locks by the same one-key law;
   capture/aggregate digests SCHEMA-ADDITIVE (five INT64 counter columns, counters measured 0
   on those fixtures); rust/trade-sim/paisa/sensex absolute pins PROVEN UNCHANGED at the tf=1
-  fixed point; `tests/golden/fixtures/` BYTE-UNTOUCHED (empty diff — Stage-1A/60-vocab/
+  fixed point; `tests/golden/fixtures/` BYTE-UNTOUCHED (`git diff
+  origin/main...HEAD -- tests/golden/fixtures/` EMPTY, branch-scoped — Stage-1A/60-vocab/
   indicator_version out of scope). PARITY: the COMMITTED dual-stream Python≡Rust hypothesis
   property (the two `test_{u64,u128}_kernel_dual_stream_parity` tests, `max_examples=25`
   each = 50 examples/run reproducible from the merged tree — the `ci` profile adds no
@@ -10340,8 +10341,9 @@ hostile-review pass._
   refuse-on-absence mirrors and the SANCTIONED greenfield run-identity
   re-key (operator-approved 2026-07-18) — every golden re-locked by hand
   (`_GOLDEN_RUN_ID` `caf0cb63…9390ca`; the 304-trade/+10,910-paisa census;
-  the PR-A id negative-pinned `_PRE_GRID_RUN_ID`; fixtures byte-untouched,
-  empty diff); AGG_COLUMNS 50→55; the R45 diffcheck reference rewritten
+  the PR-A id negative-pinned `_PRE_GRID_RUN_ID`; fixtures byte-untouched
+  (`git diff origin/main...HEAD -- tests/golden/fixtures/` EMPTY,
+  branch-scoped); AGG_COLUMNS 50→55; the R45 diffcheck reference rewritten
   independent dual-stream; the COMMITTED 50-examples/run dual-stream hypothesis
   Python≡Rust parity (max_examples=25 × the two u64/u128 tests) + in-session scratchpad
   heavy/differential runs (not committed), zero divergences; the R13
