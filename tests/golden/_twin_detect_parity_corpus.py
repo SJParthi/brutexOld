@@ -179,7 +179,10 @@ def run_fingerprint_case(trades: Sequence[CapturedTrade]) -> dict[str, Any]:
     """The digest, or the raw exception (a naive ts escapes as TypeError)."""
     try:
         return {"fingerprint": trade_fingerprint(trades)}
-    except BaseException as exc:  # freeze the VERBATIM escape law
+    except Exception as exc:  # freeze the VERBATIM escape law
+        # Every frozen escape is an ordinary Exception (TypeError et al.);
+        # at replay a BaseException (pyo3 PanicException, KeyboardInterrupt)
+        # must FAIL the test loudly, never be captured as a recorded error.
         return {"error_type": type(exc).__name__, "error_str": str(exc)}
 
 
@@ -267,7 +270,9 @@ def run_candidate_case(thunk: Callable[[], TwinCandidate]) -> dict[str, Any]:
     """The constructed echo (mask as repr — bool puns survive) or the error."""
     try:
         candidate = thunk()
-    except BaseException as exc:  # freeze the VERBATIM escape law
+    except Exception as exc:  # freeze the VERBATIM escape law
+        # Every frozen refusal/escape is an ordinary Exception; a
+        # BaseException at replay (pyo3 panic) must propagate loudly.
         return {"error_type": type(exc).__name__, "error_str": str(exc)}
     return {
         "run_id": candidate.run_id,
@@ -317,8 +322,6 @@ def run_jaccard_case(pair: tuple[frozenset[int], frozenset[int]]) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 # group_twins — the two-tier union-find partition
 # ──────────────────────────────────────────────────────────────────────────
-
-_DEFAULT = object()
 
 
 @dataclass(frozen=True)

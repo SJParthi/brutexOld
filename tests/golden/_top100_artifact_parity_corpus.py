@@ -690,11 +690,16 @@ def run_build_case(case: dict[str, Any]) -> dict[str, Any]:
     with capture_logs() as logs:
         try:
             artifact = build_top100(case["candidates"], **case["kwargs"])
-        except BaseException as exc:  # freeze the VERBATIM refusal law
+        except Exception as exc:  # freeze the VERBATIM refusal law
+            # Every frozen refusal is an ordinary Exception (Top100Error /
+            # ValueError); a BaseException at replay (pyo3 panic,
+            # KeyboardInterrupt) must propagate and fail the test loudly.
             return {"error_type": type(exc).__name__, "error_str": str(exc)}
         try:
             rendered = artifact.rendered_bytes()
-        except BaseException as exc:  # the allow_nan=False render refusal law
+        except Exception as exc:  # the allow_nan=False render refusal law
+            # The frozen render refusal is ValueError (allow_nan=False); a
+            # BaseException at replay must propagate, never be captured.
             return {
                 "built": True,
                 "n_entries": len(artifact.entries),

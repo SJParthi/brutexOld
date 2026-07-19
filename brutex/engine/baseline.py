@@ -61,7 +61,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
@@ -73,6 +73,7 @@ from brutex.models import BruteXError
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
     from pathlib import Path
+    from typing import Any
 
     from brutex.data.models import CandleBar
 
