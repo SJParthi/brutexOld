@@ -77,16 +77,17 @@ provenance — a resample made zero vendor calls). The raw lake builders
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
 from brutex.adapters.groww.constants import TRACK1_DAILY_INTERVAL
-from brutex.calendars.nse import SESSION_OPEN_IST, has_muhurat_session
+from brutex.calendars.nse import IST_FIXED_OFFSET, SESSION_OPEN_IST, has_muhurat_session
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition import MONTHS_PER_YEAR
+from brutex.data.session import ist_offset_duration
 from brutex.data.timeframes import DAILY_TF_MINUTES
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger, WindowLedgerRecord
 
@@ -102,7 +103,9 @@ if TYPE_CHECKING:
 #: localize a vendor ``00:00:00 IST`` daily timestamp, so the re-stamped UTC instant
 #: of a resampled daily bar is byte-identical to a vendor-fetched one (the dedup
 #: identity). India has no DST, so a fixed offset is exact for the 2020+ scope.
-_IST = timezone(timedelta(hours=5, minutes=30))
+#: The ONE canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST = IST_FIXED_OFFSET
 
 #: Structured logger — every degrade (no 1-minute to fill from / a quarantined
 #: window) is logged, so a resample-fill pass is visible in /logs (Golden Rule #10).
@@ -295,7 +298,7 @@ def detect_daily_open_substitutions(
 
     if df_1m.is_empty():
         return DailyOpenSubstitutionScan(substituted=(), sessions=0, muhurat_abstained=0)
-    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    ist = pl.col("ts_utc") + ist_offset_duration()
     firsts = (
         df_1m.select(ist.alias("_ist"))
         .with_columns(pl.col("_ist").dt.date().alias("_ist_date"))
@@ -1110,11 +1113,24 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     bad-tick screen is deliberately NOT wired here (a larger scope change —
     the named follow-up DEC-DAILY-WINDOW-BADTICK-001 recorded in
     MIGRATION.md's DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 entry).
+
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the SAME
+    window-cut frame is ALSO validated by
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` BEFORE
+    the price gate — an out-of-``datetime``-range stored timestamp panics the
+    Rust→Python conversion downstream as a BaseException. The IST-date window
+    cut structurally excludes such a row today (its IST date can never fall in
+    a real ``[start, end)``), so this gate is the defense-in-depth belt behind
+    that filter; the month-file read itself is ``glob=False`` (a literal file
+    list — the #1594 round-15 metachar law).
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
 
-    from brutex.data.price_sanity import validate_frame_price_sanity
+    from brutex.data.price_sanity import (
+        validate_frame_price_sanity,
+        validate_frame_ts_datetime_range,
+    )
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1157,10 +1173,19 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # the `.select(*columns)` below needs only the base OHLCV(+OI) columns,
         # which every shape carries, so the output is byte-identical for a
         # uniform tree.
-        df = pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore").collect()
+        df = pl.scan_parquet(
+            files,
+            missing_columns="insert",
+            extra_columns="ignore",
+            # LITERAL month-file list — never glob (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
+            # a `[`-carrying symbol dir otherwise glob-reads its SIBLINGS' bars
+            # into this symbol's derived 1day.
+            glob=False,
+        ).collect()
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
-        ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
+        ist_date = (pl.col("ts_utc") + ist_offset_duration()).dt.date()
         frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
@@ -1168,14 +1193,20 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
             .select(*columns)
             .sort("ts_utc")
         )
+        context = f"{exchange}/{segment}/{symbol}/1minute"
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
+        # range stored timestamp FIRST — the window twin of make_lake_read_1m's
+        # gate, on the WINDOW-CUT frame (validate-what-you-return; the IST-date
+        # window cut structurally excludes an out-of-range row today, so this
+        # is the defense-in-depth belt behind that filter). Raises the
+        # quarantining ResampleInputError.
+        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
         # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: refuse to feed a price-insane
         # (non-finite / non-positive / mis-ordered) window slice to the daily
         # resampler — the window twin of make_lake_read_1m's gate, run on the
         # WINDOW-CUT frame only (a corrupt row outside [start, end) never
         # blanks this read). Raises the quarantining ResampleInputError.
-        validate_frame_price_sanity(
-            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
-        )
+        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
         return frame
 
     return _read

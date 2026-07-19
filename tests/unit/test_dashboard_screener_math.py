@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -51,18 +52,32 @@ pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
 
 
 def _node_call(expr: str, *argv: str) -> Any:
-    """Run the REAL shipped bx-screener.js under node and return the JSON result."""
-    script = (
-        f"const S = require({json.dumps(str(_SCREENER_JS))});"
-        "const ARGS = process.argv.slice(1).map((a) => JSON.parse(a));"
-        f"console.log(JSON.stringify({expr}));"
-    )
-    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
-        ["node", "-e", script, *argv],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    """Run the REAL shipped bx-screener.js under node and return the JSON result.
+
+    The JSON arguments are handed to node via TEMP FILES (node reads + parses
+    each), not the process argv — the full 100-row fixture payload now exceeds
+    the kernel's per-arg ``MAX_ARG_STRLEN`` (128 KiB) once every row carries its
+    resilience block, so a bare argv would raise ``Argument list too long``.
+    ``ARGS[i]`` stays the parsed value, so every call site is byte-unchanged.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list[str] = []
+        for i, arg in enumerate(argv):
+            path = Path(tmp) / f"arg{i}.json"
+            path.write_text(arg, encoding="utf-8")
+            paths.append(str(path))
+        script = (
+            f"const S = require({json.dumps(str(_SCREENER_JS))});"
+            "const fs = require('fs');"
+            "const ARGS = process.argv.slice(1).map((p) => JSON.parse(fs.readFileSync(p, 'utf8')));"
+            f"console.log(JSON.stringify({expr}));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, *paths],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
     return json.loads(proc.stdout)
 
 
@@ -543,3 +558,52 @@ class TestTrustFilterFloors:
         cols = _node_call("S.COLUMNS")
         by_key = {c["key"]: c["label"] for c in cols}
         assert by_key["metrics.dsr"] == "DSR (tuple-N)"
+
+
+class TestResilienceColumnConflationDead:
+    """FIX 1 (R4): the longest-by-COUNT vs worst-by-₹ conflation is dead on the
+    /screener COLUMNS config too — node-executed over the REAL shipped
+    ``BXScreener.COLUMNS`` (not a source-string read), so a relabel regression
+    that reintroduces the ambiguous bare "Worst streak" by-count label, or drops
+    the worst-by-₹ run's OWN length column, FAILS here.
+
+    The canonical distinction (must hold on EVERY surface): "longest/max cold
+    streak" is measured BY COUNT (``metrics.max_consecutive_losses``); the
+    "worst streak (by ₹)" is a DIFFERENT, commonly SHORTER run whose own length
+    is ``resilience.worst_streak_len``. A trader must never read "the longest
+    streak (N losses) cost ₹X".
+    """
+
+    def _labels_by_key(self) -> dict[str, str]:
+        cols = _node_call("S.COLUMNS")
+        return {c["key"]: c["label"] for c in cols}
+
+    def test_by_count_column_reads_by_count_never_bare_worst_streak(self) -> None:
+        labels = self._labels_by_key()
+        by_count = labels["metrics.max_consecutive_losses"]
+        # Reads clearly BY COUNT (fails-before: the bare "Worst streak" label).
+        assert by_count == "Longest streak (count)"
+        assert "count" in by_count.lower()
+        # No column may carry the bare, ambiguous "Worst streak" label (the ₹
+        # column is the distinct "Worst streak ₹") — that bare label is exactly
+        # what let a trader read the by-count run as the run that cost the ₹.
+        assert "Worst streak" not in list(labels.values())
+
+    def test_worst_by_rupee_run_shows_its_own_length_beside_the_cost(self) -> None:
+        cols = _node_call("S.COLUMNS.map((c) => c.key)")
+        # The ₹ column and its OWN-length column both exist...
+        assert "resilience.worst_streak_len" in cols
+        assert "resilience.worst_streak_pnl_paisa" in cols
+        len_i = cols.index("resilience.worst_streak_len")
+        pnl_i = cols.index("resilience.worst_streak_pnl_paisa")
+        # ...and the length sits IMMEDIATELY beside the ₹ (adjacent columns), so
+        # the ₹ is self-attributing to its own (shorter) run.
+        assert abs(len_i - pnl_i) == 1
+        labels = self._labels_by_key()
+        assert labels["resilience.worst_streak_len"] == "Worst streak len"
+        assert labels["resilience.worst_streak_pnl_paisa"] == "Worst streak ₹"
+
+    def test_every_resilience_column_has_a_distinct_unambiguous_label(self) -> None:
+        labels = list(self._labels_by_key().values())
+        # No two columns share a label (the by-count / by-₹ pair are distinct).
+        assert len(labels) == len(set(labels))

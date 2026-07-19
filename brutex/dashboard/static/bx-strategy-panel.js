@@ -101,7 +101,8 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     cascadeDone: null, // one trades cascade per (rank, page) — animate only
     baseline: null,        // the last OK /api/v1/oneclick/baseline payload (B1)
     baselinePayload: null, // the last baseline payload of ANY status (card re-render)
-    netPaisa: null         // the top-100 row's STORED whole-run net (excess stat)
+    netPaisa: null,        // the top-100 row's STORED whole-run net (excess stat)
+    resilienceRow: null // the loaded row, for the pure self-locate verdict
   };
   var deps = {
     getTop100: null,
@@ -663,6 +664,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         var reg = row.regime && typeof row.regime === 'object' ? row.regime : {};
         byId('stTrendSplit').textContent = window.BXOneclick.trendSplitText(reg.by_trend, money);
         byId('stRegimeWonder').textContent = window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis);
+        fillResilience(row);
         /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (#1749): the joined cascade
            verdict. status_text is SERVER-built (never composed here); the
            deep line appends the verdict's own detail/rank/provisional caveat
@@ -708,6 +710,58 @@ function bxEquityLabelText(hasSeries, okEmpty) {
         byId('stName').textContent =
           'top-100 read failed — retry from the winners table or reload';
       });
+  }
+
+  /* ── Losing-streak resilience (DEC-RESILIENCE-STREAKS-001; re-ported at
+     the club-O merge-forward from strategy.html's pre-refold inline IIFE
+     into this shared panel — the standalone /strategy page AND the v29
+     #ocStrategyDrawer render through it, their markup mirrors
+     #stResilienceSection per the hook-parity fence). Every value reaches
+     the DOM via textContent — never a string-to-HTML sink; the pure cell
+     builders live in bx-oneclick.js (BXOneclick.resilienceCells /
+     resilienceSelfLocate — node-goldened). ── */
+
+  /* Fill the losing-streak resilience panel from the sibling block (pure
+     BXOneclick.resilienceCells; money via the shared exact converter). */
+  function fillResilience(row) {
+    state.resilienceRow = row;
+    var c = window.BXOneclick.resilienceCells(row, money);
+    var set = function (id, text) {
+      var n = byId(id);
+      if (n) { n.textContent = text; }
+    };
+    set('stResWorstStreak', c.worstStreak);
+    set('stResWorstStreakSub', c.worstStreakSub);
+    set('stResCost', c.cost);
+    set('stResCostSub', c.costSub);
+    set('stResUnderwater', c.underwater);
+    var badge = byId('stResUnderwaterBadge');
+    if (badge) {
+      badge.textContent = c.underwaterBadge;
+      badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
+    }
+    set('stResWorstMonth', c.worstMonth);
+    set('stResWorstMonthSub', c.worstMonthSub);
+    set('stResWinSpread', c.winSpread);
+    set('stResGuide', c.guide);
+    updateSelfLocate();
+  }
+
+  /* The pure "you are N losses in" self-locate verdict — zero backend, only
+     the shipped numbers (P95 + max). Colour tracks the verdict level. */
+  function updateSelfLocate() {
+    var out = byId('stResLocate');
+    var input = byId('stResLossesIn');
+    if (!out || !input) { return; } // host page without the section
+    var raw = input.value;
+    if (!state.resilienceRow || raw === '') {
+      out.textContent = 'enter a number';
+      out.className = 'resilience-verdict na';
+      return;
+    }
+    var v = window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow);
+    out.textContent = v.symbol + ' ' + v.text;
+    out.className = 'resilience-verdict ' + v.level;
   }
 
   function loadManifestSymbol(next) {
@@ -771,6 +825,10 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       state.tradeIdx = null;
       loadTrades();
     });
+    /* Presence-guarded (the resetPanelDom `if (n)` idiom): a host page
+       without the resilience section mounts cleanly. */
+    var resIn = byId('stResLossesIn');
+    if (resIn) { resIn.addEventListener('input', updateSelfLocate); }
   }
 
   /* The story-card / trades / chart / equity hosts painted for the PREVIOUS
@@ -798,7 +856,12 @@ function bxEquityLabelText(hasSeries, okEmpty) {
       'stWinRate', 'stPf', 'stTrades', 'stVixBand', 'stArith',
       'stExpectancy', 'stRecovery', 'stLossStreak', 'stMae', 'stMfe',
       'stMinuteDd', 'stExitMix', 'stWorst5', 'stTrendSplit', 'stRegimeWonder',
-      'stCascade', 'stCascadeDeep', 'stBench'
+      'stCascade', 'stCascadeDeep', 'stBench',
+      // DEC-RESILIENCE-STREAKS-001: the resilience hero cells join the
+      // no-previous-target-residue law (NEW-R3-1) — a reopen under a new
+      // rank pill must never show the old run's cold-streak envelope.
+      'stResWorstStreak', 'stResCost', 'stResUnderwater',
+      'stResWorstMonth', 'stResWinSpread', 'stResGuide'
     ];
     for (var i = 0; i < dashIds.length; i++) {
       var n = byId(dashIds[i]);
@@ -811,6 +874,22 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     if (stCascReset) {
       stCascReset.classList.remove('cascade-fail');
       stCascReset.title = '';
+    }
+    /* DEC-RESILIENCE-STREAKS-001: the sub-lines empty out (they render '' on
+       a live row too, never '—') and the self-locate verdict returns to its
+       honest idle copy — state.resilienceRow is nulled by update(), so the
+       verdict can never re-derive from the previous target. */
+    var resSubs = ['stResWorstStreakSub', 'stResCostSub', 'stResWorstMonthSub'];
+    for (var r = 0; r < resSubs.length; r++) {
+      var rs = byId(resSubs[r]);
+      if (rs) { rs.textContent = ''; }
+    }
+    var resBadge = byId('stResUnderwaterBadge');
+    if (resBadge) { resBadge.textContent = ''; resBadge.className = 'sub'; }
+    var resLocate = byId('stResLocate');
+    if (resLocate) {
+      resLocate.textContent = 'enter a number';
+      resLocate.className = 'resilience-verdict na';
     }
     var tbody = byId('stTradesBody');
     if (tbody) {
@@ -879,6 +958,7 @@ function bxEquityLabelText(hasSeries, okEmpty) {
     state.baseline = null;
     state.baselinePayload = null;
     state.netPaisa = null;
+    state.resilienceRow = null;
     if (!state.runId) { return; }
     resetPanelDom(); // NEW-R3-1: no previous-target residue while fetching
     byId('stRunId').textContent = String(state.runId);

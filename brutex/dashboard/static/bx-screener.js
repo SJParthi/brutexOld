@@ -145,6 +145,21 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.dsr", label: "DSR (tuple-N)", type: "num", explain: "dsr" },
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
+  // Losing-streak resilience columns (the sibling block; dotted keys resolve
+  // row.resilience.* / row.metrics.* generically; null → "—", never a
+  // fabricated 0, and a null value sorts LAST — never sortable-into-a-lie).
+  // TWO DISTINCT runs — the conflation guard (R4): the LONGEST streak is
+  // measured BY COUNT (max_consecutive_losses); the WORST streak is measured
+  // BY ₹ (worst_streak_pnl_paisa) and is a DIFFERENT, commonly SHORTER run,
+  // so its OWN length (worst_streak_len) sits immediately beside its ₹ column
+  // — a trader can never read "the longest streak (N losses) cost ₹X".
+  { key: "metrics.max_consecutive_losses", label: "Longest streak (count)", type: "num", explain: "max_consecutive_losses" },
+  { key: "resilience.losing_streak_p95", label: "Cold streak P95", type: "num", explain: "losing_streak_p95" },
+  { key: "resilience.worst_streak_len", label: "Worst streak len", type: "num", explain: "worst_streak_len" },
+  { key: "resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true, explain: "worst_streak_pnl" },
+  { key: "resilience.longest_underwater_days", label: "Underwater days", type: "num", explain: "longest_underwater" },
+  { key: "resilience.worst_loss_month_count", label: "Worst-month losses", type: "num", explain: "worst_loss_month" },
+  { key: "resilience.win_rate_year_spread", label: "Win-rate swing", type: "num", explain: "win_rate_year_spread" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
   /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
      cascade.status_text is SERVER-built (oneclick_view.cascade_status_text);

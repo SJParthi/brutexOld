@@ -487,6 +487,13 @@ class NightlyReport:
     absent_artifacts: tuple[str, ...]
     honesty_notes: tuple[str, ...]
     dry_run: bool
+    #: ADDITIVE box-update block (DEC-BOX-AUTODEPLOY-LANE-001 §5) — the
+    #: ``BoxUpdateOutcome.to_dict()`` mapping, ``None`` when the lane is
+    #: absent/never-ran (the block key is emitted ALWAYS — stable key set).
+    box_update: Mapping[str, object] | None = None
+    #: ADDITIVE env-preflight block (DEC-BOX-AUTODEPLOY-LANE-001 §12) — the
+    #: ``EnvPreflightOutcome.to_dict()`` mapping, ``None`` when it never ran.
+    env_preflight: Mapping[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -527,6 +534,8 @@ class NightlyReport:
             "absent_artifacts": list(self.absent_artifacts),
             "honesty_notes": list(self.honesty_notes),
             "dry_run": self.dry_run,
+            "box_update": None if self.box_update is None else dict(self.box_update),
+            "env_preflight": None if self.env_preflight is None else dict(self.env_preflight),
             "ok": self.ok,
             "suspect": self.suspect,
             "blocker": None if self.blocker is None else self.blocker.value,

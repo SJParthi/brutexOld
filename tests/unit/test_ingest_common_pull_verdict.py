@@ -161,6 +161,80 @@ class TestClassifyPull:
         )
         assert v.kind == "clean"
 
+    def test_cancelled_is_honest_amber_never_clean(self) -> None:
+        # Continuation-v3 MAJOR (fails-before): a cancelled pull with ZERO
+        # residual tallies fell through to the GREEN "clean" kind — the
+        # "✅ Pull complete. / No action needed." banner + the durable G5
+        # journal verdict="clean" after an operator Stop.
+        v = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=42,
+            cancelled=True,
+        )
+        assert v.kind == "cancelled"
+        assert v.needs_operator is True  # amber — only a re-run lands the rest
+        assert "CANCELLED at operator request" in v.headline
+        assert "✅ Pull complete." not in v.headline
+        assert "Re-run the pull to resume the remainder" in v.action
+        assert "No action needed" not in v.action
+
+    def test_cancelled_outranks_transient_residual(self) -> None:
+        # The cancel is the CAUSE of the residual, so it headlines; the
+        # residual windows stay visible via pending_windows.
+        v = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=9,
+            failed_pairs=0,
+            no_data=0,
+            completed=5,
+            cancelled=True,
+        )
+        assert v.kind == "cancelled"
+        assert v.pending_windows == 9
+
+    def test_worse_stops_outrank_cancelled(self) -> None:
+        # auth / mass-empty / quota each carry a WORSE, more specific
+        # remediation than "re-run" — they win over the cancel latch.
+        auth = classify_pull(
+            auth_aborted=True,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            cancelled=True,
+        )
+        assert auth.kind == "auth_expired"
+        halted = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            mass_empty_cause="tripped",
+            cancelled=True,
+        )
+        assert halted.kind == "mass_empty_halt"
+        quota = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=0,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            quota_exhausted=True,
+            cancelled=True,
+        )
+        assert quota.kind == "quota_exhausted"
+
+    def test_cancelled_default_false_keeps_prior_behaviour(self) -> None:
+        # Omitting `cancelled` reproduces the pre-feature classification.
+        v = classify_pull(
+            auth_aborted=False, still_failed_windows=0, failed_pairs=0, no_data=0, completed=7
+        )
+        assert v.kind == "clean"
+
 
 class TestPullVerdictSerialisation:
     def test_to_dict_round_trips_every_field(self) -> None:
@@ -385,6 +459,7 @@ class TestSettledSkippedHonesty:
             {"auth_aborted": True},
             {"quota_exhausted": True},
             {"mass_empty_cause": "tripped"},
+            {"cancelled": True},
             {"failed_pairs": 1},
             {"no_data": 1},
         ]

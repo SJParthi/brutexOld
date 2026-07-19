@@ -81,6 +81,7 @@
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-format.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
 <script defer src="/static/bx-portal-state.js"></script>
@@ -238,7 +239,51 @@
     </div>
     <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
   </section>
+  <!-- Losing-streak resilience hero panel (the sibling sidecar block →
+       row.resilience.* + the max from row.metrics.max_consecutive_losses).
+       Every value is textContent-rendered; a NULL/absent record reads "—". -->
+  <section aria-label="Losing-streak resilience" id="stResilienceSection">
+    <h3>🥶 Losing-streak resilience — can you hold this strategy through a cold run?</h3>
+    <div class="story-grid">
+      <div class="story-cell" data-explain="max_consecutive_losses">
+        <div class="k">Worst cold streak</div>
+        <div class="v" id="stResWorstStreak">—</div>
+        <div class="sub" id="stResWorstStreakSub"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_streak_pnl">
+        <div class="k">Worst streak (by ₹)</div>
+        <div class="v" id="stResCost">—</div>
+        <div class="sub" id="stResCostSub"></div>
+      </div>
+      <div class="story-cell" data-explain="longest_underwater">
+        <div class="k">Longest underwater</div>
+        <div class="v" id="stResUnderwater">—</div>
+        <div class="sub" id="stResUnderwaterBadge"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_loss_month">
+        <div class="k">Worst month</div>
+        <div class="v" id="stResWorstMonth">—</div>
+        <div class="sub" id="stResWorstMonthSub"></div>
+      </div>
+      <div class="story-cell" data-explain="win_rate_year_spread">
+        <div class="k">Win-rate stability</div>
+        <div class="v" id="stResWinSpread">—</div>
+      </div>
+      <div class="story-cell" data-explain="resilience_guide">
+        <div class="k">Hold-through guide</div>
+        <div class="sub" id="stResGuide">—</div>
+      </div>
+    </div>
+    <div class="resilience-locate">
+      <label for="stResLossesIn">Where am I now?</label>
+      <input id="stResLossesIn" type="number" min="0" step="1" inputmode="numeric" placeholder="losses in a row">
+      <span>losses in →</span>
+      <span id="stResLocate" class="resilience-verdict na">enter a number</span>
+    </div>
+    <div class="note">Signal-only backtest · gross of brokerage &amp; taxes · per-unit (no sizing).</div>
+  </section>
   </div>
+
 
   <div id="bxTip" hidden></div>
 

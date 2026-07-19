@@ -69,12 +69,19 @@ _EXPECTED_ROLL_SCHEDULE = (_EXPIRY_JUN.toordinal(), _EXPIRY_JUL.toordinal())
 
 #: The frozen full-content bxsnap2 digest of the stitched 600-bar slice —
 #: any ownership-cut / stitch-order / bar-content drift re-keys it.
-_EXPECTED_SNAPSHOT_HASH = "a360405b1465e63d6cdbb0ab6efb37ad192425a916c7b07bc1c2a2acdfa08e01"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): the fixture was
+# re-crafted to the rankable gap-up shape (see _day_bars), so the stitched
+# slice's bytes — and hence the snapshot hash — moved by design.
+_EXPECTED_SNAPSHOT_HASH = "1a8f36dd8d04452a77a49ba878dd2c473bc6d5418cdabf732348661704c8434e"
 
 #: The frozen run identity of mask 0b101 under the futures context (the
 #: params carry the recorded ``roll_schedule`` — the aliasing kill-shot's
 #: identity surface).
-_EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1b4c9"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): the params layout
+# now carries the UNCONDITIONAL ``fill_mode: worst_case`` token AND the
+# snapshot moved with the re-crafted fixture — the run identity moved by
+# design (the precise-era digest f6a08f4c…b1b4c9 is permanently unreachable).
+_EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce020ca"
 
 #: The frozen end-to-end store content hash (polars/zstd-build sensitive —
 #: see the module docstring).
@@ -86,30 +93,48 @@ _EXPECTED_RUN_ID = "f6a08f4cf381544a4eba2c5005b0fc02aef2e11e822f42d082f02ccd8db1
 #: the prior literal ``82211c97…``): dropping the trio leaves the 4×25 frame
 #: byte-for-byte frame-equal — every non-VIX row value, every run_id, the
 #: roll_schedule / snapshot-hash / run-id literals above all unchanged.
-_EXPECTED_STORE_HASH = "27c92c83159b8cadff6e39e099d73038b3c82c055ea0ef127be52df01d3d8482"
+# RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
+# over the re-crafted fixture — regenerated on THIS tree, two-run
+# byte-determinism pinned in the literal test below.
+_EXPECTED_STORE_HASH = "8670c7f65404068c1090d30db9381494374f7c182fc57a8a7bacc5126ca074a0"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:
-    """The sweep-run golden's drifting intraday shape, anchored on *day*."""
+    """The worst-case-rankable gap-up intraday shape, anchored on *day*.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the old wide-range drift
+    SL'd every worst-case entry on its own bar — nothing persisted): narrow
+    gap-up bars (open = prior close + 3.00, range 0.50 < the SL 0.80; the
+    next gap-up's low clears the TP level → +50 wins), a shallow bearish bar
+    each 7-bar cycle, and a DEEP bearish bar (range 0.85) every 4th cycle
+    whose stop-out keeps profit_factor finite.
+    """
     out: list[CandleBar] = []
     price = base
     for m in range(n):
-        close = price + 0.6 if m % 3 else price - 0.3
+        k = m % 7
+        if k == 3:  # shallow bearish bar
+            o = price
+            c, h, lo = o - 0.3, o + 0.1, o - 0.4
+        elif k == 4 and (m // 7) % 4 == 0:  # deep bearish loss carrier
+            o = price
+            c, h, lo = o - 0.65, o + 0.1, o - 0.75
+        else:  # narrow gap-up win bar
+            o = price + 3.0
+            c, h, lo = o + 0.3, o + 0.4, o - 0.1
         ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
-        hi = max(price, close) + 0.5
-        lo = min(price, close) - 0.5
         out.append(
             CandleBar(
                 timestamp=ts.astimezone(UTC),
-                open=Decimal(str(round(price, 2))),
-                high=Decimal(str(round(hi, 2))),
+                open=Decimal(str(round(o, 2))),
+                high=Decimal(str(round(h, 2))),
                 low=Decimal(str(round(lo, 2))),
-                close=Decimal(str(round(close, 2))),
+                close=Decimal(str(round(c, 2))),
                 volume=100,
                 open_interest=None,
             )
         )
-        price = close
+        price = c
     return out
 
 
@@ -209,11 +234,15 @@ def test_golden_stitched_slice_shape(stitched: tuple[list[CandleBar], tuple[int,
     assert len(bars) == 5 * _BARS_PER_DAY
     assert all(a.timestamp < b.timestamp for a, b in itertools.pairwise(bars))
     # Expiry-day ownership: 26 Jun bars carry the Jun contract's price plane
-    # (base 100, drifting to ~136 intraday), never the Jul contract's
-    # basis-gapped plane (base 140, drifting upward from there).
+    # (base 100 — the day's FIRST gap-up bar opens at 103.00), never the Jul
+    # contract's basis-gapped plane (base 140 — its first bar would open at
+    # 143.00). The gap-up fixture drifts ~+400 intraday so the whole-day
+    # ranges overlap between planes; the first-bar open is the clean
+    # discriminator.
     expiry_day = [b for b in bars if b.timestamp.astimezone(_IST).date() == _EXPIRY_JUN]
     assert len(expiry_day) == _BARS_PER_DAY
-    assert all(b.open < Decimal("139") for b in expiry_day)
+    assert expiry_day[0].open == Decimal("103.00")
+    assert expiry_day[0].open < Decimal("139")  # the Jun plane, never Jul's
 
 
 def test_golden_snapshot_hash_literal(

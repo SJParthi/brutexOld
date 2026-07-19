@@ -39,7 +39,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
     "sweep_runs/r-20260707-fixt01/top100.json": (
-        "a48ea333dd5b668100a4b0ed63fda0e0e56c045f208b50208bce8aeb6d842791"
+        "7c6833917049414b744703e763477c6afd856b8e336954fb205af0532d27adb0"
     ),
     "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
@@ -51,7 +51,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "60b258070fe9172e5784287c7ec6be6b3a87af82a616325058790dbdafe07f0d"
     ),
     "sweep_runs/r-empty01/top100.json": (
-        "0fbd1222ef9b776468c540ed50d90c2fe346d052469a12b4cc806e8ae11af6ba"
+        "8cceaf1ea92db3f6c3fe241032bb0e38399bbaa93158a4b607daba4aa3fae06b"
     ),
     "sweep_runs/r-hostile01/events.jsonl": (
         "c8150cf2c68dfd432632e96c6fed3221caa8e524bd9849458ba7a59c1c3b5ba9"
@@ -60,10 +60,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
     "sweep_runs/r-hostile01/top100.json": (
-        "7df84ef8bbd1e785f85200899fc2046428e7e5fed6b849e7f53836b624fd0645"
+        "123587766da55bbdc4715c2afe192ccd4f4f9e16cb1880fe52abb57f04da4ce8"
     ),
     "sweep_runs/r-short01/top100.json": (
-        "ceb4a881c523fdfd5b1634c446dd295072e24a0f91d7a2442c20bccf1d698bab"
+        "b16dee260ffb69441773a16100e40735030c611bfa953755da5f13cd86a1a95a"
     ),
 }
 
@@ -159,6 +159,21 @@ class TestMainRunRoundTrips:
         assert by_rank[1]["arm"] == "SL ₹51.50 · TP ₹93.75"
         assert by_rank[1]["arm_raw"] == {"sl_paisa": 5_150, "tp_paisa": 9_375}
         assert by_rank[gen.NULL_ARM_RANK]["arm"] == "SL — · TP —"
+
+    def test_resilience_block_reaches_the_wire_untouched(self) -> None:
+        """The sibling resilience block (top-level key) survives the reader
+        boundary — a LIVE row carries stats + the null zero-trades edge reads
+        the honest stats_live=false (never a fabricated streak)."""
+        top100 = oc.load_top100(_RUNS / gen.RUN_ID)
+        by_rank = {row["rank"]: row for row in top100.rows}
+        live = by_rank[1]["resilience"]
+        assert live["stats_live"] is True
+        assert isinstance(live["losing_streak_p95"], int)
+        assert live["worst_streak_pnl_paisa"] <= 0  # gross, per-unit, ≤ 0
+        assert isinstance(live["win_rate_by_year"], dict)
+        null = by_rank[gen.ZERO_TRADES_RANK]["resilience"]
+        assert null["stats_live"] is False
+        assert null["losing_streak_p95"] is None  # never a fabricated 0
 
     def test_events_chain_verifies_end_to_end(self) -> None:
         """Self-consistency ONLY: generator and verifier share ONE chain_hash."""

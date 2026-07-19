@@ -22,6 +22,8 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
+from brutex.metrics import rust_stats
 from brutex.metrics.cpcv import cpcv_pass_rate
 
 from tests.bench._o1_tiers import ratio_ceiling
@@ -43,13 +45,20 @@ def _best_time_ns(n: int, *, repeats: int = 5, inner: int = 3) -> float:
     return best
 
 
-def test_cpcv_pass_rate_per_fold_is_o1_in_n() -> None:
+@pytest.mark.parametrize("flag", ["0", "1"])
+def test_cpcv_pass_rate_per_fold_is_o1_in_n(flag: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flatness holds on BOTH ``BRUTEX_STATS_RUST`` arms
+    (DEC-METRICS-RUST-STATS-001 — the Rust fold kernel keeps the same
+    O(1)-per-fold-in-n shape; the ON arm times the steady state, burn-in
+    excluded via the documented reset seam)."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, flag)
+    rust_stats.reset_self_check_for_tests("cpcv", remaining=0)
     t_small = _best_time_ns(_SMALL)
     t_large = _best_time_ns(_LARGE)
     ratio = t_large / max(t_small, 1.0)
     assert ratio < ratio_ceiling(3.0), (
         f"cpcv_pass_rate time ratio {ratio:.2f}× (n=10k vs n=1k, same "
-        f"S=16/k=8) exceeds the O(1)-per-fold ceiling — the per-fold cost "
-        f"may have regressed to O(n) slicing. "
+        f"S=16/k=8, flag={flag}) exceeds the O(1)-per-fold ceiling — the "
+        f"per-fold cost may have regressed to O(n) slicing. "
         f"t_1k={t_small:.0f}ns, t_10k={t_large:.0f}ns."
     )

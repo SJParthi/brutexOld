@@ -100,18 +100,26 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
 
 
 def _make_bars(n_days: int, per_day: int) -> list[CandleBar]:
+    # The sweep_run suite's worst-case-rankable recipe
+    # (DEC-FILL-WORST-CASE-ONLY-001): mostly-up drift, every 5th day DOWN so
+    # profit_factor stays finite; EOD-only exits (sl/tp None below) because a
+    # tight SL/TP fills at the adverse extreme and gate-rejects every combo.
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
 
 
 #: Module-shared immutable bar window (built once — the tests never mutate it).
-_BARS: list[CandleBar] = _make_bars(8, 100)
+_BARS: list[CandleBar] = _make_bars(45, 100)
 
 
 def _grid(**overrides: object) -> SweepGridConfig:
@@ -121,8 +129,8 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "directions": [Side.BUY],
         "k_values": [1, 2, 3],
         "condition_bits": [0, 1, 2, 3, 4],
-        "stop_losses": [80],
-        "take_profits": [50],
+        "stop_losses": [None],
+        "take_profits": [None],
         "proximities": [None],
         "mode": "A",
         "data_snapshot_hash": "snap0001",

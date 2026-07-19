@@ -301,8 +301,10 @@ class _FakeIngestResult:
         return self.report.still_failed_windows
 
 
-def _wire_cli_fakes(monkeypatch: pytest.MonkeyPatch, captured: list[object]) -> None:
-    """Fake every network-shaped CLI seam + spy the spine's ``storm_breaker`` kwarg."""
+def _wire_cli_fakes(
+    monkeypatch: pytest.MonkeyPatch, captured: list[object], *, kwarg: str = "storm_breaker"
+) -> None:
+    """Fake every network-shaped CLI seam + spy the spine's *kwarg* breaker kwarg."""
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda _lake: [_index("NIFTY")])
     credentials = importlib.import_module("brutex.config.credentials")
     monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
@@ -312,7 +314,7 @@ def _wire_cli_fakes(monkeypatch: pytest.MonkeyPatch, captured: list[object]) -> 
     run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
 
     def fake_ingest(*_args: Any, **kwargs: Any) -> _FakeIngestResult:
-        captured.append(kwargs.get("storm_breaker"))
+        captured.append(kwargs.get(kwarg))
         return _FakeIngestResult()
 
     monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
@@ -423,3 +425,264 @@ class TestBreakerCanaryArming:
         _run_fno_phase(lake_root=tmp_path, dry_run=True)
         assert captured, "the spine was never reached"
         assert all(p is None for p in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mass ALL-FILTERED breaker — the PULL-scope resolve law
+# (DEC-ALLFILTERED-MASS-BREAKER-001 review round 4: each production pull
+# entrypoint resolves ONE breaker and threads the SAME instance into every
+# pass / phase / until-clean round, so a trip stays LATCHED for the pull —
+# the superseded per-pass resolve let a sub-floor retry pass settle windows
+# the trip alarm promised were halted. Unlike the storm breaker there is NO
+# dry-run gate: the instance is resolved unconditionally and stays inert on
+# a dry-run because its windows are ineligible by construction.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAllFilteredBreakerPullScope:
+    def test_pull_all_spot_resolves_once_and_threads_it_everywhere(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("all_filtered_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", _resolve_once)
+
+        def _factory(
+            lake_root: Path, _insts: Sequence[Instrument]
+        ) -> tuple[MarketAdapter, BarSink]:
+            del lake_root
+            return SyntheticSpotAdapter(), NullBarSink()
+
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            adapter_factory=_factory,
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull — the round-4 latch scope"
+
+    def test_pull_candles_resolves_once_and_threads_both_phases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("all_filtered_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", _resolve_once)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull, shared by every phase"
+
+    def test_pull_all_spot_live_arms_detect_and_feeds_the_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL bulk pull's windows actually REACH the breaker (review round 5).
+
+        FAIL-BEFORE: ``pull_all_spot`` never passed ``detect_completeness_gaps``
+        (default ``False``), so the spot tail's eligibility gate made EVERY bulk
+        window unobservable — the round-4 pull-scoped wiring was structurally
+        inert on the primary production path (the /pull-pipeline spot phase +
+        the one-click "Pull ALL"). Post-fix the bulk pull threads
+        ``detect_completeness_gaps=not dry_run`` (the CLI ``cmd_fetch`` pattern)
+        and a 3-series weekend-start mass all-filtered event TRIPS the breaker.
+        """
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        # SPREAD floor 3 (min_observations 100 keeps the FRACTION rule out of
+        # the way) — the 3-index vendor-day shape must trip on the 3rd series.
+        sentinel = AllFilteredBreaker(
+            spread_series_limit=3,
+            fraction_limit=0.5,
+            min_observations=100,
+            fraction_min_series=3,
+        )
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+
+        def _factory(
+            lake_root: Path, _insts: Sequence[Instrument]
+        ) -> tuple[MarketAdapter, BarSink]:
+            del lake_root
+            return SyntheticSpotAdapter(), NullBarSink()
+
+        # 2024-03-02 is a Saturday: every window's synthetic bars anchor on the
+        # window-START day, so the calendar-aware boundary filter drops them ALL
+        # — three genuinely all-filtered series, the mass vendor-day shape.
+        pull_all_spot(
+            [_index("A1"), _index("A2"), _index("A3")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            from_date="2024-03-02",
+            to_date="2024-03-03",
+            adapter_factory=_factory,
+        )
+        assert detect_seen and all(d is True for d in detect_seen)
+        assert sentinel.counts() == (3, 3, 3)  # fail-before: (0, 0, 0)
+        assert sentinel.tripped
+
+    def test_pull_all_spot_dry_run_threads_detect_false_and_never_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run bulk pull threads ``detect_completeness_gaps=False`` — the
+        resolved breaker stays inert (the comment's "ineligible by construction"
+        claim, now enforced by explicit wiring instead of a missing kwarg)."""
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+        pull_all_spot(
+            [_index("A1")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_NOW,
+            from_date="2024-03-02",
+            to_date="2024-03-03",
+        )
+        assert detect_seen and all(d is False for d in detect_seen)
+        assert sentinel.counts() == (0, 0, 0)
+        assert not sentinel.tripped
+
+    def test_pull_candles_dry_run_threads_detect_false_and_never_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run ``pull_candles`` never feeds the breaker (review round 5).
+
+        FAIL-BEFORE: this site hardcoded ``detect_completeness_gaps=True`` (a
+        #1230-era leftover), so a dry-run's weekend-start synthetic window WAS
+        observed as all-filtered — counts ``(2, 1, 1)`` over 2024-03 (the
+        2024-03-31 Sunday-start tile) — contradicting the documented
+        dry-run-never-feeds contract. Post-fix: ``not dry_run`` → ``(0, 0, 0)``.
+        """
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=True,
+        )
+        assert detect_seen and all(d is False for d in detect_seen)
+        assert sentinel.counts() == (0, 0, 0)  # fail-before: (2, 1, 1)
+        assert not sentinel.tripped
+
+    def test_pull_candles_live_still_arms_detect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-5 ``not dry_run`` flip keeps the REAL single-symbol pull armed."""
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert detect_seen and all(d is True for d in detect_seen)
+
+    def test_cli_cmd_fetch_resolves_and_threads_the_pull_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        pytest.importorskip("pyarrow")
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        _wire_cli_fakes(monkeypatch, captured, kwarg="all_filtered_breaker")
+        afb = importlib.import_module("brutex.adapters.all_filtered_breaker")
+        monkeypatch.setattr(afb, "resolve_all_filtered_breaker", _resolve_once)
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=True,  # persistence-free live wiring (NullBarSink, no ledger)
+            rows_per_chunk=5,
+        )
+        assert rc == cli.EXIT_OK
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull — the round-4 latch scope"

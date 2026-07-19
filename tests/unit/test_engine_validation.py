@@ -155,6 +155,22 @@ class TestValidateOOS:
         b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
         assert a == b
 
+    def test_no_policy_seam_and_worst_case_is_the_only_law(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: the round-2 policy seam is DELETED —
+        # the validator carries no policy/fill_mode kwarg, and its halves
+        # simulate under the ONE hardcoded worst-case law (a BUY on the
+        # ±1.00-range fixture enters at the bar HIGH: proven by comparing
+        # against an open-anchored hand fold on the SAME split).
+        import inspect
+
+        params = inspect.signature(validate_out_of_sample).parameters
+        assert "policy" not in params
+        assert "fill_mode" not in params
+        bars = _multiday(4, bars_per_day=5)
+        a = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
+        b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
+        assert a == b  # the one law is deterministic — no hidden mode input
+
 
 class TestSharpeHeld:
     def test_none_train_sharpe_fails(self) -> None:

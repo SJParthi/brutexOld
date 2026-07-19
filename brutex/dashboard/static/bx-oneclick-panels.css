@@ -218,6 +218,40 @@ body.bx-drawer-open { overflow:hidden; } /* scroll lock while the drawer is open
   .bxd-equity-draw { stroke-dashoffset: 0 !important; }
 }
 
+/* ── Losing-streak resilience panel (DEC-RESILIENCE-STREAKS-001; re-ported
+   at the club-O merge-forward onto the DEC-OPERATOR-PORTAL-REFOLD-001
+   extracted-panel layout — the styles were originally inline in
+   strategy.html, now .bx-stpanel-scoped so the standalone /strategy page
+   AND the v29 #ocStrategyDrawer mirror share ONE law). ── */
+.bx-stpanel .story-cell .sub { font-size:11px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere; }
+.bx-stpanel .story-cell .badge-bad { color:var(--red); font-weight:700; }
+.bx-stpanel .story-cell .badge-ok { color:var(--green); }
+.bx-stpanel .resilience-locate { margin-top:12px; padding:8px 12px; border:1px solid var(--border-strong);
+  border-radius:8px; font-size:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.bx-stpanel .resilience-locate input { width:96px; font:inherit; font-size:12px; padding:4px 6px;
+  border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-2); color:var(--text); }
+.bx-stpanel .resilience-verdict { font-weight:700; }
+.bx-stpanel .resilience-verdict.ok { color:var(--green); }
+.bx-stpanel .resilience-verdict.warn { color:var(--yellow); }
+.bx-stpanel .resilience-verdict.bad { color:var(--red); }
+/* Broker-grade polish, PANEL-SCOPED (#stResilienceSection only — the shared
+   .story-cell idiom on the combo card above is untouched): the coloured TRUTH
+   states read as designed status pills and the cells lift subtly on hover.
+   Transform/opacity only (no JS, no new polling); every honest "—" /
+   "unavailable" surface stays fully visible. */
+#stResilienceSection .story-cell { transition:transform .12s ease, border-color .12s ease; }
+#stResilienceSection .story-cell:hover { transform:translateY(-1px); border-color:var(--muted); }
+#stResilienceSection .badge-ok, #stResilienceSection .badge-bad {
+  display:inline-block; margin-top:6px; padding:2px 9px; border-radius:999px;
+  font-size:11px; letter-spacing:.02em; }
+#stResilienceSection .badge-ok { background:rgba(38,217,176,0.12); border:1px solid var(--green-dim); }
+#stResilienceSection .badge-bad { background:rgba(255,92,92,0.12); border:1px solid var(--red); }
+#stResilienceSection .resilience-verdict {
+  display:inline-block; padding:2px 10px; border-radius:999px; border:1px solid var(--border-strong); }
+#stResilienceSection .resilience-verdict.ok { background:rgba(38,217,176,0.12); border-color:var(--green-dim); }
+#stResilienceSection .resilience-verdict.warn { background:rgba(255,183,77,0.12); border-color:var(--yellow); }
+#stResilienceSection .resilience-verdict.bad { background:rgba(255,92,92,0.12); border-color:var(--red); }
+
 /* Covenant #6: the hidden-tab pause (BXUI.initVisibilityPause stamps
    html.bx-paused) freezes any in-flight one-shots. */
 html.bx-paused .strategy-drawer *, html.bx-paused .bx-scpanel *,

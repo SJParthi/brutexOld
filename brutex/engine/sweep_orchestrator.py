@@ -97,6 +97,7 @@ from brutex.engine.sweep_run import (
     SweepRunSummary,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import (
@@ -165,6 +166,20 @@ class Timeframe:
             raise ValueError("Timeframe.label must be non-empty")
         if self.minutes < 1:
             raise ValueError(f"Timeframe.minutes must be >= 1, got {self.minutes}")
+
+    @property
+    def duration_s(self) -> int:
+        """The interval length in TRADING seconds (``minutes * 60``).
+
+        DEC-TF-REGISTRY-DYNAMIC-001: the seconds-keyed surface of the engine
+        timeframe. ``minutes`` deliberately STAYS the dataclass field — it is
+        constructed positionally at every launch site and serialized into the
+        grid identity / per-tuple digests, so inverting field<->property would
+        churn every construction site and risk a silent 60x digest drift for
+        zero functional gain. A sub-minute ENGINE timeframe is out of scope
+        (its own DEC + a sub-minute feed are prerequisites).
+        """
+        return self.minutes * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -898,6 +913,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
+    # DEC-FILL-WORST-CASE-ONLY-001: the store address carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key — the exact mirror of
+    # canonical_trade_params' unconditional emit. Eliding it would alias
+    # worst-case store addresses with the frozen precise-era addresses, so a
+    # resume could silently adopt precise-priced tuple stores.
+    descriptor["fill_mode"] = FillMode.WORST_CASE.value
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).
