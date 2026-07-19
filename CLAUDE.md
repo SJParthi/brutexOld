@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+_Last updated: 2026-07-18 (DEC-DATA-RUST-INTEGRITY-DETECTORS-002,
+MIGRATION.md #1962 (PROVISIONAL — next-free on the live main tip (max
+#1961) at push; renumber-at-landing per DEC-LEDGER-RENUMBER-001, the
+DEC-ID is the stable handle), branch `claude/rust-slice-t24-integrity-pr2`
+— SLICE T24 PR-2: the frame bad-tick screen + the today-completeness
+verdict join the T24 Rust routing — TWO more detector-family pure laws
+behind TWO new default-OFF flags, the verbatim Python law retained as the
+LIVE parity oracle on every path. bad_tick's frame arm reuses the
+ALREADY-compiled `rust/brutex-feed/src/scan.rs::scan_bars` kernel
+(DEC-FEED-RUST-CORE-001 #1797) at the WHEEL boundary — ZERO new Rust: a
+NEW facade `brutex/data/bad_tick_rust.py` calls `brutex_feed.scan_bars`
+under the NEW default-OFF `BRUTEX_FEED_RUST_FRAME` (both rejected hoist
+alternatives recorded with Cargo.lock evidence — a crate→crate dep and a
+fifth common crate; BOTH committed `Cargo.lock` files byte-UNTOUCHED).
+today_completeness becomes `detectors.rs` law 4 behind
+`BRUTEX_LAKE_RUST_TODAY_COMPLETENESS`, bound fail-closed by the crossverify
+publish gate seam (every crate fault under the flag resolves to the ORACLE
+verdict, never a new exception class out of the classifier). Ships INERT —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+lake/schema/scope/vocab/rate change; no new routes; run identity untouched
+(the frozen sweep-run + bxsnap2 goldens pass UNMODIFIED with every flag
+armed, executed). 2 consecutive clean hostile-review rounds (0 MINOR+; the
+round-1 four NITs folded). The per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1962 — this header carries the pointer,
+never the story.)
+Earlier: 2026-07-17 (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
 the critical-path Rust u128 ENUM/COUNT kernel: the Stage-2 SUPERSET-count
 twins (`count_supermasks_u128s`/`ResidentBarsU128`) over the SHARED
 `MaskWord` core (hoisted from trade_sim to `rust/fno-math/src/mask_word.rs`)
@@ -3297,7 +3322,142 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
+- **Active branch:** `claude/rust-slice-t24-integrity-pr2`
+  (**DEC-DATA-RUST-INTEGRITY-DETECTORS-002, MIGRATION.md #1962 —
+  PROVISIONAL number, next-free on the live main tip (max #1961) at push;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001, the DEC-ID is the stable
+  handle** — SLICE T24 PR-2: the frame bad-tick screen + the
+  today-completeness verdict join the T24 Rust routing — TWO more
+  detector-family pure laws behind TWO new default-OFF flags, the verbatim
+  Python law retained as the LIVE parity oracle on every path.
+  **(1) bad_tick — WHEEL-BOUNDARY reuse (ZERO new Rust):** the entire
+  decision plane of `screen_frame_bad_ticks`'s sequential arm (the
+  derived-TF prebuild / #1932 freshness-gate 1-minute read screen,
+  DEC-READ-GUARD-PARITY-001 #1811) is ALREADY compiled in
+  `rust/brutex-feed/src/scan.rs::scan_bars` (DEC-FEED-RUST-CORE-001 #1797 —
+  the whole `BadTickScreen` state machine: session-boundary reset,
+  baseline-hold, first-offender capture, per-session warn coordinates, the
+  fixed-IST day-ordinal session key). THE RULING (design §1.3, both
+  alternatives recorded + REJECTED with Cargo.lock evidence): reuse at the
+  WHEEL boundary — a NEW facade `brutex/data/bad_tick_rust.py` calls the
+  existing compiled `brutex_feed.scan_bars` with the frame arm's columns
+  (the four price slots all receive `close` — the screen plane reads only
+  closes); the rejected options were (A) a brutex-lake → brutex-feed crate
+  dependency (couples the two independent build lanes + ~6-8 new Cargo.lock
+  entries for zero functional gain) and (B) a hoist into a fifth common
+  crate (churns brutex-feed's source digest — a cross-lane event — for
+  ~240 lines that already exist compiled). BOTH crates and BOTH committed
+  `Cargo.lock` files are byte-UNTOUCHED — the ONE compiled state machine is
+  the shared source (the strongest form of the §11 COMMON one-source
+  rule). Flag = NEW `BRUTEX_FEED_RUST_FRAME`, default OFF (deliberately
+  SEPARATE from the engine boundary's `BRUTEX_FEED_RUST` — the two seams
+  share the kernel but keep independent blast radii: an operator who armed
+  the replay seam must not silently arm this WRITE-feeding seam, and a
+  frame-arm autorevert must not disable the engine-boundary arm). G6
+  flag-gate-in-target: the gate lives in `screen_frame_bad_ticks`'s phase-2
+  branch; phase 1 (the vectorized polars candidate trigger) stays Python on
+  BOTH arms, so a clean frame returns the INPUT OBJECT and never consults
+  the flag — the clean prebuild read is byte- AND cost-identical flag-ON.
+  Flag OFF is the verbatim sequential arm extracted token-for-token to
+  `_screen_frame_sequential_python` (the LIVE parity oracle); `brutex_feed`
+  is never imported from this seam flag-OFF (bomb-wheel spy-pinned). Facade
+  layers (the PR-1 template; burn-in justified here — this seam feeds
+  STORED derived partitions): 16-call burn-in DECISION-compare (kept rows +
+  fully-materialized warn fields) vs a side-effect-free `BadTickScreen`
+  oracle run, ship-the-ORACLE-frame autorevert + process latch; degrade set
+  = wheel missing/stale · non-`us`/non-UTC ts dtype · ts/close nulls · the
+  narrow kernel-raise set · the kernel ABSTAIN (`None` — ts outside the
+  fixed-IST envelope; the #1919 belt for the `tf_autoderive` consumer,
+  which runs NO ts-range gate) · a `brutex.feed_rust.validate_scan` refusal
+  (§11 COMMON, reused verbatim) · **the LOAD-BEARING `positivity_stop` →
+  oracle arm** (`tf_autoderive.read_lake_bars_frame` runs NO price gate
+  before this screen, so a non-positive close legally reaches the seam; the
+  frame law never raises on it — the kernel stop DEGRADES the whole call to
+  the oracle, one WARN); `MemoryError`/`KeyboardInterrupt`/`SystemExit`
+  re-raise RAW (checked before the degrade set); the panic belt is the
+  #1911 PUBLIC `lake_rust_render.panic_belt_errors` alias; WARN
+  materialization rides the ONE shared `emit_bad_tick_warn` seam
+  (log-sequence parity holds by construction + is pinned).
+  **(2) today_completeness — detectors.rs law 4:** the per-class criteria
+  decision tree of `classify_today_completeness`
+  (DEC-PULL-TODAY-COMPLETENESS-GATE-001 #1774) becomes the FOURTH law in
+  `rust/brutex-lake/src/detectors.rs` (the PR-1 partial-window template):
+  ints/bools-only FFI (per-bar ABSOLUTE IST minute ordinals
+  `toordinal()*1440 + h*60 + m` — date-preserving, so distinct ordinals ≡
+  the oracle's distinct IST minute-floor datetimes over EVERY input, no
+  single-date precondition — + parallel zero-volume/OI-null bool masks +
+  the Python-computed `session_last_bar_complete` close-edge bool), the
+  reason crossing back as an INDEX into the facade-side frozen
+  `_TODAY_REASONS` tuple (mirror-pinned against the oracle's `REASON_*`
+  constants — the G6 cycle-solve: the facade never imports the target). The
+  three inert arms (not-covering / coverage abstain / non-trading) + EVERY
+  calendar consult stay PYTHON and are decided BEFORE the route
+  (negative-pinned: the crate is never consulted on an inert arm). Flag
+  `BRUTEX_LAKE_RUST_TODAY_COMPLETENESS`; the verbatim criteria body is
+  extracted to `_classify_today_completeness_python` (the LIVE oracle).
+  **LOAD-BEARING degrade discipline (crossverify gate_seam):** the
+  crossverify producer binds `classify_today_completeness` DIRECTLY as a
+  fail-closed publish gate (`brutex/crossverify/gate_seam.py`) — every
+  crate fault under the flag resolves to the ORACLE verdict, never a new
+  exception class out of the classifier (bombed-crate flag-ON gate_seam pin
+  + the crossverify belts flag-ON). Cargo.toml/Cargo.lock byte-untouched
+  (zero new deps); detectors.rs +15 cargo tests (crate total 105,
+  `--release --locked`). **SHARED-LATCH SPAN (re-disclosed):** the
+  `detectors_rust` `_CRATE_API` grows 3 → 4 all-or-nothing (a PR-1-era
+  wheel latches `crate_stale` for ALL detector laws — the #1771
+  precedent) and the ONE shared OFF autorevert latch now spans FOUR laws
+  (a burn-in trip on any of the four reverts all four for the process);
+  bad_tick's frame arm carries its OWN independent latch in
+  `bad_tick_rust.py`; the future 6-law span is the re-affirmed disclosed
+  open item Q6. **BURN-IN ≈ COMPARE-ALWAYS (cold-path disclosure):** both
+  laws are cold (the frame arm routes only candidate-BEARING frames — rare,
+  poisoned lakes; the today verdict fires once per settled window), so the
+  16-call burn-in effectively compares-always at production cadence — the
+  FFI hop is a disclosed small SLOWDOWN (payoff ≈ 0), never a speedup.
+  **STORED-OUTCOME OFF-vs-ON gates + poisoned-kernel byte-flip teeth (the
+  load-bearing parity evidence):** (a) the real-writer spike-lake
+  PRODUCTION prebuild (`materialize_lake_timeframes`, forced full) —
+  whole-bars-tree sha256 IDENTICAL both arms, the screen proven FIRED, the
+  #1932 freshness verdict "fresh" both arms, and the POISONED
+  keep-all-kernel teeth (steady-state, burn-in bypassed BY DESIGN) visibly
+  FLIP the stored derived bytes (the 500.00 spike freezes into its
+  5-minute bucket) — never an oracle-vs-oracle tautology; (b) the
+  real-writer TODAY gate pull over BOTH ingest spines (index count-short ·
+  FUT OI-null · CASH all-zero · complete index) — stored parquet bytes (the
+  withheld today rows) + window-ledger records (FAILED + `TODAY_INCOMPLETE`,
+  streak-exempt) byte-IDENTICAL, demotions proven fired both arms,
+  poisoned-crate teeth. **THE LEAK FIX:** every stored-outcome autouse
+  fixture now deletes ALL detector-law flag envs (the leak class where a
+  sibling flag armed in the multi-flag lane made an "OFF" arm route
+  mid-OFF); the PR-1 `test_detectors_rust_stored_outcome.py` fixture gains
+  the today flag for the same reason. HONEST (ADR-0020 banner verbatim):
+  expected payoff ≈ 0 — conversion is for uniformity, not speed; ships
+  INERT — a default flip needs its own DEC. Neither law is in run identity
+  (the frame seam's exposure is TRANSITIVE via stored derived partitions
+  inside `data_snapshot_hash` — closed by the stored-outcome byte A/B).
+  GATES (executed): coverage 100.00% line+branch each — `bad_tick.py`
+  71/14 (117 tests) · `bad_tick_rust.py` 122/36 (65) · `detectors_rust.py`
+  259/84 (80) · `today_completeness.py` 211/70 (87); cargo fmt --check +
+  clippy --all-targets --locked -D warnings clean + test --release --locked
+  105 passed (brutex-feed byte-untouched, not rebuilt); ruff check + ruff
+  format --check clean; `mypy --strict brutex` clean (478 files); pyright 0
+  errors on every touched/new file; lake-rust-parity.yml/ci.yml/mutation.yml
+  parse (mutation pairs: `bad_tick_rust.py` added, the `today_completeness.py`
+  pair grows the seam suite). HOSTILE REVIEW: 2 consecutive clean rounds
+  (both lenses SHIP, 0 MINOR+; the round-1 four NITs — routed-arm close-edge
+  laziness gated to INDEX_SPOT · the `detectors_rust.py` degrade-set
+  docstring truth · the TODAY payload-arm KeyError degrade · `bad_tick.py`
+  joins the mutmut loop — folded as ONE commit). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; two new env flags
+  only. Open (coordinator/queue-master): entry-number allocation +
+  renumber-at-landing; Q3/Q4 (price_sanity net-loss ruling) + Q5
+  (session/bar_screen exclusions) remain per design-pr2.md §6; Q6
+  (shared-latch span 4 → future 6) re-affirmed disclosed here. This blurb
+  carries the per-item record; MIGRATION.md #1962 is the durable ledger
+  record.)
+  Earlier: `claude/rust-u128-enum-kernel`
+  (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
   first commit, the pre-authorized crate-internal→hoist ruling branch): the width-generic `MaskWord` trait +
@@ -10159,7 +10319,38 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-u128-enum-kernel`
+- **Active feature branch:** `claude/rust-slice-t24-integrity-pr2`
+  (DEC-DATA-RUST-INTEGRITY-DETECTORS-002, MIGRATION.md #1962 — PROVISIONAL
+  number, next-free on the live main tip (max #1961) at push;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001, the DEC-ID is the stable
+  handle; SLICE T24 PR-2: the frame bad-tick screen + the today-completeness
+  verdict join the T24 Rust routing — TWO more detector-family pure laws
+  behind TWO new default-OFF flags, the verbatim Python law retained as the
+  LIVE parity oracle on every path. bad_tick's frame arm reuses the
+  ALREADY-compiled `rust/brutex-feed/src/scan.rs::scan_bars` kernel
+  (DEC-FEED-RUST-CORE-001 #1797) at the WHEEL boundary — ZERO new Rust: a
+  NEW facade `brutex/data/bad_tick_rust.py` calls `brutex_feed.scan_bars`
+  under the NEW default-OFF `BRUTEX_FEED_RUST_FRAME` (both rejected hoist
+  alternatives — a crate→crate dep and a fifth common crate — recorded with
+  Cargo.lock evidence; BOTH committed `Cargo.lock` files byte-UNTOUCHED).
+  today_completeness becomes `detectors.rs` law 4 behind
+  `BRUTEX_LAKE_RUST_TODAY_COMPLETENESS` (DEC-PULL-TODAY-COMPLETENESS-GATE-001
+  #1774), bound fail-closed by the crossverify publish gate seam
+  (`brutex/crossverify/gate_seam.py` — every crate fault → the ORACLE
+  verdict, never a new exception class). The `detectors_rust` shared OFF
+  autorevert latch now spans FOUR laws (re-disclosed; bad_tick's frame arm
+  carries its own; the future 6-law span is the re-affirmed open item Q6);
+  burn-in ≈ compare-always on these cold paths (payoff ≈ 0 — the ADR-0020
+  banner). Stored-outcome OFF-vs-ON gates over REAL-writer prebuild + TODAY
+  gate pulls (whole-bars-tree / window-ledger byte-IDENTICAL both arms) +
+  poisoned-kernel byte-flip teeth; 2 consecutive clean hostile-review
+  rounds (0 MINOR+, round-1 four NITs folded). Ships INERT — ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; two new env flags
+  only; run identity untouched (frozen sweep-run + bxsnap2 goldens pass
+  UNMODIFIED, every flag armed). Full record: the §1 Active-branch blurb +
+  MIGRATION.md #1962.)
+  Earlier: `claude/rust-u128-enum-kernel`
   (DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 — queue-master allocation, map
   v36; the critical-path Rust u128 ENUM/COUNT kernel: the width-generic
   `MaskWord` trait hoisted VERBATIM from trade_sim.rs to the shared
