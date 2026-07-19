@@ -18,7 +18,75 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
+_Last updated: 2026-07-19 (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1964
+(renumbered #1986 → #1964 at the crate-vehicle-5 fold — #1986 sat in the
+#1970–#1990 coordinator reserve band; DEC-LEDGER-RENUMBER-001), branch `claude/brutex-lake-box-wheel` —
+the brutex-lake wheel joins the operator BOX build path BEST-EFFORT (warn-only
+`make run-raw` + `bootstrap.sh` blocks; `box_update.WHEEL_SET` gains the
+optional lake entry so the nightly auto-deploy lane rebuilds it on rust/
+deltas) + the crate gains the sibling build stamps (build.rs SOURCE_DIGEST ·
+EXPECTED_BUILD.json · `__build_crate_version__`/`__source_digest__`) + the
+`brutex doctor` check set grows 9 → 11 with the two OPTIONAL lake wheel stages
+(`wheel_freshness_brutex_lake` + `wheel_source_digest_brutex_lake` — absent
+wheel = advisory WARN, never FAIL; supersedes-IN-PART
+DEC-DOCTOR-DAILY-CHECKSET-9-001: the doctor-daily cron asserts the two as
+deterministic WARN in its hermetic wheel-less env; the PASS arm is proven in
+the non-required lake-rust-parity lane against the real wheel). Build-config +
+doctor only — every BRUTEX_LAKE_RUST_* seam stays default-OFF, flag-OFF
+byte-identical; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1964.)
+Earlier: 2026-07-19 (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1963,
+branch `claude/crossverify-rust-core` — the cross-verify Rust core, first
+cut: the TWO pure-law surfaces — the pinned CSV byte assembly
+(`csv_render.render_day_csv`) + the canonical identity mapper / S3-key law
+(`canonical.canonical_identity`/`s3_key`) — re-hosted on the NEW standalone
+`rust/brutex-ops` crate behind the NEW default-OFF `BRUTEX_CROSSVERIFY_RUST`
+flag via the NEW facade `brutex/crossverify/rust_seam.py` (the
+lake_rust_stats/lake_rust_render shape: import/API handshake · per-law
+16-call burn-in bit-compare + ship-the-ORACLE autorevert · narrow degrade
+set + pyo3 panic belt · refuse-poison gates), the verbatim Python bodies
+retained as the LIVE parity oracles. FFI = ints + pre-formatted strings
+ONLY (round_money/Decimal formatting stays Python; `parse_fno_symbol`
+never re-implemented; the S3-key day crosses pre-`isoformat()`-ed);
+refusals fire PYTHON-side pre-FFI with the exact pinned
+ExportContractError bytes. NO version guard (the #1914 stdlib precedent);
+built ONLY by the NEW non-required ops-rust-parity.yml lane (main CI
+crate-free by design; the lane carries a HARD wheel-health gate so a
+broken wheel can never green-vacuous-skip the drift teeth — the round-1
+hostile-review fold, 2 MINOR + 2 NIT, verdict SHIP). Flag OFF (default) is
+byte-identical + crate-untouched (bomb-spy-pinned); expected payoff ≈ 0 —
+uniformity, not speed; ships INERT — a default flip needs its own DEC.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; new env var BRUTEX_CROSSVERIFY_RUST. This header carries the
+pointer, never the story — the full record lives in the §1 Active-branch
+blurb + MIGRATION.md #1963.)
+Earlier: 2026-07-18 (DEC-METRICS-RUST-STATS-002, MIGRATION.md #1962,
+branch `claude/metrics-tails-rust` — slice 6 PR-2, the metrics-TAILS Rust
+conversion: PSR + expected-max Sharpe (deflated_sharpe.py) + PBO/CSCV
+(pbo.py) + the WFO walk pass-count (wfo.py) re-hosted on `rust/fno-math`
+behind the SAME landed default-OFF `BRUTEX_STATS_RUST` seam (per-function
+burn-in bit-compare + autorevert; the Python tails retained forever as the
+live oracles; `ranking/overfit.py` served TRANSITIVELY with ZERO edits —
+the narrowest seam, no ranking-package touch). BIT-EXACT by proof, not
+assertion: erf rides the ONE sanctioned SAME-SYMBOL libm FFI (an fdlibm
+transcription was measurement-REFUTED; CPython's `math.erf` proven the
+platform libm symbol — 0 mismatches over 3.5M points — so both engines
+dispatch literally the same symbol, ULP-bracket golden-pinned per
+platform), inv_cdf is the AS241 transcription (0/2.5M), the WFO Sharpe
+REPLICATES numpy's pairwise reduction order (0/4,000 trials; burn-in is
+the fence), PSR/SR_0/PBO are STRUCTURAL op-for-op transcriptions; the
+lockbox stretch is DROPPED + disclosed (np-internal cumsum orders on a
+cold path — never ship drift). Flag ships OFF — flag-OFF byte-identical,
+bomb-kernel-pinned; no speedup claimed (a default flip is its own DEC).
+DISCLOSED DEVIATION: the brief named `BRUTEX_METRICS_TAILS_RUST`; the
+landed `BRUTEX_STATS_RUST` seam is extended instead (COMMON — one flag,
+one latch registry). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; run identity untouched. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1962.)
+Earlier: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
 `integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
 scoped) as ONE merge event off main tip 3ee742b3, in binding order:
 **#1618** DEC-DATA-PARSER-DEAD-DELETE-001 (MIGRATION.md #1941 — delete the
@@ -3747,7 +3815,178 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-lap8-lake-guards`
+- **Active branch:** `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  MIGRATION.md #1964 — renumbered #1986 → #1964 at the 2026-07-19
+  crate-vehicle-5 fold (#1986 sat in the #1970–#1990 coordinator reserve
+  band; DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
+  path + the doctor watch set; build-config + doctor ONLY, zero engine/data behavior
+  change: (1) BUILD — `make run-raw` + `scripts/setup/bootstrap.sh` gain the brutex_feed
+  template's BEST-EFFORT block for `rust/brutex-lake` (warn-only `|| echo`/`_warn` arm —
+  a broken toolchain / no-network box still boots; cost disclosed in the step text: a
+  cold build compiles the rev-pinned polars graph — minutes + ~12 GB target/), and
+  `brutex/nightly/box_update.py::WHEEL_SET` gains
+  `WheelSpec("brutex_lake", "rust/brutex-lake", required=False)` (forced by the
+  WHEEL_SET↔Makefile set-equality drift pin — the two move in ONE commit), so the
+  nightly box auto-deploy lane rebuilds the lake wheel on rust/ deltas from day one
+  (the coordinator's coupling item CLOSED here; the box gate's
+  `_DIGEST_CHECKS`/`_CHECK_TO_WHEEL` deliberately stay required-wheels-only — the
+  brutex_feed precedent, `digest_ok` stays None for optional wheels). (2) CRATE
+  STAMPS — rust/brutex-lake mirrors the brutex-feed stamp surfaces: NEW build.rs
+  (FRAMING v1 SOURCE_DIGEST via the shared rust/source_digest_core.rs; blake3 in
+  [build-dependencies] + [dev-dependencies], the Cargo.lock delta is ONE dependency
+  edge — blake3 1.8.5 was already in the runtime graph via polars-io/plan, zero new
+  package versions, the byte pin unmoved), pymodule `SOURCE_DIGEST` +
+  `__source_digest__`, shim `SOURCE_DIGEST` in `__all__` +
+  `__build_crate_version__`/`__source_digest__` dunders (NOT in `__all__`), NEW
+  EXPECTED_BUILD.json (19 sorted symbols = the shim `__all__`; pinned equal by tests —
+  the lake shim deliberately carries NO `_EXPECTED_COMPILED_SYMBOLS`, the r2 F2-2
+  ruling), NEW tests/source_digest_parity.rs (the shared golden vector), and the
+  .pyi gains the 3 stamp stubs + BACKFILLS the four pre-existing missing stubs
+  (classify_partial_window_verdict · interior_barless_runs · raw_integrity_blake2b_hex
+  · render_parquet_defaults_from_ipc — the file's own lockstep header honored).
+  (3) DOCTOR — two thin bindings over the UNCHANGED generic helpers (zero new branches
+  in the COMMON bodies): `wheel_freshness_brutex_lake` +
+  `wheel_source_digest_brutex_lake` (the digest stage is THE stale-.so detector — the
+  crate version is frozen at 0.1.0, so freshness alone is nearly toothless; absent
+  wheel = advisory WARN naming the rebuild, never a FAIL — DoctorReport.ok is
+  FAIL-only; `BRUTEX_SKIP_WHEEL_FRESHNESS` stays the ONE shared escape; run_doctor 9 →
+  11 stages). SUPERSEDES-IN-PART DEC-DOCTOR-DAILY-CHECKSET-9-001: doctor-daily.yml +
+  the redteam EXPECTED_STATUSES reclassify the check set 9 → 11 in lockstep, with the
+  two lake stages asserted **deterministic WARN** in the cron's hermetic env (the wheel
+  is deliberately never installed there — a ~24-min-CPU cold polars build would risk
+  the 30-min timeout; the WARN is itself the asserted, proved behavior — a PASS there
+  means an unclassified in-cron install, a SKIP means the escape env leaked, both red);
+  the PASS arm is proven by the lake-rust-parity lane's NEW step running both checks
+  against the lane-built wheel (HONEST: that lane is NON-required — the required-CI
+  teeth are the NEW wheel-tolerant twin suite
+  tests/unit/test_doctor_wheel_freshness_brutex_lake.py (fake-sys.modules arms run
+  wheel-less; live-PASS arms skipif-gated) + test_doctor.py's exact-11 pin +
+  the BOX_BUILT_OPTIONAL_KERNELS warn-only-shape pins in
+  test_run_builds_rust_kernels.py). HONEST limits: a digest PASS does not prove polars
+  lockstep (the facades' own version guard owns that WARN); mutation.yml carries no
+  doctor.py mutmut path (no wiring obligation — stated, not papered over); up.sh
+  deliberately untouched (it builds neither optional kernel). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; every
+  BRUTEX_LAKE_RUST_* seam stays default-OFF (flag-OFF byte-identity is the seams' own
+  standing OFF-arm bomb-spy pins — installing the wheel changes nothing flag-OFF).)
+  Earlier: `claude/crossverify-rust-core`
+  (**DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1963** — renumbered
+  #1962 → #1963 at the 2026-07-19 crate-vehicle-5 fold (vehicle sibling
+  #1660 took #1962; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) — the cross-verify
+  Rust core, first cut: the two pure-law surfaces (the pinned CSV byte
+  assembly + the canonical identity/S3-key law) re-hosted on the NEW
+  standalone `rust/brutex-ops` crate behind the NEW default-OFF
+  `BRUTEX_CROSSVERIFY_RUST` flag via the NEW facade
+  `brutex/crossverify/rust_seam.py` — the sibling-facade shape (import/API
+  handshake, per-law 16-call burn-in + ship-the-oracle autorevert, narrow
+  degrade set + pyo3 panic belt, refuse-poison gates), the verbatim Python
+  bodies retained as the LIVE parity oracles; FFI = ints + pre-formatted
+  strings only (round_money stays Python; `parse_fno_symbol` never
+  re-implemented; the day crosses pre-isoformat()-ed); refusals fire
+  Python-side pre-FFI with the exact pinned ExportContractError bytes; NO
+  version guard (the #1914 stdlib precedent) — the burn-in + the flag-ON
+  golden corpus are the drift teeth; the crate lives in NO workspace, main
+  CI crate-free — the NEW non-required ops-rust-parity.yml lane builds the
+  wheel, runs the flag-ON golden + hypothesis differential legs behind a
+  HARD wheel-health gate, and re-runs the law suites VERBATIM flag-ON (the
+  non-perturbation leg); the round-1 hostile-review fold landed pre-open
+  (verdict SHIP — 2 MINOR: the lane's no-vacuous-skip gate + the
+  memo-clean golden engagement pin, teeth executed-verified; 2 NIT: the
+  documented lock-free concurrency envelope + repr() on the
+  burn_in_mismatch vendor fields per #907). GATES: cargo 13 unit + 5
+  proptests; rust_seam 172/60 · canonical 75/30 · csv_render 93/36 ALL
+  100.00% on their ci.yml stanzas; the pre-existing crossverify family
+  passes UNMODIFIED with the golden fixtures BYTE-UNTOUCHED; mypy --strict
+  0 new; pyright 0 errors. HONEST: default-OFF ships INERT (a default flip
+  needs its own DEC); payoff ≈ 0 — uniformity, not speed (ADR-0020 banner);
+  the burn-in-16 post-sample divergence envelope stands (#1531/#1892/#1914);
+  the Python↔Rust refusal-code constant sets carry no drift pin —
+  defense-in-depth only, Python authoritative. Named follow-ups:
+  DEC-CROSSVERIFY-RUST-DAYEXPORT-001 (the day_export decision table);
+  oracle deletion is a later lane. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; new env var
+  `BRUTEX_CROSSVERIFY_RUST`. The full record lives in MIGRATION.md #1963 —
+  this blurb is the pointer.)
+  Earlier: `claude/metrics-tails-rust`
+  (**DEC-METRICS-RUST-STATS-002, MIGRATION.md #1962** — slice 6 (Rust
+  Stage-3/4 statistics) PR-2, the metrics-TAILS conversion (entry
+  renumbered #1977 → #1962 at the 2026-07-18 merge-reconcile — #1970–#1990
+  is the coordinator batch-4 reserve, never self-allocated; #1962 = the
+  lowest free number in the clean #1962–#1969 band vs the live main
+  ceiling #1956; DEC-LEDGER-RENUMBER-001 — the DEC-ID is the stable
+  handle): PSR + expected-max Sharpe (SR_0), the
+  PBO/CSCV fold and the WFO walk pass-count re-hosted on `rust/fno-math`
+  (NEW `src/stats/{norm,deflated_sharpe,pbo,wfo}.rs`) behind the SAME
+  landed default-OFF `BRUTEX_STATS_RUST` seam of
+  DEC-METRICS-RUST-STATS-001 (#1928) — per-function burn-in bit-compare
+  (`struct.pack('<d', …)`) + autorevert latch + warn-once, the four
+  Python tails EXTRACTED verbatim into micro-oracles
+  (`_psr_tail`/`_expected_max_tail`/`_cscv_logits`/`_walk_pass_count`)
+  that are BOTH the burn-in comparanda and the forever-retained
+  fallbacks; `brutex/ranking/overfit.py` consumes DSR TRANSITIVELY
+  through deflated_sharpe.py with ZERO edits (the narrowest seam — the
+  "never in ranking/__init__.py" constraint satisfied structurally,
+  transitive-golden-pinned). BIT-EXACTNESS BY PROOF (the acceptance
+  bar — these outputs feed ranking + cascade verdicts): (a) erf = the
+  ONE sanctioned SAME-SYMBOL libm FFI (`norm.rs` binds the process
+  libm's `erf` via one scoped `unsafe extern "C"` under the crate's
+  `#![deny(unsafe_code)]` + SAFETY argument — an fdlibm transcription
+  was REFUTED by measurement (1-ULP off on ~1.1% of 3.5M hostile
+  points; glibc ≥ 2.28 is not fdlibm) while CPython's `math.erf` was
+  PROVEN the same platform symbol (ctypes differential, 0 mismatches),
+  so bit-equality holds BY CONSTRUCTION per platform — fenced at
+  runtime by the burn-in + the ±3-ULP branch-boundary golden pins
+  through the public PSR); (b) inv_cdf = the AS241 transcription from
+  CPython statistics.py, 0 mismatches over 2.5M points; (c) the WFO
+  Sharpe REPLICATES numpy's internal pairwise reduction order
+  (n<8 sequential · ≤128 eight-accumulator · recursive `n2 -= n2 % 8`
+  split; 0/4,000 trials — claim class REPLICATED, a numpy-internal
+  order change autoreverts at burn-in, never drifts); (d) PSR/SR_0/PBO
+  cores are STRUCTURAL op-for-op transcriptions (plain-float tails, no
+  fsum), with the PBO combination cap 2,000,000 (Err → oracle, never an
+  unbounded alloc under `panic=abort`) + the itertools-order
+  lexicographic enumerator + in-crate naive twins + proptest
+  differentials. STRETCH lockbox.py DROPPED + disclosed (cold
+  once-per-run path riding `np.cumsum`/`np.maximum.accumulate` —
+  further numpy-internal orders with no payoff; beside the already-OUT
+  spa.py + monte_carlo.py seeded-PCG64 streams + the cpcv remainder).
+  HARD EXCLUSIONS honored with ZERO edits (open-PR-owned:
+  metrics/compute.py #1605 · cascade.py #1554/#1580 · types.py +
+  ranking/phrases.py #1574 · ranking/__init__.py #1478/#1544 ·
+  tiers/temporal). Seam extension APPEND-ONLY: 4 bindings + the shared
+  exact-type arg/result gates (`_numeric_as_f64` · `_count_as_i64` ·
+  `_flat_exact_floats` · `_valid_float_result`/`_valid_pbo_result`);
+  burn-in budgets psr/sr_max 16 join the pre-registered pbo 4 / wfo 16;
+  handshake same-commit (fenced lib.rs appends · `EXPECTED_BUILD.json`
+  17→21 · `.pyi` · the facade golden `_EXPECTED_SURFACE` +4 — the
+  documented deliberate-surface-change path); the PBO binding engages
+  only on the default `sharpe_from_moments` evaluator (custom
+  evaluators honestly stay Python on both arms, pinned). DISCLOSED
+  DEVIATION: the T12 brief named `BRUTEX_METRICS_TAILS_RUST`; the
+  landed `BRUTEX_STATS_RUST` seam is extended instead (Golden Rule #11
+  COMMON — a rename is a one-constant change if the coordinator
+  overrides). GATES (all executed): cargo fmt/clippy `-D warnings`/test
+  `--release --locked` 636 green; the four touched modules 100.00%
+  line+branch the ci.yml way (rust_stats 348/138 · deflated_sharpe
+  56/20 · pbo 115/46 · wfo 84/26); unit 210+39+20+37 · NEW goldens 12
+  (merge-base-frozen literals, both flags, anti-vacuous engagement) ·
+  NEW hypothesis differential 10 (bit + exception parity over hostile
+  corpora incl. the erf ULP brackets) · facade 4 · neighbors 383
+  unmodified-green; ruff/ruff-format clean; `mypy --strict` 0 new (9
+  pre-existing, stash-diffed); pyright 0 errors on touched files.
+  HONEST: the same-symbol law is PER-PLATFORM (golden-fenced wherever
+  the suite runs); cargo-mutants not re-measured in this sandbox (the
+  binary absent) — `src/stats/*.rs` already sits in the fno-math
+  `examine_globs`, so the weekly mutation matrix covers the new modules
+  automatically; pbo.py/wfo.py stay out of the python mutmut loop
+  (pre-existing scope; rust_stats + deflated_sharpe already paired);
+  NO speedup claimed — the flag ships OFF, a default flip needs its own
+  DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; run identity
+  untouched; no new routes, no new env vars.)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
   scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
   #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1960) →
@@ -11354,7 +11593,61 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-lap8-lake-guards`
+- **Active feature branch:** `claude/brutex-lake-box-wheel`
+  (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1964 — provisional,
+  renumber-at-landing — the brutex-lake wheel joins the operator BOX build
+  path BEST-EFFORT (warn-only `make run-raw` + `bootstrap.sh` blocks;
+  `box_update.WHEEL_SET` gains the optional lake entry so the nightly
+  auto-deploy lane rebuilds it on rust/ deltas — the WHEEL_SET↔Makefile
+  drift pin forces the lockstep) + the crate gains the sibling build stamps
+  (build.rs SOURCE_DIGEST · EXPECTED_BUILD.json ·
+  `__build_crate_version__`/`__source_digest__`; Cargo.lock delta = one
+  dependency edge, byte pin unmoved) + the doctor check set grows 9 → 11
+  with the two OPTIONAL lake wheel stages (absent wheel = advisory WARN,
+  never FAIL; supersedes-IN-PART DEC-DOCTOR-DAILY-CHECKSET-9-001 — the
+  doctor-daily cron asserts the two as deterministic WARN in its hermetic
+  wheel-less env; the PASS arm is proven in the non-required
+  lake-rust-parity lane against the real wheel); build-config + doctor
+  only — every BRUTEX_LAKE_RUST_* seam stays default-OFF, flag-OFF
+  byte-identical; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1964 for the full blurb)
+  Earlier: `claude/crossverify-rust-core`
+  (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #1963 — the cross-verify Rust
+  core, first cut: the pinned CSV byte assembly + the canonical
+  identity/S3-key law re-hosted on the NEW standalone `rust/brutex-ops`
+  crate behind the NEW default-OFF `BRUTEX_CROSSVERIFY_RUST` flag via the
+  NEW facade `brutex/crossverify/rust_seam.py` (sibling-facade shape:
+  handshake + per-law 16-call burn-in with ship-the-oracle autorevert +
+  degrade/panic belts + refuse-poison gates); verbatim Python bodies stay
+  the LIVE parity oracles; FFI = ints + pre-formatted strings only
+  (round_money stays Python, `parse_fno_symbol` never re-implemented);
+  refusals fire Python-side pre-FFI; NO version guard (the #1914 stdlib
+  precedent); built ONLY by the NEW non-required ops-rust-parity.yml lane
+  behind a hard wheel-health gate; the round-1 hostile-review fold landed
+  (SHIP — 2 MINOR + 2 NIT); flag OFF byte-identical (bomb-spy-pinned);
+  payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1963 for the full blurb)
+  Earlier: `claude/metrics-tails-rust`
+  (DEC-METRICS-RUST-STATS-002, MIGRATION.md #1962 — slice 6 PR-2, the
+  metrics-TAILS Rust conversion: PSR + expected-max Sharpe + PBO/CSCV +
+  the WFO walk pass-count on `rust/fno-math` behind the SAME landed
+  default-OFF `BRUTEX_STATS_RUST` seam (burn-in bit-compare + autorevert;
+  Python tails retained forever as the live oracles; overfit.py served
+  TRANSITIVELY with zero edits — no ranking-package touch); bit-exact by
+  proof — the SAME-SYMBOL libm erf FFI (fdlibm transcription
+  measurement-refuted; CPython `math.erf` proven the platform symbol,
+  ULP-bracket golden-pinned), the AS241 inv_cdf transcription (0/2.5M),
+  the numpy-pairwise-REPLICATED WFO sum (0/4,000; burn-in is the fence),
+  STRUCTURAL PSR/SR_0/PBO transcriptions; lockbox stretch DROPPED +
+  disclosed; hard exclusions honored with zero edits (compute.py #1605 ·
+  cascade.py #1554/#1580 · types/phrases #1574 · ranking/__init__.py
+  #1478/#1544); flag ships OFF — flag-OFF byte-identical,
+  bomb-kernel-pinned; no speedup claimed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1962 for the full blurb)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
   the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
   + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md

@@ -36,6 +36,10 @@ __all__ = [
     "count_supermasks_u128s",
     "popcount_bytes",
     "stats_cpcv_pass_count",
+    "stats_expected_max_sharpe",
+    "stats_pbo_cscv",
+    "stats_psr",
+    "stats_wfo_pass_count",
 ]
 
 __version__: str
@@ -154,6 +158,71 @@ def stats_cpcv_pass_count(
     (claim class STRUCTURAL). Raises `ValueError` on a structurally invalid
     input (length mismatch, `n_groups < 2`, `n_test_groups` out of
     `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
+    `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
+    ...
+
+def stats_expected_max_sharpe(n_trials: int, trial_sharpe_variance: float) -> float:
+    """Expected maximum Sharpe `SR_0` of `n_trials` zero-edge trials
+    (DEC-METRICS-RUST-STATS-002).
+
+    The operation-for-operation transcription of
+    `brutex.metrics.deflated_sharpe.expected_max_sharpe_ratio`'s tail (two
+    AS241 standard-normal quantiles + the Gumbel combination). Raises
+    `ValueError` on a domain-invalid input or on the `inv_cdf` raise domain
+    (`1 - 1/N` rounding to 1.0 at astronomical `N`); the
+    `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
+    ...
+
+def stats_pbo_cscv(
+    block_sum: list[float],
+    block_sumsq: list[float],
+    n_splits: int,
+    n_strat: int,
+    is_count: int,
+) -> tuple[int, list[float]]:
+    """CSCV split-enumeration logit loop (DEC-METRICS-RUST-STATS-002).
+
+    `block_sum`/`block_sumsq` are `brutex.metrics.pbo._block_moments`'s
+    per-block per-strategy moment matrices flattened row-major. Returns
+    `(overfit_count, logits)` in `itertools.combinations` split order —
+    the exact `pbo_probability` loop with the default `sharpe_from_moments`
+    evaluator, operation-for-operation. Raises `ValueError` on a
+    structurally invalid input or past the C(n_splits, S/2) combination cap;
+    the `brutex.metrics.rust_stats` seam routes any error to the oracle.
+    """
+    ...
+
+def stats_psr(
+    observed_sharpe: float,
+    benchmark_sharpe: float,
+    sample_length: int,
+    skew: float,
+    kurtosis: float,
+) -> float:
+    """Probabilistic Sharpe Ratio `PSR(SR*)` (DEC-METRICS-RUST-STATS-002).
+
+    The transcription of
+    `brutex.metrics.deflated_sharpe.probabilistic_sharpe_ratio`'s tail,
+    with `erf` bound to the SAME system-libm symbol CPython's `math.erf`
+    calls. Raises `ValueError` on a domain-invalid input (structurally
+    unreachable behind the Python validation); the seam routes any error to
+    the Python oracle.
+    """
+    ...
+
+def stats_wfo_pass_count(
+    returns: list[float],
+    test_starts: list[int],
+    test_stops: list[int],
+    min_sharpe: float,
+) -> int:
+    """Walk-forward test-window pass-count (DEC-METRICS-RUST-STATS-002).
+
+    Counts walks whose test-window Sharpe (the numpy-pairwise-REPLICATED
+    `sharpe_of_returns` mirror) is defined and STRICTLY greater than
+    `min_sharpe`. Raises `ValueError` on a structurally invalid window; the
     `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
     """
     ...

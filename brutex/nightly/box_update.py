@@ -272,16 +272,25 @@ class WheelSpec:
 
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
-#: target's build list (Makefile:90-105: fno-math, trading-core, brutex-feed;
-#: brutex-lake ABSENT — coordinator policy, excluded pending
-#: DEC-BRUTEX-LAKE-BOX-WHEEL-001), drift-pinned by a test that PARSES the
+#: target's build list (fno-math, trading-core, brutex-feed, brutex-lake;
+#: brutex-lake is now PRESENT per DEC-BRUTEX-LAKE-BOX-WHEEL-001 — the same
+#: DEC added its best-effort ``make run-raw`` + ``bootstrap.sh`` build
+#: blocks, so the nightly auto-deploy lane rebuilds it on rust/ deltas),
+#: drift-pinned by a test that PARSES the
 #: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
 #: equality (§10 test 16).  Runtime behavior stays a deterministic constant
 #: (the lane must run mid-update on a possibly-broken tree); CI catches drift.
+#: The gate's ``_DIGEST_CHECKS``/``_CHECK_TO_WHEEL`` deliberately still map
+#: only the two REQUIRED wheels (the brutex_feed precedent: an optional
+#: wheel's ``digest_ok`` stays ``None``; the gate subprocess calls the four
+#: required-wheel doctor checks by literal name, never ``run_doctor``) — the
+#: new lake doctor stages (``wheel_freshness_brutex_lake`` /
+#: ``wheel_source_digest_brutex_lake``) do NOT join the gate.
 WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
+    WheelSpec("brutex_lake", "rust/brutex-lake", required=False),
 )
 
 

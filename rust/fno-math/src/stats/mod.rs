@@ -2,10 +2,16 @@
 //!
 //! Rust ports of the measured-hot PURE-PYTHON loops inside the Stage-3/4
 //! statistical-validity filters (`brutex/metrics/`). Scope law: Python keeps
-//! every numpy pairwise reduction, every libm call (`log`, `pow`, `erf`),
-//! all validation and every user-facing raise; Rust runs only the
+//! all validation and every user-facing raise; Rust runs the
 //! sequential/integer heavy loops whose operation order the PYTHON SOURCE
-//! ITSELF fixes. Each kernel is dispatched behind the default-OFF
+//! ITSELF fixes. PR-2 (DEC-METRICS-RUST-STATS-002) amends the original
+//! "Python keeps every numpy pairwise reduction and every libm call" clause
+//! with two proven-safe exceptions: `log`/`exp` lower to the SAME libm
+//! symbols CPython calls (no transcription exists to drift), `erf` is BOUND
+//! to that same symbol ([`norm`]'s FFI law — a transcription was MEASURED
+//! non-bit-exact on glibc ≥ 2.28), and the ONE numpy pairwise reduction
+//! shipped ([`wfo`]) is a REPLICATED mirror of numpy's own pairwise_sum,
+//! probe-proven + burn-in-fenced. Each kernel is dispatched behind the default-OFF
 //! `BRUTEX_STATS_RUST` flag through the `brutex.metrics.rust_stats` seam
 //! (burn-in self-check + autorevert latch), and the pure-Python originals
 //! are RETAINED FOREVER as the independent parity oracles (operator
@@ -31,6 +37,15 @@
 //! compiled); claiming otherwise is FORBIDDEN. Per-call FFI copies are
 //! disclosed on each `#[pyfunction]`.
 //!
-//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1).
+//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1);
+//! [`norm`] — shared standard-normal numerics (system-libm `erf` + the
+//! AS241 inverse-CDF transcription); [`deflated_sharpe`] — the PSR + SR_0
+//! DSR kernels; [`pbo`] — the CSCV split-enumeration logit loop; [`wfo`] —
+//! the walk-forward pass-count with the numpy-pairwise REPLICATED mean
+//! (all PR-2, DEC-METRICS-RUST-STATS-002).
 
 pub mod cpcv;
+pub mod deflated_sharpe;
+pub mod norm;
+pub mod pbo;
+pub mod wfo;

@@ -11,6 +11,17 @@ never disable a future ``pbo`` kernel and vice versa). PR-1 ships ONE binding:
 Chan/Pébay fold loop of :func:`brutex.metrics.cpcv.cpcv_pass_rate` (claim
 class STRUCTURAL: the float op order is fixed by the Python source itself,
 transcribed operation-for-operation in ``rust/fno-math/src/stats/cpcv.rs``).
+PR-2 (DEC-METRICS-RUST-STATS-002 — the stats-tails continuation) APPENDS
+four more bindings on the same per-function machinery:
+:func:`psr_via_kernel` + :func:`expected_max_sharpe_via_kernel` (the DSR
+pair of :mod:`brutex.metrics.deflated_sharpe` — STRUCTURAL transcription
+with ``erf`` bound to the SAME system-libm symbol CPython's ``math.erf``
+calls and the AS241 inverse-CDF transcribed from the CPython source; the
+``rust/fno-math/src/stats/norm.rs`` law), :func:`pbo_cscv_via_kernel` (the
+CSCV split-enumeration logit loop of :mod:`brutex.metrics.pbo` —
+STRUCTURAL) and :func:`wfo_pass_count_via_kernel` (the per-walk test-window
+Sharpe of :mod:`brutex.metrics.wfo` — REPLICATED: the numpy pairwise
+reduction mirrored, probe-proven per platform, burn-in-fenced).
 
 ## The flag — ``BRUTEX_STATS_RUST`` over ``STATS_RUST_DEFAULT``
 
@@ -141,12 +152,13 @@ from __future__ import annotations
 
 import math
 import os
+import struct
 from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     import numpy as np
     import numpy.typing as npt
@@ -182,6 +194,11 @@ SELF_CHECK_SAMPLES: Final[Mapping[str, int]] = {
     "pbo": 4,
     "spa": 2,
     "wfo": 16,
+    # DEC-METRICS-RUST-STATS-002 (PR-2): the DSR pair — cheap (~µs) scalar
+    # oracles at high call cadence (once per leaderboard candidate), so the
+    # cpcv-class K=16 budget applies to both.
+    "psr": 16,
+    "sr_max": 16,
 }
 
 #: Memo key suffix for the per-function engaged-once INFO (namespaced apart
@@ -765,15 +782,472 @@ def cpcv_pass_count_via_kernel(
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# DEC-METRICS-RUST-STATS-002 (slice 6, PR-2 — the stats tails). APPENDED
+# bindings mirroring the cpcv PR-1 pattern per function: latch check →
+# input exact-type/exactness gates → lazy kernel resolve → NARROW-catch FFI
+# call → exact-type result domain validation → burn-in bit-compare with
+# ship-the-oracle autorevert → engaged-once. The cpcv binding above is
+# byte-untouched (its inline ``min_sharpe`` gate predates the shared
+# :func:`_numeric_as_f64` law below; the unit suite cross-pins the two
+# behaviorally equal so they can never drift — folding the inline copy onto
+# the helper is deliberately NOT done here, the append-only discipline).
+# ─────────────────────────────────────────────────────────────────────────
+
+#: i64 range ceiling for integer FFI arguments (PyO3 converts to Rust i64;
+#: a larger exact int would raise OverflowError at the boundary — the gates
+#: refuse it pre-call instead so the oracle serves).
+_I64_MAX: Final[int] = 2**63 - 1
+
+#: The PBO combination cap — mirrors the kernel-side
+#: ``stats::pbo::PBO_MAX_COMBINATIONS`` (a larger split enumeration would
+#: allocate an unbounded logits Vec under ``panic = "abort"``; the seam
+#: refuses FIRST so the interruptible Python oracle serves the shape —
+#: behavior identical to flag-OFF). Production is C(16, 8) = 12,870.
+_PBO_MAX_COMBINATIONS: Final[int] = 2_000_000
+
+
+def _f64_bits(value: float) -> bytes:
+    """The burn-in compare unit for float results: the raw IEEE-754 bit
+    pattern (``struct.pack('<d', …)``) — signed zeros and NaN payloads
+    distinguished exactly (the rust_metrics burn-in convention). Callers
+    pass values already proven exact-type ``float`` by the result gates."""
+    return struct.pack("<d", value)
+
+
+def _numeric_as_f64(fn: str, value: float, *, arg: str) -> float | None:
+    """The exact-TYPE + value-exactness numeric-argument law, generalized
+    from the cpcv binding's inline ``min_sharpe`` gate (refuter rounds
+    1-4 of PR-1 — see :func:`cpcv_pass_count_via_kernel`'s in-body notes;
+    the unit suite cross-pins the two equal). Annotated ``float`` but the
+    PEP-484 numeric tower + hostile callers deliver ints / subclasses /
+    foreign objects at runtime:
+
+    * exact-type ``float``: engages unless NaN (NaN refuses to the oracle
+      — for a threshold slot the oracle's ``> NaN`` semantics must own the
+      call; for a value slot the refusal is a conservative, disclosed
+      narrowing — ON≡OFF either way);
+    * exact ``int`` / ``bool``: engages IFF ``float()`` is value-exact
+      (OverflowError caught into the refusal, never raised);
+    * ANY other type: ``arg_foreign_type`` refusal — the oracle applies the
+      ORIGINAL object's own arithmetic/comparison semantics identically on
+      both arms (exact value AND exception parity).
+
+    Every warn context rides the total, bounded helpers (the round-3/4
+    context-totality law — enforced by the unit suite's AST pin).
+    """
+    vt: type[object] = type(value)
+    if vt is float:
+        if math.isnan(value):
+            warn_fallback_once(fn, "arg_inexact", arg=arg, value=_inexact_threshold_context(value))
+            return None
+        return value
+    if vt is int or vt is bool:
+        try:
+            as_f = float(value)
+        except OverflowError:
+            warn_fallback_once(fn, "arg_inexact", arg=arg, value=_inexact_threshold_context(value))
+            return None
+        if as_f != value:
+            warn_fallback_once(fn, "arg_inexact", arg=arg, value=_inexact_threshold_context(value))
+            return None
+        return as_f
+    warn_fallback_once(fn, "arg_foreign_type", arg=arg, value_type=_bounded_text(_type_name(vt)))
+    return None
+
+
+def _count_as_i64(fn: str, value: object, *, arg: str, minimum: int) -> int | None:
+    """Exact-type integer-argument gate for the i64 FFI slots.
+
+    Engages ONLY an exact ``int`` (or ``bool`` — the unsubclassable exact
+    int subtype, the cpcv precedent) inside ``[minimum, 2**63 - 1]``; every
+    other shape — a float-typed count, an int subclass, a foreign object,
+    an out-of-range value — refuses to the oracle, which applies the
+    original object's own semantics on both arms.
+    """
+    vt: type[object] = type(value)
+    if not isinstance(value, int) or (vt is not int and vt is not bool):
+        # ``isinstance`` narrows for the type checker; the exact-type clause
+        # is the actual law (an int SUBCLASS is still refused — its foreign
+        # dunders must keep owning the call on both arms).
+        warn_fallback_once(
+            fn, "arg_foreign_type", arg=arg, value_type=_bounded_text(_type_name(vt))
+        )
+        return None
+    as_int = int(value)  # exact int/bool proven above — normalizes bool → int
+    if as_int < minimum or as_int > _I64_MAX:
+        warn_fallback_once(fn, "arg_unsupported", arg=arg, value=_safe_context(value))
+        return None
+    return as_int
+
+
+def _flat_exact_floats(fn: str, rows: Sequence[Sequence[float]], *, arg: str) -> list[float] | None:
+    """Row-major flatten of a moments matrix, gated exact-type ``float``.
+
+    ``_block_moments`` rows are exact floats by construction (``0.0 +``
+    accumulation), so the production path always engages; a hostile
+    float-SUBCLASS entry (whose reflected ops could have poisoned the
+    accumulation into arbitrary objects) refuses to the oracle. O(S·N) —
+    the same order as the FFI copy it precedes, disclosed on the binding.
+    """
+    flat: list[float] = []
+    for row in rows:
+        for value in row:
+            vt: type[object] = type(value)
+            if vt is not float:
+                warn_fallback_once(
+                    fn, "arg_foreign_type", arg=arg, value_type=_bounded_text(_type_name(vt))
+                )
+                return None
+            flat.append(value)
+    return flat
+
+
+def _refuse_result_once(fn: str, result: object) -> None:
+    """Log ``rust_stats.kernel_result_refused`` (ERROR) once per function.
+
+    The output-side refuse-poison logging shared by the PR-2 bindings (the
+    cpcv binding carries its own inline copy — append-only discipline).
+    The refused object is KERNEL-controlled — its context rides the total,
+    bounded :func:`_safe_context`.
+    """
+    key = f"{fn}:kernel_result_refused"
+    if key not in _OBSERVABILITY_MEMO:
+        _OBSERVABILITY_MEMO.add(key)
+        _LOG.error("rust_stats.kernel_result_refused", fn=fn, result=_safe_context(result))
+
+
+def _valid_float_result(result: object) -> TypeGuard[float]:
+    """Exact-type ``float`` result gate (the output-side twin of the input
+    law): a byzantine wheel returning a float SUBCLASS is refused before
+    any comparison can dispatch its foreign ordering; the real kernels
+    return exact PyO3 ``f64`` → ``float``. NO range/finiteness demand —
+    a legitimately-NaN result (e.g. a NaN-variance SR_0) must flow, and
+    wrongness inside the domain is the burn-in compare's layer."""
+    return type(result) is float
+
+
+#: The PBO kernel's result arity — exactly ``(overfit_count, logits)``.
+_PBO_RESULT_ARITY: Final = 2
+
+
+def _valid_pbo_result(result: object, n_total: int) -> TypeGuard[tuple[int, list[float]]]:
+    """Domain validation of the PBO kernel's ``(overfit_count, logits)``.
+
+    Exact-type ``tuple`` of length 2; ``overfit_count`` an exact ``int`` in
+    ``[0, n_total]``; ``logits`` an exact ``list`` of exactly ``n_total``
+    exact-type ``float`` entries. O(n_total) — the same order as the fold
+    work it validates.
+    """
+    if type(result) is not tuple or len(result) != _PBO_RESULT_ARITY:
+        return False
+    count, logits = result
+    if type(count) is not int or not 0 <= count <= n_total:
+        return False
+    if type(logits) is not list or len(logits) != n_total:
+        return False
+    return all(type(value) is float for value in logits)
+
+
+def psr_via_kernel(
+    observed_sharpe: float,
+    benchmark_sharpe: float,
+    sample_length: int,
+    skew: float,
+    kurtosis: float,
+    *,
+    oracle: Callable[[], float],
+) -> float | None:
+    """Run the Rust PSR kernel; ``None`` ⇒ use the Python oracle.
+
+    The ONE FFI call site for the ``psr`` binding
+    (``fno_math.stats_psr`` — DEC-METRICS-RUST-STATS-002). Inputs arrive
+    PRE-VALIDATED by :func:`brutex.metrics.deflated_sharpe.
+    probabilistic_sharpe_ratio` (finite floats, ``sample_length >= 2``,
+    radicand > 0 — every raise stays Python-side); *oracle* is the
+    extracted ``_psr_tail`` closed over the same inputs. The four numeric
+    arguments ride :func:`_numeric_as_f64` and ``sample_length`` rides
+    :func:`_count_as_i64` — a foreign-typed / inexact argument refuses to
+    the oracle (original-object semantics on both arms). Kernel errors
+    take the NARROW catch (ValueError / TypeError / OverflowError);
+    ``MemoryError`` and every other type propagate (the global-stop law).
+    Burn-in compares the raw f64 BIT PATTERN (:func:`_f64_bits` — signed
+    zeros/NaN payloads exact); a mismatch ships the ORACLE value and
+    latches this function's kernel.
+
+    FFI cost (disclosed): five scalars per call — nil.
+    """
+    fn = "psr"
+    if kernel_disabled(fn):
+        warn_fallback_once(fn, "kernel_disabled")
+        return None
+    observed_f = _numeric_as_f64(fn, observed_sharpe, arg="observed_sharpe")
+    if observed_f is None:
+        return None
+    benchmark_f = _numeric_as_f64(fn, benchmark_sharpe, arg="benchmark_sharpe")
+    if benchmark_f is None:
+        return None
+    skew_f = _numeric_as_f64(fn, skew, arg="skew")
+    if skew_f is None:
+        return None
+    kurtosis_f = _numeric_as_f64(fn, kurtosis, arg="kurtosis")
+    if kurtosis_f is None:
+        return None
+    length_i = _count_as_i64(fn, sample_length, arg="sample_length", minimum=2)
+    if length_i is None:
+        return None
+    kernel = _resolve_kernel(fn, "stats_psr")
+    if kernel is None:
+        return None
+    try:
+        result = kernel(observed_f, benchmark_f, length_i, skew_f, kurtosis_f)
+    except (ValueError, TypeError, OverflowError) as exc:
+        warn_fallback_once(fn, "kernel_error", error=_safe_context(exc))
+        return None
+    if not _valid_float_result(result):
+        _refuse_result_once(fn, result)
+        return None
+    if _self_check_pending(fn):
+        expected = oracle()
+        if _f64_bits(result) != _f64_bits(expected):
+            disable_kernel(
+                fn,
+                "self_check_mismatch",
+                got=_safe_context(result),
+                want=_safe_context(expected),
+            )
+            return expected
+        _consume_self_check_sample(fn)
+    _log_engaged_once(fn)
+    return result
+
+
+def expected_max_sharpe_via_kernel(
+    n_trials: int,
+    trial_sharpe_variance: float,
+    *,
+    oracle: Callable[[], float],
+) -> float | None:
+    """Run the Rust expected-max-Sharpe (``SR_0``) kernel; ``None`` ⇒ Python.
+
+    The ONE FFI call site for the ``sr_max`` binding
+    (``fno_math.stats_expected_max_sharpe``). The caller dispatches only
+    AFTER its ``n_trials == 1`` early return, so ``minimum=2`` here; a NaN
+    ``trial_sharpe_variance`` (which legitimately flows to a NaN ``SR_0``
+    on both engines) is a conservative :func:`_numeric_as_f64` refusal to
+    the oracle — a disclosed narrowing, ON≡OFF either way. A kernel
+    ``ValueError`` from the AS241 raise domain (``1 - 1/N`` rounding to
+    1.0 at astronomical ``N``) refuses to the oracle, which raises the
+    identical ``StatisticsError`` — exception parity by construction.
+
+    FFI cost (disclosed): two scalars per call — nil.
+    """
+    fn = "sr_max"
+    if kernel_disabled(fn):
+        warn_fallback_once(fn, "kernel_disabled")
+        return None
+    trials_i = _count_as_i64(fn, n_trials, arg="n_trials", minimum=2)
+    if trials_i is None:
+        return None
+    variance_f = _numeric_as_f64(fn, trial_sharpe_variance, arg="trial_sharpe_variance")
+    if variance_f is None:
+        return None
+    kernel = _resolve_kernel(fn, "stats_expected_max_sharpe")
+    if kernel is None:
+        return None
+    try:
+        result = kernel(trials_i, variance_f)
+    except (ValueError, TypeError, OverflowError) as exc:
+        warn_fallback_once(fn, "kernel_error", error=_safe_context(exc))
+        return None
+    if not _valid_float_result(result):
+        _refuse_result_once(fn, result)
+        return None
+    if _self_check_pending(fn):
+        expected = oracle()
+        if _f64_bits(result) != _f64_bits(expected):
+            disable_kernel(
+                fn,
+                "self_check_mismatch",
+                got=_safe_context(result),
+                want=_safe_context(expected),
+            )
+            return expected
+        _consume_self_check_sample(fn)
+    _log_engaged_once(fn)
+    return result
+
+
+def pbo_cscv_via_kernel(
+    block_sum: Sequence[Sequence[float]],
+    block_sumsq: Sequence[Sequence[float]],
+    *,
+    n_splits: int,
+    n_strat: int,
+    is_count: int,
+    n_total: int,
+    evaluator_is_default: bool,
+    oracle: Callable[[], tuple[int, list[float]]],
+) -> tuple[int, list[float]] | None:
+    """Run the Rust CSCV logit-loop kernel; ``None`` ⇒ use the Python oracle.
+
+    The ONE FFI call site for the ``pbo`` binding
+    (``fno_math.stats_pbo_cscv``). *block_sum*/*block_sumsq* are the
+    per-block moment rows ``_block_moments`` computed (Python stays the
+    moments producer — the cpcv seam-boundary ruling); *n_total* is
+    ``math.comb(n_splits, n_splits // 2)`` for domain validation and the
+    combination cap; *evaluator_is_default* is ``evaluator is
+    sharpe_from_moments`` — a CUSTOM evaluator callable refuses
+    (``custom_evaluator``) because only the default statistic is
+    transcribed. Beyond :data:`_PBO_MAX_COMBINATIONS` the seam refuses
+    pre-call (``combination_cap``) so the kernel's logits allocation can
+    never abort under ``panic = "abort"`` — the interruptible oracle
+    serves, behavior identical to flag-OFF. Burn-in compares the overfit
+    COUNT (``==``) and EVERY logit's raw bit pattern.
+
+    FFI cost (disclosed): two ``O(n_splits · n_strat)`` flatten+copy passes
+    in, one ``O(n_total)`` logits list out — bounded by the fold work
+    either engine performs.
+    """
+    fn = "pbo"
+    if kernel_disabled(fn):
+        warn_fallback_once(fn, "kernel_disabled")
+        return None
+    if not evaluator_is_default:
+        warn_fallback_once(fn, "custom_evaluator")
+        return None
+    if n_total > _PBO_MAX_COMBINATIONS:
+        warn_fallback_once(fn, "combination_cap")
+        return None
+    splits_i = _count_as_i64(fn, n_splits, arg="n_splits", minimum=2)
+    if splits_i is None:
+        return None
+    strat_i = _count_as_i64(fn, n_strat, arg="n_strat", minimum=2)
+    if strat_i is None:
+        return None
+    count_i = _count_as_i64(fn, is_count, arg="is_count", minimum=1)
+    if count_i is None:
+        return None
+    flat_sum = _flat_exact_floats(fn, block_sum, arg="block_sum")
+    if flat_sum is None:
+        return None
+    flat_sumsq = _flat_exact_floats(fn, block_sumsq, arg="block_sumsq")
+    if flat_sumsq is None:
+        return None
+    kernel = _resolve_kernel(fn, "stats_pbo_cscv")
+    if kernel is None:
+        return None
+    try:
+        result = kernel(flat_sum, flat_sumsq, splits_i, strat_i, count_i)
+    except (ValueError, TypeError, OverflowError) as exc:
+        warn_fallback_once(fn, "kernel_error", error=_safe_context(exc))
+        return None
+    if not _valid_pbo_result(result, n_total):
+        _refuse_result_once(fn, result)
+        return None
+    if _self_check_pending(fn):
+        expected = oracle()
+        got_count, got_logits = result
+        expected_count, expected_logits = expected
+        mismatch = (
+            got_count != expected_count
+            or len(got_logits) != len(expected_logits)
+            or any(
+                _f64_bits(got) != _f64_bits(want)
+                for got, want in zip(got_logits, expected_logits, strict=True)
+            )
+        )
+        if mismatch:
+            disable_kernel(
+                fn,
+                "self_check_mismatch",
+                got=_safe_context(result),
+                want=_safe_context(expected),
+            )
+            return expected
+        _consume_self_check_sample(fn)
+    _log_engaged_once(fn)
+    return result
+
+
+def wfo_pass_count_via_kernel(
+    returns: npt.NDArray[np.float64],
+    test_starts: Sequence[int],
+    test_stops: Sequence[int],
+    min_sharpe: float,
+    *,
+    n_walks: int,
+    oracle: Callable[[], int],
+) -> int | None:
+    """Run the Rust WFO pass-count kernel; ``None`` ⇒ use the Python oracle.
+
+    The ONE FFI call site for the ``wfo`` binding
+    (``fno_math.stats_wfo_pass_count`` — the numpy-pairwise REPLICATED
+    per-walk Sharpe, the mod.rs claim taxonomy). *returns* is the
+    already-validated float64 array ``wfo_pass_rate`` built;
+    *test_starts*/*test_stops* are the walks' half-open test windows
+    (internal ints from ``walk_forward_splits``); *min_sharpe* rides the
+    SAME exact-type threshold law as the cpcv binding via
+    :func:`_numeric_as_f64` (NaN → the oracle's ``> NaN`` all-non-pass
+    semantics, foreign types → original-object comparison semantics on
+    both arms); *n_walks* bounds the result domain (the reused
+    :func:`_valid_pass_count` law).
+
+    FFI cost (disclosed): one ``O(n)`` returns copy + two ``O(walks)``
+    bound lists per call — bounded by the ``O(Σ window sizes)`` Sharpe
+    work either engine performs.
+    """
+    fn = "wfo"
+    if kernel_disabled(fn):
+        warn_fallback_once(fn, "kernel_disabled")
+        return None
+    min_sharpe_f = _numeric_as_f64(fn, min_sharpe, arg="min_sharpe")
+    if min_sharpe_f is None:
+        return None
+    kernel = _resolve_kernel(fn, "stats_wfo_pass_count")
+    if kernel is None:
+        return None
+    try:
+        result = kernel(
+            [float(x) for x in returns],
+            [int(x) for x in test_starts],
+            [int(x) for x in test_stops],
+            min_sharpe_f,
+        )
+    except (ValueError, TypeError, OverflowError) as exc:
+        warn_fallback_once(fn, "kernel_error", error=_safe_context(exc))
+        return None
+    if not _valid_pass_count(result, n_walks):
+        _refuse_result_once(fn, result)
+        return None
+    if _self_check_pending(fn):
+        expected = oracle()
+        if result != expected:
+            disable_kernel(
+                fn,
+                "self_check_mismatch",
+                got=_safe_context(result),
+                want=_safe_context(expected),
+            )
+            return expected
+        _consume_self_check_sample(fn)
+    _log_engaged_once(fn)
+    return result
+
+
 __all__ = [
     "SELF_CHECK_SAMPLES",
     "STATS_RUST_DEFAULT",
     "STATS_RUST_ENV",
     "cpcv_pass_count_via_kernel",
     "disable_kernel",
+    "expected_max_sharpe_via_kernel",
     "kernel_disabled",
+    "pbo_cscv_via_kernel",
+    "psr_via_kernel",
     "reset_observability_memo_for_tests",
     "reset_self_check_for_tests",
     "stats_rust_enabled",
     "warn_fallback_once",
+    "wfo_pass_count_via_kernel",
 ]

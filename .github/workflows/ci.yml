@@ -1070,8 +1070,17 @@ jobs:
           # drives the publisher — boto3 stays OUT of CI).
           if compgen -G "tests/unit/test_crossverify_config.py" > /dev/null; then
             pytest --cov=brutex.crossverify.config       --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_config.py
-            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py
-            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py
+            # DEC-CROSSVERIFY-RUST-CORE: the two routed law modules gain a
+            # STEM-MATCHED Rust-arm suite beside their own UNMODIFIED file
+            # (test_crossverify_<module>_rust_arm.py — the flag-ON wiring
+            # branches), so the auto-discovery gate's stem mapping and this
+            # static stanza measure the SAME union at 100% line+branch.
+            pytest --cov=brutex.crossverify.canonical    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_canonical.py tests/unit/test_crossverify_canonical_rust_arm.py
+            pytest --cov=brutex.crossverify.csv_render   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_csv_render.py tests/unit/test_crossverify_csv_render_rust_arm.py
+            # DEC-CROSSVERIFY-RUST-CORE: the default-OFF Rust seam facade —
+            # 100% line+branch STANDALONE on crate-free fakes (the REAL-wheel
+            # arms live in the non-required ops-rust-parity lane).
+            pytest --cov=brutex.crossverify.rust_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_rust_seam.py
             pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
             pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
             pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py

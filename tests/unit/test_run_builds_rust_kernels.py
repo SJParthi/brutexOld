@@ -130,11 +130,15 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
     # through the import-guarded facade brutex/data/lake_rust_render.py
     # (`importlib.import_module("brutex_lake")` inside the guard — an absent
     # or broken install latches the flag OFF with one loud WARN and the
-    # Python render serves, byte-identical). It is deliberately NOT a build
-    # prerequisite: in NO cargo workspace, built ONLY by its own CI lane
-    # (.github/workflows/lake-rust-parity.yml). A module-top
-    # `import brutex_lake` anywhere in brutex/ would make a clean clone
-    # crash-prone again — the inverse pin below forbids exactly that.
+    # Python render serves, byte-identical). It stays OPTIONAL (never a
+    # build PREREQUISITE — a build failure must not brick the box) but since
+    # DEC-BRUTEX-LAKE-BOX-WHEEL-001 it IS in the turnkey build path
+    # BEST-EFFORT (warn-only `make run-raw` + `bootstrap.sh` blocks —
+    # pinned by BOX_BUILT_OPTIONAL_KERNELS below); in NO cargo workspace,
+    # gated by its own CI lane (.github/workflows/lake-rust-parity.yml).
+    # A module-top `import brutex_lake` anywhere in brutex/ would make a
+    # clean clone crash-prone again — the inverse pin below forbids exactly
+    # that.
     "brutex_lake": (
         "brutex/data/lake_rust_render.py",
         ".github/workflows/lake-rust-parity.yml",
@@ -195,6 +199,91 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
 REQUIRED_KERNELS = {
     name: crate_dir for name, crate_dir in KERNELS.items() if name not in OPTIONAL_KERNELS
 }
+
+# OPTIONAL kernels that are ALSO in the turnkey build path BEST-EFFORT
+# (DEC-BRUTEX-LAKE-BOX-WHEEL-001): `make run-raw` + `bootstrap.sh` build them
+# in the default path with a warn-only failure arm (the brutex_feed shape —
+# `{ cd rust/<crate> && … maturin develop --release; } || echo/_warn`), so a
+# broken toolchain / no-network box still boots while every healthy
+# `make setup` / `make run-raw` produces the wheel. The build-vs-WHEEL_SET
+# coupling is separately drift-pinned by
+# tests/unit/test_nightly_box_update.py::test_wheel_set_is_the_makefile_mirror.
+BOX_BUILT_OPTIONAL_KERNELS: dict[str, str] = {
+    "brutex_lake": "rust/brutex-lake",
+}
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
+def test_box_built_optional_kernel_is_registered_optional(import_name: str, crate_dir: str) -> None:
+    """The box-built set is a SUBSET of OPTIONAL_KERNELS with matching dirs."""
+    assert import_name in OPTIONAL_KERNELS, (
+        f"{import_name} is box-built best-effort but not registered OPTIONAL — "
+        "either register it (import-guarded facade + CI lane) or promote it to "
+        "the required class."
+    )
+    assert KERNELS.get(import_name) == crate_dir.removeprefix("rust/"), (
+        f"BOX_BUILT_OPTIONAL_KERNELS maps {import_name} to {crate_dir} but the "
+        "maturin crate discovery disagrees — fix the stale registration."
+    )
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
+def test_make_run_raw_builds_optional_kernel(import_name: str, crate_dir: str) -> None:
+    """``make run-raw`` builds the optional kernel BEST-EFFORT (warn-only).
+
+    DEC-BRUTEX-LAKE-BOX-WHEEL-001: the block must carry the feed-template
+    shape — the ``import`` probe, ``cd rust/<crate> … maturin develop``, AND
+    the ``|| echo`` warn-only arm AFTER the maturin invocation (a failure
+    warns, never aborts the box boot — the seams are default-OFF and every
+    facade degrades to the Python law).
+    """
+    run_body = _make_target_body(MAKEFILE.read_text(encoding="utf-8"), "run-raw")
+    assert f"import {import_name}" in run_body, (
+        f"Makefile `run-raw` never probes `import {import_name}` — the optional "
+        f"kernel is no longer box-built (DEC-BRUTEX-LAKE-BOX-WHEEL-001)."
+    )
+    assert crate_dir in run_body and "maturin" in run_body, (
+        f"Makefile `run-raw` never builds {crate_dir} via maturin."
+    )
+    # Warn-only shape: `|| echo` must follow the crate's maturin invocation
+    # (the same after-maturin reading test_wheel_set_is_the_makefile_mirror's
+    # run-raw parser applies — required = NOT warn-only).
+    block = run_body.split(f"cd {crate_dir}", 1)
+    assert len(block) == 2, f"no `cd {crate_dir}` in the run-raw recipe"
+    after_maturin = block[1].split("maturin", 1)
+    assert len(after_maturin) == 2, f"no maturin invocation after `cd {crate_dir}`"
+    assert "|| echo" in after_maturin[1], (
+        f"the {crate_dir} run-raw block is not warn-only (`|| echo` after "
+        "maturin) — a build failure would abort the box boot; the optional "
+        "kernel must stay best-effort."
+    )
+
+
+@pytest.mark.parametrize(("import_name", "crate_dir"), sorted(BOX_BUILT_OPTIONAL_KERNELS.items()))
+def test_bootstrap_builds_optional_kernel(import_name: str, crate_dir: str) -> None:
+    """``bootstrap.sh`` builds the optional kernel BEST-EFFORT (warn-only)."""
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    assert f"import {import_name}" in bootstrap, (
+        f"bootstrap.sh never probes `import {import_name}` — the optional "
+        f"kernel is no longer box-built (DEC-BRUTEX-LAKE-BOX-WHEEL-001)."
+    )
+    assert crate_dir in bootstrap and "maturin" in bootstrap, (
+        f"bootstrap.sh never builds {crate_dir} via maturin."
+    )
+    # Warn-only shape: the failure arm is `_warn` (never `_err` + `exit 1` —
+    # the required-kernel steps' abort shape) inside the kernel's own step.
+    step = bootstrap.split(f"cd {crate_dir}", 1)
+    assert len(step) == 2, f"no `cd {crate_dir}` in bootstrap.sh"
+    failure_arm = step[1].split("fi", 2)[0]
+    assert "_warn" in failure_arm, (
+        f"the {crate_dir} bootstrap step is not warn-only (`_warn` on build "
+        "failure) — a failure would abort bootstrap; the optional kernel must "
+        "stay best-effort."
+    )
+    assert "_err" not in failure_arm, (
+        f"the {crate_dir} bootstrap step carries the abort-shape `_err` — the "
+        "optional kernel must warn, never abort."
+    )
 
 
 def test_known_kernels_are_discovered() -> None:

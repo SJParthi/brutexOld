@@ -70,6 +70,11 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Final
 
+# The slice-6 Rust-statistics seam (DEC-METRICS-RUST-STATS-002). Imports only
+# stdlib + structlog at module scope (its engine-flag import is lazy — no
+# import-time cycle; the cpcv.py precedent).
+from brutex.metrics import rust_stats
+
 __all__ = [
     "PBOResult",
     "pbo_probability",
@@ -250,6 +255,69 @@ def _block_moments(
     return block_sum, block_sumsq, block_size
 
 
+def _cscv_logits(
+    block_sum: list[list[float]],
+    block_sumsq: list[list[float]],
+    n_splits: int,
+    n_strat: int,
+    is_count: int,
+    oos_count: int,
+    denom_rank: int,
+    evaluator: MomentEvaluator,
+) -> tuple[int, list[float]]:
+    """The pure-Python CSCV split loop — the retained-forever parity oracle.
+
+    Moved VERBATIM from :func:`pbo_probability`
+    (DEC-METRICS-RUST-STATS-002; zero arithmetic change): one IS/OOS moment
+    combination + rank + logit per :func:`itertools.combinations` split.
+    Returns ``(overfit_count, logits)``. Serves every call when the
+    ``BRUTEX_STATS_RUST`` flag is OFF (the default), every fallback when it
+    is ON, and the burn-in self-check compares — never deleted.
+    """
+    all_blocks = range(n_splits)
+    half = n_splits // 2
+    logits: list[float] = []
+    overfit = 0
+    for is_blocks in combinations(all_blocks, half):
+        is_set = set(is_blocks)
+        oos_blocks = [b for b in all_blocks if b not in is_set]
+        is_stat: list[float] = []
+        oos_stat: list[float] = []
+        for n in range(n_strat):
+            is_sum = 0.0
+            is_sumsq = 0.0
+            for s in is_blocks:
+                is_sum += block_sum[s][n]
+                is_sumsq += block_sumsq[s][n]
+            oos_sum = 0.0
+            oos_sumsq = 0.0
+            for s in oos_blocks:
+                oos_sum += block_sum[s][n]
+                oos_sumsq += block_sumsq[s][n]
+            is_stat.append(evaluator(is_sum, is_sumsq, is_count))
+            oos_stat.append(evaluator(oos_sum, oos_sumsq, oos_count))
+
+        n_star = max(range(n_strat), key=is_stat.__getitem__)
+        star_oos = oos_stat[n_star]
+        # Average-rank of the IS-best strategy's OOS performance, in one pass:
+        # ``less`` strategies rank strictly below it; the ``equal`` ties (incl.
+        # itself) share the mid-rank ``less + (equal + 1) / 2`` (1-based).
+        less = 0
+        equal = 0
+        for value in oos_stat:
+            if value < star_oos:
+                less += 1
+            elif value == star_oos:
+                equal += 1
+        rank = less + (equal + 1) / 2.0
+        omega = rank / denom_rank
+        lambda_c = math.log(omega / (1.0 - omega))
+        logits.append(lambda_c)
+        if lambda_c <= _OVERFIT_LOGIT_THRESHOLD:
+            overfit += 1
+    return overfit, logits
+
+
 def pbo_probability(
     performance: Sequence[Sequence[float]],
     *,
@@ -292,47 +360,46 @@ def pbo_probability(
     is_count = half * block_size
     oos_count = is_count  # equal halves
     denom_rank = n_strat + 1
-    all_blocks = range(n_splits)
 
-    logits: list[float] = []
-    overfit = 0
-    for is_blocks in combinations(all_blocks, half):
-        is_set = set(is_blocks)
-        oos_blocks = [b for b in all_blocks if b not in is_set]
-        is_stat: list[float] = []
-        oos_stat: list[float] = []
-        for n in range(n_strat):
-            is_sum = 0.0
-            is_sumsq = 0.0
-            for s in is_blocks:
-                is_sum += block_sum[s][n]
-                is_sumsq += block_sumsq[s][n]
-            oos_sum = 0.0
-            oos_sumsq = 0.0
-            for s in oos_blocks:
-                oos_sum += block_sum[s][n]
-                oos_sumsq += block_sumsq[s][n]
-            is_stat.append(evaluator(is_sum, is_sumsq, is_count))
-            oos_stat.append(evaluator(oos_sum, oos_sumsq, oos_count))
-
-        n_star = max(range(n_strat), key=is_stat.__getitem__)
-        star_oos = oos_stat[n_star]
-        # Average-rank of the IS-best strategy's OOS performance, in one pass:
-        # ``less`` strategies rank strictly below it; the ``equal`` ties (incl.
-        # itself) share the mid-rank ``less + (equal + 1) / 2`` (1-based).
-        less = 0
-        equal = 0
-        for value in oos_stat:
-            if value < star_oos:
-                less += 1
-            elif value == star_oos:
-                equal += 1
-        rank = less + (equal + 1) / 2.0
-        omega = rank / denom_rank
-        lambda_c = math.log(omega / (1.0 - omega))
-        logits.append(lambda_c)
-        if lambda_c <= _OVERFIT_LOGIT_THRESHOLD:
-            overfit += 1
+    kernel_result: tuple[int, list[float]] | None = None
+    if rust_stats.stats_rust_enabled():
+        # The flag-gated Rust CSCV kernel (DEC-METRICS-RUST-STATS-002).
+        # ``None`` — latched / wheel-absent / kernel error / refused result /
+        # a CUSTOM evaluator / past the combination cap / a gate refusal —
+        # falls through to the retained-forever Python loop, so wheel state
+        # can never change results or error behaviour (rust_stats envelope).
+        kernel_result = rust_stats.pbo_cscv_via_kernel(
+            block_sum,
+            block_sumsq,
+            n_splits=n_splits,
+            n_strat=n_strat,
+            is_count=is_count,
+            n_total=math.comb(n_splits, half),
+            evaluator_is_default=evaluator is sharpe_from_moments,
+            oracle=lambda: _cscv_logits(
+                block_sum,
+                block_sumsq,
+                n_splits,
+                n_strat,
+                is_count,
+                oos_count,
+                denom_rank,
+                evaluator,
+            ),
+        )
+    if kernel_result is None:
+        overfit, logits = _cscv_logits(
+            block_sum,
+            block_sumsq,
+            n_splits,
+            n_strat,
+            is_count,
+            oos_count,
+            denom_rank,
+            evaluator,
+        )
+    else:
+        overfit, logits = kernel_result
 
     n_combinations = len(logits)
     return PBOResult(
