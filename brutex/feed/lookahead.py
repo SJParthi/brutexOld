@@ -199,13 +199,19 @@ class LookAheadBarrier:
             cursor.
         """
         verdict = self._core.advance_to(index)
+        if verdict == _ADVANCE_OK:
+            return
         if verdict == _ADVANCE_NEGATIVE:
             raise ValueError(f"advance_to: bar index must be >= 0, got {index}")
-        if verdict == _ADVANCE_BACKWARDS:
-            raise ValueError(
-                f"advance_to: cursor cannot move backwards "
-                f"({index} < current {self._core.current_index})"
-            )
+        # _ADVANCE_BACKWARDS — the last code in the pinned verdict
+        # vocabulary. An out-of-vocabulary code (a poisoned wheel) lands
+        # here too and refuses loudly rather than silently succeeding
+        # (the refuse-poison law — a broken core may only refuse, never
+        # quietly pass a cursor move).
+        raise ValueError(
+            f"advance_to: cursor cannot move backwards "
+            f"({index} < current {self._core.current_index})"
+        )
 
     def access(self, index: int) -> int:
         """Validate (and record) a read of bar *index*; return it unchanged.
@@ -233,6 +239,8 @@ class LookAheadBarrier:
             If *index* is negative.
         """
         verdict = self._core.access(index)
+        if verdict == _ACCESS_OK:
+            return index
         if verdict == _ACCESS_NO_CURSOR:
             raise LookAheadError(
                 f"no bar reached yet (cursor={self._core.current_index}); "
@@ -240,12 +248,14 @@ class LookAheadBarrier:
             )
         if verdict == _ACCESS_NEGATIVE:
             raise ValueError(f"access: bar index must be >= 0, got {index}")
-        if verdict == _ACCESS_LOOKAHEAD:
-            raise LookAheadError(
-                f"bar index {index} > current {self._core.current_index}: "
-                f"look-ahead read forbidden (P-06 / FR-INT-004)"
-            )
-        return index
+        # _ACCESS_LOOKAHEAD — the last code in the pinned verdict
+        # vocabulary. An out-of-vocabulary code (a poisoned wheel) lands
+        # here too and refuses loudly rather than silently permitting the
+        # read (the refuse-poison law — never weaker than P-06).
+        raise LookAheadError(
+            f"bar index {index} > current {self._core.current_index}: "
+            f"look-ahead read forbidden (P-06 / FR-INT-004)"
+        )
 
     def guard(self, index: int, value: _T) -> _T:
         """Convenience: :meth:`access` the *index*, then return *value*.
@@ -273,20 +283,34 @@ class _BarrierCoreLike(Protocol):
     """
 
     @property
-    def current_index(self) -> int: ...  # pragma: no cover — Protocol stub
+    def current_index(self) -> int:
+        """Current cursor value ``N`` (``-1`` before the first advance)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
-    def records(self) -> bool: ...  # pragma: no cover — Protocol stub
+    def records(self) -> bool:
+        """Whether the core retains the touched-index trail."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
-    def touched(self) -> list[int]: ...  # pragma: no cover — Protocol stub
+    def touched(self) -> list[int]:
+        """Every permitted index passed to :meth:`access`, in call order."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
-    def max_touched(self) -> int | None: ...  # pragma: no cover — Protocol stub
+    def max_touched(self) -> int | None:
+        """Largest permitted index touched, or ``None`` if none recorded."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
-    def advance_to(self, index: int) -> int: ...  # pragma: no cover — Protocol stub
+    def advance_to(self, index: int) -> int:
+        """Advance the cursor; return an ``_ADVANCE_*`` verdict code."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
-    def access(self, index: int) -> int: ...  # pragma: no cover — Protocol stub
+    def access(self, index: int) -> int:
+        """Validate a read of *index*; return an ``_ACCESS_*`` verdict code."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
-    def reset(self) -> None: ...  # pragma: no cover — Protocol stub
+    def reset(self) -> None:
+        """Restore the just-constructed form (cursor ``-1``, empty trail)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 @dataclass(frozen=True, slots=True)
