@@ -26,17 +26,61 @@ is two u64 ANDs, still constant-time per bar). Foundation for the brute-force sw
   is the satisfied gate for the u64→u128 widening — not a silent transition)
 - Bit-equality comparison is the natural reproducibility check
 
-## numpy + u128 (the honest envelope)
+## The >=64-bit kernel dispatch (DEC-ENUM-KERNEL-U128-001)
+
+The production batch count is Rust at EVERY width: u64-fit inputs run the
+u64-native ``fno_math`` kernel (byte-identical to the pre-u128 seam); a mask
+or bar with a bit ``>= 64`` routes to the **u128 twin kernel**
+(``fno_math.count_supermasks_u128s`` / ``fno_math.ResidentBarsU128`` — native
+``Vec<u128>`` FFI, the DEC-TRADE-SIM-U128-KERNEL-001 probe-verified crossing),
+which shares the ONE width-generic ``MaskWord`` core with the u64 kernel so
+the two widths cannot drift. ``ResidentBarBuffer`` lazily PROMOTES a
+u64-resident window to the u128 sibling on the first >64-bit mask batch (one
+``combo_mask.wide_kernel_promoted`` INFO per instance).
+
+**The LOUD-FAIL law (the deliberate INVERSION of #1549's silent-oracle
+degrade):** once the vocabulary crosses 64 bits the wide kernel is the ACTIVE
+production path — not future headroom — so a wheel missing the u128 twins at
+a >=64-bit dispatch raises the typed :class:`WideKernelUnavailableError`
+(reason ``wheel_missing_u128``, naming DEC-ENUM-KERNEL-U128-001 + the rebuild
+remediation) instead of silently degrading a whole grid sweep onto the numpy
+path. Reachable only from a monkeypatched / hand-imported stale module: a
+genuinely stale installed wheel already fails at ``import fno_math`` (the
+shim's import-time symbol handshake).
+
+## numpy + u128 (the parity ORACLE — tests only)
 
 numpy has NO uint128 dtype. The Python scalar path uses arbitrary-precision
-`int` (already u128-safe). The vectorised numpy oracle / fallback represents a
-u128 as **two u64 limbs** `(lo, hi)` and tests
+`int` (already u128-safe). The vectorised numpy reference
+(:func:`count_supermasks_reference`) represents a u128 as **two u64 limbs**
+`(lo, hi)` and tests
 `((bar_lo & m_lo) == m_lo) & ((bar_hi & m_hi) == m_hi)` — two u64 ANDs per bar,
-still O(1) per bar. The production Rust kernel (`fno_math`) is u64-native; when a
-mask or bar exceeds 64 bits the batch count routes to the two-limb numpy
-reference so no high bit is ever silently truncated (the 66-condition layout's
-bits 0-65 span past u64 only at the declared-only SuperTrend bits 64/65, which
-never fire today; the >=64-bit headroom is exercised by the tests).
+still O(1) per bar. Since DEC-ENUM-KERNEL-U128-001 it is RETAINED strictly as
+the bit-exact parity oracle the Rust kernels are verified against in
+``tests/property`` (plus the pre-existing ≤64-bit stale-wheel construction
+fallback of ``ResidentBarBuffer``, byte-identical to the pre-u128 seam) — it
+is structurally UNREACHABLE as a silent production fallback for any >=64-bit
+dispatch (the LOUD-FAIL law above). A value beyond u128 (bit >= 128) or a
+negative value raises ``OverflowError`` at the ``Vec<u128>`` FFI extraction
+edge — the SAME exception class the numpy two-limb split raised for that
+shape before this DEC (there is no oracle for beyond-u128 either: the numpy
+``uint64`` hi-limb cast rejects it identically, which is why the #1549
+``bar_bits_beyond_u128`` / ``mask_beyond_u128`` oracle-fallback reasons have
+no analogue here — beyond-u128 refuses on BOTH paths, never a triple-limb
+invention).
+
+## The kernel-kind observable (supported test surface)
+
+``ResidentBarBuffer.kernel_kind`` (one of :data:`KERNEL_RUST_U64` /
+:data:`KERNEL_RUST_U128` / :data:`KERNEL_NUMPY`) + the
+``ResidentBarBuffer.wide_kernel_active`` flag + the pure
+:func:`dispatch_kernel_kind` classifier let a test (or PR-B's vocab-66 CI
+pin) verify a >=64-bit grid is genuinely Rust-kernel-served WITHOUT
+monkeypatching — the #1549 ``rust_active`` observable shape, widened to name
+WHICH kernel serves (since the vocab-66 SuperTrend implemented-flip,
+DEC-SUPERTREND-CONDITIONS-001, the LIVE bits 64/65 fire on every warm
+non-equality bar, so warm production bar_bits genuinely span past u64 and the
+>=64-bit paths are the PRODUCTION regime, not a test-only exercise).
 
 ## Combo iteration
 
@@ -61,23 +105,30 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from itertools import combinations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import fno_math
+import structlog
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
 __all__ = [
+    "KERNEL_NUMPY",
+    "KERNEL_RUST_U64",
+    "KERNEL_RUST_U128",
     "MAX_VOCAB_BITS",
     "U64_MASK",
+    "U128_MASK",
     "VOCAB_BITS",
     "ResidentBarBuffer",
+    "WideKernelUnavailableError",
     "bits_to_mask",
     "count_combos",
     "count_supermasks",
     "count_supermasks_reference",
+    "dispatch_kernel_kind",
     "evaluate_mask",
     "iter_masks_k_of_bits",
     "iter_masks_k_of_n",
@@ -85,6 +136,8 @@ __all__ = [
     "mask_to_entry_signals",
     "popcount",
 ]
+
+_LOG = structlog.get_logger("brutex.engine.combo_mask")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -102,8 +155,90 @@ MAX_VOCAB_BITS: int = 128
 DEC-PLUGIN-001 requires for a mask-width transition (NOT a silent change)."""
 
 #: 64-bit limb mask — splits a u128 into ``(lo, hi)`` u64 limbs for the numpy
-#: oracle/fallback (numpy has no uint128). ``lo = m & U64_MASK``, ``hi = m >> 64``.
+#: oracle (numpy has no uint128) AND is the width boundary the kernel dispatch
+#: keys on: ``value > U64_MASK`` routes to the u128 kernel.
+#: ``lo = m & U64_MASK``, ``hi = m >> 64``.
 U64_MASK: int = (1 << 64) - 1
+
+#: 128-bit ceiling mask — the widest value ANY kernel (or the numpy oracle)
+#: can represent. A value ``> U128_MASK`` (or negative) raises
+#: ``OverflowError`` at the ``Vec<u128>`` FFI extraction edge, exactly as the
+#: numpy ``uint64`` hi-limb cast did pre-DEC-ENUM-KERNEL-U128-001 (see the
+#: module docstring — no triple-limb path exists on either side).
+U128_MASK: int = (1 << 128) - 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# Kernel-kind observable + the >=64-bit LOUD-FAIL law
+# (DEC-ENUM-KERNEL-U128-001 — supported test surface, see module docstring)
+# ─────────────────────────────────────────────────────────────────
+
+#: The u64-native Rust kernel serves (``fno_math.count_supermasks_u64s`` /
+#: ``fno_math.ResidentBars``) — today's production norm (60-bit vocabulary).
+KERNEL_RUST_U64: Final[str] = "rust-u64"
+
+#: The u128 Rust twin kernel serves (``fno_math.count_supermasks_u128s`` /
+#: ``fno_math.ResidentBarsU128``) — the ACTIVE production path for any
+#: >=64-bit dispatch (DEC-ENUM-KERNEL-U128-001).
+KERNEL_RUST_U128: Final[str] = "rust-u128"
+
+#: The resident two-limb numpy backing serves (test-oracle machinery; in
+#: production reachable ONLY as :class:`ResidentBarBuffer`'s pre-existing
+#: <=64-bit stale-wheel construction fallback — NEVER for a >=64-bit batch,
+#: which is the LOUD-FAIL law).
+KERNEL_NUMPY: Final[str] = "numpy"
+
+
+class WideKernelUnavailableError(RuntimeError):
+    """The >=64-bit dispatch found no u128 Rust kernel — REFUSING loudly.
+
+    DEC-ENUM-KERNEL-U128-001's LOUD-FAIL law (the deliberate inversion of the
+    #1549 trade-sim seam's silent-oracle degrade): once any mask/bar sets a
+    bit ``>= 64`` the u128 kernel is the ACTIVE production path, so a wheel
+    missing ``count_supermasks_u128s`` / ``ResidentBarsU128`` must never
+    silently demote a grid sweep to the numpy oracle — it raises THIS typed,
+    greppable error naming the remediation instead. A <=64-bit dispatch is
+    unaffected (byte-identical to the pre-DEC seam).
+    """
+
+
+def _wide_kernel_unavailable(missing: str) -> WideKernelUnavailableError:
+    """Build the LOUD-FAIL error naming the missing symbol + remediation."""
+    return WideKernelUnavailableError(
+        f"combo_mask: a mask/bar with a bit >= 64 requires the u128 Rust "
+        f"kernel, but the installed fno_math wheel is missing {missing} "
+        f"(reason: wheel_missing_u128). Refusing to silently degrade the "
+        f">=64-bit count to the numpy oracle (DEC-ENUM-KERNEL-U128-001 "
+        f"LOUD-FAIL law). Rebuild + reinstall the wheel from the current "
+        f"source: run `maturin develop --release` inside rust/fno-math "
+        f"(with the project venv active)."
+    )
+
+
+def _any_wide(values: Sequence[int]) -> bool:
+    """True iff any value sets a bit ``>= 64`` (``value > U64_MASK``).
+
+    The ONE width predicate every dispatch site keys on. A negative value
+    reads ``False`` (not wide) — it is API misuse that the u64 FFI edge
+    rejects with ``OverflowError`` exactly as before this DEC.
+    """
+    return any(v > U64_MASK for v in values)
+
+
+def dispatch_kernel_kind(bar_bits: Sequence[int], masks: Sequence[int]) -> str:
+    """Classify which Rust kernel :func:`count_supermasks` serves this call with.
+
+    Pure + deterministic (supported test surface — see the module docstring):
+    returns :data:`KERNEL_RUST_U128` iff any bar/mask sets a bit ``>= 64``,
+    else :data:`KERNEL_RUST_U64`. Never :data:`KERNEL_NUMPY` — the free
+    production dispatch has no numpy arm (the LOUD-FAIL law). The classifier
+    does not validate ranges: a beyond-u128 / negative value still classifies
+    by the same width predicate, and the actual call raises ``OverflowError``
+    at the FFI extraction edge.
+    """
+    if _any_wide(masks) or _any_wide(bar_bits):
+        return KERNEL_RUST_U128
+    return KERNEL_RUST_U64
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -375,17 +510,23 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     For each ``mask`` in ``masks`` return the number of bars in ``bar_bits``
     that satisfy ``(bar & mask) == mask``. ``out[j]`` aligns with ``masks[j]``.
 
-    Delegates to the Rust hot kernel ``fno_math.count_supermasks_u64s``
-    (ADR-0004 "Rust CPU kernel first"; a single fused branchless loop,
-    masks-outer/bars-inner, memory-bandwidth-bound). The numpy reference
-    :func:`count_supermasks_reference` is the parity oracle the kernel is
-    verified against bit-for-bit in ``tests/property`` and remains the
-    drop-in fallback (identical signature + semantics).
+    Delegates to the Rust hot kernels (ADR-0004 "Rust CPU kernel first"; a
+    single fused branchless loop, masks-outer/bars-inner,
+    memory-bandwidth-bound), width-dispatched per
+    :func:`dispatch_kernel_kind`: u64-fit inputs run
+    ``fno_math.count_supermasks_u64s`` (byte-identical to the pre-u128 seam);
+    any bar/mask with a bit ``>= 64`` runs the u128 twin
+    ``fno_math.count_supermasks_u128s`` (DEC-ENUM-KERNEL-U128-001 — the SAME
+    width-generic ``MaskWord`` core, so the widths cannot drift). The numpy
+    reference :func:`count_supermasks_reference` is the parity oracle both
+    kernels are verified against bit-for-bit in ``tests/property`` — it is
+    NOT a production fallback here (the LOUD-FAIL law: a wheel missing the
+    u128 twin raises :class:`WideKernelUnavailableError` on a >=64-bit call).
 
     Parameters
     ----------
     bar_bits : Sequence[int]
-        Per-bar packed u64 condition bitsets.
+        Per-bar packed u128 condition bitsets.
     masks : Sequence[int]
         Strategy masks to evaluate.
 
@@ -394,6 +535,17 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     list[int]
         Hit count per mask. Empty ``masks`` → ``[]``; empty ``bar_bits`` →
         ``0`` per mask. ``mask == 0`` matches every bar.
+
+    Raises
+    ------
+    WideKernelUnavailableError
+        A bar/mask sets a bit ``>= 64`` and the installed ``fno_math`` module
+        lacks the u128 kernel (reachable only from a monkeypatched /
+        hand-imported stale module — a genuinely stale wheel fails at
+        ``import fno_math`` via the shim's symbol handshake).
+    OverflowError
+        A value is negative or beyond u128 — raised at the FFI extraction
+        edge (the same class the numpy limb split raised pre-DEC).
 
     Examples
     --------
@@ -404,15 +556,19 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     >>> count_supermasks([0b1, 0b10], [])
     []
     """
-    # The Rust hot kernel is u64-native. If any mask OR bar uses a bit >= 64
-    # (the u128 headroom) the kernel would silently truncate it — so route to the
-    # bit-exact two-limb numpy reference instead (no high bit is ever dropped).
-    # Today's vocabulary's live bits (0-63, incl. bit 63 narrow_cpr_day) fit
-    # u64, so the fast Rust path is the norm; the >=64-bit branch is the
-    # correctness guard for the declared-only SuperTrend bits 64/65 (which
-    # need the second limb) and any future growth.
-    if any(m > U64_MASK for m in masks) or any(b > U64_MASK for b in bar_bits):
-        return count_supermasks_reference(bar_bits, masks)
+    # Width dispatch (DEC-ENUM-KERNEL-U128-001): the u64-native kernel would
+    # silently truncate a bit >= 64, so any wide mask OR bar routes the WHOLE
+    # call to the u128 twin kernel — never the numpy oracle (LOUD-FAIL law).
+    # Since the vocab-66 SuperTrend implemented-flip
+    # (DEC-SUPERTREND-CONDITIONS-001) the LIVE bits 64/65 fire on every warm
+    # non-equality bar, so warm production bar_bits exceed u64 and the
+    # >=64-bit branch is the PRODUCTION norm; the u64 path still serves
+    # cold/narrow windows and u64-fit batches.
+    if _any_wide(masks) or _any_wide(bar_bits):
+        wide_kernel = getattr(fno_math, "count_supermasks_u128s", None)
+        if wide_kernel is None:
+            raise _wide_kernel_unavailable("count_supermasks_u128s")
+        return list(wide_kernel(list(bar_bits), list(masks)))
     return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))
 
 
@@ -426,16 +582,30 @@ class ResidentBarBuffer:
 
     In a Stage-2 sweep the SAME ``bar_bits`` window is evaluated against many
     successive mask batches. The free :func:`count_supermasks` re-marshals the
-    whole ``bar_bits`` (~94k u64) across the Python→Rust boundary on EVERY
-    call (``combo_mask.py:315``). This buffer moves ``bar_bits`` across the
-    boundary ONCE — into a resident Rust ``Vec<u64>`` (``fno_math.ResidentBars``)
-    — and reuses it; thereafter only ``masks`` crosses per call.
+    whole ``bar_bits`` (~94k words) across the Python→Rust boundary on EVERY
+    call. This buffer moves ``bar_bits`` across the boundary ONCE — into a
+    resident Rust ``Vec`` — and reuses it; thereafter only ``masks`` crosses
+    per call. Width-dispatched (DEC-ENUM-KERNEL-U128-001): u64-fit bars build
+    ``fno_math.ResidentBars`` (byte-identical to the pre-u128 seam); wider
+    (<= u128) bars build ``fno_math.ResidentBarsU128``; a >64-bit MASK batch
+    over a u64-resident window lazily PROMOTES the window to the u128 sibling
+    (built at most once from the kept raw bars, announced with ONE
+    ``combo_mask.wide_kernel_promoted`` INFO per instance — the #1549
+    trade-sim promotion shape; both "at most once" laws are SINGLE-THREAD
+    invariants — see :meth:`_promote_wide_kernel`'s honest threading
+    envelope; production never thread-shares a buffer).
 
-    When the Rust kernel is unavailable (plain ``pip install`` without the
-    maturin-built wheel) the buffer transparently falls back to a resident
-    numpy ``uint64`` array reproducing :func:`count_supermasks_reference`
-    bit-for-bit. Exactly ONE backing store is held (Rust ``Vec`` XOR numpy
-    array, never both).
+    On the <=64-bit arm ONLY, a stale ``fno_math`` module missing
+    ``ResidentBars`` degrades the construction to a resident two-limb numpy
+    backing reproducing :func:`count_supermasks_reference` bit-for-bit —
+    byte-identical to the pre-DEC seam. On ANY >=64-bit dispatch (wide bars
+    at construction, or a wide mask batch) a module missing the u128 kernel
+    raises the typed :class:`WideKernelUnavailableError` instead — the
+    LOUD-FAIL law (never a silently numpy-degraded grid sweep; see the
+    module docstring).
+
+    The which-kernel-serves observable (supported test surface — see the
+    module docstring): :attr:`kernel_kind` + :attr:`wide_kernel_active`.
 
     This is a Stage-2 AGGREGATE-COUNT primitive over a PRE-SLICED window — it
     returns per-mask hit counts over a fixed bar set, NOT a per-bar feed, so it
@@ -445,7 +615,8 @@ class ResidentBarBuffer:
     Complexity (honest envelope — this is NOT an "O(1) Stage-2" primitive):
 
     * Construction is ``O(N_bars)`` — the one-time copy into the resident
-      buffer, paid ONCE here.
+      buffer, paid ONCE here. A lazy wide promotion pays one more
+      ``O(N_bars)`` copy, once per instance.
     * Each :meth:`count_supermasks` call is ``O(N_masks · N_bars)`` compute +
       ``O(N_masks)`` marshalling. The ``O(N_bars)`` marshalling that the free
       :func:`count_supermasks` repeats every call is paid ONCE at construction
@@ -469,15 +640,30 @@ class ResidentBarBuffer:
         ----------
         bar_bits : Sequence[int]
             Per-bar packed u128 condition bitsets for the pre-sliced window.
+
+        Raises
+        ------
+        WideKernelUnavailableError
+            A bar sets a bit ``>= 64`` and the installed ``fno_math`` module
+            lacks ``ResidentBarsU128`` (the LOUD-FAIL law; reachable only
+            from a monkeypatched / hand-imported stale module).
+        OverflowError
+            A bar is negative or beyond u128 — raised at the FFI extraction
+            edge (the same class the numpy limb split raised pre-DEC).
         """
         self._n = len(bar_bits)
-        # The Rust resident kernel is u64-native; only use it when EVERY bar fits
-        # u64 (no high-bit truncation). A bar with bits >= 64 forces the two-limb
-        # numpy backing (numpy has no uint128) — bit-exact for the full u128.
-        fits_u64 = all(b <= U64_MASK for b in bar_bits)
+        # Width dispatch (DEC-ENUM-KERNEL-U128-001): the u64 resident kernel
+        # serves only u64-fitting bars (no high-bit truncation); wider bars
+        # build the u128 twin — LOUDLY refusing when the twin is missing,
+        # never a silent numpy demotion (module-docstring LOUD-FAIL law).
+        fits_u64 = not _any_wide(bar_bits)
         self._rust: object | None = None
-        #: Raw bar list kept alongside the Rust buffer so a (rare) u128 mask can
-        #: be served via the two-limb numpy path without crossing the u64 kernel.
+        #: Lazily-promoted (or wide-constructed) u128 sibling kernel
+        #: (``fno_math.ResidentBarsU128``); built at most once per instance.
+        self._rust_wide: object | None = None
+        #: Raw bar list kept alongside the u64 Rust buffer so a >64-bit mask
+        #: batch can promote the window to the u128 sibling without a numpy
+        #: round-trip.
         self._raw: tuple[int, ...] = tuple(bar_bits)
         self._bar_lo: npt.NDArray[np.uint64] | None = None
         self._bar_hi: npt.NDArray[np.uint64] | None = None
@@ -486,15 +672,92 @@ class ResidentBarBuffer:
                 self._rust = fno_math.ResidentBars(list(bar_bits))
                 return
             except (ImportError, AttributeError):
+                # Pre-existing <=64-bit stale-wheel degrade — byte-identical
+                # to the pre-DEC seam: the resident two-limb numpy backing
+                # serves u64-fit batches bit-exactly.
                 pass
-        self._bar_lo, self._bar_hi = _split_limbs(bar_bits)
+            self._bar_lo, self._bar_hi = _split_limbs(bar_bits)
+            return
+        wide_cls = getattr(fno_math, "ResidentBarsU128", None)
+        if wide_cls is None:
+            raise _wide_kernel_unavailable("ResidentBarsU128")
+        self._rust_wide = wide_cls(list(bar_bits))
 
     @property
     def n_bars(self) -> int:
         """Number of bars in the resident window."""
         if self._rust is not None:
             return int(self._rust.n_bars)  # type: ignore[attr-defined]
+        if self._rust_wide is not None:
+            return int(self._rust_wide.n_bars)  # type: ignore[attr-defined]
         return self._n
+
+    @property
+    def kernel_kind(self) -> str:
+        """Which backing serves u64-fit mask batches (supported test surface).
+
+        One of :data:`KERNEL_RUST_U64` (the u64 Rust kernel — today's norm),
+        :data:`KERNEL_RUST_U128` (the u128 Rust twin — a wide-bar window) or
+        :data:`KERNEL_NUMPY` (the pre-existing <=64-bit stale-wheel numpy
+        degrade). Fixed for a rust-u64-constructed buffer: a later promotion
+        never changes it (the promoted u64 window still serves u64-fit
+        batches on the u64 kernel — see :attr:`wide_kernel_active`). A
+        numpy-DEGRADED buffer's ``kernel_kind`` truthfully upgrades
+        ``numpy`` -> ``rust-u128`` on wide promotion — the u128 kernel then
+        serves every batch and the numpy tail is dead code (reachable only
+        via a partial-symbol monkeypatch; a genuinely stale wheel fails at
+        ``import fno_math``).
+        """
+        if self._rust is not None:
+            return KERNEL_RUST_U64
+        if self._rust_wide is not None:
+            return KERNEL_RUST_U128
+        return KERNEL_NUMPY
+
+    @property
+    def wide_kernel_active(self) -> bool:
+        """``True`` iff the resident u128 Rust kernel exists on this buffer.
+
+        Supported test surface (the #1549 ``rust_active`` observable shape):
+        ``True`` for a wide-bar window from construction, and for a
+        u64/numpy window after its first >64-bit mask batch lazily promoted
+        it. Every >=64-bit batch on this buffer is served by that kernel —
+        by the LOUD-FAIL law there is NO other way a >=64-bit batch returns.
+        """
+        return self._rust_wide is not None
+
+    def _promote_wide_kernel(self) -> object:
+        """Build (at most once) the u128 sibling kernel for >64-bit mask batches.
+
+        DEC-ENUM-KERNEL-U128-001 (the lazy wide-promotion shape of #1549 —
+        there via ``_derive_kernel_inputs``; here ``_promote_wide_kernel`` —
+        under the inverted LOUD-FAIL law): a mask with a bit ``>= 64`` over a
+        window whose resident kernel is not u128 promotes the WHOLE batch to
+        ``fno_math.ResidentBarsU128`` — built lazily HERE from the kept raw
+        bars (one ``O(N_bars)`` FFI copy, paid once per instance, announced
+        with ONE ``combo_mask.wide_kernel_promoted`` INFO) and memoised, so a
+        chunked sweep's subsequent wide batches are pure kernel calls. When
+        the installed module predates the class this RAISES
+        :class:`WideKernelUnavailableError` (reason ``wheel_missing_u128``) —
+        never returns ``None``, never demotes to numpy.
+
+        Honest threading envelope (Golden Rule #10): the "built at most
+        once" / ONE-INFO law is a SINGLE-THREAD invariant — the memo latch
+        is a non-atomic read-check-set, so two threads sharing one instance
+        could EACH build the sibling and log the INFO. Correctness is
+        unaffected (construction is idempotent over the same kept raw bars;
+        last-writer-wins on the memo slot), and production never
+        thread-shares a buffer (one per SweepKernel; parallelism is
+        process-spawn). Deliberately doc-only — no lock on this path.
+        """
+        if self._rust_wide is not None:
+            return self._rust_wide
+        wide_cls = getattr(fno_math, "ResidentBarsU128", None)
+        if wide_cls is None:
+            raise _wide_kernel_unavailable("ResidentBarsU128")
+        self._rust_wide = wide_cls(list(self._raw))
+        _LOG.info("combo_mask.wide_kernel_promoted", n_bars=self._n)
+        return self._rust_wide
 
     def count_supermasks(self, masks: Sequence[int]) -> list[int]:
         """Per-mask SUPERSET count over the resident bars.
@@ -502,23 +765,44 @@ class ResidentBarBuffer:
         For each ``mask`` return how many resident bars satisfy
         ``(bar & mask) == mask``. ``out[j]`` aligns with ``masks[j]``. Empty
         ``masks`` → ``[]``; empty bar window → ``0`` per mask; ``mask == 0``
-        matches every bar. Only ``masks`` crosses the FFI boundary.
+        matches every bar. Only ``masks`` crosses the FFI boundary (plus, at
+        most once per instance, the lazy wide promotion's bar copy).
+
+        Raises
+        ------
+        WideKernelUnavailableError
+            A mask sets a bit ``>= 64`` and the installed ``fno_math`` module
+            lacks ``ResidentBarsU128`` (the LOUD-FAIL law).
+        OverflowError
+            A mask is negative or beyond u128 — raised at the FFI edge.
         """
-        # The u64 Rust kernel can serve only u64-fitting masks; a u128 mask
-        # routes through the two-limb numpy reference (rebuilding the limbs once
-        # for this call). The fast path is the norm (today's vocab fits u64).
-        if self._rust is not None and all(m <= U64_MASK for m in masks):
+        # Width dispatch (DEC-ENUM-KERNEL-U128-001): a >64-bit mask batch is
+        # served by the resident-or-promoted u128 kernel — NEVER the numpy
+        # backing (LOUD-FAIL law). u64-fit batches keep their construction
+        # backing byte-identically (u64 kernel / wide kernel / numpy degrade).
+        if _any_wide(masks):
+            wide = self._promote_wide_kernel()
+            return list(wide.count_supermasks(list(masks)))  # type: ignore[attr-defined]
+        if self._rust is not None:
             return list(self._rust.count_supermasks(list(masks)))  # type: ignore[attr-defined]
+        if self._rust_wide is not None:
+            # A wide-bar window serving a u64-fit batch: u64 masks are valid
+            # u128 words, and the width-generic core makes the count
+            # bit-identical to the u64 kernel's (property-pinned).
+            return list(self._rust_wide.count_supermasks(list(masks)))  # type: ignore[attr-defined]
         if len(masks) == 0:
             return []
         if self._n == 0:
             return [0] * len(masks)
-        if self._bar_lo is None or self._bar_hi is None:
-            # Rust-backed buffer asked for a u128 mask: rebuild limbs from the
-            # kept raw bars once for this call (the kernel cannot serve u128).
+        # The pre-existing <=64-bit stale-wheel numpy backing (construction
+        # degrade) — byte-identical to the pre-DEC seam for u64-fit batches.
+        bar_lo, bar_hi = self._bar_lo, self._bar_hi
+        if bar_lo is None or bar_hi is None:
+            # Defensive TOTALITY arm (direct-unit-covered, structurally
+            # unreachable today: every construction arm that leaves BOTH
+            # kernels None stores the limbs): rebuild from the kept raw bars
+            # rather than crash on a hand-mutated instance.
             bar_lo, bar_hi = _split_limbs(self._raw)
-        else:
-            bar_lo, bar_hi = self._bar_lo, self._bar_hi
         return [_count_two_limb(bar_lo, bar_hi, m) for m in masks]
 
     def count_supermask(self, mask: int) -> int:

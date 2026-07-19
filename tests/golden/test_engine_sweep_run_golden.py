@@ -71,37 +71,68 @@ _PARAMS: dict[str, object] = {
     # UNCONDITIONALLY, so the persisted run-identity matches this oracle dict.
     "fib_anchor": "prev_day",
     "start_equity_paisa": 10_000_000,
+    # DEC-FILL-WORST-CASE-ONLY-001: canonical_trade_params emits the
+    # fill_mode key UNCONDITIONALLY — worst-case is the ONLY fill model, and
+    # the permanent token keeps every run identity off the precise-era bytes.
+    "fill_mode": "worst_case",
 }
 
 
 def _bars() -> list[CandleBar]:
-    """The fixed synthetic 12-day upward-drift fixture (deterministic OHLC)."""
+    """The fixed synthetic 12-day GAP-UP fixture (deterministic OHLC).
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001: the pre-DEC upward-drift
+    fixture's wide-range bars stop out every worst-case entry on its own bar
+    (its worst-case store was EMPTY — a toothless golden). This shape RANKS:
+    7-bar cycles of NARROW gap-up bars (open = prior close + 3.00, range 0.50
+    < the SL 0.80; the next gap-up's low clears the TP level so a win banks
+    exactly +50), a shallow bearish bar at cycle position 3, and a DEEP
+    bearish bar (range 0.85 > the SL) every 4th cycle whose stop-out keeps
+    profit_factor finite — all 5 masks rank + persist (5 finalists, a
+    NON-EMPTY store hash with teeth).
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
 def _config() -> SweepRunConfig:
+    # THE goldens pin the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001
+    # re-lock): the precise-era `_GOLDEN_RUN_ID f588…921a` /
+    # `_GOLDEN_CONTENT_HASH 18129707…ca8b` constants are RETIRED (kept below
+    # as the frozen anti-alias literals) — worst-case is the only fill model,
+    # `SweepRunConfig` carries no mode field, and the constants below were
+    # regenerated on THIS tree over the rankable gap-up fixture.
     return SweepRunConfig(
         instrument="NIFTY",
         tf="1m",
@@ -134,12 +165,28 @@ def _run(tmp_path: Path, tag: str) -> SweepRunSummary:
 # ────── Pinned run-identity ──────
 
 #: The hand-pinned BLAKE3 run-identity of mask 0b101 under the fixed context.
-#: Re-locked for DEC-VOCAB-U128-CODEGEN-001: the run-id encodes the mask as
-#: ``mask:%032x`` (u128, 32 hex) instead of ``%016x`` (u64, 16 hex), so the
-#: BLAKE3 input — and thus the digest — moved by design. Re-locked AGAIN for
-#: DEC-NIFTY-FIB-AXIS-001: the params layout gained the ``fib_anchor`` key (its
-#: string enum value), so the digest moved by design.
-_GOLDEN_RUN_ID = "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
+#: Re-locked for DEC-VOCAB-U128-CODEGEN-001 (mask ``%032x``), AGAIN for
+#: DEC-NIFTY-FIB-AXIS-001 (the ``fib_anchor`` params key), and AGAIN for
+#: DEC-FILL-WORST-CASE-ONLY-001: the params layout carries the UNCONDITIONAL
+#: ``fill_mode: worst_case`` token, so THE run identity IS #1522's worst-case
+#: identity (`715212…62fc9` — byte-identical to the retired
+#: `_WORST_CASE_GOLDEN_RUN_ID`, the anti-aliasing property: keeping the key
+#: emitted keeps the pin byte-valid) and the precise-era identity below is
+#: permanently unreachable.
+_GOLDEN_RUN_ID = "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
+
+#: FROZEN HISTORICAL (anti-alias pin only — the retired precise-era identity;
+#: minted pre-DEC when the params carried NO fill_mode key). No production
+#: run may ever reproduce it again.
+_PRECISE_ERA_RUN_ID = "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
+
+
+def test_golden_run_id_never_aliases_the_precise_era() -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: dropping the permanent
+    # key would collapse the one-law identity back onto the precise-era
+    # digest — this pin makes that regression loud.
+    assert _GOLDEN_RUN_ID != _PRECISE_ERA_RUN_ID
+    assert mask_run_id(mask=0b101, params=_PARAMS, **_CTX) != _PRECISE_ERA_RUN_ID
 
 
 def test_golden_run_id_is_byte_stable() -> None:
@@ -151,30 +198,21 @@ def test_golden_run_id_is_byte_stable() -> None:
 #: The hand-pinned store content hash for the fixed fixture (polars/zstd-build
 #: sensitive — see the module docstring; the determinism + summary assertions
 #: are the version-robust contract).
-# Re-locked for DEC-SWEEP-WINNERS-BY-NAME-001: the readable-mask surface added the
-# mask_bits + condition_names + (nullable) deflated_sharpe columns to the persisted
-# Parquet schema, so the deterministic content hash moved by design. Re-locked AGAIN
-# for DEC-VOCAB-U128-CODEGEN-001: the u128 mask is persisted as two Int64 limb
-# columns (mask_bits_lo/mask_bits_hi) replacing the single mask_bits Int64 column,
-# and the run-id encoding widened to %032x — both move the deterministic hash.
-# Re-locked AGAIN for DEC-NIFTY-FIB-AXIS-001: the ``fib_anchor`` key entered the
-# params layout, so each persisted row's run_id (and thus the store bytes) moved.
-# Re-locked AGAIN for the R2-OC-2 overnight-entry-leak fix: this fixture's 12
-# synthetic days each end at 11:15 IST (never reaching a forced-exit bar), so a
-# mask firing on a day's LAST bar previously filled at the NEXT day's 09:16 open
-# — a cross-session overnight entry (audited pre-fix: 11+9+2 such fills on masks
-# 1<<0 / 1<<2 / 1<<4, every one an instant −80 stop-loss on the daily gap; masks
-# 1<<1 / 1<<3 had none and are byte-identical). Dropping those fills changes the
-# trade streams → per-mask metrics → one more mask passes the rank gates
-# (ranked/persisted 4 → 5) and the store bytes move BY DESIGN.
-# Re-locked AGAIN for DEC-VIX-STAMP-WIRE-001 (Stage C): the persisted schema
-# gained the three appended nullable REFERENCE-ONLY vix_mean/vix_min/vix_max
-# columns (all null on this UNSTAMPED fixture — the honest unknown), so the
-# deterministic byte stream moved by design. Every row VALUE, every run_id and
-# the summary tally are unchanged (pinned by test_golden_summary_is_stable +
-# test_golden_run_id_is_byte_stable; the pre-column layout itself stays pinned
-# by tests/golden/test_results_store_backcompat_golden.py's frozen fixture).
-_GOLDEN_CONTENT_HASH = "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
+# Re-lock history: DEC-SWEEP-WINNERS-BY-NAME-001 (readable-mask columns) →
+# DEC-VOCAB-U128-CODEGEN-001 (two Int64 mask limbs + %032x run ids) →
+# DEC-NIFTY-FIB-AXIS-001 (the fib_anchor params key) → the R2-OC-2
+# overnight-entry-leak fix → DEC-VIX-STAMP-WIRE-001 (the three appended
+# nullable vix columns) → **DEC-FILL-WORST-CASE-ONLY-001 (THIS re-lock)**:
+# worst-case is the ONLY fill law and the retired precise-era hash
+# (`18129707…ca8b`) is unreproducible by construction; the fixture was
+# RE-CRAFTED to the rankable gap-up shape (see `_bars`) so the one-law store
+# is NON-EMPTY (5 finalists — the pre-DEC worst-case golden's empty-store
+# hash `cadb06a3…3a9f` was toothless), and this literal was regenerated on
+# THIS tree (2026-07-15; determinism pinned by the two-run byte-equality
+# test below; mask 0b101's stream teeth: 203 trades = 181 × +50 TP wins +
+# 22 × −115 deep-bar stop-outs → net +6_520 — hand-derived in
+# `test_golden_trade_stream_exact`).
+_GOLDEN_CONTENT_HASH = "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
@@ -200,6 +238,85 @@ def test_golden_content_hash_literal(tmp_path: Path) -> None:
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     summary = _run(tmp_path, "a")
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+
+
+# ────── DEC-FILL-WORST-CASE-ONLY-001 — the one-law identity + stream teeth ──────
+
+
+def _canonical_params() -> dict[str, object]:
+    from brutex.engine.sweep_run import canonical_trade_params
+
+    return canonical_trade_params(
+        sl_paisa=80,
+        tp_paisa=50,
+        prior_n=3,
+        proximity=None,
+        start_equity_paisa=10_000_000,
+    )
+
+
+def test_worst_case_params_add_exactly_the_one_key() -> None:
+    # REWRITTEN for DEC-FILL-WORST-CASE-ONLY-001 (was the emit-on-non-PRECISE
+    # law): canonical_trade_params emits the permanent ``fill_mode:
+    # worst_case`` key UNCONDITIONALLY — no caller can vary or elide it, and
+    # popping it yields exactly the legacy params layout (nothing else moved).
+    params = _canonical_params()
+    assert params == _PARAMS  # the oracle dict INCLUDES the permanent key
+    legacy = dict(params)
+    popped = legacy.pop("fill_mode")
+    assert popped == "worst_case"
+    assert "fill_mode" not in legacy
+
+
+def test_fill_mode_emitted_for_every_leg_shape() -> None:
+    # The unconditional law is leg-shape-independent: SL-only / TP-only /
+    # EOD-only params all carry the same permanent token.
+    from brutex.engine.sweep_run import canonical_trade_params
+
+    for sl, tp in ((80, None), (None, 50), (None, None)):
+        params = canonical_trade_params(
+            sl_paisa=sl,
+            tp_paisa=tp,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert params["fill_mode"] == "worst_case"
+
+
+def test_golden_trade_stream_exact() -> None:
+    # The numeric TEETH behind the store hash: mask 0b101's worst-case
+    # per-trade stream over the fixture, pinned exactly at
+    # head/tail/aggregate. HAND-DERIVATION: a win enters at a narrow gap-up
+    # bar's HIGH (open + 0.40) and the NEXT gap-up's low (prior close +
+    # 2.90) clears the TP level (entry + 0.50) → the fill is AT level = +50
+    # paisa; a loss enters at the shallow bearish bar's HIGH (its open o +
+    # 0.10, stop floor o − 0.70) and the DEEP bar's low (o − 0.30 − 0.75 =
+    # o − 1.05) breaches it → the adverse fill min(level, low) = o − 1.05 →
+    # −115 paisa. 181 wins × 50 − 22 losses × 115 = 9_050 − 2_530 = +6_520.
+    from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.trade_sim import simulate_trades
+
+    bars = _bars()
+    signals = mask_to_entry_signals(build_bar_bits(bars), 0b101)
+    stream = [
+        (t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars)
+        for t in simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+        )
+    ]
+    assert len(stream) == 203
+    assert sum(t[0] for t in stream) == 6_520
+    assert sum(1 for t in stream if t[0] == 50) == 181
+    assert sum(1 for t in stream if t[0] == -115) == 22
+    assert stream[0] == (50, 300, 50, 2)
+    assert stream[-1] == (50, 330, 50, 2)
 
 
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — wired-vs-unwired bit-identity ──────

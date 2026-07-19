@@ -864,6 +864,11 @@ class RunCoreHandles:
         from brutex.metrics.types import ClosedTrade
         from brutex.strategies.types import Side
 
+        # DEC-FILL-WORST-CASE-ONLY-001: the ONE hardcoded worst-case fill law
+        # prices BOTH legs — the production trade sim here and the naive
+        # reference's independently re-stated worst-case arm — so the R45
+        # differential is always a same-law compare with no mode plumbing.
+
         def _production_simulate(
             bars: Sequence[Any],
             entry_signals: Sequence[bool],
@@ -981,11 +986,30 @@ class RunCoreHandles:
     # ── launch / terminal progress ────────────────────────────────────────
 
     def _reset_progress_at_launch(self) -> None:
-        """Write the launch baseline progress file (G4 — reset-at-launch)."""
+        """Write the launch baseline progress file (G4 — reset-at-launch).
+
+        The baseline carries BOTH bridge wall stamps ``publish_progress``
+        writes: ``wall_time_utc`` (the G4 liveness evidence
+        :func:`~brutex.engine.sweep_liveness.progress_verdict` judges) AND the
+        :data:`~brutex.engine.sweep_supervisor.PROGRESS_WALL_TIME_KEY` decay
+        stamp :func:`~brutex.engine.sweep_supervisor.progress_bridge_stale`
+        keys on. Without the decay stamp a ``running=True`` claim is DEAD
+        EVIDENCE ≡ absent — and the first per-tuple publish only lands at the
+        first APPLIED slot, so for the whole first-tuple window (HOURS on a
+        heavy k=5 tuple, the #1608 arithmetic) the dashboard read idle, the
+        v29 Stop button never showed, and the cancel route's bridge arm
+        refused. ONE ``self._wall()`` tick feeds both stamps (the G3
+        exact-tick discipline — the stamp must not add a tick).
+        ``_terminal_progress_patch`` deliberately does NOT re-stamp the decay
+        key: terminal files carry ``running=False`` and are never stale-gated
+        (``progress_bridge_stale`` returns ``False`` before reading the
+        stamp), and the patched payload keeps the last publish's own stamp.
+        """
         if self._progress_path is None:
             return
-        from brutex.engine.sweep_supervisor import idle_progress
+        from brutex.engine.sweep_supervisor import PROGRESS_WALL_TIME_KEY, idle_progress
 
+        wall = float(self._wall())
         payload = idle_progress()
         payload.update(
             {
@@ -994,7 +1018,8 @@ class RunCoreHandles:
                 "run_id": self.run_id,
                 "stage": self._stage,
                 "suspect": False,
-                "wall_time_utc": self._wall(),
+                PROGRESS_WALL_TIME_KEY: wall,
+                "wall_time_utc": wall,
                 "pid": os.getpid(),
             }
         )

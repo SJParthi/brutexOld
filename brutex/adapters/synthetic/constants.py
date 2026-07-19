@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Final
 
+from brutex.data.timeframes import trading_minutes_for_lake_interval
 from brutex.models import Exchange, InstrumentType
 
 # ── Identity (honesty-critical — Golden Rule #1/#10) ─────────────────────────
@@ -62,15 +63,24 @@ ANCHOR_MINUTES: Final[int] = 375
 #: the range length).
 NOISE_OCTAVES: Final[int] = 5
 
-#: BruteX canonical interval → minutes-per-bar. ``1day`` maps to the 375-minute
-#: session length (NOT 1440 wall-clock minutes) so a day bar's open→close span
-#: samples one full session ahead — matching ``SESSION_DURATION_MINUTES``.
+#: The intervals this SYNTHETIC adapter serves — a vendor-scoped SUBSET of the
+#: canonical registry labels (the selection deliberately stays local).
+_SYNTHETIC_INTERVAL_LABELS: Final[tuple[str, ...]] = (
+    "1minute",
+    "5minute",
+    "15minute",
+    "1hour",
+    "1day",
+)
+
+#: BruteX canonical interval → minutes-per-bar — DERIVED from the canonical
+#: registry (DEC-TF-REGISTRY-DYNAMIC-001; values byte-identical to the old
+#: literals). ``1day`` maps to the 375-minute session length (NOT 1440
+#: wall-clock minutes) so a day bar's open→close span samples one full
+#: session ahead — matching ``SESSION_DURATION_MINUTES``.
 INTERVAL_TO_MINUTES: Final[Mapping[str, int]] = {
-    "1minute": 1,
-    "5minute": 5,
-    "15minute": 15,
-    "1hour": 60,
-    "1day": 375,
+    lake_label: trading_minutes_for_lake_interval(lake_label)
+    for lake_label in _SYNTHETIC_INTERVAL_LABELS
 }
 #: The intervals this adapter declares it can serve.
 SUPPORTED_INTERVALS: Final[frozenset[str]] = frozenset(INTERVAL_TO_MINUTES)

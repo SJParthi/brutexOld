@@ -276,8 +276,13 @@ def test_sweep_hot_kernel_resident_sweep_sim_sign_bit_mask() -> None:
     The flat-window construction mirrors
     ``tests/unit/test_fno_math_resident_sweep_sim_u128.py``: open/close
     10_000, high +150 / low −150, one session, no forced bars. The battery
-    mask arms on bar 0 (the only superset), fills at open[1], and the
-    end-of-data close lands at close[2] → pnl 0, mfe/mae 150, holding 2.
+    mask arms on bar 0 (the only superset); under main's worst-case-only fill
+    law (DEC-FILL-WORST-CASE-ONLY-001, adopted at the 2026-07-19
+    merge-reconcile — the expectation here flipped from the retired
+    optimistic open-fill (0, 150, 150, 2, 1, 2)) the entry fills at the
+    adverse high[1] = 10_150 and the end-of-data exit lands at the last
+    bar's adverse low[2] = 9_850 → pnl −300, mfe 0, mae 300, holding 2 —
+    byte-matching the u128 sibling's pinned tuple.
     """
     fno_math = pytest.importorskip("fno_math")
     bar_bits = [BIT63_MASK, 0, 0]
@@ -294,7 +299,7 @@ def test_sweep_hot_kernel_resident_sweep_sim_sign_bit_mask() -> None:
     # Pure-Python reference: exactly one bar is a superset of the mask.
     assert _scalar_superset_counts(bar_bits, [BIT63_MASK]) == [1]
     assert sim.count_trades([BIT63_MASK], True, None, None) == [1]
-    assert sim.simulate_masks([BIT63_MASK], True, None, None) == [[(0, 150, 150, 2, 1, 2)]]
+    assert sim.simulate_masks([BIT63_MASK], True, None, None) == [[(-300, 0, 300, 2, 1, 2)]]
     # Anti-vacuity: a high mask bit NO bar carries (bit 62) fires nothing —
     # the kernel genuinely evaluated the top word, it did not match-all.
     assert sim.count_trades([1 << 62], True, None, None) == [0]

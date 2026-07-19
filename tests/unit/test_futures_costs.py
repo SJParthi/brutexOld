@@ -75,6 +75,17 @@ def _trade(**overrides: object) -> FuturesTradeInput:
         "lot_size": 75,
     }
     kwargs.update(overrides)
+    # DEC-FILL-WORST-CASE-ONLY-001: the four REQUIRED fill anchors default to
+    # FLAT bars (extremes == the resolved opens) — the adverse-max fill is
+    # then exactly ``open ± tick``, keeping the fixtures' fill literals
+    # hand-derivable from their opens.
+    for extreme, open_key in (
+        ("entry_bar_high_paisa", "entry_bar_open_paisa"),
+        ("entry_bar_low_paisa", "entry_bar_open_paisa"),
+        ("exit_bar_high_paisa", "exit_bar_open_paisa"),
+        ("exit_bar_low_paisa", "exit_bar_open_paisa"),
+    ):
+        kwargs.setdefault(extreme, kwargs[open_key])
     return FuturesTradeInput(**kwargs)  # type: ignore[arg-type]
 
 
@@ -100,60 +111,106 @@ class TestScopeAndVenue:
         assert futures_exchange_for_underlying("RELIANCE") == "NSE"
 
 
-class TestR15ApplyFuturesFill:
-    def test_r15_fill_open_plus_minus_one_tick_long(self) -> None:
-        # [R15] long: buy = entry open + tick; sell = exit open − tick.
-        buy, sell, slip = apply_futures_fill(2_200_000, 2_210_000, side="long")
+class TestApplyFuturesFillLaw:
+    """The ONE fill law: adverse extreme ± the SAME tick (flagless)."""
+
+    def test_flat_bar_fill_is_open_plus_minus_one_tick_long(self) -> None:
+        # Flat bars (extremes == opens): buy = entry + tick; sell = exit − tick.
+        buy, sell, slip = apply_futures_fill(
+            side="long",
+            entry_high_paisa=2_200_000,
+            entry_low_paisa=2_200_000,
+            exit_high_paisa=2_210_000,
+            exit_low_paisa=2_210_000,
+        )
         assert (buy, sell, slip) == (2_200_005, 2_209_995, 2 * TICK_PAISA)
 
-    def test_r15_fill_adverse_short(self) -> None:
-        # [R15] short: opening SELL = entry − tick (adverse LOWER); the cover
-        # BUY = exit + tick (adverse HIGHER) — adverse on BOTH legs.
-        buy, sell, slip = apply_futures_fill(2_200_000, 2_210_000, side="short")
-        assert (buy, sell, slip) == (2_210_005, 2_199_995, 2 * TICK_PAISA)
+    def test_ranged_bar_fills_entry_high_exit_low_long(self) -> None:
+        # long: buy = entry HIGH + tick; sell = exit LOW − tick.
+        buy, sell, slip = apply_futures_fill(
+            side="long",
+            entry_high_paisa=2_201_000,
+            entry_low_paisa=2_199_000,
+            exit_high_paisa=2_211_000,
+            exit_low_paisa=2_209_000,
+        )
+        assert (buy, sell, slip) == (2_201_005, 2_208_995, 2 * TICK_PAISA)
 
-    def test_r15_fill_long_parity_with_apply_slippage(self) -> None:
-        # [R15/COMMON] the LONG branch is byte-equal to the options
-        # calculator's long slippage (golden parity across a grid).
-        for entry, exit_ in ((5, 5), (10, 5), (2_200_000, 2_210_000), (123_455, 5)):
-            assert apply_futures_fill(entry, exit_, side="long") == _apply_slippage(
-                entry, exit_, "long"
+    def test_ranged_bar_fills_entry_low_exit_high_short(self) -> None:
+        # short: opening SELL = entry LOW − tick; cover BUY = exit HIGH + tick
+        # (adverse on BOTH legs — the resolved '# CHECK SIGN' law).
+        buy, sell, slip = apply_futures_fill(
+            side="short",
+            entry_high_paisa=2_201_000,
+            entry_low_paisa=2_199_000,
+            exit_high_paisa=2_211_000,
+            exit_low_paisa=2_209_000,
+        )
+        assert (buy, sell, slip) == (2_211_005, 2_198_995, 2 * TICK_PAISA)
+
+    def test_long_parity_with_apply_slippage(self) -> None:
+        # [COMMON] the LONG branch is byte-equal to the options calculator's
+        # long slippage under the SAME four anchors (golden parity on a grid).
+        for eh, el, xh, xl in (
+            (5, 5, 5, 5),
+            (10, 8, 5, 5),
+            (2_201_000, 2_199_000, 2_211_000, 2_209_000),
+            (123_455, 123_000, 10, 5),
+        ):
+            assert apply_futures_fill(
+                side="long",
+                entry_high_paisa=eh,
+                entry_low_paisa=el,
+                exit_high_paisa=xh,
+                exit_low_paisa=xl,
+            ) == _apply_slippage(
+                "long",
+                entry_high_paisa=eh,
+                entry_low_paisa=el,
+                exit_high_paisa=xh,
+                exit_low_paisa=xl,
             )
 
-    def test_r15_short_does_not_inherit_check_sign_ambiguity(self) -> None:
-        # [R15] the futures short sells the ENTRY leg ADVERSE at entry − tick,
-        # computed adverse-both-sides directly (never by delegating to the
-        # calculator's short branch — mechanism independence AST-pinned in the
-        # R45 test). After DEC-TRACK2-COSTS-SPEC-RECONCILE-001 (MIGRATION.md
-        # #1552) the calculator's own '# CHECK SIGN' short ambiguity was
-        # resolved to the §8 ADVERSE rule (entry + tick → entry − tick), so the
-        # calculator's short sell now AGREES with the futures adverse fill.
-        _cal_buy, cal_sell, _ = _apply_slippage(2_200_000, 2_210_000, "short_call")
-        fut_buy, fut_sell, _ = apply_futures_fill(2_200_000, 2_210_000, side="short")
-        assert cal_sell == 2_199_995  # adverse (reconciled — DEC-TRACK2-COSTS-SPEC-RECONCILE-001)
-        assert fut_sell == 2_199_995  # adverse — computed independently
-        assert fut_buy == 2_210_005
-
     def test_fill_floors_at_one_tick_long_exit(self) -> None:
-        # A one-tick exit open would sell at ₹0.00 without the floor.
-        buy, sell, slip = apply_futures_fill(100, TICK_PAISA, side="long")
+        # A one-tick exit LOW would sell at ₹0.00 without the floor.
+        buy, sell, slip = apply_futures_fill(
+            side="long",
+            entry_high_paisa=100,
+            entry_low_paisa=100,
+            exit_high_paisa=TICK_PAISA,
+            exit_low_paisa=TICK_PAISA,
+        )
         assert (buy, sell) == (105, TICK_PAISA)
         assert slip == TICK_PAISA  # the floored sell leg truly moved 0
 
     def test_fill_floors_at_one_tick_short_entry(self) -> None:
-        # A one-tick entry open would open the short at ₹0.00 without the floor.
-        buy, sell, slip = apply_futures_fill(TICK_PAISA, 100, side="short")
+        # A one-tick entry LOW would open the short at ₹0.00 without the floor.
+        buy, sell, slip = apply_futures_fill(
+            side="short",
+            entry_high_paisa=TICK_PAISA,
+            entry_low_paisa=TICK_PAISA,
+            exit_high_paisa=100,
+            exit_low_paisa=100,
+        )
         assert (buy, sell) == (105, TICK_PAISA)
         assert slip == TICK_PAISA
 
     def test_unknown_side_fails_loud(self) -> None:
         with pytest.raises(ValueError, match="side 'banana'"):
-            apply_futures_fill(100, 200, side="banana")  # type: ignore[arg-type]
+            apply_futures_fill(
+                side="banana",  # type: ignore[arg-type]
+                entry_high_paisa=100,
+                entry_low_paisa=100,
+                exit_high_paisa=200,
+                exit_low_paisa=200,
+            )
 
-    def test_r15_zero_range_bar_degenerates(self) -> None:
-        # [R15] O==H==L==C degenerates cleanly to that single price ± tick.
-        buy, sell, slip = apply_futures_fill(100_000, 100_000, side="long")
-        assert (buy, sell, slip) == (100_005, 99_995, 2 * TICK_PAISA)
+    def test_no_mode_or_open_parameters_exist(self) -> None:
+        # Killed-token pin: the fill law is flagless — no fill_mode, no
+        # retired open anchors (DEC-FILL-WORST-CASE-ONLY-001).
+        params = inspect.signature(apply_futures_fill).parameters
+        assert "fill_mode" not in params
+        assert "entry_open_paisa" not in params
 
 
 class TestBrokerage:
@@ -444,13 +501,15 @@ class TestChargePathViaSyntheticCitedFixture:
         #   buy_notional 65,002,500 · sell_notional 65,497,500
         #   gross = 495,000
         #   brokerage: min(2000, 0.03%×notional≈₹195) = 2,000 per leg → 4,000
-        #   STT: 65,497,500×2,000//1e7 = 13,099 → rupee-round → 13,100
-        #   ETC: 1,125 + 1,133 = 2,258
-        #   SEBI: 65 + 65 = 130 · IPFT: 65 + 65 = 130
-        #   stamp: 65,002,500×200//1e7 = 1,300 → rupee-round → 1,300
-        #   GST: 18% × (4,000+2,258+130+130=6,518) = 1,173 → rupee-round → 1,200
-        #   total = 4,000+13,100+2,258+130+130+1,300+1,200 = 22,118
-        #   net = 495,000 − 22,118 = 472,882
+        #   (every levy CEILs — the permanent adverse-rounding law,
+        #   DEC-FILL-WORST-CASE-ONLY-001):
+        #   STT: 65,497,500×2,000//1e7 = 13,099 → ceil₹ → 13,100
+        #   ETC: ⌈1,124.54⌉ + ⌈1,133.11⌉ = 1,125 + 1,134 = 2,259
+        #   SEBI: ⌈65.00⌉ + ⌈65.50⌉ = 66 + 66 = 132 · IPFT: same → 132
+        #   stamp: 65,002,500×200//1e7 = 1,300 → ceil₹ → 1,300
+        #   GST: 18% × (4,000+2,259+132+132=6,523) = 1,174 → ceil₹ → 1,200
+        #   total = 4,000+13,100+2,259+132+132+1,300+1,200 = 22,123
+        #   net = 495,000 − 22,123 = 472,877
         monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
         monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
         monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
@@ -468,13 +527,13 @@ class TestChargePathViaSyntheticCitedFixture:
         assert out.gross_pnl_paisa == 495_000
         assert out.brokerage_paisa == 4_000
         assert out.stt_paisa == 13_100
-        assert out.exch_paisa == 2_258
-        assert out.sebi_paisa == 130
-        assert out.ipft_paisa == 130
+        assert out.exch_paisa == 2_259
+        assert out.sebi_paisa == 132
+        assert out.ipft_paisa == 132
         assert out.stamp_paisa == 1_300
         assert out.gst_paisa == 1_200
-        assert out.total_charges_paisa == 22_118
-        assert out.net_pnl_paisa == 472_882
+        assert out.total_charges_paisa == 22_123
+        assert out.net_pnl_paisa == 472_877
         assert out.slippage_paisa == 2 * TICK_PAISA * 500
         assert out.lot_size_basis == "trade_date"
 
@@ -498,3 +557,175 @@ class TestChargePathViaSyntheticCitedFixture:
         assert out.cost_free is False
         assert out.ipft_paisa == 0  # BSE: the assumed-0 options-precedent stance
         assert out.exch_paisa > 0
+
+
+class TestExtremesRequired:
+    """DEC-FILL-WORST-CASE-ONLY-001 — the REQUIRED FuturesTradeInput anchors."""
+
+    def test_missing_extremes_refuse_fail_loud(self) -> None:
+        # An input without its adverse anchors is unpriceable — the refusal
+        # names the DEC and the missing fields (never a silent open fill).
+        with pytest.raises(ValueError, match="DEC-FILL-WORST-CASE-ONLY-001"):
+            FuturesTradeInput(
+                entry_dt_ist=_ENTRY,
+                exit_dt_ist=_EXIT,
+                instrument="NIFTY",
+                contract_symbol="NSE-NIFTY-30Jan25-FUT",
+                expiry_date=_EXPIRY,
+                entry_bar_open_paisa=2_200_000,
+                exit_bar_open_paisa=2_210_000,
+                side="long",
+                lot_size=75,
+            )
+        with pytest.raises(ValueError, match="missing .'exit_bar_low_paisa'"):
+            FuturesTradeInput(
+                entry_dt_ist=_ENTRY,
+                exit_dt_ist=_EXIT,
+                instrument="NIFTY",
+                contract_symbol="NSE-NIFTY-30Jan25-FUT",
+                expiry_date=_EXPIRY,
+                entry_bar_open_paisa=2_200_000,
+                exit_bar_open_paisa=2_210_000,
+                side="long",
+                lot_size=75,
+                entry_bar_high_paisa=2_201_000,
+                entry_bar_low_paisa=2_199_000,
+                exit_bar_high_paisa=2_211_000,
+            )
+
+    def test_no_fill_mode_field_exists(self) -> None:
+        # Killed-token pin: FuturesTradeInput carries no mode axis.
+        import dataclasses
+
+        assert "fill_mode" not in {f.name for f in dataclasses.fields(FuturesTradeInput)}
+
+    @pytest.mark.parametrize("label", ["entry", "exit"])
+    def test_extreme_ordering_validated_against_open(self, label: str) -> None:
+        with pytest.raises(ValueError, match=f"{label}_bar_high_paisa"):
+            _trade(**{f"{label}_bar_high_paisa": 1})
+        with pytest.raises(ValueError, match=f"{label}_bar_low_paisa"):
+            _trade(**{f"{label}_bar_low_paisa": 99_999_999})
+
+    def test_sub_tick_low_extreme_is_legal(self) -> None:
+        # A degenerate sub-tick LOW must NOT crash the boundary — the fill
+        # floor absorbs it (never a sim crash on one degenerate bar).
+        t = _trade(
+            entry_bar_open_paisa=10,
+            exit_bar_open_paisa=10,
+            entry_bar_high_paisa=20,
+            entry_bar_low_paisa=1,
+            exit_bar_high_paisa=20,
+            exit_bar_low_paisa=1,
+        )
+        out = compute_futures_trade_cost(t)
+        assert out.sell_fill_paisa == TICK_PAISA  # floored, not crashed
+
+
+class TestWorstCaseComputeCost:
+    def test_ranged_bars_thread_through_compute_futures_trade_cost(self) -> None:
+        # Hand-recomputed (NIFTY long, cost-free index, lot 75):
+        #   buy = entry HIGH 2,201,000 + 5 = 2,201,005
+        #   sell = exit LOW 2,209,000 − 5 = 2,208,995
+        #   gross = (2,208,995 − 2,201,005) × 75 = 7,990 × 75 = 599,250
+        out = compute_futures_trade_cost(
+            _trade(
+                entry_bar_high_paisa=2_201_000,
+                entry_bar_low_paisa=2_199_000,
+                exit_bar_high_paisa=2_211_000,
+                exit_bar_low_paisa=2_209_000,
+            )
+        )
+        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_201_005, 2_208_995)
+        assert out.gross_pnl_paisa == 599_250
+        assert out.net_pnl_paisa == 599_250  # cost-free index: net == gross
+        assert out.slippage_paisa == 2 * TICK_PAISA * 75
+
+    def test_ranged_bars_never_beat_flat_bars(self) -> None:
+        # The per-trade floor on this re-pricing layer: same opens, a WIDER
+        # fill bar can only fill WORSE — gross strictly below the flat-bar
+        # gross (equality only when the extremes collapse onto the opens).
+        flat = compute_futures_trade_cost(_trade())
+        ranged = compute_futures_trade_cost(
+            _trade(
+                entry_bar_high_paisa=2_200_500,
+                entry_bar_low_paisa=2_199_500,
+                exit_bar_high_paisa=2_210_500,
+                exit_bar_low_paisa=2_209_500,
+            )
+        )
+        assert ranged.gross_pnl_paisa < flat.gross_pnl_paisa
+
+    def test_cost_bearing_levies_round_adversely(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The PERMANENT adverse-levy-rounding law on the FULL cost-bearing
+        # charge stack under the synthetic cited fixture — every levy CEILs,
+        # so a rounding boundary can never make a worse fill pay LESS.
+        # Hand-recomputed (RELIANCE long, lot 500, entry 2025-01-02):
+        # FLAT bars (extremes == opens ₹1,300.00 / ₹1,310.00):
+        #   buy 130,005 · sell 130,995 → notionals 65,002,500 / 65,497,500
+        #   gross 495,000
+        #   brokerage: flat ₹20/leg wins the min → 4,000
+        #   STT(2000): 65,497,500×2000//1e7 = 13,099 → ceil₹ 13,100
+        #   ETC(173): ⌈1,124.54⌉ + ⌈1,133.11⌉ = 1,125 + 1,134 = 2,259
+        #   SEBI(10): ⌈65.00⌉ + ⌈65.50⌉ = 66 + 66 = 132
+        #   IPFT(10): same shape → 132
+        #   stamp(200): 65,002,500×200//1e7 = 1,300 → ceil₹ 1,300
+        #   GST: base 4,000+2,259+132+132 = 6,523 → raw 1,174 → ceil₹ 1,200
+        #   total 22,123 · net 495,000 − 22,123 = 472,877
+        # RANGED bars (extremes ±₹1 around the opens):
+        #   buy 130,105 · sell 130,895 → notionals 65,052,500 / 65,447,500
+        #   gross 395,000
+        #   STT: 65,447,500×2000//1e7 = 13,089 → ceil₹ 13,100 (the historical
+        #     refuter boundary — nearest would have paid ₹11 here)
+        #   ETC: ⌈1,125.41⌉ + ⌈1,132.24⌉ = 1,126 + 1,133 = 2,259
+        #   SEBI/IPFT: ⌈65.05⌉ + ⌈65.45⌉ = 66 + 66 = 132 each
+        #   stamp: 65,052,500×200//1e7 = 1,301 → ceil₹ 1,400
+        #   GST: same base 6,523 → 1,200
+        #   total 22,223 · net 372,777 ≤ 472,877 (the floor holds)
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
+        common: dict[str, object] = {
+            "instrument": "RELIANCE",
+            "contract_symbol": "NSE-RELIANCE-30Jan25-FUT",
+            "lot_size": 500,
+            "entry_bar_open_paisa": 130_000,
+            "exit_bar_open_paisa": 131_000,
+        }
+        flat = compute_futures_trade_cost(_trade(**common))
+        ranged = compute_futures_trade_cost(
+            _trade(
+                **common,
+                entry_bar_high_paisa=130_100,
+                entry_bar_low_paisa=129_900,
+                exit_bar_high_paisa=131_100,
+                exit_bar_low_paisa=130_900,
+            )
+        )
+        assert (flat.buy_fill_paisa, flat.sell_fill_paisa) == (130_005, 130_995)
+        assert flat.gross_pnl_paisa == 495_000
+        assert (flat.stt_paisa, flat.exch_paisa) == (13_100, 2_259)
+        assert (flat.sebi_paisa, flat.ipft_paisa) == (132, 132)
+        assert (flat.stamp_paisa, flat.gst_paisa) == (1_300, 1_200)
+        assert flat.total_charges_paisa == 22_123
+        assert (ranged.buy_fill_paisa, ranged.sell_fill_paisa) == (130_105, 130_895)
+        assert ranged.gross_pnl_paisa == 395_000
+        assert ranged.brokerage_paisa == 4_000
+        assert (ranged.stt_paisa, ranged.exch_paisa) == (13_100, 2_259)
+        assert (ranged.sebi_paisa, ranged.ipft_paisa) == (132, 132)
+        assert (ranged.stamp_paisa, ranged.gst_paisa) == (1_400, 1_200)
+        assert ranged.total_charges_paisa == 22_223
+        assert ranged.net_pnl_paisa == 372_777
+        assert ranged.net_pnl_paisa <= flat.net_pnl_paisa
+
+
+class TestBrokerageTurnoverArmCeils:
+    def test_turnover_arm_ceils_unconditionally(self) -> None:
+        # The min(₹20, 0.03%×turnover) TURNOVER arm is a rounded charge, so
+        # it rides the permanent adverse-rounding law: 1,000,500 paisa ×
+        # 0.03% = 300.15 → ceil 301 (nearest would have said 300).
+        assert futures_brokerage_leg_paisa(1_000_500, "groww") == 301
+
+    def test_flat_arm_and_zerodha_are_rounding_free(self) -> None:
+        # A big notional lands on the flat ₹20 cap; zerodha is flat-only.
+        assert futures_brokerage_leg_paisa(65_002_500, "groww") == 2_000
+        assert futures_brokerage_leg_paisa(1_000_500, "zerodha") == 2_000

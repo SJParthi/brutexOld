@@ -1,0 +1,49 @@
+SLUG: getinstrumenttypes-2
+LINK: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getinstrumenttypes-2/
+TITLE: GetInstrumentTypes
+MODIFIED: 2024-07-10T12:39:25
+-----DECODED-----
+<h3>GetInstrumentTypes : Returns list of Instrument Types (e.g. FUTIDX, FUTSTK, etc.)</h3>
+<div><b><span style="color: #dd3333;">Supported parameters</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><b>Exchange</b></td>
+<td><i>String value like MCX</i></td>
+<td>Name of supported exchange. How to get list of supported exchanges you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getexchanges-2/">here</a></td>
+</tr>
+</tbody>
+</table>
+<p> </p>
+<div><b><span style="color: #dd3333;">What is returned ?</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><strong>InstrumentTypes</strong></td>
+</tr>
+</tbody>
+</table>
+<p> </p>
+<div><b><span style="color: #dd3333;">Sample request(JavaScript)</span></b></div>
+<pre lang="javascript">
+{
+MessageType: "GetInstrumentTypes",
+Exchange: "NFO",
+};
+var message = JSON.stringify(request);
+websocket.send(message);
+</pre>
+<div><b><span style="color: #dd3333;">Example of returned data in JSON format</span></b></div>
+<pre lang="javascript">
+{
+"Request":{
+"Exchange":"NFO",
+"MessageType":"GetInstrumentTypes"
+},
+"Result":[
+{"Value":"OPTIDX"},
+{"Value":"OPTSTK"}
+],
+"MessageType":"InstrumentTypesResult"
+}
+</pre>

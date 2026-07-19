@@ -17,6 +17,7 @@ whitebox tests, DEC-P0-017).
 from __future__ import annotations
 
 import math
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -313,3 +314,62 @@ class TestParameterValidation:
     def test_pass_rate_rejects_bad_groups(self) -> None:
         with pytest.raises(ValueError, match="cannot exceed n_samples"):
             cpcv_pass_rate([1.0, 2.0, 3.0], n_groups=8)
+
+
+class TestRustStatsDispatch:
+    """The DEC-METRICS-RUST-STATS-001 seam dispatch inside ``cpcv_pass_rate``.
+
+    Wheel-independent by design (the seam function is monkeypatched): pins
+    that a kernel-served count is ADOPTED (the Python fold loop is skipped),
+    that a ``None`` from the seam falls through to the retained-forever
+    oracle byte-identically, and that the flag-OFF default never consults
+    the seam at all. Kernel-vs-oracle value parity lives in
+    ``tests/unit/test_rust_stats.py`` + the property/golden suites.
+    """
+
+    _RETURNS: ClassVar[list[float]] = [1.0, 2.0, -3.0, -4.0]  # golden: 1 of 6 folds pass
+
+    def test_flag_off_never_consults_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.metrics import rust_stats
+
+        def _forbidden(*args: object, **kwargs: object) -> int:
+            raise AssertionError("the seam must not be consulted when the flag is OFF")
+
+        monkeypatch.delenv(rust_stats.STATS_RUST_ENV, raising=False)
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", _forbidden)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0 / 6.0
+
+    def test_flag_on_kernel_count_is_adopted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A seam-served count feeds the SAME exact division expression; the
+        stubbed count of 6 (≠ the oracle's 1) proves the adoption."""
+        from brutex.metrics import rust_stats
+
+        seen: dict[str, object] = {}
+
+        def _kernel_stub(*args: object, **kwargs: object) -> int:
+            seen["n_total"] = kwargs["n_total"]
+            oracle = kwargs["oracle"]
+            assert callable(oracle)
+            seen["oracle_value"] = oracle()
+            return 6
+
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", _kernel_stub)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0  # 6/6 — the stub's count, not the oracle's 1
+        assert seen["n_total"] == 6
+        # The oracle closure handed to the seam IS the extracted fold loop.
+        assert seen["oracle_value"] == 1
+
+    def test_flag_on_seam_none_falls_through_to_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``None`` (latched / wheel-absent / kernel error / refused result)
+        serves the call from the Python fold loop — byte-identical to OFF."""
+        from brutex.metrics import rust_stats
+
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", lambda *a, **k: None)
+        rate = cpcv_pass_rate(self._RETURNS, n_groups=4, n_test_groups=2)
+        assert rate == 1.0 / 6.0

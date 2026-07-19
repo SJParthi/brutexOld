@@ -15,12 +15,30 @@ plus this display module, never of price storage.
 The 2dp rule applies to MONEY ONLY. Statistical metrics (Sharpe, Deflated
 Sharpe, p-values, CPCV scores) keep full precision — rounding them would corrupt
 strategy ranking (Golden Rule #10).
+
+Rust seam (``DEC-CONFIG-RUST-LEAVES-001``, MIGRATION.md #1943 — slice T35):
+when — and ONLY when — ``BRUTEX_CORE_RUST_MONEY`` is set truthy, the four
+public laws route through the default-OFF, burn-in-checked, fail-closed
+:mod:`brutex.money_rust` facade to the ``rust/brutex-core`` crate (exact
+decimal-STRING arithmetic; strings only cross the FFI). The flag-OFF
+default is the verbatim ``_*_python`` oracle below — byte-identical AND
+crate-untouched (bomb-crate spy-pinned). The oracles are the LIVE parity
+reference every degrade path serves; honesty banner (ADR-0020, mandatory
+verbatim): expected payoff ≈ 0 — conversion is for uniformity, not speed.
 """
 
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
+
+from brutex.money_rust import (
+    money_rust_enabled,
+    route_format_inr,
+    route_paisa_to_rupees,
+    route_round_money,
+    route_rupees_to_paisa,
+)
 
 #: Quantum for money rounding — two decimal places, always (DEC-MONEY-2DP-001).
 #: ``# pragma: no mutate`` — mutmut's string mutation yields ``Decimal("XX0.01XX")``
@@ -47,6 +65,17 @@ def round_money(rupees: Decimal) -> Decimal:
     Decimal
         The amount quantised to two decimal places, rounding half away from zero.
     """
+    if not money_rust_enabled():
+        return _round_money_python(rupees)
+    return route_round_money(rupees, _round_money_python)
+
+
+def _round_money_python(rupees: Decimal) -> Decimal:
+    """The verbatim :func:`round_money` body — the LIVE Decimal oracle.
+
+    Token-for-token the pre-seam public body (DEC-CONFIG-RUST-LEAVES-001);
+    every flag-OFF / ineligible / degraded / burn-in call serves this.
+    """
     return rupees.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
@@ -70,7 +99,19 @@ def rupees_to_paisa(rupees: Decimal) -> int:
     int
         The amount in int64 paisa.
     """
-    return int(round_money(rupees) * _PAISA_PER_RUPEE)
+    if not money_rust_enabled():
+        return _rupees_to_paisa_python(rupees)
+    return route_rupees_to_paisa(rupees, _rupees_to_paisa_python)
+
+
+def _rupees_to_paisa_python(rupees: Decimal) -> int:
+    """The verbatim :func:`rupees_to_paisa` body over the extracted oracle.
+
+    Composes :func:`_round_money_python` (not the routed public) so the
+    oracle chain is PURE Python end-to-end — a burn-in comparison must
+    never recurse into the seam.
+    """
+    return int(_round_money_python(rupees) * _PAISA_PER_RUPEE)
 
 
 def paisa_to_rupees(paisa: int) -> Decimal:
@@ -86,7 +127,14 @@ def paisa_to_rupees(paisa: int) -> Decimal:
     Decimal
         The amount in rupees, quantised to two decimal places.
     """
-    return round_money(Decimal(paisa) / _PAISA_PER_RUPEE)
+    if not money_rust_enabled():
+        return _paisa_to_rupees_python(paisa)
+    return route_paisa_to_rupees(paisa, _paisa_to_rupees_python)
+
+
+def _paisa_to_rupees_python(paisa: int) -> Decimal:
+    """The verbatim :func:`paisa_to_rupees` body over the extracted oracle."""
+    return _round_money_python(Decimal(paisa) / _PAISA_PER_RUPEE)
 
 
 def format_inr(paisa: int) -> str:
@@ -102,7 +150,14 @@ def format_inr(paisa: int) -> str:
     str
         A display string such as ``"₹1,234.56"`` — always exactly two decimals.
     """
-    return f"₹{paisa_to_rupees(paisa):,.2f}"
+    if not money_rust_enabled():
+        return _format_inr_python(paisa)
+    return route_format_inr(paisa, _format_inr_python)
+
+
+def _format_inr_python(paisa: int) -> str:
+    """The verbatim :func:`format_inr` body over the extracted oracle."""
+    return f"₹{_paisa_to_rupees_python(paisa):,.2f}"
 
 
 __all__ = ["format_inr", "paisa_to_rupees", "round_money", "rupees_to_paisa"]

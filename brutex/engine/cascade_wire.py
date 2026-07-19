@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -657,7 +658,8 @@ def _make_mc_evaluate(
     """Build the Monte-Carlo exit-logic callable (filter #9) for one candidate.
 
     Returns a closure that, given a sorted array of entry-bar positions, relocates
-    the entry signals there, re-runs the SAME trade-sim (identical exit logic), and
+    the entry signals there, re-runs the SAME trade-sim (identical exit logic —
+    the one hardcoded worst-case fill law, DEC-FILL-WORST-CASE-ONLY-001), and
     returns the per-trade Sharpe — comparable to the candidate's observed per-trade
     Sharpe. An undefined Sharpe (``< 2`` trades / zero variance) returns ``nan``,
     which the permutation test treats as "did not beat" the observed statistic.
@@ -766,6 +768,8 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        # The candidate re-simulation reproduces the persisted finalist under
+        # the ONE hardcoded worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001).
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
         # candidate re-simulation's trades are a DISCARDED stream — every
         # observable output is the CandidateInput SCALARS + returns tuples
@@ -1393,7 +1397,7 @@ def build_leaderboard_trials(
 
 def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
     """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict."""
-    return {
+    payload: dict[str, object] = {
         "instrument": spec.instrument,
         "tf_label": spec.tf_label,
         "tf_minutes": spec.tf_minutes,
@@ -1413,11 +1417,18 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # (a diverging hand-edit is a corrupt manifest, never a silent pick).
         "winners_hex": [[run_id, f"{mask:032x}"] for run_id, mask in spec.winners],
         "fib_anchor": spec.fib_anchor.value,
+        # DEC-FILL-WORST-CASE-ONLY-001: the manifest carries the UNCONDITIONAL
+        # "fill_mode": "worst_case" key (the canonical-params law's manifest
+        # twin) — the reader REFUSES a manifest without it (precise-era) so a
+        # manual replay can never re-score precise-priced winners.
+        "fill_mode": FillMode.WORST_CASE.value,
         # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
         # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
-        # when non-default, so a baseline manifest is byte-identical to a pre-axis one.
+        # when non-default, so a baseline manifest is byte-identical to a pre-axis one
+        # (modulo the unconditional fill_mode key above — the two laws compose).
         **price_source_params_fragment(spec.vwap_source, spec.ema_source),
     }
+    return payload
 
 
 def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
@@ -1426,6 +1437,19 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     # scalar coercions below read cleanly. Every malformed value is caught by the
     # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
     raw = cast(dict[str, Any], data)
+    if raw.get("fill_mode") is None or str(raw["fill_mode"]) != FillMode.WORST_CASE.value:
+        # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is
+        # the ONLY fill model and every post-DEC manifest carries the
+        # unconditional "fill_mode": "worst_case" key. An ABSENT key or a
+        # literal "precise" token identifies a PRECISE-era manifest whose
+        # winners were ranked under fills the deleted mode produced —
+        # re-scoring them here would silently launder precise-priced results
+        # as worst-case. Refuse LOUDLY; the remediation is a fresh sweep.
+        raise CascadeWireError(
+            "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
+            f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
+            "model; re-run the sweep to produce a worst-case manifest"
+        )
     try:
         proximity = raw["proximity_bps"]
         proximity_bps = (

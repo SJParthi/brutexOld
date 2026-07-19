@@ -1,13 +1,51 @@
-"""Flag-gated Rust parquet-render seam — the ADR-0020 PR-1 facade.
+"""Flag-gated Rust parquet-render seam — the datalake-roadmap render facade.
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). When — and ONLY when —
-``BRUTEX_LAKE_RUST_RENDER`` is set truthy, :meth:`ParquetWriter._render_bytes`
-routes its frame → parquet-bytes render through the ``brutex_lake`` crate (a
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891; the conversion roadmap
+ADR at ``docs/adr/0020-datalake-rust-conversion-roadmap.md``). When — and ONLY
+when — ``BRUTEX_LAKE_RUST_RENDER`` is set truthy, the two lake writers route
+their frame → parquet-bytes renders through the ``brutex_lake`` crate (a
 Rust build of polars REV-pinned at the commit the installed Python wheel's
 release tag pointed at — tags are movable, so the manifest pins the commit;
 the frame crosses as uncompressed Arrow IPC bytes). This module owns
 the flag, the three fail-closed layers, and the process-local latches; the
 crate side lives in ``rust/brutex-lake/src/lib.rs``.
+
+## Render PROFILES (PR-2) — one facade, one crate callable per byte surface
+
+Two callers, two distinct wheel call shapes, ONE guard/latch/burn-in
+apparatus (CLAUDE.md §11 COMMON — no sibling facade):
+
+* :data:`PROFILE_BARS` (the default — PR-1 back-compat):
+  :meth:`ParquetWriter._render_bytes`'s pinned options (zstd level 3,
+  ``row_group_size=100_000``, statistics OFF) →
+  ``brutex_lake.render_parquet_from_ipc``.
+* :data:`PROFILE_OPTIONS_DEFAULTS` (PR-2):
+  ``option_parquet_writer._atomic_write_parquet``'s ALL-DEFAULTS
+  ``df.write_parquet(path)`` shape (Zstd(None), statistics
+  min/max/null_count ON + distinct OFF, ``row_group_size=None`` → the
+  streaming sink's 122,880-row default split) →
+  ``brutex_lake.render_parquet_defaults_from_ipc``.
+
+The profile changes ONLY (a) which crate callable renders, (b) the burn-in
+count-budget cell (per-profile — a bars-warmed process has ZERO byte
+witnesses on the statistics/Zstd(None)/122,880-split surfaces), and (c) the
+shape-token namespace (profile-prefixed inside the facade, so a bars witness
+can never license a defaults shape). The flag, the latch, the
+import/version/metadata guards, the degrade/panic-belt sets and the OOM
+doctrine are ONE shared code path. An UNKNOWN profile value fails CLOSED:
+one loud ``lake_rust_render.fallback`` WARN (reason ``profile_unknown``) and
+the oracle bytes — never a ``KeyError`` into a write path, and never a latch
+(the install is not implicated).
+
+SHARED-LATCH DISCLOSURE (deliberate, fail-closed both directions): the
+process latch is ONE cell for BOTH profiles — any guard trip or burn-in
+autorevert on either writer's path disables the OTHER writer's Rust path
+too. A byte mismatch anywhere is evidence the INSTALL's lockstep is broken
+(same crate, same rev); the oracle always serves, payoff ≈ 0, so
+over-disabling costs nothing. Likewise a stale PR-1-vintage crate (missing
+the defaults callable) latches ``crate_unavailable`` for BOTH surfaces —
+the lockstep is an ATOMIC pin (crate == repo move together; rebuild per
+``docs/runbooks/lake-rust-render-lockstep.md``).
 
 ## The flag — ``BRUTEX_LAKE_RUST_RENDER`` (DEFAULT OFF)
 
@@ -32,8 +70,9 @@ silently. (The same wheel-boundary reasoning is why
 1. **Import guard** — the crate is resolved lazily on first engaged render;
    an absent/broken ``brutex_lake`` install logs ONE
    ``lake_rust_render.crate_unavailable`` WARN and LATCHES the seam OFF for
-   the process. The resolved module's API surface is VERIFIED (all three
-   callables present — a name-collision / hand-broken ``brutex_lake`` that
+   the process. The resolved module's API surface is VERIFIED (all FOUR
+   callables present, all-or-nothing across both profiles — a
+   name-collision / hand-broken / stale-PR-1 ``brutex_lake`` that
    imports but lacks the API latches the SAME ``crate_unavailable``, never
    an ``AttributeError`` into the pull spine), and a metadata pyfunction
    that RAISES latches ``crate_metadata_error`` (a foreign/stale install
@@ -46,39 +85,54 @@ silently. (The same wheel-boundary reasoning is why
    with no lockfile (ADR-0020 F4), so a wheel bump past the crate must
    REFUSE — never silently different bytes (§7 hazard 1).
 3. **Burn-in self-check + autorevert** — the first :data:`BURN_IN_SAMPLES`
-   engaged renders per process ALSO run the Python render and byte-compare.
-   A mismatch logs ``lake_rust_render.render_autoreverted`` (ERROR — a
-   genuine wrongness signal), SHIPS THE PYTHON BYTES (correctness first;
-   ``raw_hash`` and the on-disk partition see only oracle bytes), and
-   latches OFF for the process. After 16 clean compares
-   (``lake_rust_render.burn_in_complete``), Rust bytes ship directly. The
+   engaged renders per process **per PROFILE** ALSO run the Python render
+   and byte-compare. A mismatch logs ``lake_rust_render.render_autoreverted``
+   (ERROR — a genuine wrongness signal), SHIPS THE PYTHON BYTES (correctness
+   first; ``raw_hash`` and the on-disk partition see only oracle bytes), and
+   latches OFF for the process (BOTH profiles — the shared latch). After 16
+   clean compares per profile (``lake_rust_render.burn_in_complete``,
+   ``profile=`` field), Rust bytes ship directly. The
    pattern is the sweep-metrics kernel's burn-in verbatim
    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 / DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001
    — see ``brutex/engine/rust_metrics.py``), EXTENDED with a SCHEMA-SHAPE
    gate: the count budget alone would let a process that burnt in on 16
    spot partitions ship crate bytes for its FIRST-EVER Greeks-overlay
    partition with zero byte witness, so the caller passes a
-   ``schema_token`` (the frame's column/dtype fingerprint) and every
-   DISTINCT shape is byte-compared at least once before crate bytes ship
-   for it — even after the count budget is spent. The production token
-   space is the writer's two schema shapes (7-column spot / 17-column
-   Greeks overlay — the overlay is all-or-nothing), so the seen-set is
-   bounded by construction; a ``None`` token honestly degrades that call
-   to the count budget alone.
+   ``schema_token`` (the frame's column/dtype fingerprint), the facade
+   prefixes it with the PROFILE (a bars witness never licenses a defaults
+   shape — structural, by construction), and every DISTINCT prefixed shape
+   is byte-compared at least once before crate bytes ship for it — even
+   after the count budget is spent. HONEST BOUND (PR-2 correction of the
+   PR-1 "bounded by construction (two writer shapes)" claim, which the
+   option writer's heal path FALSIFIES — a heal re-renders whatever stored
+   schema a hand-planted file carries, so the token space is open-ended):
+   the seen-set is CAPPED at :data:`_BURN_IN_SHAPES_CAP` entries; once
+   saturated, an unseen shape is STILL byte-compared but no longer
+   recorded — the degrade direction is compare-ALWAYS for novel shapes
+   (more oracle compares on a pathological lake, never fewer). A ``None``
+   token honestly degrades that call to the count budget alone.
 
 ## Log events (all literal — greppable)
 
 * ``lake_rust_render.fallback`` (WARN, once per process per ``reason`` ∈
-  {``flag_unrecognised``, ``render_error``, ``render_result_refused``}) —
-  the Python bytes served.
+  {``flag_unrecognised``, ``profile_unknown``, ``render_error``,
+  ``render_result_refused``}) — the Python bytes served.
 * ``lake_rust_render.rust_path_disabled`` (WARN, once — ``reason`` ∈
   {``crate_unavailable``, ``crate_metadata_error``,
   ``polars_version_mismatch``, ``crate_panic``}) — the guard latch.
 * ``lake_rust_render.render_autoreverted`` (ERROR, once) — the burn-in
   byte-compare mismatch; oracle bytes shipped, latch set.
-* ``lake_rust_render.engaged`` (INFO, once) — the first Rust-served render
-  (the observable "the wired ON path actually runs Rust" signal).
-* ``lake_rust_render.burn_in_complete`` (INFO, once) — 16 clean compares.
+* ``lake_rust_render.engaged`` (INFO, once per PROFILE) — the first
+  Rust-served render on that profile (the observable "the wired ON path
+  actually runs Rust" signal; carries ``profile=``).
+* ``lake_rust_render.burn_in_complete`` (INFO, once per PROFILE) — 16 clean
+  compares on that profile.
+
+Render-path events fired from :func:`render_parquet_bytes` carry a
+``profile=`` field; NONE carries the destination path (the option writer's
+series dir name is vendor-influenceable — the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001
+log-injection discipline — so the facade's call shape simply never receives
+``dest``; events name lengths/tokens/versions only).
 
 A Rust-path render error (crate ``ValueError``/``RuntimeError`` — including
 a crate-side panic, which the crate catches at the FFI boundary and maps to
@@ -139,9 +193,13 @@ the guarded render block.
   compare) and the crate's SEPARATE rayon thread pool beside the wheel's.
 * The latches + warn-once memo are the same *documented exception* to the
   no-global-mutable-state rule as ``rust_metrics``'s: plain unlocked writes
-  — a racing writer thread can at worst run a few extra burn-in compares or
-  emit a duplicate warn, never a wrong byte (the compare ships oracle bytes
-  on ANY mismatch; thread-fuzz-pinned in the unit suite).
+  — a racing writer thread can at worst run a few extra burn-in compares,
+  transiently overshoot the shape-cap by ≤ the racing-thread count
+  (memory-only), or emit a duplicate warn, never a wrong byte (the compare
+  ships oracle bytes on ANY mismatch; thread-fuzz-pinned in the unit suite
+  across all three concurrency surfaces — the single-profile latch, two
+  profiles sharing the latch under interleaved per-profile budget
+  decrements, and concurrent NOVEL shapes past the seen-set cap).
 * The burn-in doubles the render cost for its first 16 engaged renders per
   process (bounded, amortised-nil) — and since the caller holds the
   partition's cross-process flock around the render, those first renders
@@ -160,8 +218,10 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from types import ModuleType
+
+    import polars as pl
 
 _LOG = structlog.get_logger("brutex.data.lake_rust_render")
 
@@ -170,10 +230,28 @@ _LOG = structlog.get_logger("brutex.data.lake_rust_render")
 #: an operator-directed default flip behind a future DEC.
 LAKE_RUST_RENDER_ENV: Final[str] = "BRUTEX_LAKE_RUST_RENDER"
 
-#: Engaged renders byte-compared against the Python oracle per process (the
-#: burn-in self-check). 16 mirrors the sweep-metrics kernel's
-#: ``SELF_CHECK_SAMPLES`` (the #1531/#1532 precedent).
+#: Engaged renders byte-compared against the Python oracle per process PER
+#: PROFILE (the burn-in self-check). 16 mirrors the sweep-metrics kernel's
+#: ``SELF_CHECK_SAMPLES`` (the #1531/#1532 precedent); per-profile because
+#: each profile is a distinct byte SURFACE (module docstring layer 3).
 BURN_IN_SAMPLES: Final[int] = 16
+
+#: Render profile: the PR-1 bars writer (zstd-3 / rg=100k / stats OFF) —
+#: the DEFAULT, so ``parquet_writer.py``'s PR-1 call site is byte-untouched.
+PROFILE_BARS: Final[str] = "bars"
+
+#: Render profile: the PR-2 option writer's ALL-DEFAULTS
+#: ``df.write_parquet(path)`` shape (Zstd(None) / rg=None→122,880 split /
+#: statistics min+max+null_count).
+PROFILE_OPTIONS_DEFAULTS: Final[str] = "options_defaults"
+
+#: profile → the ``brutex_lake`` pyfunction that renders it. TWO thin crate
+#: pyfunctions over ONE shared Rust core — no stringly profile enum crosses
+#: the FFI (a missing FUNCTION fails once, loudly, at the import guard).
+_PROFILE_RENDER_ATTR: Final[Mapping[str, str]] = {
+    PROFILE_BARS: "render_parquet_from_ipc",
+    PROFILE_OPTIONS_DEFAULTS: "render_parquet_defaults_from_ipc",
+}
 
 #: Truthy env literals (case-insensitive, whitespace-stripped). A DELIBERATE
 #: byte-for-byte mirror of the sweep flags' vocabulary
@@ -191,14 +269,30 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: docstring; single-cell mutable, the ``rust_metrics`` shape).
 _DISABLED_REASON: Final[list[str | None]] = [None]
 
-#: Burn-in samples still to run this process (same documented exception).
-_BURN_IN_REMAINING: Final[list[int]] = [BURN_IN_SAMPLES]
+#: The budget every lazily-initialised per-profile burn-in cell starts from
+#: (``BURN_IN_SAMPLES`` in production; the test reset seam re-points it —
+#: same documented exception).
+_BURN_IN_DEFAULT: Final[list[int]] = [BURN_IN_SAMPLES]
 
-#: Schema-shape tokens already byte-compared this process (the shape gate —
-#: module docstring layer 3). Bounded by construction: the ONE production
-#: caller derives the token from the writer's frame schema, which has
-#: exactly two shapes (7-column spot / 17-column Greeks overlay).
+#: Burn-in samples still to run this process, PER PROFILE (lazily seeded
+#: from :data:`_BURN_IN_DEFAULT` on a profile's first engaged render — same
+#: documented exception; dict ``setdefault`` is atomic under the GIL).
+_BURN_IN_REMAINING: Final[dict[str, int]] = {}
+
+#: PROFILE-PREFIXED schema-shape tokens already byte-compared this process
+#: (the shape gate — module docstring layer 3). Keys are minted inside the
+#: facade as ``f"{profile}|{schema_token}"`` so a bars witness can never
+#: license a defaults-profile shape. HONESTLY UNBOUNDED input space (the
+#: option HEAL path re-renders whatever stored schema a hand-planted file
+#: carries — the PR-2 correction of PR-1's "two writer shapes" claim), so
+#: the set is capped at :data:`_BURN_IN_SHAPES_CAP`: past the cap an unseen
+#: shape is byte-compared but NOT recorded (compare-always for novel shapes
+#: — more oracle compares, never fewer).
 _BURN_IN_SHAPES_SEEN: Final[set[str]] = set()
+
+#: The seen-set cap (fail-safe bound on facade memory under a pathological
+#: hand-planted lake; production traffic is a handful of shapes).
+_BURN_IN_SHAPES_CAP: Final[int] = 64
 
 #: Whether the shape gate is armed. Always ``True`` in production; the test
 #: reset seam disarms it together with a zeroed count budget so
@@ -208,9 +302,14 @@ _BURN_IN_SHAPE_GATE: Final[list[bool]] = [True]
 #: The crate API surface the import guard verifies (layer 1) — a module that
 #: imports but lacks any of these is a foreign/broken install and latches
 #: ``crate_unavailable`` instead of raising ``AttributeError`` mid-render.
+#: ALL-OR-NOTHING deliberately (PR-2): a stale PR-1-vintage crate missing
+#: ``render_parquet_defaults_from_ipc`` latches BOTH profiles — the lockstep
+#: is an ATOMIC pin, never a partial-install gray state (rebuild ritual:
+#: docs/runbooks/lake-rust-render-lockstep.md).
 _CRATE_API: Final[tuple[str, ...]] = (
     "pinned_polars_version",
     "render_parquet_from_ipc",
+    "render_parquet_defaults_from_ipc",
     "linked_zstd_version",
 )
 
@@ -219,7 +318,48 @@ _CRATE_API: Final[tuple[str, ...]] = (
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
 #: Memo key for the engaged-once INFO (namespaced apart from warn reasons).
+#: The BARS profile records this literal key (PR-1 back-compat — the frozen
+#: bars parity corpus's vacuous-green guard reads it); every OTHER profile
+#: records :func:`_engaged_memo_key`'s ``"__engaged__|<profile>"`` so each
+#: profile's first Rust-served render is independently observable.
 _ENGAGED_KEY: Final[str] = "__engaged__"
+
+
+def _engaged_memo_key(profile: str) -> str:
+    """The engaged-once memo key for *profile* (bars keeps the PR-1 literal)."""
+    return _ENGAGED_KEY if profile == PROFILE_BARS else f"{_ENGAGED_KEY}|{profile}"
+
+
+def ipc_handoff_bytes(df: pl.DataFrame) -> bytes:
+    """Serialise *df* to UNCOMPRESSED Arrow IPC bytes — the Rust-render handoff.
+
+    DEC-RUST-DATALAKE-IO-ROADMAP-001 (hoisted here from
+    ``parquet_writer._ipc_bytes`` in PR-2 — §11 COMMON: the option writer is
+    the second caller, and a private import from a sibling production module
+    is the house anti-pattern; ``parquet_writer._ipc_bytes`` is now a thin
+    delegating alias). When a ``BRUTEX_LAKE_RUST_RENDER`` seam is engaged,
+    the ALREADY-BUILT render frame crosses the FFI as Arrow IPC (the
+    spike-proven handoff — the crate ``rechunk``s after the read so the
+    memory layout matches the single-chunk frame both writers hand over).
+    Uncompressed deliberately: the handoff must never introduce its own
+    compression variable into the byte-parity surface. MEMORY HONESTY: this
+    materialises a FULL uncompressed-IPC copy of the frame (≈ the frame's
+    in-RAM size, LARGER than the compressed parquet) that lives alongside
+    the source ``df``, the crate's re-decoded frame and the parquet
+    buffer(s) — the engaged render's transient peak is several× the frame
+    footprint (quantified in the runbook cost table,
+    docs/runbooks/lake-rust-render-lockstep.md §0). Reached ONLY from the
+    flag-ON paths inside the writers' ``lake_write_guard`` blocks, so an
+    allocation failure here maps to ``LakeWriteHalt`` like every other
+    render allocation. Imports ``io`` locally — this leaf stays polars-free
+    at module scope (the frame arrives already built; only the caller
+    imports polars).
+    """
+    import io
+
+    bio = io.BytesIO()
+    df.write_ipc(bio, compression="uncompressed")
+    return bio.getvalue()
 
 
 def env_flag_tristate(raw: str) -> bool | None:
@@ -271,18 +411,20 @@ def rust_render_disabled() -> bool:
 
 
 def reset_lake_rust_render_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
-    """Reset the latch + burn-in budget + shape gate + warn memo (test isolation ONLY).
+    """Reset the latch + burn-in budgets + shape gate + warn memo (test isolation ONLY).
 
-    ``remaining=0`` puts the process in the post-burn-in steady state —
-    count budget spent AND the shape gate disarmed, so the returned bytes
-    are the crate's with no oracle in the path (the parity corpus depends
-    on that: an armed shape gate would cushion a first-shape divergence by
-    shipping oracle bytes). The default restores a fresh-process view
-    (budget full, shape gate armed, no shapes seen). Never called from
-    production code paths (the ``rust_metrics`` reset-seam convention).
+    ``remaining=0`` puts the process in the post-burn-in steady state for
+    EVERY profile — all count budgets spent AND the shape gate disarmed, so
+    the returned bytes are the crate's with no oracle in the path (the
+    parity corpora depend on that: an armed shape gate would cushion a
+    first-shape divergence by shipping oracle bytes). The default restores
+    a fresh-process view (every profile's lazily-seeded budget full, shape
+    gate armed, no shapes seen). Never called from production code paths
+    (the ``rust_metrics`` reset-seam convention).
     """
     _DISABLED_REASON[0] = None
-    _BURN_IN_REMAINING[0] = remaining
+    _BURN_IN_DEFAULT[0] = remaining
+    _BURN_IN_REMAINING.clear()
     _BURN_IN_SHAPES_SEEN.clear()
     _BURN_IN_SHAPE_GATE[0] = remaining > 0
     _OBSERVABILITY_MEMO.clear()
@@ -321,22 +463,26 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
         _LOG.warning("lake_rust_render.rust_path_disabled", reason=reason, **context)
 
 
-def _resolve_crate() -> ModuleType | None:
+def _resolve_crate(*, profile: str) -> ModuleType | None:
     """Import guard (layer 1): return ``brutex_lake``, or latch OFF + ``None``.
 
     An absent wheel (``ImportError``) latches ``crate_unavailable`` — the
     facade is default-OFF and opt-in, so an operator who set the flag
     without installing the crate gets ONE loud WARN naming the remedy, and
     every render serves the Python bytes. A module that IMPORTS but lacks
-    any :data:`_CRATE_API` callable (a name collision / hand-broken
-    install) latches the SAME reason — the fail-closed contract is "never a
-    new crash class", so an ``AttributeError`` must never leave this seam.
+    any :data:`_CRATE_API` callable (a name collision / hand-broken /
+    STALE-PR-1 install) latches the SAME reason — the fail-closed contract
+    is "never a new crash class", so an ``AttributeError`` must never leave
+    this seam; the surface check is all-or-nothing across BOTH profiles
+    (the atomic-pin doctrine). *profile* is log context only — the latch is
+    shared.
     """
     try:
         crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
         _disable(
             "crate_unavailable",
+            profile=profile,
             error_detail=repr(exc),
             remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
         )
@@ -345,6 +491,7 @@ def _resolve_crate() -> ModuleType | None:
         if not callable(getattr(crate, name, None)):
             _disable(
                 "crate_unavailable",
+                profile=profile,
                 error_detail=f"brutex_lake.{name} missing or not callable — foreign/broken install",
                 remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
             )
@@ -358,7 +505,7 @@ def _resolve_crate() -> ModuleType | None:
 _METADATA_ERROR: Final[object] = object()
 
 
-def _crate_metadata(crate: ModuleType, attr: str) -> object:
+def _crate_metadata(crate: ModuleType, attr: str, *, profile: str) -> object:
     """Call a crate metadata pyfunction defensively; latch OFF on ANY raise.
 
     A metadata call (``pinned_polars_version`` / ``linked_zstd_version``)
@@ -466,8 +613,9 @@ def render_parquet_bytes(
     python_render: Callable[[], bytes],
     polars_version: str,
     schema_token: str | None = None,
+    profile: str = PROFILE_BARS,
 ) -> bytes:
-    """The routed render — called by ``_render_bytes`` ONLY when the flag is ON.
+    """The routed render — called by the writer seams ONLY when the flag is ON.
 
     Runs the three fail-closed layers (module docstring) and returns the
     parquet bytes to persist. EVERY path returns valid bytes: a latched /
@@ -485,30 +633,43 @@ def render_parquet_bytes(
         process never pays the serialisation.
     python_render
         Zero-arg callable running the verbatim Python
-        ``write_parquet`` render — the live parity oracle.
+        ``write_parquet`` render for *profile* — the live parity oracle.
     polars_version
         The installed ``polars.__version__`` (the caller already imported
         polars; passed in so this leaf never imports it at module scope).
     schema_token
-        The frame's column/dtype fingerprint (the production caller passes
+        The frame's column/dtype fingerprint (the production callers pass
         ``str(df.schema)``) — keys the burn-in SHAPE gate so every distinct
-        schema shape is byte-compared at least once before crate bytes
-        ship for it. ``None`` honestly degrades this call to the count
-        budget alone (module docstring layer 3).
+        (profile, schema) shape is byte-compared at least once before crate
+        bytes ship for it (the facade prefixes the profile). ``None``
+        honestly degrades this call to the count budget alone (module
+        docstring layer 3).
+    profile
+        The render profile (:data:`PROFILE_BARS` — the PR-1 back-compat
+        default — or :data:`PROFILE_OPTIONS_DEFAULTS`); selects the crate
+        callable + the burn-in budget cell + the shape-token namespace and
+        NOTHING else. An unknown value fails CLOSED to the oracle with one
+        loud ``profile_unknown`` WARN (never a ``KeyError`` into a write
+        path; latches nothing — the install is not implicated).
     """
+    render_attr = _PROFILE_RENDER_ATTR.get(profile)
+    if render_attr is None:
+        _warn_once("profile_unknown", profile=profile)
+        return python_render()
     if rust_render_disabled():
         return python_render()
-    crate = _resolve_crate()
+    crate = _resolve_crate(profile=profile)
     if crate is None:
         return python_render()
-    pinned = _crate_metadata(crate, "pinned_polars_version")
+    pinned = _crate_metadata(crate, "pinned_polars_version", profile=profile)
     if pinned is _METADATA_ERROR:
         return python_render()
     if pinned != polars_version:
-        # Layer 2 — the version guard (ADR-0020 §7 hazard 1): fail-closed,
+        # Layer 2 — the version guard (roadmap hazard 1): fail-closed,
         # ONE loud WARN naming BOTH versions, never silently different bytes.
         _disable(
             "polars_version_mismatch",
+            profile=profile,
             installed_polars=polars_version,
             crate_pinned_polars=pinned,
             remedy="align the wheel and the crate's pinned polars rev, then "
@@ -517,9 +678,9 @@ def render_parquet_bytes(
         )
         return python_render()
     try:
-        rust_bytes = crate.render_parquet_from_ipc(ipc_bytes_factory())
+        rust_bytes = getattr(crate, render_attr)(ipc_bytes_factory())
     except _degrade_errors() as exc:
-        _warn_once("render_error", error_detail=repr(exc))
+        _warn_once("render_error", profile=profile, error_detail=repr(exc))
         return python_render()
     except (KeyboardInterrupt, SystemExit, MemoryError):
         # The escape set (the errors.py doctrine): operator interrupt /
@@ -540,62 +701,88 @@ def render_parquet_bytes(
         # A foreign BaseException the resolver cannot name PROPAGATES — the
         # disclosed narrowing (_panic_belt_errors docstring); `Exception`
         # keeps every out-of-degrade-set Exception latching as before.
-        _disable("crate_panic", error_detail=repr(exc))
+        _disable("crate_panic", profile=profile, error_detail=repr(exc))
         return python_render()
     if not isinstance(rust_bytes, bytes):
         # Refuse-poison gate (the `rust_metrics._valid_drawdown` stance): a
         # non-bytes return is a crate BUG — never persisted, served loudly
         # from the oracle. Structurally unreachable through the real crate
         # (its FFI constructs PyBytes); guards a stale/foreign install.
-        _warn_once("render_result_refused", result_type=type(rust_bytes).__name__)
+        _warn_once("render_result_refused", profile=profile, result_type=type(rust_bytes).__name__)
         return python_render()
-    if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
-        linked_zstd = _crate_metadata(crate, "linked_zstd_version")
+    engaged_key = _engaged_memo_key(profile)
+    if engaged_key not in _OBSERVABILITY_MEMO:
+        linked_zstd = _crate_metadata(crate, "linked_zstd_version", profile=profile)
         if linked_zstd is _METADATA_ERROR:
             # A raising metadata pyfunction marks a foreign/stale install —
             # its bytes are not trusted either (fail-closed; latched above).
             return python_render()
-        _OBSERVABILITY_MEMO.add(_ENGAGED_KEY)
+        _OBSERVABILITY_MEMO.add(engaged_key)
         _LOG.info(
             "lake_rust_render.engaged",
+            profile=profile,
             crate_pinned_polars=pinned,
             linked_zstd=linked_zstd,
         )
+    shape_key = None if schema_token is None else f"{profile}|{schema_token}"
     shape_unseen = (
-        _BURN_IN_SHAPE_GATE[0]
-        and schema_token is not None
-        and schema_token not in _BURN_IN_SHAPES_SEEN
+        _BURN_IN_SHAPE_GATE[0] and shape_key is not None and shape_key not in _BURN_IN_SHAPES_SEEN
     )
-    if _BURN_IN_REMAINING[0] > 0 or shape_unseen:
+    remaining = _BURN_IN_REMAINING.setdefault(profile, _BURN_IN_DEFAULT[0])
+    if remaining > 0 or shape_unseen:
         # Layer 3 — burn-in self-check (the #1531/#1532 pattern, plus the
         # shape gate — module docstring): both engines render; ANY byte
         # difference ships the ORACLE bytes and autoreverts the Rust path
-        # for the process.
+        # for the process (BOTH profiles — the shared latch).
         oracle_bytes = python_render()
         if rust_bytes != oracle_bytes:
             _disable(
                 "burn_in_byte_mismatch",
                 error=True,
+                profile=profile,
                 rust_len=len(rust_bytes),
                 python_len=len(oracle_bytes),
                 schema_token=schema_token,
             )
             return oracle_bytes
-        if schema_token is not None:
-            _BURN_IN_SHAPES_SEEN.add(schema_token)
-        if _BURN_IN_REMAINING[0] > 0:
-            _BURN_IN_REMAINING[0] -= 1
-            if _BURN_IN_REMAINING[0] == 0:
-                _LOG.info("lake_rust_render.burn_in_complete", samples=BURN_IN_SAMPLES)
+        if shape_key is not None and len(_BURN_IN_SHAPES_SEEN) < _BURN_IN_SHAPES_CAP:
+            # Past the cap the shape is deliberately NOT recorded — novel
+            # shapes then compare on EVERY render (fail-safe direction:
+            # more oracle compares, never fewer — module docstring).
+            _BURN_IN_SHAPES_SEEN.add(shape_key)
+        if remaining > 0:
+            _BURN_IN_REMAINING[profile] = remaining - 1
+            if remaining == 1:
+                _LOG.info(
+                    "lake_rust_render.burn_in_complete",
+                    profile=profile,
+                    samples=BURN_IN_SAMPLES,
+                )
         return rust_bytes
     return rust_bytes
+
+
+#: PUBLIC re-exports for the sibling lake facades (ADR-0020 PR-3+ — §11
+#: COMMON): the degrade / panic-belt catch sets are PURE and stateless —
+#: nothing about them is render-specific — so sibling seams
+#: (``brutex/data/lake_rust_merge.py``) import THESE names instead of
+#: minting copies. The per-facade LATCH/warn state stays per-facade by
+#: design (a render autorevert must never silence the merge seam and vice
+#: versa), so only the stateless helpers are shared.
+degrade_errors = _degrade_errors
+panic_belt_errors = _panic_belt_errors
 
 
 __all__ = [
     "BURN_IN_SAMPLES",
     "LAKE_RUST_RENDER_ENV",
+    "PROFILE_BARS",
+    "PROFILE_OPTIONS_DEFAULTS",
+    "degrade_errors",
     "env_flag_tristate",
+    "ipc_handoff_bytes",
     "lake_rust_render_enabled",
+    "panic_belt_errors",
     "render_parquet_bytes",
     "reset_lake_rust_render_for_tests",
     "rust_render_disabled",
