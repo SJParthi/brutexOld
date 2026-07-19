@@ -9,9 +9,9 @@ the ``"verdict"`` object in the ``/api/v1/universe/pull-all`` JSON
 it maps the *already-computed* verdict onto a small, deterministic
 :class:`VerdictBanner` presentation — a CSS modifier class + a human colour name
 (red = ``credentials_missing`` / ``auth_expired`` / ``mass_empty_halt``, amber =
-``quota_exhausted`` / ``transient_residual``, grey = ``quarantined_symbols`` /
-``known_gap_only``, green = ``clean``) + a ``show_retry_button`` flag — that the
-coverage-excluded HTML/JS renders verbatim.
+``quota_exhausted`` / ``cancelled`` / ``transient_residual``, grey =
+``quarantined_symbols`` / ``known_gap_only``, green = ``clean``) + a
+``show_retry_button`` flag — that the coverage-excluded HTML/JS renders verbatim.
 
 **COMMON (CLAUDE.md §11):** no verdict field is re-derived here — ``headline`` /
 ``action`` / ``pending_windows`` are passed through verbatim and the retry button
@@ -56,6 +56,11 @@ _KIND_STYLE: Final[dict[str, tuple[str, str]]] = {
     # map exactly equal to ``PullVerdictKind``.)
     "mass_empty_halt": ("verdict--red", "red"),
     "quota_exhausted": ("verdict--amber", "amber"),
+    # ``cancelled`` is the operator's cooperative Stop (DEC-JOB-COOPERATIVE-
+    # CANCEL-001 continuation-v3): an honest amber PARTIAL — "re-run the pull
+    # to resume the remainder" — sharing the transient_residual lane (the
+    # retry button targets the same re-pull engine), never green.
+    "cancelled": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),
     "quarantined_symbols": ("verdict--grey", "grey"),
     "known_gap_only": ("verdict--grey", "grey"),

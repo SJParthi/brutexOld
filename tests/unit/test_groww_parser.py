@@ -369,6 +369,91 @@ class TestOhlcClampWarnPerWindow:
         assert self._clamp_warns(logs)[0]["pull_id"] == "pullcccc0003"
 
 
+class TestNegativeCountClampWarnPerWindow:
+    """A vendor NEGATIVE volume / open_interest is COUNTED + WARNed once per window.
+
+    DEC-AUDIT-ALERT-CLAMP-OBS-001 (DATA-1), the sibling of the OHLC-clamp
+    counter above. Fails-before: the ``max(0, ...)`` count-field clamp
+    (DEC-VENDOR-VOLUME-NORMALIZE-001) fired with NO counter and NO log — unlike
+    the OHLC clamp — so a vendor systematically emitting negative counts never
+    surfaced. Parse output stays byte-identical: the clamped value is ``0``
+    either way; the WARNING only ADDS observability.
+    """
+
+    @staticmethod
+    def _clamp_warns(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        return [e for e in logs if e["event"] == "groww.parse.negative_volume_clamped"]
+
+    def test_one_warn_per_window_with_count(self) -> None:
+        payload = {
+            "candles": [
+                # negative volume → clamped to 0.
+                ["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, -5, None],
+                # consistent — not clamped.
+                ["2025-09-24T10:31:00", 100.0, 110.0, 90.0, 105.0, 10, 7],
+                # negative open_interest → clamped to 0.
+                ["2025-09-24T10:32:00", 100.0, 110.0, 90.0, 105.0, 10, -3],
+            ]
+        }
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        warns = self._clamp_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["negative_count_clamped_bars"] == 2
+        assert warns[0]["total_rows"] == 3
+        # Clamped VALUE is byte-identical (0) — only observability was added.
+        assert bars[0].volume == 0
+        assert bars[2].open_interest == 0
+        # The untouched bar is unchanged.
+        assert bars[1].volume == 10
+        assert bars[1].open_interest == 7
+
+    def test_both_negative_counts_on_one_bar_count_once(self) -> None:
+        # A single bar with BOTH volume AND OI negative fires the per-bar hook
+        # exactly once (mirrors on_clamp's per-bar semantics).
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, -5, -3]]}
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        warns = self._clamp_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["negative_count_clamped_bars"] == 1
+        assert bars[0].volume == 0
+        assert bars[0].open_interest == 0
+
+    def test_positive_counts_emit_no_warn(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, 10, 7]]}
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert self._clamp_warns(logs) == []
+        assert bars[0].volume == 10
+        assert bars[0].open_interest == 7
+
+    def test_two_windows_warn_independently(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, -5, None]]}
+        with capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+            parser.parse_candle_rows(payload)
+        assert len(self._clamp_warns(logs)) == 2  # one per window parse, never deduped away
+
+    def test_warn_carries_pull_id_when_bound(self) -> None:
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, 10, -3]]}
+        with pull_id_scope("pullffff0006"), capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+        assert self._clamp_warns(logs)[0]["pull_id"] == "pullffff0006"
+
+    def test_drop_volume_index_negative_oi_still_counted(self) -> None:
+        # An index pull passes drop_volume=True (volume forced to 0), but a
+        # negative open_interest must still be counted.
+        payload = {"candles": [["2025-09-24T10:30:00", 100.0, 110.0, 90.0, 105.0, 999, -3]]}
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload, drop_volume=True)
+        warns = self._clamp_warns(logs)
+        assert len(warns) == 1
+        assert warns[0]["negative_count_clamped_bars"] == 1
+        assert bars[0].volume == 0  # dropped
+        assert bars[0].open_interest == 0  # clamped from -3
+
+
 class TestEpochTimestampVerdictPerWindow:
     """The deterministic epoch-interpretation VERDICT rides every epoch payload.
 

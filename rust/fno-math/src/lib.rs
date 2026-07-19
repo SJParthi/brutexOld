@@ -56,6 +56,13 @@ pub mod compat;
 /// solvers). Currently empty — populated when MG-043 needs it.
 pub mod math;
 
+/// DEC-ENUM-KERNEL-U128-001 (hoist prerequisite): the width-generic
+/// `MaskWord` trait — HOISTED verbatim from `trade_sim` (where
+/// DEC-TRADE-SIM-U128-KERNEL-001 introduced it module-internal) so the
+/// Stage-2 enum/count kernels and the trade-sim walk genericize over the
+/// SAME shared core (CLAUDE.md §11 COMMON). Crate-internal (`pub(crate)`).
+pub(crate) mod mask_word;
+
 /// DEC-P0-050 (PR-K): PyO3 bridge to Python. Future Stage 1B
 /// AND-mask kernel, combo_hash blake3 migration, and other
 /// performance-critical Rust functions get registered here.
@@ -152,6 +159,14 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s_nthreads, m)?)?;
     m.add_class::<python::ResidentBars>()?;
+    // ── DEC-ENUM-KERNEL-U128-001: the u128 enum/count kernel twins ──
+    // (fenced additive registration block — keep-both union seam with
+    // sibling fno-math lanes; the twins of count_supermask_u64s /
+    // count_supermasks_u64s / ResidentBars over native Vec<u128>.)
+    m.add_function(wrap_pyfunction!(python::count_supermask_u128s, m)?)?;
+    m.add_function(wrap_pyfunction!(python::count_supermasks_u128s, m)?)?;
+    m.add_class::<python::ResidentBarsU128>()?;
+    // ── end DEC-ENUM-KERNEL-U128-001 registration block ──
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;

@@ -21,6 +21,11 @@ CLI ``brutex fetch`` pass):
   logs ONE ``power.keepawake.unavailable`` note and no-ops; the guard can
   NEVER raise into (or mask the outcome of) the pull it protects.
 
+The manager YIELDS ``True`` iff the assertion is actually ENGAGED (darwin +
+caffeinate spawned) and ``False`` on every graceful unavailable no-op path, so
+a caller printing operator-facing claims can tell the truth about whether the
+host is really held awake (Golden Rule #10 — the serve banner reads it).
+
 Honest envelope (Golden Rule #10): this holds the HOST awake — it does not and
 cannot keep an external SSD from its own power management, nor survive a lid
 close with ``caffeinate -i`` alone (``-s`` covers AC-powered sleep; on battery
@@ -46,14 +51,29 @@ _LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "CAFFEINATE_BINARY",
+    "SERVE_KEEP_AWAKE_ENV",
     "TERMINATE_TIMEOUT_S",
     "KeepAwakeProcess",
     "keep_awake",
+    "serve_keep_awake_enabled",
 ]
 
 #: The macOS power-assertion binary (PATH-resolved; a missing binary is the
 #: graceful ``power.keepawake.unavailable`` path, never an error).
 CAFFEINATE_BINARY: Final[str] = "caffeinate"
+
+#: Opt-in env flag holding a keep-awake assertion for the LIFE of ``brutex serve``
+#: (DEC-AUDIT-ALERT-CLAMP-OBS-001). Default OFF: today ``keep_awake`` is held ONLY
+#: during a pull, so once the pull releases it macOS sleep can take the whole
+#: serving dashboard down (the real 8h10m dark-gap incident). This flag is OPT-IN
+#: on purpose — silently changing a machine's power behaviour just by starting a
+#: server is user-hostile, so the default keeps macOS's normal sleep policy and
+#: the serve boot logs an HONEST banner stating the server does NOT prevent sleep.
+SERVE_KEEP_AWAKE_ENV: Final[str] = "BRUTEX_SERVE_KEEP_AWAKE"
+
+#: The truthy env-literal vocabulary (mirrors the repo convention —
+#: ``brutex/engine/sweep_lookahead.py`` / ``brutex/data/bad_tick.py``).
+_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
 #: Bound on each ``wait`` after ``terminate``/``kill`` — a wedged caffeinate
 #: must never hang the pull's exit path (it dies with us anyway via ``-w``).
@@ -77,6 +97,25 @@ class KeepAwakeProcess(Protocol):
     def wait(self, timeout: float | None = None) -> int:
         """Wait for exit (bounded); raises ``subprocess.TimeoutExpired`` on timeout."""
         raise NotImplementedError
+
+
+def serve_keep_awake_enabled(raw: str | None = None) -> bool:
+    """Whether ``brutex serve`` should hold a keep-awake assertion for its lifetime.
+
+    OPT-IN, default OFF (DEC-AUDIT-ALERT-CLAMP-OBS-001): only an explicit truthy
+    :data:`SERVE_KEEP_AWAKE_ENV` (``1/true/yes/on``, case-insensitive) enables it.
+    Any other value — unset, empty, ``0/false/no/off``, or junk — is OFF, so the
+    server never silently changes the host's power policy and the serve boot logs
+    an honest "does NOT prevent sleep" banner (never raises; O(1)).
+
+    Parameters
+    ----------
+    raw
+        The raw env value (``None`` reads :data:`SERVE_KEEP_AWAKE_ENV` from
+        ``os.environ``; pass explicitly in tests).
+    """
+    value = os.environ.get(SERVE_KEEP_AWAKE_ENV) if raw is None else raw
+    return value is not None and value.strip().lower() in _TRUTHY
 
 
 def _default_spawn(argv: list[str]) -> KeepAwakeProcess:
@@ -122,8 +161,17 @@ def keep_awake(
     *,
     spawn: Callable[[list[str]], KeepAwakeProcess] | None = None,
     platform: str | None = None,
-) -> Generator[None]:
+) -> Generator[bool]:
     """Hold the macOS host awake for the enclosed block — best-effort, never raises.
+
+    Yields
+    ------
+    bool
+        ``True`` iff the power assertion is actually ENGAGED (darwin AND
+        caffeinate spawned); ``False`` on the graceful unavailable no-op paths
+        (non-darwin host, or the spawn failed). Callers that print
+        operator-facing claims MUST reflect this — never state "holds the host
+        awake" over a ``False`` (Golden Rule #10).
 
     Parameters
     ----------
@@ -170,7 +218,7 @@ def keep_awake(
                 note="caffeinate -i -s -w <pid> holds the host awake until released",
             )
     try:
-        yield
+        yield proc is not None
     finally:
         if proc is not None:
             _release(proc, reason=reason)
