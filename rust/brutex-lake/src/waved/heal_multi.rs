@@ -34,8 +34,11 @@
 //! destinations, drifted-dir members), and their Python error paths embed
 //! exception-MESSAGE text in the pinned `lake_heal.partition_error` log —
 //! text Rust cannot reproduce byte-exactly. So [`preflight_bars_foreign`] /
-//! [`preflight_option_foreign`] / [`preflight_drift`] degrade the WHOLE batch
-//! PRE-mutation (read-only probes) for every such shape: an
+//! [`preflight_option_foreign`] / [`preflight_drift`] refuse the FINDING
+//! PRE-mutation (read-only probes; since the W-6a endgame the batch loop
+//! converts the verdict into a per-finding ISOLATED error and CONTINUES —
+//! the Python core these shapes used to degrade to is deleted) for every
+//! such shape: an
 //! unreadable/symlinked source or destination, an out-of-envelope bars file
 //! (schema/dtype/ts-range/price-band/CandleBar-law), a schema-incompatible
 //! option merge sibling, an `int()`-ambiguous drifted month name, a
@@ -126,7 +129,7 @@ fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
-// ── preflight probes (read-only; ANY Some(reason) = whole-batch degrade) ─────
+// ── preflight probes (read-only; Some(reason) = a per-finding isolated refusal since W-6a) ──
 
 /// Probe one bars merge DESTINATION: absent = fine (fresh write), a symlink /
 /// unreadable / out-of-envelope file degrades.

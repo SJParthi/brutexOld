@@ -925,62 +925,46 @@ pub(super) fn option_file_envelope(path: &Path) -> Option<String> {
     None
 }
 
-/// Whole-batch preflight: `Some(reason)` = degrade (the facade runs the
-/// Python core); `None` = every finding is inside the engaged envelope.
-fn preflight(lake_root: &Path, findings: &[Finding]) -> Option<String> {
-    for finding in findings {
-        match finding.kind.as_str() {
-            "IntraFileDup" => {
-                if !finding.path.exists() {
-                    continue; // both arms skip a vanished path identically
-                }
-                match read_bars_file(&finding.path) {
-                    Ok((_, _, _, Envelope::Degrade(reason))) => {
-                        return Some(format!("bars_envelope: {reason}"));
-                    }
-                    Ok(_) => {}
-                    // Unreadable — both arms error identically; a
-                    // `Refuse` (naive-ts, W-5 phase A) is the crate-owned
-                    // isolated verdict — engage, never degrade.
-                    Err(_) => {}
-                }
+/// Per-finding read-only preflight (the W-6a endgame shape): `Some(reason)`
+/// = THIS finding is outside the native heal envelope. With the Python heal
+/// core DELETED (DEC-RUST-LAKE-WAVED-001 W-6a) the verdict is no longer a
+/// whole-batch degrade — the batch loop converts it into a per-finding
+/// ISOLATED error (counted in `errors`, `lake_heal.partition_error` logged,
+/// the batch CONTINUES) BEFORE any byte of that finding is touched. The
+/// probes themselves are read-only, so a refused finding is left
+/// byte-untouched (the pre-mutation law survives per finding).
+fn preflight_one(lake_root: &Path, finding: &Finding) -> Option<String> {
+    match finding.kind.as_str() {
+        "IntraFileDup" => {
+            if !finding.path.exists() {
+                return None; // a vanished path skips identically at heal time
             }
-            "OptionIntraFileDup" => {
-                if !finding.path.exists() {
-                    continue;
+            match read_bars_file(&finding.path) {
+                Ok((_, _, _, Envelope::Degrade(reason))) => {
+                    Some(format!("bars_envelope: {reason}"))
                 }
-                if let Some(reason) = option_file_envelope(&finding.path) {
-                    return Some(format!("option_envelope: {reason}"));
-                }
-            }
-            "SchemaAlienFile" => {} // a verbatim byte move — any content engages
-            // The W-2b multi-file algorithms (deviation D-22): every shape
-            // whose Python heal would raise an exception-MESSAGE-bearing
-            // isolated error degrades PRE-mutation instead — read-only probes.
-            "ForeignMonthRows" => {
-                if let Some(reason) = super::heal_multi::preflight_bars_foreign(lake_root, finding)
-                {
-                    return Some(reason);
-                }
-            }
-            "OptionForeignMonthRows" => {
-                if let Some(reason) = super::heal_multi::preflight_option_foreign(finding) {
-                    return Some(reason);
-                }
-            }
-            "LegacyKeyDrift" => {
-                if let Some(reason) = super::heal_multi::preflight_drift(lake_root, finding) {
-                    return Some(reason);
-                }
-            }
-            other => {
-                // An unknown kind can only come from a NEWER shell — a
-                // crate/repo lockstep break; degrade loudly (zero mutation).
-                return Some(format!("unported_algorithm: {other}"));
+                // Unreadable — the heal errors identically; a `Refuse`
+                // (naive-ts, W-5 phase A) is the crate-owned isolated
+                // verdict — engage, never refuse here.
+                _ => None,
             }
         }
+        "OptionIntraFileDup" => {
+            if !finding.path.exists() {
+                return None;
+            }
+            option_file_envelope(&finding.path).map(|reason| format!("option_envelope: {reason}"))
+        }
+        "SchemaAlienFile" => None, // a verbatim byte move — any content engages
+        // The W-2b multi-file algorithms (deviation D-22): every shape
+        // whose Python heal would have raised mid-mutation refuses UPFRONT
+        // instead — read-only probes.
+        "ForeignMonthRows" => super::heal_multi::preflight_bars_foreign(lake_root, finding),
+        "OptionForeignMonthRows" => super::heal_multi::preflight_option_foreign(finding),
+        "LegacyKeyDrift" => super::heal_multi::preflight_drift(lake_root, finding),
+        // An unknown kind is `heal_one`'s own isolated arm — no probe here.
+        _ => None,
     }
-    None
 }
 
 // ── options containment + heal ───────────────────────────────────────────────
@@ -1426,8 +1410,11 @@ fn finding_token(finding: &Finding, ctx: &BatchCtx) -> (String, bool) {
     }
 }
 
-/// The batch core: parse → preflight (read-only) → per-finding loop with
-/// isolation → outcome dict. `{"degrade": reason}` = ZERO mutation happened.
+/// The batch core: parse → per-finding loop (each finding preflighted
+/// read-only, then healed) with isolation → outcome dict. Since the W-6a
+/// endgame there is NO whole-batch degrade — an out-of-envelope finding is
+/// a per-finding isolated error and the batch continues (the deleted
+/// Python core's isolation posture, owned natively).
 pub(crate) fn heal_batch_core<'py>(
     py: Python<'py>,
     lake_root: &str,
@@ -1437,10 +1424,6 @@ pub(crate) fn heal_batch_core<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let parsed = parse_findings(findings)?;
     let out = PyDict::new(py);
-    if let Some(reason) = preflight(Path::new(lake_root), &parsed) {
-        out.set_item("degrade", reason)?;
-        return Ok(out);
-    }
     let sink = EventSink { py, on_event };
     let mut ctx = BatchCtx {
         lake_root: PathBuf::from(lake_root),
@@ -1454,7 +1437,15 @@ pub(crate) fn heal_batch_core<'py>(
     };
     for finding in &parsed {
         sink.beat()?;
-        match heal_one(&mut ctx, finding, &sink) {
+        let verdict = match preflight_one(Path::new(lake_root), finding) {
+            Some(reason) => Err(HealErr::Isolated(format!(
+                "outside the native heal envelope: {reason} — finding left \
+                 byte-untouched (DEC-RUST-LAKE-WAVED-001 endgame; inspect the \
+                 file, heal or quarantine it manually)"
+            ))),
+            None => heal_one(&mut ctx, finding, &sink),
+        };
+        match verdict {
             Ok(true) => ctx.healed += 1,
             Ok(false) => ctx.skipped += 1,
             Err(HealErr::Isolated(message)) | Err(HealErr::Refuse(message)) => {
@@ -1619,8 +1610,9 @@ pub(crate) fn content_token_impl(lake_root: &str) -> (String, Vec<TokenSkip>) {
 
 /// The Wave-D W-2 heal batch (design §C-4). Findings cross as plain dicts
 /// (deviation D-10); events stream through `on_event(kind, payload)`; the
-/// return is either `{"degrade": reason}` (ZERO mutation — the facade runs
-/// the Python core) or the batch outcome dict. Runs UNDER the GIL
+/// return is the batch outcome dict (since the W-6a endgame there is no
+/// whole-batch `{"degrade"}` verdict — an out-of-envelope finding is a
+/// per-finding isolated error and the batch continues). Runs UNDER the GIL
 /// (callbacks interleave with mutations — the audit adjacency law; heal is
 /// anomaly-gated, never a hot path — deviation D-11). A Rust panic maps to
 /// `RuntimeError` (loud — the idempotent re-run posture), a disk-full to a
@@ -1659,6 +1651,19 @@ pub(crate) fn waved_heal_engaged_kinds() -> Vec<&'static str> {
         "OptionForeignMonthRows",
         "LegacyKeyDrift",
     ]
+}
+
+/// The W-6a ENDGAME lockstep witness (DEC-RUST-LAKE-WAVED-001): `True` iff
+/// this wheel carries the endgame isolation semantics — per-finding heal
+/// refusal (no whole-batch `{"degrade"}` outcome) + per-file scan skip
+/// conversion. The facade lists this name in its ALL-OR-NOTHING
+/// `_CRATE_API`: with the Python cores DELETED, a pre-endgame wheel (whose
+/// heal batch could still return a whole-batch degrade the shell no longer
+/// has an oracle for) must latch `LakeRustWavedUnavailableError` LOUDLY,
+/// never half-work.
+#[pyfunction]
+pub(crate) fn waved_endgame_witness() -> bool {
+    true
 }
 
 /// The `lake_content_token` twin (§C-5): `(token_hex, skip_events)` where

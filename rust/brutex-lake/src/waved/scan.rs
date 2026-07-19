@@ -79,14 +79,22 @@ const OPTION_KEY_COLUMNS: [&str; 2] = ["side", "timestamp"];
 const EVENT_SCAN_SKIP: &str = "lake.invariant.scan_skip";
 const EVENT_SYMLINK_SKIPPED: &str = "lake.invariant.symlink_skipped";
 
-/// One scan failure: `Degrade` = the whole scan is outside the byte-parity
-/// envelope (a `ValueError` at the FFI → the facade serves the oracle);
+/// One scan failure: `Degrade` = a shape outside the native envelope;
 /// `PauseRaised` = the injected pause callback raised — the actual `PyErr`
 /// is parked in the FFI shell's side slot so the core (and therefore the
 /// `cargo test` binary) stays libpython-symbol-free, and the shell
 /// re-raises it verbatim.
+///
+/// ENDGAME LAW (DEC-RUST-LAKE-WAVED-001 W-6a — the Python scan core is
+/// DELETED): a `Degrade` no longer aborts the scan for the classes a real
+/// lake can carry. Every per-file / per-entry site converts it into a LOUD
+/// counted `lake.invariant.scan_skip` on ITS OWN path (the module's
+/// documented isolation posture — never process-killing, never silent);
+/// only the structurally-impossible defensive belts still propagate to the
+/// FFI `ValueError`.
 pub enum ScanFail {
-    /// Whole-scan degrade with the human reason.
+    /// Out-of-envelope shape with the human reason (isolated at the
+    /// nearest per-file/per-entry boundary — see the enum docs).
     Degrade(String),
     /// The Python pause callback's own exception (parked shell-side).
     PauseRaised,
@@ -285,6 +293,43 @@ impl ScanPayload {
             error_repr,
         });
     }
+
+    /// The W-6a endgame isolation arm for a BARS-tree path the native
+    /// scanner cannot judge (int()-ambiguous name, unmappable dtype,
+    /// non-UTF-8 component, unexpected stat fault): one LOUD counted
+    /// `lake.invariant.scan_skip` — never a whole-scan refusal.
+    fn skip_bars_unjudgeable(&mut self, path: &Path, reason: String, engine: bool) {
+        self.log(EVENT_SCAN_SKIP, path, false, Some(reason), false);
+        self.files_skipped += 1;
+        self.note_first_read(path);
+        if engine {
+            self.engine_files_skipped += 1;
+        }
+    }
+
+    /// The options-tree twin of [`Self::skip_bars_unjudgeable`] (repr'd
+    /// path — the vendor-influenceable series-dir component, the round-8
+    /// log-injection fold).
+    fn skip_option_unjudgeable(&mut self, path: &Path, reason: String) {
+        self.log(EVENT_SCAN_SKIP, path, true, Some(reason), false);
+        self.option_files_skipped += 1;
+        self.note_first_read(path);
+    }
+
+    /// A non-UTF-8 (or otherwise unlistable) DIRECTORY entry skipped by
+    /// the walk — loud + counted (`files_skipped`; a dir is not a file,
+    /// but the counter is the ONE skip surface consumers watch — the
+    /// disclosed W-6a counting choice).
+    fn skip_walk_entry(&mut self, path: &Path, reason: &str) {
+        self.log(
+            EVENT_SCAN_SKIP,
+            path,
+            false,
+            Some(reason.to_string()),
+            false,
+        );
+        self.files_skipped += 1;
+    }
 }
 
 fn degrade(reason: impl Into<String>) -> ScanFail {
@@ -327,32 +372,42 @@ fn is_dir_strict(path: &Path) -> Result<bool, ScanFail> {
     }
 }
 
-fn entry_name(entry: &fs::DirEntry) -> Result<String, ScanFail> {
-    entry
-        .file_name()
-        .into_string()
-        .map_err(|_| degrade("non-UTF-8 directory entry name"))
+/// The W-6a non-UTF-8 skip reason (the ruled endgame isolation class —
+/// Python's bytes-tolerant walk is deleted; the shape is skipped LOUD).
+const NON_UTF8_ENTRY_REASON: &str =
+    "non-UTF-8 directory entry name — outside the native scan envelope (skipped, not scanned)";
+
+/// A directory entry's UTF-8 name, or `None` = the W-6a non-UTF-8 skip
+/// (the caller logs + counts the entry's PATH loudly).
+fn entry_name(entry: &fs::DirEntry) -> Option<String> {
+    entry.file_name().into_string().ok()
 }
 
 /// `lake_invariants._child_dirs` twin: sorted child DIRECTORIES (metadata
 /// follows symlinks), one-name filter, per-child fault isolation (ANY
 /// stat fault skips that child — the Python per-child `except OSError`
-/// guard), a vanished/mid-faulted level reads `[]`.
+/// guard), a vanished/mid-faulted level reads `[]`. A non-UTF-8 child
+/// name lands in *skipped* (the W-6a loud isolation arm — the deleted
+/// Python walk handled such names natively).
 fn child_dirs(
     parent: &Path,
     name_filter: Option<&str>,
-) -> Result<Vec<(String, PathBuf)>, ScanFail> {
+    skipped: &mut Vec<PathBuf>,
+) -> Vec<(String, PathBuf)> {
     let Ok(entries) = fs::read_dir(parent) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else {
-            // Mid-iteration fault: Python's `list(parent.iterdir())` sits
+            // Mid-iteration fault: Python's `list(parent.iterdir())` sat
             // inside ONE try/except OSError returning [] — mirror that.
-            return Ok(Vec::new());
+            return Vec::new();
         };
-        let name = entry_name(&entry)?;
+        let Some(name) = entry_name(&entry) else {
+            skipped.push(entry.path());
+            continue;
+        };
         let path = entry.path();
         match fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => {}
@@ -366,7 +421,7 @@ fn child_dirs(
         out.push((name, path));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    out
 }
 
 /// The `interval_dir.glob("*/*.parquet")` twin: one dir level (any name,
@@ -375,16 +430,20 @@ fn child_dirs(
 /// candidate — its read/parse then classifies it). Unreadable levels are
 /// silently absent (the glob's OSError suppression); sorted by
 /// `(year_name, file_name)` — Python's `sorted(Path)` component order.
-fn leaf_candidates(interval_dir: &Path) -> Result<Vec<PathBuf>, ScanFail> {
+/// Non-UTF-8 entry names land in *skipped* (the W-6a isolation arm).
+fn leaf_candidates(interval_dir: &Path, skipped: &mut Vec<PathBuf>) -> Vec<PathBuf> {
     let Ok(years) = fs::read_dir(interval_dir) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let mut out: Vec<(String, String, PathBuf)> = Vec::new();
     for year_entry in years {
         let Ok(year_entry) = year_entry else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
-        let year_name = entry_name(&year_entry)?;
+        let Some(year_name) = entry_name(&year_entry) else {
+            skipped.push(year_entry.path());
+            continue;
+        };
         let year_path = year_entry.path();
         match fs::metadata(&year_path) {
             Ok(meta) if meta.is_dir() => {}
@@ -397,14 +456,17 @@ fn leaf_candidates(interval_dir: &Path) -> Result<Vec<PathBuf>, ScanFail> {
             let Ok(file_entry) = file_entry else {
                 break;
             };
-            let file_name = entry_name(&file_entry)?;
+            let Some(file_name) = entry_name(&file_entry) else {
+                skipped.push(file_entry.path());
+                continue;
+            };
             if file_name.ends_with(".parquet") {
                 out.push((year_name.clone(), file_name, file_entry.path()));
             }
         }
     }
     out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-    Ok(out.into_iter().map(|(_, _, path)| path).collect())
+    out.into_iter().map(|(_, _, path)| path).collect()
 }
 
 /// `int()`-twin verdict for a year/month path token.
@@ -917,10 +979,16 @@ fn bars_canonical_set(
     match fs::metadata(&canonical) {
         Err(err) if ignorable_stat_error(&err) => return Ok(Some(HashSet::new())),
         Err(err) => {
-            return Err(degrade(format!(
-                "cannot stat canonical sibling {}: {err}",
-                canonical.display()
-            )));
+            // W-6a isolation: an unjudgeable stat fault on the sibling is
+            // the loud unresolved abstain, never a whole-scan refusal.
+            payload.log(
+                EVENT_SCAN_SKIP,
+                &canonical,
+                false,
+                Some(format!("cannot stat canonical sibling: {err}")),
+                false,
+            );
+            return Ok(None);
         }
         Ok(_) => {}
     }
@@ -942,10 +1010,23 @@ fn bars_canonical_set(
         Ok(df) => df,
     };
     pause()?;
-    let ts = df
-        .column("timestamp")
-        .map_err(|err| degrade(format!("canonical timestamp column vanished: {err}")))?;
-    match ts_raw(ts)? {
+    type CanonicalFacts = Option<(Vec<Option<i64>>, TimeUnit)>;
+    let facts = (|| -> Result<CanonicalFacts, ScanFail> {
+        let ts = df
+            .column("timestamp")
+            .map_err(|err| degrade(format!("canonical timestamp column vanished: {err}")))?;
+        Ok(ts_raw(ts)?.map(|(values, unit, _aware)| (values, unit)))
+    })();
+    let facts = match facts {
+        Ok(facts) => facts,
+        Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+        Err(ScanFail::Degrade(reason)) => {
+            // W-6a isolation: an unjudgeable sibling frame abstains loudly.
+            payload.log(EVENT_SCAN_SKIP, &canonical, false, Some(reason), false);
+            return Ok(None);
+        }
+    };
+    match facts.map(|(values, unit)| (values, unit, true)) {
         // Non-Datetime values are never `isinstance(ts, datetime)` — the
         // Python set comprehension yields nothing for them.
         None => Ok(Some(HashSet::new())),
@@ -1041,43 +1122,81 @@ fn scan_bars_series(
             Ok(df) => df,
         };
         pause()?;
-        if let Some(reason) = bar_dtype_alien_reason(&df)? {
-            // Dtype-alien: skipped WITHOUT a first-skip note or engine
-            // attribution (the Python flow's exact asymmetry — the finding
-            // itself carries the engine relevance).
-            let index = payload.findings.len();
-            payload.findings.push(FindingRec::AlienBars {
-                path: path.display().to_string(),
-                coords: coords.clone(),
-                reason,
-            });
-            payload.events.push(EventRec::Finding { index });
-            payload.files_skipped += 1;
-            continue;
+        // W-6a isolation: the three classification probes run BEFORE any
+        // counter mutation, so an out-of-envelope verdict (an unmappable
+        // dtype repr, a probe fault) folds into ONE loud counted skip for
+        // THIS file — never a whole-scan refusal (the enum-doc law).
+        enum BarsStep {
+            Alien(String),
+            OutOfRange,
+            Classified {
+                raw: Vec<Option<i64>>,
+                unit: TimeUnit,
+                bad_rows: u64,
+            },
         }
-        let ts = df
-            .column("timestamp")
-            .map_err(|err| degrade(format!("timestamp column vanished: {err}")))?;
-        let Some((raw, unit, _aware)) = ts_raw(ts)? else {
-            return Err(degrade("timestamp dtype changed under the alien gate"));
-        };
-        if out_of_datetime_range(&raw, unit) {
-            payload.log(
-                EVENT_SCAN_SKIP,
-                path,
-                false,
-                Some("timestamp value out of datetime range".to_string()),
-                false,
-            );
-            payload.files_skipped += 1;
-            payload.note_first_read(path);
-            if coords.engine(cfg) {
-                payload.engine_files_skipped += 1;
+        let step = (|| -> Result<BarsStep, ScanFail> {
+            if let Some(reason) = bar_dtype_alien_reason(&df)? {
+                return Ok(BarsStep::Alien(reason));
             }
-            continue;
-        }
+            let ts = df
+                .column("timestamp")
+                .map_err(|err| degrade(format!("timestamp column vanished: {err}")))?;
+            let Some((raw, unit, _aware)) = ts_raw(ts)? else {
+                return Err(degrade("timestamp dtype changed under the alien gate"));
+            };
+            if out_of_datetime_range(&raw, unit) {
+                return Ok(BarsStep::OutOfRange);
+            }
+            let bad_rows = price_violations(&df)?;
+            Ok(BarsStep::Classified {
+                raw,
+                unit,
+                bad_rows,
+            })
+        })();
+        let (raw, unit, bad_rows) = match step {
+            Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+            Err(ScanFail::Degrade(reason)) => {
+                payload.skip_bars_unjudgeable(path, reason, coords.engine(cfg));
+                continue;
+            }
+            Ok(BarsStep::Alien(reason)) => {
+                // Dtype-alien: skipped WITHOUT a first-skip note or engine
+                // attribution (the Python flow's exact asymmetry — the
+                // finding itself carries the engine relevance).
+                let index = payload.findings.len();
+                payload.findings.push(FindingRec::AlienBars {
+                    path: path.display().to_string(),
+                    coords: coords.clone(),
+                    reason,
+                });
+                payload.events.push(EventRec::Finding { index });
+                payload.files_skipped += 1;
+                continue;
+            }
+            Ok(BarsStep::OutOfRange) => {
+                payload.log(
+                    EVENT_SCAN_SKIP,
+                    path,
+                    false,
+                    Some("timestamp value out of datetime range".to_string()),
+                    false,
+                );
+                payload.files_skipped += 1;
+                payload.note_first_read(path);
+                if coords.engine(cfg) {
+                    payload.engine_files_skipped += 1;
+                }
+                continue;
+            }
+            Ok(BarsStep::Classified {
+                raw,
+                unit,
+                bad_rows,
+            }) => (raw, unit, bad_rows),
+        };
         let physical = raw.len() as u64;
-        let bad_rows = price_violations(&df)?;
         payload.files_scanned += 1;
         scanned_in_series += 1;
         *payload
@@ -1134,20 +1253,53 @@ fn scan_bars_series(
         payload.series_scanned += 1;
     }
     for (index, coords, foreign_us) in pending {
-        let overlap = classify_overlap(
+        let overlap = match classify_overlap(
             cfg,
             payload,
             pause,
             &coords,
             &foreign_us,
             &mut canonical_cache,
-        )?;
+        ) {
+            Ok(overlap) => overlap,
+            Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+            Err(ScanFail::Degrade(reason)) => {
+                // W-6a isolation: an unjudgeable canonical sibling leaves
+                // the finding honestly unclassified (`overlap_rows=None` —
+                // the unreadable-sibling abstain law) after one loud
+                // scan_skip naming the reason.
+                if let FindingRec::BarsForeign { path, .. } = &payload.findings[index] {
+                    let path = PathBuf::from(path);
+                    payload.log(EVENT_SCAN_SKIP, &path, false, Some(reason), false);
+                }
+                None
+            }
+        };
         if let FindingRec::BarsForeign { overlap_rows, .. } = &mut payload.findings[index] {
             *overlap_rows = overlap;
         }
         payload.events.push(EventRec::Finding { index });
     }
     Ok(())
+}
+
+/// Positional engine attribution from the WALK tail
+/// (`_engine_coord_from_path` — the parse-failure branch's census law).
+fn walk_engine_attribution(cfg: &ScanConfig, base: &Path, path: &Path) -> bool {
+    if let Ok(rel) = path.strip_prefix(base) {
+        let walk: Vec<&str> = rel
+            .components()
+            .take(3)
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        return walk.len() == 3
+            && cfg.engine_coords.contains(&(
+                walk[0].to_string(),
+                walk[1].to_string(),
+                walk[2].to_string(),
+            ));
+    }
+    false
 }
 
 fn scan_bars(
@@ -1157,42 +1309,47 @@ fn scan_bars(
     pause: Pause<'_>,
 ) -> Result<(), ScanFail> {
     let base = cfg.lake_root.join("bars");
-    for (_exch_name, exch_dir) in child_dirs(&base, cfg.exchange.as_deref())? {
-        for (_seg_name, seg_dir) in child_dirs(&exch_dir, cfg.segment.as_deref())? {
-            for (_sym_name, sym_dir) in child_dirs(&seg_dir, cfg.symbol.as_deref())? {
-                for (_interval_name, interval_dir) in child_dirs(&sym_dir, cfg.interval.as_deref())?
+    let mut walk_skips: Vec<PathBuf> = Vec::new();
+    for (_exch_name, exch_dir) in child_dirs(&base, cfg.exchange.as_deref(), &mut walk_skips) {
+        for (_seg_name, seg_dir) in child_dirs(&exch_dir, cfg.segment.as_deref(), &mut walk_skips) {
+            for (_sym_name, sym_dir) in child_dirs(&seg_dir, cfg.symbol.as_deref(), &mut walk_skips)
+            {
+                for (_interval_name, interval_dir) in
+                    child_dirs(&sym_dir, cfg.interval.as_deref(), &mut walk_skips)
                 {
-                    let candidates = leaf_candidates(&interval_dir)?;
+                    let candidates = leaf_candidates(&interval_dir, &mut walk_skips);
                     if candidates.is_empty() {
                         continue;
                     }
                     let mut entries: Vec<(BarsCoords, PathBuf)> = Vec::new();
                     for path in &candidates {
-                        match parse_partition(cfg, canon_root, path)? {
-                            None => {
+                        match parse_partition(cfg, canon_root, path) {
+                            Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+                            Err(ScanFail::Degrade(reason)) => {
+                                // W-6a isolation: an int()-ambiguous name /
+                                // unresolvable path is a LOUD counted skip
+                                // (the parse-fail arm + a scan_skip WARN),
+                                // never a whole-scan refusal.
+                                let engine = walk_engine_attribution(cfg, &base, path);
+                                payload.log(EVENT_SCAN_SKIP, path, false, Some(reason), false);
+                                payload.files_skipped += 1;
+                                payload.note_first_parse(path);
+                                if engine {
+                                    payload.engine_files_skipped += 1;
+                                }
+                                continue;
+                            }
+                            Ok(None) => {
                                 payload.files_skipped += 1;
                                 payload.note_first_parse(path);
                                 // Positional engine attribution from the
                                 // WALK tail (`_engine_coord_from_path`).
-                                if let Ok(rel) = path.strip_prefix(&base) {
-                                    let walk: Vec<&str> = rel
-                                        .components()
-                                        .take(3)
-                                        .filter_map(|c| c.as_os_str().to_str())
-                                        .collect();
-                                    if walk.len() == 3
-                                        && cfg.engine_coords.contains(&(
-                                            walk[0].to_string(),
-                                            walk[1].to_string(),
-                                            walk[2].to_string(),
-                                        ))
-                                    {
-                                        payload.engine_files_skipped += 1;
-                                    }
+                                if walk_engine_attribution(cfg, &base, path) {
+                                    payload.engine_files_skipped += 1;
                                 }
                                 continue;
                             }
-                            Some(coords) => {
+                            Ok(Some(coords)) => {
                                 payload
                                     .symbol_dirs
                                     .entry((coords.exchange.clone(), coords.segment.clone()))
@@ -1217,6 +1374,9 @@ fn scan_bars(
                 }
             }
         }
+    }
+    for path in walk_skips {
+        payload.skip_walk_entry(&path, NON_UTF8_ENTRY_REASON);
     }
     Ok(())
 }
@@ -1339,19 +1499,33 @@ fn option_canonical_keys(
     month: u32,
 ) -> Result<Option<HashSet<OptionKey>>, ScanFail> {
     let canonical = series_dir.join(format!("{year:04}-{month:02}.parquet"));
-    if is_symlink(&canonical)? {
-        // repr() — the path embeds the vendor-influenceable series dir name
-        // (the round-8 log-injection fold); no pause — no read attempted.
-        payload.log(EVENT_SYMLINK_SKIPPED, &canonical, true, None, false);
-        return Ok(None);
+    match is_symlink(&canonical) {
+        Ok(true) => {
+            // repr() — the path embeds the vendor-influenceable series dir
+            // name (the round-8 log-injection fold); no pause — no read
+            // attempted.
+            payload.log(EVENT_SYMLINK_SKIPPED, &canonical, true, None, false);
+            return Ok(None);
+        }
+        Ok(false) => {}
+        Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+        Err(ScanFail::Degrade(reason)) => {
+            // W-6a isolation: an unjudgeable probe abstains loudly.
+            payload.log(EVENT_SCAN_SKIP, &canonical, true, Some(reason), false);
+            return Ok(None);
+        }
     }
     match fs::metadata(&canonical) {
         Err(err) if ignorable_stat_error(&err) => return Ok(Some(HashSet::new())),
         Err(err) => {
-            return Err(degrade(format!(
-                "cannot stat canonical option sibling {}: {err}",
-                canonical.display()
-            )));
+            payload.log(
+                EVENT_SCAN_SKIP,
+                &canonical,
+                true,
+                Some(format!("cannot stat canonical option sibling: {err}")),
+                false,
+            );
+            return Ok(None);
         }
         Ok(_) => {}
     }
@@ -1373,14 +1547,24 @@ fn option_canonical_keys(
         Ok(df) => df,
     };
     pause()?;
-    if let Some(verdict) = option_key_gate(&df)? {
-        // Verdict strings are path-free — the error field rides RAW.
-        payload.log(EVENT_SCAN_SKIP, &canonical, true, Some(verdict), false);
-        return Ok(None);
+    let keys = (|| -> Result<Option<HashSet<OptionKey>>, ScanFail> {
+        if let Some(verdict) = option_key_gate(&df)? {
+            // Verdict strings are path-free — the error field rides RAW.
+            payload.log(EVENT_SCAN_SKIP, &canonical, true, Some(verdict), false);
+            return Ok(None);
+        }
+        let sides = side_values(&df)?;
+        let stamps = option_ts_values(&df)?;
+        Ok(Some(sides.into_iter().zip(stamps).collect()))
+    })();
+    match keys {
+        Ok(keys) => Ok(keys),
+        Err(ScanFail::PauseRaised) => Err(ScanFail::PauseRaised),
+        Err(ScanFail::Degrade(reason)) => {
+            payload.log(EVENT_SCAN_SKIP, &canonical, true, Some(reason), false);
+            Ok(None)
+        }
     }
-    let sides = side_values(&df)?;
-    let stamps = option_ts_values(&df)?;
-    Ok(Some(sides.into_iter().zip(stamps).collect()))
 }
 
 /// `_classify_option_overlap` twin over one series' pending foreign keys.
@@ -1417,40 +1601,115 @@ fn classify_option_overlap(
     Ok(if unresolved { None } else { Some(overlap) })
 }
 
+/// One options file's gate/probe verdict (the W-6a per-file fold).
+enum OptionFileStep {
+    /// The dtype/range gate refused with the pinned verdict string.
+    GateRefused(String),
+    /// The key payloads (the gate passed).
+    Keys {
+        sides: Vec<Option<String>>,
+        stamps: Vec<OptionTs>,
+    },
+}
+
 fn scan_options(
     cfg: &ScanConfig,
     payload: &mut ScanPayload,
     pause: Pause<'_>,
 ) -> Result<(), ScanFail> {
     let options_root = cfg.lake_root.join("options");
-    if is_symlink(&options_root)? {
-        // The options-ROOT skip stays RAW: operator-configured root + a
-        // fixed literal, no vendor-derived component.
-        payload.log(EVENT_SYMLINK_SKIPPED, &options_root, false, None, false);
-        return Ok(());
+    match is_symlink(&options_root) {
+        Ok(true) => {
+            // The options-ROOT skip stays RAW: operator-configured root + a
+            // fixed literal, no vendor-derived component.
+            payload.log(EVENT_SYMLINK_SKIPPED, &options_root, false, None, false);
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+        Err(ScanFail::Degrade(reason)) => {
+            // W-6a isolation: an unjudgeable root probe skips the WHOLE
+            // options tree loudly (never a whole-scan refusal).
+            payload.log(EVENT_SCAN_SKIP, &options_root, false, Some(reason), false);
+            return Ok(());
+        }
     }
-    if !is_dir_strict(&options_root)? {
-        return Ok(());
+    match is_dir_strict(&options_root) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+        Err(ScanFail::Degrade(reason)) => {
+            payload.log(EVENT_SCAN_SKIP, &options_root, false, Some(reason), false);
+            return Ok(());
+        }
     }
-    // The series listing is UNGUARDED in Python (`options_root.iterdir()`
-    // raising crashes the scan) — a listing fault degrades, the oracle
-    // then crashes identically.
-    let entries = fs::read_dir(&options_root)
-        .map_err(|err| degrade(format!("cannot list options root: {err}")))?;
+    // The series listing: a listing fault skips the tree LOUDLY (W-6a — the
+    // deleted Python oracle would have crashed here; isolation is the ruled
+    // endgame posture).
+    let entries = match fs::read_dir(&options_root) {
+        Ok(entries) => entries,
+        Err(err) => {
+            payload.log(
+                EVENT_SCAN_SKIP,
+                &options_root,
+                false,
+                Some(format!("cannot list options root: {err}")),
+                false,
+            );
+            return Ok(());
+        }
+    };
     let mut series_dirs: Vec<(String, PathBuf)> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|err| degrade(format!("options root listing fault: {err}")))?;
-        let name = entry_name(&entry)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                payload.log(
+                    EVENT_SCAN_SKIP,
+                    &options_root,
+                    false,
+                    Some(format!("options root listing fault: {err}")),
+                    false,
+                );
+                break;
+            }
+        };
         let path = entry.path();
-        if is_dir_strict(&path)? {
-            series_dirs.push((name, path));
+        let Some(name) = entry_name(&entry) else {
+            payload.log(
+                EVENT_SCAN_SKIP,
+                &path,
+                true,
+                Some(NON_UTF8_ENTRY_REASON.to_string()),
+                false,
+            );
+            payload.option_files_skipped += 1;
+            continue;
+        };
+        match is_dir_strict(&path) {
+            Ok(true) => series_dirs.push((name, path)),
+            Ok(false) => {}
+            Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+            Err(ScanFail::Degrade(reason)) => {
+                payload.log(EVENT_SCAN_SKIP, &path, true, Some(reason), false);
+                payload.option_files_skipped += 1;
+            }
         }
     }
     series_dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_series_name, series_dir) in series_dirs {
-        if is_symlink(&series_dir)? {
-            payload.log(EVENT_SYMLINK_SKIPPED, &series_dir, true, None, false);
-            continue;
+    for (series, series_dir) in series_dirs {
+        match is_symlink(&series_dir) {
+            Ok(true) => {
+                payload.log(EVENT_SYMLINK_SKIPPED, &series_dir, true, None, false);
+                continue;
+            }
+            Ok(false) => {}
+            Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+            Err(ScanFail::Degrade(reason)) => {
+                payload.log(EVENT_SCAN_SKIP, &series_dir, true, Some(reason), false);
+                payload.option_files_skipped += 1;
+                continue;
+            }
         }
         let mut canonical_cache: HashMap<(i64, u32), Option<HashSet<OptionKey>>> = HashMap::new();
         let mut pending: Vec<(usize, BTreeSet<OptionKey>)> = Vec::new();
@@ -1460,18 +1719,23 @@ fn scan_options(
                 let Ok(file_entry) = file_entry else {
                     break;
                 };
-                let name = entry_name(&file_entry)?;
+                let Some(name) = entry_name(&file_entry) else {
+                    payload.log(
+                        EVENT_SCAN_SKIP,
+                        &file_entry.path(),
+                        true,
+                        Some(NON_UTF8_ENTRY_REASON.to_string()),
+                        false,
+                    );
+                    payload.option_files_skipped += 1;
+                    continue;
+                };
                 if name.ends_with(".parquet") {
                     file_names.push(name);
                 }
             }
         }
         file_names.sort();
-        let series = series_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| degrade("non-UTF-8 series dir name"))?
-            .to_string();
         for file_name in &file_names {
             let path = series_dir.join(file_name);
             let home = option_file_month(file_name);
@@ -1484,11 +1748,19 @@ fn scan_options(
                     Some(_) => {}
                 }
             }
-            if is_symlink(&path)? {
-                payload.log(EVENT_SYMLINK_SKIPPED, &path, true, None, false);
-                payload.option_files_skipped += 1;
-                payload.note_first_read(&path);
-                continue;
+            match is_symlink(&path) {
+                Ok(true) => {
+                    payload.log(EVENT_SYMLINK_SKIPPED, &path, true, None, false);
+                    payload.option_files_skipped += 1;
+                    payload.note_first_read(&path);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+                Err(ScanFail::Degrade(reason)) => {
+                    payload.skip_option_unjudgeable(&path, reason);
+                    continue;
+                }
             }
             payload.reads_performed += 1;
             let df = match read_columns(&path, &OPTION_KEY_COLUMNS) {
@@ -1515,19 +1787,36 @@ fn scan_options(
                 Ok(df) => df,
             };
             pause()?;
-            if let Some(verdict) = option_key_gate(&df)? {
-                payload.log(EVENT_SCAN_SKIP, &path, true, Some(verdict), false);
-                payload.option_files_skipped += 1;
-                payload.note_first_read(&path);
-                continue;
-            }
+            // W-6a isolation: the gate + value probes fold an
+            // out-of-envelope verdict into ONE loud counted skip for THIS
+            // file (never a whole-scan refusal).
+            let gate_step = (|| -> Result<OptionFileStep, ScanFail> {
+                if let Some(verdict) = option_key_gate(&df)? {
+                    return Ok(OptionFileStep::GateRefused(verdict));
+                }
+                let sides = side_values(&df)?;
+                let stamps = option_ts_values(&df)?;
+                Ok(OptionFileStep::Keys { sides, stamps })
+            })();
+            let (sides, stamps) = match gate_step {
+                Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+                Err(ScanFail::Degrade(reason)) => {
+                    payload.skip_option_unjudgeable(&path, reason);
+                    continue;
+                }
+                Ok(OptionFileStep::GateRefused(verdict)) => {
+                    payload.log(EVENT_SCAN_SKIP, &path, true, Some(verdict), false);
+                    payload.option_files_skipped += 1;
+                    payload.note_first_read(&path);
+                    continue;
+                }
+                Ok(OptionFileStep::Keys { sides, stamps }) => (sides, stamps),
+            };
             let physical = df.height() as u64;
             payload.option_files_scanned += 1;
             if physical == 0 {
                 continue;
             }
-            let sides = side_values(&df)?;
-            let stamps = option_ts_values(&df)?;
             let unique = sides
                 .iter()
                 .zip(stamps.iter())
@@ -1569,13 +1858,25 @@ fn scan_options(
             }
         }
         for (index, foreign_keys) in pending {
-            let overlap = classify_option_overlap(
+            let overlap = match classify_option_overlap(
                 payload,
                 pause,
                 &series_dir,
                 &foreign_keys,
                 &mut canonical_cache,
-            )?;
+            ) {
+                Ok(overlap) => overlap,
+                Err(ScanFail::PauseRaised) => return Err(ScanFail::PauseRaised),
+                Err(ScanFail::Degrade(reason)) => {
+                    // W-6a isolation: an unjudgeable sibling leaves the
+                    // finding honestly unclassified after one loud skip.
+                    if let FindingRec::OptionForeign { path, .. } = &payload.findings[index] {
+                        let path = PathBuf::from(path);
+                        payload.log(EVENT_SCAN_SKIP, &path, true, Some(reason), false);
+                    }
+                    None
+                }
+            };
             if let FindingRec::OptionForeign { overlap_rows, .. } = &mut payload.findings[index] {
                 *overlap_rows = overlap;
             }
@@ -2096,19 +2397,111 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_year_dir_degrades() {
+    fn ambiguous_year_dir_skips_loud_counted() {
+        // The W-6a endgame isolation law (DEC-RUST-LAKE-WAVED-001): an
+        // int()-ambiguous year dir — a shape the deleted Python oracle used
+        // to own — is a LOUD counted per-file scan_skip naming the reason,
+        // never a whole-scan refusal; a healthy sibling still scans.
         let dir = scratch_dir("ambiguous");
         write_frame(
             &dir.join("bars/NSE/INDEX/NIFTY/1minute/ 2024/06.parquet"),
             &bars_frame(&[Some(JUNE_US)], 100.0),
         );
-        let err = scan_lake_impl(&cfg_for(&dir), &mut || Ok(()))
-            .map(|_| ())
-            .unwrap_err();
-        match err {
-            ScanFail::Degrade(reason) => assert!(reason.contains("int()-ambiguous")),
-            ScanFail::PauseRaised => panic!("expected degrade"),
-        }
+        write_frame(
+            &bars_dest(&dir, 2024, 6),
+            &bars_frame(&[Some(JUNE_US)], 100.0),
+        );
+        let payload = run(&cfg_for(&dir));
+        assert_eq!(payload.files_scanned, 1); // the healthy sibling
+        assert_eq!(payload.files_skipped, 1); // the ambiguous plant
+        assert_eq!(payload.engine_files_skipped, 1); // NIFTY = engine coords
+        assert!(
+            payload
+                .first_skipped_parse
+                .as_deref()
+                .unwrap()
+                .contains(" 2024")
+        );
+        let skip_logged = payload.events.iter().any(|event| {
+            matches!(
+                event,
+                EventRec::Log { event: EVENT_SCAN_SKIP, error: Some(reason), .. }
+                    if reason.contains("int()-ambiguous")
+            )
+        });
+        assert!(skip_logged, "the ambiguous skip must be LOUD");
+        assert!(payload.findings.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unmapped_dtype_ohlc_skips_loud_counted() {
+        // W-6a isolation (the D-19 class): an OHLC column whose dtype has no
+        // pinned polars-python repr (a nested List) is a LOUD counted
+        // per-file scan_skip — never a whole-scan refusal.
+        let dir = scratch_dir("unmapped");
+        let dtype = DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC));
+        let ts = Series::new("timestamp".into(), vec![Some(JUNE_US)])
+            .cast(&dtype)
+            .unwrap();
+        let nested = |name: &str| {
+            let inner = Series::new("x".into(), ["junk"]);
+            Column::new(name.into(), [inner.clone()])
+        };
+        let df = DataFrame::new_infer_height(vec![
+            ts.into(),
+            nested("open"),
+            nested("high"),
+            nested("low"),
+            nested("close"),
+        ])
+        .unwrap();
+        write_frame(&bars_dest(&dir, 2024, 6), &df);
+        write_frame(
+            &dir.join("bars/NSE/INDEX/NIFTY/1minute/2024/07.parquet"),
+            &bars_frame(&[Some(JUNE_US + US_PER_DAY * 40)], 100.0),
+        );
+        let payload = run(&cfg_for(&dir));
+        assert_eq!(payload.files_scanned, 1); // the healthy sibling
+        assert_eq!(payload.files_skipped, 1);
+        assert_eq!(payload.engine_files_skipped, 1);
+        let skip_logged = payload.events.iter().any(|event| {
+            matches!(
+                event,
+                EventRec::Log { event: EVENT_SCAN_SKIP, error: Some(reason), .. }
+                    if reason.contains("dtype")
+            )
+        });
+        assert!(skip_logged, "the unmapped-dtype skip must be LOUD");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_dir_entry_skips_loud_counted() {
+        // W-6a isolation: a non-UTF-8 directory entry name (a shape the
+        // deleted bytes-tolerant Python walk handled natively) is a LOUD
+        // counted scan_skip; healthy siblings still scan.
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch_dir("nonutf8");
+        write_frame(
+            &bars_dest(&dir, 2024, 6),
+            &bars_frame(&[Some(JUNE_US)], 100.0),
+        );
+        let junk = dir
+            .join("bars/NSE")
+            .join(std::ffi::OsStr::from_bytes(b"BAD\xff"));
+        std::fs::create_dir_all(&junk).unwrap();
+        let payload = run(&cfg_for(&dir));
+        assert_eq!(payload.files_scanned, 1);
+        assert_eq!(payload.files_skipped, 1); // the junk entry, counted
+        let skip_logged = payload.events.iter().any(|event| {
+            matches!(
+                event,
+                EventRec::Log { event: EVENT_SCAN_SKIP, error: Some(reason), .. }
+                    if reason.contains("non-UTF-8")
+            )
+        });
+        assert!(skip_logged, "the non-UTF-8 skip must be LOUD");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

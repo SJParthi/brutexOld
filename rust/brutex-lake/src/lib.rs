@@ -598,6 +598,10 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // engaged set). Appended AFTER the W-1..W-4 registrations (§4.1
     // additive merge law).
     m.add_function(wrap_pyfunction!(waved::heal::waved_heal_engaged_kinds, m)?)?;
+    // ADR-0020 Wave-D W-6a (DEC-RUST-LAKE-WAVED-001 ENDGAME — the Python
+    // cores are deleted; per-finding/per-file isolation is crate-owned).
+    // Appended AFTER every earlier waved registration (§4.1 additive law).
+    m.add_function(wrap_pyfunction!(waved::heal::waved_endgame_witness, m)?)?;
     Ok(())
 }
 
