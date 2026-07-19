@@ -177,18 +177,22 @@ class TestWarmLaunchReadCount:
         read_parquet_calls: list[str] = []
         read_bytes_calls: list[str] = []
         real_read_parquet = pl.read_parquet
-        real_read_bytes = pathlib.Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the sha256 full-bytes read rides the
+        # guarded reader now — spy THAT seam (Path.read_bytes is unused here);
+        # the module object is the file's ONE top-level `catalog_reconcile`
+        # import (no second import style — the #1810 CodeQL convention).
+        real_read_bytes = catalog_reconcile.read_regular_bytes
 
         def spy_read_parquet(source: Any, **kwargs: Any) -> Any:
             read_parquet_calls.append(str(source))
             return real_read_parquet(source, **kwargs)
 
-        def spy_read_bytes(self: pathlib.Path, *args: Any, **kwargs: Any) -> bytes:
-            read_bytes_calls.append(str(self))
-            return real_read_bytes(self, *args, **kwargs)
+        def spy_read_bytes(path: pathlib.Path, *args: Any, **kwargs: Any) -> bytes:
+            read_bytes_calls.append(str(path))
+            return real_read_bytes(path, *args, **kwargs)
 
         monkeypatch.setattr(pl, "read_parquet", spy_read_parquet)
-        monkeypatch.setattr(pathlib.Path, "read_bytes", spy_read_bytes)
+        monkeypatch.setattr(catalog_reconcile, "read_regular_bytes", spy_read_bytes)
 
         with Catalog.open(lake / "catalog.duckdb") as cat:
             cold = reconcile_catalog_from_lake(
