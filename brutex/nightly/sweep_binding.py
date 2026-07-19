@@ -53,6 +53,7 @@ from typing import Any, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.chain import (
     EXIT_OK,
     EXIT_SWEEP_TUPLE_FAILED,
@@ -205,7 +206,7 @@ def read_sweep_tail_counts(audit_path: Path, *, since_utc: float) -> Mapping[str
     genuinely-integer payload values are kept (a bool is not a counter).
     """
     try:
-        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        lines = read_regular_text(audit_path).splitlines()
     except OSError:
         return None
     complete_action = _supervisor_complete_action()

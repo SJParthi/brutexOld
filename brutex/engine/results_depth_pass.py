@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes, read_regular_text
 from brutex.engine.baseline import baseline_filename, compute_baseline, write_baseline
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
 from brutex.engine.minute_path import MinuteIndex
@@ -276,7 +277,7 @@ class _Tallies:
 
 def _store_sha256(store_path: Path) -> str:
     """The CURRENT store bytes' sha256 — the sidecar stamp's idempotence key."""
-    return hashlib.sha256(store_path.read_bytes()).hexdigest()
+    return hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
 
 
 def _warn_vix_miss(run_id: str, missing: int, tallies: _Tallies) -> None:
@@ -321,7 +322,7 @@ def _probe_manifest(run_dir: Path) -> None:
     if not manifest.exists():
         return
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(manifest))
     except (OSError, ValueError):
         _LOG.warning("results_depth.manifest_invalid", path=str(manifest), reason="unreadable")
         return
@@ -565,7 +566,7 @@ def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
     except ImportError as exc:
         raise ResultsDepthError(_POLARS_HINT) from exc
     try:
-        df = pl.read_parquet(paths.aggs)
+        df = read_parquet_regular(paths.aggs)
     except (pl.exceptions.PolarsError, OSError) as exc:
         raise ResultsDepthError(f"unreadable aggs sidecar at {paths.aggs}: {exc}") from exc
     records: list[ComboAggregate] = []

@@ -314,3 +314,27 @@ class TestTodSecondsRustSeamDelegation:
 
         # A Muhurat-style 18:15 open takes the dynamic branch.
         assert _session_open_seconds(time(18, 15)) == 18 * 3600 + 15 * 60
+
+
+class TestExtendedSessionToDBits:
+    """DEC-EXTENDED-SESSION-OUTAGE-001 — a post-15:30 bar on the 2021-02-24
+    extended day (close 17:00 IST) stamps VALID, deterministic metadata."""
+
+    def test_1659_bar_on_extended_day_stamps_without_raising(self) -> None:
+        # minute_of_session 464 (> the regular 374 ceiling) is a valid,
+        # honest index on the 465-minute session — no raise, no clamp.
+        outage = date(2021, 2, 24)
+        contract = FuturesContract(NIFTY, date(2021, 2, 25))
+        m = stamp_bar(_ist(outage, 16, 59), contract)
+        assert m.trade_date == outage
+        assert m.minute_of_session == (16 * 60 + 59) - (9 * 60 + 15)  # 464
+        assert m.minute_of_session > 374  # beyond the regular-session ceiling
+
+    def test_extended_day_session_open_unchanged(self) -> None:
+        # The extension moved only the CLOSE — the open (hence the ToD
+        # anchor, bits 44-47) stays 09:15, so a 10:00 bar stamps minute 45
+        # exactly as on any regular day (deterministic, date-invariant).
+        outage = date(2021, 2, 24)
+        contract = FuturesContract(NIFTY, date(2021, 2, 25))
+        m = stamp_bar(_ist(outage, 10, 0), contract)
+        assert m.minute_of_session == 45
