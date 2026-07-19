@@ -1,0 +1,558 @@
+{
+  "constants": {
+    "audit_relpath": [
+      "audit",
+      "sweep-all.jsonl"
+    ],
+    "default_sort_by": "sharpe",
+    "quarantine_dirname": "quarantine",
+    "quarantine_log_path_cap": 20,
+    "snapshot_quarantine_event": "results.snapshot_mismatch_quarantined",
+    "sort_aliases": {
+      "calmar": "calmar_ratio",
+      "pf": "profit_factor",
+      "pnl": "net_pnl_paisa",
+      "sharpe": "sharpe_ratio",
+      "sortino": "sortino_ratio",
+      "trades": "total_trades",
+      "win": "win_rate"
+    }
+  },
+  "format_conditions": [
+    {
+      "expect": "(no conditions \u2014 enters every bar)",
+      "name": "empty"
+    },
+    {
+      "expect": "bar_bullish",
+      "name": "single"
+    },
+    {
+      "expect": "close_above_ema20 AND bar_bullish",
+      "name": "joined"
+    },
+    {
+      "expect": "\u03c0\u22653 AND \u2602-condition",
+      "name": "unicode_passthrough"
+    },
+    {
+      "expect": " ",
+      "name": "whitespace_only_is_truthy"
+    }
+  ],
+  "format_deflated": [
+    {
+      "expect": "\u2014",
+      "name": "none"
+    },
+    {
+      "expect": "+0.0000",
+      "name": "zero"
+    },
+    {
+      "expect": "-0.0000",
+      "name": "negative_zero"
+    },
+    {
+      "expect": "+0.1000",
+      "name": "tenth"
+    },
+    {
+      "expect": "+0.0000",
+      "name": "tiny_underflows_display"
+    },
+    {
+      "expect": "+0.9700",
+      "name": "typical"
+    },
+    {
+      "expect": "-1.2345",
+      "name": "negative_half_boundary"
+    },
+    {
+      "expect": "+2.0000",
+      "name": "half_boundary"
+    },
+    {
+      "expect": "+1000000000000000000.0000",
+      "name": "huge"
+    },
+    {
+      "expect": "-1000000000000000000.0000",
+      "name": "negative_huge"
+    }
+  ],
+  "leaderboard": [
+    {
+      "expect": "(no persisted results)",
+      "name": "empty"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish",
+      "name": "single_no_origins"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700  src=grid\n    close_above_ema20 AND bar_bullish\n#2  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+0.750  dsr@tupleN=+0.9700  src=stage3\n    close_above_ema20 AND bar_bullish\n#3  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+0.500  dsr@tupleN=+0.9700  src=?\n    close_above_ema20 AND bar_bullish",
+      "name": "multi_with_origins"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700  src=?\n    close_above_ema20 AND bar_bullish",
+      "name": "empty_origins_is_not_none"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=\u2014\n    close_above_ema20 AND bar_bullish",
+      "name": "dsr_none_dash"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b9-0.01  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#2  NIFTY 5m bull  pnl=\u20b90.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#3  NIFTY 5m bull  pnl=\u20b90.05  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#4  NIFTY 5m bull  pnl=\u20b91,234,567.89  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#5  NIFTY 5m bull  pnl=\u20b9-123,456,789.01  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#6  NIFTY 5m bull  pnl=\u20b990,071,992,547,409.93  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#7  NIFTY 5m bull  pnl=\u20b946,116,860,184,273,879.04  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish",
+      "name": "money_edges"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=0.0%  sharpe=+0.000  dsr@tupleN=+0.0000\n    close_above_ema20 AND bar_bullish\n#2  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=100.0%  sharpe=+0.000  dsr@tupleN=+0.0000\n    close_above_ema20 AND bar_bullish\n#3  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=33.5%  sharpe=-1.234  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#4  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=100.0%  sharpe=+2.000  dsr@tupleN=\u2014\n    close_above_ema20 AND bar_bullish",
+      "name": "metric_format_edges"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)",
+      "name": "mask_zero_no_conditions"
+    },
+    {
+      "expect": "#1  NIFTY 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND close_below_ema20 AND close_above_ema200 AND close_below_ema200 AND ema20_above_ema200 AND ema20_below_ema200 AND near_pivot_p AND near_pivot_r1 AND near_pivot_r2 AND near_pivot_r3 AND near_pivot_s1 AND near_pivot_s2 AND near_pivot_s3 AND close_above_pdh AND close_below_pdh AND close_above_pdl AND close_below_pdl AND near_pdh AND near_pdl AND near_fib_0 AND near_fib_236 AND near_fib_382 AND near_fib_50 AND near_fib_618 AND near_fib_786 AND near_fib_100 AND near_fib_1272 AND near_fib_1618 AND near_fib_200 AND near_fib_2618 AND bar_bullish AND bar_bearish AND bar_doji AND bar_large_body AND bar_small_body AND long_upper_wick AND long_lower_wick AND prior_n_bullish AND prior_n_bearish AND prior_alternating AND close_at_day_high AND close_at_day_low AND close_in_upper_third AND close_in_lower_third AND early_morning AND mid_morning AND midday AND afternoon AND gap_up_day AND gap_down_day AND inside_day AND outside_day AND close_above_vwap AND close_below_vwap AND near_pivot_r5 AND near_pivot_s5 AND bos_bullish AND bos_bearish AND choch_bullish AND choch_bearish",
+      "name": "mask_full_60bit_decode"
+    },
+    {
+      "expect": "#1  \u0928\u093f\u092b\u094d\u091f\u0940\u2602 \u096bm \u0924\u0947\u091c\u0940  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish",
+      "name": "unicode_instrument_passthrough"
+    },
+    {
+      "expect": "#1  BAD-\ud800-SURROGATE 5m bull  pnl=\u20b910.00  trades=40  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish",
+      "name": "lone_surrogate_instrument"
+    }
+  ],
+  "provisional_note": [
+    {
+      "expect": "",
+      "name": "verdicts_absent"
+    },
+    {
+      "expect": "",
+      "name": "verdicts_not_a_list"
+    },
+    {
+      "expect": "",
+      "name": "verdicts_string_not_a_list"
+    },
+    {
+      "expect": "",
+      "name": "verdicts_empty_list"
+    },
+    {
+      "expect": "",
+      "name": "no_verdict_stamped"
+    },
+    {
+      "expect": "",
+      "name": "non_dict_entries_not_stamped"
+    },
+    {
+      "expect": "  provisional=1 (pool-N DSR pass \u2014 not proven at leaderboard N)",
+      "name": "one_provisional_pass"
+    },
+    {
+      "expect": "",
+      "name": "provisional_on_rejection_not_counted"
+    },
+    {
+      "expect": "",
+      "name": "provisional_int_1_is_not_True"
+    },
+    {
+      "expect": "",
+      "name": "passed_int_1_is_not_True"
+    },
+    {
+      "expect": "  provisional=2 (pool-N DSR pass \u2014 not proven at leaderboard N)",
+      "name": "two_counted"
+    }
+  ],
+  "show_report": [
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 5\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)\n#3  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500\n    close_above_ema20 AND bar_bullish\n#4  SENSEX 1h bear  pnl=\u20b9-2.50  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=-0.5000\n    close_above_ema20 AND bar_bullish\n#5  NIFTY 5m bull  pnl=\u20b95.00  trades=12  win=62.5%  sharpe=+0.750  dsr@tupleN=\u2014\n    close_above_ema20 AND bar_bullish"
+      },
+      "name": "basic_top10_default_sort"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=pnl  showing top 2\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)\n#2  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish"
+      },
+      "name": "top2_pnl"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=trades  showing top 5\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b9-2.50  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=-0.5000\n    close_above_ema20 AND bar_bullish\n#3  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#4  NIFTY 5m bull  pnl=\u20b95.00  trades=12  win=62.5%  sharpe=+0.750  dsr@tupleN=\u2014\n    close_above_ema20 AND bar_bullish\n#5  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)"
+      },
+      "name": "trades_tie_run_id_asc"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=0  finalists=0  sort=sharpe  showing top 0\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n(no persisted results)"
+      },
+      "name": "empty_tree"
+    },
+    {
+      "expect": {
+        "error_str": "results root not found or not a directory: <ROOT>/nope",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "missing_root_refused"
+    },
+    {
+      "expect": {
+        "error_str": "top must be >= 1, got 0",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "top_zero_refused"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'Sharpe'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "unknown_sort_refused"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 3\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)\n#3  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500\n    close_above_ema20 AND bar_bullish\n\nStage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=841 source=leaderboard"
+      },
+      "name": "with_sidecar_section"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 1\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n\nStage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+      },
+      "name": "with_unreadable_sidecar_still_renders"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 5\n  (per-row src= markers from the cascade manifest: src=grid rows are gate survivors; src=stage3 rows are UNGATED refined trials \u2014 DEC-ROW-PROVENANCE-001)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700  src=stage3\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700  src=grid\n    (no conditions \u2014 enters every bar)\n#3  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500  src=grid\n    close_above_ema20 AND bar_bullish\n#4  SENSEX 1h bear  pnl=\u20b9-2.50  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=-0.5000  src=grid\n    close_above_ema20 AND bar_bullish\n#5  NIFTY 5m bull  pnl=\u20b95.00  trades=12  win=62.5%  sharpe=+0.750  dsr@tupleN=\u2014  src=stage3\n    close_above_ema20 AND bar_bullish"
+      },
+      "name": "manifest_stage3_markers"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 5\n  (per-row src= markers from the cascade manifest: src=grid rows are gate survivors; src=stage3 rows are UNGATED refined trials \u2014 DEC-ROW-PROVENANCE-001)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700  src=grid\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700  src=grid\n    (no conditions \u2014 enters every bar)\n#3  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500  src=grid\n    close_above_ema20 AND bar_bullish\n#4  SENSEX 1h bear  pnl=\u20b9-2.50  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=-0.5000  src=grid\n    close_above_ema20 AND bar_bullish\n#5  NIFTY 5m bull  pnl=\u20b95.00  trades=12  win=62.5%  sharpe=+0.750  dsr@tupleN=\u2014  src=grid\n    close_above_ema20 AND bar_bullish"
+      },
+      "name": "manifest_disabled_all_grid"
+    },
+    {
+      "expect": {
+        "text": "BruteX results \u2014 <ROOT>\n  files=3  finalists=5  sort=sharpe  showing top 5\n  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also persists UNGATED Stage-3 refined-eval trials \u2014 no per-row gate verdict)\n\n#1  NIFTY 5m bull  pnl=\u20b990.00  trades=40  win=62.5%  sharpe=+3.250  dsr@tupleN=+0.9700\n    close_above_ema20 AND bar_bullish\n#2  SENSEX 1h bear  pnl=\u20b990,071,992,547,409.93  trades=7  win=62.5%  sharpe=+2.000  dsr@tupleN=+0.9700\n    (no conditions \u2014 enters every bar)\n#3  BANKNIFTY 15m bull  pnl=\u20b940.00  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=+0.2500\n    close_above_ema20 AND bar_bullish\n#4  SENSEX 1h bear  pnl=\u20b9-2.50  trades=55  win=62.5%  sharpe=+1.500  dsr@tupleN=-0.5000\n    close_above_ema20 AND bar_bullish\n#5  NIFTY 5m bull  pnl=\u20b95.00  trades=12  win=62.5%  sharpe=+0.750  dsr@tupleN=\u2014\n    close_above_ema20 AND bar_bullish"
+      },
+      "name": "manifest_pre_provenance_disclaimer"
+    }
+  ],
+  "sidecar_group": [
+    {
+      "expect": {
+        "error_str": "group entry is not an object",
+        "error_type": "ValueError"
+      },
+      "name": "entry_not_object_int"
+    },
+    {
+      "expect": {
+        "error_str": "group entry is not an object",
+        "error_type": "ValueError"
+      },
+      "name": "entry_not_object_list"
+    },
+    {
+      "expect": {
+        "error_str": "group report is not an object",
+        "error_type": "ValueError"
+      },
+      "name": "report_absent"
+    },
+    {
+      "expect": {
+        "error_str": "group report is not an object",
+        "error_type": "ValueError"
+      },
+      "name": "report_not_object"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.6571  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "full_leaderboard_dsr"
+    },
+    {
+      "expect": {
+        "text": "  ? ?  pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "labels_missing_question_marks"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=? survived=?  dsr N=12 source=leaderboard"
+      },
+      "name": "counts_missing_question_marks"
+    },
+    {
+      "expect": {
+        "text": "  5 None  pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "non_string_labels_echoed"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N not stamped (pre-ADR-0008 report)"
+      },
+      "name": "dsr_stamp_absent_pre_adr0008"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=3 source=pool"
+      },
+      "name": "dsr_pool_fallback"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=9 source=weird"
+      },
+      "name": "dsr_junk_source_echoed"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=? source=leaderboard"
+      },
+      "name": "dsr_trials_missing_question_mark"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO not recorded (pre-sidecar report)  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "pbo_absent_pre_sidecar"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO skipped (pool < 2 candidates / short series / pool empty at #5)  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "pbo_null_skipped"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=1.0000  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "pbo_int_coerced"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=1.0000  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "pbo_bool_true_coerces_to_1"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "pbo_numeric_string_coerced"
+    },
+    {
+      "expect": {
+        "error_str": "could not convert string to float: 'junk'",
+        "error_type": "ValueError"
+      },
+      "name": "pbo_junk_string_raises"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.6571  in=3 survived=2  dsr N=3 source=pool"
+      },
+      "name": "pbo_full_precision_display_rounded"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=3 source=pool  provisional=1 (pool-N DSR pass \u2014 not proven at leaderboard N)"
+      },
+      "name": "provisional_counted_in_line"
+    },
+    {
+      "expect": {
+        "text": "  NIFTY 1minute  pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
+      },
+      "name": "provisional_zero_flagged_no_label"
+    }
+  ],
+  "sidecar_render": [
+    {
+      "expect": "",
+      "name": "absent_file"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  NIFTY 1minute  pool PBO=0.6571  in=3 survived=2  dsr N=12 source=leaderboard\n  BANKNIFTY 1minute  pool PBO skipped (pool < 2 candidates / short series / pool empty at #5)  in=3 survived=2  dsr N=3 source=pool",
+      "name": "two_groups"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  (no pooled slices)",
+      "name": "empty_groups_placeholder"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+      "name": "corrupt_json"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: not a cascade report object",
+      "name": "payload_not_object"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: not a cascade report object",
+      "name": "groups_not_a_list"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: unsupported report version 99",
+      "name": "version_99"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  NIFTY 1minute  pool PBO=0.5000  in=3 survived=2  dsr N=12 source=leaderboard",
+      "name": "version_true_bool_pun_loads"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: unsupported report version '1'",
+      "name": "version_string_1_refused_repr"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: unsupported report version None",
+      "name": "version_key_absent_none_repr"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: group entry is not an object",
+      "name": "group_entry_not_object"
+    },
+    {
+      "expect": "Stage-4 cascade sidecar \u2014 <ROOT>/cascade/cascade-report.json\n  UNREADABLE: could not convert string to float: 'junk'",
+      "name": "group_float_coercion_valueerror"
+    }
+  ],
+  "sort_field": [
+    {
+      "expect": {
+        "field": "sharpe_ratio"
+      },
+      "name": "alias_sharpe"
+    },
+    {
+      "expect": {
+        "field": "sortino_ratio"
+      },
+      "name": "alias_sortino"
+    },
+    {
+      "expect": {
+        "field": "calmar_ratio"
+      },
+      "name": "alias_calmar"
+    },
+    {
+      "expect": {
+        "field": "net_pnl_paisa"
+      },
+      "name": "alias_pnl"
+    },
+    {
+      "expect": {
+        "field": "win_rate"
+      },
+      "name": "alias_win"
+    },
+    {
+      "expect": {
+        "field": "total_trades"
+      },
+      "name": "alias_trades"
+    },
+    {
+      "expect": {
+        "field": "profit_factor"
+      },
+      "name": "alias_pf"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'sharpe_ratio'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_sharpe_ratio"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'sortino_ratio'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_sortino_ratio"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'calmar_ratio'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_calmar_ratio"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'net_pnl_paisa'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_net_pnl_paisa"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'win_rate'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_win_rate"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'total_trades'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_total_trades"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'profit_factor'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "canonical_rejected_profit_factor"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key ''; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "blank"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'Sharpe'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "case_drift_Sharpe"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'PNL'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "case_drift_PNL"
+    },
+    {
+      "expect": {
+        "error_str": "unknown sort key 'junk'; choose one of ['calmar', 'pf', 'pnl', 'sharpe', 'sortino', 'trades', 'win']",
+        "error_type": "ResultsStoreError"
+      },
+      "name": "junk_token"
+    }
+  ]
+}

@@ -435,6 +435,87 @@ def capture_top100_artifact() -> dict[str, Any]:
     }
 
 
+def capture_results_report() -> dict[str, Any]:
+    """Freeze the results_report render-law family (slice 2c).
+
+    Family (b) — the render laws — is frozen exhaustively; family (a) — the
+    store-coupled I/O orchestration half, which stays shim-side Python in
+    phase B — is pinned only through the few end-to-end ``show_report`` cases
+    (its main protection is the UNMODIFIED pre-existing unit suite).
+    """
+    from brutex.engine.results_report import (
+        _AUDIT_RELPATH,
+        _QUARANTINE_DIRNAME,
+        _QUARANTINE_LOG_PATH_CAP,
+        DEFAULT_SORT_BY,
+        SNAPSHOT_QUARANTINE_EVENT,
+        SORT_ALIASES,
+    )
+
+    from tests.golden._results_report_parity_corpus import (
+        format_conditions_cases,
+        format_deflated_cases,
+        leaderboard_cases,
+        provisional_note_cases,
+        run_format_conditions_case,
+        run_format_deflated_case,
+        run_leaderboard_case,
+        run_provisional_note_case,
+        run_show_report_case,
+        run_sidecar_group_case,
+        run_sidecar_render_case,
+        run_sort_field_case,
+        show_report_cases,
+        sidecar_group_cases,
+        sidecar_render_cases,
+        sort_field_cases,
+    )
+
+    constants = {
+        "sort_aliases": dict(sorted(SORT_ALIASES.items())),
+        "default_sort_by": DEFAULT_SORT_BY,
+        "quarantine_dirname": _QUARANTINE_DIRNAME,
+        "audit_relpath": list(_AUDIT_RELPATH),
+        "quarantine_log_path_cap": _QUARANTINE_LOG_PATH_CAP,
+        "snapshot_quarantine_event": SNAPSHOT_QUARANTINE_EVENT,
+    }
+    return {
+        "constants": constants,
+        "sort_field": [
+            {"name": name, "expect": run_sort_field_case(token)}
+            for name, token in sort_field_cases()
+        ],
+        "format_deflated": [
+            {"name": name, "expect": run_format_deflated_case(value)}
+            for name, value in format_deflated_cases()
+        ],
+        "format_conditions": [
+            {"name": name, "expect": run_format_conditions_case(value)}
+            for name, value in format_conditions_cases()
+        ],
+        "leaderboard": [
+            {"name": name, "expect": run_leaderboard_case(case)}
+            for name, case in leaderboard_cases()
+        ],
+        "provisional_note": [
+            {"name": name, "expect": run_provisional_note_case(report)}
+            for name, report in provisional_note_cases()
+        ],
+        "sidecar_group": [
+            {"name": name, "expect": run_sidecar_group_case(entry)}
+            for name, entry in sidecar_group_cases()
+        ],
+        "sidecar_render": [
+            {"name": name, "expect": run_sidecar_render_case(content)}
+            for name, content in sidecar_render_cases()
+        ],
+        "show_report": [
+            {"name": name, "expect": run_show_report_case(case)}
+            for name, case in show_report_cases()
+        ],
+    }
+
+
 def main() -> int:
     # PER-FILE refusal (slice 2a): each family whose fixture already exists is
     # skipped LOUDLY unless the regen env is set — so a later slice can add its
@@ -446,6 +527,7 @@ def main() -> int:
         "combo_aggregates.json": capture_combo_aggregates,
         "cascade_wire.json": capture_cascade_wire,
         "top100_artifact.json": capture_top100_artifact,
+        "results_report.json": capture_results_report,
     }
     regen = os.environ.get(_REGEN_ENV) == "1"
     wrote = 0
