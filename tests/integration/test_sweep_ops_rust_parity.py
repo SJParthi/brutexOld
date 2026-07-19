@@ -12,6 +12,7 @@ compiled crate and asserts value-identity with the retained Python oracles
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Final
@@ -38,11 +39,16 @@ from brutex.engine.sweep_checkpoint import (  # noqa: E402
     SweepCheckpointError,
     SweepCheckpointStore,
 )
+from brutex.engine.sweep_detach import (  # noqa: E402
+    DetachedSweepHandle,
+    probe_handle,
+)
 from brutex.engine.sweep_exit_status import (  # noqa: E402
     RunState,
     read_exit_status,
     write_exit_status,
 )
+from brutex.engine.sweep_heal import _mismatch_decision_python  # noqa: E402
 from brutex.engine.sweep_identity import (  # noqa: E402
     _gate_config_fragment,
     _gate_config_fragment_python,
@@ -57,6 +63,7 @@ from brutex.engine.sweep_ops_rust import (  # noqa: E402
     SWEEP_OPS_RUST_ENV,
     reset_sweep_ops_rust_for_tests,
     routed_count_violations,
+    routed_heal_mismatch,
     sweep_ops_rust_disabled,
 )
 from brutex.engine.sweep_preflight import (  # noqa: E402
@@ -69,6 +76,15 @@ from brutex.engine.sweep_progress import (  # noqa: E402
     _derived_python,
 )
 from brutex.engine.sweep_quarantine import quarantine_tuple_trio  # noqa: E402
+from brutex.engine.sweep_scheduler import (  # noqa: E402
+    IST_OFFSET_SECONDS,
+    CheckpointView,
+    Schedule,
+    _next_fire_python,
+    cycle_audit_payload,
+    decide_resume,
+    plan_cycle,
+)
 from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla  # noqa: E402
 from brutex.engine.sweep_stall_policy import (  # noqa: E402
     StallPolicy,
@@ -1074,4 +1090,216 @@ class TestSliceThreeBurnInSteadyState:
             )
             assert outcome.dest.name == f"runx-{i + 1}"
 
+        assert sweep_ops_rust_disabled() is False
+
+
+# ─────────────────── slice 4 — the process/lock-ops family ───────────────────
+
+
+def _write_probe_progress(root: Path, payload: dict[str, object]) -> None:
+    path = root / "progress" / "sweep-progress.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class TestDetachProbeParity:
+    def _drive(self, root: Path) -> list[RunVerdict]:
+        handle = DetachedSweepHandle(pid=4321, run_id_hint=None, results_root=root, cmdline=("x",))
+        now = 1_000_000.0
+        verdicts = [
+            probe_handle(handle, now_wall=now, pid_alive=lambda pid: False),
+            probe_handle(handle, now_wall=now, pid_alive=lambda pid: True),
+        ]
+        _write_probe_progress(root, {"running": True, "wall_time_utc": now, "pid": 4321})
+        verdicts.append(probe_handle(handle, now_wall=now, pid_alive=lambda pid: True))
+        _write_probe_progress(root, {"running": True, "wall_time_utc": now, "pid": 9999})
+        verdicts.append(probe_handle(handle, now_wall=now, pid_alive=lambda pid: True))
+        return verdicts
+
+    def test_probe_parity_flag_on_vs_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = self._drive(tmp_path / "off")
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
+        reset_sweep_ops_rust_for_tests()
+        on = self._drive(tmp_path / "on")
+        assert on == off
+        assert on == [
+            RunVerdict.NOT_RUNNING,
+            RunVerdict.UNKNOWN,
+            RunVerdict.RUNNING,
+            RunVerdict.UNKNOWN,
+        ]
+        assert sweep_ops_rust_disabled() is False
+
+
+class TestHealMismatchParity:
+    """The crate's mismatch tail ≡ the retained sweep_heal oracle.
+
+    The whole-surface ``assess_heal`` parity (real trees, refusal bytes)
+    lives in the stem suite's flag-driven ``TestSweepOpsRouting`` class —
+    here the REAL wheel's decision fold is driven differentially.
+    """
+
+    @given(
+        src=st.lists(
+            st.one_of(st.none(), st.sampled_from(["a" * 64, "b" * 64, "f" * 64])),
+            min_size=3,
+            max_size=3,
+        ),
+        plan=st.lists(
+            st.one_of(st.none(), st.sampled_from(["a" * 64, "b" * 64, "f" * 64])),
+            min_size=3,
+            max_size=3,
+        ),
+        dest=st.lists(
+            st.one_of(st.none(), st.sampled_from(["a" * 64, "b" * 64, "f" * 64])),
+            min_size=3,
+            max_size=3,
+        ),
+    )
+    def test_hypothesis_differential_vs_python_law(
+        self,
+        src: list[str | None],
+        plan: list[str | None],
+        dest: list[str | None],
+    ) -> None:
+        assert brutex_sweep_ops.heal_mismatch_decision(
+            src, plan, dest
+        ) == _mismatch_decision_python(src, plan, dest)
+
+    def test_routed_wrapper_serves_the_crate_value(self) -> None:
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> str:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert (
+            routed_heal_mismatch(
+                [None, None, None],
+                ["a" * 64, "b" * 64, None],
+                ["a" * 64, "b" * 64, None],
+                python_law=forbidden_oracle,
+            )
+            == "already_quarantined"
+        )
+
+
+class TestSchedulerParity:
+    @staticmethod
+    def _drive() -> list[object]:
+        interval = Schedule.parse("30m")
+        daily = Schedule.parse("daily@02:30", tz_offset_seconds=IST_OFFSET_SECONDS)
+        now = 1_728_000_000.0
+        outcomes: list[object] = []
+        for schedule in (interval, daily):
+            fire = schedule.next_fire_after(now)
+            refire = schedule.next_fire_after(float(fire), last_fire=float(fire))
+            outcomes.append((fire, type(fire).__name__, refire, type(refire).__name__))
+            plan = plan_cycle(
+                now=now,
+                schedule=schedule,
+                checkpoint_view=CheckpointView(
+                    exists=True, sweep_id_matches=True, next_index=3, total_combos=10
+                ),
+            )
+            outcomes.append(
+                json.dumps(
+                    cycle_audit_payload(
+                        cycle_index=0,
+                        fire_at=plan.fire_at,
+                        schedule=schedule,
+                        resume=plan.resume,
+                        once=False,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        views = [
+            CheckpointView(exists=False, sweep_id_matches=False, next_index=0, total_combos=0),
+            CheckpointView(exists=True, sweep_id_matches=False, next_index=3, total_combos=10),
+            CheckpointView(exists=True, sweep_id_matches=True, next_index=10, total_combos=10),
+            CheckpointView(exists=True, sweep_id_matches=True, next_index=3, total_combos=10),
+        ]
+        outcomes.extend(decide_resume(view) for view in views)
+        return outcomes
+
+    def test_scheduler_parity_flag_on_vs_off_including_audit_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = self._drive()
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
+        reset_sweep_ops_rust_for_tests()
+        on = self._drive()
+        assert on == off
+        # The daily fire epoch is an INT on both arms — the json.dumps audit
+        # payload renders int bytes, never a trailing ".0".
+        daily_fire = on[2]
+        assert isinstance(daily_fire, tuple)
+        assert daily_fire[1] == "int" and daily_fire[3] == "int"
+        assert sweep_ops_rust_disabled() is False
+
+    @given(
+        is_interval=st.booleans(),
+        interval_seconds=st.integers(min_value=1, max_value=2**31),
+        second_of_day=st.integers(min_value=0, max_value=86_399),
+        tz_offset_seconds=st.integers(min_value=-86_400, max_value=86_400),
+        now=st.floats(allow_nan=False, allow_infinity=False, min_value=0.0, max_value=4e9),
+        last_fire=st.one_of(
+            st.none(),
+            st.floats(allow_nan=False, allow_infinity=False, min_value=0.0, max_value=4e9),
+        ),
+    )
+    def test_hypothesis_differential_vs_python_law(
+        self,
+        is_interval: bool,
+        interval_seconds: int,
+        second_of_day: int,
+        tz_offset_seconds: int,
+        now: float,
+        last_fire: float | None,
+    ) -> None:
+        """The crate arithmetic ≡ the Python oracle over the gated domain —
+        VALUE equality (the wrapper's output gate owns the daily int
+        reconstruction; the oracle's daily arm returns exact-int values)."""
+        rust = brutex_sweep_ops.schedule_next_fire(
+            is_interval, interval_seconds, second_of_day, tz_offset_seconds, now, last_fire
+        )
+        assert rust == _next_fire_python(
+            is_interval, interval_seconds, second_of_day, tz_offset_seconds, now, last_fire
+        )
+
+
+class TestSliceFourBurnInSteadyState:
+    def test_eighteen_engaged_calls_never_autorevert(self, tmp_path: Path) -> None:
+        reset_sweep_ops_rust_for_tests()
+        root = tmp_path / "probe"
+        handle = DetachedSweepHandle(pid=7, run_id_hint=None, results_root=root, cmdline=("x",))
+        _write_probe_progress(root, {"running": True, "wall_time_utc": 50.0, "pid": 7})
+        for _ in range(18):  # 18 engaged probe folds
+            assert (
+                probe_handle(handle, now_wall=50.0, pid_alive=lambda pid: True)
+                is RunVerdict.RUNNING
+            )
+        schedule = Schedule.parse("daily@02:30", tz_offset_seconds=IST_OFFSET_SECONDS)
+        for i in range(18):  # 18 engaged next-fire folds
+            fire = schedule.next_fire_after(1_728_000_000.0 + i)
+            assert type(fire) is int
+        view = CheckpointView(exists=True, sweep_id_matches=True, next_index=3, total_combos=10)
+        for _ in range(18):  # 18 engaged resume folds
+            assert decide_resume(view).resume_from_index == 3
+        for _ in range(18):  # 18 engaged heal mismatch folds
+            assert (
+                routed_heal_mismatch(
+                    [None, "b" * 64, None],
+                    ["a" * 64, "b" * 64, None],
+                    [None, None, None],
+                    python_law=lambda: "complete_partial",
+                )
+                == "complete_partial"
+            )
         assert sweep_ops_rust_disabled() is False

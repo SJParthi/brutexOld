@@ -17,6 +17,7 @@ loudly instead.
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import blake3
@@ -355,6 +356,88 @@ def _checkpoint_adoption_verdict(
     return "adopt"
 
 
+_FAKE_RUN_VERDICT_TOKENS = ["running", "stale", "not_running", "unknown"]
+
+
+def _detach_probe_verdict(
+    has_progress: bool,
+    handle_pid_alive: bool,
+    verdict_token: str | None,
+    pids_match: bool,
+) -> str:
+    """The sweep_detach probe cross-check fold (fake twin)."""
+    if not has_progress:
+        return "unknown" if handle_pid_alive else "not_running"
+    if verdict_token is None:
+        raise ValueError("verdict token required when a progress payload is readable")
+    if verdict_token not in _FAKE_RUN_VERDICT_TOKENS:
+        raise ValueError(f"unknown run-verdict token: {verdict_token!r}")
+    if verdict_token == "running" and not pids_match:
+        return "unknown"
+    return verdict_token
+
+
+def _heal_mismatch_decision(
+    src: list[str | None],
+    plan: list[str | None],
+    dest: list[str | None],
+) -> str:
+    """The sweep_heal assess mismatch-tail decision (fake twin)."""
+    for name, values in (("src", src), ("plan", plan), ("dest", dest)):
+        if len(values) != 3:
+            raise ValueError(f"{name} must carry exactly 3 artifact slots, got {len(values)}")
+    if all(value is None for value in src) and dest == plan:
+        return "already_quarantined"
+    sidecars_consistent = all(src[i] is None or src[i] == plan[i] for i in (1, 2))
+    any_sidecar_present = any(src[i] is not None for i in (1, 2))
+    if src[0] is None and sidecars_consistent and any_sidecar_present:
+        return "complete_partial"
+    return "refuse"
+
+
+def _schedule_next_fire(
+    is_interval: bool,
+    interval_seconds: int,
+    second_of_day: int,
+    tz_offset_seconds: int,
+    now: float,
+    last_fire: float | None,
+) -> float:
+    """The sweep_scheduler next-fire clock arithmetic (fake twin — f64-shaped)."""
+    if not math.isfinite(now):
+        raise ValueError("now must be finite")
+    if last_fire is not None and not math.isfinite(last_fire):
+        raise ValueError("last_fire must be finite")
+    if is_interval:
+        anchor = now if last_fire is None else last_fire
+        candidate = anchor + float(interval_seconds)
+        return candidate if candidate > now else now
+    tz = float(tz_offset_seconds)
+    local_now = now + tz
+    day_start = math.floor(local_now / 86_400.0) * 86_400.0
+    today_fire = day_start + float(second_of_day) - tz
+    candidate = today_fire if today_fire >= now else today_fire + 86_400.0
+    if last_fire is not None and candidate <= last_fire:
+        candidate += 86_400.0
+    return candidate
+
+
+def _resume_decision(
+    exists: bool,
+    sweep_id_matches: bool,
+    next_index: int,
+    total_combos: int,
+) -> tuple[str, int]:
+    """The sweep_scheduler resume classification (fake twin)."""
+    if not exists:
+        return ("fresh_absent", 0)
+    if not sweep_id_matches:
+        return ("fresh_foreign", 0)
+    if next_index >= total_combos:
+        return ("already_complete", total_combos)
+    return ("resume", next_index)
+
+
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:
     """Return a fresh behavior-correct fake crate namespace.
 
@@ -385,4 +468,9 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
         quarantine_next_ordinal=_quarantine_next_ordinal,
         checkpoint_record_decision=_checkpoint_record_decision,
         checkpoint_adoption_verdict=_checkpoint_adoption_verdict,
+        RUN_VERDICT_TOKENS=list(_FAKE_RUN_VERDICT_TOKENS),
+        detach_probe_verdict=_detach_probe_verdict,
+        heal_mismatch_decision=_heal_mismatch_decision,
+        schedule_next_fire=_schedule_next_fire,
+        resume_decision=_resume_decision,
     )

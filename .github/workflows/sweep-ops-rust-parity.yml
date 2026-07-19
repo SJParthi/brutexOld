@@ -162,6 +162,10 @@ jobs:
             tests/integration/test_sweep_ops_rust_parity.py
 
       - name: Flag-ON verbatim legs (the UNMODIFIED routed-module stem suites)
+        # The last two entries are slice 4's lock-composition EXTRA GATE —
+        # the sweep_singleflight G6/G10 battery + the #1785 sweep-vs-pull
+        # concurrency regression must pass UNMODIFIED with the flag ON
+        # (flock/OFD semantics stay Python; the routing must be invisible).
         run: |
           BRUTEX_SWEEP_OPS_RUST=1 pytest -rs -q \
             tests/unit/test_engine_run_layout.py \
@@ -178,4 +182,9 @@ jobs:
             tests/unit/test_observability_run_tripwires.py \
             tests/unit/test_engine_sweep_exit_status.py \
             tests/unit/test_engine_sweep_quarantine.py \
-            tests/unit/test_engine_sweep_checkpoint.py
+            tests/unit/test_engine_sweep_checkpoint.py \
+            tests/unit/test_engine_sweep_detach.py \
+            tests/unit/test_engine_sweep_heal.py \
+            tests/unit/test_engine_sweep_scheduler.py \
+            tests/unit/test_engine_sweep_singleflight.py \
+            tests/integration/test_sweep_pull_concurrency.py

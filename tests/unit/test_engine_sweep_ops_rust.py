@@ -26,15 +26,19 @@ from brutex.engine.sweep_ops_rust import (
     routed_checkpoint_adoption_verdict,
     routed_checkpoint_record_decision,
     routed_count_violations,
+    routed_detach_probe_verdict,
     routed_exit_status_resolution,
     routed_freshness_stale,
     routed_gate_fragment,
+    routed_heal_mismatch,
     routed_liveness_tail,
     routed_preflight_missing,
     routed_progress_derived,
     routed_quarantine_next_ordinal,
     routed_rank_plan,
+    routed_resume_decision,
     routed_run_path,
+    routed_schedule_next_fire,
     routed_sla_decision,
     routed_stall_timeout,
     routed_stamp_verdict,
@@ -182,6 +186,25 @@ class TestFlagLaw:
         assert (
             routed_checkpoint_adoption_verdict("a", 10, "a", 10, python_law=lambda: "adopt")
             == "adopt"
+        )
+        # Slice-4 laws: equally crate-free when the flag is OFF.
+        assert (
+            routed_detach_probe_verdict(False, False, None, False, python_law=lambda: "not_running")
+            == "not_running"
+        )
+        assert (
+            routed_heal_mismatch(
+                [None] * 3, ["a" * 64, None, None], [None] * 3, python_law=lambda: "refuse"
+            )
+            == "refuse"
+        )
+        assert (
+            routed_schedule_next_fire(True, 300, 0, 0, 1_000.0, None, python_law=lambda: 1_300.0)
+            == 1_300.0
+        )
+        assert routed_resume_decision(True, True, 7, 10, python_law=lambda: ("resume", 7)) == (
+            "resume",
+            7,
         )
         assert calls == []
 
@@ -2255,3 +2278,442 @@ class TestSliceThreeDriftPins:
             _adoption_verdict_python("a", 10, "a", 10),
         }
         assert produced == sweep_ops_rust._ADOPTION_TOKENS
+
+
+class TestRoutedDetachProbeVerdict:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((False, False, None, False), "not_running"),
+            ((False, True, None, False), "unknown"),
+            ((True, False, "running", True), "running"),
+            ((True, False, "running", False), "unknown"),  # foreign progress pid
+            ((True, False, "stale", False), "stale"),
+            ((True, False, "not_running", True), "not_running"),
+            ((True, False, "unknown", True), "unknown"),
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...], expected: str
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_detach_probe_verdict(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (1, False, None, False),  # int has_progress
+            (False, 0, None, False),  # int pid-alive flag
+            (True, False, "running", "yes"),  # str pids_match
+            (True, False, "RUNNING", True),  # foreign-case token
+            (True, False, "dead", True),  # unknown token
+            (True, False, None, True),  # progress present but no token
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_detach_probe_verdict(*args, python_law=lambda: "unknown") == "unknown"
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "detach_probe_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [7, "dead", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.detach_probe_verdict = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_detach_probe_verdict(
+                    True, False, "running", True, python_law=lambda: "running"
+                )
+                == "running"
+            )
+        warns = [e for e in logs if e.get("reason") == "detach_probe_result_refused"]
+        assert len(warns) == 1
+
+    def test_crate_raise_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+
+        def raising(*args: Any) -> str:
+            raise ValueError("belt")
+
+        crate.detach_probe_verdict = raising
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_detach_probe_verdict(False, True, None, False, python_law=lambda: "unknown")
+                == "unknown"
+            )
+        warns = [e for e in logs if e.get("reason") == "detach_probe_error"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A pid-recycling-blind poison: claims RUNNING despite the foreign pid.
+        crate.detach_probe_verdict = lambda *args: "running"
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_detach_probe_verdict(
+                    True, False, "running", False, python_law=lambda: "unknown"
+                )
+                == "unknown"
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_detach_probe"
+
+
+class TestRoutedHealMismatch:
+    @pytest.mark.parametrize(
+        ("src", "plan", "dest", "expected"),
+        [
+            (
+                [None, None, None],
+                ["a" * 64, "b" * 64, None],
+                ["a" * 64, "b" * 64, None],
+                "already_quarantined",
+            ),
+            (
+                [None, "b" * 64, None],
+                ["a" * 64, "b" * 64, "c" * 64],
+                [None, None, None],
+                "complete_partial",
+            ),
+            (
+                [None, None, None],
+                ["a" * 64, "b" * 64, None],
+                ["f" * 64, "b" * 64, None],
+                "refuse",  # diverged quarantined copy
+            ),
+            (
+                ["f" * 64, "b" * 64, None],
+                ["a" * 64, "b" * 64, None],
+                [None, None, None],
+                "refuse",  # store still present but diverged
+            ),
+            (
+                [None, None, None],
+                ["a" * 64, "b" * 64, None],
+                [None, None, None],
+                "refuse",  # nothing left to recognise a crashed heal by
+            ),
+        ],
+    )
+    def test_parity_with_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        src: list[str | None],
+        plan: list[str | None],
+        dest: list[str | None],
+        expected: str,
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_heal_mismatch(src, plan, dest, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        ("src", "plan", "dest"),
+        [
+            (("a" * 64, None, None), [None] * 3, [None] * 3),  # tuple, not list
+            ([None, None], [None] * 3, [None] * 3),  # wrong arity
+            ([None] * 3, [7, None, None], [None] * 3),  # int hash
+            ([None] * 3, [None] * 3, ["¡hash", None, None]),  # non-ASCII hash
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        src: Any,
+        plan: Any,
+        dest: Any,
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_heal_mismatch(src, plan, dest, python_law=lambda: "refuse") == "refuse"
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "heal_mismatch_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [7, "move_trio", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        # NOTE ``move_trio`` is a VALID HealAction decision but NOT a member
+        # of the mismatch-tail vocabulary — the happy arm stays Python, so a
+        # crate emitting it is refused (a poisoned wheel can never bless a
+        # move the Python happy arm did not decide).
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.heal_mismatch_decision = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_heal_mismatch(
+                    [None] * 3, ["a" * 64, None, None], [None] * 3, python_law=lambda: "refuse"
+                )
+                == "refuse"
+            )
+        warns = [e for e in logs if e.get("reason") == "heal_mismatch_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A quarantine-blessing poison: claims already_quarantined on a
+        # diverged dest — shipping it would skip a refusal (C2).
+        crate.heal_mismatch_decision = lambda *args: "already_quarantined"
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_heal_mismatch(
+                    [None] * 3,
+                    ["a" * 64, None, None],
+                    ["f" * 64, None, None],
+                    python_law=lambda: "refuse",
+                )
+                == "refuse"
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_heal_mismatch"
+
+
+class TestRoutedScheduleNextFire:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((True, 300, 0, 0, 1_000.0, None), 1_300.0),
+            ((True, 300, 0, 0, 5_000.0, 1_000.0), 5_000.0),  # behind → fire now
+            ((True, 300, 0, 0, 1_100.0, 1_000.0), 1_300.0),
+            ((False, 0, 7_200, 0, 1_728_000_100.0, None), 1_728_007_200),
+            ((False, 0, 7_200, 19_800, 1_728_000_000.0, None), 1_728_073_800),
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...], expected: float
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        result = routed_schedule_next_fire(*args, python_law=lambda: expected)
+        assert result == expected
+        # The daily arm reconstructs the Python oracle's INT return type —
+        # the daemon's json.dumps audit bytes must be identical either arm.
+        assert type(result) is (float if args[0] else int)
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (1, 300, 0, 0, 1_000.0, None),  # int is_interval
+            (True, 300.0, 0, 0, 1_000.0, None),  # float interval field
+            (True, 300, 0, 0, 1_000, None),  # int now
+            (True, 300, 0, 0, float("nan"), None),  # non-finite now
+            (True, 300, 0, 0, 1_000.0, float("inf")),  # non-finite last_fire
+            (True, 2**53, 0, 0, 1_000.0, None),  # beyond the exact-f64 bound
+            (False, 0, 0, 0, float(2**53), None),  # clock beyond the bound
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_schedule_next_fire(*args, python_law=lambda: 7.0) == 7.0
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "schedule_next_fire_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", ["1300", None, float("nan")])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.schedule_next_fire = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_schedule_next_fire(True, 300, 0, 0, 1_000.0, None, python_law=lambda: 7.0)
+                == 7.0
+            )
+        warns = [e for e in logs if e.get("reason") == "schedule_next_fire_result_refused"]
+        assert len(warns) == 1
+
+    def test_non_integral_daily_result_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A daily fire epoch is an INTEGER by construction (gated int fields);
+        # a fractional f64 from a poisoned wheel is refused to the oracle
+        # instead of silently changing the audit payload's type/bytes.
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.schedule_next_fire = lambda *args: 1_728_007_200.5
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_schedule_next_fire(
+                    False, 0, 7_200, 0, 1_728_000_100.0, None, python_law=lambda: 1_728_007_200
+                )
+                == 1_728_007_200
+            )
+        warns = [e for e in logs if e.get("reason") == "schedule_next_fire_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.schedule_next_fire = lambda *args: 999.0  # wrong-fire poison
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_schedule_next_fire(
+                    True, 300, 0, 0, 1_000.0, None, python_law=lambda: 1_300.0
+                )
+                == 1_300.0
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_schedule_next_fire"
+
+
+class TestRoutedResumeDecision:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((False, False, 7, 10), ("fresh_absent", 0)),
+            ((True, False, 7, 10), ("fresh_foreign", 0)),
+            ((True, True, 10, 10), ("already_complete", 10)),
+            ((True, True, 99, 10), ("already_complete", 10)),
+            ((True, True, 7, 10), ("resume", 7)),
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...], expected: tuple[str, int]
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_resume_decision(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (1, True, 7, 10),  # int exists flag
+            (True, "yes", 7, 10),  # str matches flag
+            (True, True, True, 10),  # bool index
+            (True, True, 7, 10.0),  # float total
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_resume_decision(*args, python_law=lambda: ("resume", 7)) == ("resume", 7)
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "resume_decision_input_refused"]
+        assert len(warns) == 1
+
+    def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+
+        def raising(*args: Any) -> tuple[str, int]:
+            raise OverflowError("out of i64")
+
+        crate.resume_decision = raising
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_resume_decision(
+                True, True, 2**64, 2**65, python_law=lambda: ("resume", 2**64)
+            ) == ("resume", 2**64)
+        warns = [e for e in logs if e.get("reason") == "resume_decision_error"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize(
+        "result",
+        [("fresh", 0), ("resume",), ("resume", 7.0), "resume", None],
+    )
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.resume_decision = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_resume_decision(True, True, 7, 10, python_law=lambda: ("resume", 7)) == (
+                "resume",
+                7,
+            )
+        warns = [e for e in logs if e.get("reason") == "resume_decision_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A skip-work poison: claims ALREADY_COMPLETE with tuples left.
+        crate.resume_decision = lambda *args: ("already_complete", 10)
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_resume_decision(True, True, 7, 10, python_law=lambda: ("resume", 7)) == (
+                "resume",
+                7,
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_resume_decision"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> tuple[str, int]:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_resume_decision(True, True, 7, 10, python_law=forbidden_oracle) == (
+            "resume",
+            7,
+        )
+
+
+class TestSliceFourDriftPins:
+    def test_run_verdict_tokens_mirror_enum(self) -> None:
+        from brutex.engine.sweep_liveness import RunVerdict
+
+        assert {v.value for v in RunVerdict} == sweep_ops_rust._RUN_VERDICT_TOKENS
+
+    def test_heal_artifact_slots_mirror_suffixes(self) -> None:
+        from brutex.engine.sweep_heal import ARTIFACT_SUFFIXES
+
+        assert len(ARTIFACT_SUFFIXES) == sweep_ops_rust._HEAL_ARTIFACT_SLOTS
+
+    def test_heal_mismatch_tokens_cover_the_wiring_arms(self) -> None:
+        from brutex.engine.sweep_heal import _mismatch_decision_python
+
+        produced = {
+            _mismatch_decision_python([None] * 3, ["a" * 64, None, None], ["a" * 64, None, None]),
+            _mismatch_decision_python(
+                [None, "b" * 64, None], ["a" * 64, "b" * 64, None], [None] * 3
+            ),
+            _mismatch_decision_python(["f" * 64, None, None], ["a" * 64, None, None], [None] * 3),
+        }
+        assert produced == sweep_ops_rust._HEAL_MISMATCH_TOKENS
+
+    def test_resume_tokens_cover_the_wiring_arms(self) -> None:
+        from brutex.engine.sweep_scheduler import _resume_decision_python
+
+        produced = {
+            _resume_decision_python(False, False, 7, 10)[0],
+            _resume_decision_python(True, False, 7, 10)[0],
+            _resume_decision_python(True, True, 10, 10)[0],
+            _resume_decision_python(True, True, 7, 10)[0],
+        }
+        assert produced == sweep_ops_rust._RESUME_TOKENS
+
+    def test_detach_probe_never_double_routes_the_liveness_tail(self) -> None:
+        # The probe fold takes progress_verdict's OUTPUT as an input token —
+        # its own decision tail is the slice-1b routed law. Pin the facade's
+        # docstring law: the probe wrapper accepts every FULL RunVerdict token
+        # (including "unknown", which the 3-member tail vocabulary lacks).
+        assert sweep_ops_rust._LIVENESS_TAIL_TOKENS < sweep_ops_rust._RUN_VERDICT_TOKENS

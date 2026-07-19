@@ -52,6 +52,10 @@ from brutex.engine.sweep_liveness import (
     default_pid_alive,
     progress_verdict,
 )
+from brutex.engine.sweep_ops_rust import (
+    routed_detach_probe_verdict,
+    sweep_ops_rust_enabled,
+)
 
 __all__ = [
     "DETACHED_ENV_SENTINEL",
@@ -324,13 +328,47 @@ def probe_handle(
     )
     now = time.time() if now_wall is None else now_wall
     progress = _read_progress_mapping(path)
+    args: tuple[bool, bool, str | None, bool]
     if progress is None:
-        if not pid_alive(handle.pid):
-            return RunVerdict.NOT_RUNNING
-        return RunVerdict.UNKNOWN
-    verdict = progress_verdict(
-        progress, now_wall=now, fresh_seconds=fresh_seconds, pid_alive=pid_alive
-    )
-    if verdict is RunVerdict.RUNNING and progress.get("pid") != handle.pid:
-        return RunVerdict.UNKNOWN
-    return verdict
+        # The pid probe runs ONLY in this arm (lazy, exactly as before); the
+        # verdict/pids-match operands are unused dummies for the fold.
+        args = (False, bool(pid_alive(handle.pid)), None, False)
+    else:
+        verdict = progress_verdict(
+            progress, now_wall=now, fresh_seconds=fresh_seconds, pid_alive=pid_alive
+        )
+        # The equality over the raw JSON ``pid`` value stays Python; the
+        # handle's pid-alive operand is an unused dummy in this arm.
+        args = (True, False, verdict.value, bool(progress.get("pid") == handle.pid))
+    if sweep_ops_rust_enabled():
+        token = routed_detach_probe_verdict(*args, python_law=lambda: _probe_decision_python(*args))
+    else:
+        token = _probe_decision_python(*args)
+    return RunVerdict(token)
+
+
+def _probe_decision_python(
+    has_progress: bool,
+    handle_pid_alive: bool,
+    verdict_token: str | None,
+    pids_match: bool,
+) -> str:
+    """The pure probe cross-check fold — the retained Python oracle.
+
+    The verbatim :func:`probe_handle` decision law over pre-computed
+    operands (the routed twin is the crate's ``detach_probe_verdict`` —
+    DEC-RUST-SWEEP-OPS-001 slice 4): no progress → ``not_running`` when the
+    pid is dead else ``unknown``; a ``running`` verdict with a foreign
+    progress pid → ``unknown``; every other verdict passes through.
+    """
+    if not has_progress:
+        if not handle_pid_alive:
+            return RunVerdict.NOT_RUNNING.value
+        return RunVerdict.UNKNOWN.value
+    if verdict_token is None:
+        # Defensive totality — :func:`probe_handle` always supplies a token
+        # under ``has_progress``; an impossible shape folds fail-closed.
+        return RunVerdict.UNKNOWN.value
+    if verdict_token == RunVerdict.RUNNING.value and not pids_match:
+        return RunVerdict.UNKNOWN.value
+    return verdict_token

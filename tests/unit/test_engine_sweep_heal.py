@@ -595,3 +595,88 @@ class TestCellFindingsNeverReachHeal:
             created_utc="20260611T130000Z",
         )
         assert len(plan.entries) == 1  # only the GRID divergence is heal-grade
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the assess mismatch-tail decision (C2).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — every REFUSAL message, the happy ``move_trio`` arm
+    (with its LAZY dest hashing) and the destructive ``--execute`` move stay
+    Python on both arms; only the pure mismatch-tail decision routes.
+    ``assess_heal`` is read-only, so the SAME trees are assessed twice.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_flag_off_including_refusal_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Four real trees, one per decision arm (assess is read-only).
+        fresh_root, fresh_plan = _real_plan(tmp_path / "fresh")
+        partial_root, partial_plan = _real_plan(tmp_path / "partial")
+        entry = partial_plan.entries[0]
+        store = partial_root / entry.rel_store
+        dest = partial_root / QUARANTINE_DIRNAME / partial_plan.quarantine_subdir / entry.rel_store
+        dest.parent.mkdir(parents=True)
+        store.rename(dest)
+        moved_root, moved_plan = _real_plan(tmp_path / "moved")
+        entry = moved_plan.entries[0]
+        store = moved_root / entry.rel_store
+        dest = moved_root / QUARANTINE_DIRNAME / moved_plan.quarantine_subdir / entry.rel_store
+        dest.parent.mkdir(parents=True)
+        for suffix in ARTIFACT_SUFFIXES:
+            src = store.with_name(store.name + suffix)
+            if src.exists():
+                src.rename(dest.with_name(dest.name + suffix))
+        stale_root, stale_plan = _real_plan(tmp_path / "stale")
+        store = stale_root / stale_plan.entries[0].rel_store
+        store.write_bytes(store.read_bytes() + b"changed-again")
+
+        shapes = [
+            (fresh_root, fresh_plan),
+            (partial_root, partial_plan),
+            (moved_root, moved_plan),
+            (stale_root, stale_plan),
+        ]
+        off = [
+            assess_heal(root, plan, sweep_running=False, allow_mass_quarantine=True)
+            for root, plan in shapes
+        ]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [
+                assess_heal(root, plan, sweep_running=False, allow_mass_quarantine=True)
+                for root, plan in shapes
+            ]
+        finally:
+            self._reset_facade()
+        assert on == off  # HealAssessment equality — refusal BYTES included
+        assert [a.decision for a in on[0].actions] == ["move_trio"]
+        assert [a.decision for a in on[1].actions] == ["complete_partial"]
+        assert [a.decision for a in on[2].actions] == ["already_quarantined"]
+        assert not on[3].ok
+        assert any("changed since the report" in r for r in on[3].refusals)

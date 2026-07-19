@@ -130,6 +130,42 @@ endgame — its ONLY pure decision is a one-line set membership
 crate-side copy would mint a second source, and marshaling ~50 column
 names per exception call is overhead, not conversion.
 
+Slice-4 routed laws (the PROCESS/LOCK-OPS family — same wiring shape,
+same shared engage core). The hard rail: NOTHING OS-shaped crosses the
+FFI — flock/OFD composition, the fork/``start_new_session`` spawn + the
+``BRUTEX_SWEEP_DETACHED`` env-sentinel stamp, every heal REFUSAL message
++ the destructive ``--execute`` quarantine MOVE, and Telegram MarkdownV2
+rendering all stay Python verbatim; ONLY pure decision folds route:
+
+17. **Detach probe verdict** (:func:`routed_detach_probe_verdict`) —
+    ``brutex/engine/sweep_detach.py``'s ``probe_handle`` cross-check fold
+    (R7). The liveness verdict is an INPUT token (``progress_verdict``'s
+    output — its own tail is law 8; nothing is double-routed) and the
+    ``pids_match`` equality over the raw JSON pid stays Python.
+18. **Heal mismatch decision** (:func:`routed_heal_mismatch`) —
+    ``brutex/engine/sweep_heal.py``'s ``assess_heal`` MISMATCH TAIL over
+    the three ``Option[sha256]`` triples in ``ARTIFACT_SUFFIXES`` order.
+    The happy arm (``src == plan`` → ``move_trio``) stays Python so dest
+    hashing remains LAZY; ``refuse`` keys the Python-owned C2 message.
+19. **Schedule next-fire arithmetic** (:func:`routed_schedule_next_fire`)
+    — ``brutex/engine/sweep_scheduler.py``'s clock-injected interval +
+    daily arms, gated to the exactly-representable f64 integer range; the
+    OUTPUT gate reconstructs the daily arm's ``int`` return TYPE so the
+    daemon's ``json.dumps`` audit bytes stay identical either arm.
+    ``Schedule.parse`` stays Python (regex marshal-land — Unicode ``\\d``
+    + ``$``-before-newline are Python semantics, not conversion targets).
+20. **Resume decision** (:func:`routed_resume_decision`) —
+    ``sweep_scheduler.decide_resume``'s FRESH / RESUME / ALREADY_COMPLETE
+    classification as a 4-way token + index (the two FRESH arms are
+    distinct tokens); the REASON strings render Python-side byte-exactly.
+
+Slice-4 N/A dispositions (honest, not padding): ``sweep_singleflight``
+stays Python whole — the G6/G10 laws ARE flock/OFD composition (OS-land;
+the only "decision" is a trivial best-effort holder-pid parse), and
+``sweep_alerts`` stays Python whole — MarkdownV2 escaping is a BYTE-LAW
+(never re-rendered in Rust) and the crash-loop ``>= threshold``
+comparison is a one-line trivial fold.
+
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
 * **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
@@ -241,6 +277,14 @@ _LAW_QUARANTINE_ORDINAL: Final[str] = "quarantine_ordinal"
 _LAW_CHECKPOINT_RECORD: Final[str] = "checkpoint_record"
 #: The checkpoint-adoption-verdict burn-in budget key (slice 3).
 _LAW_CHECKPOINT_ADOPTION: Final[str] = "checkpoint_adoption"
+#: The detach-probe-verdict-law burn-in budget key (slice 4).
+_LAW_DETACH_PROBE: Final[str] = "detach_probe"
+#: The heal-mismatch-decision burn-in budget key (slice 4).
+_LAW_HEAL_MISMATCH: Final[str] = "heal_mismatch"
+#: The schedule-next-fire-law burn-in budget key (slice 4).
+_LAW_SCHEDULE_NEXT_FIRE: Final[str] = "schedule_next_fire"
+#: The resume-decision-law burn-in budget key (slice 4).
+_LAW_RESUME_DECISION: Final[str] = "resume_decision"
 
 #: Every routed law's burn-in budget key (the reset seam iterates this).
 _ALL_LAWS: Final[tuple[str, ...]] = (
@@ -262,6 +306,10 @@ _ALL_LAWS: Final[tuple[str, ...]] = (
     _LAW_QUARANTINE_ORDINAL,
     _LAW_CHECKPOINT_RECORD,
     _LAW_CHECKPOINT_ADOPTION,
+    _LAW_DETACH_PROBE,
+    _LAW_HEAL_MISMATCH,
+    _LAW_SCHEDULE_NEXT_FIRE,
+    _LAW_RESUME_DECISION,
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live.
@@ -280,15 +328,19 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "checkpoint_adoption_verdict",
     "checkpoint_record_decision",
     "count_reconciliation",
+    "detach_probe_verdict",
     "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
+    "heal_mismatch_decision",
     "join_path_segments",
     "liveness_tail",
     "preflight_missing",
     "progress_derived",
     "quarantine_next_ordinal",
     "rank_plan_decision",
+    "resume_decision",
+    "schedule_next_fire",
     "sla_decision",
     "stall_scaled_timeout",
     "stamp_verdict",
@@ -375,6 +427,31 @@ _RECORD_DECISION_TOKENS: Final[frozenset[str]] = frozenset(
 )
 #: The checkpoint adoption-verdict tokens (the crate ↔ wiring contract).
 _ADOPTION_TOKENS: Final[frozenset[str]] = frozenset({"adopt", "foreign", "total_mismatch"})
+#: The FULL ``RunVerdict`` wire tokens (``sweep_liveness.RunVerdict`` values —
+#: drift-pinned by the facade suite; distinct from the 3-member
+#: :data:`_LIVENESS_TAIL_TOKENS`, which the tail law can never emit
+#: ``unknown`` from) — the detach probe verdict vocabulary (slice 4).
+_RUN_VERDICT_TOKENS: Final[frozenset[str]] = frozenset(
+    {"running", "stale", "not_running", "unknown"}
+)
+#: The heal mismatch-tail decision tokens (the crate ↔ wiring contract; the
+#: ``refuse`` member keys ``sweep_heal``'s Python-owned C2 refusal arm).
+_HEAL_MISMATCH_TOKENS: Final[frozenset[str]] = frozenset(
+    {"already_quarantined", "complete_partial", "refuse"}
+)
+#: Artifact slots per condemned heal tuple (``sweep_heal.ARTIFACT_SUFFIXES``
+#: arity — drift-pinned; no import, ``sweep_heal`` imports THIS module).
+_HEAL_ARTIFACT_SLOTS: Final[int] = 3
+#: The resume-decision tokens (the crate ↔ wiring contract; the two FRESH
+#: arms are DISTINCT so the Python-side reason strings stay byte-exact).
+_RESUME_TOKENS: Final[frozenset[str]] = frozenset(
+    {"fresh_absent", "fresh_foreign", "already_complete", "resume"}
+)
+#: The exactly-representable f64 integer bound for scheduler operands: with
+#: every input |value| ≤ 2^52, the daily arm's crate f64 arithmetic is
+#: value-identical to the Python oracle's exact INT arithmetic (every
+#: intermediate stays an integer < 2^53) — beyond it, refuse to the oracle.
+_SCHEDULER_EXACT_BOUND: Final[float] = float(2**52)
 
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
@@ -1475,6 +1552,212 @@ def routed_checkpoint_adoption_verdict(
     )
 
 
+# ─────────────────── slice 4 — the process/lock-ops family ───────────────────
+
+
+def _validate_run_verdict(raw: object) -> str | None:
+    """Structural OUTPUT gate for the detach probe-verdict token."""
+    if type(raw) is not str or raw not in _RUN_VERDICT_TOKENS:
+        return None
+    return raw
+
+
+def routed_detach_probe_verdict(
+    has_progress: bool,
+    handle_pid_alive: bool,
+    verdict_token: str | None,
+    pids_match: bool,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed detach probe-handle cross-check fold (slice 4, R7).
+
+    Exact-type input gates: the three flags exact ``bool``; *verdict_token*
+    ``None`` (only when *has_progress* is ``False``) or an exact ``str`` in
+    the mirrored :data:`_RUN_VERDICT_TOKENS`. The liveness verdict itself is
+    an INPUT here — computed Python-side by ``progress_verdict`` (whose own
+    decision tail is the slice-1b routed law; nothing is double-routed) —
+    and the ``pids_match`` equality over the raw JSON ``pid`` value stays
+    Python. The pid probe, the pidfile read and the fork/env-sentinel spawn
+    machinery never cross the FFI.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        any(type(flag) is not bool for flag in (has_progress, handle_pid_alive, pids_match))
+        or (
+            verdict_token is not None
+            and (type(verdict_token) is not str or verdict_token not in _RUN_VERDICT_TOKENS)
+        )
+        or (has_progress and verdict_token is None)
+    ):
+        _warn_once("detach_probe_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_DETACH_PROBE,
+        "detach_probe_verdict",
+        (has_progress, handle_pid_alive, verdict_token, pids_match),
+        python_law=python_law,
+        validate=_validate_run_verdict,
+    )
+
+
+def _validate_heal_mismatch(raw: object) -> str | None:
+    """Structural OUTPUT gate for the heal mismatch-tail decision token."""
+    if type(raw) is not str or raw not in _HEAL_MISMATCH_TOKENS:
+        return None
+    return raw
+
+
+def _heal_triple_refused(values: Sequence[str | None]) -> bool:
+    """``True`` when a heal hash triple may NOT cross the FFI (gate helper)."""
+    if type(values) is not list or len(values) != _HEAL_ARTIFACT_SLOTS:
+        return True
+    return any(
+        value is not None and (type(value) is not str or not value.isascii()) for value in values
+    )
+
+
+def routed_heal_mismatch(
+    src_values: Sequence[str | None],
+    plan_values: Sequence[str | None],
+    dest_values: Sequence[str | None],
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed heal assess mismatch-tail decision (slice 4, C2).
+
+    Exact-type input gates: each triple an exact ``list`` of exactly
+    :data:`_HEAL_ARTIFACT_SLOTS` entries, every entry ``None`` or an exact
+    ASCII ``str`` (sha256 hex by construction — a non-ASCII "hash" from a
+    hand-built plan refuses to the oracle rather than risking a
+    lone-surrogate FFI degrade). Consulted ONLY after the Python happy arm
+    (``src == plan`` → ``move_trio``) failed — dest hashing stays LAZY —
+    and the ``refuse`` token maps back to the Python-owned C2 refusal
+    MESSAGE; the destructive quarantine MOVE itself never routes.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(_heal_triple_refused(values) for values in (src_values, plan_values, dest_values)):
+        _warn_once("heal_mismatch_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_HEAL_MISMATCH,
+        "heal_mismatch_decision",
+        (src_values, plan_values, dest_values),
+        python_law=python_law,
+        validate=_validate_heal_mismatch,
+    )
+
+
+def _scheduler_int_refused(value: int) -> bool:
+    """``True`` when a scheduler int operand may NOT cross the FFI."""
+    return type(value) is not int or abs(value) > _SCHEDULER_EXACT_BOUND
+
+
+def _scheduler_clock_refused(value: float) -> bool:
+    """``True`` when a scheduler clock operand may NOT cross the FFI."""
+    return (
+        type(value) is not float or not math.isfinite(value) or abs(value) > _SCHEDULER_EXACT_BOUND
+    )
+
+
+def routed_schedule_next_fire(
+    is_interval: bool,
+    interval_seconds: int,
+    second_of_day: int,
+    tz_offset_seconds: int,
+    now: float,
+    last_fire: float | None,
+    *,
+    python_law: Callable[[], float],
+) -> float:
+    """The routed scheduler next-fire clock arithmetic (slice 4).
+
+    Exact-type input gates: *is_interval* exact ``bool``; the three schedule
+    fields exact ``int`` and the clock operands exact FINITE ``float``, each
+    within :data:`_SCHEDULER_EXACT_BOUND` (|value| ≤ 2^52) — inside that
+    range the crate's f64 daily arithmetic is value-identical to the Python
+    oracle's exact INT arithmetic. The OUTPUT gate reconstructs the daily
+    arm's ``int`` return TYPE (the fire epoch is ``json.dumps``-rendered
+    into the daemon's audit payload — int vs float bytes differ), so the
+    audit bytes stay identical either arm.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        type(is_interval) is not bool
+        or any(
+            _scheduler_int_refused(value)
+            for value in (interval_seconds, second_of_day, tz_offset_seconds)
+        )
+        or _scheduler_clock_refused(now)
+        or (last_fire is not None and _scheduler_clock_refused(last_fire))
+    ):
+        _warn_once("schedule_next_fire_input_refused")
+        return python_law()
+
+    def _validate_fire(raw: object) -> float | None:
+        if type(raw) is not float or not math.isfinite(raw):
+            return None
+        if is_interval:
+            return raw
+        if not raw.is_integer():
+            return None
+        return int(raw)  # int-in-float slot — the PEP 484 numeric tower
+
+    return _routed_law_call(
+        _LAW_SCHEDULE_NEXT_FIRE,
+        "schedule_next_fire",
+        (is_interval, interval_seconds, second_of_day, tz_offset_seconds, now, last_fire),
+        python_law=python_law,
+        validate=_validate_fire,
+    )
+
+
+def _validate_resume_decision(raw: object) -> tuple[str, int] | None:
+    """Structural OUTPUT gate for the resume ``(token, index)`` pair."""
+    if not (isinstance(raw, tuple) and len(raw) == _STRING_PAIR_ARITY):
+        return None
+    token, index = raw
+    if type(token) is not str or token not in _RESUME_TOKENS or type(index) is not int:
+        return None
+    return (token, index)
+
+
+def routed_resume_decision(
+    exists: bool,
+    sweep_id_matches: bool,
+    next_index: int,
+    total_combos: int,
+    *,
+    python_law: Callable[[], tuple[str, int]],
+) -> tuple[str, int]:
+    """The routed scheduler resume classification (slice 4).
+
+    Exact-type input gates: the two flags exact ``bool``, the two indices
+    exact ``int`` (``bool`` excluded; out-of-``i64`` degrades via
+    ``OverflowError``). Returns the 4-way token + resume index; the
+    human-readable REASON strings — which differ between the two FRESH
+    arms — are rendered Python-side from the token, byte-identical either
+    arm.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(type(flag) is not bool for flag in (exists, sweep_id_matches)) or any(
+        type(value) is not int for value in (next_index, total_combos)
+    ):
+        _warn_once("resume_decision_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_RESUME_DECISION,
+        "resume_decision",
+        (exists, sweep_id_matches, next_index, total_combos),
+        python_law=python_law,
+        validate=_validate_resume_decision,
+    )
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "SWEEP_OPS_RUST_ENV",
@@ -1485,15 +1768,19 @@ __all__ = [
     "routed_checkpoint_adoption_verdict",
     "routed_checkpoint_record_decision",
     "routed_count_violations",
+    "routed_detach_probe_verdict",
     "routed_exit_status_resolution",
     "routed_freshness_stale",
     "routed_gate_fragment",
+    "routed_heal_mismatch",
     "routed_liveness_tail",
     "routed_preflight_missing",
     "routed_progress_derived",
     "routed_quarantine_next_ordinal",
     "routed_rank_plan",
+    "routed_resume_decision",
     "routed_run_path",
+    "routed_schedule_next_fire",
     "routed_sla_decision",
     "routed_stall_timeout",
     "routed_stamp_verdict",
