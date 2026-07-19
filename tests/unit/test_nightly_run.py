@@ -1366,8 +1366,11 @@ def test_decay_note_arms() -> None:
     assert _decay_note(None) is None
     assert _decay_note({"status": "disabled"}) is None
     assert _decay_note({"status": "skipped", "reason": "no_top100_artifact"}) is None
-    assert _decay_note({"status": "ok", "decayed": 0, "checked": 3}) is None
-    assert _decay_note({"status": "ok", "checked": 3}) is None  # decayed absent
+    # The bare quiet-ok night (diff persisted) stays SILENT — the round-2
+    # MINOR flip made a diff-less ok block noteworthy, so the quiet pins
+    # now carry the persisted diff_path a healthy leg always stamps.
+    assert _decay_note({"status": "ok", "decayed": 0, "checked": 3, "diff_path": "d.json"}) is None
+    assert _decay_note({"status": "ok", "checked": 3, "diff_path": "d.json"}) is None  # absent
     note = _decay_note(
         {
             "status": "ok",
@@ -1384,6 +1387,33 @@ def test_decay_note_arms() -> None:
     assert err == "📉 decay leg: error — boom"
 
 
+def test_decay_note_soft_failure_arm() -> None:
+    """Round-2 MINOR: a quiet-ok night whose diff sidecar write FAILED
+    (``diff_path is None`` — decay.py's soft OSError arm) must surface on
+    the morning note, never a silent soft failure."""
+    from brutex.nightly.run import _decay_note
+
+    expected = "📉 decay: diff NOT persisted — see report.json + logs"
+    assert _decay_note({"status": "ok", "decayed": 0, "checked": 3, "diff_path": None}) == expected
+    # A defensively-absent key reads the same honest arm.
+    assert _decay_note({"status": "ok", "decayed": 0, "checked": 3}) == expected
+    # A DECAYED night keeps the existing line byte-identical (precedence —
+    # report.json still carries the null diff_path).
+    note = _decay_note(
+        {
+            "status": "ok",
+            "decayed": 2,
+            "checked": 5,
+            "run_id": "a" * 64,
+            "window_sessions": 63,
+            "diff_path": None,
+        }
+    )
+    assert note is not None
+    assert note.startswith("📉 decay: 2/5")
+    assert "NOT persisted" not in note
+
+
 def test_champions_note_arms() -> None:
     """The 🏆 one-liner: silent on quiet statuses + transition-free nights;
     fires on promoted/seeded/retire-flagged and on error statuses."""
@@ -1392,9 +1422,30 @@ def test_champions_note_arms() -> None:
     assert _champions_note(None) is None
     assert _champions_note({"status": "disabled"}) is None
     assert _champions_note({"status": "skipped", "reason": "no_top100_artifact"}) is None
-    assert _champions_note({"status": "ok", "transitions": []}) is None
-    assert _champions_note({"status": "ok", "transitions": "junk"}) is None
-    quiet = _champions_note({"status": "ok", "transitions": [{"action": "RETAINED"}, "junk"]})
+    # CONSCIOUSLY FLIPPED (round-2 MINOR): the bare `{"status": "ok",
+    # "transitions": []}` pin is gone — a state_path-less ok block now
+    # honestly reads "state NOT persisted". The quiet pins carry the
+    # persisted state_path (+ zero scope_errors) a healthy leg always stamps.
+    assert (
+        _champions_note(
+            {"status": "ok", "transitions": [], "scope_errors": 0, "state_path": "s.json"}
+        )
+        is None
+    )
+    assert (
+        _champions_note(
+            {"status": "ok", "transitions": "junk", "scope_errors": 0, "state_path": "s.json"}
+        )
+        is None
+    )
+    quiet = _champions_note(
+        {
+            "status": "ok",
+            "transitions": [{"action": "RETAINED"}, "junk"],
+            "scope_errors": 0,
+            "state_path": "s.json",
+        }
+    )
     assert quiet is None  # RETAINED-only nights are the steady state
     note = _champions_note(
         {
@@ -1411,6 +1462,50 @@ def test_champions_note_arms() -> None:
     )
     err = _champions_note({"status": "env_error", "error": "junk env"})
     assert err == "🏆 champions leg: env_error — junk env"
+
+
+def test_champions_note_soft_failure_arms() -> None:
+    """Round-2 MINOR: a quiet-ok night with SOFT failures — per-scope
+    isolation errors and/or a failed state save — must surface on the
+    morning note, composing only the clauses that are true."""
+    from brutex.nightly.run import _champions_note
+
+    # scope_errors alone (state persisted).
+    assert _champions_note(
+        {"status": "ok", "transitions": [], "scope_errors": 2, "state_path": "s.json"}
+    ) == ("🏆 champions: 2 scope error(s) — see report.json + logs")
+    # state NOT persisted alone (zero scope errors).
+    assert _champions_note(
+        {"status": "ok", "transitions": [], "scope_errors": 0, "state_path": None}
+    ) == ("🏆 champions: state NOT persisted — see report.json + logs")
+    # A defensively-absent state_path key reads the same honest arm.
+    assert _champions_note({"status": "ok", "transitions": []}) == (
+        "🏆 champions: state NOT persisted — see report.json + logs"
+    )
+    # BOTH clauses composed, scope errors first.
+    assert _champions_note(
+        {"status": "ok", "transitions": [], "scope_errors": 3, "state_path": None}
+    ) == ("🏆 champions: 3 scope error(s) / state NOT persisted — see report.json + logs")
+    # Junk scope_errors folds to 0 — never a TypeError on the note path.
+    assert (
+        _champions_note(
+            {"status": "ok", "transitions": [], "scope_errors": "junk", "state_path": "s.json"}
+        )
+        is None
+    )
+    # A transitions night keeps the existing line byte-identical (precedence —
+    # report.json still carries the soft counters).
+    note = _champions_note(
+        {
+            "status": "ok",
+            "transitions": [{"action": "PROMOTED"}],
+            "scope_errors": 1,
+            "state_path": None,
+        }
+    )
+    assert note == (
+        "🏆 champions: 1 promoted · 0 seeded · 0 retire-flagged (ledger champions/champions.jsonl)"
+    )
 
 
 def test_wet_run_notes_surface_noteworthy_leg_blocks(

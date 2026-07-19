@@ -872,6 +872,11 @@ def _decay_note(block: Mapping[str, object] | None) -> str | None:
                 f"(run {str(block.get('run_id'))[:12]}…, trailing "
                 f"{block.get('window_sessions')} sessions) — retire-flagged, see decay-diff.json"
             )
+        if block.get("diff_path") is None:
+            # A quiet-ok night whose diff sidecar write FAILED (round-2 MINOR):
+            # report.json + the WARN carry it, but the morning note must too —
+            # never a silent soft failure on the glanceable line.
+            return "📉 decay: diff NOT persisted — see report.json + logs"
         return None
     return f"📉 decay leg: {status} — {str(block.get('error', ''))[:120]}"
 
@@ -896,6 +901,19 @@ def _champions_note(block: Mapping[str, object] | None) -> str | None:
                 f"🏆 champions: {promoted} promoted · {seeded} seeded · "
                 f"{flagged} retire-flagged (ledger champions/champions.jsonl)"
             )
+        # A quiet-ok night with SOFT failures (round-2 MINOR): per-scope
+        # isolation errors and/or a failed state save land in report.json +
+        # WARNs, but the morning note must surface them too — compose only
+        # the clauses that are true, never a silent soft failure.
+        scope_errors_raw = block.get("scope_errors")
+        scope_errors = scope_errors_raw if isinstance(scope_errors_raw, int) else 0
+        clauses: list[str] = []
+        if scope_errors > 0:
+            clauses.append(f"{scope_errors} scope error(s)")
+        if block.get("state_path") is None:
+            clauses.append("state NOT persisted")
+        if clauses:
+            return f"🏆 champions: {' / '.join(clauses)} — see report.json + logs"
         return None
     return f"🏆 champions leg: {status} — {str(block.get('error', ''))[:120]}"
 
