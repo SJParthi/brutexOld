@@ -1,0 +1,49 @@
+# Maturin build configuration for the BruteX ops Rust kernel crate
+# (DEC-NIGHTLY-RUST-CORE-001).
+#
+# Pip installs this as a separate distribution alongside `brutex`, exactly
+# like the sibling kernels (`rust/fno-math`, `rust/trading-core`,
+# `rust/brutex-lake`). It is DELIBERATELY not installed by the main CI test
+# job: the Python facade (`brutex/nightly/nightly_rust.py`) is default-OFF
+# and degrades loudly to the retained Python oracle when the crate is
+# absent, so every Python test stays wheel-free.
+#
+# References:
+#   - rust/brutex-lake/pyproject.toml (the layout template)
+#   - rust/fno-math/pyproject.toml (the DEC-P0-055 mixed-layout convention)
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-ops"
+version = "0.1.0"
+description = "BruteX ops Rust kernels — the nightly chain's pure decision laws behind a default-OFF facade (DEC-NIGHTLY-RUST-CORE-001)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout (the fno-math DEC-P0-055 convention): Python
+# source under `python/`, the cdylib registered as the private
+# `brutex_ops._brutex_ops` submodule, re-exported by `__init__.py` with a
+# matched `__init__.pyi` + `py.typed` marker for pyright/mypy strict mode.
+python-source = "python"
+module-name = "brutex_ops._brutex_ops"
+features = ["pyo3/extension-module"]
+strip = true
+# Enforce the committed Cargo.lock on every wheel build (cargo --locked) —
+# pure std + pyo3, but a silently re-resolved pyo3 patch release is still
+# an unaudited delta (the brutex-lake posture, minus the byte-pin stakes).
+locked = true
