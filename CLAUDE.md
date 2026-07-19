@@ -3613,8 +3613,15 @@ hostile-review pass._
   test --release --locked green; wheel rebuilt (cp312-abi3) + the refuter
   harness rerun clean (the T18 fold touched no src/ — no further rebuild
   needed, replay-verified on the installed wheel);
-  zero Python-side gate exposure (no Python files
-  touched). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  Python-side gate exposure = the ONE test-file edit — the #479
+  kernel-discovery build guard auto-found the crate, so
+  `tests/unit/test_run_builds_rust_kernels.py` registers `brutex_calendar`
+  OPTIONAL-INERT via the NEW facade-less variant (facade slot None, legal
+  ONLY with a DEC-cited reason in `INERT_FACADELESS_REASONS`; the ci-lane
+  pin on the `rust-brutex-calendar` job + the never-module-top-imported
+  inverse pin stay LIVE; the flip PR must re-point the registration at the
+  real guarded facade — guard file 31/31 green, ruff/pyright clean).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
   no new env vars.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
