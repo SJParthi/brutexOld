@@ -3610,6 +3610,14 @@ hostile-review pass._
   DEC-TOP100-AXIS-JOIN-KEY-001 · hostile-scope isolation · the shared leg
   catalog · the negative-Sharpe disclosure — this header carries the pointer,
   never the story; the per-finding record lives in MIGRATION.md #1981/#1982).
+  HOSTILE-REVIEW ROUND 2 folded (all round-1 fixes verified REAL-AND-PINNED;
+  1 MINOR fixed + pinned — soft failures now surface on the morning note:
+  a quiet-ok champions night with scope_errors/state-not-persisted and a
+  quiet-ok decay night with a failed diff write each emit an honest
+  one-liner, the noteworthy/error arms byte-identical, the bare ok-empty
+  pin consciously flipped; 1 ship-over NIT recorded as the named follow-up
+  DEC-NIGHTLY-LEG-BASEEXC-REPORT-001 — per-item record in MIGRATION.md
+  #1981/#1982).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
