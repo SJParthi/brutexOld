@@ -3968,7 +3968,7 @@ hostile-review pass._
   100.00% (314/106, 167) · lake_heal 100.00% (618/192, 225) ·
   catalog_reconcile 100.00% (94/24, 38) · timeframe_materialize 100.00%
   (176/56, 115) · the facade 100.00% standalone (368/166, 152); the waved
-  differentials 43+14+12+58 + the harness 72; the broad -k lake battery
+  differentials 43+14+12+55 + the harness 59; the broad -k lake battery
   1,029 passed; ruff + format clean; `mypy --strict` 0 new (the env-only
   `cma` baseline); pyright 0 errors on touched files. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
