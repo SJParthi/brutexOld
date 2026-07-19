@@ -21,7 +21,10 @@
 #      with the real wheel installed (the data-rust-parity heal-twin
 #      precedent) — run_layout / sweep_identity / sweep_stall_policy
 #      (slices 0/1) + sweep_progress / sweep_sla_guard / sweep_mem_budget /
-#      sweep_preflight / sweep_liveness (slice 1b).
+#      sweep_preflight / sweep_liveness (slice 1b) + sweep_audit /
+#      stage_stamp / chain_map / run_tripwires (slice 2 — the audit-chain
+#      family, incl. the TAMPER tests re-run flag-ON: every tamper still
+#      breaks the chain on the Rust arm).
 #
 # NOT a required gate: it gates the FUTURE default-ON flip, which must cite
 # a fresh green run of this lane as a stated precondition — a red run here
@@ -141,4 +144,8 @@ jobs:
             tests/unit/test_engine_sweep_sla_guard.py \
             tests/unit/test_engine_sweep_mem_budget.py \
             tests/unit/test_engine_sweep_preflight.py \
-            tests/unit/test_engine_sweep_liveness.py
+            tests/unit/test_engine_sweep_liveness.py \
+            tests/unit/test_engine_sweep_audit.py \
+            tests/unit/test_observability_stage_stamp.py \
+            tests/unit/test_observability_chain_map.py \
+            tests/unit/test_observability_run_tripwires.py

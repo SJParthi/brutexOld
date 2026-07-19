@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import blake3
+
 
 def _join_path_segments(base: str, segments: list[str]) -> str:
     """The run_layout POSIX path-join law (fake twin)."""
@@ -143,6 +145,143 @@ def _liveness_tail(pid_ok: bool, now_wall: float, wall: float, fresh_seconds: fl
     return "running"
 
 
+def _audit_entry_hash(
+    seq: str,
+    prev_hash: str,
+    ts: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+) -> str:
+    """The sweep_audit BLAKE3 entry-hash law (fake twin — same pip blake3)."""
+    hasher = blake3.blake3()
+    for index, field in enumerate((seq, prev_hash, ts, actor, action, subject, payload_json)):
+        if index:
+            hasher.update(b"|")
+        hasher.update(field.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _chain_verify_step(
+    expected_seq: int,
+    prev_expected: str,
+    seq: int,
+    prev_hash: str,
+    ts: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+    entry_hash: str,
+) -> tuple[str, str, str]:
+    """The sweep_audit per-entry verify step (fake twin)."""
+    if seq != expected_seq:
+        return ("seq_out_of_order", str(expected_seq), str(seq))
+    if prev_hash != prev_expected:
+        return ("prev_hash_mismatch", prev_expected, prev_hash)
+    recomputed = _audit_entry_hash(str(seq), prev_hash, ts, actor, action, subject, payload_json)
+    if entry_hash != recomputed:
+        return ("entry_hash_mismatch", recomputed, entry_hash)
+    return ("ok", recomputed, "")
+
+
+def _stamp_verdict(
+    recomputed: str,
+    content_hash: str,
+    stage: str,
+    expected_stage: str,
+    run_id: str,
+    expected_run_id: str | None,
+    stamped_snapshot: str | None,
+    expected_snapshot: str | None,
+) -> str:
+    """The stage_stamp validate mismatch decision (fake twin)."""
+    mismatch = (
+        recomputed != content_hash
+        or stage != expected_stage
+        or (expected_run_id is not None and run_id != expected_run_id)
+        or (
+            expected_snapshot is not None
+            and stamped_snapshot is not None
+            and stamped_snapshot != expected_snapshot
+        )
+    )
+    return "hash_mismatch" if mismatch else "ok"
+
+
+_FAKE_CHAIN_LINKS = ["preflight", "sweep", "stage3", "cascade", "artifacts"]
+
+
+def _chain_link_state(
+    link: str,
+    idx: int,
+    verdict: str | None,
+    running: bool,
+    last_stage: str | None,
+    terminal: str | None,
+    refusal_text: str | None,
+    error_type: str | None,
+) -> tuple[str, str]:
+    """The chain_map per-link state ladder (fake twin)."""
+    if verdict in ("hash_mismatch", "malformed"):
+        return ("red", f"stamp {verdict}")
+    if running and link == last_stage:
+        return ("running", "in progress")
+    if verdict == "ok":
+        return ("green", "stamp valid")
+    if running:
+        if last_stage is None:
+            return ("amber", "running; stage unknown")
+        if idx < _FAKE_CHAIN_LINKS.index(last_stage):
+            return ("green", "completed (inferred)")
+        return ("pending", "not started")
+    if terminal in ("complete", "suspect_complete"):
+        return ("green", "run complete")
+    if terminal == "refused":
+        if link == "preflight":
+            return ("red", f"refused: {refusal_text or ''}")
+        return ("pending", "not started")
+    if terminal in ("failed", "halted"):
+        if last_stage is None:
+            return ("amber", f"run {terminal}; stage unknown")
+        if idx < _FAKE_CHAIN_LINKS.index(last_stage):
+            return ("green", "completed (inferred)")
+        if link == last_stage:
+            return ("red", f"run {terminal} at this stage ({error_type or 'unknown error'})")
+        return ("pending", "not started")
+    return ("pending", "no evidence")
+
+
+def _count_reconciliation(
+    total: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    in_flight: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+) -> str:
+    """The run_tripwires D-9 counter violations fold (fake twin)."""
+    violations: list[str] = []
+    if in_flight < 0:
+        violations.append(f"in_flight {in_flight} < 0")
+    if enumerated != total:
+        violations.append(f"snapshot enumerated {enumerated} != armed total {total}")
+    if skipped > evaluated:
+        violations.append(f"skipped {skipped} > evaluated {evaluated} (skipped ⊆ evaluated)")
+    if survivors > evaluated:
+        violations.append(f"survivors {survivors} > evaluated {evaluated}")
+    if evaluated + in_flight > total:
+        violations.append(f"evaluated {evaluated} + in_flight {in_flight} > enumerated {total}")
+    if prev_evaluated is not None and evaluated < prev_evaluated:
+        violations.append(f"evaluated went backwards: {evaluated} < {prev_evaluated}")
+    if is_done and evaluated != total:
+        violations.append(f"run done but evaluated {evaluated} != enumerated {total}")
+    return "; ".join(violations)
+
+
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:
     """Return a fresh behavior-correct fake crate namespace.
 
@@ -153,6 +292,7 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
     return SimpleNamespace(
         __version__=version,
         RUN_DIR_SUBDIR="runs",
+        CHAIN_LINKS=list(_FAKE_CHAIN_LINKS),
         join_path_segments=_join_path_segments,
         gate_config_fragment=_gate_config_fragment,
         stall_scaled_timeout=_stall_scaled_timeout,
@@ -162,4 +302,9 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
         preflight_missing=_preflight_missing,
         freshness_stale=_freshness_stale,
         liveness_tail=_liveness_tail,
+        audit_entry_hash=_audit_entry_hash,
+        chain_verify_step=_chain_verify_step,
+        stamp_verdict=_stamp_verdict,
+        chain_link_state=_chain_link_state,
+        count_reconciliation=_count_reconciliation,
     )

@@ -12,7 +12,7 @@ compiled crate and asserts value-identity with the retained Python oracles
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Final
 
@@ -28,6 +28,12 @@ from brutex.engine.run_layout import (  # noqa: E402
     mirror_run_dir,
     run_dir,
 )
+from brutex.engine.sweep_audit import (  # noqa: E402
+    SweepAuditChainCorruption,
+    SweepAuditWriter,
+    _entry_hash_python,
+    verify_chain,
+)
 from brutex.engine.sweep_identity import (  # noqa: E402
     _gate_config_fragment,
     _gate_config_fragment_python,
@@ -41,6 +47,7 @@ from brutex.engine.sweep_mem_budget import (  # noqa: E402
 from brutex.engine.sweep_ops_rust import (  # noqa: E402
     SWEEP_OPS_RUST_ENV,
     reset_sweep_ops_rust_for_tests,
+    routed_count_violations,
     sweep_ops_rust_disabled,
 )
 from brutex.engine.sweep_preflight import (  # noqa: E402
@@ -56,6 +63,18 @@ from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla  # noqa: 
 from brutex.engine.sweep_stall_policy import (  # noqa: E402
     StallPolicy,
     resolve_stall_policy,
+)
+from brutex.observability.chain_map import LINKS, build_chain_map  # noqa: E402
+from brutex.observability.run_tripwires import (  # noqa: E402
+    TripwireConfig,
+    TripwireMonitor,
+    _count_violations_python,
+)
+from brutex.observability.stage_stamp import (  # noqa: E402
+    SNAPSHOT_EXTRA_KEY,
+    StampVerdict,
+    validate_stage_stamp,
+    write_stage_stamp,
 )
 from brutex.ranking import OverfitGateConfig  # noqa: E402
 from hypothesis import given  # noqa: E402
@@ -463,3 +482,392 @@ class TestSliceOneBBurnInSteadyState:
         assert preflight_slices(sizes, symbols=["NSE-NIFTY"], intervals=["1minute"]).missing == (
             ("NSE-NIFTY", "1minute"),
         )
+
+
+# ────────────────── slice 2 — the audit-chain family ──────────────────
+
+#: The cross-language golden literals — the SAME hex strings are pinned in
+#: ``rust/brutex-sweep-ops/src/audit_chain.rs``'s cargo tests (the
+#: shared-literal pin pattern: pip blake3 here, the ``blake3`` crate there).
+_GENESIS: Final[str] = "0" * 64
+_G1: Final[str] = "ab1df54e0d8428288ece95f9b5e462f4af17beb3046ea429c6ee86d67e33ff2e"
+_G2: Final[str] = "4966787250e36bea06d71232fdb6e1087ed6b1757f1fa454152b7be989e087a7"
+_G3: Final[str] = "7fb88619e479fc3cf60860936a745c9a3ec67e3aef6bcbc1d57ff410202563b8"
+
+_G1_FIELDS: Final[tuple[str, ...]] = (
+    "0",
+    _GENESIS,
+    "1700000000.5",
+    "sweep",
+    "SWEEP_START",
+    "sweep:abc",
+    '{"total_combos":22100}',
+)
+_G2_FIELDS: Final[tuple[str, ...]] = (
+    "1",
+    _G1,
+    "1700000001.25",
+    "sweep",
+    "COMBO_DONE",
+    "combo:5e",
+    '{"mask":7,"trades":42}',
+)
+_G3_FIELDS: Final[tuple[str, ...]] = (
+    "7",
+    "f" * 64,
+    "123.5",
+    "aktör",
+    "ACT",
+    "subj-ß",
+    '{"k":"v–"}',
+)
+
+
+class TestSliceTwoGoldenLiterals:
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [(_G1_FIELDS, _G1), (_G2_FIELDS, _G2), (_G3_FIELDS, _G3)],
+        ids=["genesis-entry", "chained-entry", "non-ascii-utf8"],
+    )
+    def test_crate_and_pip_blake3_agree_on_goldens(
+        self, fields: tuple[str, ...], expected: str
+    ) -> None:
+        """The compiled crate AND the pip-blake3 oracle reproduce the SAME
+        frozen hex literals the cargo suite pins (cross-language byte pin)."""
+        assert brutex_sweep_ops.audit_entry_hash(*fields) == expected
+        assert _entry_hash_python(*fields) == expected
+
+    def test_chain_links_twin(self) -> None:
+        """The crate's CHAIN_LINKS is the chain_map LINKS tuple (drift pin)."""
+        assert tuple(brutex_sweep_ops.CHAIN_LINKS) == LINKS
+
+    @given(
+        seq=st.integers(min_value=-(2**31), max_value=2**63),
+        prev=st.text(max_size=80),
+        actor=st.text(max_size=24),
+        action=st.text(max_size=24),
+        subject=st.text(max_size=48),
+        payload_json=st.text(max_size=64),
+        ts=st.floats(allow_nan=False, allow_infinity=False),
+    )
+    def test_hypothesis_differential_vs_pip_blake3(
+        self,
+        seq: int,
+        prev: str,
+        actor: str,
+        action: str,
+        subject: str,
+        payload_json: str,
+        ts: float,
+    ) -> None:
+        """crate blake3 ≡ pip blake3 over arbitrary pre-rendered UTF-8 fields
+        (incl. non-ASCII — st.text() spans the non-surrogate plane)."""
+        fields = (str(seq), prev, str(ts), actor, action, subject, payload_json)
+        assert brutex_sweep_ops.audit_entry_hash(*fields) == _entry_hash_python(*fields)
+
+
+def _write_chain(path: Path) -> None:
+    """Write a small deterministic REAL chain via the production writer."""
+    with SweepAuditWriter.open(path) as log:
+        log.append(
+            action="SWEEP_START",
+            subject="sweep:abc",
+            payload={"total_combos": 22100},
+            ts_utc=1700000000.5,
+        )
+        log.append(
+            action="COMBO_DONE",
+            subject="combo:5e",
+            payload={"mask": 7, "trades": 42},
+            ts_utc=1700000001.25,
+        )
+        log.append(
+            action="SWEEP_COMPLETE",
+            subject="sweep:abc",
+            payload={"note": "done–ß"},
+            ts_utc=1700000002.75,
+        )
+
+
+class TestAuditChainParity:
+    def test_flag_on_chain_bytes_identical_to_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A chain written flag-ON is BYTE-identical to the flag-OFF chain
+        (the load-bearing byte-identity law — Python renders, Rust hashes)."""
+        on_log = tmp_path / "on.jsonl"
+        _write_chain(on_log)
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off_log = tmp_path / "off.jsonl"
+        _write_chain(off_log)
+        assert on_log.read_bytes() == off_log.read_bytes()
+
+    def test_verify_chain_green_flag_on(self, tmp_path: Path) -> None:
+        log = tmp_path / "audit.jsonl"
+        _write_chain(log)
+        assert verify_chain(log) == 3
+        assert sweep_ops_rust_disabled() is False
+
+    @pytest.mark.parametrize(
+        ("tamper", "reason_fragment"),
+        [
+            (lambda text: text.replace('"trades":42', '"trades":43'), "content tampered"),
+            (
+                lambda text: (
+                    "\n".join([text.splitlines()[0], text.splitlines()[2], text.splitlines()[1]])
+                    + "\n"
+                ),
+                "seq number out of order",
+            ),
+            (
+                # Relink entry 1's prev_hash (its SECOND-line _G1 occurrence) —
+                # the linkage check fires before the content recompute.
+                lambda text: (
+                    "\n".join(
+                        line.replace(_G1, "e" * 64, 1) if index == 1 else line
+                        for index, line in enumerate(text.splitlines())
+                    )
+                    + "\n"
+                ),
+                "prev_hash does not match",
+            ),
+        ],
+        ids=["payload-byte-flip", "reordered-lines", "prev-hash-relink"],
+    )
+    def test_tamper_breaks_chain_with_identical_message_both_arms(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tamper: Callable[[str], str],
+        reason_fragment: str,
+    ) -> None:
+        """Every tamper shape still BREAKS the chain flag-ON, with the SAME
+        exception type + message BYTES as the flag-OFF oracle arm."""
+        log = tmp_path / "audit.jsonl"
+        _write_chain(log)
+        log.write_text(tamper(log.read_text(encoding="utf-8")), encoding="utf-8")
+
+        with pytest.raises(SweepAuditChainCorruption) as on_exc:
+            verify_chain(log)
+        assert sweep_ops_rust_disabled() is False
+
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        with pytest.raises(SweepAuditChainCorruption) as off_exc:
+            verify_chain(log)
+
+        assert str(on_exc.value) == str(off_exc.value)
+        assert on_exc.value.seq == off_exc.value.seq
+        assert reason_fragment in str(on_exc.value)
+
+
+class TestStampVerdictParity:
+    def _stamped(self, tmp_path: Path, *, snapshot: str | None = None) -> Path:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        artifact = tmp_path / "artifact.bin"
+        artifact.write_bytes(b"artifact-bytes")
+        extra = None if snapshot is None else {SNAPSHOT_EXTRA_KEY: snapshot}
+        write_stage_stamp(artifact, stage="sweep", run_id=_RUN_ID, extra=extra)
+        return artifact
+
+    def test_verdict_matrix_parity_flag_on_vs_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ok = self._stamped(tmp_path / "ok", snapshot="snap-a")
+        corrupt = self._stamped(tmp_path / "corrupt")
+        corrupt.write_bytes(b"tampered-bytes")
+        wrong_stage = self._stamped(tmp_path / "stage")
+        wrong_run = self._stamped(tmp_path / "run")
+        snap = self._stamped(tmp_path / "snap", snapshot="snap-a")
+
+        def verdicts() -> list[StampVerdict]:
+            return [
+                validate_stage_stamp(
+                    ok,
+                    expected_stage="sweep",
+                    expected_run_id=_RUN_ID,
+                    expected_snapshot_hash="snap-a",
+                )[0],
+                validate_stage_stamp(corrupt, expected_stage="sweep")[0],
+                validate_stage_stamp(wrong_stage, expected_stage="stage3_cell")[0],
+                validate_stage_stamp(wrong_run, expected_stage="sweep", expected_run_id="other")[0],
+                validate_stage_stamp(snap, expected_stage="sweep", expected_snapshot_hash="snap-b")[
+                    0
+                ],
+            ]
+
+        on = verdicts()
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = verdicts()
+        assert on == off
+        assert on == [
+            StampVerdict.OK,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+            StampVerdict.HASH_MISMATCH,
+        ]
+
+
+class TestChainLinkStateParity:
+    _SCENARIOS: Final[list[dict[str, object]]] = [
+        {  # running mid-stage: before/at/after split + a validated stamp
+            "progress": {"running": True, "stage": "stage3", "run_id": "r1"},
+            "stamps": {"preflight": StampVerdict.OK},
+            "suspect": False,
+            "exit_status": None,
+        },
+        {  # running, stage unknown → amber everywhere undecided
+            "progress": {"running": True},
+            "stamps": {},
+            "suspect": False,
+            "exit_status": None,
+        },
+        {  # red stamp evidence wins over a complete terminal
+            "progress": None,
+            "stamps": {"sweep": StampVerdict.HASH_MISMATCH},
+            "suspect": False,
+            "exit_status": {"state": "complete", "run_id": "r2"},
+        },
+        {  # refusal with the EMPTY refusal_text (the falsy-law pin)
+            "progress": None,
+            "stamps": {},
+            "suspect": False,
+            "exit_status": {"state": "refused", "refusal_text": ""},
+        },
+        {  # failed at a known stage — error_type absent → "unknown error"
+            "progress": {"running": False, "stage": "cascade"},
+            "stamps": {},
+            "suspect": False,
+            "exit_status": {"state": "halted"},
+        },
+        {  # failed, stage unknown → amber
+            "progress": None,
+            "stamps": {},
+            "suspect": False,
+            "exit_status": {"state": "failed", "error_type": "OSError"},
+        },
+        {  # suspect amber floor over a complete run
+            "progress": None,
+            "stamps": {"artifacts": StampVerdict.OK},
+            "suspect": True,
+            "exit_status": {"state": "complete"},
+        },
+        {  # no evidence at all → pending everywhere
+            "progress": None,
+            "stamps": {},
+            "suspect": False,
+            "exit_status": None,
+        },
+    ]
+
+    def test_chain_map_parity_flag_on_vs_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def maps() -> list[dict[str, object]]:
+            return [
+                build_chain_map(
+                    progress=case["progress"],  # type: ignore[arg-type]
+                    stamps=case["stamps"],  # type: ignore[arg-type]
+                    suspect=case["suspect"],  # type: ignore[arg-type]
+                    exit_status=case["exit_status"],  # type: ignore[arg-type]
+                )
+                for case in self._SCENARIOS
+            ]
+
+        on = maps()
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        assert maps() == on
+
+
+class TestCountViolationsParity:
+    @pytest.mark.parametrize(
+        "case",
+        [
+            (100, 100, 50, 10, 5, 0, None, False),  # clean
+            (100, 90, 50, 60, 5, -1, None, False),  # negative in-flight + 2 more
+            (100, 100, 50, 10, 60, 60, 55, False),  # survivors/backwards/overrun
+            (100, 100, 90, 0, 0, 0, None, True),  # done but short
+            (100, 100, 100, 0, 0, 0, 100, True),  # clean done
+        ],
+        ids=["clean", "neg-in-flight", "triple", "done-short", "clean-done"],
+    )
+    def test_crate_matches_python_law(
+        self, case: tuple[int, int, int, int, int, int, int | None, bool]
+    ) -> None:
+        assert brutex_sweep_ops.count_reconciliation(*case) == _count_violations_python(*case)
+
+    def test_real_monitor_fires_identically_both_arms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = TripwireConfig(
+            throughput_floor_fraction=0.0,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+
+        def fired_details() -> tuple[bool, list[str]]:
+            monitor = TripwireMonitor(
+                config=config,
+                enumerated_total=90,
+                on_trip=lambda event: None,
+                ram_total_bytes=0,
+            )
+            monitor.on_progress(
+                _snapshot(enumerated=100, evaluated=150, survivors=200), in_flight=0
+            )
+            return (monitor.suspect, [event.detail for event in monitor.events])
+
+        on = fired_details()
+        assert sweep_ops_rust_disabled() is False
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = fired_details()
+        assert on == off
+        assert on[0] is True
+        assert "enumerated 100 != armed total 90" in on[1][0]
+
+
+class TestSliceTwoBurnInSteadyState:
+    def test_burn_in_completes_and_serves_rust(self, tmp_path: Path) -> None:
+        """>16 engaged calls per slice-2 law with zero autoreverts."""
+        log = tmp_path / "audit.jsonl"
+        with SweepAuditWriter.open(log) as writer:
+            for i in range(18):  # 18 engaged entry-hash calls
+                writer.append(
+                    action="COMBO_DONE",
+                    subject=f"combo:{i}",
+                    payload={"i": i},
+                    ts_utc=1700000000.0 + i,
+                )
+        assert verify_chain(log) == 18  # 18 engaged verify-step calls
+
+        artifact = tmp_path / "artifact.bin"
+        artifact.write_bytes(b"payload")
+        write_stage_stamp(artifact, stage="sweep", run_id=_RUN_ID)
+        for _ in range(18):  # 18 engaged stamp-verdict calls
+            verdict, _stamp = validate_stage_stamp(artifact, expected_stage="sweep")
+            assert verdict is StampVerdict.OK
+
+        for _ in range(4):  # 4 × 5 links = 20 engaged link-state calls
+            build_chain_map(
+                progress=None,
+                stamps={},
+                suspect=False,
+                exit_status={"state": "complete"},
+            )
+
+        law_args = (100, 100, 50, 10, 5, 0, None, False)
+        for _ in range(18):  # 18 engaged count-violation folds
+            detail = routed_count_violations(
+                *law_args, python_law=lambda: _count_violations_python(*law_args)
+            )
+            assert detail == ""
+
+        assert sweep_ops_rust_disabled() is False
+        # Steady state still value-identical to the oracle.
+        assert verify_chain(log) == 18

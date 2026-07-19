@@ -902,3 +902,66 @@ class TestEventShape:
     def test_severity_vocabulary_exact(self) -> None:
         assert SEVERITY_WARNING == "warning"
         assert SEVERITY_CRITICAL == "critical"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-RUST-SWEEP-OPS-001 — flag-ON routing parity (wheel-free fake crate)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the D-9 count-reconciliation fold.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must fire the
+    SAME events (detail bytes included) as the flag-OFF Python fold that
+    every OTHER test in this file drives.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def _fire(self) -> tuple[bool, list[str]]:
+        monitor, sink, clock = _monitor(total=90)
+        _tick(monitor, clock, _snap(enumerated=100, evaluated=150, survivors=200))
+        return (monitor.suspect, [event.detail for event in sink.events])
+
+    def test_flag_on_fires_identical_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        off = self._fire()
+        assert off[0] is True
+        assert "enumerated 100 != armed total 90" in off[1][0]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert self._fire() == off
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_clean_counts_fire_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._arm_fake_crate(monkeypatch)
+        try:
+            monitor, sink, clock = _monitor(total=100)
+            _tick(monitor, clock, _snap(evaluated=50, survivors=5, skipped=10))
+            assert monitor.suspect is False
+            assert sink.events == []
+        finally:
+            self._reset_facade()

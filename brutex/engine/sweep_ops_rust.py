@@ -61,6 +61,41 @@ helper is final-slice housekeeping):
    AFTER the payload typing + the ``os.kill`` pid probe (both stay Python —
    the fail-closed UNKNOWN arm IS Python-type introspection).
 
+Slice-2 routed laws (the AUDIT-CHAIN family — same wiring shape, same
+shared engage core). Byte-identity is LOAD-BEARING here (the sweep audit
+JSONL hash chain is a CI gate — CLAUDE.md Golden Rule #8), so the safety
+rails are explicit: Python renders EVERY hashed field string (``str(seq)``,
+the float-repr ``str(ts_utc)``, the canonical payload JSON — JSON is NEVER
+re-rendered in Rust, the float-repr trap) and Rust only joins + hashes /
+decides; the ORCHESTRATOR SHA-256 chain (``brutex/orchestrator/audit.py``)
+is the DISTINCT family and has NO seam here — never conflated:
+
+9.  **Audit entry-hash law** (:func:`routed_audit_entry_hash`) —
+    ``brutex/engine/sweep_audit.py``'s ``SweepAuditEntry.compute_hash``
+    BLAKE3 over the ``|``-joined 7 pre-rendered fields (the crate uses the
+    official ``blake3`` crate — the same algorithm the pure-pip ``blake3``
+    package provides the oracle).
+10. **Chain verify step** (:func:`routed_chain_verify_step`) —
+    ``verify_chain``'s per-entry decision (seq → prev-hash linkage →
+    recomputed content hash; first failure wins) as a
+    ``(token, expected, actual)`` triple; Python owns the
+    ``SweepAuditChainCorruption`` construction + message bytes.
+11. **Stamp verdict law** (:func:`routed_stamp_verdict`) —
+    ``brutex/observability/stage_stamp.py``'s ``validate_stage_stamp``
+    mismatch decision (content hash / stage / run-id / the G7
+    both-sides-assert snapshot law). The artifact HASHING stays Python
+    (streamed ``hashlib`` — the bounded-memory law); the
+    MISSING/MALFORMED verdicts are I/O-derived and decided Python-side.
+12. **Chain-link state ladder** (:func:`routed_chain_link_state`) —
+    ``brutex/observability/chain_map.py``'s ``_link_state`` per-link
+    priority rules 1-5 (the suspect amber floor is a one-line transform
+    that stays Python in ``build_chain_map``).
+13. **Count-reconciliation fold** (:func:`routed_count_violations`) —
+    ``brutex/observability/run_tripwires.py``'s ``_reconcile_counts`` D-9
+    violations detail (EMPTY string = clean; ints only — no float repr
+    crosses). The tripwire engine's fail-soft law (#1712 I-3) holds by
+    construction: every seam degrades to the oracle, never a new raise.
+
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
 * **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
@@ -153,6 +188,16 @@ _LAW_PREFLIGHT_MISSING: Final[str] = "preflight_missing"
 _LAW_FRESHNESS_STALE: Final[str] = "freshness_stale"
 #: The liveness-verdict-tail burn-in budget key (slice 1b).
 _LAW_LIVENESS_TAIL: Final[str] = "liveness_tail"
+#: The audit-entry-hash-law burn-in budget key (slice 2).
+_LAW_AUDIT_ENTRY_HASH: Final[str] = "audit_entry_hash"
+#: The chain-verify-step-law burn-in budget key (slice 2).
+_LAW_CHAIN_VERIFY_STEP: Final[str] = "chain_verify_step"
+#: The stamp-verdict-law burn-in budget key (slice 2).
+_LAW_STAMP_VERDICT: Final[str] = "stamp_verdict"
+#: The chain-link-state-law burn-in budget key (slice 2).
+_LAW_CHAIN_LINK_STATE: Final[str] = "chain_link_state"
+#: The count-reconciliation-fold burn-in budget key (slice 2).
+_LAW_COUNT_VIOLATIONS: Final[str] = "count_violations"
 
 #: Every routed law's burn-in budget key (the reset seam iterates this).
 _ALL_LAWS: Final[tuple[str, ...]] = (
@@ -165,6 +210,11 @@ _ALL_LAWS: Final[tuple[str, ...]] = (
     _LAW_PREFLIGHT_MISSING,
     _LAW_FRESHNESS_STALE,
     _LAW_LIVENESS_TAIL,
+    _LAW_AUDIT_ENTRY_HASH,
+    _LAW_CHAIN_VERIFY_STEP,
+    _LAW_STAMP_VERDICT,
+    _LAW_CHAIN_LINK_STATE,
+    _LAW_COUNT_VIOLATIONS,
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live.
@@ -177,6 +227,10 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(_ALL_LAWS, BURN_IN_SAM
 #: surface. A wheel missing any is a pre-slice-1b install (``crate_stale`` —
 #: extending this list stales older wheels BY DESIGN; rebuild via maturin).
 _CRATE_API: Final[tuple[str, ...]] = (
+    "audit_entry_hash",
+    "chain_link_state",
+    "chain_verify_step",
+    "count_reconciliation",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
@@ -186,6 +240,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",
+    "stamp_verdict",
 )
 
 #: Structural arities of the crate's fragment legs + stall pair (the frozen
@@ -225,6 +280,35 @@ _RANK_PLAN_VERDICTS: Final[frozenset[str]] = frozenset(
 #: Python-owned fail-closed ``unknown`` — drift-pinned by the facade test
 #: suite; no import, same cycle law).
 _LIVENESS_TAIL_TOKENS: Final[frozenset[str]] = frozenset({"running", "stale", "not_running"})
+
+#: A 64-hex-lowercase BLAKE3 digest's character set (output gate — slice 2).
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
+#: A BLAKE3-256 hex digest's length (mirrors ``sweep_audit.BLAKE3_HEX_LEN``
+#: — drift-pinned by the facade suite; no import, same cycle law:
+#: ``sweep_audit`` imports THIS module).
+_HASH_HEX_LEN: Final[int] = 64
+#: The chain-verify-step wire tokens (the crate ↔ wiring contract; the
+#: non-``ok`` members key ``sweep_audit``'s reason map — drift-pinned).
+_CHAIN_VERIFY_TOKENS: Final[frozenset[str]] = frozenset(
+    {"ok", "seq_out_of_order", "prev_hash_mismatch", "entry_hash_mismatch"}
+)
+#: The verify-step triple's arity (refuse-poison gate — slice 2).
+_VERIFY_TRIPLE_ARITY: Final[int] = 3
+#: The stamp-verdict RESULT tokens (the crate ↔ wiring contract).
+_STAMP_VERDICT_RESULTS: Final[frozenset[str]] = frozenset({"ok", "hash_mismatch"})
+#: The stamp-verdict INPUT tokens (``StampVerdict`` values — drift-pinned by
+#: the facade suite; no import, ``stage_stamp`` imports THIS module).
+_STAMP_VERDICT_TOKENS: Final[frozenset[str]] = frozenset(
+    {"ok", "missing_artifact", "missing_stamp", "hash_mismatch", "malformed"}
+)
+#: The five chain links (``chain_map.LINKS`` — drift-pinned; no import,
+#: ``chain_map`` imports THIS module) — the ``last_stage`` input gate.
+_CHAIN_LINKS: Final[tuple[str, ...]] = ("preflight", "sweep", "stage3", "cascade", "artifacts")
+#: The chain-link state tokens (``chain_map.LinkState`` values —
+#: drift-pinned, same cycle law).
+_LINK_STATE_TOKENS: Final[frozenset[str]] = frozenset(
+    {"pending", "running", "green", "amber", "red"}
+)
 
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
@@ -865,10 +949,296 @@ def routed_liveness_tail(
     )
 
 
+# ─────────────────── slice 2 — the audit-chain family ───────────────────
+
+
+def _validate_hash_hex(raw: object) -> str | None:
+    """Structural OUTPUT gate for a 64-lowercase-hex BLAKE3 digest string."""
+    if type(raw) is not str or len(raw) != _HASH_HEX_LEN:
+        return None
+    if not all(char in _HEX_DIGITS for char in raw):
+        return None
+    return raw
+
+
+def routed_audit_entry_hash(
+    seq_str: str,
+    prev_hash: str,
+    ts_str: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed sweep-audit BLAKE3 entry-hash law (Golden Rule #8 chain).
+
+    Exact-type input gates: all seven fields must be exact ``str`` — they
+    arrive ALREADY rendered by Python (``str(seq)`` / the float-repr
+    ``str(ts_utc)`` / the canonical payload JSON), so the crate only joins
+    the UTF-8 bytes with ``|`` and hashes. A lone-surrogate field (which the
+    oracle's own ``.encode("utf-8")`` would raise on) fails the PyO3 string
+    conversion into the degrade set and the oracle raises identically.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    fields = (seq_str, prev_hash, ts_str, actor, action, subject, payload_json)
+    if any(type(field) is not str for field in fields):
+        _warn_once("audit_entry_hash_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_AUDIT_ENTRY_HASH,
+        "audit_entry_hash",
+        fields,
+        python_law=python_law,
+        validate=_validate_hash_hex,
+    )
+
+
+def _validate_verify_step(raw: object) -> tuple[str, str, str] | None:
+    """Structural OUTPUT gate for the ``(token, expected, actual)`` triple."""
+    if not (isinstance(raw, tuple) and len(raw) == _VERIFY_TRIPLE_ARITY):
+        return None
+    token, expected, actual = raw
+    if any(type(part) is not str for part in (token, expected, actual)):
+        return None
+    if token not in _CHAIN_VERIFY_TOKENS:
+        return None
+    return (token, expected, actual)
+
+
+def routed_chain_verify_step(
+    expected_seq: int,
+    prev_expected: str,
+    seq: int,
+    prev_hash: str,
+    ts_str: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+    entry_hash: str,
+    *,
+    python_law: Callable[[], tuple[str, str, str]],
+) -> tuple[str, str, str]:
+    """The routed per-entry ``verify_chain`` step — ``(token, expected, actual)``.
+
+    Exact-type input gates: both seq operands exact ``int`` (``bool``
+    excluded — ``str(True)`` ≠ Rust ``"true"``; an out-of-``i64`` seq
+    degrades via ``OverflowError``) and the eight field strings exact
+    ``str``. Python owns the corruption-exception construction + message
+    bytes; only the DECISION (which check failed first, with the
+    recomputed hash) routes.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(type(value) is not int for value in (expected_seq, seq)) or any(
+        type(field) is not str
+        for field in (
+            prev_expected,
+            prev_hash,
+            ts_str,
+            actor,
+            action,
+            subject,
+            payload_json,
+            entry_hash,
+        )
+    ):
+        _warn_once("chain_verify_step_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_CHAIN_VERIFY_STEP,
+        "chain_verify_step",
+        (
+            expected_seq,
+            prev_expected,
+            seq,
+            prev_hash,
+            ts_str,
+            actor,
+            action,
+            subject,
+            payload_json,
+            entry_hash,
+        ),
+        python_law=python_law,
+        validate=_validate_verify_step,
+    )
+
+
+def _validate_stamp_verdict(raw: object) -> str | None:
+    """Structural OUTPUT gate for the stamp-verdict result token."""
+    if type(raw) is not str or raw not in _STAMP_VERDICT_RESULTS:
+        return None
+    return raw
+
+
+def routed_stamp_verdict(
+    recomputed: str,
+    content_hash: str,
+    stage: str,
+    expected_stage: str,
+    run_id: str,
+    expected_run_id: str | None,
+    stamped_snapshot: str | None,
+    expected_snapshot: str | None,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed stage-stamp mismatch decision — ``"ok"`` / ``"hash_mismatch"``.
+
+    Exact-type input gates: the five mandatory operands exact ``str``; the
+    three optional operands ``None`` or exact ``str``. The artifact hashing
+    + the MISSING/MALFORMED I/O verdicts stay Python.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(
+        type(field) is not str
+        for field in (recomputed, content_hash, stage, expected_stage, run_id)
+    ) or any(
+        optional is not None and type(optional) is not str
+        for optional in (expected_run_id, stamped_snapshot, expected_snapshot)
+    ):
+        _warn_once("stamp_verdict_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_STAMP_VERDICT,
+        "stamp_verdict",
+        (
+            recomputed,
+            content_hash,
+            stage,
+            expected_stage,
+            run_id,
+            expected_run_id,
+            stamped_snapshot,
+            expected_snapshot,
+        ),
+        python_law=python_law,
+        validate=_validate_stamp_verdict,
+    )
+
+
+def _validate_link_state(raw: object) -> tuple[str, str] | None:
+    """Structural OUTPUT gate for the ``(state_token, detail)`` pair."""
+    if not (isinstance(raw, tuple) and len(raw) == _STRING_PAIR_ARITY):
+        return None
+    state, detail = raw
+    if type(state) is not str or type(detail) is not str:
+        return None
+    if state not in _LINK_STATE_TOKENS:
+        return None
+    return (state, detail)
+
+
+def routed_chain_link_state(
+    link: str,
+    idx: int,
+    verdict_token: str | None,
+    running: bool,
+    last_stage: str | None,
+    terminal: str | None,
+    refusal_text: str | None,
+    error_type: str | None,
+    *,
+    python_law: Callable[[], tuple[str, str]],
+) -> tuple[str, str]:
+    """The routed chain-map per-link state ladder — ``(state_token, detail)``.
+
+    Exact-type input gates: *link* exact ``str``, *idx* exact ``int``
+    (``bool`` excluded), *running* exact ``bool``, *verdict_token* ``None``
+    or one of the mirrored ``StampVerdict`` values, *last_stage* ``None``
+    or one of the mirrored :data:`_CHAIN_LINKS` (the ladder indexes it),
+    and the terminal/refusal/error operands ``None`` or exact ``str``.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        type(link) is not str
+        or type(idx) is not int
+        or type(running) is not bool
+        or (verdict_token is not None and verdict_token not in _STAMP_VERDICT_TOKENS)
+        or (last_stage is not None and last_stage not in _CHAIN_LINKS)
+        or any(
+            optional is not None and type(optional) is not str
+            for optional in (terminal, refusal_text, error_type)
+        )
+    ):
+        _warn_once("chain_link_state_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_CHAIN_LINK_STATE,
+        "chain_link_state",
+        (link, idx, verdict_token, running, last_stage, terminal, refusal_text, error_type),
+        python_law=python_law,
+        validate=_validate_link_state,
+    )
+
+
+def _validate_violations_detail(raw: object) -> str | None:
+    """Structural OUTPUT gate for the violations detail (EMPTY = clean).
+
+    The engage core's ``None``-means-refused contract forbids a bare
+    ``None`` law result, so the crate renders "no violations" as the EMPTY
+    string — any exact ``str`` passes.
+    """
+    if type(raw) is not str:
+        return None
+    return raw
+
+
+def routed_count_violations(
+    total: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    in_flight: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed D-9 count-reconciliation violations fold (EMPTY = clean).
+
+    Exact-type input gates: the six counters exact ``int`` (``bool``
+    excluded; out-of-``i64`` degrades via ``OverflowError``; the one
+    checked crate arithmetic — ``evaluated + in_flight`` — degrades on an
+    ``i64`` overflow rather than aborting), *prev_evaluated* ``None`` or
+    exact ``int``, *is_done* exact ``bool``. Runs inside the tripwire
+    monitor's fail-soft envelope — every degrade ships the oracle, never a
+    new raise into the sweep.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    counters = (total, enumerated, evaluated, skipped, survivors, in_flight)
+    if (
+        any(type(count) is not int for count in counters)
+        or (prev_evaluated is not None and type(prev_evaluated) is not int)
+        or type(is_done) is not bool
+    ):
+        _warn_once("count_violations_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_COUNT_VIOLATIONS,
+        "count_reconciliation",
+        (*counters, prev_evaluated, is_done),
+        python_law=python_law,
+        validate=_validate_violations_detail,
+    )
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "SWEEP_OPS_RUST_ENV",
     "reset_sweep_ops_rust_for_tests",
+    "routed_audit_entry_hash",
+    "routed_chain_link_state",
+    "routed_chain_verify_step",
+    "routed_count_violations",
     "routed_freshness_stale",
     "routed_gate_fragment",
     "routed_liveness_tail",
@@ -878,6 +1248,7 @@ __all__ = [
     "routed_run_path",
     "routed_sla_decision",
     "routed_stall_timeout",
+    "routed_stamp_verdict",
     "sweep_ops_rust_disabled",
     "sweep_ops_rust_enabled",
 ]
