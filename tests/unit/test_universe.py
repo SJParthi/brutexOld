@@ -59,10 +59,13 @@ def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
 
     This suite pins the pre-#1934 admission MECHANICS over stock/sectoral
     fixtures; under ``BRUTEX_FEED_SCOPE=full`` those legacy rules are
-    byte-identical (the parity half of the §6 widen-path pin — running this
-    suite full-arm IS that pin's permanent net). The shipped index4-default
-    guard arms live in ``test_universe_index_only_scope.py`` + the
-    scope-gate batteries (migration Law 1)."""
+    byte-identical MODULO the one recorded A2 BSE-derivative correction —
+    ``full ⊇ index4``, pinned below at
+    ``test_bse_derivative_admitted_under_full`` (the parity half of the §6
+    widen-path pin — running this suite full-arm IS that pin's permanent
+    net). The shipped index4-default guard arms live in
+    ``test_universe_index_only_scope.py`` + the scope-gate batteries
+    (migration Law 1)."""
     monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
