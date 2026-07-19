@@ -142,7 +142,9 @@ def _evaluate_axis(
             share = pos_by_label[label] / total_pos
         strata_stats[label] = {
             "trades": len(g),
-            "expectancy_paisa": float(statistics.fmean(g)) if g else None,
+            # Every group is non-empty by construction (built by appending
+            # each aligned trade), so the mean is always defined.
+            "expectancy_paisa": float(statistics.fmean(g)),
             "positive_pnl_share": share,
         }
 
