@@ -57,6 +57,8 @@
 .bx-stpanel .bx-arrow-entry { fill: #26D9B0; }
 .bx-stpanel .bx-arrow-exit { fill: #FFB74D; }
 .bx-stpanel .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
+/* DEC-RESULTS-TRUST-HONESTY-001 (B1): the STORED buy-&-hold benchmark overlay */
+.bx-stpanel .bx-buyhold-line { stroke: #7FB3FF; stroke-width: 1.6; stroke-dasharray: 5 4; }
 .bx-stpanel table { width:100%; border-collapse:collapse; font-size:12px; }
 .bx-stpanel th, .bx-stpanel td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
 .bx-stpanel th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }

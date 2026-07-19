@@ -188,8 +188,15 @@ class TestPagesServe:
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
         assert "condition-subset — not wired yet, lands at merge-integration" in html
-        # The preflight/estimator strip is HONEST about not being wired (P1).
-        assert "estimator not wired yet — lands at merge-integration (P1)" in html
+        # The preflight strip names the extinction default + the operative
+        # guard and deliberately shows NO fabricated time estimate
+        # (DEC-SWEEP-APRIORI-DEFAULT-001 — extinction depth is data-dependent;
+        # the old "estimator not wired yet" placeholder token is KILLED on
+        # this page, negative-pinned below).
+        assert "exploration: Apriori-to-extinction (default)" in html
+        assert "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS" in html
+        assert "No time estimate is shown" in html
+        assert "estimator not wired yet — lands at merge-integration (P1)" not in html
         # R3: the button never pulls — stated on the page.
         assert "this button NEVER pulls" in html or "NEVER pulls" in html
 
@@ -755,6 +762,43 @@ class TestStrategyPage:
 
     def test_ticker_strip_present(self) -> None:
         assert 'id="bxTickerStrip"' in _template("strategy.html")
+
+    def test_buy_and_hold_benchmark_wiring(self) -> None:
+        """B1 (DEC-RESULTS-TRUST-HONESTY-001): the STORED baseline drives the
+        winner-card benchmark cell + the dashed equity overlay — served
+        verbatim from /api/v1/oneclick/baseline, never recomputed client-side
+        (the paisa parse is digit-wise over the exact stored 2-dp strings).
+        Pins REPOINTED at the club-Q merge-reconcile: the inline strategy
+        wiring moved VERBATIM into the extracted bx-strategy-panel.js + the
+        shared bx-oneclick-panels.css (the #1749 cascade-display relocation
+        precedent, DEC-OPERATOR-PORTAL-REFOLD-001 #1796); the markup lives
+        in BOTH copies — strategy.html AND v29's #ocStrategyDrawer (the
+        T-N2 hook-parity fence owns the both-copies law via
+        _PANEL_INVENTORY)."""
+        panel = _static_js("bx-strategy-panel.js")
+        assert "/api/v1/oneclick/baseline?run_id=" in panel
+        assert "function rupees2paisa(s)" in panel
+        assert "function benchSeriesPaisa()" in panel
+        assert "bx-buyhold-line" in panel
+        assert "stored by the results-depth pass — never recomputed" in panel
+        # The overlay shares ONE y-scale with the equity line (magnitude honesty)
+        # and states its per-unit / session-indexed envelope on the note line.
+        assert "ONE shared y-scale" in panel
+        assert "buy & hold overlay (dashed, per-unit, stored R27 baseline" in panel
+        assert "equity shows the loaded page" in panel
+        # The excess stat is arithmetic over STORED values only.
+        assert "combo net vs buy & hold (per-unit):" in panel
+        # DOM law: card + detail values land via textContent only.
+        assert "cell.textContent" in panel
+        assert "detail.textContent" in panel
+        # The dashed-overlay CSS lives in the ONE shared panel stylesheet.
+        css = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")
+        assert ".bx-stpanel .bx-buyhold-line" in css
+        # Markup: both copies carry the cell + the honest awaiting detail.
+        for html in (_template("strategy.html"), _template("v29.html")):
+            assert 'id="stBench"' in html
+            assert 'id="stBenchDetail"' in html
+            assert "benchmark: awaiting stored baseline artifact (R27)" in html
 
 
 # ---------------------------------------------------------------------------
