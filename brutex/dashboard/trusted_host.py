@@ -69,7 +69,7 @@ def host_without_port(host_header: str) -> str:
     return host_header.split(":", maxsplit=1)[0]
 
 
-class BracketAwareTrustedHostMiddleware(TrustedHostMiddleware):
+class BracketAwareTrustedHostMiddleware(TrustedHostMiddleware):  # pyright: ignore[reportUntypedBaseClass]
     """``TrustedHostMiddleware`` that admits allowlisted BRACKETED IPv6 Hosts.
 
     Pure-ASGI (guards ``http`` AND ``websocket`` scopes — the ``/ws`` route
