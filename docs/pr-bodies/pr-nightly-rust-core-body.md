@@ -7,7 +7,7 @@
 ## Summary
 
 - **FIRST CUT of the `brutex/nightly/` Rust conversion** (DEC-NIGHTLY-RUST-CORE-001,
-  MIGRATION.md #1957): the TEN named pure decision kernels — chain
+  MIGRATION.md #1960): the TEN named pure decision kernels — chain
   (`first_breaker` · `exit_code_for` · `audit_reconcile_tripwire`), report
   (`summary_lines` + its `_verdict`/`_count_text` sub-laws), schedule
   (`render_launchd_plist` · `parse_at` · `pmset_wake_command` ·
@@ -27,8 +27,9 @@
   `DEC-NIGHTLY-RUST-CORE-002` (the NAMED follow-up — backup/restore ordering,
   `deadman_verdict`, the probes floor law, run.py orchestration + bindings:
   deliberately stay Python).
-- **MIGRATION.md row(s):** #1957 (provisional — renumber-at-landing per
-  DEC-LEDGER-RENUMBER-001).
+- **MIGRATION.md row(s):** #1960 (renumbered #1957 → #1960 at the 2026-07-19
+  merge-reconcile — main took #1957 for `DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001`;
+  DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001).
 - **Spec section(s) touched:** none (ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; run identity untouched).
 
@@ -129,7 +130,7 @@ $ .venv/bin/mypy --strict brutex → clean (496 files; the single stage3_refine 
 | 12 | O(1) hot path | N/A — nightly orchestration, not a hot path (honest) |
 | 13 | Audit chain | ✅ untouched (direct file appends, not structlog; no audit surface changed) |
 | 14 | Observability | ✅ structlog events: `nightly_rust.engaged` / `.fallback` / `.disabled` / `.kernel_autoreverted` / `.burn_in_complete` |
-| 15 | Decision ID ledgered | ✅ DEC-NIGHTLY-RUST-CORE-001 → MIGRATION.md #1957 |
+| 15 | Decision ID ledgered | ✅ DEC-NIGHTLY-RUST-CORE-001 → MIGRATION.md #1960 |
 
 ## Z+ 7-row resilience matrix
 
@@ -153,7 +154,7 @@ $ .venv/bin/mypy --strict brutex → clean (496 files; the single stage3_refine 
 - **PREVENT:** default-OFF flag; latches are monotone toward OFF; escape set
   re-raises raw; `lib.rs` append-only registration law.
 - **AUDIT:** structlog events for every engage/degrade/refuse/autorevert;
-  ledger entry MIGRATION.md #1957; this PR body.
+  ledger entry MIGRATION.md #1960; this PR body.
 - **RECOVER:** every failure path serves the oracle — the nightly chain never
   gains a new crash class; runtime recovery = unset the flag.
 - **COOLDOWN:** warn-once registry (no log storms); process-local latches reset
@@ -169,7 +170,7 @@ oracle extraction is byte-identical. Findings folded on this branch:
 
 - **1 MINOR:** the no-CI-parity-lane gap — already disclosed in the Honest
   envelope; follow-up material under `DEC-NIGHTLY-RUST-CORE-002`.
-- **2 NITs (both fixed):** the MIGRATION.md #1957 wording on the sub-law FFI
+- **2 NITs (both fixed):** the MIGRATION.md #1960 wording on the sub-law FFI
   faces (pinned DIRECTLY by cargo, TRANSITIVELY by the Python nets — reworded
   to that truth) + a thread-safety design note beside the facade's
   process-local module state (single-threaded orchestration; a race could

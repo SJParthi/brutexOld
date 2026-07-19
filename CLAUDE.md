@@ -18,7 +18,10 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1957,
+_Last updated: 2026-07-19 (DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1960 —
+renumbered #1957 → #1960 at the 2026-07-19 merge-reconcile (main took
+#1957 for DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001; DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001) —
 branch `claude/nightly-rust-core` — FIRST CUT of the `brutex/nightly/`
 Rust conversion: the TEN pure decision kernels (chain
 `first_breaker`/`exit_code_for`/`audit_reconcile_tripwire` · report
@@ -43,7 +46,7 @@ the probes floor law · run.py orchestration + bindings — stay PYTHON).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
-MIGRATION.md #1957.)
+MIGRATION.md #1960.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3550,7 +3553,10 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/nightly-rust-core`
-  (**DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1957** — FIRST CUT of the
+  (**DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1960** — renumbered
+  #1957 → #1960 at the 2026-07-19 merge-reconcile (main took #1957 for
+  DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001; DEC-IDs are the stable
+  handles per DEC-LEDGER-RENUMBER-001) — FIRST CUT of the
   `brutex/nightly/` Rust conversion: the TEN named pure DECISION kernels
   (chain: `first_breaker` · `exit_code_for` · `audit_reconcile_tripwire`;
   report: `summary_lines` + its `_verdict`/`_count_text` sub-laws;
@@ -10868,7 +10874,8 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/nightly-rust-core`
-  (DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1957 — FIRST CUT of the
+  (DEC-NIGHTLY-RUST-CORE-001, MIGRATION.md #1960 — renumbered
+  #1957 → #1960 at the 2026-07-19 merge-reconcile — FIRST CUT of the
   `brutex/nightly/` Rust conversion: the TEN pure decision kernels (chain
   first_breaker/exit_code_for/audit_reconcile_tripwire · report
   summary_lines + its _verdict/_count_text sub-laws · schedule
@@ -10886,7 +10893,7 @@ hostile-review pass._
   DEC-NIGHTLY-RUST-CORE-002 (backup/restore ordering · deadman_verdict ·
   the probes floor law · run.py orchestration — stay Python); ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1957 for the full blurb)
+  see §1 + MIGRATION.md #1960 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
