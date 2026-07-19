@@ -297,7 +297,7 @@ jobs:
           ls -l wheelhouse/
           test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 5
           pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_cascade-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies; print('all four kernels import OK')"
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_cascade; print('all five kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
