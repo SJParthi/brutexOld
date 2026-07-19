@@ -33,7 +33,9 @@
 # COST HONESTY: the crate is stdlib-pure Rust (no polars graph) — a cold
 # run compiles in ~seconds, so no cargo cache is carried (the lake lane's
 # cache machinery earns its keep against a ~6.5 min polars build; here it
-# would be pure config surface).
+# would be pure config surface). The lane ALSO builds the two compiled
+# engine wheels (fno_math + trading_core — seconds-scale each): every suite
+# here imports brutex.engine, whose __init__ eagerly imports both.
 
 name: sweep-ops-rust-parity
 
@@ -124,6 +126,28 @@ jobs:
             fi
             echo "pip install ./rust/brutex-sweep-ops failed (attempt $n) — retrying in 10s" >&2
             sleep 10
+          done
+
+      - name: Install the fno_math + trading_core engine wheels
+        # Every suite in this lane imports brutex.engine, whose __init__
+        # eagerly imports combo_mask (`import fno_math`, combo_mask.py:110)
+        # and stage1a (`import fno_math` + `import trading_core`,
+        # stage1a.py:78/80) — HARD wheel imports, so the lane installs both
+        # exactly like ci.yml's test job does (the lake-rust-parity
+        # trading_core-step precedent; wheels are compiler-version
+        # independent). Same crates.io flake-retry idiom as above.
+        run: |
+          for crate in ./rust/fno-math ./rust/trading-core; do
+            n=0
+            until pip install "$crate"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                echo "pip install $crate failed after 3 attempts" >&2
+                exit 1
+              fi
+              echo "pip install $crate failed (attempt $n) — retrying in 10s" >&2
+              sleep 10
+            done
           done
 
       - name: Facade matrix + real-wheel parity suite
