@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 
+CHAIN_LINKS: list[str]
 RUN_DIR_SUBDIR: str
 __version__: str
 __build_crate_version__: str
@@ -48,4 +49,55 @@ def liveness_tail(
     now_wall: float,
     wall: float,
     fresh_seconds: float,
+) -> str: ...
+def audit_entry_hash(
+    seq: str,
+    prev_hash: str,
+    ts: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+) -> str: ...
+def chain_verify_step(
+    expected_seq: int,
+    prev_expected: str,
+    seq: int,
+    prev_hash: str,
+    ts: str,
+    actor: str,
+    action: str,
+    subject: str,
+    payload_json: str,
+    entry_hash: str,
+) -> tuple[str, str, str]: ...
+def stamp_verdict(
+    recomputed: str,
+    content_hash: str,
+    stage: str,
+    expected_stage: str,
+    run_id: str,
+    expected_run_id: str | None,
+    stamped_snapshot: str | None,
+    expected_snapshot: str | None,
+) -> str: ...
+def chain_link_state(
+    link: str,
+    idx: int,
+    verdict: str | None,
+    running: bool,
+    last_stage: str | None,
+    terminal: str | None,
+    refusal_text: str | None,
+    error_type: str | None,
+) -> tuple[str, str]: ...
+def count_reconciliation(
+    total: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    in_flight: int,
+    prev_evaluated: int | None,
+    is_done: bool,
 ) -> str: ...

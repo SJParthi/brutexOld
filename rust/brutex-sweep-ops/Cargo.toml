@@ -50,6 +50,15 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
+# Slice 2 (audit_chain): the official BLAKE3 crate — the SAME algorithm the
+# Python side's pure-pip `blake3` package implements (sweep_audit's chain) and
+# the SAME crate rust/fno-math already pins for `blake3_hash` (version floor
+# mirrored — a skew between the two crates would be an algorithm-identical
+# but lockstep-hygiene divergence, so keep them aligned). NOT a new hash law:
+# the chain's byte layout stays defined by brutex/engine/sweep_audit.py and
+# is burn-in + cross-language-golden pinned.
+blake3 = "1.5"
+
 # Optional — only compiled when the `python` feature is enabled. abi3-py312
 # pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
 # kernels use the identical pin).

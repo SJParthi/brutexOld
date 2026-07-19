@@ -27,6 +27,20 @@ Slice 1b — the deferred leaf batch:
 * ``liveness_tail`` — the ``sweep_liveness`` ``progress_verdict`` decision
   tail.
 
+Slice 2 — the audit-chain family:
+
+* ``audit_entry_hash`` — the ``sweep_audit`` BLAKE3 entry-hash law (fields
+  arrive ALREADY rendered Python-side; Rust joins with ``|`` + hashes).
+* ``chain_verify_step`` — the ``sweep_audit`` per-entry ``verify_chain``
+  step (seq → prev-hash linkage → recomputed content hash; first failure
+  wins).
+* ``stamp_verdict`` — the ``stage_stamp`` validate mismatch decision.
+* ``chain_link_state`` — the ``chain_map`` per-link state ladder.
+* ``count_reconciliation`` — the ``run_tripwires`` D-9 counter-identity
+  violations fold.
+* ``CHAIN_LINKS`` — the Rust twin of ``chain_map.LINKS`` (drift-pinned by
+  the parity suite).
+
 Wheel-source freshness handshake (the sibling-wheel pattern)
 ------------------------------------------------------------
 Import-time guard: the compiled ``.so`` is asserted to expose EVERY symbol
@@ -49,8 +63,13 @@ from collections.abc import Sequence
 #: Every symbol this shim re-exports from the compiled PyO3 module — the ONE
 #: in-code source of truth for the import-time freshness handshake.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
+    "CHAIN_LINKS",
     "RUN_DIR_SUBDIR",
     "__version__",
+    "audit_entry_hash",
+    "chain_link_state",
+    "chain_verify_step",
+    "count_reconciliation",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
@@ -60,6 +79,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",
+    "stamp_verdict",
 )
 
 
@@ -87,8 +107,13 @@ _assert_compiled_surface(_compiled)
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._brutex_sweep_ops import (  # noqa: E402
+    CHAIN_LINKS,
     RUN_DIR_SUBDIR,
     __version__,
+    audit_entry_hash,
+    chain_link_state,
+    chain_verify_step,
+    count_reconciliation,
     freshness_stale,
     gate_config_fragment,
     join_path_segments,
@@ -98,6 +123,7 @@ from ._brutex_sweep_ops import (  # noqa: E402
     rank_plan_decision,
     sla_decision,
     stall_scaled_timeout,
+    stamp_verdict,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -105,8 +131,13 @@ from ._brutex_sweep_ops import (  # noqa: E402
 __build_crate_version__: str = __version__
 
 __all__ = [
+    "CHAIN_LINKS",
     "RUN_DIR_SUBDIR",
     "__version__",
+    "audit_entry_hash",
+    "chain_link_state",
+    "chain_verify_step",
+    "count_reconciliation",
     "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
@@ -116,4 +147,5 @@ __all__ = [
     "rank_plan_decision",
     "sla_decision",
     "stall_scaled_timeout",
+    "stamp_verdict",
 ]
