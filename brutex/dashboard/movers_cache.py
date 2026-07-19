@@ -175,6 +175,7 @@ __all__ = [
     "MoversSnapshotCache",
     "candidate_key",
     "deep_size_bytes",
+    "native_frame_in_payload",
     "revision_generation",
 ]
 
@@ -438,6 +439,89 @@ def deep_size_bytes(value: object) -> int:
         return _shallow_size(value)
 
 
+#: Root module names whose objects :func:`deep_size_bytes` provably
+#: UNDER-COUNTS (native off-heap buffers behind a tiny Python shell —
+#: polars/pyarrow frames, series, tables). A watermark-carrying cache holding
+#: one silently defeats the ``max_bytes`` budget (DEC-MEMORY-FOOTPRINT-
+#: HARDENING-001's stated heuristic limit → an unbounded-RSS OOM risk), so
+#: the store path GUARDS against them (:func:`native_frame_in_payload`).
+_NATIVE_FRAME_MODULE_ROOTS: Final[frozenset[str]] = frozenset({"polars", "pyarrow"})
+
+#: Depth cap for :func:`native_frame_in_payload` — the same shallow-payload
+#: rationale as :data:`_DEEP_SIZE_MAX_DEPTH`, but tighter: cached payloads
+#: embed frames (if ever, wrongly) at the top level or inside one/two
+#: container levels.
+_NATIVE_FRAME_MAX_DEPTH: Final[int] = 4
+
+#: Width cap for :func:`native_frame_in_payload` — only the FIRST this-many
+#: items of each container are probed (the depth cap's width twin; the
+#: hostile-review-fix-round bench catch: an uncapped probe walked a
+#: 200k-record ledger payload per watermarked insert — 91 ms measured vs the
+#: 50 ms ``test_cold_serve_sizing_cost_bounded_at_scale`` ceiling —
+#: reintroducing the O(rows) insert-path walk the #1721 M1 sizing hint
+#: removed). A wrongly-cached frame sits at the payload top level or inside a
+#: NARROW wrapper (``{"frame": df}`` / ``(generation, df)``) — and a
+#: frame-of-rows payload carries one at item 0 — never uniquely past the
+#: first few dozen items of a wide row list. HONEST bound (Golden Rule #10):
+#: worst case is O(K^D) module checks over a pathologically nested payload
+#: (~1M at K=32 / D=4) — bounded and payload-SIZE-independent, NOT literal
+#: O(1); the probe additionally runs ONLY on :meth:`_size_payload`'s
+#: deep-size FALLBACK arm, which already pays an O(payload) walk.
+_NATIVE_FRAME_MAX_ITEMS: Final[int] = 32
+
+
+def native_frame_in_payload(value: object) -> str | None:
+    """Qualified type name of the FIRST polars/pyarrow object in *value*, else ``None``.
+
+    DEC-LAKE-READ-INODE-GUARD-001 (the #1721 byte-watermark companion guard):
+    :func:`deep_size_bytes` sizes only the Python SHELL of a native-library
+    object — a cached polars ``DataFrame`` / pyarrow ``Table`` carries its
+    real payload in off-heap buffers the walk cannot see, so ONE such entry
+    silently defeats a ``max_bytes`` watermark and re-opens the OOM the
+    watermark exists to bound. This probe walks *value* SHALLOWLY (dict keys +
+    values, list/tuple/set/frozenset items; depth-capped at
+    :data:`_NATIVE_FRAME_MAX_DEPTH` AND width-capped at
+    :data:`_NATIVE_FRAME_MAX_ITEMS` per container — deeper nests and wider
+    tails abstain, the bounded-work law) and reports the
+    first object whose type's ROOT module is in
+    :data:`_NATIVE_FRAME_MODULE_ROOTS`. Detection is by module-name ONLY —
+    polars/pyarrow are never imported here (the module stays wheel-free).
+    ANY probe fault abstains to ``None`` (a guard can never break an insert —
+    Golden Rule #1's never-crash posture for accounting; a container mutated
+    mid-iteration folds into the same abstain — the iteration deliberately
+    takes NO materializing ``list(...)`` copy, so a 200k-item payload never
+    pays an O(items) copy just to be width-cap-skipped).
+    """
+
+    def _probe(obj: object, depth: int) -> str | None:
+        module = type(obj).__module__
+        if isinstance(module, str) and module.partition(".")[0] in _NATIVE_FRAME_MODULE_ROOTS:
+            return f"{module}.{type(obj).__qualname__}"
+        if depth >= _NATIVE_FRAME_MAX_DEPTH:
+            return None  # deeper nests abstain (bounded work).
+        if isinstance(obj, dict):
+            for index, (key, item) in enumerate(obj.items()):
+                if index >= _NATIVE_FRAME_MAX_ITEMS:
+                    return None  # wider containers abstain (bounded work).
+                found = _probe(key, depth + 1) or _probe(item, depth + 1)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            for index, item in enumerate(obj):
+                if index >= _NATIVE_FRAME_MAX_ITEMS:
+                    return None  # wider containers abstain (bounded work).
+                found = _probe(item, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    try:
+        return _probe(value, 0)
+    except Exception:  # pylint: disable=broad-except — the guard must never break an insert
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class _Entry:
     """One cached candidate set plus the generation + clock it was computed at.
@@ -599,6 +683,10 @@ class MoversSnapshotCache:
         #: One WARNING per single-entry-over-budget breach EPISODE; reset the
         #: moment an insert lands the total back at/below the watermark.
         self._single_over_warned = False
+        #: One WARNING per instance for a watermark-defeating native-frame
+        #: payload (DEC-LAKE-READ-INODE-GUARD-001 — polars/pyarrow objects
+        #: whose off-heap buffers ``deep_size_bytes`` cannot see).
+        self._native_frame_warned = False
         self._pull_active_probe = pull_active_probe
         self._adaptive_floor = adaptive_floor
         self._adaptive_base_floor_s = adaptive_base_floor_s
@@ -674,7 +762,13 @@ class MoversSnapshotCache:
         unrecognized shape) and ANY hint fault fall back to
         :func:`deep_size_bytes` (which itself never raises), so sizing can
         never break an insert (Golden Rule #1's never-crash posture for
-        accounting).
+        accounting). The DEC-LAKE-READ-INODE-GUARD-001 native-frame probe
+        runs on the deep-size FALLBACK arm ONLY: a hint-RECOGNIZED payload is
+        by construction one of the caller's own known shapes (never a native
+        frame — the hints are ours), and running the probe before the hint
+        reintroduced the O(rows) insert-path walk the hint exists to remove
+        (the bench ``test_cold_serve_sizing_cost_bounded_at_scale`` caught
+        exactly that — 91 ms vs the 50 ms ceiling at 200k records).
         """
         if self._max_bytes is None:
             return 0
@@ -688,7 +782,28 @@ class MoversSnapshotCache:
             except Exception:  # pylint: disable=broad-except — a hint fault falls back
                 hinted = None  # deep-size fallback below — never a skipped insert.
             if hinted is not None:
+                # Hint-recognized ⇒ a known our-own shape, never a frame —
+                # the probe is deliberately SKIPPED (zero sizing work beyond
+                # the O(1) hint; the docstring's bench-caught law).
                 return max(0, hinted)
+        # DEC-LAKE-READ-INODE-GUARD-001 — the #1721 watermark companion guard,
+        # on the deep-size FALLBACK arm only: a polars/pyarrow object in a
+        # WATERMARK-carrying cache's payload defeats the byte accounting
+        # (deep_size sees only the Python shell of its off-heap buffers → an
+        # unbounded-RSS OOM risk). Detect + WARN once per instance, never
+        # refuse the insert (Golden Rule #1's never-crash accounting posture;
+        # the fix is at the producer). This arm already pays the O(payload)
+        # deep walk, so the width+depth-capped probe adds no complexity class.
+        if not self._native_frame_warned:
+            offender = native_frame_in_payload(value)
+            if offender is not None:
+                self._native_frame_warned = True
+                _LOG.warning(
+                    "movers_cache.native_frame_payload",
+                    payload_type=type(value).__name__,
+                    native_type=offender,
+                    max_bytes=self._max_bytes,
+                )
         return deep_size_bytes(value)
 
     def _store_entry_locked(

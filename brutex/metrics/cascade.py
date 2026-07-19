@@ -433,6 +433,21 @@ class CandidateVerdict:
     #: every existing construction is unaffected. NEVER rounded (CLAUDE.md
     #: §4 — display projections mint their own ``rate * 100.0`` alias).
     cpcv_pass_rate: float | None = None
+    #: The cascade's OWN filter-#2 Deflated Sharpe for this candidate
+    #: (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 5): the value was
+    #: previously computed per candidate then DISCARDED on the pass path —
+    #: only a reject's ``detail`` string carried it. Populated for EVERY
+    #: candidate whose DSR evaluation succeeded (a pass, a filter-#2
+    #: threshold reject, AND a later-stage reject alike); ``None`` when the
+    #: candidate never reached filter #2 (hard-gate reject) or the
+    #: evaluation itself raised. Deflated against the report's run-level
+    #: ``dsr_n_trials`` under ``dsr_n_source`` (``"leaderboard"`` = the
+    #: corrected search-N; ``"pool"`` = the legacy under-count that also
+    #: sets :attr:`provisional`). Full precision, NEVER rounded
+    #: (DEC-STAT-DSR-PBO-001). ADDITIVE with a ``None`` default so
+    #: pre-change constructions/deserialisations load ``None``, never a
+    #: fabricated 0.
+    dsr_corrected: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,10 +704,20 @@ def run_stage4_cascade(
 
     verdicts: dict[str, CandidateVerdict] = {}
     stage_survivors: dict[str, int] = {}
+    # DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): every successfully
+    # evaluated filter-#2 DSR is RETAINED per candidate so the verdict carries
+    # it on the pass path too (it was previously discarded there — only the
+    # reject detail string kept the figure). Absent id ⇒ honest None (hard-gate
+    # reject / the DSR evaluation itself raised), never a fabricated 0.
+    dsr_by_id: dict[str, float] = {}
 
     def reject(c: CandidateInput, stage: FilterStage, detail: str) -> None:
         verdicts[c.candidate_id] = CandidateVerdict(
-            candidate_id=c.candidate_id, passed=False, rejected_at=stage, detail=detail
+            candidate_id=c.candidate_id,
+            passed=False,
+            rejected_at=stage,
+            detail=detail,
+            dsr_corrected=dsr_by_id.get(c.candidate_id),
         )
 
     survivors = pool
@@ -761,6 +786,9 @@ def run_stage4_cascade(
         except ValueError as exc:
             reject(c, FilterStage.DEFLATED_SHARPE, f"DSR could not be evaluated: {exc}")
             continue
+        # Retained BEFORE the threshold branch so pass AND reject verdicts
+        # alike carry the evaluated figure (DEC-RESULTS-TRUST-HONESTY-001).
+        dsr_by_id[c.candidate_id] = dsr.deflated_sharpe_ratio
         if dsr.deflated_sharpe_ratio < config.dsr_min:
             reject(
                 c,
@@ -977,6 +1005,10 @@ def run_stage4_cascade(
             # A pool-N-deflated pass is PROVISIONAL (R2-SR-F4): the legacy
             # entering-pool fallback under-counts the true leaderboard N.
             provisional=dsr_n_source == "pool",
+            # Every survivor passed filter #2, so its evaluated DSR is always
+            # present here (DEC-RESULTS-TRUST-HONESTY-001 — the previously
+            # discarded pass-path value; .get keeps the honest-None contract).
+            dsr_corrected=dsr_by_id.get(c.candidate_id),
         )
 
     # ONE final recording-only stamp (DEC-RESULTS-CASCADE-VERDICT-JOIN-001):

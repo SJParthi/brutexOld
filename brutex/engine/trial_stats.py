@@ -67,6 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.results_store import _atomic_write
 from brutex.models import BruteXError
 from brutex.ranking.overfit import _MIN_FINITE_SHARPES
@@ -85,6 +86,23 @@ _TUPLE_DIGEST_LEN: Final[int] = 16
 
 #: SHA-256 hex length — the store's ``FlushResult.content_hash`` format.
 _CONTENT_HASH_LEN: Final[int] = 64
+
+#: The exploration-MODE-dependent census triple (DEC-SWEEP-APRIORI-DEFAULT-001,
+#: MIGRATION.md #1752 review fix round 2) — the ONE cross-module source of the
+#: :class:`TupleTrialStats` field names whose values legitimately depend on the
+#: sweep's exploration mode (legacy fixed-k enumeration vs the Apriori
+#: extinction frontier): the frontier prunes candidates EARLIER, so
+#: ``n_enumerated`` / ``n_conflict_pruned`` / ``n_minhits_dropped`` diverge
+#: between the two modes over the SAME bars while every result-bearing field
+#: (``n_backtested``, the Sharpe moments, the pairing identity) is
+#: mode-invariant. ``sweep_verify`` consumes this to attribute a MIXED-mode
+#: tree's confined sidecar recount residue non-corrupt (the ``VIX_FIELDS``
+#: precedent — one owner, imported never re-minted).
+MODE_CENSUS_FIELDS: Final[tuple[str, ...]] = (
+    "n_conflict_pruned",
+    "n_enumerated",
+    "n_minhits_dropped",
+)
 
 #: The exact payload keys a v1 sidecar must carry (sorted; the JSON contract).
 _PAYLOAD_KEYS: Final[tuple[str, ...]] = (
@@ -436,7 +454,7 @@ def read_tuple_trial_stats(path: Path) -> TupleTrialStats:
     if not path.exists():
         raise TrialStatsError(f"trial-stats sidecar not found at {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(path))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise TrialStatsError(f"trial-stats sidecar at {path} is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
@@ -469,6 +487,7 @@ def read_tuple_trial_stats(path: Path) -> TupleTrialStats:
 
 
 __all__ = [
+    "MODE_CENSUS_FIELDS",
     "TRIAL_STATS_SCHEMA_VERSION",
     "TRIAL_STATS_SUFFIX",
     "LeaderboardTrialStats",

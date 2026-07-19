@@ -29,9 +29,10 @@ from pathlib import Path
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultsStore, ResultsStoreError, ResultsStoreSchemaError
 from brutex.engine.sweep_orchestrator import (
     DEFAULT_MAX_TUPLES,
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     SweepGridConfig,
     SweepGridSummary,
     SweepTuple,
@@ -49,6 +50,7 @@ from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -1178,6 +1180,235 @@ def test_default_max_tuples_is_exposed() -> None:
     assert DEFAULT_MAX_TUPLES == 100_000
 
 
+class TestRunSweepGridCorruptStoreContained:
+    """DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+    A CORRUPT / old-schema finalist store raised at its LOAD boundary on resume is
+    CONTAINED to a per-tuple ``TUPLE_FAILED`` (never a whole-grid abort), fires the
+    dedicated ``sweep_grid.tuple_store_corrupt`` WARN with the heal remediation, and
+    leaves the corrupt file in place (un-sentineled → visible on every resume). Only
+    the G14 ``ResultsStoreSchemaError`` is caught — its parent ``ResultsStoreError``
+    keeps the documented global abort.
+    """
+
+    def test_corrupt_store_contained_tuple_failed(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])  # 2 tuples
+        results_root = tmp_path / "results"
+
+        # Simulate a corrupt finalist store on resume: a real garbage parquet at
+        # the BANKNIFTY tuple's store path (VECTOR: overwrite *.parquet with
+        # b"CORRUPT\x00\x01"*40). load_or_create_store loads it (path exists) →
+        # ResultsStore.load raises the typed ResultsStoreSchemaError.
+        victim = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        victim_path = tuple_store_path(results_root, victim, grid)
+        victim_path.parent.mkdir(parents=True, exist_ok=True)
+        victim_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+
+        audit_path = tmp_path / "grid.jsonl"
+        with capture_logs() as logs, AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # The clean tuple ran; the corrupt one was contained, not a whole-grid abort.
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 1
+        # The corrupt file is left in place (un-quarantined, un-sentineled).
+        assert victim_path.read_bytes() == b"CORRUPT\x00\x01" * 40
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "BANKNIFTY" in failed.payload["tuple"]
+        assert "ResultsStoreSchemaError" in failed.payload["error"]
+        # The dedicated corrupt-store WARN carries the store path + heal remediation.
+        corrupt = [e for e in logs if e.get("event") == "sweep_grid.tuple_store_corrupt"]
+        assert len(corrupt) == 1
+        assert str(victim_path) in corrupt[0]["error"]
+        assert corrupt[0]["remediation"] == TUPLE_STORE_CORRUPT_REMEDIATION
+        assert verify_chain(audit_path) > 0
+
+    def test_store_schema_error_from_store_for_is_contained(self, tmp_path: Path) -> None:
+        """A ResultsStoreSchemaError raised from the store factory is contained + WARNed."""
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        base_store_for = make_store_for(tmp_path / "results", grid)
+
+        def _corrupt_store_for(tuple_: SweepTuple) -> ResultsStore:
+            raise ResultsStoreSchemaError(
+                f"unreadable results store at {tmp_path}/store.parquet: boom"
+            )
+
+        del base_store_for  # the real factory is intentionally unused here
+        with capture_logs() as logs, AuditWriter.open(tmp_path / "grid.jsonl") as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_corrupt_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        assert any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
+
+    def test_parent_results_store_error_still_aborts_grid(self, tmp_path: Path) -> None:
+        """The NARROWNESS tooth: a parent ResultsStoreError (not schema) still aborts."""
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+        grid = _grid()
+
+        def _conflict_store_for(tuple_: SweepTuple) -> ResultsStore:
+            # A run-identity CONFLICT / env fault is ResultsStoreError, NOT the G14
+            # ResultsStoreSchemaError — it must keep the documented global abort.
+            raise ResultsStoreError("run-identity conflict: same id, different metrics")
+
+        with (
+            AuditWriter.open(tmp_path / "grid.jsonl") as audit,
+            pytest.raises(ResultsStoreError, match="run-identity conflict"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_conflict_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+
+
+class TestRemediationFlagsRunnable:
+    """Review round 1 MAJOR-1: the remediation command chain must be RUNNABLE.
+
+    The prior string named a NONEXISTENT ``--out-root`` flag and skipped the
+    heal-plan step, so an operator copy-paste failed. These pins parse the
+    string's tokens against the REAL argparse surface (``brutex.cli.build_parser``)
+    so the string can never rot against the CLI again — mutant-killing:
+    reintroducing ``--out-root``, dropping ``--results-root``/``--recount``/
+    ``--emit-heal-plan``/``--execute``, or renaming either subcommand fails here.
+    """
+
+    @staticmethod
+    def _subparser_option_strings(command: str) -> set[str]:
+        """Every ``--flag`` the REAL *command* subparser accepts (live surface)."""
+        import argparse
+
+        from brutex.cli import build_parser
+
+        parser = build_parser()
+        sub = next(
+            action
+            for action in parser._actions  # pyright: ignore[reportPrivateUsage]
+            if isinstance(action, argparse._SubParsersAction)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert command in sub.choices, f"remediation names a nonexistent command: {command}"
+        chosen = sub.choices[command]
+        options: set[str] = set()
+        for action in chosen._actions:  # pyright: ignore[reportPrivateUsage]
+            options.update(action.option_strings)
+        return options
+
+    def test_every_flag_in_the_string_exists_on_the_named_parsers(self) -> None:
+        """Each LEG's ``--`` flags must exist on THAT leg's OWN subparser.
+
+        Round-2 NIT: the prior union check let a flag valid on one leg but written
+        into the OTHER leg's sentence still pass. Split the string at the
+        ``brutex sweep-heal`` boundary and assert per-leg containment, so a flag
+        in the wrong leg (e.g. ``--execute`` written into the verify sentence, or
+        ``--recount`` into the heal sentence) fails here.
+        """
+        import re
+
+        text = TUPLE_STORE_CORRUPT_REMEDIATION
+        split = text.index("brutex sweep-heal")
+        assert split > text.index("brutex sweep-verify"), "verify leg must precede heal leg"
+        verify_leg, heal_leg = text[:split], text[split:]
+
+        def _flags(segment: str) -> set[str]:
+            return set(re.findall(r"--[a-z][a-z0-9-]*", segment, re.ASCII))
+
+        verify_flags, heal_flags = _flags(verify_leg), _flags(heal_leg)
+        assert verify_flags, "the verify leg must name at least one CLI flag"
+        assert heal_flags, "the heal leg must name at least one CLI flag"
+
+        verify_known = self._subparser_option_strings("sweep-verify")
+        heal_known = self._subparser_option_strings("sweep-heal")
+        assert not (verify_flags - verify_known), (
+            f"verify leg names flags absent from sweep-verify: {sorted(verify_flags - verify_known)}"
+        )
+        assert not (heal_flags - heal_known), (
+            f"heal leg names flags absent from sweep-heal: {sorted(heal_flags - heal_known)}"
+        )
+
+    def test_verify_leg_parses_on_the_real_cli(self) -> None:
+        """The sweep-verify leg's exact flags parse (with the required grid dates)."""
+        from brutex.cli import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "sweep-verify",
+                "--results-root",
+                "res",
+                "--recount",
+                "--emit-heal-plan",
+                "--start",
+                "2024-01-02",
+                "--end",
+                "2024-01-10",
+            ]
+        )
+        assert args.recount is True
+        assert args.emit_heal_plan is True
+        assert args.results_root == Path("res")
+
+    def test_heal_leg_parses_on_the_real_cli(self) -> None:
+        """The sweep-heal leg's exact shape (positional plan + flags) parses."""
+        from brutex.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["sweep-heal", "res/heal/plan.json", "--results-root", "res", "--execute"]
+        )
+        assert args.plan == Path("res/heal/plan.json")
+        assert args.results_root == Path("res")
+        assert args.execute is True
+
+    def test_out_root_is_not_a_real_flag_and_not_in_the_string(self) -> None:
+        """The exact round-1 defect, pinned dead: ``--out-root`` is fictional."""
+        from brutex.cli import build_parser
+
+        assert "--out-root" not in TUPLE_STORE_CORRUPT_REMEDIATION
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "sweep-verify",
+                    "--out-root",
+                    "res",
+                    "--start",
+                    "2024-01-02",
+                    "--end",
+                    "2024-01-10",
+                ]
+            )
+
+    def test_chain_load_bearing_tokens_pinned(self) -> None:
+        """The chain's load-bearing tokens, individually (mutant killers)."""
+        text = TUPLE_STORE_CORRUPT_REMEDIATION
+        assert "brutex sweep-verify" in text
+        assert "brutex sweep-heal" in text
+        assert "--results-root" in text
+        assert "--recount" in text
+        assert "--emit-heal-plan" in text
+        assert "--execute" in text
+        assert "/heal/" in text  # the plan location the verify leg writes
+        assert "move the corrupt store file aside" in text  # the manual fallback
+        # The C7 mass-quarantine gate disclosure (a >= 50%-condemned plan —
+        # e.g. a single-tuple grid — refuses without the override flag).
+        assert "--allow-mass-quarantine" in text
+        assert "C7" in text
+
+
 # ────── ADR-0012 roll_schedule threading through the grid ──────
 
 
@@ -1256,3 +1487,208 @@ class TestRunSweepGridRollSchedule:
         base = _run("none", None)
         assert _run("empty", {}) == base
         assert _run("foreign", {"NSE-NIFTY-FUT": _FUT_SCHEDULE}) == base
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The grid driver's apriori wiring: the ONE hit_memo_cell_key builder, the
+# per-cell memo threading (reset on a cell change, None on legacy), the
+# EMIT-ON-apriori START/COMPLETE payload keys, and the DISTINCT
+# tuples_failed_apriori_budget counter.
+
+
+class TestHitMemoCellKey:
+    """The memo's cell key == the kernel-cache determinant set (§11 COMMON)."""
+
+    def test_key_components(self) -> None:
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        key = hit_memo_cell_key(tuple_, grid, (738885,))
+        assert key == (
+            tuple_.instrument,
+            tuple_.tf.label,
+            None,  # proximity None flattens to None
+            grid.prior_n,
+            tuple_.fib_anchor.value,
+            (738885,),
+            False,  # apply_1day_mask for a spot 1minute tuple
+        )
+
+    def test_direction_sl_tp_k_are_excluded(self) -> None:
+        """The key survives the whole cell's k-ladder — the memo's point."""
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        grid = _grid(
+            directions=[Side.BUY, Side.SELL],
+            k_values=[1, 2],
+            stop_losses=[80, None],
+            take_profits=[50, None],
+        )
+        keys = {hit_memo_cell_key(t, grid, None) for t in iter_sweep_tuples(grid)}
+        assert len(keys) == 1  # ONE cell across every direction/k/sl/tp tuple
+
+    def test_proximity_flattens_to_bps(self) -> None:
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        prox = ProximityParams(pivot_proximity_bps=12)
+        grid = _grid(proximities=[prox])
+        tuple_ = next(iter_sweep_tuples(grid))
+        key = hit_memo_cell_key(tuple_, grid, None)
+        assert key[2] == (
+            prox.pivot_proximity_bps,
+            prox.pdh_pdl_proximity_bps,
+            prox.fib_proximity_bps,
+        )
+
+
+class TestRunSweepGridAprioriWiring:
+    """START/COMPLETE keys + memo threading + the budget-trip counter."""
+
+    @staticmethod
+    def _capture_memos(
+        tmp_path: Path, grid: SweepGridConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[SweepGridSummary, list[object], Path]:
+        """Run the grid with a fake run_one_tuple capturing hit_count_memo."""
+        memos: list[object] = []
+
+        def _fake(grid_: object, tuple_: object, **kwargs: object) -> object:
+            memos.append(kwargs["hit_count_memo"])
+            return None  # classify as no-bars: no engine work
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _fake)
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        return summary, memos, audit_path
+
+    def test_legacy_start_and_complete_payloads_carry_no_apriori_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1, 2])
+        _summary, memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        assert memos == [None, None]  # legacy: memo structurally absent
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert "apriori" not in start.payload
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert "tuples_failed_apriori_budget" not in complete.payload
+
+    def test_apriori_start_records_the_mode_and_complete_the_counter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2])
+        _summary, memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        # ONE memo dict shared across the whole cell's k-ladder.
+        assert len(memos) == 2
+        assert isinstance(memos[0], dict)
+        assert memos[0] is memos[1]
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert start.payload["apriori"] == {
+            "enabled": True,
+            "max_mask_bars": DEFAULT_MAX_MASK_BARS,
+        }
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 0
+
+    def test_overfit_gated_start_records_gate_config_overfit_leg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 (MIGRATION.md #1851): an
+        overfit-gated grid's GRID_SWEEP_START payload records the #1336
+        overfit fragment ``[dsr_min, weight, default_skew,
+        default_excess_kurtosis]`` under ``gate_config`` — the MINT side of
+        the recount recovery channel `recorded_overfit_from_audit` reads."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=0.9))
+        _summary, _memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert start.payload["gate_config"] == {"overfit": [0.9, 0.05, 0.0, 0.0]}
+
+    def test_ungated_start_carries_no_gate_config_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EMIT-ON-active absence pin (#1851): an UNGATED grid writes NO
+        ``gate_config`` key — absent == legacy, never a recorded default."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1])
+        _summary, _memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert "gate_config" not in start.payload
+
+    def test_memo_resets_on_a_cell_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two cells (two timeframes) → two DISTINCT memo dicts (reset-on-change)."""
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)], k_values=[1, 2])
+        _summary, memos, _audit = self._capture_memos(tmp_path, grid, monkeypatch)
+        # Enumeration order: tf-major → [1m k1, 1m k2, 5m k1, 5m k2].
+        assert len(memos) == 4
+        assert memos[0] is memos[1]
+        assert memos[2] is memos[3]
+        assert memos[0] is not memos[2]
+
+    def test_budget_trip_counts_distinctly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SweepAprioriBudgetError is counted APART from generic failures —
+        by EXACT isinstance, so a LOOK-ALIKE class name is never miscounted
+        (review fix round 1 m8)."""
+        from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2, 3])
+
+        def _fake(grid_: object, tuple_: object, **kwargs: object) -> object:
+            k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
+            if k == 2:
+                raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
+            if k == 3:
+                raise SweepComboError("generic combo failure")
+            return None
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _fake)
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        assert summary.tuples_failed == 3
+        assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 1
+
+    def test_summary_field_defaults_zero(self) -> None:
+        """The defaulted-field back-compat law (the quarantined_prior precedent)."""
+        summary = SweepGridSummary(
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            enumerated=1,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=1,
+            ranked=0,
+            persisted=0,
+            tuples_failed=0,
+        )
+        assert summary.tuples_failed_apriori_budget == 0

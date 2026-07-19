@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_via
+from brutex.data.guarded_read import read_regular_bytes_deadline
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports
     from pathlib import Path
@@ -166,7 +167,15 @@ def load_last_run(lake_root: Path) -> dict[str, object] | None:
                 error=f"exceeds the {MAX_JOURNAL_BYTES}-byte sanity cap",
             )
             return None
-        payload = json.loads(path.read_bytes().decode("utf-8"))
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — this read is
+        # served by GET /api/v1/crossverify/progress on every panel poll,
+        # matching its already-FIFO-hardened owed-days sibling): a planted
+        # FIFO / wedged volume folds into the corruption arm below
+        # (NotRegularFileError / ReadStallError are OSError subclasses)
+        # instead of wedging the route thread forever.
+        payload = json.loads(
+            read_regular_bytes_deadline(path, what="crossverify last-run read").decode("utf-8")
+        )
         if not isinstance(payload, dict) or payload.get("version") != JOURNAL_VERSION:
             raise ValueError(f"unsupported last-run shape/version at {path}")
     except FileNotFoundError:
@@ -280,7 +289,12 @@ def load_journal(lake_root: Path, day: date) -> DayJournal | None:
         )
         return None
     try:
-        raw = path.read_bytes().decode("utf-8")
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the journal
+        # load runs under the per-day LEAF flock on the producer path): the
+        # pre-read stat cap reads 0 for a planted FIFO, so the guard on the
+        # READ itself is load-bearing; failures fold into the existing
+        # corruption arm (both guard errors are OSError subclasses).
+        raw = read_regular_bytes_deadline(path, what="crossverify journal read").decode("utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         # A file raced away between the stat and the read folds in here too
         # (FileNotFoundError IS an OSError) — one WARN, honest degrade.
