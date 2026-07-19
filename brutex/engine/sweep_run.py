@@ -85,6 +85,7 @@ memory in bounded mode is O(kept), NOT O(1).
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -593,6 +594,14 @@ class SweepRunConfig:
     #: contained). ``None`` — every spot config — emits NO params key, so spot
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
+    #: Opt-in Door-6 SL-hit-rate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    #: Stage B — the ``SweepGridConfig.max_sl_hit_rate`` knob, threaded here by
+    #: ``to_run_config``): a gate-time SELECTION knob, so it is folded into the
+    #: store-address identity by ``_gate_config_fragment``
+    #: (active-only — ``None``, the default, leaves every digest AND every gate
+    #: verdict byte-identical) and is NEVER part of ``canonical_trade_params``
+    #: (simulation is unchanged). Appended LAST (defaulted-last law).
+    max_sl_hit_rate: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -651,6 +660,17 @@ class SweepRunConfig:
             raise ValueError(f"SweepRunConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepRunConfig.min_hits must be >= 0, got {self.min_hits}")
+        # The SAME range law SweepGridConfig enforces (CLAUDE.md §11 COMMON —
+        # one validation contract on both config layers, so a direct
+        # run_persisted_sweep caller cannot smuggle a junk ceiling past the
+        # grid's check).
+        if self.max_sl_hit_rate is not None and (
+            not math.isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0
+        ):
+            raise ValueError(
+                f"SweepRunConfig.max_sl_hit_rate must be a finite fraction in "
+                f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -989,6 +1009,42 @@ def ranked_combo_to_result_row(
         vix_mean=vix_mean,
         vix_min=vix_min,
         vix_max=vix_max,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate is total on ResultMetrics;
+        # the Kelly pair rides the SAME _metric_or_zero None → 0.0 coercion
+        # the rankable profit_factor column has always ridden (the mirrored
+        # precedent — design-pack ruling), so a row written by current code
+        # always carries concrete floats and a stored None can only mean a
+        # pre-extension file (the Ruling-5 read boundary).
+        loss_rate=m.loss_rate,
+        kelly_fraction=_metric_or_zero(m.kelly_fraction),
+        log_growth_at_half_kelly=_metric_or_zero(m.log_growth_at_half_kelly),
+        # sl_hit_rate (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is a
+        # PLAIN pass-through — deliberately NO _metric_or_zero coercion: a
+        # None here means the metrics were computed WITHOUT the exit-reason
+        # counters ("reasons unavailable"), and coercing it to 0.0 would
+        # fabricate a perfect-looking SL record (Golden Rule #1). The sweep
+        # spine always threads the counters, so every sweep-persisted row's
+        # column is concrete (test-pinned); None reaches disk only from a
+        # counter-less legacy caller — the same honest-unknown a
+        # pre-extension store reads back.
+        sl_hit_rate=m.sl_hit_rate,
+        # The recency family (DEC-METRICS-TRAILING-WINDOW-001 Stage C) is a
+        # PLAIN pass-through — NO _metric_or_zero coercion: None means the
+        # GLOBAL trailing anchor was absent (a legacy caller), or — for the
+        # trailing trio — the 24-month window honestly held zero trades;
+        # coercing either to 0.0 would fabricate a measured recency figure
+        # (Golden Rule #1). The sweep spine always threads the anchor, so a
+        # sweep-persisted row's decay composite is concrete (test-pinned)
+        # while its trailing trio is concrete exactly when the window held
+        # trades. The exact int trailing net rides the row's nullable
+        # Float64 lane (exact below 2**53 paisa).
+        trailing_sharpe_ratio=m.trailing_sharpe_ratio,
+        trailing_profit_factor=m.trailing_profit_factor,
+        trailing_net_pnl_paisa=(
+            None if m.trailing_net_pnl_paisa is None else float(m.trailing_net_pnl_paisa)
+        ),
+        decay_weighted_net_paisa=m.decay_weighted_net_paisa,
     )
 
 
@@ -1228,13 +1284,17 @@ def _iter_mask_metrics(
 
     The factored Phase-C body (DEC-SWEEP-STREAMING-RANK-001, CLAUDE.md §11
     COMMON): chunked
-    :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks_with_exit_indices`
-    batches — each mask's ``(trades, exit_indices)`` pair, the certified exit
-    indices threaded into the per-mask
+    :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks_with_exit_counts`
+    batches — each mask's ``(trades, exit_indices, exit_counts)`` triple, the
+    certified exit indices threaded into the per-mask
     :func:`~brutex.engine.sweep_driver.metrics_from_trades` tail so its
     kernel arm skips the per-mask ``exit_ts``→index dict build
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001; a ``None`` stream demotes to the
-    dict, results byte-identical) — shared VERBATIM by the batch rank
+    dict, results byte-identical) and the exit-reason counters threaded so
+    the metrics carry a concrete ``sl_hit_rate``
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B — the sweep spine ALWAYS
+    supplies them, so every persisted row's column is concrete) — shared
+    VERBATIM by the batch rank
     accumulation, the bounded columnar accumulation, AND the bounded
     finalists' O(top_k) metrics recompute — one spine, so the three
     consumers can never drift (the recomputed finalist metrics are
@@ -1248,30 +1308,38 @@ def _iter_mask_metrics(
     re-raises BARE at every level (OOM = GLOBAL stop, DEC-LAKE-WRITE-HALT-001).
     """
     chunk_size = _trade_sim_chunk_masks(len(bars))
+    # The GLOBAL recency anchor (DEC-METRICS-TRAILING-WINDOW-001) — hoisted +
+    # empty-guarded (refuter round 1): an EMPTY bars sequence must keep the
+    # PRE-recency failure shape (the metrics tail's own empty-bars
+    # ValueError, ridden into _combo_error), never a new ``bars[-1]``
+    # IndexError from the anchor read.
+    trailing_anchor = bars[-1].timestamp if bars else None
     for chunk_start in range(0, len(masks), chunk_size):
         chunk = masks[chunk_start : chunk_start + chunk_size]
         try:
-            chunk_pairs = sim.simulate_masks_with_exit_indices(
+            chunk_triples = sim.simulate_masks_with_exit_counts(
                 chunk,
                 direction=cfg.direction,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
             )
             # Batch-contract guard: the batch call must RETURN exactly one
-            # (trades, exit_indices) pair per mask (both arms do, by
-            # construction). A wrong-length return (a PyO3 marshalling bug,
-            # a kernel bug) raises HERE — inside the chunk try — so it rides
-            # the SAME re-attribution → SweepComboError tuple-skip ladder as
-            # a chunk that RAISES (the oracle passes every mask, so it fails
-            # LOUD naming the chunk), instead of escaping run_persisted_sweep
-            # as a bare error the grid drivers (#904) would turn into a
-            # grid-wide abort. The `strict=True` zip below is then a
-            # structurally-unreachable second belt.
-            if len(chunk_pairs) != len(chunk):
+            # (trades, exit_indices, exit_counts) triple per mask (both arms
+            # do, by construction). A wrong-length return (a PyO3 marshalling
+            # bug, a kernel bug) raises HERE — inside the chunk try — so it
+            # rides the SAME re-attribution → SweepComboError tuple-skip
+            # ladder as a chunk that RAISES (the oracle passes every mask, so
+            # it fails LOUD naming the chunk), instead of escaping
+            # run_persisted_sweep as a bare error the grid drivers (#904)
+            # would turn into a grid-wide abort. The `strict=True` zip below
+            # is then a structurally-unreachable second belt. The kernel arm's
+            # own sum(exit_counts)==len(trades) validation raises inside this
+            # SAME try, riding the identical ladder.
+            if len(chunk_triples) != len(chunk):
                 raise ValueError(
-                    f"simulate_masks_with_exit_indices returned {len(chunk_pairs)} "
-                    f"trade/exit-index pairs for a chunk of {len(chunk)} masks — "
-                    f"batch-contract violation"
+                    f"simulate_masks_with_exit_counts returned {len(chunk_triples)} "
+                    f"trade/exit-index/exit-count triples for a chunk of {len(chunk)} "
+                    f"masks — batch-contract violation"
                 )
         except MemoryError:
             raise
@@ -1288,7 +1356,7 @@ def _iter_mask_metrics(
                 run_id_of,
                 reference_stamper=sim.reference_stamper,
             )
-        for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
+        for mask, (trades, exit_indices, exit_counts) in zip(chunk, chunk_triples, strict=True):
             try:
                 metrics = metrics_from_trades(
                     bars,
@@ -1296,6 +1364,11 @@ def _iter_mask_metrics(
                     start_equity_paisa=cfg.start_equity_paisa,
                     tf_minutes=cfg.tf_minutes,
                     exit_indices=exit_indices,
+                    exit_reason_counts=exit_counts,
+                    # The loaded bar range's END instant — one value per launch
+                    # (every mask shares the tuple's full bars), NEVER a
+                    # per-combo max exit_ts. Hoisted above the loop.
+                    trailing_anchor=trailing_anchor,
                 )
             except MemoryError:
                 raise
@@ -1830,7 +1903,11 @@ def run_persisted_sweep(
     # an EXACT owned-bytes watermark that degrades gracefully to a
     # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
     pairs: list[tuple[int, ResultMetrics]] = []
-    columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
+    columns = (
+        SurvivorColumns(with_overfit=cfg.overfit is not None, max_sl_hit_rate=cfg.max_sl_hit_rate)
+        if plan.bounded
+        else None
+    )
     sim: ResidentTradeSim | None = None
     if kept:
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
@@ -1878,7 +1955,7 @@ def run_persisted_sweep(
                     )
                 )
     if columns is None:
-        ranked = rank_combos(pairs, overfit=cfg.overfit)
+        ranked = rank_combos(pairs, overfit=cfg.overfit, max_sl_hit_rate=cfg.max_sl_hit_rate)
         finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
         n_ranked = len(ranked)
         backtested = len(pairs)

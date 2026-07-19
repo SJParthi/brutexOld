@@ -59,7 +59,14 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
-from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
+from brutex.engine.results_store import (
+    EXIT_QUALITY_FIELDS,
+    GROWTH_FIELDS,
+    RECENCY_FIELDS,
+    VIX_FIELDS,
+    ResultsStore,
+    ResultsStoreError,
+)
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -1564,38 +1571,65 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
     )
 
 
+#: Every appended-last NULLABLE optional store column a pre-VIX-generation
+#: file necessarily predates: the VIX trio itself plus every LATER optional
+#: family (growth / exit-quality / recency — DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+#: / DEC-METRICS-KELLY-GROWTH-001 / DEC-METRICS-TRAILING-WINDOW-001, which
+#: landed strictly AFTER the trio, so a store missing the trio also misses
+#: them). Built from the ONE public per-family column source in
+#: ``results_store`` (CLAUDE.md §2 Rule 11 COMMON) — a family column added
+#: there widens the attribution nulling + the schema-migration strip here
+#: automatically.
+_APPENDED_NULLABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    VIX_FIELDS + GROWTH_FIELDS + EXIT_QUALITY_FIELDS + RECENCY_FIELDS
+)
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
     The attribution test behind the ``recount_vix_divergence`` finding family
-    (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
-    ``run_id`` set, agree on EVERY non-VIX field of every row, and either
-    disagree on at least one ``vix_mean``/``vix_min``/``vix_max`` value OR
-    differ ONLY in the trio columns' very EXISTENCE (the schema-generation
-    shape below). Anything less provable returns ``None`` — an unreadable
-    Parquet, a run_id-set drift, a non-VIX field difference, or fully-EQUAL
-    rows over IDENTICAL schemas (the byte diff then has an unknown non-row
-    cause) all fall back to the caller's normal corrupt/inconclusive ladder.
-    Honest attribution only, never a guess (Golden Rule #1).
+    (DEC-VIX-STAMP-WIRE-001, widened by the appended nullable families of
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001 /
+    DEC-METRICS-TRAILING-WINDOW-001): both stores must LOAD cleanly, hold
+    the SAME ``run_id`` set, agree on EVERY field of every row OUTSIDE the
+    appended nullable columns (:data:`_APPENDED_NULLABLE_FIELDS`), and every
+    appended-nullable difference must itself be attributable — a VIX trio
+    difference under the trio laws below, or a LATER-family
+    (growth / exit-quality / recency) difference whose ORIGINAL side is
+    ``None`` (the sanctioned pre-extension None→value backfill; those
+    metrics are deterministic and INSIDE the run-identity envelope, so a
+    recorded non-``None`` value the recount cannot reproduce is NEVER
+    attributable here — it abstains to the corrupt ladder). Anything less
+    provable returns ``None`` — an unreadable Parquet, a run_id-set drift,
+    a non-nullable field difference, or fully-EQUAL rows over IDENTICAL
+    schemas (the byte diff then has an unknown non-row cause) all fall back
+    to the caller's normal corrupt/inconclusive ladder. Honest attribution
+    only, never a guess (Golden Rule #1).
 
-    A confirmed VIX-only diff is one of THREE cheaply-distinguishable shapes
+    A confirmed diff is one of THREE cheaply-distinguishable shapes
     (two row-level + one schema-level) — the round-4 panel caught the old
     single "the lake moved" wording claiming a cause it had not established
     for the first shape, and the round-5 panel caught the schema shape
     silently abstaining onto the generic ladder:
 
-    * ``"backfill"`` (row shape) — every differing trio field is ``None`` on
-      the ORIGINAL side (a VIX lake that has since GAINED coverage, or a
-      part-null store): nothing recorded was contradicted, and a plain redo
-      appends the trio as the sanctioned directional None→value backfill —
-      no quarantine needed.
+    * ``"backfill"`` (row shape) — every differing nullable field (trio
+      and/or later-family) is ``None`` on the ORIGINAL side (a VIX lake
+      that has since GAINED coverage, a part-null store, or a
+      pre-extension store whose recount computes the later-family
+      metrics): nothing recorded was contradicted, and a plain redo
+      appends the values as the sanctioned directional None→value
+      backfill — no quarantine needed.
     * ``"backfill"`` (schema shape) — every row fully EQUAL (both sides an
       all-``None`` trio) but the ORIGINAL file predates the trio COLUMNS
       themselves: a pre-VIX-generation store loads ``None`` per
       ``_row_from_record``'s optional read, while the recount's reflush
-      writes the current schema WITH the three all-null columns appended, so
-      such a tree can NEVER be byte-identical. Attributed iff the ONLY
-      schema difference is the missing trio
+      writes the current schema WITH the appended-last all-null nullable
+      columns (the trio + every LATER optional family a strictly-older
+      store also necessarily predates — growth / exit-quality / recency),
+      so such a tree can NEVER be byte-identical. Attributed iff the ONLY
+      schema difference is exactly those missing appended nullable columns,
+      the whole trio among them
       (:func:`_is_pre_vix_schema_migration`) — same family, same remedy.
     * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
       (value-vs-value, or a recorded value the recount can no longer
@@ -1609,51 +1643,64 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
         return None  # unreadable/corrupt bytes are never VIX-attributable
     if set(original_rows) != set(scratch_rows):
         return None
-    vix_differs = False
+    nullable_differs = False
     recorded_value_differs = False
-    # Null the trio from the ONE public column source (results_store.VIX_FIELDS,
-    # CLAUDE.md §2 Rule 11 COMMON) — a fourth trio field added there is nulled
-    # here automatically, never a silently-desynced mirrored literal.
-    # dict[str, Any]: the trio fields are typed non-None on ResultRow's
+    # Null the appended nullable columns from the ONE public per-family
+    # column source (results_store.VIX_FIELDS + the later families,
+    # CLAUDE.md §2 Rule 11 COMMON) — a field added there is nulled here
+    # automatically, never a silently-desynced mirrored literal.
+    # dict[str, Any]: the nullable fields are typed non-None on ResultRow's
     # replace() signature, so a dict[str, None] splat fails strict mypy even
-    # though None is the valid null for every nullable trio column.
-    vix_nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
+    # though None is the valid null for every nullable column.
+    nulled: dict[str, Any] = dict.fromkeys(_APPENDED_NULLABLE_FIELDS)
     for run_id, ours in original_rows.items():
         theirs = scratch_rows[run_id]
         if ours == theirs:
             continue
-        if replace(ours, **vix_nulled) != replace(theirs, **vix_nulled):
-            return None  # a non-VIX field differs — not VIX-attributable
-        vix_differs = True
+        if replace(ours, **nulled) != replace(theirs, **nulled):
+            return None  # a non-nullable field differs — not attributable
+        nullable_differs = True
         for name in VIX_FIELDS:
             mine = getattr(ours, name)
             if mine != getattr(theirs, name) and mine is not None:
                 recorded_value_differs = True
-    if not vix_differs:
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
+            mine = getattr(ours, name)
+            if mine != getattr(theirs, name) and mine is not None:
+                # A later-family metric is deterministic + INSIDE the
+                # run-identity envelope: a recorded value the recount cannot
+                # reproduce is a genuine divergence, never backfill/moved.
+                return None
+    if not nullable_differs:
         # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
         # cause is the schema-generation migration (a pre-VIX-columns store
-        # vs the current writer's appended all-null trio — the round-5 panel
-        # shape); anything else honestly abstains to the normal ladder.
+        # vs the current writer's appended all-null nullable columns — the
+        # round-5 panel shape); anything else honestly abstains to the
+        # normal ladder.
         return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
     return "moved" if recorded_value_differs else "backfill"
 
 
 def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
-    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+    """``True`` iff *original*'s schema is exactly *scratch*'s minus the appended nullable columns.
 
     The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
     (round-5 panel): a store written BEFORE the trio columns landed loads an
     all-``None`` trio, so its rows compare fully EQUAL to an unstamped
     recount's — yet the recount's reflush writes the CURRENT schema with the
-    three all-null trio columns and the bytes differ. That diff is
-    attributable iff the ONLY schema difference is the missing trio: the
-    scratch must carry all three columns, the original none, and stripping
-    the trio from the scratch schema must reproduce the original schema
-    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
-    partial trio presence, any other column/dtype drift, an unreadable
-    footer — returns ``False`` and the caller abstains to the normal ladder.
-    Honest attribution only, never a guess (Golden Rule #1). O(columns) —
-    two Parquet footer reads, no row data.
+    appended-last all-null nullable columns (the trio + the strictly-later
+    growth / exit-quality / recency families such a store also predates) and
+    the bytes differ. That diff is attributable iff the ONLY schema
+    difference is exactly those missing columns: the scratch must carry the
+    whole trio, the original NONE of the appended nullable columns (a
+    partial presence of ANY of them is not the pre-VIX generation), and
+    stripping the appended nullable columns from the scratch schema must
+    reproduce the original schema EXACTLY (names AND dtypes,
+    order-sensitively). Anything less provable — partial presence, any
+    other column/dtype drift, an unreadable footer — returns ``False`` and
+    the caller abstains to the normal ladder. Honest attribution only,
+    never a guess (Golden Rule #1). O(columns) — two Parquet footer reads,
+    no row data.
     """
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
@@ -1669,12 +1716,12 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
-    if any(name in original_names for name in VIX_FIELDS):
-        return False  # partial/total trio presence — not the pre-VIX generation
+    if any(name in original_names for name in _APPENDED_NULLABLE_FIELDS):
+        return False  # partial nullable-column presence — not the pre-VIX generation
     scratch_names = {name for name, _ in scratch_schema}
     if any(name not in scratch_names for name in VIX_FIELDS):
         return False  # the recount side lacks the trio — not this migration
-    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
+    stripped = [entry for entry in scratch_schema if entry[0] not in _APPENDED_NULLABLE_FIELDS]
     return stripped == original_schema
 
 
@@ -1991,15 +2038,15 @@ def compare_recount(
                     )
                 else:
                     cause_and_remedy = (
-                        "The original rows carry NO trio values — a store "
-                        "written before the VIX columns landed, or a VIX lake "
-                        "that has since GAINED coverage; nothing recorded was "
-                        "contradicted. VIX is deliberately OUTSIDE the recorded "
-                        "context and the run identity (CLAUDE.md §2 Rule 3), so "
-                        "this is NOT evidence of corruption and never "
-                        "heal-grade. Remedy: a plain redo appends the trio as "
-                        "the sanctioned directional None→value backfill — no "
-                        "quarantine needed"
+                        "The original rows carry NO values on the diverging "
+                        "nullable columns — a store written before those "
+                        "columns landed, or (for the trio) a VIX lake that "
+                        "has since GAINED coverage; nothing recorded was "
+                        "contradicted. Every diverging value lands as the "
+                        "sanctioned directional None→value backfill, so this "
+                        "is NOT evidence of corruption and never heal-grade. "
+                        "Remedy: a plain redo appends the missing values as "
+                        "that backfill — no quarantine needed"
                     )
                 findings.append(
                     VerifyFinding(
@@ -2011,10 +2058,13 @@ def compare_recount(
                         ),
                         severity="warn",
                         detail=(
-                            "ONLY the REFERENCE-ONLY vix_mean/vix_min/vix_max trio "
-                            "diverges (the pairing sidecar/sentinel re-pair that "
-                            "store's hash) — every run_id and every non-VIX column "
-                            f"reproduced exactly. {cause_and_remedy}"
+                            "ONLY appended nullable columns diverge (the "
+                            "REFERENCE-ONLY vix_mean/vix_min/vix_max trio and/or "
+                            "the nullable growth/exit-quality/recency metrics as "
+                            "an original-side-None backfill; the pairing "
+                            "sidecar/sentinel re-pair that store's hash) — every "
+                            "run_id and every other column reproduced exactly. "
+                            f"{cause_and_remedy}"
                         ),
                     )
                 )

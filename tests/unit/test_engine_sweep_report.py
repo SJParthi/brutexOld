@@ -165,6 +165,13 @@ def _rc(
         "skewness": 0.0,
         "kurtosis": 0.0,
         "returns_std_dev": 0.0,
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate consistent with the
+        # counts above (losing 20 / total 50); the Kelly pair defaults
+        # None (undefined) — override per test where the value matters.
+        "loss_rate": 0.4,
+        "kelly_fraction": None,
+        "log_growth_at_half_kelly": None,
     }
     return RankedCombo(mask=mask, metrics=ResultMetrics(**base), composite_score=score)
 

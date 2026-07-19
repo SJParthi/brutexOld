@@ -75,7 +75,7 @@ import itertools
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from math import prod
+from math import isfinite, prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -287,6 +287,16 @@ class SweepGridConfig:
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
         own backtested-combo count is its authoritative trial count ``N``.
+    max_sl_hit_rate
+        Opt-in SL-hit-rate gate ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+        Stage B). ``None`` (the default) is fully inert — identity digests
+        AND gate verdicts byte-identical. A SET value is range-validated (a
+        finite fraction in ``(0, 1]``) and ENFORCED as ranking Door 6
+        (:func:`brutex.ranking.passes_gates` — fail-closed on an absent
+        ``sl_hit_rate``), forwarded to every tuple's
+        :class:`~brutex.engine.sweep_run.SweepRunConfig`; the knob joins the
+        gate-config identity fragment so a gated vs an ungated tree can never
+        share a store address (see the field comment).
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -333,6 +343,17 @@ class SweepGridConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    #: Opt-in SL-hit-rate gate CEILING (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    #: Stage B — enforcement live): when set, combos whose stop-loss-exit
+    #: fraction (``ResultMetrics.sl_hit_rate``, the Stage-B exit-reason wire)
+    #: exceeds it are rejected at ranking Door 6 (fail-closed: a row with no
+    #: measured ``sl_hit_rate`` fails an active gate) — and the knob joins the
+    #: gate-config identity fragment (``_gate_config_fragment``) so gated and
+    #: ungated trees can never share a store address (the exact "ungated rows
+    #: served as institutional winners" trap the fragment exists to prevent).
+    #: ``None`` (the default) is fully inert: every existing digest AND every
+    #: gate verdict byte-identical.
+    max_sl_hit_rate: float | None = None
     #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
     #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
@@ -475,6 +496,17 @@ class SweepGridConfig:
             raise ValueError(f"SweepGridConfig.top_k must be >= 1 or None, got {self.top_k}")
         if self.min_hits < 0:
             raise ValueError(f"SweepGridConfig.min_hits must be >= 0, got {self.min_hits}")
+        if self.max_sl_hit_rate is not None and (
+            not isfinite(self.max_sl_hit_rate) or not 0.0 < self.max_sl_hit_rate <= 1.0
+        ):
+            # Range law only — the Stage-A "not yet enforced" refusal is GONE:
+            # the Stage-B exit-reason wire made ``sl_hit_rate`` concrete on
+            # every sweep row, and ``to_run_config`` threads the ceiling into
+            # ranking Door 6 (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B).
+            raise ValueError(
+                f"SweepGridConfig.max_sl_hit_rate must be a finite fraction in "
+                f"(0.0, 1.0] or None, got {self.max_sl_hit_rate}"
+            )
 
         # Per-tuple guard: reject up front any k whose mask count exceeds the cap,
         # so a tuple can never raise mid-grid AFTER earlier tuples persisted.
@@ -584,8 +616,8 @@ class SweepTuple:
         Threads the grid's shared context (mode + the three reproducibility
         hashes), shared knobs (``condition_bits``, ``prior_n``,
         ``start_equity_paisa``), the honest guards (``max_combos``, ``top_k``,
-        ``min_hits``) and the opt-in ``overfit`` gate config together with this
-        tuple's swept axes.
+        ``min_hits``) and the opt-in gate configs (``overfit``,
+        ``max_sl_hit_rate``) together with this tuple's swept axes.
 
         Parameters
         ----------
@@ -630,6 +662,7 @@ class SweepTuple:
             min_hits=grid.min_hits,
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
+            max_sl_hit_rate=grid.max_sl_hit_rate,
         )
 
 

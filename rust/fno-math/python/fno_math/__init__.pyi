@@ -34,6 +34,8 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
+    "metrics_fold_recency",
+    "metrics_fold_trades",
     "popcount_bytes",
     "stats_cpcv_pass_count",
 ]
@@ -173,6 +175,66 @@ def sweep_drawdown_stats(
     """
     ...
 
+def metrics_fold_recency(
+    pnl_paisa: list[int],
+    mfe_paisa: list[int],
+    mae_paisa: list[int],
+    holding_bars: list[int],
+    returns: list[float],
+    exit_us: list[int],
+    anchor_us: int,
+    cutoff_us: int,
+) -> tuple[
+    tuple[
+        tuple[int, int, int, int, int, int, int],
+        tuple[int, int, int, int, int, int],
+        tuple[int, float, float, float, float],
+        tuple[float, float, float],
+    ]
+    | None,
+    list[tuple[int, int]],
+]:
+    """Recency FOLD twin (DEC-METRICS-TRAILING-WINDOW-001 Stage-C2).
+
+    The Rust mirror of `brutex.metrics.compute.fold_recency`: the trailing
+    window's `metrics_fold_trades` wire over the `exit_us >= cutoff_us`
+    subsequence (`None` when the window holds zero trades) plus the exact
+    integer `(age_month_bucket, net_pnl_paisa)` pairs sorted ascending
+    (bucket = `max(0, div_euclid(anchor_us - exit_us, 86_400_000_000)) //
+    30` — the `timedelta.days` floor law). `returns` and the epoch-µs
+    instants are Python-computed (bit-identity by construction). Raises
+    `ValueError` outside the validated envelope; the seam degrades to the
+    Python oracle.
+    """
+    ...
+
+def metrics_fold_trades(
+    pnl_paisa: list[int],
+    mfe_paisa: list[int],
+    mae_paisa: list[int],
+    holding_bars: list[int],
+    returns: list[float],
+) -> tuple[
+    tuple[int, int, int, int, int, int, int],
+    tuple[int, int, int, int, int, int],
+    tuple[int, float, float, float, float],
+    tuple[float, float, float],
+]:
+    """Per-trade metrics FOLD (DEC-METRICS-RUST-COMPUTE-FOLD-001).
+
+    The Rust mirror of `brutex.metrics.compute._fold_trades` over five
+    parallel per-trade columns; `returns` is the Python-computed
+    `pnl_paisa / start_equity_paisa` column (bit-identity by construction).
+    Returns four nested tuples the seam reassembles into `TradeFolds`:
+    `(n_trades, winners, losers, max_holding_bars, largest_loss_paisa,
+    max_consecutive_losses, max_consecutive_wins)` · `(net_pnl_paisa,
+    gross_profit_paisa, gross_loss_abs_paisa, sum_mfe_paisa, sum_mae_paisa,
+    sum_holding_bars)` · the `(n, mean, m2, m3, m4)` moments · the
+    `(downside_sum_sq, p95, p5)` floats. Raises `ValueError` on any input
+    outside the validated envelope; the seam degrades to the Python oracle.
+    """
+    ...
+
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
 
@@ -263,6 +325,26 @@ class ResidentSweepSim:
         """
         ...
 
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+    ) -> list[
+        tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
+    ]:
+        """`simulate_masks` PLUS per-mask exit-reason counters (the additive twin).
+
+        DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B: `out[j]` is
+        `(trades, exit_reason_counts)` for `masks[j]` — the trades byte-equal
+        to `simulate_masks`'s (one shared walk core), the counts one `u64` per
+        `EXIT_REASONS` member in vocabulary order `(stop_loss, take_profit,
+        forced_1520, signal, end_of_data, session_gap)`, with
+        `sum(counts) == len(trades)`.
+        """
+        ...
+
 class ResidentSweepSimU128:
     """Resident Stage-2 trade-sim buffer over a >64-bit vocabulary (u128 twin).
 
@@ -315,4 +397,18 @@ class ResidentSweepSimU128:
 
         `out[j]` aligns with `masks[j]`.
         """
+        ...
+
+    def simulate_masks_with_exit_counts(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+    ) -> list[
+        tuple[list[tuple[int, int, int, int, int, int]], tuple[int, int, int, int, int, int]]
+    ]:
+        """Batch trades PLUS per-mask exit-reason counters — the wide twin of
+        `ResidentSweepSim.simulate_masks_with_exit_counts` (same vocabulary
+        order, same `sum(counts) == len(trades)` law)."""
         ...

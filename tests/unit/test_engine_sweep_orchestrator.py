@@ -741,6 +741,92 @@ class TestTupleDigestGateSelectionIdentity:
         assert len({p_base, p_topk, p_mh}) == 3
 
 
+# ── max_sl_hit_rate — the Door-6 gate knob (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) ──
+
+
+class TestMaxSlHitRateKnob:
+    """The opt-in SL-hit-rate gate knob: identity elision + Stage-B enforcement.
+
+    Stage A shipped the config plumbing with a construction refusal; Stage B
+    (the exit-reason wire) DELETED the refusal — a SET value is now accepted,
+    range-validated, folded into the store-address identity
+    (``_gate_config_fragment``) and threaded to ranking Door 6 via
+    ``to_run_config``.
+    """
+
+    def test_default_none_keeps_the_frozen_digest(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        digest = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
+        assert _tuple_digest(_tuple(), _grid()) == digest
+        # An EXPLICIT None is the default — byte-identical, never a re-key.
+        assert _tuple_digest(_tuple(), _grid(max_sl_hit_rate=None)) == digest
+
+    def test_set_value_is_accepted_and_rekeys_the_digest(self) -> None:
+        """Stage B: an in-range ceiling constructs (the Stage-A refusal is
+        GONE) and moves the tuple digest off the frozen default — a gated vs
+        an ungated tree can never share a store address."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        default = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
+        gated = _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.5))
+        assert gated != default
+        # Distinct ceilings are distinct addresses too.
+        assert gated != _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.25))
+
+    def test_boundary_one_is_accepted(self) -> None:
+        assert _grid(max_sl_hit_rate=1.0).max_sl_hit_rate == 1.0
+
+    def test_gated_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """The C1/C2 law for Door 6: a gated grid maps to fresh store paths."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        p_base = tuple_store_path(tmp_path, t, _grid())
+        p_gated = tuple_store_path(tmp_path, t, _grid(max_sl_hit_rate=0.5))
+        assert p_base != p_gated
+        assert completion_sentinel_path(p_base) != completion_sentinel_path(p_gated)
+
+    def test_to_run_config_threads_the_ceiling(self) -> None:
+        """The grid knob reaches every tuple's SweepRunConfig (the Door-6
+        enforcement input) — and the default stays None."""
+        grid = _grid(max_sl_hit_rate=0.5)
+        run_cfg = next(iter_sweep_tuples(grid)).to_run_config(grid)
+        assert run_cfg.max_sl_hit_rate == 0.5
+        default_grid = _grid()
+        assert next(iter_sweep_tuples(default_grid)).to_run_config(
+            default_grid
+        ).max_sl_hit_rate is (None)
+
+    @pytest.mark.parametrize("bad", [0.0, -0.1, 1.0000001, float("nan"), float("inf")])
+    def test_out_of_range_value_is_a_range_refusal(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="finite fraction"):
+            _grid(max_sl_hit_rate=bad)
+
+    def test_fragment_folds_the_active_knob_via_a_protocol_fake(self) -> None:
+        """The active-only identity fold, exercised through the structural
+        ``_GateConfigInput`` seam (kept beside the real-grid digest tests —
+        the fold contract is independent of the concrete config class)."""
+        from brutex.engine.sweep_identity import (
+            _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        class _FakeGrid:
+            overfit = None
+            max_sl_hit_rate: float | None = 0.5
+            stage3_enable = False
+            stage3_top_k = 10_000
+            stage3_max_fevals = 200
+            stage3_max_restarts = 3
+
+        assert _gate_config_fragment(_FakeGrid()) == {"max_sl_hit_rate": 0.5}
+
+        class _FakeGridOff(_FakeGrid):
+            max_sl_hit_rate = None
+
+        assert _gate_config_fragment(_FakeGridOff()) is None
+
+
 # ────── run_sweep_grid ──────
 
 

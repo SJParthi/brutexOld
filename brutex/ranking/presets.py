@@ -12,11 +12,22 @@ Default ``min_dd_first``: smallest ``max_drawdown_pct`` FIRST → composite
 score (full precision, never rounded) descending as the tiebreak — a ``None``
 composite ranks AFTER every real one, never coerced to a fake number →
 fewest ``max_consecutive_losses`` → ``run_id`` ASC (the store's tie law).
-Alternates ``composite`` / ``profit_factor`` / ``win_rate`` / ``calmar``:
+Alternates ``composite`` / ``profit_factor`` / ``win_rate`` / ``calmar`` /
+``growth`` (half-Kelly log growth, DEC-METRICS-KELLY-GROWTH-001 — a ``None``
+growth ranks after every scored one, the composite None-after-scored idiom):
 each DESCENDING on the RAW uncoerced value with the same ``run_id``-ASC
 stable pre-sort — the exact ``ResultsStore.top_k`` two-pass law
 (recon-ranking §3), so every preset is a strict, discovery-order-free total
-order (property-pinned).
+order (property-pinned). ``win_rate_safe``
+(DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) is the second MULTI-part
+ascending preset (the ``min_dd_first`` in-tuple sign-flip idiom): win rate
+DESC → SL-hit rate ASC (a ``None`` rate — a pre-extension store row — ranks
+AFTER every concrete one within an equal win rate, the None-presence-flag
+law) → composite DESC (``None`` after scored) → ``run_id`` ASC.
+The Stage-C recency alternates (DEC-METRICS-TRAILING-WINDOW-001):
+``recent`` (trailing 24-month Sharpe DESC, None-after-scored) and
+``recent_decay`` (whole-history decay-weighted net P&L DESC, same law) —
+both appended LAST.
 
 ## Inputs
 
@@ -50,16 +61,33 @@ __all__ = [
     "PRESETS",
     "PRESET_MIN_DD_FIRST",
     "PRESET_NAMES",
+    "PRESET_RECENT",
+    "PRESET_RECENT_DECAY",
+    "PRESET_WIN_RATE_SAFE",
     "RankRecord",
     "RankingPreset",
     "min_dd_first_key",
     "resolve_preset",
     "sort_by_preset",
+    "win_rate_safe_key",
 ]
 
 #: The R30 default preset token + the one-click alternates, in display order.
 PRESET_MIN_DD_FIRST: Final[str] = "min_dd_first"
 DEFAULT_PRESET: Final[str] = PRESET_MIN_DD_FIRST
+
+#: The Stage-B ``win_rate_safe`` preset token
+#: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) — appended LAST to :data:`PRESETS`.
+PRESET_WIN_RATE_SAFE: Final[str] = "win_rate_safe"
+
+#: The Stage-C recency preset tokens (DEC-METRICS-TRAILING-WINDOW-001) —
+#: appended LAST to :data:`PRESETS`, after ``win_rate_safe``. ``recent``
+#: orders on the trailing-window Sharpe; ``recent_decay`` on the
+#: whole-history decay-weighted net P&L (the lane's reading of the map's
+#: "decay-weighted composite variant" — a distinct preset over the persisted
+#: decay composite, named in the DEC).
+PRESET_RECENT: Final[str] = "recent"
+PRESET_RECENT_DECAY: Final[str] = "recent_decay"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +107,39 @@ class RankRecord:
     profit_factor: float
     win_rate: float
     calmar_ratio: float
+    #: The persisted half-Kelly log-growth figure feeding the ``growth``
+    #: preset (DEC-METRICS-KELLY-GROWTH-001). ``None`` = honestly unscored
+    #: (a pre-extension store row) — ranks AFTER every scored record under
+    #: the ``_growth_key`` presence flag, exactly like an unscored
+    #: composite. Defaulted so pre-extension record builders stay valid.
+    log_growth_at_half_kelly: float | None = None
+    #: The persisted SL-hit rate feeding the ``win_rate_safe`` preset
+    #: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B). ``None`` = honestly
+    #: unknown (a pre-extension store row) — ranks AFTER every concrete rate
+    #: within an equal win rate under the :func:`win_rate_safe_key` presence
+    #: flag, never coerced to a fake 0.0 (which would rank a pre-extension
+    #: row as "never hits SL"). Defaulted-LAST so pre-extension record
+    #: builders stay valid.
+    sl_hit_rate: float | None = None
+    #: The persisted trailing-window Sharpe feeding the ``recent`` preset
+    #: (DEC-METRICS-TRAILING-WINDOW-001). ``None`` = honestly unscored (a
+    #: pre-extension store row, an anchor-less run, or a 24-month window
+    #: with zero trades) — ranks AFTER every scored record under the
+    #: presence flag, never coerced. Defaulted-LAST.
+    trailing_sharpe_ratio: float | None = None
+    #: The persisted decay-weighted net P&L feeding the ``recent_decay``
+    #: preset (DEC-METRICS-TRAILING-WINDOW-001). ``None`` = honestly
+    #: unscored (a pre-extension store row or an anchor-less run) — ranks
+    #: AFTER every scored record. Defaulted-LAST.
+    decay_weighted_net_paisa: float | None = None
 
 
-#: A preset sort key — either the 4-part min-DD ascending key or the
-#: ``(value_present, raw_value)`` descending key of the alternates.
-type PresetKey = tuple[float, int, float, int] | tuple[int, float]
+#: A preset sort key — the 4-part min-DD ascending key, the 5-part
+#: win-rate-safe ascending key, or the ``(value_present, raw_value)``
+#: descending key of the single-metric alternates.
+type PresetKey = (
+    tuple[float, int, float, int] | tuple[int, float] | tuple[float, int, float, int, float]
+)
 
 
 def min_dd_first_key(record: RankRecord) -> tuple[float, int, float, int]:
@@ -127,6 +183,72 @@ def _calmar_key(record: RankRecord) -> tuple[int, float]:
     return (1, record.calmar_ratio)
 
 
+def _growth_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, log_growth_at_half_kelly)`` — the ``growth`` preset key.
+
+    The ``_composite_key`` None-after-scored idiom (DEC-METRICS-KELLY-GROWTH-001):
+    a ``None`` log-growth (a pre-extension store row — honestly unscored)
+    sorts LAST under ``reverse=True`` via the presence flag, never coerced to
+    a fake number; ties fall through to the stable ``run_id``-ASC pre-sort.
+    """
+    growth = record.log_growth_at_half_kelly
+    if growth is None:
+        return (0, 0.0)
+    return (1, growth)
+
+
+def win_rate_safe_key(record: RankRecord) -> tuple[float, int, float, int, float]:
+    """The Stage-B ``win_rate_safe`` sort key (ascending sort).
+
+    DEC-METRICS-LOSSRATE-FIRSTCLASS-001: highest win rate first (in-tuple
+    sign flip — the :func:`min_dd_first_key` idiom, ONE ``reverse`` per
+    preset); then SL-hit rate ASCENDING (fewest stop-loss exits wins the
+    win-rate tie — a ``None`` rate ranks AFTER every concrete one via the
+    presence flag: an unknown-exit-quality row never outranks a measured
+    one); then composite score DESC (``None`` after scored — the
+    :func:`min_dd_first_key` composite arms verbatim). Ties fall through to
+    the stable ``run_id``-ASC pre-sort.
+    """
+    sl_hit_rate = record.sl_hit_rate
+    composite = record.composite_score
+    return (
+        -record.win_rate,
+        0 if sl_hit_rate is not None else 1,
+        sl_hit_rate if sl_hit_rate is not None else 0.0,
+        0 if composite is not None else 1,
+        -(composite if composite is not None else 0.0),
+    )
+
+
+def _trailing_sharpe_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, trailing_sharpe_ratio)`` — the ``recent`` preset key.
+
+    The ``_composite_key`` None-after-scored idiom
+    (DEC-METRICS-TRAILING-WINDOW-001): a ``None`` trailing Sharpe (a
+    pre-extension store row, an anchor-less run, or a trailing window with
+    zero trades — all honestly unscored) sorts LAST under ``reverse=True``
+    via the presence flag, never coerced to a fake number; ties fall through
+    to the stable ``run_id``-ASC pre-sort.
+    """
+    trailing_sharpe = record.trailing_sharpe_ratio
+    if trailing_sharpe is None:
+        return (0, 0.0)
+    return (1, trailing_sharpe)
+
+
+def _decay_net_key(record: RankRecord) -> tuple[int, float]:
+    """``(value_present, decay_weighted_net_paisa)`` — the ``recent_decay`` key.
+
+    Same None-after-scored law (DEC-METRICS-TRAILING-WINDOW-001): a ``None``
+    decay composite (a pre-extension store row or an anchor-less run) sorts
+    LAST under ``reverse=True``; ties fall through to ``run_id``-ASC.
+    """
+    decay_net = record.decay_weighted_net_paisa
+    if decay_net is None:
+        return (0, 0.0)
+    return (1, decay_net)
+
+
 @dataclass(frozen=True, slots=True)
 class RankingPreset:
     """One named ranking law: a sort key + its direction.
@@ -164,7 +286,7 @@ def sort_by_preset[T](
     return tuple(item for _record, item in keyed)
 
 
-#: The named preset table (R30): the default + the four one-click alternates,
+#: The named preset table (R30): the default + the one-click alternates,
 #: in display order. Keys are the wire tokens the CLI/dashboard pass around.
 PRESETS: Final[Mapping[str, RankingPreset]] = {
     PRESET_MIN_DD_FIRST: RankingPreset(
@@ -199,6 +321,38 @@ PRESETS: Final[Mapping[str, RankingPreset]] = {
         describe="Calmar ratio, descending",
         reverse=True,
         key=_calmar_key,
+    ),
+    "growth": RankingPreset(
+        name="growth",
+        describe=("half-Kelly log growth, descending (unscored/pre-extension rows rank last)"),
+        reverse=True,
+        key=_growth_key,
+    ),
+    PRESET_WIN_RATE_SAFE: RankingPreset(
+        name=PRESET_WIN_RATE_SAFE,
+        describe=(
+            "win rate first, fewest stop-loss exits break the tie (unknown "
+            "SL-hit rates rank last within a win rate), composite tiebreak"
+        ),
+        reverse=False,
+        key=win_rate_safe_key,
+    ),
+    PRESET_RECENT: RankingPreset(
+        name=PRESET_RECENT,
+        describe=(
+            "trailing 24-month Sharpe, descending (unscored / no-recent-trade rows rank last)"
+        ),
+        reverse=True,
+        key=_trailing_sharpe_key,
+    ),
+    PRESET_RECENT_DECAY: RankingPreset(
+        name=PRESET_RECENT_DECAY,
+        describe=(
+            "decay-weighted net P&L (12-month half-life over the whole "
+            "history), descending (unscored rows rank last)"
+        ),
+        reverse=True,
+        key=_decay_net_key,
     ),
 }
 

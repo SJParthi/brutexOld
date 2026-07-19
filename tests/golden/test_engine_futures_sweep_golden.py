@@ -96,7 +96,28 @@ _EXPECTED_RUN_ID = "2aa8c684565a5e250a86d59b8161e8bfed3e1e94fbc0f8a91fce128c1ce0
 # RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001 (2026-07-15): worst-case fills
 # over the re-crafted fixture — regenerated on THIS tree, two-run
 # byte-determinism pinned in the literal test below.
-_EXPECTED_STORE_HASH = "8670c7f65404068c1090d30db9381494374f7c182fc57a8a7bacc5126ca074a0"
+# RE-LOCKED for the W2 metrics-depth fold (MIGRATION.md #1974–#1976, the
+# #1976 census fold of main ace41c7e0 — regenerated 2026-07-19 on the
+# folded tree with a FRESH hand-audit under worst-case fill semantics; the
+# house law: goldens are re-derived, never merged textually; the pre-fold
+# sl_hit_rate/recency audit values were PRE-worst-case HISTORY and are
+# superseded by the figures below). AUDITED DELTA CLASS — schema-additive
+# ONLY, proven against a live main-baseline worktree at ace41c7e0 (which
+# reproduces its literal `8670c7f6…74a0` exactly): the SAME 3 rows with
+# byte-stable run_ids, the SAME 28-column prefix in the SAME order with
+# EVERY old column value byte-equal, plus EXACTLY the lane's 8
+# appended-LAST nullable columns (the growth trio + sl_hit_rate + the
+# recency four). WORST-CASE HAND-AUDIT of the mask bit-0 row (142 trades =
+# 122 TP wins × +50 → gross_profit 6_100, + 20 SL stop-outs → gross_loss
+# 2_210 across the two bearish-bar depths, avg −110.5; net +3_890):
+# loss_rate = 20/142 = 0.14084507042253522; every loss is an SL fill under
+# worst-case → sl_hit_rate = 20/142 (== loss_rate — all wins are TP);
+# kelly = p − q/b with p = 122/142, b = 50/110.5 → 0.5478873239436619 and
+# g(f*/2) = 0.055308117989589976; the 5-session Jun-2025 stitched slice
+# sits wholly inside the 24-month trailing window AND decay bucket 0 →
+# trailing_net_pnl_paisa == decay_weighted_net_paisa == net (+3_890) and
+# trailing sharpe/pf equal the full-history columns.
+_EXPECTED_STORE_HASH = "1022bebf4e372f2ca8291a90bdab9f32e189822778447382eb01aa1dce737728"
 
 
 def _day_bars(day: date, base: float, n: int = _BARS_PER_DAY) -> list[CandleBar]:

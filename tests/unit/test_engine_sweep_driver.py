@@ -950,3 +950,172 @@ class TestKernelSelfCheck:
 
     def test_default_burn_in_budget_is_pinned(self) -> None:
         assert SELF_CHECK_SAMPLES == 16
+
+
+# ── exit-reason counter threading (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 B) ────
+
+
+class TestExitReasonCountersThreading:
+    """metrics_from_trades → sl_hit_rate on BOTH arms; evaluate_combo concrete."""
+
+    def _trades_with_counts(self) -> tuple[list[CandleBar], list[ClosedTrade]]:
+        from brutex.engine.combo_mask import mask_to_entry_signals
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.trade_sim import simulate_trades_with_exit_counts
+        from brutex.strategies.types import Side
+
+        bars = _session_bars()
+        bits = build_bar_bits(bars)
+        trades, _idx, counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+        )
+        assert trades  # the mask-0 walk trades on this feed
+        assert sum(counts) == len(trades)
+        self._counts = counts
+        return bars, trades
+
+    def test_counters_yield_concrete_rate_on_the_default_kernel_arm(self) -> None:
+        from brutex.engine.trade_sim import STOP_LOSS_REASON_INDEX
+
+        bars, trades = self._trades_with_counts()
+        m = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            tf_minutes=1,
+            exit_reason_counts=self._counts,
+        )
+        assert m.sl_hit_rate == self._counts[STOP_LOSS_REASON_INDEX] / len(trades)
+
+    def test_counters_yield_the_same_rate_on_the_python_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
+        bars, trades = self._trades_with_counts()
+        m = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            tf_minutes=1,
+            exit_reason_counts=self._counts,
+        )
+        from brutex.engine.trade_sim import STOP_LOSS_REASON_INDEX
+
+        assert m.sl_hit_rate == self._counts[STOP_LOSS_REASON_INDEX] / len(trades)
+
+    def test_absent_counters_stay_the_honest_none(self) -> None:
+        bars, trades = self._trades_with_counts()
+        m = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            tf_minutes=1,
+        )
+        assert m.sl_hit_rate is None
+
+    def test_evaluate_combo_metrics_carry_concrete_sl_hit_rate(self) -> None:
+        from brutex.strategies.types import Side
+
+        bars = _session_bars()
+        m = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, stop_loss_paisa=50)
+        assert m.sl_hit_rate is not None
+        assert 0.0 <= m.sl_hit_rate <= 1.0
+
+
+class TestRecencyAnchorThreading:
+    """metrics_from_trades threads the GLOBAL trailing_anchor to the recency
+    pass on BOTH arms (DEC-METRICS-TRAILING-WINDOW-001); absent anchor is the
+    honest all-None legacy arm."""
+
+    def _bars_and_trades(self) -> tuple[list[CandleBar], list[ClosedTrade]]:
+        from brutex.engine.combo_mask import mask_to_entry_signals
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.trade_sim import simulate_trades_with_exit_counts
+
+        bars = _session_bars()
+        bits = build_bar_bits(bars)
+        trades, _idx, _counts = simulate_trades_with_exit_counts(
+            bars,
+            mask_to_entry_signals(bits, 0),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+        )
+        assert trades
+        return bars, trades
+
+    def _metrics(self, anchor: object = None) -> ResultMetrics:
+        bars, trades = self._bars_and_trades()
+        kwargs: dict[str, object] = {}
+        if anchor is not None:
+            kwargs["trailing_anchor"] = anchor
+        return metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            tf_minutes=1,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_anchor_yields_concrete_recency_on_the_default_kernel_arm(self) -> None:
+        bars, _ = self._bars_and_trades()
+        m = self._metrics(anchor=bars[-1].timestamp)
+        # The fixture spans one session (<< the 730-day window, << one
+        # 30-day decay bucket): trailing == full history, decay == net.
+        assert m.trailing_net_pnl_paisa == m.net_pnl_paisa
+        assert m.decay_weighted_net_paisa == float(m.net_pnl_paisa)
+        assert m.trailing_profit_factor == m.profit_factor
+
+    def test_python_tail_matches_the_kernel_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bars, _ = self._bars_and_trades()
+        default_arm = self._metrics(anchor=bars[-1].timestamp)
+        monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
+        python_arm = self._metrics(anchor=bars[-1].timestamp)
+        for name in (
+            "trailing_sharpe_ratio",
+            "trailing_profit_factor",
+            "trailing_net_pnl_paisa",
+            "decay_weighted_net_paisa",
+        ):
+            assert getattr(python_arm, name) == getattr(default_arm, name), name
+
+    def test_absent_anchor_is_the_honest_all_none_legacy_arm(self) -> None:
+        m = self._metrics()
+        assert m.trailing_sharpe_ratio is None
+        assert m.trailing_profit_factor is None
+        assert m.trailing_net_pnl_paisa is None
+        assert m.decay_weighted_net_paisa is None
+
+    def test_metrics_for_mask_passes_the_anchor_through(self) -> None:
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.sweep_driver import metrics_for_mask
+
+        bars = _session_bars()
+        bits = build_bar_bits(bars)
+        with_anchor = metrics_for_mask(
+            bars,
+            bits,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+            take_profit_paisa=None,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            trailing_anchor=bars[-1].timestamp,
+        )
+        without = metrics_for_mask(
+            bars,
+            bits,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=50,
+            take_profit_paisa=None,
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+        )
+        assert with_anchor.decay_weighted_net_paisa is not None
+        assert without.decay_weighted_net_paisa is None

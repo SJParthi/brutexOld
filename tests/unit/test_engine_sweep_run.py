@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 import pytest
 from brutex.data.models import CandleBar
@@ -197,7 +197,7 @@ def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[Residen
     """A ResidentTradeSim subclass whose BATCH call raises — chunk-failure injection."""
 
     class _RaisingSim(ResidentTradeSim):
-        def simulate_masks_with_exit_indices(self, *args: object, **kwargs: object) -> NoReturn:
+        def simulate_masks_with_exit_counts(self, *args: object, **kwargs: object) -> NoReturn:
             raise exc_factory()
 
     return _RaisingSim
@@ -214,10 +214,10 @@ class _ShortChunkSim(ResidentTradeSim):
     ``ValueError`` escaping ``run_persisted_sweep`` as a grid-wide abort.
     """
 
-    def simulate_masks_with_exit_indices(
+    def simulate_masks_with_exit_counts(
         self, masks: Sequence[int], **kwargs: Any
-    ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
-        return super().simulate_masks_with_exit_indices(masks, **kwargs)[:-1]
+    ) -> list[tuple[list[ClosedTrade], list[int] | None, tuple[int, ...]]]:
+        return super().simulate_masks_with_exit_counts(masks, **kwargs)[:-1]
 
 
 def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[object]:
@@ -536,6 +536,17 @@ class TestRankedComboToResultRow:
         # Prices are 2dp-snapped Decimals drawn from real OHLC.
         assert row.avg_entry_price == row.avg_entry_price.quantize(Decimal("0.01"))
         assert row.avg_entry_price > 0
+        # The loss/growth trio (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 /
+        # DEC-METRICS-KELLY-GROWTH-001): loss_rate maps 1:1 (total on
+        # metrics); the Kelly pair rides the SAME _metric_or_zero None → 0.0
+        # coercion the rankable profit_factor column has always ridden, so a
+        # row written by current code always carries concrete floats.
+        assert row.loss_rate == rc.metrics.loss_rate
+        m = rc.metrics
+        assert row.kelly_fraction == (m.kelly_fraction if m.kelly_fraction is not None else 0.0)
+        assert row.log_growth_at_half_kelly == (
+            m.log_growth_at_half_kelly if m.log_growth_at_half_kelly is not None else 0.0
+        )
 
     def test_short_direction_uses_sell_side(self) -> None:
         bars = _trending_bars()
@@ -2834,7 +2845,7 @@ class TestChunkLengthContract:
         msg = str(excinfo.value)
         # The SweepComboError names the CHUNK + carries the length ValueError.
         assert "trade-sim chunk of 5 masks" in msg
-        assert "returned 4 trade/exit-index pairs for a chunk of 5 masks" in msg
+        assert "returned 4 trade/exit-index/exit-count triples for a chunk of 5 masks" in msg
         assert "batch-contract violation" in msg
         assert "every mask passed the per-mask Python-oracle re-run" in msg
         assert isinstance(excinfo.value.__cause__, ValueError)
@@ -3510,6 +3521,226 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ── sweep concreteness pin (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) ─────
+
+
+class TestSlHitRateConcretePersist:
+    """The sweep spine ALWAYS threads exit-reason counters, so every
+    sweep-persisted row's ``sl_hit_rate`` is CONCRETE — never the counter-less
+    ``None`` (the row-level honesty pin the projector's no-coercion law
+    depends on)."""
+
+    def test_persisted_rows_carry_concrete_sl_hit_rate(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.persisted >= 1  # anti-vacuity
+        for row in store.rows():
+            assert row.sl_hit_rate is not None
+            assert 0.0 <= row.sl_hit_rate <= 1.0
+
+
+class TestRecencyConcretePersist:
+    """The sweep spine ALWAYS threads the GLOBAL ``trailing_anchor`` (the
+    loaded bar range's end — DEC-METRICS-TRAILING-WINDOW-001), so every
+    sweep-persisted row's ``decay_weighted_net_paisa`` is CONCRETE, and —
+    because the fixture's bars all sit inside the 24-month window — so is
+    its trailing trio, equal to the full-history figures (the projector's
+    no-coercion law depends on this row-level honesty pin).
+
+    RE-DERIVED at the W2 #1976 census fold: main's worst-case re-craft
+    widened ``_trending_bars`` to 45 days, so the fixture now straddles TWO
+    30-day decay age buckets (trades exiting > 30 days before the anchor
+    land in bucket 1 at weight ``0.5**(1/12)``) — decay is CONCRETE but no
+    longer equal to net. HAND-AUDITED bucket layout per persisted mask
+    (session-gap exits, ~one trade/day; bucket key = ``(anchor −
+    exit_ts).days // 30``): mask 2 → net 57_960 = 38_640 (bucket 0) +
+    19_320 (bucket 1); mask 8 → net 54_610 = 38_640 + 15_970; mask 16 →
+    net 79_000 = 56_220 + 22_780. The trailing trio still equals the
+    full-history figures exactly (45 days << the 730-day window)."""
+
+    #: mask_bits → (net_pnl_paisa, bucket-0 pnl, bucket-1 pnl) — the
+    #: hand-audited decay bucket layout above (oracle: per-mask
+    #: ``simulate_trades`` streams bucketed by the GLOBAL anchor law).
+    _EXPECTED_BUCKETS: ClassVar[dict[int, tuple[int, int, int]]] = {
+        2: (57_960, 38_640, 19_320),
+        8: (54_610, 38_640, 15_970),
+        16: (79_000, 56_220, 22_780),
+    }
+
+    def test_persisted_rows_carry_concrete_recency_metrics(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars, _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.persisted >= 1  # anti-vacuity
+        rows = {row.mask_bits: row for row in store.rows()}
+        assert set(rows) == set(self._EXPECTED_BUCKETS)  # the gate-passing trio
+        for mask, (net, bucket0, bucket1) in self._EXPECTED_BUCKETS.items():
+            row = rows[mask]
+            assert row.net_pnl_paisa == net
+            # 45 days << 730: the whole history is inside the trailing
+            # window — the trio equals the full-history figures exactly.
+            assert row.trailing_net_pnl_paisa == float(net)
+            assert row.trailing_sharpe_ratio is not None
+            # The decay composite in the combine's own arithmetic (ascending
+            # bucket accumulation of ``pnl · 0.5**(bucket/12)``): bucket 0 at
+            # weight 1.0 + bucket 1 at half-life weight — CONCRETE, positive,
+            # and strictly BELOW net (bucket 1's weight < 1.0).
+            expected_decay = float(bucket0) + bucket1 * 0.5 ** (1 / 12.0)
+            assert row.decay_weighted_net_paisa == expected_decay
+            assert 0.0 < expected_decay < float(net)
+
+
+class TestIterMaskMetricsEmptyBarsShape:
+    """The empty-bars failure SHAPE of the eval spine (refuter round 1).
+
+    The GLOBAL recency anchor read is hoisted + empty-guarded
+    (``bars[-1].timestamp if bars else None``) so a degenerate empty bar
+    sequence keeps the PRE-recency failure shape: the metrics tail's own
+    ``ValueError`` (``build_equity_curve: bars must be non-empty``), wrapped
+    by ``_combo_error`` into the ``SweepComboError`` tuple-skip ladder —
+    never a NEW ``IndexError`` cause out of the anchor read. Production
+    refuses empty bars upstream (``ResidentTradeSim`` raises at
+    construction), so the spine is driven with a minimal duck-typed sim.
+    """
+
+    def test_empty_bars_keeps_the_pre_recency_value_error_shape(self) -> None:
+        from brutex.engine.sweep_run import _iter_mask_metrics
+        from brutex.engine.trade_sim import EXIT_REASONS
+
+        class _EmptyBarsSim:
+            reference_stamper = None
+
+            def simulate_masks_with_exit_counts(
+                self, masks: Sequence[int], **_kw: object
+            ) -> list[tuple[tuple[()], tuple[()], tuple[int, ...]]]:
+                return [((), (), (0,) * len(EXIT_REASONS)) for _ in masks]
+
+        with pytest.raises(SweepComboError) as excinfo:
+            list(
+                _iter_mask_metrics(
+                    _EmptyBarsSim(),  # type: ignore[arg-type]  # duck-typed degenerate sim
+                    [0],
+                    [],
+                    [],
+                    _make_config(),
+                    "bull",
+                    lambda mask: "0" * 64,
+                )
+            )
+        cause = excinfo.value.__cause__
+        # The OLD shape: the metrics tail's own empty-bars ValueError —
+        # explicitly NOT an IndexError from an unguarded ``bars[-1]`` read.
+        assert isinstance(cause, ValueError)
+        assert "bars must be non-empty" in str(cause)
+
+
+def _sl_spread_bars(n_days: int = 12, per_day: int = 120) -> list[CandleBar]:
+    """The worst-case-rankable gap-up shape that SPREADS ``sl_hit_rate``.
+
+    RE-DERIVED at the W2 #1976 census fold: main's 45-day ``_trending_bars``
+    rides EOD-only exits under the suite default (``sl/tp = None``), so every
+    persisted row read the SAME ``sl_hit_rate == 0.0`` — one distinct value
+    cannot exercise the Door-6 ceiling. This is the sweep-run GOLDEN's
+    rankable gap-up shape (``tests/golden/test_engine_sweep_run_golden.py``
+    ``_bars`` — 7-bar cycles of narrow gap-up TP winners + a shallow bearish
+    bar + a deep bearish SL loss carrier every 4th cycle) rebuilt locally:
+    under ``sl=80 / tp=50`` worst-case fills all 5 masks rank + persist with
+    FIVE distinct hand-audited rates — every loss is an SL stop-out, so
+    ``sl_hit_rate == losing/total``: mask 16 → 21/194 ≈ 0.108247, mask 4 →
+    22/203 ≈ 0.108374, mask 1 → 37/332 ≈ 0.111446, mask 8 → 20/163 ≈
+    0.122699, mask 2 → 11/88 = 0.125.
+    """
+    bars: list[CandleBar] = []
+    cycle = 0
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish SL loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar (range 0.50 < the SL 0.80)
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestMaxSlHitRateEnforcement:
+    """Door-6 enforcement end-to-end (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
+    Stage B): an active ``SweepRunConfig.max_sl_hit_rate`` ceiling gates the
+    persisted survivor set at ranking time; the default knob is
+    byte-identical to the pre-door sweep."""
+
+    @staticmethod
+    def _run(tmp_path: Path, name: str, **overrides: object) -> ResultsStore:
+        # The SL/TP pair the spread fixture is hand-audited under (knob
+        # tests override the DOOR, never the fill geometry).
+        overrides.setdefault("sl_paisa", 80)
+        overrides.setdefault("tp_paisa", 50)
+        bars = _sl_spread_bars()
+        store = ResultsStore(path=tmp_path / f"{name}.parquet")
+        with AuditWriter.open(tmp_path / f"{name}.jsonl") as audit:
+            run_persisted_sweep(
+                bars, _make_config(**overrides), store=store, dedup=_dedup(), audit=audit
+            )
+        return store
+
+    def test_active_ceiling_drops_exactly_the_over_ceiling_rows(self, tmp_path: Path) -> None:
+        baseline = self._run(tmp_path, "base")
+        rates = {row.run_id: row.sl_hit_rate for row in baseline.rows()}
+        assert rates  # anti-vacuity: the fixture persists survivors
+        values = sorted({rate for rate in rates.values() if rate is not None})
+        assert len(values) >= 2, "fixture must spread sl_hit_rate to exercise the door"
+        ceiling = values[0]  # keep only the lowest observed rate(s)
+        gated = self._run(tmp_path, "gated", max_sl_hit_rate=ceiling)
+        gated_ids = {row.run_id for row in gated.rows()}
+        expected = {
+            run_id for run_id, rate in rates.items() if rate is not None and rate <= ceiling
+        }
+        assert gated_ids == expected
+        assert gated_ids < set(rates)  # strictly fewer survivors — the door bit
+
+    def test_ceiling_of_one_keeps_every_measured_row(self, tmp_path: Path) -> None:
+        """``sl_hit_rate <= 1.0`` always, and sweep rows are always measured,
+        so the loosest legal ceiling is survivor-set-identical to default."""
+        baseline = self._run(tmp_path, "base1")
+        gated = self._run(tmp_path, "gated1", max_sl_hit_rate=1.0)
+        assert {row.run_id for row in gated.rows()} == {row.run_id for row in baseline.rows()}
+
+    def test_junk_ceiling_is_refused_at_config(self) -> None:
+        with pytest.raises(ValueError, match="finite fraction"):
+            _make_config(max_sl_hit_rate=0.0)
+        with pytest.raises(ValueError, match="finite fraction"):
+            _make_config(max_sl_hit_rate=float("nan"))
 
 
 # ────── The WORST_CASE finalist-projection threading pin (fix round 2) ──────

@@ -55,9 +55,30 @@ def _metrics(draw: st.DrawFn) -> ResultMetrics:
         profit_factor=draw(_maybe_ratio),
         max_drawdown_pct=draw(_pct),
         win_rate=draw(_rate),
+        # loss_rate joined the gate inputs with the derived Door 5
+        # (DEC-METRICS-KELLY-GROWTH-001) — drawn over the SAME hostile
+        # envelope (incl. NaN/±inf for the fail-closed guard and 1.0 for the
+        # all-loss degenerate arm) PLUS the type-illegal ``None`` (refuter
+        # round 1: ``ResultMetrics.loss_rate`` is NON-nullable, so ``None``
+        # is junk — the twins must fail CLOSED on it, never TypeError out of
+        # the derived streak threshold; the fixture's ``Any`` overrides are
+        # the deliberate type-illegal escape hatch).
+        loss_rate=draw(st.one_of(st.none(), _rate)),
         win_loss_ratio=draw(_maybe_ratio),
         max_consecutive_losses=draw(st.integers(min_value=0, max_value=50)),
+        # sl_hit_rate joined the (knob-active) gate inputs with Door 6
+        # (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) — drawn over the SAME
+        # hostile envelope PLUS None (the fail-closed absence arm).
+        sl_hit_rate=draw(st.one_of(st.none(), _rate)),
     )
+
+
+#: The Door-6 knob: inactive (None) or an in-range ceiling — the only values
+#: SweepGridConfig/SweepRunConfig admit (junk ceilings are refused at config).
+_ceiling = st.one_of(
+    st.none(),
+    st.floats(min_value=0.001, max_value=1.0, allow_nan=False, allow_infinity=False),
+)
 
 
 @given(m=_metrics())
@@ -91,3 +112,23 @@ def test_non_finite_guard_is_exclusive(m: ResultMetrics) -> None:
 @settings(max_examples=100, deadline=None)
 def test_deterministic(m: ResultMetrics) -> None:
     assert gate_reasons(m) == gate_reasons(m)
+
+
+@given(m=_metrics(), ceiling=_ceiling)
+@settings(max_examples=300, deadline=None)
+def test_twin_parity_holds_under_the_door6_knob(m: ResultMetrics, ceiling: float | None) -> None:
+    """The ruling-12 law extended over the Door-6 knob axis
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B): pass ⇔ zero reasons for
+    EVERY (metrics, ceiling) pair, and structural token laws still hold."""
+    verdict = passes_gates(m, max_sl_hit_rate=ceiling)
+    reasons = gate_reasons(m, max_sl_hit_rate=ceiling)
+    assert bool(verdict) == (reasons == ())
+    assert set(reasons) <= set(GATE_REASON_ORDER)
+    indices = [GATE_REASON_ORDER.index(token) for token in reasons]
+    assert indices == sorted(set(indices))
+    if GATE_NON_FINITE_INPUT in reasons:
+        assert reasons == (GATE_NON_FINITE_INPUT,)
+    if ceiling is None:
+        # The inactive knob is byte-identical to the knob-less call.
+        assert verdict == passes_gates(m)
+        assert reasons == gate_reasons(m)
