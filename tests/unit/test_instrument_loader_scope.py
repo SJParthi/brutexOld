@@ -1,12 +1,15 @@
-"""The index4-default loader + auto-heal arms — DEC-UNIVERSE-INDEX-ONLY-001.
+"""The index4-default loader + auto-heal CHAIN arms — DEC-UNIVERSE-INDEX-ONLY-001.
 
 The shipped-default (Law-1) guard arms for the A5/A6 loader narrowing over a
 REAL master fixture (exactly-4-rows, NTM dormancy with ZERO network, the
-report scope keys), the §5.1 SYMMETRIC auto-heal probe (narrow / widen /
-gdfl-no-loop / env-divergence — loop-freedom both directions over a REAL
-store), and the P1 pull-selection narrowing. Fails-before proofs executed
-manually against the merge-base tree (recorded in the PR body); these are the
-permanent net.
+report scope keys), the §5.1 auto-heal SYSTEM chain (probe → reload →
+converged store — loop-freedom both directions incl. env-divergence over a
+REAL store), and the P1 pull-selection narrowing. The PURE
+``store_scope_mismatch`` arms + the ``evaluate_master_reload_trigger``
+assembly + the cli wiring pin live in the auto_pull stem suite
+(``tests/unit/test_dashboard_auto_pull_scope.py`` — the discovery-gate
+mapping law). Fails-before proofs executed manually against the merge-base
+tree (recorded in the PR body); these are the permanent net.
 """
 
 from __future__ import annotations
@@ -23,18 +26,11 @@ from brutex.config.feed_scope import (
     INDEX4_UNDERLYINGS,
     SCOPE_FULL,
     SCOPE_INDEX4,
-    FeedScope,
-    resolve_feed_scope,
 )
-from brutex.dashboard.auto_pull import (
-    evaluate_master_reload_trigger,
-    should_reload_instrument_master,
-    store_scope_mismatch,
-)
+from brutex.dashboard.auto_pull import evaluate_master_reload_trigger
 from brutex.dashboard.instrument_loader import load_instrument_master
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.data.instrument_store import InstrumentStore
-from brutex.models import Exchange
 
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
 
@@ -211,69 +207,6 @@ class TestIndex4LoaderDefault:
         }
 
 
-def _index4() -> FeedScope:
-    return resolve_feed_scope("groww")
-
-
-class TestStoreScopeMismatch:
-    """§5.1 — the SYMMETRIC probe, pure arms."""
-
-    def test_narrow_arm_fires_on_eq_rows(self) -> None:
-        assert store_scope_mismatch(scope=_index4(), index_rows=[], eq_row_count=1) is True
-
-    def test_narrow_arm_fires_on_out_of_scope_idx(self) -> None:
-        assert (
-            store_scope_mismatch(
-                scope=_index4(),
-                index_rows=[(Exchange.NSE, "NIFTYIT")],
-                eq_row_count=0,
-            )
-            is True
-        )
-
-    def test_narrow_arm_quiet_on_admitted_store(self) -> None:
-        rows = list(INDEX4_UNDERLYINGS)
-        assert store_scope_mismatch(scope=_index4(), index_rows=rows, eq_row_count=0) is False
-
-    def test_widen_arm_fires_on_zero_eq_under_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(FEED_SCOPE_ENV, "full")
-        full = resolve_feed_scope("groww")
-        assert (
-            store_scope_mismatch(scope=full, index_rows=list(INDEX4_UNDERLYINGS), eq_row_count=0)
-            is True
-        )
-        # A populated wide store reads False — ONE reload, no loop.
-        assert (
-            store_scope_mismatch(scope=full, index_rows=list(INDEX4_UNDERLYINGS), eq_row_count=212)
-            is False
-        )
-
-    def test_gdfl_no_loop_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """§6#11 — a wide NON-groww binding can NEVER arm the widen arm: the
-
-        probe keys on the LOADER's OWN feed scope (groww, still index4), so a
-        4-row store reads False — zero reloads, no per-boot loop."""
-        monkeypatch.setenv(FEED_SCOPE_ENV, "gdfl=full")
-        loader_scope = resolve_feed_scope("groww")
-        assert loader_scope.bounded()
-        assert (
-            store_scope_mismatch(
-                scope=loader_scope, index_rows=list(INDEX4_UNDERLYINGS), eq_row_count=0
-            )
-            is False
-        )
-
-    def test_scope_mismatch_flag_reaches_verdict(self) -> None:
-        assert (
-            should_reload_instrument_master(index_count=4, stock_count=0, scope_mismatch=True)
-            is True
-        )
-        assert (
-            should_reload_instrument_master(index_count=4, stock_count=0, scope_mismatch=False)
-            is False
-        )
-
-
 class TestAutoHealChain:
     """§6#11 — the SYSTEM chain: probe → reload → converged store → False."""
 
@@ -324,23 +257,3 @@ class TestAutoHealChain:
         monkeypatch.setenv(FEED_SCOPE_ENV, "gdfl=full")
         should, _summary = evaluate_master_reload_trigger(store)
         assert should is False
-
-
-class TestCliAutoloadWiringPin:
-    """§5.1 — the call-site source pin (the #1645 idiom): the pragma-no-cover
-
-    daemon body must consume the COVERED trigger helper, never a hand-built
-    kwargs assembly a dropped kwarg could silently ship through."""
-
-    def test_autoload_daemon_uses_covered_trigger_helper(self) -> None:
-        source = (Path(__file__).resolve().parents[2] / "brutex" / "cli.py").read_text(
-            encoding="utf-8"
-        )
-        start = source.index("def _autoload_instrument_master(")
-        end = source.index("def _start_instrument_autoload(")
-        body = source[start:end]
-        assert "evaluate_master_reload_trigger(store)" in body
-        assert "should_reload_instrument_master(" not in body  # no hand assembly
-        assert "load_instrument_master(store)" in body
-        # The §5.6 divergence visibility: the autoload log names the scope.
-        assert 'scope=counts.get("scope")' in body

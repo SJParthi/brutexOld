@@ -3438,8 +3438,9 @@ def _autoload_instrument_master(
         # under index4 → ONE pruning reload; widen: zero EQ rows under a
         # persistent `full` env → ONE widening reload), keyed on the LOADER's
         # OWN feed scope — never the read union. This call site's kwargs are
-        # source-pinned (tests/unit/test_cli_autoload_scope_pin.py, the #1645
-        # idiom) because this daemon body is pragma-no-cover.
+        # source-pinned (tests/unit/test_dashboard_auto_pull_scope.py
+        # TestCliAutoloadWiringPin, the #1645 idiom) because this daemon body
+        # is pragma-no-cover.
         should_reload, summary = evaluate_master_reload_trigger(store)
         if should_reload:
             counts = load_instrument_master(store)
