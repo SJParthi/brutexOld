@@ -1,0 +1,11 @@
+{
+  "_comment": "Wheel-source freshness fingerprint (DEC-RUST-CALENDAR-LEAVES-001; the fno_math/trading_core/brutex_feed pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_calendar._EXPECTED_COMPILED_SYMBOLS' non-dunder names. Update this file in the SAME commit as any rust/brutex-calendar surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught at BUILD time by the probe-generated golden battery (rust/brutex-calendar/tests/goldens/), not at runtime.",
+  "crate_version": "0.1.0",
+  "symbols": [
+    "SOURCE_DIGEST",
+    "__version__",
+    "classify_month_drift",
+    "parse_observed_sidecar",
+    "validate_settle_evidence"
+  ]
+}
