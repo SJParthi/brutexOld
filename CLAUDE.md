@@ -25,7 +25,9 @@ approve-all winning-completeness ruling (items 6 + 7): the QUARANTINED
 low-support rescue lane (second Stage-1B floor 8; masks with hits ∈ [8, 30)
 simulate through the normal trade-sim path, tagged `low_support=True`,
 validated by the n<30-honest battery — the BORN-RUST exact binomial tail
-`fno_math.stats_binom_tail_log_sf` p < 1e-4 · blake3-seeded MC permutation ·
+`fno_math.stats_binom_tail_log_sf` p < 1e-4 under the BARRIER-IMPLIED null
+p0 = SL/(SL+TP) on decided trades only (the round-1 hostile-review
+respecification of the fair-coin null) · blake3-seeded MC permutation ·
 rescue-floor lockbox; DSR/CPCV honestly BYPASSED — and surfaced ONLY in the
 additive `provisional_specialists` top100 section, NEVER main-ranked; the
 apriori-freeze survival clause consciously superseded-when-armed with the
@@ -35,8 +37,9 @@ exact-integer derivation keeping the SAME 40×50 = 2,000-cell shape — Mode-A
 is the r=400-paisa identity anchor; SENSEX's absurd ₹2 ceiling becomes ₹450 at
 r=90,000 — + the ~5-cell log-spaced coarse nightly axis; the spec's "locked,
 never data-derived" Mode-A clause consciously superseded-in-part, historical
-text kept). BOTH default-OFF (fail-loud knobs `BRUTEX_RESCUE_MIN_HITS` ·
-`BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`); OFF =
+text kept). BOTH default-OFF (knobs `BRUTEX_RESCUE_MIN_HITS` ·
+`BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS` —
+fail-loud ONCE BOUND; no production reader until the club-fold binding); OFF =
 byte-identical, frozen goldens unmodified. ENGINE UNCHANGED when OFF —
 NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
 blurb + MIGRATION.md #1977–#1978 — this header carries the pointer, never
@@ -3333,12 +3336,19 @@ hostile-review pass._
   (hits==8 IN, hits==30 OUT — pinned), simulates through the NORMAL `metrics_for_mask` trade-sim core, and
   validates with the n<30-HONEST battery (DSR/CPCV honestly BYPASSED — the PSR effective-N asymptotics +
   S=16 CPCV fold counts are structurally invalid below ~30 trades, documented): (1) the BORN-RUST exact
-  binomial sign-test tail — NEW `rust/fno-math/src/stats/binom.rs` `stats_binom_tail_log_sf(n,k,p)`
+  binomial upper-tail test at p < 1e-4 under the BARRIER-IMPLIED null p0 = SL/(SL+TP)
+  (`barrier_null_win_probability` — gambler's ruin of a driftless walk under the cell's OWN barriers, both
+  required positive fail-loud; n = winners + losers, scratch trades discarded; achievability + the
+  barrier-only-null approximation disclosed in the module docstring — the round-1 hostile-review
+  respecification of the original fair-coin p=0.5 frequency null, which auto-rejected profitable
+  low-win-rate specialists and was unpassable below n=14) — NEW `rust/fno-math/src/stats/binom.rs`
+  `stats_binom_tail_log_sf(n,k,p)`
   (log-space, O(n)/call, Result-never-panic; additive registration across lib.rs/shim/.pyi/
   EXPECTED_BUILD.json/facade golden; crate version + Cargo.lock byte-untouched; cross-language parity
-  bounded honestly by the tests-side exact-Fraction oracle at p=0.5 (1e-10 log-units) + the op-for-op
-  transcription over hostile n/k/p (1e-9 — the disclosed libm envelope), never a bit-identity claim) at
-  p < 1e-4; (2) the EXISTING `monte_carlo_permutation_test` (B=1000) seeded `rescue_mc_seed(candidate_id)`
+  bounded honestly by the tests-side exact-Fraction oracle at the dyadic p=0.5 (1e-10 log-units — an
+  exactness anchor, not the production null) + the op-for-op
+  transcription over hostile n/k/p (1e-9 — the disclosed libm envelope; the arm covering the production
+  p0), never a bit-identity claim); (2) the EXISTING `monte_carlo_permutation_test` (B=1000) seeded `rescue_mc_seed(candidate_id)`
   = blake3 mod 2³¹ — Golden Rule #4, bit-deterministic; (3) the EXISTING `lockbox_evaluation` at the
   rescue floor `lockbox_min_trades=5` (a W3-DEFAULT standing in for an un-ruled operator value,
   disclosed — the 500-trade production floor would auto-fail every n<30 candidate); `mc_skip_if_failed`
@@ -3383,9 +3393,22 @@ hostile-review pass._
   way; frozen goldens (run-identity + apriori parity + vocab) UNMODIFIED fixtures byte-untouched; cargo
   fmt/clippy -D warnings/test --release --locked green (binom kernel 10 in-crate tests); ruff/ruff-format/
   `mypy --strict`/pyright clean; the 7-type battery (unit/integration/property/golden/bench + hand-applied
-  mutants on the floor/band/fragment laws). ENGINE UNCHANGED when OFF — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  mutants on the floor/band/fragment laws). HOSTILE-REVIEW ROUND 1 folded (2026-07-19, same branch,
+  pre-PR — the per-finding record lives in MIGRATION.md #1977): the binomial gate RESPECIFIED onto the
+  barrier-implied null (R1 MAJOR — the fair-coin p=0.5 frequency null auto-rejected profitable
+  low-win-rate specialists, was unpassable below n=14 at alpha=1e-4, and counted ties;
+  `RescueConfig.binom_null_p` REMOVED, `RescueLaneResult.binom_null_p` + section provenance keys added;
+  R1-falsifier/achievability/p0-threading/ties-discard Fraction-oracle-pinned); the lane's
+  `metrics_for_mask(reference_stamper=None)` SANCTIONED as the SIXTH discarded-stream site (R2 BLOCKER —
+  the VIX pin map + §2 Rule 3 widened FIVE→SIX consciously); the two nonexistent test-file citations in
+  #1977/#1978 corrected (R4); the env-knob "fail-loud" + coverage claims scoped honestly (R3/R4 — see
+  below). HONEST: the 100% coverage is unit/property-level — ZERO end-to-end production coverage until the
+  club-fold binding (no production module imports the lane). ENGINE UNCHANGED when OFF —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; new env vars `BRUTEX_RESCUE_MIN_HITS` +
-  `BRUTEX_STAGE3_INSTRUMENT_SCALE` + `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`, all fail-loud.)
+  `BRUTEX_STAGE3_INSTRUMENT_SCALE` + `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS` — each resolver fail-loud ONCE
+  BOUND; no production code reads any of the three until the deferred club-fold binding lands, so arming
+  them today is a clean silent no-op.)
   Earlier: `claude/rust-u128-enum-kernel` (**DEC-ENUM-KERNEL-U128-001, MIGRATION.md #1942 —
   queue-master allocation (map v36; live-main ceiling #1917 at assignment — gaps are legal per
   DEC-LEDGER-RENUMBER-001)** — the critical-path Rust u128 ENUM/COUNT kernel. THE HOIST (its own severable
@@ -9918,7 +9941,7 @@ hostile-review pass._
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
    #1645 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
-   trade streams are the FIVE named DISCARDED/unobservable streams —
+   trade streams are the SIX named DISCARDED/unobservable streams —
    the Stage-4 cascade candidate re-simulation (stamps would be dropped
    at the CandidateInput scalar conversion; report bytes pinned
    identical — the round-6 review DELETED the cascade chain's dead
@@ -9926,8 +9949,13 @@ hostile-review pass._
    builds that paid a full VIX lake read per replay/click for zero
    output), its Monte-Carlo permutation filter, `run_persisted_sweep`'s
    K-of-N inner stream, the CLI options-sim replay (stamps would be
-   dropped at the SpotSignal conversion) and `brutex sweep`'s
-   text-report replay (report bytes pinned identical) — each an
+   dropped at the SpotSignal conversion), `brutex sweep`'s
+   text-report replay (report bytes pinned identical) and the
+   low-support rescue lane's quarantined re-simulation
+   (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001, MIGRATION.md #1977 — rescued
+   rows are provisional-specialists ARTIFACT rows only, never
+   main-ranked/persisted to a store; the sixth site, sanctioned by that
+   DEC's round-1 hostile review as a conscious extension) — each an
    explicit literal `reference_stamper=None` enumerated by an AST pin
    whose exact-count laws also REFUSE a silently-omitted kwarg
    and positively pin the entry-point binds (round-2 panel hardening);
@@ -10256,7 +10284,9 @@ hostile-review pass._
   through the normal trade-sim path via the reused popcount kernel +
   `metrics_for_mask` + `build_candidate_input`, tagged `low_support=True`,
   validated by the n<30-honest battery — BORN-RUST
-  `fno_math.stats_binom_tail_log_sf` exact binomial tail p < 1e-4 ·
+  `fno_math.stats_binom_tail_log_sf` exact binomial tail p < 1e-4 under the
+  BARRIER-IMPLIED null p0 = SL/(SL+TP) on decided trades (winners + losers;
+  the round-1 hostile-review respecification of the fair-coin null) ·
   blake3-seeded MC B=1000 · rescue-floor lockbox; DSR/CPCV honestly
   bypassed — and surfaced ONLY in the additive `provisional_specialists`
   top100 section, never main-ranked; apriori survival clause consciously
@@ -10271,8 +10301,12 @@ hostile-review pass._
   axis fragment's `canonical_trade_params` merge deferred to the club fold —
   identity-neutral at default, pinned; the ~5-cell coarse nightly axis via
   `nightly_sweep_kwargs(sltp_scale_cells=…)`, default None byte-identical).
-  BOTH default-OFF behind fail-loud knobs (`BRUTEX_RESCUE_MIN_HITS` ·
-  `BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`);
+  BOTH default-OFF behind the knobs `BRUTEX_RESCUE_MIN_HITS` ·
+  `BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`
+  (fail-loud ONCE BOUND — no production reader until the club-fold binding;
+  arming today is a clean silent no-op); hostile-review round 1 folded
+  (binomial null respec + the SIXTH sanctioned VIX literal-None site +
+  citation/honesty corrections — MIGRATION.md #1977 carries the record);
   OFF = byte-identical, frozen goldens unmodified; ENGINE UNCHANGED when
   OFF — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1977–#1978 for the full blurb)
