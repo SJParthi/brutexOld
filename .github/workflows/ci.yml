@@ -2532,8 +2532,14 @@ jobs:
           # brutex.metrics.cascade (262 stmts / 84 branches) — chains the hard
           # gates + the 9 filters + composite ranking. Same numpy-safe form as
           # the sibling metrics gates (brutex.metrics eagerly imports numpy).
+          # DEC-REGIME-MUST-SURVIVE-STRATUM-001: test_cascade_extreme_vol.py
+          # joins the gate — it covers the default-OFF extreme-vol
+          # must-survive filter #10 block in cascade.py.
+          # DEC-REGIME-FRAGILITY-GATE-001: test_cascade_regime_fragility.py
+          # joins the gate — it covers the default-OFF regime-fragility
+          # filter #11 block in cascade.py.
           if compgen -G "tests/unit/test_cascade.py" > /dev/null; then
-            pytest tests/unit/test_cascade.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            pytest tests/unit/test_cascade.py tests/unit/test_cascade_extreme_vol.py tests/unit/test_cascade_regime_fragility.py --cov=brutex --cov-branch --cov-fail-under=0 -q
             coverage report --include="*/brutex/metrics/cascade.py" | grep -q "brutex/metrics/cascade.py" \
               || { echo "ERROR: brutex/metrics/cascade.py was not measured — gate failed"; exit 1; }
             coverage report --include="*/brutex/metrics/cascade.py" --show-missing --fail-under=100
