@@ -1454,9 +1454,13 @@ jobs:
           # recovery by run-id match, the audited refinement post-pass, the
           # refined-cell cascade specs + manifest record, and the F11 A/B
           # byte-identical-tree determinism oracle — needs the [optimize]
-          # extra installed in this job).
+          # extra installed in this job). The stem-matched Hook-A seam suite
+          # (test_engine_stage3_wire_rollup_hook.py, DEC-RESULTS-TOPK-ROLLUP-001)
+          # joins the stanza's file list — it carries the rollup_paths_hook
+          # fire-arm coverage the discovery gate's stem family already
+          # collects (the #1913/#1719 stanza-extension precedent).
           if compgen -G "tests/unit/test_engine_stage3_wire.py" > /dev/null; then
-            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py
+            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py tests/unit/test_engine_stage3_wire_rollup_hook.py
           else
             echo "(brutex.engine.stage3_wire test file not present yet — gate inactive)"
           fi
