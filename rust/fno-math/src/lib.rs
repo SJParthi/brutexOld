@@ -85,6 +85,13 @@ pub mod metrics;
 /// Python keeps every numpy pairwise reduction, libm call and raise.
 pub mod stats;
 
+/// LANE W5 (DEC-NIGHTLY-DECAY-R48-001 + DEC-CHAMPION-CHALLENGER-001): the
+/// nightly continuous-adaptation verdict kernels — trailing Sharpe/max-DD
+/// fold, the R48 decay verdict under the lockbox tolerance law, and the
+/// champion/challenger domination compare. Born-Rust per the
+/// rust-o1-totality-law BORN-RUST rule.
+pub mod decay;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -168,5 +175,12 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
     // ---- end stats module ----
+    // ---- decay module (LANE W5, DEC-NIGHTLY-DECAY-R48-001 +
+    // DEC-CHAMPION-CHALLENGER-001): the nightly adaptation verdict kernels.
+    // Additive registration only (keep-both union seam with sibling lanes).
+    m.add_function(wrap_pyfunction!(decay::decay_trailing_fold, m)?)?;
+    m.add_function(wrap_pyfunction!(decay::decay_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(decay::champion_dominates, m)?)?;
+    // ---- end decay module ----
     Ok(())
 }

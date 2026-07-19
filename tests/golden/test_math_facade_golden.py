@@ -50,6 +50,11 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
+        # DEC-NIGHTLY-DECAY-R48-001 (LANE W5) — the born-Rust decay verdict /
+        # trailing-fold / domination kernels (deliberate additive entries).
+        "champion_dominates",
+        "decay_trailing_fold",
+        "decay_verdict",
         "popcount_bytes",
         "stats_cpcv_pass_count",
         "sweep_drawdown_stats",

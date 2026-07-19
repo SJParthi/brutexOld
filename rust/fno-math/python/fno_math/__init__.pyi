@@ -29,11 +29,14 @@ __all__ = [
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "champion_dominates",
     "count_supermask_u64s",
     "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
+    "decay_trailing_fold",
+    "decay_verdict",
     "popcount_bytes",
     "stats_cpcv_pass_count",
 ]
@@ -155,6 +158,54 @@ def stats_cpcv_pass_count(
     input (length mismatch, `n_groups < 2`, `n_test_groups` out of
     `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
     `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
+    ...
+
+def decay_trailing_fold(returns: list[float]) -> tuple[float | None, float, float]:
+    """Trailing-window fold `(sharpe, max_drawdown, net)` (DEC-NIGHTLY-DECAY-R48-001).
+
+    One sequential pass over a per-trade return series: population-std
+    Sharpe (zero risk-free, no annualisation; `None` for `n < 2`, zero or
+    non-finite variance) + the largest peak-to-trough decline of the
+    cumulative-return equity path (the lockbox `_max_drawdown` law) + the
+    sequential net. Op-order transcription of the
+    `brutex.nightly.decay_math` Python oracle (bit-identical by structure).
+    """
+    ...
+
+def decay_verdict(
+    trailing_sharpe: float | None,
+    discovery_sharpe: float,
+    trailing_max_dd: float,
+    discovery_max_dd: float,
+    n_trades: int,
+    min_trades: int,
+    sharpe_tolerance: float,
+    mdd_tolerance: float,
+) -> int:
+    """R48 decay verdict code (DEC-NIGHTLY-DECAY-R48-001).
+
+    `0` healthy / `1` decayed / `2` abstain-low-N / `3` abstain-undefined.
+    Decayed iff `trailing_sharpe < (1 - sharpe_tolerance) * discovery_sharpe`
+    OR `trailing_max_dd > (1 + mdd_tolerance) * discovery_max_dd` (the
+    lockbox tolerance law); `n_trades < min_trades` abstains BEFORE any
+    compare (never a decay claim at low N). Raises `ValueError` on a
+    non-finite/negative tolerance, a non-finite `discovery_sharpe`, or a
+    non-finite/negative `discovery_max_dd`.
+    """
+    ...
+
+def champion_dominates(
+    challenger_sharpe: float,
+    challenger_max_dd: float,
+    champion_sharpe: float,
+    champion_max_dd: float,
+) -> bool:
+    """Champion/challenger domination compare (DEC-CHAMPION-CHALLENGER-001).
+
+    True iff the challenger's lockbox Sharpe is STRICTLY higher AND its
+    lockbox max-DD is no worse (`<=`). Raises `ValueError` on any
+    non-finite input (a promotion never rides an undefined metric).
     """
     ...
 
