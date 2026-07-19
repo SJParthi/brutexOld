@@ -3934,10 +3934,13 @@ hostile-review pass._
   per-finding counted error, byte-untouched, batch continues; reconcile:
   the GAP-#9 loud per-file skip; scan: the loud counted scan_skip; read:
   the typed quarantining ResampleInputError — the inode-guard class
-  excepted: a non-regular inode in the read set keeps its typed
-  `NotRegularFileError` per DEC-LAKE-READ-INODE-GUARD-001/-002, crossed
-  from the crate as a real OSError and restored facade-side — the D-31
-  workspace-health fix). W-6b closes the endgame's
+  excepted: EVERY planted non-regular/mis-typed `*.parquet` inode entry
+  (FIFO/device/dir) refuses loudly with the typed `NotRegularFileError`
+  on BOTH read arms per DEC-LAKE-READ-INODE-GUARD-001/-002, crossed from
+  the crate as a real OSError and restored facade-side — the D-31
+  workspace-health fix + the D-32 walker alignment: a `*.parquet`-NAMED
+  directory is collected as a read candidate and refused, never
+  descended into to silently serve its members). W-6b closes the endgame's
   production-reachable narrowing: the bars-tree dup heal gains the
   frame-level verbatim PRESERVE arm — the EXACT 17-column Greeks-overlay
   schema Greeks enrichment writes AND the finite beyond-2^53-paisa

@@ -51,6 +51,7 @@ from brutex.data.errors import (  # noqa: E402
 )
 from brutex.data.models import CandleBar  # noqa: E402
 from brutex.data.parquet_writer import ParquetWriter  # noqa: E402
+from brutex.data.sidecar_read import NotRegularFileError  # noqa: E402
 from brutex.data.sink import ParquetBarSink  # noqa: E402
 from brutex.data.timeframe_materialize import (  # noqa: E402
     PrebuildKind,
@@ -255,6 +256,61 @@ class TestGateExceptions:
         with pytest.raises(NoStored1mBarsError) as second:
             reader()
         assert str(second.value) == str(first.value)
+
+
+class TestInodeGateWholeTree:
+    """D-32: a ``*.parquet``-NAMED DIRECTORY on the whole-tree arm refuses
+    with the typed :class:`NotRegularFileError`
+    (DEC-LAKE-READ-INODE-GUARD-001/-002 — the pre-lane loud posture) instead
+    of being descended into and silently serving its member files (the
+    pre-fix walker's polars-dataset-dir emulation)."""
+
+    def _plant_dir(self, lake_root: Path) -> Path:
+        plant = (
+            lake_root / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute" / "2021" / "02.parquet"
+        )
+        plant.mkdir(parents=True)
+        return plant
+
+    def test_planted_parquet_named_dir_refuses_typed_and_cause_chained(
+        self, tmp_path: Path
+    ) -> None:
+        _write_bars(tmp_path, [_bar(0)])
+        self._plant_dir(tmp_path)
+        reader = _reader(tmp_path)
+        with pytest.raises(NotRegularFileError) as excinfo:
+            reader()
+        err = excinfo.value
+        # The crate message verbatim — the D-31 real-OSError channel.
+        assert "not a regular file" in str(err)
+        assert "02.parquet" in str(err)
+        # Cause-chained: the crate crossed a REAL OSError (the type-level
+        # token); the facade re-raise carries its message byte-for-byte.
+        assert isinstance(err.__cause__, OSError)
+        assert not isinstance(err.__cause__, NotRegularFileError)
+        assert str(err) == str(err.__cause__)
+
+    def test_dir_with_member_files_refuses_never_serves_members(self, tmp_path: Path) -> None:
+        # Pre-fix the walker DESCENDED into the plant and served this valid
+        # member as the symbol's own bars — the silent-serve now refuses.
+        _write_bars(tmp_path, [_bar(0)])
+        plant = self._plant_dir(tmp_path)
+        member = pl.DataFrame(
+            {
+                "timestamp": pl.Series("timestamp", [_SESSION_OPEN_UTC.replace(tzinfo=None)]).cast(
+                    pl.Datetime(time_unit="us", time_zone="UTC")
+                ),
+                "open": [999.0],
+                "high": [999.0],
+                "low": [999.0],
+                "close": [999.0],
+                "volume": [1],
+                "open_interest": [0],
+            }
+        )
+        member.write_parquet(plant / "member.parquet")
+        with pytest.raises(NotRegularFileError, match="not a regular file"):
+            _reader(tmp_path)()
 
 
 class TestBadTickWarnFrozen:

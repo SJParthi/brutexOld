@@ -114,12 +114,17 @@ pub(super) fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
     Ok(buf)
 }
 
-/// Collect every `*.parquet`-named FILE under *root* (recursive), ascending
+/// Collect every `*.parquet`-named ENTRY under *root* (recursive), ascending
 /// lexicographic — the whole-tree arm's enumeration. A `*.parquet`-named
-/// DIRECTORY (the out-of-band dataset-dir plant) is descended into so its
-/// member files are read — the practical equivalent of polars' dataset-dir
-/// glob read. Walk errors surface (the facade wraps them into the typed
-/// quarantining `ResampleInputError` — the W-6a endgame law).
+/// entry is COLLECTED whatever its inode type (file / directory / FIFO /
+/// symlink): the per-file inode gate downstream owns the regular-file
+/// verdict, so a `*.parquet`-named DIRECTORY (the out-of-band dataset-dir
+/// plant) refuses loudly with the typed `NotRegularFile` class (D-32 —
+/// restoring the pre-lane loud posture) instead of being descended into and
+/// silently serving its member files. Ordinary (non-`*.parquet`-named)
+/// directories — year dirs — descend unchanged. Walk errors surface (the
+/// facade wraps them into the typed quarantining `ResampleInputError` —
+/// the W-6a endgame law).
 fn collect_tree_parquet_files(root: &Path) -> std::io::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -127,10 +132,10 @@ fn collect_tree_parquet_files(root: &Path) -> std::io::Result<Vec<String>> {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if entry.file_name().to_string_lossy().ends_with(".parquet") {
+            if entry.file_name().to_string_lossy().ends_with(".parquet") {
                 out.push(path.to_string_lossy().into_owned());
+            } else if path.is_dir() {
+                stack.push(path);
             }
         }
     }
@@ -1038,6 +1043,52 @@ mod tests {
         );
         assert!(gone_err.to_string().contains("cannot stat"), "{gone_err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parquet_named_directory_refuses_on_the_whole_tree_arm() {
+        // D-32: a `*.parquet`-NAMED DIRECTORY in the tree is collected as a
+        // read candidate — never descended — so the inode gate refuses it
+        // with the DISTINCT `NotRegularFile` class (the pre-lane loud
+        // posture); its member files are NEVER silently served.
+        let dir = scratch_dir("dirplant");
+        write_parquet(
+            &dir,
+            "2024/01.parquet",
+            &stored_frame(&[OPEN_0915_UTC_US], &[100.0], false),
+        );
+        // The dir-with-contents shape: a healthy member INSIDE the plant
+        // must not be served through the walk.
+        write_parquet(
+            &dir,
+            "2024/02.parquet/member.parquet",
+            &stored_frame(&[OPEN_0915_UTC_US + 31 * DAY_US], &[105.0], false),
+        );
+        let err = read_1m_impl(&[], Some(&dir.to_string_lossy()), false, true).unwrap_err();
+        match &err {
+            ReadCoreError::NotRegularFile(msg) => {
+                assert!(msg.contains("not a regular file"), "{msg}");
+                assert!(msg.contains("02.parquet"), "{msg}");
+            }
+            other => panic!("expected the NotRegularFile class, got {other:?}"),
+        }
+        // An EMPTY `*.parquet`-named dir refuses identically (pre-fix it
+        // was silently descended and contributed nothing).
+        let empty_plant = scratch_dir("dirplant-empty");
+        write_parquet(
+            &empty_plant,
+            "2024/01.parquet",
+            &stored_frame(&[OPEN_0915_UTC_US], &[100.0], false),
+        );
+        std::fs::create_dir_all(empty_plant.join("2024/03.parquet")).unwrap();
+        let empty_err =
+            read_1m_impl(&[], Some(&empty_plant.to_string_lossy()), false, true).unwrap_err();
+        assert!(
+            matches!(&empty_err, ReadCoreError::NotRegularFile(msg) if msg.contains("03.parquet")),
+            "empty dir plant must refuse too: {empty_err:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&empty_plant).unwrap();
     }
 
     #[test]
