@@ -390,6 +390,49 @@ def _isolate_run_forensics_mirror(
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sweep_apriori_env() -> Iterator[None]:
+    """Snapshot-restore ``BRUTEX_SWEEP_APRIORI`` around every test so the
+    extinction default never leaks between tests in the one pytest process.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001: the CLI sweep dispatch (``cmd_sweep_all`` /
+    the ``exploration`` ladder in ``brutex/cli.py``) writes
+    ``os.environ["BRUTEX_SWEEP_APRIORI"] = "1"`` with a RAW assignment (not
+    ``monkeypatch``) so spawn workers inherit the pruned path. In a real CLI
+    invocation the process exits and nothing leaks; but the suite drives that
+    dispatch IN-PROCESS, and the raw write is invisible to a test's own
+    ``monkeypatch`` teardown — so without this guard the flag leaks into every
+    later test in the same process and silently engages the Apriori frontier
+    (reproduced: the ``test_engine_sweep_run`` / ``test_engine_sweep_parallel`` /
+    ``test_engine_sweep_run_core`` census + the ``test_sweep_runcore_byte_identity``
+    goldens diverge — 12 order-dependent failures in the full-suite coverage
+    gate, all green in isolation). This is the harness twin of the dashboard's
+    own snapshot-restore law (``run_sweep_from_request``, ruling 5) applied at
+    the pytest boundary so EVERY in-process caller of the dispatch is covered,
+    and it never fights a test's deliberate ``monkeypatch.setenv`` of the same
+    var (autouse setup precedes the test's own ``monkeypatch``, so the snapshot
+    is the true pre-test value and both restore to it).
+
+    LITERAL env-var name (drift-pinned against
+    ``brutex.engine.sweep_apriori.SWEEP_APRIORI_ENV`` in
+    ``tests/unit/test_engine_sweep_apriori.py``), deliberately NOT an import:
+    this fixture is suite-wide autouse and the redteam nightly harness
+    (redteam-nightly.yml) runs a PYTHON-ONLY editable install with no Rust
+    wheels, so importing ``brutex.engine`` here would error the setup of every
+    redteam test — the same reason ``_isolate_run_forensics_mirror`` above uses
+    a literal.
+    """
+    env_name = "BRUTEX_SWEEP_APRIORI"
+    original = os.environ.get(env_name)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = original
+
+
+@pytest.fixture(autouse=True)
 def _testclient_loopback_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point every ``TestClient`` at ``base_url="http://localhost"`` by default (R2-DS-F1).
 
