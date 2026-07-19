@@ -2576,6 +2576,35 @@ class TestFamilyManifestSerialisation:
         with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
             cw._spec_from_dict(payload)
 
+    def test_family_infinity_json_token_refused_typed(self) -> None:
+        # DEC-CASCADE-STAT-TIER-WIRE-001 refuter round 1 (Refuter A): the
+        # non-standard JSON token ``Infinity`` — which ``json.loads`` accepts
+        # by default — previously leaked a RAW OverflowError out of the parse
+        # (``int(float("inf"))``) instead of the typed CascadeWireError.
+        # Driven through the REAL manifest_from_json path over hand-built
+        # wire bytes carrying the literal token.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest(specs=(_family_spec(),))))
+        payload["specs"][0]["family_sl_tp"] = [[float("inf"), 80]]
+        wire = json.dumps(payload).encode("utf-8")  # allow_nan default emits Infinity
+        assert b"Infinity" in wire
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw.manifest_from_json(wire)
+
+    def test_sibling_int_field_infinity_refused_typed(self) -> None:
+        # The PRE-EXISTING sibling leak closed in the same stroke: an
+        # ``Infinity`` token in any int-coerced spec field (here sl_paisa)
+        # takes the SAME typed refusal, never a raw OverflowError.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest(specs=(_family_spec(),))))
+        payload["specs"][0]["sl_paisa"] = float("-inf")
+        wire = json.dumps(payload).encode("utf-8")
+        assert b"-Infinity" in wire
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw.manifest_from_json(wire)
+
     def test_manifest_with_family_is_byte_stable(self) -> None:
         manifest = cw.CascadeManifest(
             version=cw.MANIFEST_VERSION,

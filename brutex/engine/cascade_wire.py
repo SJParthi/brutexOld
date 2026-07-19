@@ -1677,7 +1677,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     """Rebuild a :class:`CascadeTupleSpec` from :func:`_spec_to_dict` output."""
     # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
     # scalar coercions below read cleanly. Every malformed value is caught by the
-    # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
+    # ``(KeyError, TypeError, ValueError, OverflowError)`` guard and re-raised as
+    # a CascadeWireError. OverflowError joined the guard at the
+    # DEC-CASCADE-STAT-TIER-WIRE-001 refuter round 1: ``json.loads`` accepts the
+    # non-standard ``Infinity``/``-Infinity`` tokens by default and
+    # ``int(float("inf"))`` raises OverflowError (``NaN`` raises ValueError —
+    # already caught), so a hand-corrupted manifest previously leaked a raw
+    # OverflowError from every int-coerced field instead of the typed refusal.
     raw = cast(dict[str, Any], data)
     if raw.get("fill_mode") is None or str(raw["fill_mode"]) != FillMode.WORST_CASE.value:
         # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is
@@ -1738,7 +1744,7 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 else tuple((int(sl), int(tp)) for sl, tp in raw["family_sl_tp"])
             ),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
 
 
