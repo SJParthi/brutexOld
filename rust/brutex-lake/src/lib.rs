@@ -135,6 +135,11 @@ pub mod window_ledger_render;
 // partial-window truncation verdict. ADDITIVE registration (§4.1 sibling
 // merge law); own module file.
 pub mod detectors;
+// SLICE T24 PR-3a — the instrument-master AUDIT pure laws (the economics
+// lot fold + the master-integrity fold, laws 5-6 of the same DEC). Own
+// module file (the one-module-per-family house style — the design Q7
+// ruling); ADDITIVE registration (§4.1 sibling merge law).
+pub mod audits;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -610,6 +615,14 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
         detectors::classify_today_completeness_verdict,
         m
     )?)?;
+    // SLICE T24 PR-3a — the FIFTH + SIXTH detector-family laws (the
+    // instrument-master economics + structural audit folds, audits.rs).
+    // The facade's `_CRATE_API` handshake grows 4 → 6 all-or-nothing: a
+    // PR-2-era wheel latches `crate_stale` for ALL detector laws (the
+    // disclosed #1771 precedent). Appended after the PR-2 law, never
+    // reordering it (the §4.1 additive-registration law).
+    m.add_function(wrap_pyfunction!(audits::economics_lot_fold, m)?)?;
+    m.add_function(wrap_pyfunction!(audits::master_integrity_fold, m)?)?;
     Ok(())
 }
 

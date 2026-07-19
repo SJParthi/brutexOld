@@ -46,6 +46,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
+from brutex.data.detectors_rust import (
+    MasterIntegrityPayload,
+    master_integrity_rust_enabled,
+    routed_audit_master_integrity,
+)
 from brutex.models import Instrument, InstrumentType
 
 #: Leg buckets that turn the verdict RED (the structural failures).
@@ -86,6 +91,31 @@ _SPECIAL_CHARS: Final[frozenset[str]] = frozenset("&-. ")
 DEFAULT_TEST_UNDERLYING_MARKERS: Final[tuple[str, str]] = ("NSETEST", "BSETEST")
 
 _Identity = tuple[str, int]  # (exchange value, security_id) — the spot identity
+
+# ---------------------------------------------------------------------------
+# SLICE T24 PR-3a routing vocabulary (DEC-DATA-RUST-INTEGRITY-DETECTORS-001).
+# ---------------------------------------------------------------------------
+
+#: Routed-leg disposition tokens for the payload walk (input-order law —
+#: the orphan SAMPLE interleaves empty-underlying failures with routed
+#: failures exactly as the oracle records them).
+_DISP_EMPTY: Final[str] = "empty"
+_DISP_TEST: Final[str] = "test"
+_DISP_ROUTED: Final[str] = "routed"
+
+#: The crate's per-leg bucket codes (the ``BUCKET_*`` constants of
+#: ``rust/brutex-lake/src/audits.rs``, mirrored — the fake crate and the
+#: facade's ``_MASTER_BUCKET_CODE_COUNT`` gate share this order).
+_CODE_RESOLVED_BOTH: Final[int] = 0
+_CODE_SYMBOL_ONLY: Final[int] = 1
+_CODE_TOKEN_ONLY: Final[int] = 2
+_CODE_ORPHAN: Final[int] = 3
+_CODE_AMBIGUOUS: Final[int] = 4
+_CODE_DISAGREEMENT: Final[int] = 5
+
+#: The interned-id sentinel for an ABSENT key (no symbol / no token / no
+#: genuine numeric ``feed_token``) — the crate's ``NO_KEY`` twin.
+_NO_KEY: Final[int] = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +246,241 @@ def audit_master_integrity(
     -------
     MasterIntegrityReport
         The verdict + counts + a capped orphan sample.
+
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-3a): the
+    two-pass table build + leg classification is served by
+    :func:`_audit_master_integrity_python` — the verbatim body, the LIVE
+    parity oracle — via the default-OFF
+    ``BRUTEX_LAKE_RUST_MASTER_INTEGRITY`` facade
+    (:mod:`brutex.data.detectors_rust`). NO string/Decimal semantics enter
+    Rust: the routed payload interns every symbol/token/identity key to a
+    dense id, applies the alias reversal and pre-computes the
+    Unicode-sensitive predicates (``str.isdigit()`` on ``feed_token`` —
+    the ``'²²'`` trap class — the ``*NSETEST*`` marker containment, the
+    special-char tally) Python-side; the Decimal-bearing dedup, the type
+    counts and the input-order orphan-sample walk stay Python (the
+    materializer tallies the crate's per-leg bucket CODES). Flag OFF (the
+    default) returns the oracle directly — the crate is never imported,
+    byte-identical to the pre-facade law. Every crate fault under the flag
+    resolves to the ORACLE report — never a new exception class out of
+    this audit (the DETECT-only never-crash-the-load posture holds on both
+    arms).
+
+    HONEST (the facade's ceremony disclosure): the routed payload build is
+    itself an O(rows) two-pass Python walk with dicts — the same
+    complexity class as the fold it replaces (payoff ≈ 0, the ADR-0020
+    banner) — and the audit runs ~once per master load, so burn-in
+    effectively means compare-always in production (a permanent live
+    differential).
+    """
+
+    def _oracle() -> MasterIntegrityReport:
+        return _audit_master_integrity_python(
+            instruments,
+            index_aliases=index_aliases,
+            test_underlying_markers=test_underlying_markers,
+            now=now,
+            run_id=run_id,
+            csv_source_sha256=csv_source_sha256,
+        )
+
+    if not master_integrity_rust_enabled():
+        return _oracle()
+
+    # The routed arm (the G6 shape): the payload state — dispositions,
+    # counts, dedup, special set — is stashed for the materializer (the
+    # facade calls the factory before the crate and the materializer only
+    # after a clean, gate-passing crate return).
+    state: dict[str, Any] = {}
+
+    def _payload() -> MasterIntegrityPayload:
+        reverse_aliases = {v: k for k, v in (index_aliases or {}).items()}
+        markers = tuple(m.upper() for m in test_underlying_markers)
+        sym_intern: dict[tuple[str, str], int] = {}
+        tok_intern: dict[tuple[str, int], int] = {}
+        identity_intern: dict[_Identity, int] = {}
+        spot_sym_key_ids: list[int] = []
+        spot_identity_ids: list[int] = []
+        spot_token_key_ids: list[int] = []
+        seen_dedup: set[tuple[Any, ...]] = set()
+        counts = dict.fromkeys(InstrumentType, 0)
+        dedup_collisions = 0
+
+        # Pass 1 — EXACTLY the oracle's pass 1, with the spot tables
+        # replaced by interned-id VECTORS (the crate replays the dict-op
+        # sequence; the Decimal-bearing dedup + type counts stay HERE).
+        for inst in instruments:
+            counts[inst.instrument] += 1
+            key = _dedup_key(inst)
+            if key in seen_dedup:
+                dedup_collisions += 1
+            else:
+                seen_dedup.add(key)
+            if inst.instrument in (InstrumentType.IDX, InstrumentType.EQ):
+                exch = inst.exch_id.value
+                identity: _Identity = (exch, inst.security_id)
+                identity_id = identity_intern.setdefault(identity, len(identity_intern))
+                sym_id = sym_intern.setdefault((exch, inst.symbol_name), len(sym_intern))
+                tok_id = _NO_KEY
+                if _has_genuine_numeric_token(inst):
+                    # The token key IS the identity tuple — interned in its
+                    # OWN id space (shared with the LEG token keys below so
+                    # the crate's lookups match the oracle's dict hits).
+                    tok_id = tok_intern.setdefault(identity, len(tok_intern))
+                spot_sym_key_ids.append(sym_id)
+                spot_identity_ids.append(identity_id)
+                spot_token_key_ids.append(tok_id)
+
+        # Pass 2 — the oracle's leg filter + key derivation (the marker /
+        # special-char Unicode predicates + the alias reversal stay HERE);
+        # empty/test legs are Python-filtered BEFORE the vectors, recorded
+        # as dispositions so the materializer interleaves them in input
+        # order exactly like the oracle's sample walk.
+        leg_dispositions: list[tuple[Instrument, str]] = []
+        leg_sym_key_ids: list[int] = []
+        leg_tok_key_ids: list[int] = []
+        special: set[str] = set()
+        for inst in instruments:
+            if inst.instrument not in (InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE):
+                continue
+            exch = inst.exch_id.value
+            under_sym = inst.underlying_symbol
+            under_tok = inst.underlying_security_id
+            if not under_sym and under_tok is None:
+                leg_dispositions.append((inst, _DISP_EMPTY))
+                continue
+            if under_sym and any(m in under_sym.upper() for m in markers):
+                leg_dispositions.append((inst, _DISP_TEST))
+                continue
+            if under_sym and any(ch in _SPECIAL_CHARS for ch in under_sym):
+                special.add(under_sym)
+            sym_id = (
+                sym_intern.setdefault(
+                    (exch, reverse_aliases.get(under_sym, under_sym)), len(sym_intern)
+                )
+                if under_sym
+                else _NO_KEY
+            )
+            tok_id = (
+                tok_intern.setdefault((exch, under_tok), len(tok_intern))
+                if under_tok is not None
+                else _NO_KEY
+            )
+            leg_dispositions.append((inst, _DISP_ROUTED))
+            leg_sym_key_ids.append(sym_id)
+            leg_tok_key_ids.append(tok_id)
+
+        state["counts"] = counts
+        state["dedup_collisions"] = dedup_collisions
+        state["leg_dispositions"] = leg_dispositions
+        state["special"] = special
+        return MasterIntegrityPayload(
+            spot_sym_key_ids=tuple(spot_sym_key_ids),
+            spot_identity_ids=tuple(spot_identity_ids),
+            spot_token_key_ids=tuple(spot_token_key_ids),
+            leg_sym_key_ids=tuple(leg_sym_key_ids),
+            leg_tok_key_ids=tuple(leg_tok_key_ids),
+            identity_count=len(identity_intern),
+        )
+
+    def _materialize(bucket_codes: Sequence[int], unreferenced: int) -> MasterIntegrityReport:
+        resolved_both = resolved_symbol_only = resolved_token_only = 0
+        orphan = ambiguous = disagreement = empty_underlying = test_instrument = 0
+        orphan_sample: list[OrphanLeg] = []
+
+        def _record_orphan(inst: Instrument, reason: str) -> None:
+            if len(orphan_sample) < ORPHAN_SAMPLE_CAP:
+                orphan_sample.append(
+                    OrphanLeg(
+                        exchange=inst.exch_id.value,
+                        symbol=inst.symbol_name,
+                        instrument_type=inst.instrument.value,
+                        underlying_symbol=inst.underlying_symbol,
+                        underlying_security_id=inst.underlying_security_id,
+                        reason=reason,
+                    )
+                )
+
+        # The input-order walk: empty/test legs interleave with the routed
+        # legs' crate codes exactly as the oracle's single loop records
+        # them (one cursor over the code list — one source of ordering).
+        cursor = 0
+        leg_dispositions: list[tuple[Instrument, str]] = state["leg_dispositions"]
+        for inst, disposition in leg_dispositions:
+            if disposition is _DISP_EMPTY:
+                empty_underlying += 1
+                _record_orphan(inst, REASON_EMPTY_UNDERLYING)
+            elif disposition is _DISP_TEST:
+                test_instrument += 1
+            else:
+                code = bucket_codes[cursor]
+                cursor += 1
+                if code == _CODE_RESOLVED_BOTH:
+                    resolved_both += 1
+                elif code == _CODE_SYMBOL_ONLY:
+                    resolved_symbol_only += 1
+                elif code == _CODE_TOKEN_ONLY:
+                    resolved_token_only += 1
+                elif code == _CODE_ORPHAN:
+                    orphan += 1
+                    _record_orphan(inst, REASON_ORPHAN)
+                elif code == _CODE_AMBIGUOUS:
+                    ambiguous += 1
+                    _record_orphan(inst, REASON_AMBIGUOUS)
+                else:  # _CODE_DISAGREEMENT — the gate holds every code < 6
+                    disagreement += 1
+                    _record_orphan(inst, REASON_DISAGREEMENT)
+        counts: dict[InstrumentType, int] = state["counts"]
+        special: set[str] = state["special"]
+        return MasterIntegrityReport(
+            generated_at=now.isoformat(),
+            run_id=run_id,
+            csv_source_sha256=csv_source_sha256,
+            total_rows=len(instruments),
+            type_counts=TypeCounts(
+                idx=counts[InstrumentType.IDX],
+                eq=counts[InstrumentType.EQ],
+                fut=counts[InstrumentType.FUT],
+                ce=counts[InstrumentType.CE],
+                pe=counts[InstrumentType.PE],
+            ),
+            resolved_both=resolved_both,
+            resolved_symbol_only=resolved_symbol_only,
+            resolved_token_only=resolved_token_only,
+            orphan_count=orphan,
+            ambiguous_count=ambiguous,
+            disagreement_count=disagreement,
+            empty_underlying_count=empty_underlying,
+            dedup_collisions=state["dedup_collisions"],
+            spots_with_no_legs=unreferenced,
+            test_instrument_count=test_instrument,
+            special_char_count=len(special),
+            special_char_underlyings=tuple(sorted(special))[:SPECIAL_CHAR_SAMPLE_CAP],
+            orphan_legs=tuple(orphan_sample),
+        )
+
+    return routed_audit_master_integrity(
+        payload_factory=_payload, python_law=_oracle, materialize=_materialize
+    )
+
+
+def _audit_master_integrity_python(
+    instruments: Sequence[Instrument],
+    *,
+    index_aliases: Mapping[str, str] | None = None,
+    test_underlying_markers: Sequence[str] = DEFAULT_TEST_UNDERLYING_MARKERS,
+    now: datetime,
+    run_id: str = "",
+    csv_source_sha256: str = "",
+) -> MasterIntegrityReport:
+    """The verbatim audit body — the LIVE parity oracle (T24 PR-3a).
+
+    The whole pre-routing body of :func:`audit_master_integrity`, moved
+    token-for-token (the Slice-0 extraction discipline); both arms of the
+    routed audit serve or burn-in-compare against exactly this body —
+    including the pass-1 FIRST-identity/ambiguity precedence (the stored
+    ``spot_by_symbol`` mapping stays the first identity while
+    ``sym_ambiguous`` wins the classification) the crate transcribes.
     """
     reverse_aliases = {v: k for k, v in (index_aliases or {}).items()}
 

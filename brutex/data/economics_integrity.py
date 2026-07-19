@@ -40,6 +40,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Final
 
+from brutex.data.detectors_rust import (
+    EconomicsIntegrityPayload,
+    economics_integrity_rust_enabled,
+    routed_audit_economics_integrity,
+)
 from brutex.data.master_integrity import DEFAULT_TEST_UNDERLYING_MARKERS
 from brutex.models import Instrument, InstrumentType
 
@@ -126,6 +131,170 @@ def audit_economics_integrity(
     -------
     EconomicsIntegrityReport
         The verdict + counts + capped samples.
+
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-3a): the
+    group folds + verdict derivation are served by
+    :func:`_audit_economics_integrity_python` — the verbatim body, the
+    LIVE parity oracle — via the default-OFF
+    ``BRUTEX_LAKE_RUST_ECONOMICS_INTEGRITY`` facade
+    (:mod:`brutex.data.detectors_rust`). NO string semantics enter Rust:
+    the routed payload interns every key to a dense id and pre-computes
+    the Unicode-sensitive predicates (the ``*NSETEST*`` ``.upper()``
+    marker containment, the empty-underlying skip) Python-side, and the
+    report-visible capped-sample ORDER (the full-key string sort) stays
+    Python in the materializer. Flag OFF (the default) returns the oracle
+    directly — the crate is never imported, byte-identical to the
+    pre-facade law. Every crate fault under the flag resolves to the
+    ORACLE report — never a new exception class out of this audit.
+
+    HONEST (the facade's ceremony disclosure): the routed payload build is
+    itself an O(legs) Python pass with dicts — the same complexity class
+    as the fold it replaces (payoff ≈ 0, the ADR-0020 banner) — and the
+    audit runs ~once per master load, so burn-in effectively means
+    compare-always in production (a permanent live differential).
+    """
+
+    def _oracle() -> EconomicsIntegrityReport:
+        return _audit_economics_integrity_python(
+            instruments,
+            test_underlying_markers=test_underlying_markers,
+            now=now,
+            run_id=run_id,
+            csv_source_sha256=csv_source_sha256,
+        )
+
+    if not economics_integrity_rust_enabled():
+        return _oracle()
+
+    # The routed arm (the G6 shape): Python interns the keys ONCE — the
+    # payload state is stashed for the materializer (the facade calls the
+    # factory before the crate and the materializer only after a clean,
+    # gate-passing crate return, so the ordering is structural).
+    state: dict[str, Any] = {}
+
+    def _payload() -> EconomicsIntegrityPayload:
+        markers = tuple(m.upper() for m in test_underlying_markers)
+        group_intern: dict[tuple[str, str, date | None], int] = {}
+        under_intern: dict[tuple[str, str], int] = {}
+        group_ids: list[int] = []
+        under_ids: list[int] = []
+        lots: list[int] = []
+        total_legs = 0
+        # EXACTLY the oracle's leg filter — non-leg rows, empty underlyings
+        # and marker-excluded legs never reach the vectors (the Unicode
+        # `.upper()` containment stays HERE, never in Rust).
+        for inst in instruments:
+            if inst.instrument not in _LEG_TYPES:
+                continue
+            under = inst.underlying_symbol
+            if not under or any(m in under.upper() for m in markers):
+                continue
+            total_legs += 1
+            exch = inst.exch_id.value
+            group_key = (exch, under, inst.sm_expiry_date)
+            group_id = group_intern.setdefault(group_key, len(group_intern))
+            under_key = (exch, under)
+            under_id = under_intern.setdefault(under_key, len(under_intern))
+            group_ids.append(group_id)
+            under_ids.append(under_id)
+            lots.append(inst.lot_size)
+        # Dict insertion order ⇒ list index == interned id.
+        state["group_keys"] = list(group_intern)
+        state["under_keys"] = list(under_intern)
+        state["total_legs"] = total_legs
+        return EconomicsIntegrityPayload(
+            group_ids=tuple(group_ids),
+            under_ids=tuple(under_ids),
+            lots=tuple(lots),
+            group_count=len(group_intern),
+            under_count=len(under_intern),
+        )
+
+    def _materialize(
+        mismatch_group_ids: Sequence[int],
+        mismatch_lots: Sequence[Sequence[int]],
+        revision_under_ids: Sequence[int],
+        revision_lots: Sequence[Sequence[int]],
+    ) -> EconomicsIntegrityReport:
+        group_keys: list[tuple[str, str, date | None]] = state["group_keys"]
+        under_keys: list[tuple[str, str]] = state["under_keys"]
+        # The report-visible SAMPLE ORDER law stays Python (the oracle's
+        # full-key sort — input-order-independent): sort the flagged ids on
+        # the SAME (exch, under, expiry-iso) key, then cap. The crate's
+        # per-group lots are already sorted-distinct ascending.
+        mismatch_pairs = sorted(
+            zip(mismatch_group_ids, mismatch_lots, strict=True),
+            key=lambda pair: _group_sort_key(group_keys[pair[0]]),
+        )
+        mismatches = tuple(
+            _mismatch_entry(group_keys[group_id], lots)
+            for group_id, lots in mismatch_pairs[:SAMPLE_CAP]
+        )
+        revision_pairs = sorted(
+            zip(revision_under_ids, revision_lots, strict=True),
+            key=lambda pair: under_keys[pair[0]],
+        )
+        revisions = tuple(
+            LotRevision(
+                exchange=under_keys[under_id][0],
+                underlying=under_keys[under_id][1],
+                lots=tuple(lots),
+            )
+            for under_id, lots in revision_pairs[:SAMPLE_CAP]
+        )
+        return EconomicsIntegrityReport(
+            generated_at=now.isoformat(),
+            run_id=run_id,
+            csv_source_sha256=csv_source_sha256,
+            total_legs=state["total_legs"],
+            expiry_groups=len(group_keys),
+            lot_mismatch_expiries=len(mismatch_pairs),
+            underlyings_with_lot_revisions=len(revision_pairs),
+            mismatches=mismatches,
+            lot_revisions=revisions,
+        )
+
+    return routed_audit_economics_integrity(
+        payload_factory=_payload, python_law=_oracle, materialize=_materialize
+    )
+
+
+def _group_sort_key(group_key: tuple[str, str, date | None]) -> tuple[str, str, str]:
+    """The routed materializer's group sort key — the oracle's sort law verbatim."""
+    exch, under, expiry = group_key
+    return (exch, under, expiry.isoformat() if expiry else "")
+
+
+def _mismatch_entry(group_key: tuple[str, str, date | None], lots: Sequence[int]) -> LotMismatch:
+    """One routed-arm mismatch sample entry — the oracle's construction verbatim.
+
+    The ``else ""`` arm is the SAME defensive totality as the oracle's (a
+    parsed FUT/CE/PE leg always carries ``sm_expiry_date`` — the model's
+    ``__post_init__`` refuses a ``None`` — so the arm is latently
+    unreachable but keeps the key total).
+    """
+    exch, under, expiry = group_key
+    return LotMismatch(
+        exchange=exch,
+        underlying=under,
+        expiry=expiry.isoformat() if expiry else "",
+        lots=tuple(lots),
+    )
+
+
+def _audit_economics_integrity_python(
+    instruments: Sequence[Instrument],
+    *,
+    test_underlying_markers: Sequence[str] = DEFAULT_TEST_UNDERLYING_MARKERS,
+    now: datetime,
+    run_id: str = "",
+    csv_source_sha256: str = "",
+) -> EconomicsIntegrityReport:
+    """The verbatim audit body — the LIVE parity oracle (T24 PR-3a).
+
+    The whole pre-routing body of :func:`audit_economics_integrity`, moved
+    token-for-token (the Slice-0 extraction discipline); both arms of the
+    routed audit serve or burn-in-compare against exactly this body.
     """
     markers = tuple(m.upper() for m in test_underlying_markers)
     lots_by_expiry: dict[tuple[str, str, date | None], set[int]] = {}

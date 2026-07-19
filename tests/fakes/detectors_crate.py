@@ -1,7 +1,7 @@
 """A faithful stand-in ``brutex_lake`` crate for the T24 detector laws.
 
 DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 — PR-1 laws 1-3, PR-2
-adds law 4). The ONE fake-crate builder the facade suite
+adds law 4, PR-3a adds the audit pair 5-6). The ONE fake-crate builder the facade suite
 (``test_detectors_rust.py``) and the target seam suites share (CLAUDE.md
 §11 COMMON — no per-file copy): a ``SimpleNamespace`` exposing the exact
 ``_CRATE_API`` surface with law-faithful pure-Python implementations, so
@@ -182,12 +182,98 @@ def fake_classify_today_completeness_verdict(
     return (incomplete, reason, distinct, oi_null_count, zero_volume_count, count_short_observed)
 
 
+def fake_economics_lot_fold(
+    group_ids: Sequence[int], under_ids: Sequence[int], lots: Sequence[int]
+) -> tuple[list[int], list[list[int]], list[int], list[list[int]], int]:
+    """The economics lot-fold law (PR-3a) — the crate mirror in Python.
+
+    Flagged ids in ascending-id order; each flagged id's distinct lots
+    sorted ascending; the observed distinct-group count last (the facade's
+    handshake field).
+    """
+    n = len(group_ids)
+    if len(under_ids) != n or len(lots) != n:
+        raise ValueError("column lengths diverge")
+    by_group: dict[int, set[int]] = {}
+    by_under: dict[int, set[int]] = {}
+    for group_id, under_id, lot in zip(group_ids, under_ids, lots, strict=True):
+        by_group.setdefault(group_id, set()).add(lot)
+        by_under.setdefault(under_id, set()).add(lot)
+    mismatch_ids = sorted(g for g, s in by_group.items() if len(s) > 1)
+    mismatch_lots = [sorted(by_group[g]) for g in mismatch_ids]
+    revision_ids = sorted(u for u, s in by_under.items() if len(s) > 1)
+    revision_lots = [sorted(by_under[u]) for u in revision_ids]
+    return (mismatch_ids, mismatch_lots, revision_ids, revision_lots, len(by_group))
+
+
+def fake_master_integrity_fold(
+    spot_sym_key_ids: Sequence[int],
+    spot_identity_ids: Sequence[int],
+    spot_token_key_ids: Sequence[int],
+    leg_sym_key_ids: Sequence[int],
+    leg_tok_key_ids: Sequence[int],
+) -> tuple[list[int], int]:
+    """The master-integrity fold law (PR-3a) — the crate mirror in Python.
+
+    Bucket codes mirror the crate's ``BUCKET_*`` order: 0 resolved_both ·
+    1 symbol_only · 2 token_only · 3 orphan · 4 ambiguous ·
+    5 disagreement; ``-1`` is the absent-key sentinel. Pass 1 replays the
+    oracle's dict-op sequence exactly (the stored symbol mapping keeps the
+    FIRST identity; a later distinct identity marks the key ambiguous;
+    ``sym_ambiguous`` wins the classification).
+    """
+    n_spots = len(spot_sym_key_ids)
+    if len(spot_identity_ids) != n_spots or len(spot_token_key_ids) != n_spots:
+        raise ValueError("spot column lengths diverge")
+    if len(leg_tok_key_ids) != len(leg_sym_key_ids):
+        raise ValueError("leg column lengths diverge")
+    spot_by_symbol: dict[int, int] = {}
+    ambiguous_symbol_keys: set[int] = set()
+    spot_by_token: dict[int, int] = {}
+    spot_identities: set[int] = set()
+    for sym_key, identity, tok_key in zip(
+        spot_sym_key_ids, spot_identity_ids, spot_token_key_ids, strict=True
+    ):
+        spot_identities.add(identity)
+        existing = spot_by_symbol.get(sym_key)
+        if existing is not None and existing != identity:
+            ambiguous_symbol_keys.add(sym_key)
+        else:
+            spot_by_symbol[sym_key] = identity
+        if tok_key >= 0:
+            spot_by_token[tok_key] = identity
+    codes: list[int] = []
+    referenced: set[int] = set()
+    for sym_key, tok_key in zip(leg_sym_key_ids, leg_tok_key_ids, strict=True):
+        sym_ambiguous = sym_key >= 0 and sym_key in ambiguous_symbol_keys
+        sym_hit = spot_by_symbol.get(sym_key) if sym_key >= 0 else None
+        tok_hit = spot_by_token.get(tok_key) if tok_key >= 0 else None
+        if sym_ambiguous:
+            codes.append(4)
+        elif sym_hit is not None and tok_hit is not None and sym_hit != tok_hit:
+            codes.append(5)
+        elif sym_hit is not None and tok_hit is not None:
+            codes.append(0)
+            referenced.add(sym_hit)
+        elif sym_hit is not None:
+            codes.append(1)
+            referenced.add(sym_hit)
+        elif tok_hit is not None:
+            codes.append(2)
+            referenced.add(tok_hit)
+        else:
+            codes.append(3)
+    return (codes, len(spot_identities - referenced))
+
+
 def fake_detectors_crate(
     *,
     blake2b_hex: Callable[..., object] | None = None,
     interior_runs: Callable[..., object] | None = None,
     classify_partial: Callable[..., object] | None = None,
     classify_today: Callable[..., object] | None = None,
+    economics_fold: Callable[..., object] | None = None,
+    master_fold: Callable[..., object] | None = None,
     version: str = "0.1.0-fake",
 ) -> SimpleNamespace:
     """A stand-in ``brutex_lake`` module exposing the T24 ``_CRATE_API`` surface."""
@@ -205,6 +291,12 @@ def fake_detectors_crate(
             classify_today
             if classify_today is not None
             else fake_classify_today_completeness_verdict
+        ),
+        economics_lot_fold=(
+            economics_fold if economics_fold is not None else fake_economics_lot_fold
+        ),
+        master_integrity_fold=(
+            master_fold if master_fold is not None else fake_master_integrity_fold
         ),
         __version__=version,
     )

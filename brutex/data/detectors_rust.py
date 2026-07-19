@@ -1,13 +1,13 @@
 """detectors_rust — the default-OFF Rust routing facade for the T24 detector laws.
 
 DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 — PR-1 laws 1-3,
-MIGRATION.md #1948; PR-2 adds law 4). Routes FOUR cold data-integrity
-detector pure laws through the ``rust/brutex-lake`` crate behind four
-default-OFF flags, with the verbatim Python law retained as the LIVE parity
-oracle (the ADR-0020 ``lake_rust_render`` / G8 template, in the G6
-``render_shard`` integration shape — the TARGET module gates its own flag
-and hands this facade zero-arg factories, so no verdict dataclass ever has
-to import back into this module):
+MIGRATION.md #1948; PR-2 adds law 4; PR-3a adds laws 5-6). Routes SIX cold
+data-integrity detector/audit pure laws through the ``rust/brutex-lake``
+crate behind six default-OFF flags, with the verbatim Python law retained
+as the LIVE parity oracle (the ADR-0020 ``lake_rust_render`` / G8
+template, in the G6 ``render_shard`` integration shape — the TARGET module
+gates its own flag and hands this facade zero-arg factories, so no
+verdict/report dataclass ever has to import back into this module):
 
 1. **Raw-integrity digest** (``BRUTEX_LAKE_RUST_RAW_INTEGRITY``) — the
    ``hashlib.blake2b(canonical, digest_size=32).hexdigest()`` leg of
@@ -43,15 +43,40 @@ to import back into this module):
    a fail-closed publish gate (``brutex/crossverify/gate_seam.py``), so a
    crate fault under the flag must ALWAYS resolve to the oracle verdict —
    never a new exception class out of the classifier (pinned).
+5. **Economics lot fold** (``BRUTEX_LAKE_RUST_ECONOMICS_INTEGRITY``,
+   SLICE T24 PR-3a) — the group folds + verdict derivation of
+   :func:`brutex.data.economics_integrity.audit_economics_integrity`
+   (DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001). Ints-only in the STRONGEST
+   form — no string semantics enter Rust at all: the target interns every
+   ``(exchange, underlying, expiry)`` / ``(exchange, underlying)`` key to
+   a dense id and pre-computes the Unicode-sensitive predicates (the
+   ``*NSETEST*`` ``.upper()`` marker containment, the empty-underlying
+   skip) BEFORE the per-leg vectors are built; the report-visible
+   capped-sample ORDER (the full-key string sort) stays Python. The crate
+   returns the flagged group/underlying ids + their sorted distinct lots.
+6. **Master-integrity fold** (``BRUTEX_LAKE_RUST_MASTER_INTEGRITY``,
+   SLICE T24 PR-3a) — the two-pass spot-table build + leg classification
+   of :func:`brutex.data.master_integrity.audit_master_integrity`
+   (DEC-INSTRUMENT-MASTER-INTEGRITY-001) over interned ids ONLY: the
+   FIRST-identity/ambiguity precedence of pass 1 and the 7-way pass-2
+   bucket order (ambiguous > disagreement > both > symbol_only >
+   token_only > orphan). The Unicode traps (``str.isdigit()`` on
+   ``feed_token``, marker containment, the special-char tally), the alias
+   reversal, the Decimal-bearing dedup key and the type counts stay
+   PYTHON (the dedup is a set membership on a tuple with a ``Decimal``
+   member — interning it for Rust to re-count would be pure ceremony; a
+   recorded design decision). Per-leg bucket CODES cross back (the
+   DEC-FEED-RUST-CORE-001 indices shape) — the target tallies the counts
+   it must walk anyway for the input-order orphan sample.
 
 ## The fail-closed layers (the PR-1 template, adapted)
 
-* **Flags** — four per-module flags, each default OFF (truthy → ON, falsy →
+* **Flags** — six per-module flags, each default OFF (truthy → ON, falsy →
   OFF, junk → loud-OFF once; the §11 COMMON :func:`env_flag_tristate`
   imported from the sibling facade). The flag gate lives in the TARGET
   modules (the G6 shape) so flag OFF is the literal verbatim oracle call —
   the crate is never imported (bomb-crate spy-pinned).
-* **ONE shared latch** — the four laws share one process-local OFF latch
+* **ONE shared latch** — the six laws share one process-local OFF latch
   (the PR-2 lake_rust_render precedent: either profile's trip disables
   both — DISCLOSED, and re-disclosed at each ``_CRATE_API`` growth): any
   law's crate-absent / crate-stale / panic / burn-in-mismatch latch serves
@@ -60,9 +85,10 @@ to import back into this module):
 * **Import guard / SYMBOL handshake** — polars-free laws, so the PR-1
   polars VERSION guard is meaningless here (the G8 disclosed deviation):
   an absent wheel latches ``crate_unavailable``; a wheel missing ANY of the
-  four law callables is a pre-PR-2 (or foreign/broken) install and latches
+  six law callables is a pre-PR-3a (or foreign/broken) install and latches
   ``crate_stale`` for ALL laws (the all-or-nothing consequence, disclosed:
-  a PR-1-era wheel serves the oracle for the PR-1 laws too until rebuilt).
+  a PR-1/PR-2-era wheel serves the oracle for its own laws too until
+  rebuilt).
 * **Degrade set** — the FIVE-member :data:`_DEGRADE_ERRORS` =
   ``ValueError``/``RuntimeError``/``TypeError``/``OverflowError``/
   ``AttributeError`` → oracle with one capped WARN per reason (the
@@ -72,12 +98,14 @@ to import back into this module):
   boundary CATCHES surfaces as ``PyRuntimeError`` and lands in THIS arm,
   a warn-once degrade with NO latch; ``TypeError``/``OverflowError`` are
   PyO3 argument conversion — an out-of-``i64`` ordinal lands here;
-  ``AttributeError`` is the broken-crate-internals belt). The TODAY law's
-  PAYLOAD call additionally degrades on ``KeyError`` (the target's
-  class-code lookup — structurally total today over the closed
-  ``InstrumentClass`` enum; defense-in-depth so a poisoned/unknown class
-  token resolves to the oracle with one WARN, never a ``crate_panic``
-  latch via the ``Exception``-inclusive panic belt). ``MemoryError`` is
+  ``AttributeError`` is the broken-crate-internals belt). Every
+  payload-factory call (the TODAY law's + both PR-3a audit laws')
+  additionally degrades on ``KeyError``
+  (:data:`_PAYLOAD_DEGRADE_ERRORS` — for TODAY the target's class-code
+  lookup, structurally total today over the closed ``InstrumentClass``
+  enum; defense-in-depth so a poisoned payload build resolves to the
+  oracle with one WARN, never a ``crate_panic`` latch via the
+  ``Exception``-inclusive panic belt). ``MemoryError`` is
   DELIBERATELY absent — OOM re-raises raw, identical to the pure-Python
   path; ``KeyboardInterrupt``/``SystemExit`` likewise. The narrow panic
   belt (:func:`_panic_belt_errors` — imported from the sibling facade, ONE
@@ -86,8 +114,12 @@ to import back into this module):
   executed truth — the round-1 review wording fold).
 * **Refuse-poison gates** — a wrong-shaped crate return (non-str hex,
   junk run tuples / out-of-``date``-range ordinals, malformed verdict
-  fields or an unknown reason token) is REFUSED to the oracle with one
-  WARN — a poisoned wheel can only degrade, never corrupt.
+  fields, an unknown reason token, out-of-interned-range audit ids,
+  non-ascending lot lists, a bucket-code list diverging from the leg
+  count or an out-of-vocabulary bucket code) is REFUSED to the oracle
+  with one WARN — a poisoned wheel can only degrade, never corrupt (the
+  PR-1/PR-2 depth, mirrored — the design Q8 recording: shape + range +
+  known-token sets; value drift is burn-in's territory).
 * **Burn-in + autorevert** — the first :data:`BURN_IN_SAMPLES` engaged
   calls PER LAW compare the (materialized) Rust value against the live
   oracle; ANY difference ships the ORACLE value and autoreverts the Rust
@@ -95,13 +127,21 @@ to import back into this module):
 
 ## Honesty (ADR-0020 banner; CLAUDE.md Golden Rule #10)
 
-Expected payoff ≈ 0 — conversion is for uniformity, not speed. All three
-laws are cold pull-tail / doctor diagnostics; the FFI hop plus the payload
-prep is a small SLOWDOWN, accepted because the surrounding paths are
-vendor-I/O-dominated and the seams ship DEFAULT-OFF (a default flip needs
-its own DEC). These detectors gate REAL ledger demotions
-(DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 #1031) —
-decision parity, not speed, is the bar, hence the burn-in + the hostile
+Expected payoff ≈ 0 — conversion is for uniformity, not speed. All six
+laws are cold pull-tail / doctor / master-load diagnostics; the FFI hop
+plus the payload prep is a small SLOWDOWN, accepted because the
+surrounding paths are vendor-I/O-dominated and the seams ship DEFAULT-OFF
+(a default flip needs its own DEC). For the PR-3a audit laws the payload
+INTERNING is itself an O(legs)/O(rows) Python pass with dicts — the same
+complexity class as the fold it replaces (the honest today_completeness
+disclosure reused); and each runs ~once per master load per process, so
+the 16-call burn-in effectively means COMPARE-ALWAYS in production — a
+permanent live differential, honest and cheap on a cold path (the PR-1
+raw-integrity law has the same property; re-disclosed, never hidden).
+These detectors gate REAL ledger demotions
+(DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001 #1031) + the
+/universe integrity panels' persisted schema_meta verdicts — decision
+parity, not speed, is the bar, hence the burn-in + the hostile
 golden/differential corpus. Flags are read per call (one ``os.environ``
 probe) so spawn workers resolve their own inherited environment.
 """
@@ -125,7 +165,7 @@ import structlog
 from brutex.data.lake_rust_render import _panic_belt_errors, env_flag_tristate
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from types import ModuleType
 
 _LOG = structlog.get_logger(__name__)
@@ -138,6 +178,10 @@ LAKE_RUST_INTERIOR_GAP_ENV: Final[str] = "BRUTEX_LAKE_RUST_INTERIOR_GAP"
 LAKE_RUST_PARTIAL_WINDOW_ENV: Final[str] = "BRUTEX_LAKE_RUST_PARTIAL_WINDOW"
 #: The TODAY minute-completeness verdict opt-in flag (SLICE T24 PR-2).
 LAKE_RUST_TODAY_COMPLETENESS_ENV: Final[str] = "BRUTEX_LAKE_RUST_TODAY_COMPLETENESS"
+#: The economics lot-fold opt-in flag (SLICE T24 PR-3a).
+LAKE_RUST_ECONOMICS_INTEGRITY_ENV: Final[str] = "BRUTEX_LAKE_RUST_ECONOMICS_INTEGRITY"
+#: The master-integrity fold opt-in flag (SLICE T24 PR-3a).
+LAKE_RUST_MASTER_INTEGRITY_ENV: Final[str] = "BRUTEX_LAKE_RUST_MASTER_INTEGRITY"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python
 #: oracle before Rust values ship uncompared (the #1531/#1532 pattern).
@@ -151,8 +195,12 @@ _LAW_INTERIOR_RUNS: Final[str] = "interior_runs"
 _LAW_PARTIAL_WINDOW: Final[str] = "partial_window"
 #: The today-completeness-law burn-in budget key (PR-2).
 _LAW_TODAY_COMPLETENESS: Final[str] = "today_completeness"
+#: The economics-lot-fold-law burn-in budget key (PR-3a).
+_LAW_ECONOMICS_INTEGRITY: Final[str] = "economics_integrity"
+#: The master-integrity-fold-law burn-in budget key (PR-3a).
+_LAW_MASTER_INTEGRITY: Final[str] = "master_integrity"
 
-#: Process-local OFF latch — ONE latch shared by all four laws (module
+#: Process-local OFF latch — ONE latch shared by all six laws (module
 #: docstring; the PR-2 shared-latch precedent, disclosed).
 _DISABLED_REASON: Final[list[str | None]] = [None]
 
@@ -162,16 +210,20 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
     _LAW_INTERIOR_RUNS: BURN_IN_SAMPLES,
     _LAW_PARTIAL_WINDOW: BURN_IN_SAMPLES,
     _LAW_TODAY_COMPLETENESS: BURN_IN_SAMPLES,
+    _LAW_ECONOMICS_INTEGRITY: BURN_IN_SAMPLES,
+    _LAW_MASTER_INTEGRITY: BURN_IN_SAMPLES,
 }
 
-#: The crate callables ALL four laws need — the all-or-nothing SYMBOL
-#: handshake surface. A wheel missing any is a pre-PR-2 install
+#: The crate callables ALL six laws need — the all-or-nothing SYMBOL
+#: handshake surface. A wheel missing any is a pre-PR-3a install
 #: (``crate_stale`` — latching every law, the disclosed #1771 precedent).
 _CRATE_API: Final[tuple[str, ...]] = (
     "raw_integrity_blake2b_hex",
     "interior_barless_runs",
     "classify_partial_window_verdict",
     "classify_today_completeness_verdict",
+    "economics_lot_fold",
+    "master_integrity_fold",
 )
 
 #: Once-per-process-per-reason log memo.
@@ -190,12 +242,14 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
     AttributeError,
 )
 
-#: The TODAY law's PAYLOAD-call degrade set — :data:`_DEGRADE_ERRORS` +
-#: ``KeyError`` (the round-1 review payload-arm addition, module docstring:
-#: the target's class-code lookup is structurally total today; a
-#: poisoned/unknown class token must degrade warn-once to the oracle,
-#: never mis-latch ``crate_panic`` through the panic belt).
-_TODAY_PAYLOAD_DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
+#: The PAYLOAD-factory-call degrade set — :data:`_DEGRADE_ERRORS` +
+#: ``KeyError`` (the PR-2 round-1 review payload-arm addition, module
+#: docstring; generalized to every payload-bearing law at PR-3a: the TODAY
+#: law's class-code lookup is structurally total today, and the audit
+#: laws' interning walks carry no lookup at all — defense-in-depth so a
+#: poisoned payload build degrades warn-once to the oracle, never
+#: mis-latching ``crate_panic`` through the panic belt).
+_PAYLOAD_DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
     *_DEGRADE_ERRORS,
     KeyError,
 )
@@ -283,6 +337,54 @@ class TodayCompletenessPayload:
     last_bar_complete: bool
 
 
+@dataclass(frozen=True, slots=True)
+class EconomicsIntegrityPayload:
+    """The ints-only FFI payload for the economics lot fold (PR-3a).
+
+    Built by the target's payload factory over the FILTERED legs (non-leg
+    rows, empty underlyings and ``*NSETEST*``-marked legs are skipped
+    PYTHON-side — the Unicode ``.upper()`` containment never crosses):
+    ``group_ids`` / ``under_ids`` are the dense interned ids of each kept
+    leg's ``(exchange, underlying, expiry)`` / ``(exchange, underlying)``
+    keys, ``lots`` the parallel ``lot_size`` values. ``group_count`` /
+    ``under_count`` are the interned-id ranges — the refuse-poison gate
+    holds every crate-returned id inside them and the crate's observed
+    group count EQUAL to ``group_count`` (a mismatch is a poisoned crate →
+    oracle).
+    """
+
+    group_ids: tuple[int, ...]
+    under_ids: tuple[int, ...]
+    lots: tuple[int, ...]
+    group_count: int
+    under_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class MasterIntegrityPayload:
+    """The ints-only FFI payload for the master-integrity fold (PR-3a).
+
+    Built by the target's payload factory: one entry per IDX/EQ row (input
+    order) in the three ``spot_*`` vectors — the interned ``(exchange,
+    symbol_name)`` key, the interned ``(exchange, security_id)`` identity,
+    and the interned token key (``-1`` when the row carries no GENUINE
+    numeric ``feed_token`` — the ``str.isdigit()`` Unicode-trap predicate
+    stays Python) — and one entry per ROUTED FUT/CE/PE leg (input order,
+    POST the Python empty-underlying/test-marker filtering) in the two
+    ``leg_*`` vectors (``-1`` = no symbol / no token; the leg symbol key
+    is alias-REVERSED Python-side before interning). ``identity_count``
+    is the interned identity range — the refuse-poison gate holds the
+    crate's unreferenced-spot count inside ``[0, identity_count]``.
+    """
+
+    spot_sym_key_ids: tuple[int, ...]
+    spot_identity_ids: tuple[int, ...]
+    spot_token_key_ids: tuple[int, ...]
+    leg_sym_key_ids: tuple[int, ...]
+    leg_tok_key_ids: tuple[int, ...]
+    identity_count: int
+
+
 def raw_integrity_rust_enabled() -> bool:
     """Resolve ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` (default OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_RAW_INTEGRITY_ENV)
@@ -303,6 +405,16 @@ def today_completeness_rust_enabled() -> bool:
     return _flag_enabled(LAKE_RUST_TODAY_COMPLETENESS_ENV)
 
 
+def economics_integrity_rust_enabled() -> bool:
+    """Resolve ``BRUTEX_LAKE_RUST_ECONOMICS_INTEGRITY`` (default OFF, junk loud-OFF)."""
+    return _flag_enabled(LAKE_RUST_ECONOMICS_INTEGRITY_ENV)
+
+
+def master_integrity_rust_enabled() -> bool:
+    """Resolve ``BRUTEX_LAKE_RUST_MASTER_INTEGRITY`` (default OFF, junk loud-OFF)."""
+    return _flag_enabled(LAKE_RUST_MASTER_INTEGRITY_ENV)
+
+
 def rust_detectors_disabled() -> bool:
     """``True`` iff a guard/autorevert latched the Rust path OFF this process."""
     return _DISABLED_REASON[0] is not None
@@ -321,6 +433,8 @@ def reset_detectors_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _BURN_IN_REMAINING[_LAW_INTERIOR_RUNS] = remaining
     _BURN_IN_REMAINING[_LAW_PARTIAL_WINDOW] = remaining
     _BURN_IN_REMAINING[_LAW_TODAY_COMPLETENESS] = remaining
+    _BURN_IN_REMAINING[_LAW_ECONOMICS_INTEGRITY] = remaining
+    _BURN_IN_REMAINING[_LAW_MASTER_INTEGRITY] = remaining
     _OBSERVABILITY_MEMO.clear()
 
 
@@ -675,7 +789,7 @@ def routed_classify_today_completeness[VerdictT](
         return python_law()
     try:
         payload = payload_factory()
-    except _TODAY_PAYLOAD_DEGRADE_ERRORS as exc:
+    except _PAYLOAD_DEGRADE_ERRORS as exc:
         # The payload factory is pure Python (no FFI, no panic belt needed):
         # a `KeyError` here is the target's class-code lookup missing a
         # token — structurally unreachable today (the closed `InstrumentClass`
@@ -766,19 +880,238 @@ def _partial_fields_well_formed(fields: object) -> bool:
     return isinstance(missing, int)
 
 
+# ---------------------------------------------------------------------------
+# SLICE T24 PR-3a — laws 5 (economics lot fold) + 6 (master-integrity fold).
+# ---------------------------------------------------------------------------
+
+#: The crate economics-fold fields arity — ``(mismatch_group_ids,
+#: mismatch_lots, revision_under_ids, revision_lots, expiry_group_count)``.
+_ECONOMICS_FIELDS_ARITY: Final[int] = 5
+
+#: The crate master-fold fields arity — ``(bucket_codes,
+#: unreferenced_spot_count)``.
+_MASTER_FIELDS_ARITY: Final[int] = 2
+
+#: The master-fold bucket-code vocabulary size (codes ``0..5`` — the
+#: ``BUCKET_*`` constants of ``rust/brutex-lake/src/audits.rs``, mirrored
+#: by the target's ``_CODE_*`` constants; an out-of-range code is a
+#: stale/foreign crate speaking a different vocabulary — refused).
+_MASTER_BUCKET_CODE_COUNT: Final[int] = 6
+
+
+def _non_bool_int(value: object) -> bool:
+    """``True`` iff *value* is an ``int`` that is not a ``bool`` (the gates' int law)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _flagged_ids_well_formed(ids: object, lots_lists: object, *, upper: int) -> bool:
+    """One flagged-id family of the economics gate: ids + parallel lot lists.
+
+    Ids must be non-bool ints inside the Python-interned ``[0, upper)``
+    range; each parallel lots list must be a ``list`` of ≥ 2 non-bool ints
+    in STRICTLY ascending order (a flagged group by definition holds ≥ 2
+    distinct lots, and the crate law returns them sorted-distinct).
+    """
+    if not (isinstance(ids, list) and isinstance(lots_lists, list)):
+        return False
+    if len(ids) != len(lots_lists):
+        return False
+    for flagged_id in ids:
+        if not _non_bool_int(flagged_id):
+            return False
+        if not 0 <= flagged_id < upper:
+            return False
+    for lots in lots_lists:
+        if not isinstance(lots, list) or len(lots) < 2:
+            return False
+        previous: int | None = None
+        for lot in lots:
+            if not _non_bool_int(lot):
+                return False
+            if previous is not None and lot <= previous:
+                return False
+            previous = lot
+    return True
+
+
+def _economics_fields_well_formed(fields: object, payload: EconomicsIntegrityPayload) -> bool:
+    """The refuse-poison shape gate for the economics-fold fields.
+
+    Arity 5; both flagged-id families via :func:`_flagged_ids_well_formed`
+    (group ids bounded by ``payload.group_count``, underlying ids by
+    ``payload.under_count``); ``expiry_group_count`` a non-bool int EQUAL
+    to the Python-known interned group count (the design §1.3 handshake —
+    a crate that saw a different group universe is poisoned). Anything
+    else is refused to the oracle with one WARN (degrade, never a latch).
+    """
+    if not (isinstance(fields, tuple) and len(fields) == _ECONOMICS_FIELDS_ARITY):
+        return False
+    mismatch_ids, mismatch_lots, revision_ids, revision_lots, group_count = fields
+    if not _flagged_ids_well_formed(mismatch_ids, mismatch_lots, upper=payload.group_count):
+        return False
+    if not _flagged_ids_well_formed(revision_ids, revision_lots, upper=payload.under_count):
+        return False
+    return _non_bool_int(group_count) and group_count == payload.group_count
+
+
+def routed_audit_economics_integrity[ReportT](
+    *,
+    payload_factory: Callable[[], EconomicsIntegrityPayload],
+    python_law: Callable[[], ReportT],
+    materialize: Callable[
+        [Sequence[int], Sequence[Sequence[int]], Sequence[int], Sequence[Sequence[int]]],
+        ReportT,
+    ],
+) -> ReportT:
+    """The routed economics lot fold — called ONLY when the flag is ON.
+
+    *payload_factory* builds the ints-only :class:`EconomicsIntegrityPayload`
+    (the target's one interning walk — a latched process never pays it);
+    *python_law* is the zero-arg verbatim audit oracle; *materialize* turns
+    the crate's ``(mismatch_group_ids, mismatch_lots, revision_under_ids,
+    revision_lots)`` into the target's report object (defined target-side —
+    the string sort + ``SAMPLE_CAP`` + dataclass build live where the
+    strings live; this facade never imports the report dataclass — no
+    import cycle). EVERY path returns a report: latched / guarded /
+    degraded / refused calls return ``python_law()``, a burn-in mismatch
+    returns the ORACLE report + autoreverts. The PAYLOAD call carries its
+    OWN :data:`_PAYLOAD_DEGRADE_ERRORS` arm (the PR-2 template).
+    """
+    if rust_detectors_disabled():
+        return python_law()
+    crate = _resolve_crate()
+    if crate is None:
+        return python_law()
+    try:
+        payload = payload_factory()
+    except _PAYLOAD_DEGRADE_ERRORS as exc:
+        # Pure-Python payload build (no FFI, no panic belt needed) — a
+        # fault here degrades warn-once to the oracle, never a latch;
+        # KeyboardInterrupt/SystemExit/MemoryError propagate structurally.
+        _warn_once("economics_integrity_payload_error", error_detail=repr(exc))
+        return python_law()
+    try:
+        fields = crate.economics_lot_fold(payload.group_ids, payload.under_ids, payload.lots)
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("economics_integrity_error", error_detail=repr(exc))
+        return python_law()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return python_law()
+    if not _economics_fields_well_formed(fields, payload):
+        _warn_once("economics_integrity_result_refused", result_type=type(fields).__name__)
+        return python_law()
+    mismatch_ids, mismatch_lots, revision_ids, revision_lots, _group_count = fields
+    report = materialize(mismatch_ids, mismatch_lots, revision_ids, revision_lots)
+    _log_engaged_once(crate)
+    return _burn_in_check(_LAW_ECONOMICS_INTEGRITY, report, python_law)
+
+
+def _master_fields_well_formed(fields: object, payload: MasterIntegrityPayload) -> bool:
+    """The refuse-poison shape gate for the master-fold fields.
+
+    Arity 2; ``bucket_codes`` a ``list`` whose length EQUALS the routed
+    leg-vector length, every element a non-bool int inside the
+    :data:`_MASTER_BUCKET_CODE_COUNT` vocabulary; the unreferenced-spot
+    count a non-bool int inside ``[0, payload.identity_count]``. The
+    design-sketch count returns (and their sum-consistency channel) are
+    structurally absent — Python tallies the codes itself (the Q8
+    recording); anything else is refused to the oracle with one WARN.
+    """
+    if not (isinstance(fields, tuple) and len(fields) == _MASTER_FIELDS_ARITY):
+        return False
+    bucket_codes, unreferenced = fields
+    if not isinstance(bucket_codes, list):
+        return False
+    if len(bucket_codes) != len(payload.leg_sym_key_ids):
+        return False
+    for code in bucket_codes:
+        if not _non_bool_int(code):
+            return False
+        if not 0 <= code < _MASTER_BUCKET_CODE_COUNT:
+            return False
+    return _non_bool_int(unreferenced) and 0 <= unreferenced <= payload.identity_count
+
+
+def routed_audit_master_integrity[ReportT](
+    *,
+    payload_factory: Callable[[], MasterIntegrityPayload],
+    python_law: Callable[[], ReportT],
+    materialize: Callable[[Sequence[int], int], ReportT],
+) -> ReportT:
+    """The routed master-integrity fold — called ONLY when the flag is ON.
+
+    *payload_factory* builds the ints-only :class:`MasterIntegrityPayload`
+    (the target's two-pass interning walk — type counts, the
+    Decimal-bearing dedup, the Unicode predicates and the alias reversal
+    all happen there, Python-side); *python_law* is the zero-arg verbatim
+    audit oracle; *materialize* turns the crate's ``(bucket_codes,
+    unreferenced_spot_count)`` into the target's report object (the
+    input-order orphan-sample walk + count tallies + dataclass build live
+    target-side — no import cycle). EVERY path returns a report: latched /
+    guarded / degraded / refused calls return ``python_law()``, a burn-in
+    mismatch returns the ORACLE report + autoreverts. The PAYLOAD call
+    carries its OWN :data:`_PAYLOAD_DEGRADE_ERRORS` arm (the PR-2
+    template).
+    """
+    if rust_detectors_disabled():
+        return python_law()
+    crate = _resolve_crate()
+    if crate is None:
+        return python_law()
+    try:
+        payload = payload_factory()
+    except _PAYLOAD_DEGRADE_ERRORS as exc:
+        _warn_once("master_integrity_payload_error", error_detail=repr(exc))
+        return python_law()
+    try:
+        fields = crate.master_integrity_fold(
+            payload.spot_sym_key_ids,
+            payload.spot_identity_ids,
+            payload.spot_token_key_ids,
+            payload.leg_sym_key_ids,
+            payload.leg_tok_key_ids,
+        )
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("master_integrity_error", error_detail=repr(exc))
+        return python_law()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return python_law()
+    if not _master_fields_well_formed(fields, payload):
+        _warn_once("master_integrity_result_refused", result_type=type(fields).__name__)
+        return python_law()
+    bucket_codes, unreferenced = fields
+    report = materialize(bucket_codes, unreferenced)
+    _log_engaged_once(crate)
+    return _burn_in_check(_LAW_MASTER_INTEGRITY, report, python_law)
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
+    "LAKE_RUST_ECONOMICS_INTEGRITY_ENV",
     "LAKE_RUST_INTERIOR_GAP_ENV",
+    "LAKE_RUST_MASTER_INTEGRITY_ENV",
     "LAKE_RUST_PARTIAL_WINDOW_ENV",
     "LAKE_RUST_RAW_INTEGRITY_ENV",
     "LAKE_RUST_TODAY_COMPLETENESS_ENV",
+    "EconomicsIntegrityPayload",
     "InteriorRunsPayload",
+    "MasterIntegrityPayload",
     "PartialWindowPayload",
     "TodayCompletenessPayload",
+    "economics_integrity_rust_enabled",
     "interior_gap_rust_enabled",
+    "master_integrity_rust_enabled",
     "partial_window_rust_enabled",
     "raw_integrity_rust_enabled",
     "reset_detectors_rust_for_tests",
+    "routed_audit_economics_integrity",
+    "routed_audit_master_integrity",
     "routed_classify_partial_window",
     "routed_classify_today_completeness",
     "routed_hash_payload_hex",

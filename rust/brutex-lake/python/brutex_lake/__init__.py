@@ -31,11 +31,12 @@ window-ledger status + merge-key date laws (``classify_window_status`` /
 (``render_ledger_parquet_from_ipc``; ROW-EQUIVALENCE standard, never bytes
 — the #1917 spike's measured-infeasible verdict); and
 ``brutex/data/detectors_rust.py`` (SLICE T24 —
-PR-1 laws + the PR-2 fourth law,
+PR-1 laws + the PR-2 fourth law + the PR-3a audit pair,
 DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948) — the T24
 detector laws (``raw_integrity_blake2b_hex`` / ``interior_barless_runs`` /
 ``classify_partial_window_verdict`` /
-``classify_today_completeness_verdict``, behind four per-module flags).
+``classify_today_completeness_verdict`` / ``economics_lot_fold`` /
+``master_integrity_fold``, behind six per-module flags).
 Nothing else in ``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
@@ -59,10 +60,12 @@ from brutex_lake._brutex_lake import (
     classify_today_completeness_verdict,
     classify_window_status,
     date_isoformat,
+    economics_lot_fold,
     interior_barless_runs,
     linked_zstd_version,
     lock_release,
     lock_try_exclusive,
+    master_integrity_fold,
     merge_decision_from_ipc,
     pinned_polars_version,
     raw_integrity_blake2b_hex,
@@ -81,10 +84,12 @@ __all__ = [
     "classify_today_completeness_verdict",
     "classify_window_status",
     "date_isoformat",
+    "economics_lot_fold",
     "interior_barless_runs",
     "linked_zstd_version",
     "lock_release",
     "lock_try_exclusive",
+    "master_integrity_fold",
     "merge_decision_from_ipc",
     "pinned_polars_version",
     "raw_integrity_blake2b_hex",
