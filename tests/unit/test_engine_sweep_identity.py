@@ -75,3 +75,75 @@ class TestReExportShim:
 
     def test_orchestrator_imports_same_object(self) -> None:
         assert sweep_orchestrator._gate_config_fragment is sweep_identity._gate_config_fragment
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1 routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the gate-config fragment law.
+
+    Wheel-free: a behavior-correct FAKE crate is injected by patching the
+    facade's ``importlib`` binding. Flag ON must be value-identical to the
+    flag-OFF Python law (which every OTHER test in this file drives) — this
+    law feeds RUN IDENTITY, so identity is the whole contract.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        def gate_config_fragment(
+            overfit: tuple[float, float, float, float] | None,
+            stage3_enable: bool,
+            top_k: int,
+            max_fevals: int,
+            max_restarts: int,
+        ) -> tuple[object, object]:
+            stage3 = (top_k, max_fevals, max_restarts) if stage3_enable else None
+            return (overfit, stage3)
+
+        crate = SimpleNamespace(
+            __version__="fake",
+            join_path_segments=lambda base, segments: base,
+            gate_config_fragment=gate_config_fragment,
+            stall_scaled_timeout=lambda *args: (300.0, False),
+        )
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_all_shapes(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from brutex.engine.sweep_identity import _gate_config_fragment_python
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            grids = [
+                _grid(),  # both off → None
+                _grid(overfit=OverfitGateConfig(dsr_min=0.95)),  # overfit only
+                _grid(  # stage3 only
+                    stage3_enable=True,
+                    stage3_top_k=7,
+                    stage3_max_fevals=11,
+                    stage3_max_restarts=2,
+                ),
+                _grid(  # both legs
+                    overfit=OverfitGateConfig(dsr_min=0.90), stage3_enable=True
+                ),
+            ]
+            for grid in grids:
+                assert _gate_config_fragment(grid) == _gate_config_fragment_python(grid)
+        finally:
+            self._reset_facade()

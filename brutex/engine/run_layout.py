@@ -28,6 +28,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# wired functions gate on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical (the Python law below is the live oracle).
+from brutex.engine.sweep_ops_rust import routed_run_path, sweep_ops_rust_enabled
+
 __all__ = [
     "MIRROR_ROOT_ENV",
     "RUN_DIR_SUBDIR",
@@ -62,6 +67,18 @@ def run_dir(results_root: Path, run_id: str) -> Path:
     Path
         The single directory every per-run artifact lives under.
     """
+    if sweep_ops_rust_enabled():
+        return routed_run_path(
+            str(results_root),
+            (RUN_DIR_SUBDIR, run_id),
+            python_law=lambda: _run_dir_python(results_root, run_id),
+        )
+    return _run_dir_python(results_root, run_id)
+
+
+def _run_dir_python(results_root: Path, run_id: str) -> Path:
+    """The verbatim Python ``run_dir`` law — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip)."""
     return results_root / RUN_DIR_SUBDIR / run_id
 
 
@@ -98,9 +115,21 @@ def mirror_run_dir(run_id: str, *, env: dict[str, str] | None = None) -> Path | 
         stripped = override.strip()
         if not stripped:
             return None  # explicitly disabled
+        if sweep_ops_rust_enabled():
+            return routed_run_path(
+                stripped,
+                (run_id,),
+                python_law=lambda: Path(stripped) / run_id,
+            )
         return Path(stripped) / run_id
     try:
         home = Path.home()
     except RuntimeError:
         return None
+    if sweep_ops_rust_enabled():
+        return routed_run_path(
+            str(home),
+            (".brutex", "runs", run_id),
+            python_law=lambda: home / ".brutex" / "runs" / run_id,
+        )
     return home / ".brutex" / "runs" / run_id
