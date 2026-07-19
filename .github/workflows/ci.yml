@@ -4550,7 +4550,21 @@ jobs:
           run_gate brutex/engine/sweep_liveness.py tests/unit/test_engine_sweep_liveness.py 300 0.78 sweep_liveness
           run_gate brutex/observability/stage_stamp.py tests/unit/test_observability_stage_stamp.py 900 0.74 stage_stamp
           run_gate brutex/observability/run_manifest.py tests/unit/test_observability_run_manifest.py 1800 0.77 run_manifest
-          run_gate brutex/observability/run_tripwires.py tests/unit/test_observability_run_tripwires.py 2100 0.75 run_tripwires
+          # DEC-RUST-OBSERVABILITY-TRIPWIRES-002: the run_tripwires runner
+          # ALSO drives the seam suite (the DEC-CONFIG-RUST-LEAVES-001
+          # money.py precedent) — the S2-S4 seams added the oracle/
+          # materializer/bit-const mutant surface whose kills need
+          # EXACT-equality asserts the frozen 81-test file cannot gain
+          # (mutmut's XX-wrap keeps inner substrings intact): measured at
+          # the seam head 406 mutants / 291 killed = 71.7% under the 81
+          # alone (below floor) vs 368 killed / 38 survived = 90.6% with
+          # the seam suite's TestRunGateSupplementalPins killers. Budget
+          # raised 2100 -> 2600 for the grown runner (measured 975 s
+          # CI-replica, wheel-blocked). Floor 0.75 UNCHANGED — the
+          # sibling ratchet convention; the measured 90.6% clears the
+          # Golden-Rule-#12 85% target, and RAISING the floor to pin that
+          # is deliberate follow-up territory, not this lane's call.
+          run_gate brutex/observability/run_tripwires.py "tests/unit/test_observability_run_tripwires.py tests/unit/test_observability_rust.py" 2600 0.75 run_tripwires
 
       - name: Upload mutmut results XML for analysis
         if: always()

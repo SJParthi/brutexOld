@@ -22,7 +22,9 @@
 #      the OFF-arm inertness pins prove flag-unset stays byte-identical even
 #      with the wheel installed.
 #   4. The flag-ON twin: the SAME two suites plus the four consumer-module
-#      suites (loop_watchdog / watchdog / sla / stage_stamp) re-run VERBATIM
+#      suites (loop_watchdog / watchdog / sla / stage_stamp) AND the four
+#      run_tripwires suites (unit / property / bench / stress —
+#      DEC-RUST-OBSERVABILITY-TRIPWIRES-002) re-run VERBATIM
 #      under BRUTEX_OBSERVABILITY_RUST=1 with the real crate installed. Any
 #      test failing ONLY under the flag is a perturbation finding —
 #      fix-or-refuse, never a test edit. Honesty: that step proves
@@ -34,8 +36,8 @@
 # default-ON flip, not every PR — a red run here blocks re-engaging the
 # flag, never an unrelated merge. The future default-ON flip DEC must either
 # make this lane required or cite a fresh green run of it as a stated
-# precondition. Path-triggered on the crate + the facade + the four seamed
-# modules + the two suites + itself, plus workflow_dispatch.
+# precondition. Path-triggered on the crate + the facade + the five seamed
+# modules + the covering suites + itself, plus workflow_dispatch.
 #
 # COST HONESTY: the crate is polars-free and tiny — a cold run compiles only
 # the pyo3 graph (minutes, not the lake lane's polars graph); the cargo
@@ -57,8 +59,13 @@ on:
       - "brutex/observability/watchdog.py"
       - "brutex/observability/sla.py"
       - "brutex/observability/stage_stamp.py"
+      - "brutex/observability/run_tripwires.py"
       - "tests/unit/test_observability_rust.py"
       - "tests/integration/test_observability_rust_parity.py"
+      - "tests/unit/test_observability_run_tripwires.py"
+      - "tests/property/test_tripwire_reconciliation_invariant.py"
+      - "tests/bench/test_run_tripwires_o1.py"
+      - "tests/stress/test_run_tripwires_storm.py"
       - ".github/workflows/observability-rust-parity.yml"
   pull_request:
     paths:
@@ -68,8 +75,13 @@ on:
       - "brutex/observability/watchdog.py"
       - "brutex/observability/sla.py"
       - "brutex/observability/stage_stamp.py"
+      - "brutex/observability/run_tripwires.py"
       - "tests/unit/test_observability_rust.py"
       - "tests/integration/test_observability_rust_parity.py"
+      - "tests/unit/test_observability_run_tripwires.py"
+      - "tests/property/test_tripwire_reconciliation_invariant.py"
+      - "tests/bench/test_run_tripwires_o1.py"
+      - "tests/stress/test_run_tripwires_storm.py"
       - ".github/workflows/observability-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -168,7 +180,11 @@ jobs:
             tests/unit/test_observability_rust.py \
             tests/integration/test_observability_rust_parity.py
 
-      - name: Flag-ON twin (facade suites + the four consumer-module suites)
+      - name: Flag-ON twin (facade + consumer-module + run_tripwires suites)
+        # The four run_tripwires suites ride VERBATIM (zero file edits) —
+        # the DEC-RUST-OBSERVABILITY-TRIPWIRES-002 env twins: the protected
+        # unit matrix + the reconciliation hypothesis properties + the O(1)
+        # bench + the storm all re-prove under the engaged crate.
         env:
           BRUTEX_OBSERVABILITY_RUST: "1"
         run: |
@@ -178,4 +194,8 @@ jobs:
             tests/unit/test_observability_loop_watchdog.py \
             tests/unit/test_observability_watchdog.py \
             tests/unit/test_observability_sla.py \
-            tests/unit/test_observability_stage_stamp.py
+            tests/unit/test_observability_stage_stamp.py \
+            tests/unit/test_observability_run_tripwires.py \
+            tests/property/test_tripwire_reconciliation_invariant.py \
+            tests/bench/test_run_tripwires_o1.py \
+            tests/stress/test_run_tripwires_storm.py
