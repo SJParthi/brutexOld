@@ -18,7 +18,43 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
+_Last updated: 2026-07-19 (DEC-RUST-OBSERVABILITY-TRIPWIRES-002,
+MIGRATION.md #1962 provisional, branch
+`claude/rust-observability-tripwires` — the observability Rust lane,
+SECOND CUT (the -001 named follow-up): SEVEN pure run-tripwire decision
+laws — T2 count-reconciliation (violation bitmask) · T3 throughput
+floor/dwell · T4a memory budget · T4b memory slope · T5 NaN/absurd
+summary classify (batch) · T6 stage-prerequisite membership (mask) · T9
+ru_maxrss normalization — re-hosted on the SAME
+`rust/brutex-observability` crate (0.1.0 → 0.2.0; the all-or-nothing
+`_CRATE_API` handshake grows 8 → 15 symbols, so a pre--002 wheel latches
+`crate_stale`) behind the SAME ONE default-OFF flag
+`BRUTEX_OBSERVABILITY_RUST` via the SAME facade, with
+run_tripwires.py's own `_*_python` oracles retained as the LIVE flag-OFF
+laws. The crate returns TW_NONE/TW_CLEAR/TW_FIRE candidate CODES only —
+the dynamic `_in_breach` set NEVER crosses the FFI (Python's untouched
+`_edge_fire`/`_clear` own membership + re-arm); T1 (interval gate) / T7
+(edge-fire set) / T8 (SUSPECT latch + fan-out) stay Python, T10 (config
+validation) PERMANENTLY; the I-3 blanket except keeps every fold — a
+facade-raised MemoryError folds to observe_failed on BOTH arms (the
+documented OOM-landing INVERSION vs the loop-watchdog lane). Flag OFF
+(default) BYTE-IDENTICAL, bomb-spy pinned; the run_tripwires ci.yml
+stanza stays 100% over the UNMODIFIED 81 tests; the run_gate runner
+grows to ALSO drive the seam suite (the money.py multi-file precedent,
+budget 2100→2600, floor 0.75 unchanged); cargo-mutants over
+src/tripwires.rs de-survivored by restructure/tests, never exclusions;
+the facade mutmut pair stands at 596/596 killed. ADR-0020 banner
+verbatim: expected payoff ≈ 0 — conversion is for uniformity, not
+speed; ships INERT — a default flip needs its own DEC + soak, oracle
+deletion only via the H.2 rail (DEC-OBSERVABILITY-ORACLE-DELETE-001).
+Deferred wiring stays the named follow-up (the ci.yml crate job +
+ci-ok.needs + the weekly cargo-mutants job + mutation path triggers —
+the -001 posture; the non-required parity lane + the run_gate ARE
+wired). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
+NO new env var. This header carries the pointer, never the story — the
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1962.)
+Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
 provisional, branch `claude/rust-observability-lane` — the observability
 Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
 (loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
@@ -3563,7 +3599,102 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-observability-lane`
+- **Active branch:** `claude/rust-observability-tripwires`
+  (**DEC-RUST-OBSERVABILITY-TRIPWIRES-002, MIGRATION.md #1962** — entry
+  number PROVISIONAL: the next numerically free above the live tail #1961;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001 (the DEC-ID is the stable
+  handle) — the observability Rust lane, SECOND CUT, the -001 named
+  follow-up. THE SLICE: SEVEN pure run-tripwire DECISION laws — T2
+  count-reconciliation (a u32 violation bitmask, bit i = predicate i in the
+  `_reconcile_counts` append order; the bit-4 `evaluated + in_flight >
+  total` sum runs in i128, lossless ≡ Python's arbitrary-precision compare)
+  · T3 throughput floor/dwell (strict-`>` peak fold, `== dwell` EDGE law,
+  checked_add → the typed CounterOverflow) · T4a memory budget · T4b memory
+  slope (divides-never-multiplies) · T5 NaN/absurd summary classify (WHOLE
+  batch — values + screened + threshold → per-element code arrays; empty and
+  all-screened batches legal; length mismatch = the typed
+  SummaryLenMismatch belt) · T6 stage-prerequisite membership (the
+  absent-required-token mask in required order, byte-compare law) · T9
+  `ru_maxrss` normalization (darwin bytes / other KiB ×1024 via checked_mul
+  → RssOverflow → the oracle's honest unbounded value) — re-hosted on the
+  SAME `rust/brutex-observability` crate as NEW `src/tripwires.rs`
+  (package 0.1.0 → 0.2.0; the all-or-nothing `_CRATE_API` handshake grows
+  8 → 15 symbols so a pre--002 wheel latches `crate_stale`) behind the
+  SAME ONE default-OFF flag `BRUTEX_OBSERVABILITY_RUST` via seven
+  `routed_tripwire_*` faces on the SAME facade (per-law 16-sample burn-in
+  bit-compare + ship-the-ORACLE autorevert; the -001 degrade set + panic
+  belt + escape trio; exact-type refuse-poison input gates + output
+  shape/vocabulary gates over TW_NONE/TW_CLEAR/TW_FIRE), with
+  `run_tripwires.py`'s own extracted `_*_python` oracles as the LIVE
+  flag-OFF laws bound at the consumer seams (`_reconcile_counts` ·
+  `_watch_throughput` · `_watch_memory`/`_slope_breach` ·
+  `on_tuple_summary` · `on_stage` · `normalized_ru_maxrss_bytes`). STAYS
+  PYTHON: the dynamic `_in_breach` set NEVER crosses the FFI — the crate
+  returns fire-candidate/clear/none CODES and the byte-untouched
+  `_edge_fire`/`_clear` own membership + re-arm (T7); T1 (the interval
+  gate — a 2-line clock compare on the hot gated path); T8 (the SUSPECT
+  set-once latch + fan-out — side effects); T10 (config validation +
+  from_env — PERMANENT, the `content_hash_of` class); every fire/clear
+  application, detail template, values dict, gate and state write. I-3:
+  the blanket except keeps every fold — a facade-raised MemoryError folds
+  to observe_failed on BOTH arms (the documented OOM-landing INVERSION vs
+  the loop-watchdog lane, integration-pinned). FLAG OFF (default) is
+  BYTE-IDENTICAL (bomb-crate spies; the run_tripwires ci.yml stanza stays
+  100.00% — 346/112, 0 missed — over the UNMODIFIED 81 protected tests).
+  S5 EVIDENCE: the integration parity file grows the full flag-ON
+  TestTripwiresEntry matrix (all 7 laws through the REAL entry points,
+  oracles BOMBED), the fail-soft + MemoryError-inversion both-arms pins,
+  the lifecycle rows and the hypothesis ON/OFF whole-entry equivalence
+  (31 passed); the recorded ad-hoc differential: 7 laws × 20,000 =
+  140,000 samples, 0 bitwise mismatches; the parity lane EXTENDED (paths
+  + the four run_tripwires suites in the flag-ON leg — no restructure).
+  S6 MUTATION EVIDENCE (CI-replica, mutmut 2.5.1, wheel-blocked): the
+  S2-S4 seams grew the run_gate surface 324 → 406 mutants and the frozen
+  81 alone read 71.7% (below the 0.75 floor; pre-seam baseline 75.6%), so
+  the ci.yml run_gate runner is EXTENDED to also drive the seam suite
+  (the money.py multi-file precedent) + the 18-test
+  TestRunGateSupplementalPins killer class — the combined runner measures
+  368/406 = 90.6% at wall 975 s (budget
+  2100→2600, floor 0.75 unchanged; DEV-6's out-of-gate caveat resolved
+  structurally). cargo-mutants over src/tripwires.rs: 249 tested — 242
+  caught / 5 missed / 2 unviable on the first full run; the 5 missed
+  killed by RESTRUCTURE/TESTS, never exclusions (two T2 `>`→`>=` boundary
+  killers; the T3 peak-fold `>`→`>=` killed by a −0.0/+0.0 BITWISE
+  to_bits pin; the SummaryLenMismatch Display fmt-drop killed by a
+  to_string()==const assert; the ONE genuinely-equivalent `1 << 0` ≡
+  `1 >> 0` mutant removed BY FORM — `mask |= 1`), re-run of the whole
+  matched region verified 106/106 caught, 0 missed. GATES (executed): cargo fmt/clippy `-D warnings`
+  --locked/test --release --locked green ×2 feature sets (106 tests);
+  facade stanza BOTH arms 100.00% (609/190, 0 missed) — wheel-present 373
+  passed, wheel-absent 345 passed + 28 skipped; the flag-ON twin battery
+  623 passed; the protected 38-file battery 1141 passed, 1 skipped (the
+  pre-existing env-only cma); the four A-D consumer stanzas unchanged
+  100.00% (sla 92/16 · watchdog 71/8 · loop_watchdog 190/46 · stage_stamp
+  152/42); the S1 facade mutmut pair record 596/596 killed + 16/16
+  hand-applied seam mutants (S2-S4); ruff/ruff-format clean; `mypy
+  --strict` 0 new (496 files, the one pre-existing env-only cma error);
+  pyright 0 errors on touched files. DEVIATIONS DEV-1..DEV-6 recorded in
+  MIGRATION.md #1962 (T5 Vec<i64> FFI widening · S1 test-local oracles
+  superseded by the S2-S4 real-oracle binds · structurally-unreachable
+  checked_add Err arms pinned at the wheel surface · the
+  snapshot-counter single-read re-order · the coerce-before-screen
+  whole-tick abort · the run_gate-resolved seam-apply mutant classes).
+  HONEST (ADR-0020 banner verbatim): expected payoff ≈ 0 — conversion is
+  for uniformity, not speed; every routed law is sub-microsecond Python
+  on a gated path and the engaged arm ADDS an FFI hop; ships INERT — a
+  default flip needs its own DEC + soak, oracle deletion only via the H.2
+  rail (DEC-OBSERVABILITY-ORACLE-DELETE-001); ONE lane flag = a
+  poisoned-crate autorevert latches all twelve routed laws together (the
+  disclosed -001 envelope). DEFERRED (the -001 posture, unchanged): the
+  ci.yml crate job + ci-ok.needs + the weekly cargo-mutants job + the
+  mutation.yml path triggers (verified absent — nothing to refresh; the
+  non-required parity lane + the extended run_gate + the facade mutmut
+  pair ARE wired). Named follow-ups:
+  DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the structlog→tracing endgame
+  lane · the remaining pure-law observability modules. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; NO new env var.)
+  Earlier: `claude/rust-observability-lane`
   (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
   #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync — main took #1954 for
@@ -10932,7 +11063,33 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-observability-lane`
+- **Active feature branch:** `claude/rust-observability-tripwires`
+  (DEC-RUST-OBSERVABILITY-TRIPWIRES-002, MIGRATION.md #1962 provisional —
+  entry number = the next numerically free above the live tail #1961;
+  renumber-at-landing per DEC-LEDGER-RENUMBER-001 — the observability Rust
+  lane, SECOND CUT (the -001 named follow-up): SEVEN pure run-tripwire
+  decision laws — T2 count-reconciliation (violation bitmask) · T3
+  throughput floor/dwell · T4a memory budget · T4b memory slope · T5
+  NaN/absurd summary classify (batch) · T6 stage-prerequisite membership
+  (mask) · T9 ru_maxrss normalization — re-hosted on the SAME
+  `rust/brutex-observability` crate (0.1.0 → 0.2.0; handshake 8 → 15
+  symbols, a pre--002 wheel latches `crate_stale`) behind the SAME ONE
+  default-OFF flag `BRUTEX_OBSERVABILITY_RUST` via the SAME facade, with
+  run_tripwires.py's own `_*_python` oracles as the LIVE flag-OFF laws;
+  the crate returns TW_NONE/TW_CLEAR/TW_FIRE candidate codes only — the
+  dynamic `_in_breach` set never crosses the FFI; T1/T7/T8 stay Python,
+  T10 permanently; the I-3 blanket except keeps every fold (a
+  facade-raised MemoryError folds to observe_failed on BOTH arms — the
+  documented OOM-landing inversion vs the loop-watchdog lane); flag OFF
+  (default) byte-identical (bomb-spy-pinned); the run_tripwires ci.yml
+  stanza stays 100% over the UNMODIFIED 81 tests; the run_gate runner
+  grows to also drive the seam suite (money.py precedent, budget
+  2100→2600, floor 0.75 unchanged); cargo-mutants over src/tripwires.rs
+  de-survivored by restructure/tests, never exclusions; ships INERT —
+  expected payoff ≈ 0, uniformity not speed (ADR-0020 banner verbatim);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; NO new env var; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1962 for the full blurb)
+  Earlier: `claude/rust-observability-lane`
   (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
   #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync, main took #1954 for
