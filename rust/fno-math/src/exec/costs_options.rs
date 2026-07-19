@@ -1,4 +1,4 @@
-//! Options charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) — the
+//! Options charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) — the
 //! exact-integer twin of `brutex.costs.calculator._charge_stack_py`
 //! (CALCULATOR_SPEC §4 Steps 1, 3–13 in EXACT order).
 //!
@@ -102,13 +102,15 @@ pub(crate) fn add_i64(a: i64, b: i64, what: &str) -> Result<i64, String> {
 }
 
 /// `calculator.py` Steps 1, 3–13 in EXACT order (the `_charge_stack_py`
-/// twin). Laws: STT/stamp/GST = [`floor_rate_scale`] THEN [`round_to_rupee`];
-/// ETC/SEBI/IPFT = [`round_to_paisa`] per LEG then sum (never sum-then-round —
-/// COSTS_VERIFIED Ex.1's 501 = 228 + 273); GST base = the already-rounded
-/// service components, STT + stamp excluded, ONE rupee rounding
-/// (DEC-COST-001); STT reads the SELL notional only, stamp the BUY notional
-/// only; gross is sign-branched (long: sell − buy; short: buy − sell) — the
-/// options stack keeps the branch.
+/// twin under the DEC-FILL-WORST-CASE-ONLY-001 law). Laws: fills anchor on
+/// the worst-case bar EXTREMES ([`apply_slippage`]); STT/stamp/GST =
+/// [`floor_rate_scale`] THEN the ADVERSE-ceiling [`round_to_rupee`];
+/// ETC/SEBI/IPFT = the ADVERSE-ceiling [`round_to_paisa`] per LEG then sum
+/// (never sum-then-round — COSTS_VERIFIED Ex.1's 502 = 228 + 274); GST base
+/// = the already-rounded service components, STT + stamp excluded, ONE
+/// rupee rounding (DEC-COST-001); STT reads the SELL notional only, stamp
+/// the BUY notional only; gross is sign-branched (long: sell − buy; short:
+/// buy − sell) — the options stack keeps the branch.
 ///
 /// # Errors
 ///
@@ -116,8 +118,10 @@ pub(crate) fn add_i64(a: i64, b: i64, what: &str) -> Result<i64, String> {
 /// routes them to the Python-bigint arm) or an internal law violation.
 #[allow(clippy::too_many_arguments)]
 pub fn option_charge_stack(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
     lot_size: i64,
     n_lots: i64,
@@ -129,9 +133,15 @@ pub fn option_charge_stack(
     stamp_rate: i64,
     gst_rate: i64,
 ) -> Result<ChargeStack, String> {
-    // ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
-    let (buy_fill_paisa, sell_fill_paisa, realized_slip_per_share) =
-        apply_slippage(entry_open_paisa, exit_open_paisa, is_long)?;
+    // ── Step 1: apply slippage (1-tick flat adverse, around the worst-case
+    //    bar-extreme anchor — DEC-FILL-WORST-CASE-ONLY-001) ───────────────
+    let (buy_fill_paisa, sell_fill_paisa, realized_slip_per_share) = apply_slippage(
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
+        is_long,
+    )?;
 
     // ── Step 3: notionals (paise) — lot size resolved by the caller ─────
     let n_shares = to_i64(
@@ -154,23 +164,23 @@ pub fn option_charge_stack(
     let stt_paisa = round_to_rupee(floor_rate_scale(
         i128::from(sell_notional_paisa),
         i128::from(stt_rate),
-    )?);
+    )?)?;
 
-    // ── Step 6: exchange transaction charge (per leg, half-up, then sum) ─
+    // ── Step 6: exchange transaction charge (per leg, adverse-ceil, sum) ─
     let exch_paisa = add_i64(
         round_to_paisa(i128::from(buy_notional_paisa) * i128::from(etc_rate))?,
         round_to_paisa(i128::from(sell_notional_paisa) * i128::from(etc_rate))?,
         "option_charge_stack: exch",
     )?;
 
-    // ── Step 7: SEBI turnover fee (per leg, half-up, then sum) ──────────
+    // ── Step 7: SEBI turnover fee (per leg, adverse-ceil, then sum) ─────
     let sebi_paisa = add_i64(
         round_to_paisa(i128::from(buy_notional_paisa) * i128::from(sebi_rate))?,
         round_to_paisa(i128::from(sell_notional_paisa) * i128::from(sebi_rate))?,
         "option_charge_stack: sebi",
     )?;
 
-    // ── Step 8: IPFT (per leg, half-up, then sum) ───────────────────────
+    // ── Step 8: IPFT (per leg, adverse-ceil, then sum) ──────────────────
     let ipft_paisa = add_i64(
         round_to_paisa(i128::from(buy_notional_paisa) * i128::from(ipft_rate))?,
         round_to_paisa(i128::from(sell_notional_paisa) * i128::from(ipft_rate))?,
@@ -181,7 +191,7 @@ pub fn option_charge_stack(
     let stamp_paisa = round_to_rupee(floor_rate_scale(
         i128::from(buy_notional_paisa),
         i128::from(stamp_rate),
-    )?);
+    )?)?;
 
     // ── Step 10: GST rounded ONCE on the services base (DEC-COST-001) ───
     let gst = gst_paisa(
@@ -250,17 +260,23 @@ mod tests {
     /// The VERIFIED production option rates as of 2026-05-15 entries
     /// (COSTS_VERIFIED §5): STT 0.15%, NSE ETC 0.03503%, SEBI 0.0001%,
     /// NSE IPFT 0.0005%, stamp 0.003%, GST 18%; Groww flat ₹40 round trip.
+    /// Flat-bar helper (high == low == open) at the VERIFIED NSE rates —
+    /// COSTS_VERIFIED's examples are open-quoted, so the flat-bar call IS
+    /// the worst-case-law equivalent of each example.
     fn nse_2026(entry: i64, exit: i64, is_long: bool, lot: i64, n_lots: i64) -> ChargeStack {
         option_charge_stack(
-            entry, exit, is_long, lot, n_lots, 4_000, 15_000, 3_503, 10, 50, 300, 1_800_000,
+            entry, entry, exit, exit, is_long, lot, n_lots, 4_000, 15_000, 3_503, 10, 50, 300,
+            1_800_000,
         )
         .unwrap()
     }
 
     #[test]
     fn costs_verified_example_1_nifty_1_lot() {
-        // COSTS_VERIFIED §5 Ex.1 (tests/golden/test_costs_verified_examples):
-        // NIFTY long 10_000→12_000, lot 65 — every field hand-pinned.
+        // COSTS_VERIFIED §5 Ex.1 (regenerated under the permanent adverse
+        // CEIL law by DEC-FILL-WORST-CASE-ONLY-001 — total ₹67.12; every
+        // field oracle-executed at the club-R1 reconcile): NIFTY long
+        // 10_000→12_000 flat bars, lot 65.
         let s = nse_2026(10_000, 12_000, true, 65, 1);
         assert_eq!(s.buy_fill_paisa, 10_005);
         assert_eq!(s.sell_fill_paisa, 11_995);
@@ -269,70 +285,73 @@ mod tests {
         assert_eq!(s.sell_notional_paisa, 779_675);
         assert_eq!(s.brokerage_paisa, 4_000);
         assert_eq!(s.stt_paisa, 1_200);
-        assert_eq!(s.exch_paisa, 501); // 228 + 273 per-leg — never sum-then-round
+        assert_eq!(s.exch_paisa, 502); // 228 + 274 per-leg — never sum-then-round
         assert_eq!(s.sebi_paisa, 2);
-        assert_eq!(s.ipft_paisa, 7);
-        assert_eq!(s.stamp_paisa, 0);
-        assert_eq!(s.gst_paisa, 800);
-        assert_eq!(s.total_charges_paisa, 6_510);
+        assert_eq!(s.ipft_paisa, 8);
+        assert_eq!(s.stamp_paisa, 100);
+        assert_eq!(s.gst_paisa, 900);
+        assert_eq!(s.total_charges_paisa, 6_712);
         assert_eq!(s.gross_pnl_paisa, 129_350);
-        assert_eq!(s.net_pnl_paisa, 122_840);
+        assert_eq!(s.net_pnl_paisa, 122_638);
         assert_eq!(s.slippage_paisa, 650);
     }
 
     #[test]
     fn costs_verified_example_2_nifty_5_lots() {
+        // Ex.2 regenerated (total ₹137.51 — DEC-FILL-WORST-CASE-ONLY-001).
         let s = nse_2026(10_000, 12_000, true, 65, 5);
         assert_eq!(s.buy_notional_paisa, 3_251_625);
         assert_eq!(s.sell_notional_paisa, 3_898_375);
         assert_eq!(s.brokerage_paisa, 4_000); // flat — never scales with lots
-        assert_eq!(s.stt_paisa, 5_800);
-        assert_eq!(s.exch_paisa, 2_505);
-        assert_eq!(s.sebi_paisa, 7);
-        assert_eq!(s.ipft_paisa, 35);
+        assert_eq!(s.stt_paisa, 5_900);
+        assert_eq!(s.exch_paisa, 2_506);
+        assert_eq!(s.sebi_paisa, 8);
+        assert_eq!(s.ipft_paisa, 37);
         assert_eq!(s.stamp_paisa, 100);
         assert_eq!(s.gst_paisa, 1_200);
-        assert_eq!(s.total_charges_paisa, 13_647);
+        assert_eq!(s.total_charges_paisa, 13_751);
         assert_eq!(s.gross_pnl_paisa, 646_750);
-        assert_eq!(s.net_pnl_paisa, 633_103);
+        assert_eq!(s.net_pnl_paisa, 632_999);
     }
 
     #[test]
     fn costs_verified_example_3_banknifty_round_once_gst() {
-        // Ex.3: BANKNIFTY lot 30, 5_000→6_000 — the GST round-ONCE pin
-        // (₹7 — NOT the pre-DEC-COST-001 ₹4+₹4=₹8 split).
+        // Ex.3 regenerated (total ₹53.21): BANKNIFTY lot 30, 5_000→6_000 —
+        // GST still rounded ONCE on the services base (DEC-COST-001), now
+        // at the adverse rupee ceiling.
         let s = nse_2026(5_000, 6_000, true, 30, 1);
         assert_eq!(s.buy_notional_paisa, 150_150);
         assert_eq!(s.sell_notional_paisa, 179_850);
         assert_eq!(s.stt_paisa, 300);
-        assert_eq!(s.exch_paisa, 116);
-        assert_eq!(s.sebi_paisa, 0);
+        assert_eq!(s.exch_paisa, 117);
+        assert_eq!(s.sebi_paisa, 2);
         assert_eq!(s.ipft_paisa, 2);
-        assert_eq!(s.stamp_paisa, 0);
-        assert_eq!(s.gst_paisa, 700);
-        assert_eq!(s.total_charges_paisa, 5_118);
+        assert_eq!(s.stamp_paisa, 100);
+        assert_eq!(s.gst_paisa, 800);
+        assert_eq!(s.total_charges_paisa, 5_321);
         assert_eq!(s.gross_pnl_paisa, 29_700);
-        assert_eq!(s.net_pnl_paisa, 24_582);
+        assert_eq!(s.net_pnl_paisa, 24_379);
     }
 
     #[test]
     fn costs_verified_example_4_sensex_bse_rates() {
-        // Ex.4: SENSEX lot 20, 8_000→10_000 — BSE ETC 0.03250%, IPFT 0.
+        // Ex.4 regenerated (total ₹53.20): SENSEX lot 20, 8_000→10_000 —
+        // BSE ETC 0.03250%, IPFT 0.
         let s = option_charge_stack(
-            8_000, 10_000, true, 20, 1, 4_000, 15_000, 3_250, 10, 0, 300, 1_800_000,
+            8_000, 8_000, 10_000, 10_000, true, 20, 1, 4_000, 15_000, 3_250, 10, 0, 300, 1_800_000,
         )
         .unwrap();
         assert_eq!(s.buy_notional_paisa, 160_100);
         assert_eq!(s.sell_notional_paisa, 199_900);
         assert_eq!(s.stt_paisa, 300);
-        assert_eq!(s.exch_paisa, 117);
-        assert_eq!(s.sebi_paisa, 0);
+        assert_eq!(s.exch_paisa, 118);
+        assert_eq!(s.sebi_paisa, 2);
         assert_eq!(s.ipft_paisa, 0);
-        assert_eq!(s.stamp_paisa, 0);
-        assert_eq!(s.gst_paisa, 700);
-        assert_eq!(s.total_charges_paisa, 5_117);
+        assert_eq!(s.stamp_paisa, 100);
+        assert_eq!(s.gst_paisa, 800);
+        assert_eq!(s.total_charges_paisa, 5_320);
         assert_eq!(s.gross_pnl_paisa, 39_800);
-        assert_eq!(s.net_pnl_paisa, 34_683);
+        assert_eq!(s.net_pnl_paisa, 34_480);
     }
 
     #[test]
@@ -354,6 +373,8 @@ mod tests {
     fn overflow_inputs_err_never_panic() {
         assert!(
             option_charge_stack(
+                i64::MAX / 2,
+                i64::MAX / 2,
                 i64::MAX / 2,
                 i64::MAX / 2,
                 true,
@@ -419,7 +440,7 @@ mod tests {
                 stamp in 0i64..2_000_000,
             ) {
                 let s = option_charge_stack(
-                    entry, exit, is_long, lot, n_lots, 4_000,
+                    entry, entry, exit, exit, is_long, lot, n_lots, 4_000,
                     stt, etc, sebi, ipft, stamp, 1_800_000,
                 ).unwrap();
                 prop_assert_eq!(s.net_pnl_paisa, s.gross_pnl_paisa - s.total_charges_paisa);

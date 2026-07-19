@@ -3570,6 +3570,52 @@ class TestDerivedRecall:
                 now=_now,
             )
 
+    def test_recall_tf_rebuild_conversion_panic_is_per_symbol_isolation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — FAILS-BEFORE: a stored
+        out-of-datetime-range timestamp panicked the rebuild's Rust→Python
+        conversion as ``pyo3_runtime.PanicException`` (a BaseException), which
+        sailed PAST ``_rebuild_tf_months``' former bare ``except Exception``
+        and aborted the WHOLE recall batch. Now the guard is the round-18
+        ``_SWEEP_GUARD_ERRORS`` — counted ``tf_failed``, loudly logged, the
+        batch completes."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0)), _bar(_ts(1))])
+        materialize_lake_timeframes(
+            lake_root=lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=["5m"],
+        )
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+
+        def _panic(**_kwargs: Any) -> Any:
+            pl = pytest.importorskip("polars")
+            raise pl.exceptions.PanicException(
+                "called `Result::unwrap()` on an `Err` value: OverflowError"
+            )
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _panic)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.tf_rebuilt == 0
+        assert report.recall.tf_failed == 1
+        failures = _events(logs, "lake_heal.tf_rebuild_failed")
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+
     def test_recall_tf_rebuild_is_month_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

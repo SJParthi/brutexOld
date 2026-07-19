@@ -17,7 +17,11 @@ frame-for-frame. Any drift (a stale table left behind by a 1m backfill, a
 pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid) returns ``"stale"`` — never
 silently absorbed. Both sides hold lake values already snapped to the
 2-decimal tick grid at the write boundary (DEC-SPOT-PRICE-2DP-001), so
-exact equality is the honest comparison.
+exact equality is the honest comparison. The 1-minute BASE side is read with
+the SAME bad-tick screen the prebuild's read runs
+(DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001 — screened-vs-screened, one
+``BRUTEX_BAD_TICK_SCREEN`` switch), so a legitimate stored in-session spike
+the screen exists for can never read a healthy lake as permanently stale.
 """
 
 from __future__ import annotations
@@ -57,7 +61,9 @@ def compare_derived_freshness(df_1m: pl.DataFrame, df_stored: pl.DataFrame, tf_m
     return "fresh" if expected.equals(stored.cast(expected.schema)) else "stale"
 
 
-def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -> pl.DataFrame:
+def read_lake_bars_frame(
+    symbol_dir: Path, interval: str, *, source: str = "", screen_bad_ticks: bool = False
+) -> pl.DataFrame:
     """Read ONE stored ``(symbol, interval)`` partition as the canonical compare frame.
 
     The COMMON lake read the freshness compares run on (CLAUDE.md §11 —
@@ -68,20 +74,47 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     wired reader serves, never a poisoned-era physical duplicate), renamed +
     projected to the resampler's canonical ``ts_utc``/OHLCV columns, sorted.
     *source* labels the dedup log event; blank derives ``<symbol>/<interval>``.
+
+    *screen_bad_ticks* (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001): ``True`` opts
+    the read into the SAME bad-tick screen the prebuild's 1-minute read runs
+    (:func:`~brutex.data.bad_tick.screen_frame_bad_ticks`, REUSED — never
+    copied), gated by the SAME ``BRUTEX_BAD_TICK_SCREEN`` kill switch
+    (:func:`~brutex.data.bad_tick.bad_tick_screen_enabled` checked HERE, at the
+    read site — exactly mirroring
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m`'s gating, so
+    the ONE switch flips every screened boundary together; switch OFF ⇒ the
+    raw deduped frame, byte-identical to the pre-parity read). The freshness
+    consumers set it on their **1-minute BASE read only** — the stored DERIVED
+    partition is the prebuild's screened OUTPUT and must never be re-screened
+    (a derived bucket's legitimate coarse move could false-trip the in-session
+    ratio test). Default ``False`` keeps every other read byte-identical.
     """
     import polars as pl
 
+    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
     from brutex.data.lake_read import dedup_bars_frame
 
+    resolved_source = source or f"{symbol_dir.name}/{interval}"
     frame, _dropped = dedup_bars_frame(
         pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
-        source=source or f"{symbol_dir.name}/{interval}",
+        source=resolved_source,
     )
-    return (
+    frame = (
         frame.rename({"timestamp": "ts_utc"})
         .select("ts_utc", "open", "high", "low", "close", "volume")
         .sort("ts_utc")
     )
+    if screen_bad_ticks and bad_tick_screen_enabled():
+        # DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001: compare screened-vs-screened.
+        # The prebuild writes derived TFs from the SCREENED 1-minute
+        # (make_lake_read_1m, DEC-READ-GUARD-PARITY-001), so a freshness
+        # re-derivation from the UNSCREENED raw 1m read a lake with ONE
+        # legitimate self-consistent >=4x in-session spike as PERMANENTLY
+        # "stale" — a false sweep/doctor wedge no prebuild re-run could ever
+        # clear. Runs AFTER the sort (the screen's documented precondition);
+        # clean frames return the input object unchanged (zero-copy).
+        frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=resolved_source)
+    return frame
 
 
 def lake_derived_freshness_verdicts(
@@ -112,6 +145,22 @@ def lake_derived_freshness_verdicts(
     * a symbol with NO stored ``1minute`` base is never keyed — the verdict is
       unknowable without the base (abstain, mirroring the doctor's skip).
 
+    Screen parity (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001): the 1-minute BASE
+    read opts into the SAME bad-tick screen the prebuild's read runs
+    (``screen_bad_ticks=True`` on :func:`read_lake_bars_frame` — the one
+    ``BRUTEX_BAD_TICK_SCREEN`` kill switch honored at the read site), so the
+    re-derivation compares screened-vs-screened; switch OFF compares
+    unscreened-vs-unscreened (the pre-parity behavior). The stored DERIVED
+    partition read stays unscreened — it is the prebuild's screened output.
+    HONEST residual (the ghost-bucket class, named follow-up
+    DEC-DERIVED-GHOST-BUCKET-PRUNE-001): a stored derived bucket whose SOLE
+    1-minute source is screened away survives even a forced full re-prebuild
+    (the derived writers are latest-wins and never delete), so such a lake
+    honestly reads ``"stale"`` — the stored table genuinely serves a bucket
+    the screened base disowns; the escape is deleting the symbol's derived TF
+    partitions and re-running the prebuild (see
+    :meth:`~brutex.engine.sweep_preflight.FreshnessReport.remediation`).
+
     The per-pair 1-minute frame is read ONCE per symbol. O(stored bars) per
     launch — a deliberate one-time preflight cost against consuming a stale
     derived table into run identity.
@@ -135,7 +184,7 @@ def lake_derived_freshness_verdicts(
             if not (derived_dir.is_dir() and any(derived_dir.rglob("*.parquet"))):
                 continue  # nothing stored → the zero-bar preflight owns this pair
             if df_1m is None:
-                df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+                df_1m = read_lake_bars_frame(symbol_dir, "1minute", screen_bad_ticks=True)
             verdicts[(symbol, interval)] = compare_derived_freshness(
                 df_1m,
                 read_lake_bars_frame(symbol_dir, interval),

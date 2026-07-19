@@ -1,6 +1,6 @@
 """Unit tests for the flag-gated Rust exec-cores seam (``brutex/exec_rust.py``).
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1724). Covers the ``BRUTEX_EXEC_RUST``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1960). Covers the ``BRUTEX_EXEC_RUST``
 tristate resolution, the structural OFF-never-touches-the-kernel proof, the
 wheel-missing / envelope / narrow-catch fallbacks (with ``MemoryError``
 re-raising bare), the wire-arity refusal, the kernel-vs-Python-oracle
@@ -178,21 +178,30 @@ def test_flag_unrecognised_fails_safe_off_with_one_warning(
 def _call_every_wrapper() -> list[object]:
     """Invoke all six seam wrappers once with in-envelope arguments."""
     return [
-        exec_rust.fill_slippage(9_995, 12_005, is_long=True),
-        exec_rust.fill_futures(9_995, 12_005, is_long=False),
-        exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
-        exec_rust.charge_stack_futures(2_200_000, 2_210_000, **_FUTURES_ARGS),
+        exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True),
+        exec_rust.fill_futures(9_995, 9_995, 12_005, 12_005, is_long=False),
+        exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS),
+        exec_rust.charge_stack_futures(2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS),
         exec_rust.materialize_option_tail(
-            12_000, 15_000, entry_volume=10, exit_volume=10, reject_stale=True, **_OPTION_ARGS
+            12_000,
+            15_000,
+            12_000,
+            12_000,
+            15_000,
+            15_000,
+            entry_volume=10,
+            exit_volume=10,
+            **_OPTION_ARGS,
         ),
         exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
+            2_201_000,
+            2_199_000,
+            2_211_000,
+            2_209_000,
             entry_volume=10,
             exit_volume=10,
             path_highs_paisa=[2_201_000],
             path_lows_paisa=[2_199_000],
-            reject_stale=True,
             **_FUTURES_ARGS,
         ),
     ]
@@ -244,7 +253,7 @@ def test_stale_wheel_missing_exec_symbol_raises_named_error(
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
     monkeypatch.setattr(exec_rust, "_rust", SimpleNamespace())  # no exec_* symbols
     with pytest.raises(exec_rust.StaleExecWheelError) as excinfo:
-        exec_rust.fill_slippage(9_995, 12_005, is_long=True)
+        exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True)
     # EXACT message pin — kills any string-literal mutant of the message
     # or of the resolved symbol name.
     assert str(excinfo.value) == (
@@ -277,27 +286,40 @@ _FUTURES_ARGS_BIG: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x1
 
 def _envelope_calls() -> dict[str, Callable[[], object]]:
     return {
-        "fill_slippage": lambda: exec_rust.fill_slippage(_TOO_BIG, 12_005, is_long=True),
-        "fill_futures": lambda: exec_rust.fill_futures(9_995, _TOO_SMALL, is_long=True),
+        "fill_slippage": lambda: exec_rust.fill_slippage(
+            _TOO_BIG, 9_995, 12_005, 12_005, is_long=True
+        ),
+        "fill_futures": lambda: exec_rust.fill_futures(
+            9_995, 9_995, _TOO_SMALL, 12_005, is_long=True
+        ),
         "charge_stack_option": lambda: exec_rust.charge_stack_option(
-            9_995, 12_005, **_OPTION_ARGS_BIG
+            9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS_BIG
         ),
         "charge_stack_futures": lambda: exec_rust.charge_stack_futures(
-            2_200_000, 2_210_000, **_FUTURES_ARGS_BIG
+            2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS_BIG
         ),
         "materialize_option_tail": lambda: exec_rust.materialize_option_tail(
-            _TOO_BIG, 15_000, entry_volume=10, exit_volume=10, reject_stale=True, **_OPTION_ARGS
+            _TOO_BIG,
+            15_000,
+            _TOO_BIG,
+            _TOO_BIG,
+            15_000,
+            15_000,
+            entry_volume=10,
+            exit_volume=10,
+            **_OPTION_ARGS,
         ),
         # The path LISTS are part of the futures envelope — a single
         # out-of-envelope path element must route to the Python arm.
         "materialize_futures_tail": lambda: exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
+            2_201_000,
+            2_199_000,
+            2_211_000,
+            2_209_000,
             entry_volume=10,
             exit_volume=10,
             path_highs_paisa=[2_201_000, _TOO_BIG],
             path_lows_paisa=[2_199_000, 2_199_000],
-            reject_stale=True,
             **_FUTURES_ARGS,
         ),
     }
@@ -334,7 +356,7 @@ def test_exact_i64_boundaries_are_in_envelope(monkeypatch: pytest.MonkeyPatch) -
     for boundary in (2**63 - 1, -(2**63)):
         exec_rust.reset_warn_memo_for_tests()
         with capture_logs() as logs:
-            assert exec_rust.fill_slippage(boundary, 12_005, is_long=True) is None
+            assert exec_rust.fill_slippage(boundary, boundary, 12_005, 12_005, is_long=True) is None
         events = {e["event"] for e in logs}
         assert events == {"exec_rust.kernel_fallback"}, boundary
 
@@ -351,13 +373,14 @@ def test_futures_tail_turnover_none_served_and_present_enveloped(
     def tail(turnover: int | None) -> tuple[str, ChargeStack | None, int, int] | None:
         args: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x100": turnover}
         return exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
+            2_201_000,
+            2_199_000,
+            2_211_000,
+            2_209_000,
             entry_volume=10,
             exit_volume=10,
             path_highs_paisa=[2_201_000],
             path_lows_paisa=[2_199_000],
-            reject_stale=True,
             **args,
         )
 
@@ -366,7 +389,9 @@ def test_futures_tail_turnover_none_served_and_present_enveloped(
     kind, stack, _mae, _mfe = served
     assert kind == "trade"
     none_args: dict[str, Any] = {**_FUTURES_ARGS, "brokerage_turnover_bps_x100": None}
-    assert stack == _futures_charge_stack_py(2_200_000, 2_210_000, **none_args)
+    assert stack == _futures_charge_stack_py(
+        2_201_000, 2_199_000, 2_211_000, 2_209_000, **none_args
+    )
     bomb = _BombKernel()
     monkeypatch.setattr(exec_rust, "_rust", bomb)
     with capture_logs() as logs:
@@ -404,23 +429,36 @@ _WRAPPER_TO_KERNEL_FN: dict[str, str] = {
 
 def _in_envelope_calls() -> dict[str, Callable[[], object]]:
     return {
-        "fill_slippage": lambda: exec_rust.fill_slippage(9_995, 12_005, is_long=True),
-        "fill_futures": lambda: exec_rust.fill_futures(9_995, 12_005, is_long=True),
-        "charge_stack_option": lambda: exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
+        "fill_slippage": lambda: exec_rust.fill_slippage(
+            9_995, 9_995, 12_005, 12_005, is_long=True
+        ),
+        "fill_futures": lambda: exec_rust.fill_futures(9_995, 9_995, 12_005, 12_005, is_long=True),
+        "charge_stack_option": lambda: exec_rust.charge_stack_option(
+            9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS
+        ),
         "charge_stack_futures": lambda: exec_rust.charge_stack_futures(
-            2_200_000, 2_210_000, **_FUTURES_ARGS
+            2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS
         ),
         "materialize_option_tail": lambda: exec_rust.materialize_option_tail(
-            12_000, 15_000, entry_volume=10, exit_volume=10, reject_stale=True, **_OPTION_ARGS
+            12_000,
+            15_000,
+            12_000,
+            12_000,
+            15_000,
+            15_000,
+            entry_volume=10,
+            exit_volume=10,
+            **_OPTION_ARGS,
         ),
         "materialize_futures_tail": lambda: exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
+            2_201_000,
+            2_199_000,
+            2_211_000,
+            2_209_000,
             entry_volume=10,
             exit_volume=10,
             path_highs_paisa=[2_201_000],
             path_lows_paisa=[2_199_000],
-            reject_stale=True,
             **_FUTURES_ARGS,
         ),
     }
@@ -464,20 +502,29 @@ def test_memory_error_reraises_bare(monkeypatch: pytest.MonkeyPatch, site: str) 
 
 def _futures_tail_call() -> object:
     return exec_rust.materialize_futures_tail(
-        2_200_000,
-        2_210_000,
+        2_201_000,
+        2_199_000,
+        2_211_000,
+        2_209_000,
         entry_volume=10,
         exit_volume=10,
         path_highs_paisa=[2_201_000],
         path_lows_paisa=[2_199_000],
-        reject_stale=True,
         **_FUTURES_ARGS,
     )
 
 
 def _option_tail_call() -> object:
     return exec_rust.materialize_option_tail(
-        12_000, 15_000, entry_volume=10, exit_volume=10, reject_stale=True, **_OPTION_ARGS
+        12_000,
+        15_000,
+        12_000,
+        12_000,
+        15_000,
+        15_000,
+        entry_volume=10,
+        exit_volume=10,
+        **_OPTION_ARGS,
     )
 
 
@@ -512,12 +559,14 @@ class TestKernelWireShapeGuard:
             (
                 "charge_stack_option",
                 "exec_option_charge_stack",
-                lambda: exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
+                lambda: exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS),
             ),
             (
                 "charge_stack_futures",
                 "exec_futures_charge_stack",
-                lambda: exec_rust.charge_stack_futures(2_200_000, 2_210_000, **_FUTURES_ARGS),
+                lambda: exec_rust.charge_stack_futures(
+                    2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS
+                ),
             ),
         ],
         ids=["option-stack", "futures-stack"],
@@ -544,12 +593,14 @@ class TestKernelWireShapeGuard:
             (
                 "charge_stack_option",
                 "exec_option_charge_stack",
-                lambda: exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS),
+                lambda: exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS),
             ),
             (
                 "charge_stack_futures",
                 "exec_futures_charge_stack",
-                lambda: exec_rust.charge_stack_futures(2_200_000, 2_210_000, **_FUTURES_ARGS),
+                lambda: exec_rust.charge_stack_futures(
+                    2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS
+                ),
             ),
         ],
         ids=["option-stack", "futures-stack"],
@@ -632,13 +683,13 @@ class TestKernelWireShapeGuard:
             (
                 "fill_slippage",
                 "exec_apply_slippage",
-                lambda: exec_rust.fill_slippage(9_995, 12_005, is_long=True),
+                lambda: exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True),
                 (1, 2),
             ),
             (
                 "fill_futures",
                 "exec_apply_futures_fill",
-                lambda: exec_rust.fill_futures(9_995, 12_005, is_long=True),
+                lambda: exec_rust.fill_futures(9_995, 9_995, 12_005, 12_005, is_long=True),
                 (1, 2, "x"),
             ),
         ],
@@ -710,7 +761,9 @@ class TestKernelWireShapeGuard:
         fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: wire)
         monkeypatch.setattr(exec_rust, "_rust", fake)
         with capture_logs() as logs:
-            assert exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS) is None
+            assert (
+                exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS) is None
+            )
         self._assert_one_wire_fallback(logs, "charge_stack_option")
         assert logs[0]["error"] == "wire[3] is bool, expected int"
 
@@ -733,7 +786,9 @@ class TestKernelWireShapeGuard:
         fake = SimpleNamespace(exec_option_charge_stack=lambda *_a: [junk] * 17)
         monkeypatch.setattr(exec_rust, "_rust", fake)
         with capture_logs() as logs:
-            assert exec_rust.charge_stack_option(9_995, 12_005, **_OPTION_ARGS) is None
+            assert (
+                exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **_OPTION_ARGS) is None
+            )
             assert compute_trade_cost(trade) == off
         self._assert_one_wire_fallback(logs, "charge_stack_option")
         assert logs[0]["error"] == "wire[0] is outside the i64 range"
@@ -783,8 +838,14 @@ def test_fill_slippage_matches_python_oracle(
     monkeypatch: pytest.MonkeyPatch, entry: int, exit_: int, is_long: bool
 ) -> None:
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    got = exec_rust.fill_slippage(entry, exit_, is_long=is_long)
-    assert got == _apply_slippage(entry, exit_, "long" if is_long else "short")
+    got = exec_rust.fill_slippage(entry, entry, exit_, exit_, is_long=is_long)
+    assert got == _apply_slippage(
+        "long" if is_long else "short",
+        entry_high_paisa=entry,
+        entry_low_paisa=entry,
+        exit_high_paisa=exit_,
+        exit_low_paisa=exit_,
+    )
 
 
 @pytest.mark.parametrize("is_long", [True, False])
@@ -795,8 +856,14 @@ def test_fill_futures_matches_python_oracle(
     monkeypatch: pytest.MonkeyPatch, entry: int, exit_: int, is_long: bool
 ) -> None:
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
-    got = exec_rust.fill_futures(entry, exit_, is_long=is_long)
-    assert got == apply_futures_fill(entry, exit_, side="long" if is_long else "short")
+    got = exec_rust.fill_futures(entry, entry, exit_, exit_, is_long=is_long)
+    assert got == apply_futures_fill(
+        side="long" if is_long else "short",
+        entry_high_paisa=entry,
+        entry_low_paisa=entry,
+        exit_high_paisa=exit_,
+        exit_low_paisa=exit_,
+    )
 
 
 @pytest.mark.parametrize("is_long", [True, False])
@@ -805,9 +872,9 @@ def test_charge_stack_option_matches_python_oracle(
 ) -> None:
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
     args = {**_OPTION_ARGS, "is_long": is_long}
-    got = exec_rust.charge_stack_option(9_995, 12_005, **args)
+    got = exec_rust.charge_stack_option(9_995, 9_995, 12_005, 12_005, **args)
     assert isinstance(got, ChargeStack)
-    assert got == _charge_stack_py(9_995, 12_005, **args)
+    assert got == _charge_stack_py(9_995, 9_995, 12_005, 12_005, **args)
 
 
 @pytest.mark.parametrize(
@@ -824,31 +891,42 @@ def test_charge_stack_futures_matches_python_oracle(
 ) -> None:
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
     args = {**_FUTURES_ARGS, **overrides}
-    got = exec_rust.charge_stack_futures(2_200_000, 2_210_000, **args)
+    got = exec_rust.charge_stack_futures(2_201_000, 2_199_000, 2_211_000, 2_209_000, **args)
     assert isinstance(got, ChargeStack)
-    assert got == _futures_charge_stack_py(2_200_000, 2_210_000, **args)
+    assert got == _futures_charge_stack_py(2_201_000, 2_199_000, 2_211_000, 2_209_000, **args)
 
 
 def test_materialize_option_tail_verdicts(monkeypatch: pytest.MonkeyPatch) -> None:
     """stale_bar / tick_floor / trade verdicts, matching the Python laws:
-    stale = zero volume either bar iff ``reject_stale``; tick floor = entry
-    ≤ 5×tick (25 paisa) OR exit < 1 tick; trade = the oracle stack."""
+    stale = zero volume on either bar, UNCONDITIONAL
+    (DEC-FILL-WORST-CASE-ONLY-001 — the ``reject_stale`` knob is deleted);
+    tick floor = entry OPEN ≤ 5×tick (25 paisa) OR exit OPEN < 1 tick;
+    trade = the oracle stack over the fill bars' extremes (flat bars here,
+    extremes == opens)."""
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
 
-    def tail(entry: int, exit_: int, ev: int, xv: int, *, reject_stale: bool = True) -> object:
+    def tail(entry: int, exit_: int, ev: int, xv: int) -> object:
         return exec_rust.materialize_option_tail(
-            entry, exit_, entry_volume=ev, exit_volume=xv, reject_stale=reject_stale, **_OPTION_ARGS
+            entry,
+            exit_,
+            entry,
+            entry,
+            exit_,
+            exit_,
+            entry_volume=ev,
+            exit_volume=xv,
+            **_OPTION_ARGS,
         )
 
     assert tail(12_000, 15_000, 0, 10) == ("stale_bar", None)
     assert tail(12_000, 15_000, 10, 0) == ("stale_bar", None)
+    assert tail(12_000, 15_000, 0, 0) == ("stale_bar", None)  # unconditional
     assert tail(25, 15_000, 10, 10) == ("tick_floor", None)  # entry ≤ 25 paisa
     assert tail(26, 4, 10, 10) == ("tick_floor", None)  # exit < one tick
-    expected = _charge_stack_py(12_000, 15_000, **_OPTION_ARGS)
+    # Stale precedes the tick floor (the pinned gate order).
+    assert tail(25, 15_000, 0, 10) == ("stale_bar", None)
+    expected = _charge_stack_py(12_000, 12_000, 15_000, 15_000, **_OPTION_ARGS)
     assert tail(12_000, 15_000, 10, 10) == ("trade", expected)
-    # Opt-out: zero volume with reject_stale=False still prices (the stale
-    # gate precedes the tick gate ONLY when armed).
-    assert tail(12_000, 15_000, 0, 0, reject_stale=False) == ("trade", expected)
 
 
 def test_materialize_futures_tail_verdicts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -857,32 +935,30 @@ def test_materialize_futures_tail_verdicts(monkeypatch: pytest.MonkeyPatch) -> N
     twin (basis fill = buy_fill for a long)."""
     monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
 
-    def tail(ev: int, xv: int, *, reject_stale: bool = True) -> object:
+    def tail(ev: int, xv: int) -> object:
         return exec_rust.materialize_futures_tail(
-            2_200_000,
-            2_210_000,
+            2_201_000,
+            2_199_000,
+            2_211_000,
+            2_209_000,
             entry_volume=ev,
             exit_volume=xv,
             path_highs_paisa=[2_201_000, 2_208_000],
             path_lows_paisa=[2_199_000, 2_204_000],
-            reject_stale=reject_stale,
             **_FUTURES_ARGS,
         )
 
     assert tail(0, 10) == ("stale_bar", None, 0, 0)
     assert tail(10, 0) == ("stale_bar", None, 0, 0)
-    expected = _futures_charge_stack_py(2_200_000, 2_210_000, **_FUTURES_ARGS)
+    expected = _futures_charge_stack_py(2_201_000, 2_199_000, 2_211_000, 2_209_000, **_FUTURES_ARGS)
     n_shares = _FUTURES_ARGS["lot_size"] * _FUTURES_ARGS["n_lots"]
     entry_fill = expected.buy_fill_paisa  # long basis
     mae_unit = max(0, entry_fill - 2_199_000, entry_fill - 2_204_000)
     mfe_unit = max(0, 2_201_000 - entry_fill, 2_208_000 - entry_fill)
     assert tail(10, 10) == ("trade", expected, mae_unit * n_shares, mfe_unit * n_shares)
-    assert tail(0, 0, reject_stale=False) == (
-        "trade",
-        expected,
-        mae_unit * n_shares,
-        mfe_unit * n_shares,
-    )
+    # UNCONDITIONAL stale (DEC-FILL-WORST-CASE-ONLY-001): both bars stale
+    # rejects — there is no opt-out arm any more.
+    assert tail(0, 0) == ("stale_bar", None, 0, 0)
 
 
 # ── engagement through the REAL dispatch sites ──────────────────────────
@@ -915,6 +991,10 @@ def _option_trade() -> TradeInput:
         expiry_date=date(2026, 5, 21),
         entry_bar_open_paisa=9_995,
         exit_bar_open_paisa=12_005,
+        entry_bar_high_paisa=9_995,
+        entry_bar_low_paisa=9_995,
+        exit_bar_high_paisa=12_005,
+        exit_bar_low_paisa=12_005,
         side="long_call",
         n_lots=1,
         broker="groww",
@@ -932,6 +1012,10 @@ def _futures_trade() -> FuturesTradeInput:
         expiry_date=date(2025, 1, 30),
         entry_bar_open_paisa=2_200_000,
         exit_bar_open_paisa=2_210_000,
+        entry_bar_high_paisa=2_200_000,
+        entry_bar_low_paisa=2_200_000,
+        exit_bar_high_paisa=2_210_000,
+        exit_bar_low_paisa=2_210_000,
         side="long",
         lot_size=75,
         n_lots=1,
@@ -968,6 +1052,8 @@ def test_off_arm_is_todays_python_bytes(monkeypatch: pytest.MonkeyPatch) -> None
     breakdown = results[0][0]
     stack = _charge_stack_py(
         9_995,
+        9_995,
+        12_005,
         12_005,
         is_long=True,
         lot_size=breakdown.n_shares_per_lot,

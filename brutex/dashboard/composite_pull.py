@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from brutex.adapters.ingest_common import CancelCheck
 from brutex.dashboard.fno_underlying import (
     primary_fno_underlying,
     resolve_fno_index_aliases,
@@ -160,6 +161,27 @@ class CompositePullReport:
     metadata: MetadataPullReport | None
     historical: HistoricalPullReport | None
     note: str
+
+    @property
+    def ok(self) -> bool:
+        """The historical stage verdict — the ONE home of the composite-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): this report
+        SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol, and the
+        sequencer's :func:`~brutex.dashboard.pipeline_pull.historical_phase_ok`
+        gate DELEGATES here (the composed law MOVED verbatim — this module sits
+        below the sequencer in the import graph; CLAUDE.md §11 COMMON).
+        BOTH inner sub-reports must be clean: the inner metadata sub-report
+        rides :attr:`~brutex.dashboard.metadata_pull.MetadataPullReport.ok`,
+        the inner candle sub-report rides
+        :attr:`~brutex.dashboard.historical_pull.HistoricalPullReport.ok`; a
+        ``None`` sub-report is a reported no-op, NOT a failure — the full law
+        + rationale lives on the gate's docstring.
+        """
+        if self.metadata is not None and not self.metadata.ok:
+            return False
+        return self.historical is None or self.historical.ok
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the composite route + the live panel."""
@@ -280,6 +302,7 @@ def pull_historical_for_underlyings(
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -541,6 +564,10 @@ PersistentSymbolFormPreference` (durable across pulls); ``None`` (the default) i
         # — and the phase-(a)-folded prior-step verdict for the Greeks strict arm.
         underlying_kinds=_underlying_kind_map(tradable),
         prior_steps=prior_steps,
+        # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): threaded to the
+        # F&O (contract, interval) window boundary; the phase catches the
+        # propagated PullCancelled and stops gracefully (ledger persisted).
+        should_stop=should_stop,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

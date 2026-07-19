@@ -21,6 +21,7 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentBarsU128",
     "ResidentSweepEnum",
     "ResidentSweepEnumU128",
     "ResidentSweepSim",
@@ -31,9 +32,11 @@ __all__ = [
     "bitcount_u64s",
     "blake3_hash",
     "count_supermask_u64s",
+    "count_supermask_u128s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
-    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    "count_supermasks_u128s",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
     "exec_apply_futures_fill",
     "exec_apply_slippage",
     "exec_futures_charge_stack",
@@ -53,6 +56,7 @@ __all__ = [
     "ranking_passes_gates",
     "ranking_rank_order",
     "ranking_zscores",
+    "stats_cpcv_pass_count",
     "sweep_drawdown_stats",
 ]
 
@@ -112,6 +116,27 @@ def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
     `bar` in `bar_bits` with `(bar & masks[j]) == masks[j]`. Positionally
     aligned with `masks`. Empty `masks` → `[]`; empty `bar_bits` → `0` per
     mask.
+    """
+    ...
+
+def count_supermask_u128s(bar_bits: list[int], mask: int) -> int:
+    """Single-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermask_u64s`: counts `bar` in `bar_bits` with
+    `(bar & mask) == mask` over native u128 words. A value outside
+    `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge.
+    """
+    ...
+
+def count_supermasks_u128s(bar_bits: list[int], masks: list[int]) -> list[int]:
+    """Batched per-mask SUPERSET count over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `count_supermasks_u64s` — same contract with `bar_bits`
+    / `masks` widened to u128 (positional alignment; empty `masks` → `[]`;
+    empty `bar_bits` → `0` per mask; `mask == 0` matches every bar). Routes
+    through the SAME width-generic dispatch as the u64 kernel, so the counts
+    cannot drift between widths. A value outside `[0, 2**128)` raises
+    `OverflowError` at the PyO3 extraction edge.
     """
     ...
 
@@ -237,36 +262,49 @@ def ranking_cr_div_i64(numerator: int, denominator: int) -> float:
     """
     ...
 
-# --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+# --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
 # Options/futures execution integer cores (rust/fno-math/src/exec/). All
 # money values are int64 paisa; rates use the `rate_decimal × 10^7` encoding;
 # a charge stack crosses as the PINNED 17-slot list mirroring
-# `brutex.costs.calculator.ChargeStack`; out-of-envelope arithmetic raises
+# `brutex.costs.types.ChargeStack`; out-of-envelope arithmetic raises
 # `ValueError` (the Python seam falls back to the Python oracle arm).
 
 def exec_round_to_paisa(amount_x_bps_x100: int) -> int:
-    """Half-away-from-zero at scale 10^7 (`_round_to_paisa` twin)."""
+    """ADVERSE CEILING at scale 10^7 (`_round_levy_paisa` twin,
+    DEC-FILL-WORST-CASE-ONLY-001)."""
     ...
 
 def exec_round_to_rupee(amount_paisa: int) -> int:
-    """Half-away-from-zero to a multiple of 100 paise (`_round_to_rupee` twin)."""
+    """ADVERSE CEILING to a multiple of 100 paise (`_round_levy_rupee` twin)."""
     ...
 
 def exec_apply_slippage(
-    entry_open_paisa: int, exit_open_paisa: int, is_long: bool
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
 ) -> tuple[int, int, int]:
-    """R15 fill law → `(buy_fill, sell_fill, realized_slip_per_share)`."""
+    """Worst-case bar-extreme fill law →
+    `(buy_fill, sell_fill, realized_slip_per_share)`."""
     ...
 
 def exec_apply_futures_fill(
-    entry_open_paisa: int, exit_open_paisa: int, is_long: bool
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
 ) -> tuple[int, int, int]:
-    """Futures R15 fill law (numerically the reconciled `exec_apply_slippage`)."""
+    """Futures worst-case fill law (numerically the reconciled
+    `exec_apply_slippage`)."""
     ...
 
 def exec_option_charge_stack(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     is_long: bool,
     lot_size: int,
     n_lots: int,
@@ -282,8 +320,10 @@ def exec_option_charge_stack(
     ...
 
 def exec_futures_charge_stack(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     is_long: bool,
     lot_size: int,
     n_lots: int,
@@ -303,10 +343,13 @@ def exec_futures_charge_stack(
 def exec_options_materialize(
     entry_open_paisa: int,
     exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     entry_volume: int,
     exit_volume: int,
     is_long: bool,
-    reject_stale: bool,
     lot_size: int,
     n_lots: int,
     brokerage_round_trip_paisa: int,
@@ -317,18 +360,20 @@ def exec_options_materialize(
     stamp_rate: int,
     gst_rate: int,
 ) -> tuple[str, list[int] | None]:
-    """Options post-I/O tail → `("stale_bar"|"tick_floor", None)` or `("trade", wire)`."""
+    """Options post-I/O tail (UNCONDITIONAL stale gate) →
+    `("stale_bar"|"tick_floor", None)` or `("trade", wire)`."""
     ...
 
 def exec_futures_materialize(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     entry_volume: int,
     exit_volume: int,
     path_highs_paisa: list[int],
     path_lows_paisa: list[int],
     is_long: bool,
-    reject_stale: bool,
     lot_size: int,
     n_lots: int,
     cost_free: bool,
@@ -341,10 +386,32 @@ def exec_futures_materialize(
     stamp_rate: int,
     gst_rate: int,
 ) -> tuple[str, list[int] | None]:
-    """Futures post-I/O tail → `("stale_bar", None)` or `("trade", wire+[mae, mfe])`."""
+    """Futures post-I/O tail (UNCONDITIONAL stale gate) →
+    `("stale_bar", None)` or `("trade", wire+[mae, mfe])`."""
     ...
 
 # --- end exec (slice 7 / P8) ---
+
+def stats_cpcv_pass_count(
+    counts: list[int],
+    means: list[float],
+    m2s: list[float],
+    n_test_groups: int,
+    min_sharpe: float,
+) -> int:
+    """CPCV fold pass-count over per-group moment triples (DEC-METRICS-RUST-STATS-001).
+
+    `counts`/`means`/`m2s` are the per-group `(n, mean, M2)` triples from
+    `brutex.metrics.cpcv._group_moments`. Returns how many of the
+    `C(len(counts), n_test_groups)` folds have a defined Chan/Pébay-merged
+    Sharpe STRICTLY greater than `min_sharpe` — the exact
+    `brutex.metrics.cpcv._combine_moments` fold, operation-for-operation
+    (claim class STRUCTURAL). Raises `ValueError` on a structurally invalid
+    input (length mismatch, `n_groups < 2`, `n_test_groups` out of
+    `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
+    `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
+    ...
 
 def sweep_drawdown_stats(
     n_bars: int,
@@ -424,6 +491,22 @@ class ResidentBars:
     def count_supermasks(self, masks: list[int]) -> list[int]: ...
     def count_supermask(self, mask: int) -> int: ...
 
+class ResidentBarsU128:
+    """Resident bar buffer over a u128 domain (DEC-ENUM-KERNEL-U128-001).
+
+    The wide twin of `ResidentBars`: holds u128 `bar_bits` Rust-side across
+    batch calls (the `O(N_bars)` copy paid ONCE in `__init__`; subsequent
+    `count_supermasks` calls marshal only `masks`). Frozen + immutable; only
+    `n_bars` is exposed. A `bar_bits` / mask value outside `[0, 2**128)`
+    raises `OverflowError` at the PyO3 extraction edge.
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def count_supermasks(self, masks: list[int]) -> list[int]: ...
+    def count_supermask(self, mask: int) -> int: ...
+
 class ResidentSweepSim:
     """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + sessions + bar_bits.
 
@@ -461,9 +544,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of masks → per-mask round-trip trade tuples.
 
@@ -479,9 +559,6 @@ class ResidentSweepSim:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (the throughput-bench fast path).
 
@@ -522,9 +599,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[list[tuple[int, int, int, int, int, int]]]:
         """Simulate a batch of u128 masks → per-mask round-trip trade tuples.
 
@@ -540,9 +614,6 @@ class ResidentSweepSimU128:
         is_buy: bool,
         sl_paisa: int | None,
         tp_paisa: int | None,
-        sl_next_open: bool = ...,
-        tp_next_open: bool = ...,
-        tp_first: bool = ...,
     ) -> list[int]:
         """Per-mask round-trip trade COUNT only (no per-trade allocation).
 

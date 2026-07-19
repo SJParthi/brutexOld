@@ -1,4 +1,4 @@
-//! Futures charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) — the
+//! Futures charge stack (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) — the
 //! exact-integer twin of `brutex.costs.futures_costs._futures_charge_stack_py`
 //! (futures_costs.py:722-847 pre-extraction).
 //!
@@ -16,7 +16,8 @@ use crate::exec::money::{floor_rate_scale, gst_paisa, round_to_paisa, round_to_r
 /// One-leg brokerage from caller-RESOLVED broker parameters — the
 /// `brutex.costs.futures_costs._brokerage_leg_paisa` twin: `None` turnover =
 /// a flat-only broker (Zerodha); a rate = the Groww
-/// `min(flat, half-up(notional × turnover))` arm.
+/// `min(flat, adverse-ceil(notional × turnover))` arm (the permanent
+/// adverse-levy rounding, DEC-FILL-WORST-CASE-ONLY-001).
 ///
 /// # Errors
 ///
@@ -40,8 +41,9 @@ pub fn brokerage_leg_paisa(
 /// — ONE formula for BOTH directions (the fill law pre-assigns the legs, no
 /// sign branch); brokerage = [`brokerage_leg_paisa`] PER LEG instead of the
 /// options flat round trip. Same rounding laws otherwise (statutory floor
-/// then rupee; non-statutory per-leg paisa half-up; GST round-ONCE,
-/// DEC-COST-001).
+/// then ADVERSE-ceiling rupee; non-statutory per-leg adverse paisa ceiling —
+/// DEC-FILL-WORST-CASE-ONLY-001; GST round-ONCE, DEC-COST-001); fills anchor
+/// on the worst-case bar EXTREMES ([`apply_futures_fill`]).
 ///
 /// # Errors
 ///
@@ -49,8 +51,10 @@ pub fn brokerage_leg_paisa(
 /// routes them to the Python-bigint arm) or an internal law violation.
 #[allow(clippy::too_many_arguments)]
 pub fn futures_charge_stack(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
     lot_size: i64,
     n_lots: i64,
@@ -64,8 +68,13 @@ pub fn futures_charge_stack(
     stamp_rate: i64,
     gst_rate: i64,
 ) -> Result<ChargeStack, String> {
-    let (buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit) =
-        apply_futures_fill(entry_open_paisa, exit_open_paisa, is_long)?;
+    let (buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit) = apply_futures_fill(
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
+        is_long,
+    )?;
     let n_shares = to_i64(
         i128::from(n_lots) * i128::from(lot_size),
         "futures_charge_stack: n_shares",
@@ -130,8 +139,8 @@ pub fn futures_charge_stack(
     let stt_paisa = round_to_rupee(floor_rate_scale(
         i128::from(sell_notional_paisa),
         i128::from(stt_rate),
-    )?);
-    // ETC: both sides, per-leg paisa half-up then sum.
+    )?)?;
+    // ETC: both sides, per-leg adverse paisa ceiling then sum.
     let exch_paisa = add_i64(
         round_to_paisa(i128::from(buy_notional_paisa) * i128::from(etc_rate))?,
         round_to_paisa(i128::from(sell_notional_paisa) * i128::from(etc_rate))?,
@@ -153,7 +162,7 @@ pub fn futures_charge_stack(
     let stamp_paisa = round_to_rupee(floor_rate_scale(
         i128::from(buy_notional_paisa),
         i128::from(stamp_rate),
-    )?);
+    )?)?;
     // GST 18% on services only, rounded ONCE on the total (DEC-COST-001).
     let gst = gst_paisa(
         &[brokerage_paisa, exch_paisa, sebi_paisa, ipft_paisa],
@@ -217,7 +226,8 @@ mod tests {
         // 2_210_000): gross = net = 749_250, all charges 0, slippage 750 —
         // WITHOUT touching any rate arg (all zeroed here).
         let s = futures_charge_stack(
-            2_200_000, 2_210_000, true, 75, 1, true, 0, None, 0, 0, 0, 0, 0, 0,
+            2_200_000, 2_200_000, 2_210_000, 2_210_000, true, 75, 1, true, 0, None, 0, 0, 0, 0, 0,
+            0,
         )
         .unwrap();
         assert_eq!(s.buy_fill_paisa, 2_200_005);
@@ -233,7 +243,8 @@ mod tests {
     fn cost_free_index_short_golden() {
         // Short, same prices: gross = net = −750_750.
         let s = futures_charge_stack(
-            2_200_000, 2_210_000, false, 75, 1, true, 0, None, 0, 0, 0, 0, 0, 0,
+            2_200_000, 2_200_000, 2_210_000, 2_210_000, false, 75, 1, true, 0, None, 0, 0, 0, 0, 0,
+            0,
         )
         .unwrap();
         assert_eq!(s.gross_pnl_paisa, -750_750);
@@ -249,6 +260,8 @@ mod tests {
         // stamp 200 (SYNTHETIC — never shipped as production rates).
         let s = futures_charge_stack(
             130_000,
+            130_000,
+            131_000,
             131_000,
             true,
             500,
@@ -264,44 +277,55 @@ mod tests {
             1_800_000,
         )
         .unwrap();
+        // Oracle-re-derived under the adverse CEIL law at the club-R1
+        // reconcile (DEC-FILL-WORST-CASE-ONLY-001; flat bars ≡ the open
+        // quotes of the Python fixture).
         assert_eq!(s.buy_fill_paisa, 130_005);
         assert_eq!(s.sell_fill_paisa, 130_995);
         assert_eq!(s.buy_notional_paisa, 65_002_500);
         assert_eq!(s.sell_notional_paisa, 65_497_500);
         assert_eq!(s.gross_pnl_paisa, 495_000);
         assert_eq!(s.brokerage_paisa, 4_000);
-        assert_eq!(s.stt_paisa, 13_100); // 13_099 raw → rupee 13_100
-        assert_eq!(s.exch_paisa, 2_258); // 1_125 + 1_133 per leg
-        assert_eq!(s.sebi_paisa, 130);
-        assert_eq!(s.ipft_paisa, 130);
+        assert_eq!(s.stt_paisa, 13_100); // 13_099 raw → CEIL rupee 13_100
+        assert_eq!(s.exch_paisa, 2_259); // 1_125 + 1_134 per leg, ceiled
+        assert_eq!(s.sebi_paisa, 132);
+        assert_eq!(s.ipft_paisa, 132);
         assert_eq!(s.stamp_paisa, 1_300);
-        assert_eq!(s.gst_paisa, 1_200); // 18% × 6_518 = 1_173 → 1_200
-        assert_eq!(s.total_charges_paisa, 22_118);
-        assert_eq!(s.net_pnl_paisa, 472_882);
+        assert_eq!(s.gst_paisa, 1_200); // 18% × 6_523 = 1_174 raw → 1_200
+        assert_eq!(s.total_charges_paisa, 22_123);
+        assert_eq!(s.net_pnl_paisa, 472_877);
     }
 
     #[test]
     fn zerodha_flat_arm_golden() {
-        // The commit-1 Python regression twin: RELIANCE zerodha lot 1,
-        // 10_000 → 11_000 — brokerage stays flat 4_000 (the Groww arm would
-        // read 3 + 3 = 6), GST 700, net −3_710.
+        // The commit-1 Python regression twin (oracle-re-derived under the
+        // adverse CEIL law): RELIANCE zerodha lot 1, 10_000 → 11_000 —
+        // brokerage stays flat 4_000 (the Groww arm would read 3 + 3 = 6);
+        // sub-paisa ETC/SEBI/IPFT legs now CEIL to 1 each (2 per charge);
+        // the statutory STT raw 2 → CEIL rupee 100; GST 800; net −3_916.
         let s = futures_charge_stack(
-            10_000, 11_000, true, 1, 1, false, 2_000, None, 2_000, 173, 10, 10, 200, 1_800_000,
+            10_000, 10_000, 11_000, 11_000, true, 1, 1, false, 2_000, None, 2_000, 173, 10, 10,
+            200, 1_800_000,
         )
         .unwrap();
         assert_eq!(s.brokerage_paisa, 4_000);
-        assert_eq!(s.stt_paisa, 0);
-        assert_eq!(s.exch_paisa, 0);
-        assert_eq!(s.gst_paisa, 700);
-        assert_eq!(s.total_charges_paisa, 4_700);
+        assert_eq!(s.stt_paisa, 100);
+        assert_eq!(s.exch_paisa, 2);
+        assert_eq!(s.sebi_paisa, 2);
+        assert_eq!(s.ipft_paisa, 2);
+        assert_eq!(s.stamp_paisa, 0);
+        assert_eq!(s.gst_paisa, 800);
+        assert_eq!(s.total_charges_paisa, 4_906);
         assert_eq!(s.gross_pnl_paisa, 990);
-        assert_eq!(s.net_pnl_paisa, -3_710);
+        assert_eq!(s.net_pnl_paisa, -3_916);
     }
 
     #[test]
     fn overflow_errs_not_panics() {
         assert!(
             futures_charge_stack(
+                i64::MAX / 2,
+                i64::MAX / 2,
                 i64::MAX / 2,
                 i64::MAX / 2,
                 true,
@@ -337,7 +361,7 @@ mod tests {
                 n_lots in 1i64..10_000,
             ) {
                 let s = futures_charge_stack(
-                    entry, exit, is_long, lot, n_lots, true, 0, None,
+                    entry, entry, exit, exit, is_long, lot, n_lots, true, 0, None,
                     0, 0, 0, 0, 0, 0,
                 ).unwrap();
                 prop_assert_eq!(s.total_charges_paisa, 0);
@@ -365,7 +389,7 @@ mod tests {
                 stamp in 0i64..2_000_000,
             ) {
                 let s = futures_charge_stack(
-                    entry, exit, is_long, lot, n_lots, false, 2_000, turnover,
+                    entry, entry, exit, exit, is_long, lot, n_lots, false, 2_000, turnover,
                     stt, etc, 10, 50, stamp, 1_800_000,
                 ).unwrap();
                 prop_assert_eq!(s.net_pnl_paisa, s.gross_pnl_paisa - s.total_charges_paisa);

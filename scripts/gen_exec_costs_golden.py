@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the cross-language golden answer-key for the exec integer cores.
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1724), the ``vocab_golden_vectors``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1960), the ``vocab_golden_vectors``
 discipline: freeze the *current* Python charge-stack / fill / money /
 materialize outputs over a diverse, deterministic case set into ONE
 language-neutral JSON fixture (``tests/golden/fixtures/
@@ -13,25 +13,34 @@ exec_costs_golden_vectors.json``). The fixture is the **oracle**:
 * ``rust/fno-math/tests/exec_golden.rs`` asserts the native crate
   reproduces the same values bit-for-bit with no Python in the loop.
 
+Schema v2 (the DEC-FILL-WORST-CASE-ONLY-001 reconcile — MIGRATION.md #1825
+landed on main while the exec slice was in flight; main's law WINS
+structurally, so the fixture is re-expressed on it): fills anchor on the
+fill bars' FOUR adverse extremes (entry high/low + exit high/low — the
+retired OPEN anchors are gone), levy rounding is the permanent ADVERSE
+CEILING (`_round_levy_paisa` / `_round_levy_rupee`), and the stale gate is
+UNCONDITIONAL (the `reject_stale` opt-in column is deleted).
+
 Sections + laws covered:
 
-* ``money`` — the coordinator's mandatory boundary vectors (the #1510
-  bx-format IEEE-divergence lesson): the ±0.005-class half-up ties BOTH
-  signs at BOTH scales, negatives, zero, and the int64 extremes (i64::MIN /
-  i64::MAX and the ×10^7-scaled i128 edges). Values serialised as STRINGS —
-  a JSON double cannot carry > 2^53 exactly (the vocab mask-hex precedent).
-* ``fills`` — the 7-point boundary-open grid {5, 6, 7, 10, 25, 26, big} ×
-  both sides × both fill laws (options ``_apply_slippage`` / futures
-  ``apply_futures_fill``), incl. the 1-tick floor degeneracies.
+* ``money`` — the CEIL boundary vectors: exact-multiple fixpoints BOTH
+  signs at BOTH scales, one-past boundaries, zero, and the int64 extremes
+  on the representable side (i64::MAX itself CEILs out of range — the
+  kernel refuses; the largest in-envelope multiple is pinned instead).
+  Values serialised as STRINGS — a JSON double cannot carry > 2^53 exactly
+  (the vocab mask-hex precedent).
+* ``fills`` — a bar-pair grid over the boundary anchors (tick-floor
+  degeneracies, flat bars, wide bars, big paisa) × both sides × both fill
+  laws (options ``_apply_slippage`` / futures ``apply_futures_fill``).
 * ``option_stacks`` / ``futures_stacks`` — both charge stacks across every
   REGIME WINDOW BOUNDARY date on the VALID side (rates resolved from the
   REAL Python accessors and recorded as arguments — dates never cross the
   FFI; refusal windows themselves stay Python raises, out of scope here),
-  plus tie-provoking notionals (searched deterministically so the ETC
-  half-up tie genuinely fires), the Groww min-law both arms, the Zerodha
-  flat arm, the cost-free arm, and seeded random wide-domain cases.
+  plus the Groww min-law both arms, the Zerodha flat arm, the cost-free
+  arm, and seeded random wide-domain cases.
 * ``options_materialize`` / ``futures_materialize`` — verdict edges
-  (stale × opt-in/out, tick floor `<=`/`<` boundaries) + MAE/MFE paths.
+  (unconditional stale, tick floor `<=`/`<` OPEN boundaries, the
+  stale-precedes-tick order pin) + MAE/MFE paths off the worst-case fills.
 
 Regeneration is REFUSED unless ``BRUTEX_REGEN_EXEC_GOLDEN=1`` (a frozen
 oracle is a deliberate, ledger-worthy artifact — the preopen-golden
@@ -52,8 +61,8 @@ from brutex.costs import constants as const
 from brutex.costs.calculator import (
     _apply_slippage,  # the generator IS the oracle capture
     _charge_stack_py,
-    _round_to_paisa,
-    _round_to_rupee,
+    _round_levy_paisa,
+    _round_levy_rupee,
 )
 from brutex.costs.futures_costs import (
     GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100,
@@ -70,6 +79,9 @@ _FIXTURE_PATH = _FIXTURE / "exec_costs_golden_vectors.json"
 _SEED = 20260711
 _I64_MAX = 2**63 - 1
 _I64_MIN = -(2**63)
+#: The largest multiple of 100 that fits i64 — the in-envelope CEIL ceiling
+#: (i64::MAX itself would CEIL to +100 past it; the kernel refuses that).
+_I64_MAX_RUPEE_MULTIPLE = (_I64_MAX // 100) * 100
 
 #: Rate-set basis dates — every VERIFIED regime boundary on its VALID side
 #: (refusal-adjacent where the adjacent window refuses). The dates are
@@ -94,7 +106,19 @@ _SYNTH_FUT_ETC = 173
 _SYNTH_FUT_IPFT = 10
 _SYNTH_FUT_STAMP = 200
 
-_FILL_GRID = (5, 6, 7, 10, 25, 26, 9_995, 12_005, 2_200_000)
+#: Fill-bar grid — (high, low) pairs: tick-floor degeneracies, flat bars,
+#: narrow/wide ranges, and big-paisa index-scale bars.
+_BAR_GRID: tuple[tuple[int, int], ...] = (
+    (5, 5),  # flat at the tick floor
+    (6, 5),
+    (7, 6),
+    (10, 7),
+    (25, 10),
+    (26, 25),
+    (9_995, 9_990),
+    (12_005, 11_900),
+    (2_200_000, 2_190_000),
+)
 
 
 def _money_cases() -> list[dict[str, Any]]:
@@ -103,15 +127,20 @@ def _money_cases() -> list[dict[str, Any]]:
         0,
         1,
         4_999_999,
-        5_000_000,  # the exact +0.5-paisa tie (the ±0.005 rupee class)
+        5_000_000,  # the old half-up tie — CEILs to 1 like every fraction
         5_000_001,
+        9_999_999,
+        10_000_000,  # exact multiple — fixpoint
+        10_000_001,  # one past → CEILs up
+        -1,  # negative fraction → CEIL toward +∞ = 0
         -4_999_999,
-        -5_000_000,  # the −0.5-paisa tie
+        -5_000_000,
         -5_000_001,
+        -9_999_999,
+        -10_000_000,  # exact negative multiple — fixpoint
+        -10_000_001,
         15_000_000,
         -15_000_000,
-        25_000_000,
-        -25_000_000,
         123_456_789_012_345,
         -123_456_789_012_345,
         _I64_MAX,
@@ -125,27 +154,35 @@ def _money_cases() -> list[dict[str, Any]]:
                 "id": f"rtp-{i:03d}",
                 "op": "round_to_paisa",
                 "x": str(x),
-                "expected": str(_round_to_paisa(x)),
+                "expected": str(_round_levy_paisa(x)),
             }
         )
     rupee_inputs = [
         0,
-        1,
+        1,  # any fraction CEILs up to 100
         49,
-        50,  # the exact +₹0.50 tie (half-up → 100)
+        50,
         51,
-        -49,
-        -50,  # the −₹0.50 tie (away from zero → −100)
-        -51,
         99,
-        100,
+        100,  # exact multiple — fixpoint
+        101,
         149,
         150,
+        199,
+        200,
+        -1,  # negative fraction → CEIL toward +∞ = 0
+        -49,
+        -50,
+        -51,
+        -99,
+        -100,  # exact negative multiple — fixpoint
+        -101,
         -150,
         12_345,
         -12_345,
-        _I64_MAX,
-        _I64_MIN,
+        _I64_MAX_RUPEE_MULTIPLE,  # in-envelope ceiling (exact multiple)
+        _I64_MAX_RUPEE_MULTIPLE - 99,  # CEILs up to the ceiling exactly
+        _I64_MIN,  # CEILs toward +∞ — in range
     ]
     for i, p in enumerate(rupee_inputs):
         cases.append(
@@ -153,7 +190,7 @@ def _money_cases() -> list[dict[str, Any]]:
                 "id": f"rtr-{i:03d}",
                 "op": "round_to_rupee",
                 "x": str(p),
-                "expected": str(_round_to_rupee(p)),
+                "expected": str(_round_levy_rupee(p)),
             }
         )
     return cases
@@ -162,44 +199,55 @@ def _money_cases() -> list[dict[str, Any]]:
 def _fill_cases() -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     i = 0
-    for entry in _FILL_GRID:
-        for exit_ in _FILL_GRID:
+    for entry_high, entry_low in _BAR_GRID:
+        for exit_high, exit_low in _BAR_GRID:
             for is_long in (True, False):
                 side = "long" if is_long else "short"
+                bar_args = {
+                    "entry_high_paisa": entry_high,
+                    "entry_low_paisa": entry_low,
+                    "exit_high_paisa": exit_high,
+                    "exit_low_paisa": exit_low,
+                }
                 cases.append(
                     {
                         "id": f"fill-opt-{i:03d}",
                         "op": "slippage",
-                        "entry": entry,
-                        "exit": exit_,
+                        "entry_high": entry_high,
+                        "entry_low": entry_low,
+                        "exit_high": exit_high,
+                        "exit_low": exit_low,
                         "is_long": is_long,
-                        "expected": list(_apply_slippage(entry, exit_, side)),
+                        "expected": list(_apply_slippage(side, **bar_args)),
                     }
                 )
                 cases.append(
                     {
                         "id": f"fill-fut-{i:03d}",
                         "op": "futures_fill",
-                        "entry": entry,
-                        "exit": exit_,
+                        "entry_high": entry_high,
+                        "entry_low": entry_low,
+                        "exit_high": exit_high,
+                        "exit_low": exit_low,
                         "is_long": is_long,
-                        "expected": list(apply_futures_fill(entry, exit_, side=side)),
+                        "expected": list(apply_futures_fill(side=side, **bar_args)),
                     }
                 )
                 i += 1
     return cases
 
 
-def _find_tie_notional(rate: int, per_share_hint: int, n_shares: int) -> int:
-    """Deterministically search for a per-share paisa near *per_share_hint*
-    whose ``notional × rate`` lands EXACTLY on the +0.5-paisa half-up tie
-    (``≡ 5_000_000 (mod 10_000_000)``) — so the golden genuinely exercises
-    the tie arm of ``_round_to_paisa``. Falls back to the hint (no tie
-    representable for this rate/lot combination)."""
-    for per_share in range(per_share_hint, per_share_hint + 200_000):
-        if (per_share * n_shares * rate) % 10_000_000 == 5_000_000:
-            return per_share
-    return per_share_hint
+def _bar(
+    anchor: int, rng: random.Random | None = None, spread: int | None = None
+) -> tuple[int, int]:
+    """A (high, low) bar around *anchor*: deterministic ``spread`` when given,
+    else a seeded random spread; low floored at 1."""
+    if spread is None:
+        assert rng is not None
+        spread = rng.randint(0, max(1, anchor // 20))
+    high = anchor + spread
+    low = max(1, anchor - spread)
+    return high, low
 
 
 def _option_rate_sets() -> list[dict[str, Any]]:
@@ -238,7 +286,13 @@ def _option_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
     i = 0
 
     def add(
-        entry: int, exit_: int, *, is_long: bool, lot: int, n_lots: int, rates: dict[str, Any]
+        entry_bar: tuple[int, int],
+        exit_bar: tuple[int, int],
+        *,
+        is_long: bool,
+        lot: int,
+        n_lots: int,
+        rates: dict[str, Any],
     ) -> None:
         nonlocal i
         args = {
@@ -253,12 +307,14 @@ def _option_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
             "stamp_rate": rates["stamp_rate"],
             "gst_rate": rates["gst_rate"],
         }
-        stack = _charge_stack_py(entry, exit_, **args)
+        stack = _charge_stack_py(entry_bar[0], entry_bar[1], exit_bar[0], exit_bar[1], **args)
         cases.append(
             {
                 "id": f"ostack-{i:03d}",
-                "entry": entry,
-                "exit": exit_,
+                "entry_high": entry_bar[0],
+                "entry_low": entry_bar[1],
+                "exit_high": exit_bar[0],
+                "exit_low": exit_bar[1],
                 **args,
                 "rate_basis": {k: rates[k] for k in ("rate_basis_date", "venue", "note")},
                 "expected": list(stack),
@@ -270,20 +326,23 @@ def _option_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
     # Every boundary rate set × the canonical §12.1-ish trade, both sides.
     for rates in rate_sets:
         for is_long in (True, False):
-            add(9_995, 12_005, is_long=is_long, lot=65, n_lots=1, rates=rates)
+            add((10_000, 9_990), (12_010, 12_000), is_long=is_long, lot=65, n_lots=1, rates=rates)
     base = rate_sets[2]  # 2024-10-01 NSE — the fully-verified set
-    # Boundary opens through the full stack.
-    for entry, exit_ in ((5, 5), (7, 6), (25, 26), (26, 25), (12_000, 15_000)):
-        add(entry, exit_, is_long=True, lot=75, n_lots=2, rates=base)
-    # Tie-provoking notional for the ETC half-up (searched, deterministic).
-    tie = _find_tie_notional(base["etc_rate"], 10_000, 65)
-    add(tie, tie + 2_010, is_long=True, lot=65, n_lots=1, rates=base)
+    # Boundary bars through the full stack (flat + narrow + crossing bars).
+    for entry_bar, exit_bar in (
+        ((5, 5), (5, 5)),
+        ((7, 6), (6, 5)),
+        ((25, 10), (26, 25)),
+        ((26, 25), (25, 10)),
+        ((12_050, 11_950), (15_100, 14_900)),
+    ):
+        add(entry_bar, exit_bar, is_long=True, lot=75, n_lots=2, rates=base)
     # Seeded random wide-domain cases over every rate set.
     for _ in range(60):
         rates = rng.choice(rate_sets)
         add(
-            rng.randint(26, 5_000_000),
-            rng.randint(5, 5_000_000),
+            _bar(rng.randint(26, 5_000_000), rng),
+            _bar(rng.randint(5, 5_000_000), rng),
             is_long=rng.random() < 0.5,
             lot=rng.choice([15, 20, 30, 35, 65, 75, 500, 1_000]),
             n_lots=rng.randint(1, 100),
@@ -297,8 +356,8 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
     i = 0
 
     def add(
-        entry: int,
-        exit_: int,
+        entry_bar: tuple[int, int],
+        exit_bar: tuple[int, int],
         *,
         is_long: bool,
         lot: int,
@@ -324,12 +383,16 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
             "stamp_rate": 0 if cost_free else _SYNTH_FUT_STAMP,
             "gst_rate": 0 if cost_free else const.GST_TOTAL_BPS_X100,
         }
-        stack = _futures_charge_stack_py(entry, exit_, **args)
+        stack = _futures_charge_stack_py(
+            entry_bar[0], entry_bar[1], exit_bar[0], exit_bar[1], **args
+        )
         cases.append(
             {
                 "id": f"fstack-{i:03d}",
-                "entry": entry,
-                "exit": exit_,
+                "entry_high": entry_bar[0],
+                "entry_low": entry_bar[1],
+                "exit_high": exit_bar[0],
+                "exit_low": exit_bar[1],
                 **args,
                 "rate_basis": basis,
                 "expected": list(stack),
@@ -339,12 +402,16 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
 
     groww_flat = const.brokerage_paisa("groww")
     turnover = GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100
-    # The cost-free index arm (net == gross), both sides + the boundary opens.
-    for entry, exit_ in ((2_200_000, 2_210_000), (5, 5), (25, 26)):
+    # The cost-free index arm (net == gross), both sides + the boundary bars.
+    for entry_bar, exit_bar in (
+        ((2_201_000, 2_199_000), (2_211_000, 2_209_000)),
+        ((5, 5), (5, 5)),
+        ((26, 25), (25, 10)),
+    ):
         for is_long in (True, False):
             add(
-                entry,
-                exit_,
+                entry_bar,
+                exit_bar,
                 is_long=is_long,
                 lot=75,
                 n_lots=1,
@@ -360,10 +427,10 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
     for d in _FUTURES_STT_DATES:
         stt = stt_futures_rate_bps_x100(d)
         for is_long in (True, False):
-            # small notional: 200 × 500 × 0.03% = 30 paisa < 2 000 flat
+            # small notional: the turnover leg wins vs the 2 000 flat
             add(
-                200,
-                220,
+                (205, 195),
+                (225, 215),
                 is_long=is_long,
                 lot=500,
                 n_lots=1,
@@ -375,8 +442,8 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
             )
             # large notional: the flat ₹20 cap wins
             add(
-                2_200_000,
-                2_210_000,
+                (2_201_000, 2_199_000),
+                (2_211_000, 2_209_000),
                 is_long=is_long,
                 lot=500,
                 n_lots=1,
@@ -388,8 +455,8 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
             )
             # zerodha: flat only (turnover None)
             add(
-                2_200_000,
-                2_210_000,
+                (2_201_000, 2_199_000),
+                (2_211_000, 2_209_000),
                 is_long=is_long,
                 lot=500,
                 n_lots=1,
@@ -405,8 +472,8 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
         cost_free = rng.random() < 0.3
         zerodha = rng.random() < 0.3
         add(
-            rng.randint(5, 5_000_000),
-            rng.randint(5, 5_000_000),
+            _bar(rng.randint(5, 5_000_000), rng),
+            _bar(rng.randint(5, 5_000_000), rng),
             is_long=rng.random() < 0.5,
             lot=rng.choice([15, 30, 75, 500, 1_000]),
             n_lots=rng.randint(1, 50),
@@ -422,7 +489,8 @@ def _futures_stack_cases(rng: random.Random) -> list[dict[str, Any]]:
 def _options_materialize_cases() -> list[dict[str, Any]]:
     """Verdict edges through the SAME Python laws the executor tail runs —
     the expected values derive from the pinned gate order (stale → tick →
-    stack), never re-minted."""
+    stack), never re-minted. The tick floor gates on the OPENS; the fills
+    anchor on the extremes."""
     base = _option_rate_sets()[2]
     args = {
         "is_long": True,
@@ -436,35 +504,40 @@ def _options_materialize_cases() -> list[dict[str, Any]]:
         "stamp_rate": base["stamp_rate"],
         "gst_rate": base["gst_rate"],
     }
-    grid: list[tuple[int, int, int, int, bool]] = [
-        # columns: entry · exit · entry_volume · exit_volume · reject_stale
-        (12_000, 15_000, 0, 10, True),  # stale entry
-        (12_000, 15_000, 10, 0, True),  # stale exit
-        (12_000, 15_000, 0, 0, False),  # opt-out → prices
-        (25, 15_000, 0, 10, False),  # opt-out + tick floor: tick wins
-        (25, 15_000, 10, 10, True),  # tick floor `<=` boundary (25 rejects)
-        (26, 15_000, 10, 10, True),  # 26 prices (one past the floor)
-        (26, 4, 10, 10, True),  # sub-tick exit `<` boundary (4 rejects)
-        (26, 5, 10, 10, True),  # exit exactly one tick prices
-        (25, 15_000, 0, 10, True),  # stale precedes tick (order pin)
-        (9_995, 12_005, 10, 10, True),  # plain trade
+    grid: list[tuple[int, int, tuple[int, int], tuple[int, int], int, int]] = [
+        # columns: entry_open · exit_open · entry_bar · exit_bar · ev · xv
+        (12_000, 15_000, (12_050, 11_950), (15_100, 14_900), 0, 10),  # stale entry
+        (12_000, 15_000, (12_050, 11_950), (15_100, 14_900), 10, 0),  # stale exit
+        (12_000, 15_000, (12_050, 11_950), (15_100, 14_900), 0, 0),  # stale both
+        (25, 15_000, (26, 24), (15_100, 14_900), 0, 10),  # stale precedes tick
+        (25, 15_000, (26, 24), (15_100, 14_900), 10, 10),  # tick `<=` boundary (25 rejects)
+        (26, 15_000, (27, 25), (15_100, 14_900), 10, 10),  # 26 prices (one past the floor)
+        (26, 4, (27, 25), (5, 4), 10, 10),  # sub-tick exit `<` boundary (4 rejects)
+        (26, 5, (27, 25), (6, 5), 10, 10),  # exit exactly one tick prices
+        (9_995, 12_005, (10_000, 9_990), (12_010, 12_000), 10, 10),  # plain trade
     ]
     cases: list[dict[str, Any]] = []
-    for i, (entry, exit_, ev, xv, reject_stale) in enumerate(grid):
-        if reject_stale and (ev == 0 or xv == 0):
+    for i, (entry_open, exit_open, entry_bar, exit_bar, ev, xv) in enumerate(grid):
+        if ev == 0 or xv == 0:
             kind, expected = "stale_bar", None
-        elif entry <= 25 or exit_ < 5:
+        elif entry_open <= 25 or exit_open < 5:
             kind, expected = "tick_floor", None
         else:
-            kind, expected = "trade", list(_charge_stack_py(entry, exit_, **args))
+            kind = "trade"
+            expected = list(
+                _charge_stack_py(entry_bar[0], entry_bar[1], exit_bar[0], exit_bar[1], **args)
+            )
         cases.append(
             {
                 "id": f"omat-{i:03d}",
-                "entry": entry,
-                "exit": exit_,
+                "entry_open": entry_open,
+                "exit_open": exit_open,
+                "entry_high": entry_bar[0],
+                "entry_low": entry_bar[1],
+                "exit_high": exit_bar[0],
+                "exit_low": exit_bar[1],
                 "entry_volume": ev,
                 "exit_volume": xv,
-                "reject_stale": reject_stale,
                 **args,
                 "expected_kind": kind,
                 "expected": expected,
@@ -488,41 +561,42 @@ def _futures_materialize_cases() -> list[dict[str, Any]]:
         "stamp_rate": 0,
         "gst_rate": 0,
     }
-    grid: list[tuple[int, int, int, int, bool, bool, list[int], list[int]]] = [
-        # columns: entry · exit · ev · xv · reject_stale · is_long · highs · lows
-        (2_200_000, 2_210_000, 0, 10, True, True, [2_201_000], [2_199_000]),  # stale
-        (2_200_000, 2_210_000, 10, 0, True, True, [2_201_000], [2_199_000]),  # stale
-        (2_200_000, 2_210_000, 0, 0, False, True, [2_201_000], [2_199_000]),  # opt-out
-        (2_200_000, 2_210_000, 10, 10, True, True, [], []),  # empty path → 0/0
+    entry_bar = (2_201_000, 2_199_000)
+    exit_bar = (2_211_000, 2_209_000)
+    loser_exit = (2_191_000, 2_189_000)
+    grid: list[tuple[tuple[int, int], tuple[int, int], int, int, bool, list[int], list[int]]] = [
+        # columns: entry_bar · exit_bar · ev · xv · is_long · highs · lows
+        (entry_bar, exit_bar, 0, 10, True, [2_201_000], [2_199_000]),  # stale entry
+        (entry_bar, exit_bar, 10, 0, True, [2_201_000], [2_199_000]),  # stale exit
+        (entry_bar, exit_bar, 0, 0, True, [2_201_000], [2_199_000]),  # stale both
+        (entry_bar, exit_bar, 10, 10, True, [], []),  # empty path → 0/0
         (
-            2_200_000,
-            2_210_000,
+            entry_bar,
+            exit_bar,
             10,
             10,
-            True,
             True,
             [2_201_000, 2_208_000, 2_203_000],
             [2_199_000, 2_204_000, 2_195_000],
         ),
         (
-            2_200_000,
-            2_210_000,
+            entry_bar,
+            exit_bar,
             10,
             10,
-            True,
             False,  # short — basis = sell_fill, favorable = down
             [2_201_000, 2_208_000, 2_203_000],
             [2_199_000, 2_204_000, 2_195_000],
         ),
-        (2_200_000, 2_190_000, 10, 10, True, True, [2_230_000], [2_170_000]),  # loser
+        (entry_bar, loser_exit, 10, 10, True, [2_230_000], [2_170_000]),  # loser
     ]
     cases: list[dict[str, Any]] = []
-    for i, (entry, exit_, ev, xv, reject_stale, is_long, highs, lows) in enumerate(grid):
+    for i, (e_bar, x_bar, ev, xv, is_long, highs, lows) in enumerate(grid):
         case_args = {**args, "is_long": is_long}
-        if reject_stale and (ev == 0 or xv == 0):
+        if ev == 0 or xv == 0:
             kind, expected = "stale_bar", None
         else:
-            stack = _futures_charge_stack_py(entry, exit_, **case_args)
+            stack = _futures_charge_stack_py(e_bar[0], e_bar[1], x_bar[0], x_bar[1], **case_args)
             basis = stack.buy_fill_paisa if is_long else stack.sell_fill_paisa
             mae_u = 0
             mfe_u = 0
@@ -536,13 +610,14 @@ def _futures_materialize_cases() -> list[dict[str, Any]]:
         cases.append(
             {
                 "id": f"fmat-{i:03d}",
-                "entry": entry,
-                "exit": exit_,
+                "entry_high": e_bar[0],
+                "entry_low": e_bar[1],
+                "exit_high": x_bar[0],
+                "exit_low": x_bar[1],
                 "entry_volume": ev,
                 "exit_volume": xv,
                 "path_highs": highs,
                 "path_lows": lows,
-                "reject_stale": reject_stale,
                 **case_args,
                 "expected_kind": kind,
                 "expected": expected,
@@ -556,13 +631,16 @@ def build_payload() -> dict[str, Any]:
     payload: dict[str, Any] = {
         "_comment": (
             "FROZEN cross-language oracle for the exec integer cores "
-            "(DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724). Generated ONCE from "
-            "the Python bodies by scripts/gen_exec_costs_golden.py; regeneration "
-            f"refused without {REGEN_ENV}=1. Money values are STRINGS (JSON "
-            "doubles lose >2^53). Charge-stack wires are the pinned 17-slot "
-            "ChargeStack order; futures materialize wires append [mae, mfe]."
+            "(DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960). Generated from "
+            "the Python bodies by scripts/gen_exec_costs_golden.py; "
+            f"regeneration refused without {REGEN_ENV}=1. Schema v2 = the "
+            "DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: bar-extreme "
+            "worst-case fills, ADVERSE-CEILING levy rounding, unconditional "
+            "stale gate. Money values are STRINGS (JSON doubles lose >2^53). "
+            "Charge-stack wires are the pinned 17-slot ChargeStack order; "
+            "futures materialize wires append [mae, mfe]."
         ),
-        "schema_version": 1,
+        "schema_version": 2,
         "seed": _SEED,
         "money": _money_cases(),
         "fills": _fill_cases(),

@@ -1,4 +1,4 @@
-"""Flag-gated Rust execution-cores seam (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724).
+"""Flag-gated Rust execution-cores seam (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960).
 
 Slice 7 / P8 of the Rust conversion program: the Python side of the
 ``rust/fno-math/src/exec/`` integer cores — flag resolution, the i64
@@ -359,17 +359,25 @@ def _stack_from_wire(wire: Any) -> ChargeStack:
 
 
 def fill_slippage(
-    entry_open_paisa: int, exit_open_paisa: int, *, is_long: bool
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    *,
+    is_long: bool,
 ) -> tuple[int, int, int] | None:
-    """Kernel-served ``_apply_slippage`` twin, or ``None`` → Python arm."""
+    """Kernel-served ``_apply_slippage`` twin (worst-case bar-extreme
+    anchors, DEC-FILL-WORST-CASE-ONLY-001), or ``None`` → Python arm."""
     rust = _kernel_or_none()
     if rust is None:
         return None
-    if not _fits_i64(entry_open_paisa, exit_open_paisa):
+    if not _fits_i64(entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa):
         _envelope_fallback("fill_slippage")
         return None
     try:
-        out = _kernel_fn(rust, "exec_apply_slippage")(entry_open_paisa, exit_open_paisa, is_long)
+        out = _kernel_fn(rust, "exec_apply_slippage")(
+            entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa, is_long
+        )
     except MemoryError:
         raise
     except (ValueError, TypeError, OverflowError) as exc:
@@ -383,18 +391,24 @@ def fill_slippage(
 
 
 def fill_futures(
-    entry_open_paisa: int, exit_open_paisa: int, *, is_long: bool
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    *,
+    is_long: bool,
 ) -> tuple[int, int, int] | None:
-    """Kernel-served ``apply_futures_fill`` twin, or ``None`` → Python arm."""
+    """Kernel-served ``apply_futures_fill`` twin (worst-case bar-extreme
+    anchors, DEC-FILL-WORST-CASE-ONLY-001), or ``None`` → Python arm."""
     rust = _kernel_or_none()
     if rust is None:
         return None
-    if not _fits_i64(entry_open_paisa, exit_open_paisa):
+    if not _fits_i64(entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa):
         _envelope_fallback("fill_futures")
         return None
     try:
         out = _kernel_fn(rust, "exec_apply_futures_fill")(
-            entry_open_paisa, exit_open_paisa, is_long
+            entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa, is_long
         )
     except MemoryError:
         raise
@@ -409,8 +423,10 @@ def fill_futures(
 
 
 def charge_stack_option(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     *,
     is_long: bool,
     lot_size: int,
@@ -432,8 +448,10 @@ def charge_stack_option(
     if rust is None:
         return None
     if not _fits_i64(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         lot_size,
         n_lots,
         brokerage_round_trip_paisa,
@@ -448,8 +466,10 @@ def charge_stack_option(
         return None
     try:
         wire = _kernel_fn(rust, "exec_option_charge_stack")(
-            entry_open_paisa,
-            exit_open_paisa,
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
             is_long,
             lot_size,
             n_lots,
@@ -474,8 +494,10 @@ def charge_stack_option(
 
 
 def charge_stack_futures(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     *,
     is_long: bool,
     lot_size: int,
@@ -499,8 +521,10 @@ def charge_stack_futures(
     if rust is None:
         return None
     if not _fits_i64(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         lot_size,
         n_lots,
         brokerage_flat_paisa,
@@ -519,8 +543,10 @@ def charge_stack_futures(
         return None
     try:
         wire = _kernel_fn(rust, "exec_futures_charge_stack")(
-            entry_open_paisa,
-            exit_open_paisa,
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
             is_long,
             lot_size,
             n_lots,
@@ -549,11 +575,14 @@ def charge_stack_futures(
 def materialize_option_tail(
     entry_open_paisa: int,
     exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     *,
     entry_volume: int,
     exit_volume: int,
     is_long: bool,
-    reject_stale: bool,
     lot_size: int,
     n_lots: int,
     brokerage_round_trip_paisa: int,
@@ -577,6 +606,10 @@ def materialize_option_tail(
     if not _fits_i64(
         entry_open_paisa,
         exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         entry_volume,
         exit_volume,
         lot_size,
@@ -595,10 +628,13 @@ def materialize_option_tail(
         kind, wire = _kernel_fn(rust, "exec_options_materialize")(
             entry_open_paisa,
             exit_open_paisa,
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
             entry_volume,
             exit_volume,
             is_long,
-            reject_stale,
             lot_size,
             n_lots,
             brokerage_round_trip_paisa,
@@ -630,15 +666,16 @@ def materialize_option_tail(
 
 
 def materialize_futures_tail(
-    entry_open_paisa: int,
-    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
     *,
     entry_volume: int,
     exit_volume: int,
     path_highs_paisa: list[int],
     path_lows_paisa: list[int],
     is_long: bool,
-    reject_stale: bool,
     lot_size: int,
     n_lots: int,
     cost_free: bool,
@@ -660,8 +697,10 @@ def materialize_futures_tail(
     if rust is None:
         return None
     if not _fits_i64(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         entry_volume,
         exit_volume,
         lot_size,
@@ -682,14 +721,15 @@ def materialize_futures_tail(
         return None
     try:
         kind, wire = _kernel_fn(rust, "exec_futures_materialize")(
-            entry_open_paisa,
-            exit_open_paisa,
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
             entry_volume,
             exit_volume,
             path_highs_paisa,
             path_lows_paisa,
             is_long,
-            reject_stale,
             lot_size,
             n_lots,
             cost_free,

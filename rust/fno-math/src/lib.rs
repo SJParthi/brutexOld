@@ -56,6 +56,13 @@ pub mod compat;
 /// solvers). Currently empty — populated when MG-043 needs it.
 pub mod math;
 
+/// DEC-ENUM-KERNEL-U128-001 (hoist prerequisite): the width-generic
+/// `MaskWord` trait — HOISTED verbatim from `trade_sim` (where
+/// DEC-TRADE-SIM-U128-KERNEL-001 introduced it module-internal) so the
+/// Stage-2 enum/count kernels and the trade-sim walk genericize over the
+/// SAME shared core (CLAUDE.md §11 COMMON). Crate-internal (`pub(crate)`).
+pub(crate) mod mask_word;
+
 /// DEC-P0-050 (PR-K): PyO3 bridge to Python. Future Stage 1B
 /// AND-mask kernel, combo_hash blake3 migration, and other
 /// performance-critical Rust functions get registered here.
@@ -92,14 +99,20 @@ pub mod ranking;
 /// `brutex/engine/rust_enum.py`).
 pub mod enum_kernel;
 
-// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
-/// Options/futures execution integer cores: money-law primitives, R15 fill
-/// laws, both charge stacks, and the post-I/O materialize verdict tails —
-/// exact-integer twins of the Python oracles in `brutex.costs` / the two
-/// executors; rates cross the FFI as ARGUMENTS (Python stays the sole
-/// rate/refusal authority).
+// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
+/// Options/futures execution integer cores: money-law primitives, the
+/// worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001), both charge stacks,
+/// and the post-I/O materialize verdict tails — exact-integer twins of the
+/// Python oracles in `brutex.costs` / the two executors; rates cross the
+/// FFI as ARGUMENTS (Python stays the sole rate/refusal authority).
 pub mod exec;
 // --- end exec (slice 7 / P8) ---
+
+/// DEC-METRICS-RUST-STATS-001 (slice 6): Stage-3/4 statistics kernels — the
+/// sequential/integer heavy loops of the Stage-3/4 statistical filters
+/// (CPCV fold pass-count in PR-1; later PRs append inside the same module).
+/// Python keeps every numpy pairwise reduction, libm call and raise.
+pub mod stats;
 
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -167,6 +180,14 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s_nthreads, m)?)?;
     m.add_class::<python::ResidentBars>()?;
+    // ── DEC-ENUM-KERNEL-U128-001: the u128 enum/count kernel twins ──
+    // (fenced additive registration block — keep-both union seam with
+    // sibling fno-math lanes; the twins of count_supermask_u64s /
+    // count_supermasks_u64s / ResidentBars over native Vec<u128>.)
+    m.add_function(wrap_pyfunction!(python::count_supermask_u128s, m)?)?;
+    m.add_function(wrap_pyfunction!(python::count_supermasks_u128s, m)?)?;
+    m.add_class::<python::ResidentBarsU128>()?;
+    // ── end DEC-ENUM-KERNEL-U128-001 registration block ──
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
@@ -195,7 +216,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ranking::ranking_rank_order, m)?)?;
     m.add_function(wrap_pyfunction!(ranking::ranking_zscores, m)?)?;
     // ── end slice-4 ranking.rs registrations ──
-    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
     m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_paisa, m)?)?;
     m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_rupee, m)?)?;
     m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_slippage, m)?)?;
@@ -205,5 +226,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exec::ffi::exec_options_materialize, m)?)?;
     m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_materialize, m)?)?;
     // --- end exec (slice 7 / P8) ---
+    // ---- stats module (slice 6, DEC-METRICS-RUST-STATS-001): Stage-3/4
+    // statistics kernels. Additive registration only; existing registrations
+    // above are untouched. Later slice-6 PRs append inside this fence.
+    m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // ---- end stats module ----
     Ok(())
 }

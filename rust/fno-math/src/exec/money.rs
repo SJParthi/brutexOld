@@ -1,14 +1,18 @@
-//! THE Rust money law module (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724).
+//! THE Rust money law module (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960).
 //!
-//! Exact-integer twins of `brutex.costs.calculator._round_to_paisa` /
-//! `_round_to_rupee` plus the statutory floor stage and the GST round-ONCE
-//! law. Standalone — zero deps on the sibling exec modules, rlib-visible so
+//! Exact-integer twins of `brutex.costs.calculator._round_levy_paisa` /
+//! `_round_levy_rupee` (the permanent ADVERSE ceiling levy rounding,
+//! DEC-FILL-WORST-CASE-ONLY-001 — the retired PRECISE half-up arms are
+//! deleted with their mode) plus the statutory floor stage and the GST
+//! round-ONCE law. Standalone — zero deps on the sibling exec modules, rlib-visible so
 //! future slices import rather than re-mint (the Rust twin of
 //! `brutex.money`'s COMMON role).
 //!
 //! ## ⚠ Two-laws warning (see also `exec::mod`)
 //!
-//! This module is **half-AWAY-FROM-ZERO** (the money law). The indicator law
+//! This module is **ADVERSE CEILING toward +∞** (the levy law —
+//! DEC-FILL-WORST-CASE-ONLY-001: a levy is a charge, so "adverse" =
+//! larger; the backtest can only understate the net). The indicator law
 //! (`trading_core::indicators::round_half_even`, half-to-EVEN on f64) is a
 //! DIFFERENT law for a DIFFERENT domain — never substitute one for the other.
 //!
@@ -18,7 +22,7 @@
 //! `value × rate` product by 10^7 with NO rounding adjustment
 //! ([`floor_rate_scale`]) and only then round to the rupee
 //! ([`round_to_rupee`]); the non-statutory charges (ETC / SEBI / IPFT + the
-//! Groww futures brokerage turnover arm) round half-up at the paisa in ONE
+//! Groww futures brokerage turnover arm) ceil at the paisa in ONE
 //! step ([`round_to_paisa`]). Making these different FUNCTION NAMES — not
 //! different constants — keeps the one-paisa drift trap unexpressible by
 //! accident.
@@ -35,59 +39,51 @@
 /// (`brutex.costs.calculator` rate-encoding law).
 pub const RATE_SCALE: i128 = 10_000_000;
 
-/// Half of [`RATE_SCALE`] — the half-up adjustment at the paisa scale.
-pub const RATE_SCALE_HALF: i128 = 5_000_000;
-
-/// Round a `paisa × 10^7-scaled-rate` product to whole paise, half AWAY from
-/// zero — the `brutex.costs.calculator._round_to_paisa` twin
-/// (calculator.py:44-68). Non-statutory charges: ETC / SEBI / IPFT (+ the
-/// Groww futures brokerage turnover arm).
+/// ADVERSE (ceiling toward +∞) paisa rounding for a `paisa ×
+/// 10^7-scaled-rate` product — the
+/// `brutex.costs.calculator._round_levy_paisa` twin
+/// (DEC-FILL-WORST-CASE-ONLY-001: every rate-scaled levy rounds ADVERSELY;
+/// the retired PRECISE half-up arm is deleted with its mode). Non-statutory
+/// charges: ETC / SEBI / IPFT (+ the Groww futures brokerage turnover arm).
 ///
-/// Each sign branch divides a NON-NEGATIVE value, where Rust `/` (truncating)
-/// equals Python `//` (floor) — the sign branch mirrors the Python source
-/// line-for-line. Ties are pinned both signs in the unit table below.
+/// The Python law is `-((-x) // 10_000_000)` (floor division), i.e.
+/// `ceil(x / 10^7)` — mirrored here as `-((-x).div_euclid(RATE_SCALE))`
+/// (`div_euclid` = true floor semantics, so the identity holds for any
+/// sign).
 ///
 /// # Errors
 ///
-/// `Err` when the adjusted magnitude overflows i128 (unreachable for products
-/// of two i64s — |i64|² < i128::MAX/2) or the quotient overflows i64.
+/// `Err` when `-x` overflows i128 (only `i128::MIN`) or the quotient
+/// overflows i64.
 pub fn round_to_paisa(x: i128) -> Result<i64, String> {
-    let q = if x >= 0 {
-        x.checked_add(RATE_SCALE_HALF)
-            .ok_or_else(|| format!("round_to_paisa: {x} + half overflows i128"))?
-            / RATE_SCALE
-    } else {
-        let neg = x
-            .checked_neg()
-            .ok_or_else(|| format!("round_to_paisa: |{x}| overflows i128"))?;
-        -(neg
-            .checked_add(RATE_SCALE_HALF)
-            .ok_or_else(|| format!("round_to_paisa: |{x}| + half overflows i128"))?
-            / RATE_SCALE)
-    };
+    let neg = x
+        .checked_neg()
+        .ok_or_else(|| format!("round_to_paisa: |{x}| overflows i128"))?;
+    let q = -(neg.div_euclid(RATE_SCALE));
     i64::try_from(q).map_err(|_| format!("round_to_paisa: result {q} overflows i64"))
 }
 
-/// Round paise to the nearest multiple of 100 (whole rupee), half AWAY from
-/// zero — the `brutex.costs.calculator._round_to_rupee` twin
-/// (calculator.py:71-91). Statutory levies AFTER the floor stage: STT /
-/// stamp / GST.
+/// ADVERSE (ceiling) statutory rupee rounding — paise up to the NEXT
+/// multiple of 100, toward +∞ — the
+/// `brutex.costs.calculator._round_levy_rupee` twin
+/// (DEC-FILL-WORST-CASE-ONLY-001; the retired PRECISE nearest-rupee
+/// half-up arm is deleted with its mode). Statutory levies AFTER the floor
+/// stage: STT / stamp / GST.
 ///
-/// Computed in i128 internally so `p + 50` can never overflow at the i64
-/// edge. The result is total over ALL i64 inputs: the nearest multiple of 100
-/// to any i64 differs from it by at most 50, and the nearest-100 neighbours
-/// of `i64::MAX` (…807 → …800) and `i64::MIN` (…808 → …800) both round
-/// TOWARD zero, so the i128 quotient always fits back in i64 (unit-pinned at
-/// both extremes below).
-pub fn round_to_rupee(p: i64) -> i64 {
+/// The Python law is `-((-p) // 100) * 100` = `ceil(p / 100) × 100`,
+/// mirrored via `div_euclid` in i128. NO LONGER total over i64: the ceiling
+/// of `i64::MAX` (…807 → …900) overflows i64, so the near-MAX edge returns
+/// `Err` (the Python arm's bigints carry on — the seam's envelope routes
+/// such inputs to the oracle; `i64::MIN` (…808 → …800) still fits).
+///
+/// # Errors
+///
+/// `Err` when the ceiled multiple overflows i64 (only within 100 paise of
+/// `i64::MAX`).
+pub fn round_to_rupee(p: i64) -> Result<i64, String> {
     let w = i128::from(p);
-    let q = if w >= 0 {
-        ((w + 50) / 100) * 100
-    } else {
-        -(((-w + 50) / 100) * 100)
-    };
-    // Proven in-range above (extremes unit-pinned); the cast is exact.
-    q as i64
+    let q = -((-w).div_euclid(100)) * 100;
+    i64::try_from(q).map_err(|_| format!("round_to_rupee: result {q} overflows i64"))
 }
 
 /// The statutory RAW stage: `(notional × rate) // 10^7` with **NO rounding
@@ -126,63 +122,81 @@ pub fn gst_paisa(base_components_paisa: &[i64], gst_rate_bps_x100: i64) -> Resul
         base += i128::from(component);
     }
     let raw = floor_rate_scale(base, i128::from(gst_rate_bps_x100))?;
-    Ok(round_to_rupee(raw))
+    round_to_rupee(raw)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── The pinned tie tables — byte-copied from the Python oracle pins
-    //    (tests/unit/test_costs_calculator.py:1049-1084) ──────────────────
+    // ── The pinned adverse-ceiling tables — derived from the merged Python
+    //    oracle `_round_levy_paisa` / `_round_levy_rupee`
+    //    (DEC-FILL-WORST-CASE-ONLY-001; re-derived at the club-R1
+    //    merge-reconcile — every literal below reproduced by executing the
+    //    Python law) ────────────────────────────────────────────────────
 
     #[test]
-    fn round_to_paisa_tie_table_both_signs() {
-        // Positive: exactly-half rounds AWAY (up); just-under-half floors.
+    fn round_to_paisa_ceiling_table_both_signs() {
+        // Positive: ANY fractional part ceils up — 1 unit already rounds to
+        // a whole paisa; exact multiples are fixed points.
+        assert_eq!(round_to_paisa(1), Ok(1));
+        assert_eq!(round_to_paisa(4_999_999), Ok(1));
         assert_eq!(round_to_paisa(5_000_000), Ok(1));
-        assert_eq!(round_to_paisa(4_999_999), Ok(0));
+        assert_eq!(round_to_paisa(10_000_000), Ok(1));
+        assert_eq!(round_to_paisa(10_000_001), Ok(2));
         assert_eq!(round_to_paisa(15_000_000), Ok(2));
-        // Negative: exactly-half rounds AWAY (down) — never toward +∞.
-        assert_eq!(round_to_paisa(-5_000_000), Ok(-1));
+        // Negative: ceiling toward +∞ — a sub-paisa negative reads 0, an
+        // exact multiple is a fixed point.
+        assert_eq!(round_to_paisa(-1), Ok(0));
         assert_eq!(round_to_paisa(-4_999_999), Ok(0));
-        assert_eq!(round_to_paisa(-15_000_000), Ok(-2));
+        assert_eq!(round_to_paisa(-5_000_000), Ok(0));
+        assert_eq!(round_to_paisa(-9_999_999), Ok(0));
+        assert_eq!(round_to_paisa(-10_000_000), Ok(-1));
+        assert_eq!(round_to_paisa(-15_000_000), Ok(-1));
     }
 
     #[test]
-    fn round_to_rupee_tie_table_both_signs() {
-        assert_eq!(round_to_rupee(50), 100); // the exact ROUND_HALF_UP tie
-        assert_eq!(round_to_rupee(49), 0);
-        assert_eq!(round_to_rupee(150), 200);
-        assert_eq!(round_to_rupee(1_170), 1_200); // ₹11.70 → ₹12
-        assert_eq!(round_to_rupee(-50), -100);
-        assert_eq!(round_to_rupee(-49), 0);
-        assert_eq!(round_to_rupee(-150), -200);
+    fn round_to_rupee_ceiling_table_both_signs() {
+        assert_eq!(round_to_rupee(1), Ok(100)); // any fraction ceils
+        assert_eq!(round_to_rupee(49), Ok(100));
+        assert_eq!(round_to_rupee(50), Ok(100));
+        assert_eq!(round_to_rupee(100), Ok(100)); // fixed point
+        assert_eq!(round_to_rupee(101), Ok(200));
+        assert_eq!(round_to_rupee(150), Ok(200));
+        assert_eq!(round_to_rupee(1_100), Ok(1_100));
+        assert_eq!(round_to_rupee(1_101), Ok(1_200)); // ₹11.01 → ₹12
+        assert_eq!(round_to_rupee(1_170), Ok(1_200)); // ₹11.70 → ₹12
+        assert_eq!(round_to_rupee(-1), Ok(0));
+        assert_eq!(round_to_rupee(-50), Ok(0));
+        assert_eq!(round_to_rupee(-99), Ok(0));
+        assert_eq!(round_to_rupee(-100), Ok(-100));
+        assert_eq!(round_to_rupee(-101), Ok(-100));
+        assert_eq!(round_to_rupee(-151), Ok(-100));
+        assert_eq!(round_to_rupee(-200), Ok(-200));
     }
 
-    // ── Coordinator-mandated money-law boundary vectors (slice-7 parity
-    //    gate (a)): the ±0.005-class half boundary at each scale, negative,
-    //    zero, and the int64 extremes ────────────────────────────────────
+    // ── Boundary vectors: zero, the int64 extremes ──────────────────────
 
     #[test]
     fn money_law_boundary_vectors() {
         // Zero is a fixed point of every primitive.
         assert_eq!(round_to_paisa(0), Ok(0));
-        assert_eq!(round_to_rupee(0), 0);
+        assert_eq!(round_to_rupee(0), Ok(0));
         assert_eq!(floor_rate_scale(0, 3_503), Ok(0));
-        // The rupee half-boundary class either side of a whole rupee
-        // (the integer analog of the ±₹0.005 Decimal class).
-        assert_eq!(round_to_rupee(149), 100);
-        assert_eq!(round_to_rupee(151), 200);
-        assert_eq!(round_to_rupee(-149), -100);
-        assert_eq!(round_to_rupee(-151), -200);
-        // int64-max/min paisa: total, rounds toward zero at both extremes.
-        assert_eq!(round_to_rupee(i64::MAX), 9_223_372_036_854_775_800);
-        assert_eq!(round_to_rupee(i64::MIN), -9_223_372_036_854_775_800);
-        // i64::MAX-scale products through the paisa rounder stay exact.
+        // i64::MAX ceils PAST i64 (…807 → …900) — Err, never a wrap; the
+        // seam's envelope guard keeps such inputs on the Python-bigint arm.
+        assert!(round_to_rupee(i64::MAX).is_err());
+        // The last in-range ceiling below the edge still computes.
         assert_eq!(
-            round_to_paisa(i128::from(i64::MAX)),
-            Ok(922_337_203_685) // (i64::MAX + 5e6) / 1e7, floored
+            round_to_rupee(9_223_372_036_854_775_800),
+            Ok(9_223_372_036_854_775_800)
         );
+        // i64::MIN (…808) ceils toward +∞ to …800 — still in range.
+        assert_eq!(round_to_rupee(i64::MIN), Ok(-9_223_372_036_854_775_800));
+        // i64::MAX-scale products through the paisa rounder stay exact:
+        // ceil(i64::MAX / 1e7) = 922_337_203_686 (fractional → up).
+        assert_eq!(round_to_paisa(i128::from(i64::MAX)), Ok(922_337_203_686));
+        // ceil((i64::MIN + 1) / 1e7) toward +∞ = −922_337_203_685.
         assert_eq!(
             round_to_paisa(i128::from(i64::MIN) + 1),
             Ok(-922_337_203_685)
@@ -191,19 +205,22 @@ mod tests {
 
     #[test]
     fn round_to_paisa_overflow_edges_err_not_panic() {
-        assert!(round_to_paisa(i128::MAX).is_err()); // + half overflows
         assert!(round_to_paisa(i128::MIN).is_err()); // |MIN| overflows
         // A quotient past i64 errs cleanly.
         assert!(round_to_paisa(i128::from(i64::MAX) * RATE_SCALE * 2).is_err());
         // Just inside the envelope still computes.
         assert!(round_to_paisa(i128::from(i64::MAX)).is_ok());
+        // i128::MAX itself has a representable ceiling? Its quotient is far
+        // past i64 — Err, never a panic.
+        assert!(round_to_paisa(i128::MAX).is_err());
     }
 
-    // ── floor_rate_scale: the floor-vs-half-up trap made visible ────────
+    // ── floor_rate_scale: the floor-vs-ceiling trap made visible ────────
 
     #[test]
-    fn floor_rate_scale_is_floor_never_half_up() {
-        // 9_999_999 / 1e7 would half-up to 1; the statutory raw stage FLOORS.
+    fn floor_rate_scale_is_floor_never_ceiling() {
+        // 9_999_999 / 1e7 would CEIL to 1; the statutory raw stage FLOORS —
+        // the adverse rounding happens ONLY at the rupee stage after it.
         assert_eq!(floor_rate_scale(9_999_999, 1), Ok(0));
         assert_eq!(floor_rate_scale(1, 9_999_999), Ok(0));
         // The COSTS_VERIFIED Ex.1 STT raw: 779_675 × 15_000 // 1e7 = 1_169.
@@ -228,16 +245,16 @@ mod tests {
         assert!(floor_rate_scale(i128::from(i64::MAX), RATE_SCALE * 2).is_err()); // i64 exit
     }
 
-    // ── GST round-ONCE law ───────────────────────────────────────────────
+    // ── GST round-ONCE law (adverse rupee ceiling) ──────────────────────
 
     #[test]
     fn gst_round_once_law_ex1() {
-        // COSTS_VERIFIED §5 Ex.1: base 4_000+501+2+7 = 4_510;
-        // 4_510 × 1_800_000 // 1e7 = 811 → rupee → 800.
-        assert_eq!(gst_paisa(&[4_000, 501, 2, 7], 1_800_000), Ok(800));
-        // Ex.3's regenerated round-ONCE value: base 4_000+116+0+2 = 4_118;
-        // raw 741 → 700 (NOT the doc's old ₹4+₹4 split).
-        assert_eq!(gst_paisa(&[4_000, 116, 0, 2], 1_800_000), Ok(700));
+        // The merged-oracle Fixture-A base: 4_000 + 238 + 2 + 4 = 4_244;
+        // 4_244 × 1_800_000 // 1e7 = 763 → CEIL rupee → 800 (oracle-derived
+        // at the club-R1 reconcile — `_charge_stack_py` Fixture A flat).
+        assert_eq!(gst_paisa(&[4_000, 238, 2, 4], 1_800_000), Ok(800));
+        // Fixture-B flat base: 4_000 + 83 + 2 + 0 = 4_085; raw 735 → 800.
+        assert_eq!(gst_paisa(&[4_000, 83, 2, 0], 1_800_000), Ok(800));
     }
 
     #[test]
@@ -245,7 +262,8 @@ mod tests {
         // The base slice IS the law boundary: the caller passes exactly
         // brokerage+exch+sebi+ipft (STT/stamp excluded there).
         assert_eq!(gst_paisa(&[], 1_800_000), Ok(0));
-        assert_eq!(gst_paisa(&[4_000], 1_800_000), Ok(700)); // 720 → 700
+        // 4_000 × 18% = 720 raw → CEIL rupee → 800.
+        assert_eq!(gst_paisa(&[4_000], 1_800_000), Ok(800));
     }
 
     #[test]
@@ -260,47 +278,37 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            /// Odd symmetry: f(−x) == −f(x) — half-AWAY-from-zero, never
-            /// toward +∞ (kills a dropped sign branch). Domain bounded to
-            /// ±2^80 so BOTH signs' quotients fit i64 (at the extreme edge
-            /// Ok(i64::MIN) legitimately pairs with an Err on the mirror —
-            /// pinned separately in `round_to_paisa_overflow_edges…`).
+            /// Ceiling law: 10^7·r ≥ x with 10^7·r − x < 10^7 — r is the
+            /// LEAST integer at/above x/10^7 (kills a floor/half-up mutant).
             #[test]
-            fn round_to_paisa_odd_symmetry(x in -(1i128 << 80)..(1i128 << 80)) {
-                let pos = round_to_paisa(x).unwrap();
-                let neg = round_to_paisa(-x).unwrap();
-                prop_assert_eq!(neg, -pos);
-            }
-
-            /// |10^7·r − x| ≤ 5·10^6 with AWAY-from-zero ties: r is the
-            /// nearest integer, and an exact tie lands away from zero.
-            #[test]
-            fn round_to_paisa_nearest_with_away_ties(x in -(1i128 << 80)..(1i128 << 80)) {
+            fn round_to_paisa_is_ceiling(x in -(1i128 << 80)..(1i128 << 80)) {
                 let r = i128::from(round_to_paisa(x).unwrap());
-                let err = r * RATE_SCALE - x;
-                prop_assert!(err.abs() <= RATE_SCALE_HALF);
-                if err.abs() == RATE_SCALE_HALF {
-                    // tie: |r·1e7| must be ≥ |x| (rounded AWAY from zero)
-                    prop_assert!((r * RATE_SCALE).abs() >= x.abs());
-                }
+                prop_assert!(r * RATE_SCALE >= x);
+                prop_assert!(r * RATE_SCALE - x < RATE_SCALE);
             }
 
-            /// Result ≡ 0 (mod 100), within 50 paise, away-from-zero ties.
+            /// Result ≡ 0 (mod 100), at/above p, within 100 paise — the
+            /// least multiple of 100 at/above p (ceiling toward +∞).
             #[test]
-            fn round_to_rupee_multiple_of_100_nearest(p in i64::MIN..=i64::MAX) {
-                let r = round_to_rupee(p);
+            fn round_to_rupee_least_multiple_at_or_above(
+                p in i64::MIN..=(i64::MAX - 100)
+            ) {
+                let r = round_to_rupee(p).unwrap();
                 prop_assert_eq!(r % 100, 0);
-                let err = i128::from(r) - i128::from(p);
-                prop_assert!(err.abs() <= 50);
-                if err.abs() == 50 {
-                    prop_assert!(i128::from(r).abs() >= i128::from(p).abs());
-                }
+                let diff = i128::from(r) - i128::from(p);
+                prop_assert!(diff >= 0);
+                prop_assert!(diff < 100);
             }
 
-            /// Odd symmetry for the rupee rounder (bounded so −p exists).
+            /// Ceiling anti-symmetry: ceil(−x) == −floor(x) — pinned via the
+            /// floor stage (kills a re-introduced sign-symmetric half-up).
             #[test]
-            fn round_to_rupee_odd_symmetry(p in (i64::MIN + 1)..=i64::MAX) {
-                prop_assert_eq!(round_to_rupee(-p), -round_to_rupee(p));
+            fn round_to_paisa_ceil_floor_duality(x in -(1i128 << 80)..(1i128 << 80)) {
+                let c = i128::from(round_to_paisa(x).unwrap());
+                let f = i128::from(floor_rate_scale(x, 1).unwrap());
+                // ceil(x/u) == floor((x + u − 1)/u); floor stage is exact.
+                prop_assert!(c == f || c == f + 1);
+                prop_assert_eq!(c == f, x.rem_euclid(RATE_SCALE) == 0);
             }
 
             /// floor_rate_scale == mathematical floor of x·rate/1e7

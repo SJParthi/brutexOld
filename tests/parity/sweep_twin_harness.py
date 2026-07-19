@@ -134,6 +134,12 @@ PROGRESS_VOLATILE_KEYS: Final[frozenset[str]] = frozenset(
         # siblings ``pid`` + ``running`` stay COMPARED: both are
         # deterministic in today's in-process twin (compare-by-default).
         "wall_time_utc",
+        # wall-clock stamp added by main's DEC-SWEEP-RUN-IDENTITY-COMPLETE-001
+        # train (``PROGRESS_WALL_TIME_KEY = "wall_time"`` in
+        # sweep_supervisor.py, landed while the club was in flight — folded
+        # here at the club-R1 merge-reconcile 2026-07-19): wall-clock-derived
+        # by construction, the ``wall_time_utc`` sibling's exact class.
+        "wall_time",
     }
 )
 

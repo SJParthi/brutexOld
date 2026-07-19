@@ -82,15 +82,20 @@ _DIGEST = "abad1deaabad1dea"
 #: The REAL compiled class, captured before any poison monkeypatching.
 _REAL_U64 = fno_math.ResidentSweepEnum
 
-#: Fixture facts measured on the OFF arm (2026-07-11) and load-bearing for
-#: the poison goldens: at k=2 the fixture persists NINE finalists, the
-#: LOWEST-hits finalist is mask 36 (bits {2, 5}, 120 hits) and the
-#: highest-hits finalist is mask 5 (bits {0, 2}, 836 hits); the next
-#: finalist above 36 has 250 hits, so ``min_hits = 121`` drops EXACTLY
-#: mask 36 on a healthy run.
-_DROP_TARGET_MASK = 5
-_SPURIOUS_MASK = 36
-_SPURIOUS_MIN_HITS = 121
+#: Fixture facts RE-MEASURED on the OFF arm (2026-07-19, the club-R1
+#: #1825 worst-case-fills reconcile — the original 2026-07-11 facts were
+#: minted under precise-era fills) and load-bearing for the poison goldens:
+#: at k=2 / min_hits=5 the fixture backtests ELEVEN kept masks but only
+#: SEVEN persist store rows under worst-case fills — {9, 10, 17, 20, 33,
+#: 34, 40} (masks 5/18/24/36 backtest to no persisted row, so a poison
+#: targeting them can no longer move store bytes). The highest-hits
+#: PERSISTED finalist is mask 17 (bits {0, 4}, 716 hits — mask 5 has 835
+#: hits but persists nothing) and the LOWEST-hits persisted finalist is
+#: mask 34 (bits {1, 5}, 250 hits); ``min_hits = 251`` drops mask 34 on a
+#: healthy run (kept order there: [5, 9, 17, 33, 10, 20, 40]).
+_DROP_TARGET_MASK = 17
+_SPURIOUS_MASK = 34
+_SPURIOUS_MIN_HITS = 251
 
 
 @pytest.fixture(autouse=True)
@@ -103,17 +108,29 @@ def _fresh_rust_enum_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _bars() -> list[CandleBar]:
-    """A 14-day synthetic 1m fixture with mixed intraday structure."""
+    """A 14-day synthetic 1m fixture with mixed intraday structure.
+
+    RE-SHAPED at the 2026-07-19 club-R1 merge-reconcile onto main's landed
+    DEC-FILL-WORST-CASE-ONLY-001 (#1825) fixture law (the
+    `_worst_case_ranking_bars` note in test_engine_sweep_run.py): the
+    original 0.6-per-3-bars drift under a ±0.5 pad lost every trade once
+    entries fill at the bar HIGH, so the worst-case arm never persisted a
+    finalist and this golden's anti-vacuity teeth (persisted > 0; the
+    inverted drop/keep hash moves) went dead. This variant rises 1.0 with a
+    0.5 dip every 4th bar under a tight ±0.05 pad — worst-case fills still
+    clear the rank gates, and the ON-vs-OFF byte-parity law is
+    bars-shape-independent either way.
+    """
     out: list[CandleBar] = []
     for d in range(14):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            close = price + 1.0 if m % 4 else price - 0.5
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
+            hi = max(price, close) + 0.05
+            lo = min(price, close) - 0.05
             out.append(
                 CandleBar(
                     timestamp=ts,
@@ -141,8 +158,10 @@ def _config(k: int, min_hits: int = _MIN_HITS) -> SweepRunConfig:
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
         tf_minutes=1,
-        sl_paisa=80,
-        tp_paisa=50,
+        # sl/tp widened 80/50 → 200/100 at the club-R1 #1825 reconcile (the
+        # main fixture-law pair the worst-case fills still rank under).
+        sl_paisa=200,
+        tp_paisa=100,
         min_hits=min_hits,
     )
 
@@ -332,9 +351,11 @@ class _PoisonBase:
 
 
 class _DropFinalist(_PoisonBase):
-    """Silently DROP the highest-hits finalist mask with self-consistent
-    counts (the drop re-bucketed as a conflict prune; the in-band hits count
-    adjusted per the short-circuit law) — the design's dropped-mask poison."""
+    """Silently DROP the highest-hits PERSISTED finalist mask with
+    self-consistent counts (the drop re-bucketed as a conflict prune; the
+    in-band hits count adjusted per the short-circuit law) — the design's
+    dropped-mask poison. The target must be a mask that persists a store
+    row under worst-case fills, or the byte-compare teeth go dead."""
 
     def _poison(
         self, raw: tuple[int, int, int, bool, int, list[int]]
@@ -347,19 +368,20 @@ class _DropFinalist(_PoisonBase):
 
 
 class _SpuriousKeep(_PoisonBase):
-    """Wrongly ADMIT the below-min-hits mask 36 (a genuine gate-passing
-    strategy the healthy min_hits=121 arm drops) with self-consistent counts
-    — the round-6 spurious-keep mirror. The mask is conflict-free, so the
-    tallies need NO adjustment: only the seam-derived minhits_dropped moves."""
+    """Wrongly ADMIT the below-min-hits mask 34 (a genuine gate-passing,
+    row-persisting strategy the healthy min_hits=251 arm drops) with
+    self-consistent counts — the round-6 spurious-keep mirror. The mask is
+    conflict-free, so the tallies need NO adjustment: only the seam-derived
+    minhits_dropped moves."""
 
     def _poison(
         self, raw: tuple[int, int, int, bool, int, list[int]]
     ) -> tuple[int, int, int, bool, int, list[int]] | None:
         enumerated, pruned, next_rank, exhausted, hits, kept = raw
-        if _SPURIOUS_MASK in kept or 40 not in kept:
+        if _SPURIOUS_MASK in kept or 20 not in kept:
             return None
         kept = list(kept)
-        kept.insert(kept.index(40), _SPURIOUS_MASK)  # lex position: {2,5} before {3,5}
+        kept.insert(kept.index(20), _SPURIOUS_MASK)  # lex position: {1,5} before {2,4}
         return (enumerated, pruned, next_rank, exhausted, hits, kept)
 
 

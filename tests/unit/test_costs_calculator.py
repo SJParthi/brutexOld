@@ -19,6 +19,7 @@ coverage on `brutex.costs.*` (the per-module strict gate in
 
 from __future__ import annotations
 
+import importlib
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -37,8 +38,13 @@ from brutex.costs import (
     UnverifiedCostRegimeError,
     compute_trade_cost,
     constants,
+    require_bar_extremes,
 )
-from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import (
+    _apply_slippage,
+    _round_levy_paisa,
+    _round_levy_rupee,
+)
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -63,10 +69,19 @@ def _make_trade(
     broker: Broker = "groww",
     gst_split: GstSplit = "intra_state",
     trade_outcome: TradeOutcome = "NORMAL_CLOSE",
+    entry_high_paisa: int | None = None,
+    entry_low_paisa: int | None = None,
+    exit_high_paisa: int | None = None,
+    exit_low_paisa: int | None = None,
 ) -> TradeInput:
     """Build a TradeInput with the §12.1 canonical defaults.
 
-    Allows individual fields to be overridden for fixture variants.
+    Allows individual fields to be overridden for fixture variants. The four
+    worst-case fill anchors (REQUIRED — DEC-FILL-WORST-CASE-ONLY-001) default
+    to FLAT bars (extremes == opens): on a flat bar the adverse-max fill is
+    exactly ``open ± tick`` — byte-identical to the retired precise fill — so
+    every §12.x fixture's FILL literals stay hand-derivable from its opens
+    while the LEVY literals ride the permanent adverse (ceiling) rounding.
     """
     return TradeInput(
         entry_dt_ist=entry_dt,
@@ -82,6 +97,10 @@ def _make_trade(
         broker=broker,
         gst_split=gst_split,
         trade_outcome=trade_outcome,
+        entry_bar_high_paisa=entry_high_paisa if entry_high_paisa is not None else entry_open_paisa,
+        entry_bar_low_paisa=entry_low_paisa if entry_low_paisa is not None else entry_open_paisa,
+        exit_bar_high_paisa=exit_high_paisa if exit_high_paisa is not None else exit_open_paisa,
+        exit_bar_low_paisa=exit_low_paisa if exit_low_paisa is not None else exit_open_paisa,
     )
 
 
@@ -105,13 +124,16 @@ def test_total_charges_composition_fast_first_pin() -> None:
     the run. Inputs + expected stack are the hand-recomputed values of
     ``TestChargeStackMutationHardening.test_gst_base_and_total_composition_signs``
     (big synthetic SEBI/IPFT so every component is distinct + material):
-    4_000 + 11_707_800 + 5_466_511 + 156_052_260 + 312_104_520 + 234_000 +
-    85_252_900 = 570_821_991.
+    4_000 + 11_707_900 + 5_466_512 + 156_052_260 + 312_104_520 + 234_000 +
+    85_253_000 = 570_822_192 (re-derived under the #1825 adverse-CEILING law
+    at the club-R1 reconcile; flat bars — fills unchanged).
     """
     from brutex.costs.calculator import _charge_stack_py
 
     stack = _charge_stack_py(
         3_000_000,
+        3_000_000,
+        3_002_010,
         3_002_010,
         is_long=True,
         lot_size=65,
@@ -124,7 +146,7 @@ def test_total_charges_composition_fast_first_pin() -> None:
         stamp_rate=300,
         gst_rate=1_800_000,
     )
-    assert stack.total_charges_paisa == 570_821_991
+    assert stack.total_charges_paisa == 570_822_192
     assert stack.total_charges_paisa > 0
     assert stack.total_charges_paisa == (
         stack.brokerage_paisa
@@ -146,31 +168,37 @@ def test_total_charges_composition_fast_first_pin() -> None:
 def test_fixture_12_1_nifty_canonical() -> None:
     """§12.1 NIFTY ATM call, post-Apr-2026 STT (0.15%), lot=65.
 
-    Premium ₹99.95 → ₹120.05 with ±1 tick slippage = ₹100.00 → ₹120.00.
-
-    Every line item below is the spec table.
+    Premium ₹99.95 → ₹120.05, FLAT bars: the adverse-max fills are exactly
+    ``open ± tick`` = ₹100.00 → ₹120.00 (byte-equal to the spec table's
+    fills). The levies ride the PERMANENT adverse (ceiling) rounding law
+    (DEC-FILL-WORST-CASE-ONLY-001) — each line hand-derived below, the
+    retired nearest-rounded value in the trailing comment.
     """
     r = compute_trade_cost(_make_trade())
 
     assert r.n_shares_per_lot == 65  # Jan-2026 onwards NIFTY lot
     assert r.n_shares == 65
-    assert r.buy_fill_paisa == 10_000  # ₹100.00 (after +1 tick)
-    assert r.sell_fill_paisa == 12_000  # ₹120.00 (after -1 tick)
+    assert r.buy_fill_paisa == 10_000  # ₹100.00 (entry HIGH 99.95 + 1 tick)
+    assert r.sell_fill_paisa == 12_000  # ₹120.00 (exit LOW 120.05 − 1 tick)
     assert r.buy_notional_paisa == 650_000  # ₹6,500
     assert r.sell_notional_paisa == 780_000  # ₹7,800
 
-    assert r.brokerage_paisa == 4_000  # ₹40 = ₹20 × 2 legs
-    assert r.stt_paisa == 1_200  # ₹12 = ₹11.70 rounded up (statutory)
-    assert r.exch_paisa == 501  # ₹5.01
-    assert r.sebi_paisa == 2  # ₹0.02
-    assert r.ipft_paisa == 7  # ₹0.07
-    assert r.stamp_paisa == 0  # ₹0 = ₹0.195 → ₹0 rounded (statutory)
-    assert r.gst_paisa == 800  # ₹8 (DEC-COST-001: round 18% total once)
+    assert r.brokerage_paisa == 4_000  # ₹40 = ₹20 × 2 legs (flat, no rounding)
+    assert r.stt_paisa == 1_200  # ceil₹(780_000 × 0.15% = 1_170) = ₹12 (same)
+    # exch per leg: ceil(650_000×0.03503% = 227.7) + ceil(780_000×… = 273.2)
+    assert r.exch_paisa == 502  # 228 + 274 (was 228 + 273 = 501 under nearest)
+    # sebi per leg: ceil(0.65) + ceil(0.78) = 1 + 1 = 2 (nearest gave the
+    # same 2 — both fractions sit above ½, so ceiling changes nothing here).
+    assert r.sebi_paisa == 2
+    # ipft per leg: ceil(3.25) + ceil(3.90) = 4 + 4 (was 3 + 4 = 7 nearest)
+    assert r.ipft_paisa == 8
+    assert r.stamp_paisa == 100  # ceil₹(650_000 × 0.003% = 19.5) = ₹1 (was 0)
+    assert r.gst_paisa == 900  # ceil₹(18% × (4_000+502+2+8) = 812.16) (was 800)
 
     assert r.slippage_paisa == 650  # ₹6.50 (2 ticks × 65 shares)
-    assert r.total_charges_paisa == 6_510  # ₹65.10
+    assert r.total_charges_paisa == 6_712  # ₹67.12 (was 6_510 under nearest)
     assert r.gross_pnl_paisa == 130_000  # ₹1,300
-    assert r.net_pnl_paisa == 123_490  # ₹1,234.90
+    assert r.net_pnl_paisa == 123_288  # 130_000 − 6_712
 
     assert r.used_exercise_branch is False
     assert r.n_orders_per_leg == 1
@@ -524,6 +552,11 @@ def _make_trade_kwargs() -> dict[str, object]:
         "broker": "groww",
         "gst_split": "intra_state",
         "trade_outcome": "NORMAL_CLOSE",
+        # DEC-FILL-WORST-CASE-ONLY-001: the four REQUIRED fill anchors (flat).
+        "entry_bar_high_paisa": 10_000,
+        "entry_bar_low_paisa": 10_000,
+        "exit_bar_high_paisa": 10_000,
+        "exit_bar_low_paisa": 10_000,
     }
 
 
@@ -1097,46 +1130,53 @@ def test_short_entry_fill_floored_at_one_tick() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
-# CHANGE 3 (NIT-1) — direct ROUND_HALF_UP rounding-helper tests
+# Adverse (ceiling) levy rounding — the PERMANENT law
+# (DEC-FILL-WORST-CASE-ONLY-001; the retired nearest half-up arm and its
+# ``_round_to_paisa`` / ``_round_to_rupee`` helpers are DELETED with the
+# PRECISE mode)
 # ─────────────────────────────────────────────────────────────────
 
 
-def test_round_to_paisa_positive_path_byte_identical() -> None:
-    """NIT-1: positive inputs are byte-identical to the historical formula."""
-    for x in (0, 1, 4_999_999, 5_000_000, 5_000_001, 14_999_999, 15_000_000, 99_999_999):
-        assert _round_to_paisa(x) == (x + 5_000_000) // 10_000_000
+def test_round_levy_paisa_ceils() -> None:
+    """Every rate-scaled levy rounds ADVERSELY — ceiling toward +∞.
+
+    Any fractional paisa rounds UP (a levy is a charge — adverse = larger);
+    an exact multiple is untouched; the ceiling is toward +∞ for any sign
+    (totality — the live calculator never feeds a negative product).
+    """
+    assert _round_levy_paisa(0) == 0
+    assert _round_levy_paisa(1) == 1  # any fraction → up
+    assert _round_levy_paisa(4_999_999) == 1  # nearest would say 0
+    assert _round_levy_paisa(5_000_000) == 1
+    assert _round_levy_paisa(10_000_000) == 1  # exact multiple
+    assert _round_levy_paisa(10_000_001) == 2
+    assert _round_levy_paisa(-1) == 0  # toward +∞
+    assert _round_levy_paisa(-10_000_000) == -1
 
 
-def test_round_to_paisa_half_up_away_from_zero() -> None:
-    """NIT-1: ties round AWAY from zero (ROUND_HALF_UP), both signs."""
-    assert _round_to_paisa(5_000_000) == 1  # +0.5 → +1 (just-on tie)
-    assert _round_to_paisa(4_999_999) == 0  # just below half → 0
-    assert _round_to_paisa(5_000_001) == 1  # just above half → 1
-    assert _round_to_paisa(15_000_000) == 2  # +1.5 → +2
-    assert _round_to_paisa(0) == 0  # exact zero
-    assert _round_to_paisa(-5_000_000) == -1  # -0.5 → -1 (away from zero)
-    assert _round_to_paisa(-15_000_000) == -2  # -1.5 → -2
-    assert _round_to_paisa(-4_999_999) == 0  # just-above -half → 0
-    assert _round_to_paisa(-5_000_001) == -1  # just-below -half → -1
+def test_round_levy_rupee_ceils() -> None:
+    """The adverse (ceiling) statutory arm — the refuter's boundary stays dead.
+
+    1,149 paisa is the historical refuter counterexample's worst-case STT raw
+    value: nearest rounded it DOWN to 1,100 (the ₹1 drop that beat the
+    25-paisa gross drop); the ceiling keeps it at 1,200 — permanently.
+    """
+    assert _round_levy_rupee(0) == 0
+    assert _round_levy_rupee(1) == 100  # any fraction → up
+    assert _round_levy_rupee(49) == 100  # nearest would say 0
+    assert _round_levy_rupee(100) == 100  # exact multiple
+    assert _round_levy_rupee(101) == 200
+    assert _round_levy_rupee(1_149) == 1_200  # the boundary
+    assert _round_levy_rupee(-1) == 0  # toward +∞
+    assert _round_levy_rupee(-100) == -100
 
 
-def test_round_to_rupee_positive_path_byte_identical() -> None:
-    """NIT-1: positive inputs are byte-identical to the historical formula."""
-    for x in (0, 1, 49, 50, 51, 149, 150, 1_170, 99_999):
-        assert _round_to_rupee(x) == ((x + 50) // 100) * 100
+def test_nearest_rounding_helpers_deleted() -> None:
+    """Killed-token pin: the nearest half-up rounders are gone."""
+    mod = importlib.import_module("brutex.costs.calculator")
 
-
-def test_round_to_rupee_half_up_away_from_zero() -> None:
-    """NIT-1: ties round AWAY from zero (ROUND_HALF_UP), both signs."""
-    assert _round_to_rupee(50) == 100  # +0.5 rupee → +1
-    assert _round_to_rupee(49) == 0  # just below half → 0
-    assert _round_to_rupee(51) == 100  # just above half → 1
-    assert _round_to_rupee(150) == 200  # +1.5 → +2
-    assert _round_to_rupee(0) == 0  # exact zero
-    assert _round_to_rupee(-50) == -100  # -0.5 → -1 (away from zero)
-    assert _round_to_rupee(-150) == -200  # -1.5 → -2
-    assert _round_to_rupee(-49) == 0  # just-above -half → 0
-    assert _round_to_rupee(-51) == -100  # just-below -half → -1
+    assert not hasattr(mod, "_round_to_paisa")
+    assert not hasattr(mod, "_round_to_rupee")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1276,10 +1316,11 @@ def test_property_cost_invariants(
     # MINOR-3 floor: no fill below one tick.
     assert r.buy_fill_paisa >= constants.TICK_PAISA
     assert r.sell_fill_paisa >= constants.TICK_PAISA
-    # Rounding idempotence: re-rounding a rupee-rounded value is a no-op.
-    assert _round_to_rupee(r.stt_paisa) == r.stt_paisa
-    assert _round_to_rupee(r.gst_paisa) == r.gst_paisa
-    assert _round_to_rupee(r.stamp_paisa) == r.stamp_paisa
+    # Rounding idempotence: re-CEILING a rupee-rounded value is a no-op
+    # (the permanent adverse law, DEC-FILL-WORST-CASE-ONLY-001).
+    assert _round_levy_rupee(r.stt_paisa) == r.stt_paisa
+    assert _round_levy_rupee(r.gst_paisa) == r.gst_paisa
+    assert _round_levy_rupee(r.stamp_paisa) == r.stamp_paisa
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1300,6 +1341,10 @@ def test_trade_input_accepts_equal_entry_exit() -> None:
         entry_bar_open_paisa=10_000,
         exit_bar_open_paisa=10_000,
         side="long_call",
+        entry_bar_high_paisa=10_000,
+        entry_bar_low_paisa=10_000,
+        exit_bar_high_paisa=10_000,
+        exit_bar_low_paisa=10_000,
     )
     assert trade.exit_dt_ist == trade.entry_dt_ist
 
@@ -1317,6 +1362,10 @@ def test_trade_input_accepts_min_valid_boundaries() -> None:
         exit_bar_open_paisa=5,
         side="long_call",
         n_lots=1,
+        entry_bar_high_paisa=5,
+        entry_bar_low_paisa=5,
+        exit_bar_high_paisa=5,
+        exit_bar_low_paisa=5,
     )
     assert trade.entry_bar_open_paisa == 5
     assert trade.n_lots == 1
@@ -1357,6 +1406,280 @@ def test_trade_input_rejects_negative_strike() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# DEC-FILL-WORST-CASE-ONLY-001 — the ONE fill law (_apply_slippage +
+# the REQUIRED TradeInput extremes + compute_trade_cost)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestWorstCaseApplySlippage:
+    """The adverse-extreme ± the SAME tick law, all four legs — flagless."""
+
+    def test_long_entry_buys_high_exit_sells_low(self) -> None:
+        # long: buy = entry HIGH + tick; sell = exit LOW − tick.
+        buy, sell, slip = _apply_slippage(
+            "long_call",
+            entry_high_paisa=12_100,
+            entry_low_paisa=11_900,
+            exit_high_paisa=15_100,
+            exit_low_paisa=14_900,
+        )
+        assert (buy, sell, slip) == (12_105, 14_895, 2 * constants.TICK_PAISA)
+
+    def test_short_entry_sells_low_exit_buys_high(self) -> None:
+        # short (production-unreachable under DEC-EXEC-008, forward-compat):
+        # opening SELL = entry LOW − tick; cover BUY = exit HIGH + tick.
+        buy, sell, slip = _apply_slippage(
+            "short_call",
+            entry_high_paisa=12_100,
+            entry_low_paisa=11_900,
+            exit_high_paisa=15_100,
+            exit_low_paisa=14_900,
+        )
+        assert (buy, sell, slip) == (15_105, 11_895, 2 * constants.TICK_PAISA)
+
+    def test_flat_bar_fills_are_open_plus_minus_tick(self) -> None:
+        # THE NAMED FLAT-BAR COUNTEREXAMPLE (kept as the law's rationale): on
+        # a flat bar (high == low == open) a bare buy-at-HIGH would fill
+        # BELOW the retired precise ``open + tick`` — the kept ±tick makes
+        # the flat bar fill exactly ``open ± tick``, so the worst-case fill
+        # can never flatter (both legs, both sides).
+        for side, expected in (
+            ("long_call", (12_005, 14_995, 2 * constants.TICK_PAISA)),
+            ("short_put", (15_005, 11_995, 2 * constants.TICK_PAISA)),
+        ):
+            got = _apply_slippage(
+                side,
+                entry_high_paisa=12_000,
+                entry_low_paisa=12_000,
+                exit_high_paisa=15_000,
+                exit_low_paisa=15_000,
+            )
+            assert got == expected, side
+
+    def test_sub_tick_low_floors_never_crashes(self) -> None:
+        # A degenerate sub-tick exit LOW floors the sell at one tick; the
+        # realized slippage reads the floored truth (sell leg moved 0…
+        # here 3−5 < 5 ⇒ floored; |3 − 5| = 2 realized on that leg).
+        buy, sell, slip = _apply_slippage(
+            "long_put",
+            entry_high_paisa=40,
+            entry_low_paisa=25,
+            exit_high_paisa=12,
+            exit_low_paisa=3,
+        )
+        assert (buy, sell) == (45, constants.TICK_PAISA)
+        assert slip == constants.TICK_PAISA + abs(3 - constants.TICK_PAISA)
+
+    def test_no_fill_mode_parameter_exists(self) -> None:
+        # Killed-token pin: the slippage law is flagless — no mode, no open
+        # anchors (the retired precise arm read the bar OPENs).
+        import inspect
+
+        params = inspect.signature(_apply_slippage).parameters
+        assert "fill_mode" not in params
+        assert "entry_open_paisa" not in params
+
+
+_WORST_EXTREMES: dict[str, int] = {
+    "entry_high_paisa": 10_100,
+    "entry_low_paisa": 9_900,
+    "exit_high_paisa": 12_100,
+    "exit_low_paisa": 11_900,
+}
+
+
+class TestTradeInputExtremesRequired:
+    def test_missing_extremes_refuse_fail_loud(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: an input without its adverse anchors
+        # is unpriceable — the refusal names the DEC and the missing fields.
+        with pytest.raises(ValueError, match="DEC-FILL-WORST-CASE-ONLY-001"):
+            TradeInput(
+                entry_dt_ist=datetime(2026, 5, 15, 10, 0),
+                exit_dt_ist=datetime(2026, 5, 15, 11, 0),
+                instrument="NIFTY",
+                option_type="CE",
+                strike=2_500_000,
+                expiry_date=date(2026, 5, 21),
+                entry_bar_open_paisa=9_995,
+                exit_bar_open_paisa=12_005,
+                side="long_call",
+            )
+        with pytest.raises(ValueError, match="missing .'exit_bar_low_paisa'"):
+            TradeInput(
+                entry_dt_ist=datetime(2026, 5, 15, 10, 0),
+                exit_dt_ist=datetime(2026, 5, 15, 11, 0),
+                instrument="NIFTY",
+                option_type="CE",
+                strike=2_500_000,
+                expiry_date=date(2026, 5, 21),
+                entry_bar_open_paisa=9_995,
+                exit_bar_open_paisa=12_005,
+                side="long_call",
+                entry_bar_high_paisa=10_100,
+                entry_bar_low_paisa=9_900,
+                exit_bar_high_paisa=12_100,
+            )
+
+    def test_no_fill_mode_field_exists(self) -> None:
+        # Killed-token pin: TradeInput carries no mode axis.
+        import dataclasses
+
+        assert "fill_mode" not in {f.name for f in dataclasses.fields(TradeInput)}
+
+    @pytest.mark.parametrize("label", ["entry", "exit"])
+    def test_extreme_ordering_validated_against_open(self, label: str) -> None:
+        with pytest.raises(ValueError, match=f"{label}_bar_high_paisa"):
+            _make_trade(**{**_WORST_EXTREMES, f"{label}_high_paisa": 1})  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match=f"{label}_bar_low_paisa"):
+            _make_trade(**{**_WORST_EXTREMES, f"{label}_low_paisa": 99_999_999})  # type: ignore[arg-type]
+
+
+_REQUIRE_EXTREMES_FULL: dict[str, int] = {
+    "entry_bar_high_paisa": 10_100,
+    "entry_bar_low_paisa": 9_900,
+    "exit_bar_high_paisa": 12_100,
+    "exit_bar_low_paisa": 11_900,
+}
+
+
+class TestRequireBarExtremes:
+    """The COMMON Optional-narrowing seam ``types.require_bar_extremes``.
+
+    Replaces the bare ``assert`` narrowing (bandit B101 — the enclosed check
+    would vanish under ``python -O``) with an explicit fail-loud
+    ``raise AssertionError``. Shared by ``compute_trade_cost`` AND
+    ``compute_futures_trade_cost`` (Golden Rule #11 COMMON).
+    """
+
+    def test_all_present_returns_narrowed_tuple(self) -> None:
+        assert require_bar_extremes(**_REQUIRE_EXTREMES_FULL) == (
+            10_100,
+            9_900,
+            12_100,
+            11_900,
+        )
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "entry_bar_high_paisa",
+            "entry_bar_low_paisa",
+            "exit_bar_high_paisa",
+            "exit_bar_low_paisa",
+        ],
+    )
+    def test_each_none_position_raises_assertion_error(self, missing: str) -> None:
+        # One case per `or` term — a dropped term is a killed mutant, not a
+        # silently-narrowed None (the broken-invariant path stays fail-loud).
+        kwargs: dict[str, int | None] = {**_REQUIRE_EXTREMES_FULL, missing: None}
+        with pytest.raises(AssertionError, match="broken"):
+            require_bar_extremes(
+                entry_bar_high_paisa=kwargs["entry_bar_high_paisa"],
+                entry_bar_low_paisa=kwargs["entry_bar_low_paisa"],
+                exit_bar_high_paisa=kwargs["exit_bar_high_paisa"],
+                exit_bar_low_paisa=kwargs["exit_bar_low_paisa"],
+            )
+
+
+class TestWorstCaseComputeTradeCost:
+    def test_ranged_bars_fill_at_the_extremes(self) -> None:
+        # Fills anchor the bar extremes ± tick: buy = entry HIGH 101.00 +
+        # tick = 101.05; sell = exit LOW 119.00 − tick = 118.95.
+        r = compute_trade_cost(_make_trade(**_WORST_EXTREMES))  # type: ignore[arg-type]
+        assert (r.buy_fill_paisa, r.sell_fill_paisa) == (10_105, 11_895)
+
+    def test_flat_bars_levies_ceiled_exact_stack(self) -> None:
+        # The flat-bar default fixture (fills == the retired precise bytes:
+        # 10_000 / 12_000) under the PERMANENT adverse (ceiling) levy law —
+        # the exact charge stack, hand-derived PER LEG (buy notional 650_000,
+        # sell notional 780_000; the levies ceil each leg):
+        #   exch  = ceil(650_000×3503/1e7 = 227.7) + ceil(780_000×… = 273.2)
+        #         = 228 + 274 = 502  (nearest: 228 + 273 = 501)
+        #   ipft  = ceil(3.25) + ceil(3.90) = 4 + 4 = 8  (nearest: 3 + 4 = 7)
+        #   sebi  = ceil(0.65) + ceil(0.78) = 1 + 1 = 2  (nearest: 2 — same)
+        #   stt   = ceil₹(780_000 × 0.15% = 1_170)  = 1_200 (exact — same)
+        #   stamp = ceil₹(650_000 × 0.003% = 19.5)  = 100  (nearest: 0)
+        #   gst   = ceil₹((4_000+502+2+8) × 18% = 812.16) = 900 (nearest: 800)
+        r = compute_trade_cost(_make_trade())
+        assert (r.buy_fill_paisa, r.sell_fill_paisa) == (10_000, 12_000)
+        assert r.exch_paisa == 502
+        assert r.ipft_paisa == 8
+        assert r.sebi_paisa == 2
+        assert r.stt_paisa == 1_200
+        assert r.stamp_paisa == 100
+        assert r.gst_paisa == 900
+
+    def test_net_floor_refuter_boundary_regression(self) -> None:
+        # THE NAMED HISTORICAL REGRESSION (refuter-confirmed MAJOR-1 of the
+        # absorbed #1522 design's fix round 2): entry FLAT at
+        # ₹460.05, exit low ONE paisa under the open, entry date 2024-10-03
+        # (post-Oct-2024 STT regime, lot 25). The worst-case sell notional —
+        # 25 paisa smaller — crossed a ₹0.5 STT nearest-rupee boundary
+        # DOWNWARD (STT ₹11 vs ₹12), so under NEAREST rounding the smaller
+        # notional PAID LESS and the "worst" net beat the flat-bar net by
+        # 75 paisa. The adverse (ceiling) law keeps STT at ₹12 and the
+        # floor holds: the ranged (worse-fill) trade nets STRICTLY less.
+        entry_dt = datetime(2024, 10, 3, 10, 0)
+        flat = compute_trade_cost(
+            _make_trade(
+                entry_dt=entry_dt,
+                expiry_date=date(2024, 10, 31),
+                entry_open_paisa=46_005,
+                exit_open_paisa=46_005,
+            )
+        )
+        ranged = compute_trade_cost(
+            _make_trade(
+                entry_dt=entry_dt,
+                expiry_date=date(2024, 10, 31),
+                entry_open_paisa=46_005,
+                exit_open_paisa=46_005,
+                entry_high_paisa=46_005,  # entry flat: buy fills equal
+                entry_low_paisa=46_005,
+                exit_high_paisa=46_005,
+                exit_low_paisa=46_004,  # exit low 1 paisa under the open
+            )
+        )
+        assert (flat.buy_fill_paisa, flat.sell_fill_paisa) == (46_010, 46_000)
+        assert (ranged.buy_fill_paisa, ranged.sell_fill_paisa) == (46_010, 45_999)
+        # The boundary: the ranged raw STT 1,149.975 would round to 1,100
+        # under nearest (the historical violation) — the ceiling keeps 1,200.
+        assert flat.stt_paisa == 1_200
+        assert ranged.stt_paisa == 1_200
+        assert ranged.net_pnl_paisa <= flat.net_pnl_paisa
+
+    def test_net_floor_boundary_scan(self) -> None:
+        # Boundary-scan regression: several opens straddling ₹0.5 statutory
+        # rounding boundaries (the historical refuter reported a violation at
+        # EVERY ₹40 open boundary under nearest rounding — 46_005 ± k×4_000
+        # paisa all crossed), each with the exit low 1 paisa under the open.
+        # A 1-paisa-WORSE fill must never produce a BETTER net at ANY of
+        # them (the never-flatter floor the ceiling law guarantees).
+        for open_p in (42_005, 46_005, 50_005, 54_005, 58_005, 62_005):
+            entry_dt = datetime(2024, 10, 3, 10, 0)
+            flat = compute_trade_cost(
+                _make_trade(
+                    entry_dt=entry_dt,
+                    expiry_date=date(2024, 10, 31),
+                    entry_open_paisa=open_p,
+                    exit_open_paisa=open_p,
+                )
+            )
+            ranged = compute_trade_cost(
+                _make_trade(
+                    entry_dt=entry_dt,
+                    expiry_date=date(2024, 10, 31),
+                    entry_open_paisa=open_p,
+                    exit_open_paisa=open_p,
+                    entry_high_paisa=open_p,
+                    entry_low_paisa=open_p,
+                    exit_high_paisa=open_p,
+                    exit_low_paisa=open_p - 1,
+                )
+            )
+            assert ranged.net_pnl_paisa <= flat.net_pnl_paisa, open_p
+
+
 # DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch (slice 7 / P8)
 # ─────────────────────────────────────────────────────────────────
 
@@ -1462,15 +1785,15 @@ class TestChargeStackMutationHardening:
                     7_807_433_400,
                     4_000,
                     11_711_200,
-                    5_468_066,
-                    15_609,
-                    78_048,
+                    5_468_067,
+                    15_611,
+                    78_050,
                     234_100,
-                    1_001_800,
+                    1_001_900,
                     26_000,
-                    18_512_823,
+                    18_512_928,
                     5_200_000,
-                    -13_312_823,
+                    -13_312_928,
                     10,
                 ),
             ),
@@ -1485,16 +1808,16 @@ class TestChargeStackMutationHardening:
                     7_848_334_000,
                     7_853_534_000,
                     4_000,
-                    11_780_300,
-                    5_500_364,
-                    15_702,
+                    11_780_400,
+                    5_500_365,
+                    15_703,
                     78_510,
                     235_500,
-                    1_007_700,
+                    1_007_800,
                     26_000,
-                    18_622_076,
+                    18_622_278,
                     5_200_000,
-                    -13_422_076,
+                    -13_422_278,
                     10,
                 ),
             ),
@@ -1510,15 +1833,15 @@ class TestChargeStackMutationHardening:
                     7_805_249_400,
                     4_000,
                     11_707_900,
-                    5_466_536,
-                    15_605,
-                    78_026,
-                    234_000,
+                    5_466_537,
+                    15_607,
+                    78_028,
+                    234_100,
                     1_001_600,
                     26_000,
-                    18_507_667,
+                    18_507_772,
                     5_200_000,
-                    -13_307_667,
+                    -13_307_772,
                     10,
                 ),
             ),
@@ -1530,7 +1853,7 @@ class TestChargeStackMutationHardening:
     ) -> None:
         from brutex.costs.calculator import _charge_stack_py
 
-        stack = _charge_stack_py(entry, exit_, **self._COMMON)  # type: ignore[arg-type]
+        stack = _charge_stack_py(entry, entry, exit_, exit_, **self._COMMON)  # type: ignore[arg-type]
         assert tuple(stack) == expected
 
     def test_gst_base_and_total_composition_signs(self) -> None:
@@ -1540,7 +1863,7 @@ class TestChargeStackMutationHardening:
         from brutex.costs.calculator import _charge_stack_py
 
         args: dict[str, object] = {**self._COMMON, "sebi_rate": 100_000, "ipft_rate": 200_000}
-        stack = _charge_stack_py(3_000_000, 3_002_010, **args)  # type: ignore[arg-type]
+        stack = _charge_stack_py(3_000_000, 3_000_000, 3_002_010, 3_002_010, **args)  # type: ignore[arg-type]
         assert tuple(stack) == (
             3_000_005,
             3_002_005,
@@ -1548,16 +1871,16 @@ class TestChargeStackMutationHardening:
             7_800_013_000,
             7_805_213_000,
             4_000,
-            11_707_800,
-            5_466_511,
+            11_707_900,
+            5_466_512,
             156_052_260,
             312_104_520,
             234_000,
-            85_252_900,
+            85_253_000,
             26_000,
-            570_821_991,
+            570_822_192,
             5_200_000,
-            -565_621_991,
+            -565_622_192,
             10,
         )
 

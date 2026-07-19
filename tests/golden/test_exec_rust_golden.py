@@ -1,8 +1,8 @@
 """Golden cross-language oracle for the exec integer cores (dual-arm).
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1724), the ``vocab_golden_vectors``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1960), the ``vocab_golden_vectors``
 discipline: a frozen ``input → value`` answer-key
-(``fixtures/exec_costs_golden_vectors.json``, produced ONCE by
+(``fixtures/exec_costs_golden_vectors.json``, produced by
 ``scripts/gen_exec_costs_golden.py``, regeneration refused without
 ``BRUTEX_REGEN_EXEC_GOLDEN=1``) that:
 
@@ -12,6 +12,11 @@ discipline: a frozen ``input → value`` answer-key
   natively (``rust/fno-math/tests/exec_golden.rs``) AND through the
   flag-ON seam (the Rust arm below, ENGAGED-asserted so it can never go
   vacuous: a missing wheel or a silent fallback FAILS, it never skips).
+
+Schema v2 = the DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: fills
+anchor on the fill bars' FOUR adverse extremes, levy rounding is the
+permanent ADVERSE CEILING (``_round_levy_paisa`` / ``_round_levy_rupee``),
+and the stale gate is UNCONDITIONAL (no ``reject_stale`` column).
 
 Money values are STRINGS in the fixture (a JSON double loses > 2^53 — the
 vocab mask-hex precedent). The materialize sections' verdict laws are
@@ -30,16 +35,16 @@ from typing import Any, Literal
 import pytest
 from brutex import exec_rust
 from brutex.costs.calculator import (
-    ChargeStack,
     _apply_slippage,  # pyright: ignore[reportPrivateUsage] — the oracle arm
     _charge_stack_py,  # pyright: ignore[reportPrivateUsage] — the oracle arm
-    _round_to_paisa,  # pyright: ignore[reportPrivateUsage] — the oracle arm
-    _round_to_rupee,  # pyright: ignore[reportPrivateUsage] — the oracle arm
+    _round_levy_paisa,  # pyright: ignore[reportPrivateUsage] — the oracle arm
+    _round_levy_rupee,  # pyright: ignore[reportPrivateUsage] — the oracle arm
 )
 from brutex.costs.futures_costs import (
     _futures_charge_stack_py,  # pyright: ignore[reportPrivateUsage] — the oracle arm
     apply_futures_fill,
 )
+from brutex.costs.types import ChargeStack
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "exec_costs_golden_vectors.json"
 _DATA: dict[str, Any] = json.loads(_FIXTURE.read_text(encoding="utf-8"))
@@ -55,6 +60,11 @@ _STACK_ARG_KEYS = (
     "stamp_rate",
     "gst_rate",
 )
+
+
+def _bars(case: dict[str, Any]) -> tuple[int, int, int, int]:
+    """The four fill-bar extremes in the oracle argument order."""
+    return (case["entry_high"], case["entry_low"], case["exit_high"], case["exit_low"])
 
 
 def _option_args(case: dict[str, Any]) -> dict[str, Any]:
@@ -73,13 +83,13 @@ def _futures_args(case: dict[str, Any]) -> dict[str, Any]:
 
 def test_fixture_shape_and_volume() -> None:
     """The frozen corpus is present, versioned, and non-trivially sized."""
-    assert _DATA["schema_version"] == 1
+    assert _DATA["schema_version"] == 2
     for section, floor in (
         ("money", 30),
         ("fills", 300),
         ("option_stacks", 70),
         ("futures_stacks", 50),
-        ("options_materialize", 10),
+        ("options_materialize", 9),
         ("futures_materialize", 7),
     ):
         assert len(_DATA[section]) >= floor, section
@@ -92,29 +102,36 @@ def test_python_oracle_reproduces_money_vectors() -> None:
     for case in _DATA["money"]:
         x = int(case["x"])
         expected = int(case["expected"])
-        got = _round_to_paisa(x) if case["op"] == "round_to_paisa" else _round_to_rupee(x)
+        got = _round_levy_paisa(x) if case["op"] == "round_to_paisa" else _round_levy_rupee(x)
         assert got == expected, case["id"]
 
 
 def test_python_oracle_reproduces_fill_vectors() -> None:
     for case in _DATA["fills"]:
         side: Literal["long", "short"] = "long" if case["is_long"] else "short"
+        eh, el, xh, xl = _bars(case)
+        bar_args = {
+            "entry_high_paisa": eh,
+            "entry_low_paisa": el,
+            "exit_high_paisa": xh,
+            "exit_low_paisa": xl,
+        }
         if case["op"] == "slippage":
-            got = _apply_slippage(case["entry"], case["exit"], side)
+            got = _apply_slippage(side, **bar_args)
         else:
-            got = apply_futures_fill(case["entry"], case["exit"], side=side)
+            got = apply_futures_fill(side=side, **bar_args)
         assert list(got) == case["expected"], case["id"]
 
 
 def test_python_oracle_reproduces_option_stacks() -> None:
     for case in _DATA["option_stacks"]:
-        stack = _charge_stack_py(case["entry"], case["exit"], **_option_args(case))
+        stack = _charge_stack_py(*_bars(case), **_option_args(case))
         assert list(stack) == case["expected"], case["id"]
 
 
 def test_python_oracle_reproduces_futures_stacks() -> None:
     for case in _DATA["futures_stacks"]:
-        stack = _futures_charge_stack_py(case["entry"], case["exit"], **_futures_args(case))
+        stack = _futures_charge_stack_py(*_bars(case), **_futures_args(case))
         assert list(stack) == case["expected"], case["id"]
 
 
@@ -126,13 +143,13 @@ def test_python_oracle_reproduces_materialize_trade_stacks() -> None:
     for case in _DATA["options_materialize"]:
         if case["expected_kind"] != "trade":
             continue
-        stack = _charge_stack_py(case["entry"], case["exit"], **_option_args(case))
+        stack = _charge_stack_py(*_bars(case), **_option_args(case))
         assert list(stack) == case["expected"], case["id"]
         checked += 1
     for case in _DATA["futures_materialize"]:
         if case["expected_kind"] != "trade":
             continue
-        stack = _futures_charge_stack_py(case["entry"], case["exit"], **_futures_args(case))
+        stack = _futures_charge_stack_py(*_bars(case), **_futures_args(case))
         assert list(stack) == case["expected"][:17], case["id"]
         checked += 1
     assert checked >= 5  # the corpus must genuinely carry priced verdicts
@@ -155,9 +172,9 @@ def _rust_on(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_rust_seam_reproduces_fill_vectors() -> None:
     for case in _DATA["fills"]:
         if case["op"] == "slippage":
-            got = exec_rust.fill_slippage(case["entry"], case["exit"], is_long=case["is_long"])
+            got = exec_rust.fill_slippage(*_bars(case), is_long=case["is_long"])
         else:
-            got = exec_rust.fill_futures(case["entry"], case["exit"], is_long=case["is_long"])
+            got = exec_rust.fill_futures(*_bars(case), is_long=case["is_long"])
         assert got is not None, f"{case['id']}: seam fell back (not engaged)"
         assert list(got) == case["expected"], case["id"]
 
@@ -165,7 +182,7 @@ def test_rust_seam_reproduces_fill_vectors() -> None:
 @pytest.mark.usefixtures("_rust_on")
 def test_rust_seam_reproduces_option_stacks() -> None:
     for case in _DATA["option_stacks"]:
-        got = exec_rust.charge_stack_option(case["entry"], case["exit"], **_option_args(case))
+        got = exec_rust.charge_stack_option(*_bars(case), **_option_args(case))
         assert got is not None, f"{case['id']}: seam fell back (not engaged)"
         assert isinstance(got, ChargeStack)
         assert list(got) == case["expected"], case["id"]
@@ -174,7 +191,7 @@ def test_rust_seam_reproduces_option_stacks() -> None:
 @pytest.mark.usefixtures("_rust_on")
 def test_rust_seam_reproduces_futures_stacks() -> None:
     for case in _DATA["futures_stacks"]:
-        got = exec_rust.charge_stack_futures(case["entry"], case["exit"], **_futures_args(case))
+        got = exec_rust.charge_stack_futures(*_bars(case), **_futures_args(case))
         assert got is not None, f"{case['id']}: seam fell back (not engaged)"
         assert list(got) == case["expected"], case["id"]
 
@@ -183,11 +200,11 @@ def test_rust_seam_reproduces_futures_stacks() -> None:
 def test_rust_seam_reproduces_options_materialize_verdicts() -> None:
     for case in _DATA["options_materialize"]:
         got = exec_rust.materialize_option_tail(
-            case["entry"],
-            case["exit"],
+            case["entry_open"],
+            case["exit_open"],
+            *_bars(case),
             entry_volume=case["entry_volume"],
             exit_volume=case["exit_volume"],
-            reject_stale=case["reject_stale"],
             **_option_args(case),
         )
         assert got is not None, f"{case['id']}: seam fell back (not engaged)"
@@ -204,13 +221,11 @@ def test_rust_seam_reproduces_options_materialize_verdicts() -> None:
 def test_rust_seam_reproduces_futures_materialize_verdicts() -> None:
     for case in _DATA["futures_materialize"]:
         got = exec_rust.materialize_futures_tail(
-            case["entry"],
-            case["exit"],
+            *_bars(case),
             entry_volume=case["entry_volume"],
             exit_volume=case["exit_volume"],
             path_highs_paisa=case["path_highs"],
             path_lows_paisa=case["path_lows"],
-            reject_stale=case["reject_stale"],
             **_futures_args(case),
         )
         assert got is not None, f"{case['id']}: seam fell back (not engaged)"

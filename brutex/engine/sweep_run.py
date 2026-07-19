@@ -142,6 +142,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
     write_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
@@ -797,6 +798,16 @@ def canonical_trade_params(
     params.update(price_source_params_fragment(vwap_source, ema_source))
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model, and the
+    # key is emitted UNCONDITIONALLY. Removing the key instead would ALIAS
+    # every worst-case run_id with the frozen precise-era identities (the
+    # retired emit-on-non-PRECISE elide law meant "no key = PRECISE legacy"),
+    # silently re-serving precise-priced stores as worst-case results. The
+    # permanent key makes every post-DEC identity distinct from every
+    # precise-era identity by construction (Golden Rule #4 / #7); the
+    # verify/recount law is now "fill_mode key MUST be present and MUST read
+    # 'worst_case' — anything else is a refused legacy artifact".
+    params["fill_mode"] = FillMode.WORST_CASE.value
     return params
 
 
@@ -892,7 +903,10 @@ def ranked_combo_to_result_row(
         re-simulation; ``bar_bits`` is reused, not rebuilt).
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
-        reproduce the ranked combo's trades exactly.
+        reproduce the ranked combo's trades exactly. The fill law itself is
+        NOT a knob: worst-case is the only fill model
+        (DEC-FILL-WORST-CASE-ONLY-001), so the re-simulation prices under the
+        same hardcoded adverse-max law the sweep did by construction.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -1591,6 +1605,10 @@ def run_persisted_sweep(
             "data_snapshot_hash": cfg.data_snapshot_hash,
             "indicator_version": cfg.indicator_version,
             "code_commit_sha": cfg.code_commit_sha,
+            # DEC-FILL-WORST-CASE-ONLY-001: `params` already carries the
+            # UNCONDITIONAL "fill_mode": "worst_case" key (the elide law is
+            # retired with the PRECISE mode), so the audit line records the
+            # identity dict verbatim — hash inputs and audit wire agree.
             "params": params,
         },
     )

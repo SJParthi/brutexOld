@@ -179,6 +179,23 @@ class TestBuildTop100Payload:
         assert payload["empty_note"] is None
         assert payload["rows"][0]["metrics"]["sharpe"] == 1.0000000000000002  # untouched
 
+    def test_resilience_block_passes_through_untouched(self) -> None:
+        """The sibling resilience block is a top-level entry key the reader
+        boundary never maps — it reaches the wire byte-for-byte (full
+        precision), so the /strategy panel + /screener read row.resilience.*."""
+        resilience = {
+            "stats_live": True,
+            "losing_streak_p95": 4,
+            "worst_streak_pnl_pct": -12.5,
+            "longest_underwater_days": 30,
+            "win_rate_by_year": {"2024": [30, 50]},
+        }
+        rows = ({"rank": 1, "metrics": {"max_consecutive_losses": 5}, "resilience": resilience},)
+        payload = ov.build_top100_payload(
+            "r-x", Top100Result("ok", rows, "", "1:1"), fixture_root_active=False
+        )
+        assert payload["rows"][0]["resilience"] == resilience  # untouched, full precision
+
     def test_valid_empty_gets_the_honest_note(self) -> None:
         payload = ov.build_top100_payload(
             "r-x", Top100Result("ok", (), "", "1:1"), fixture_root_active=False

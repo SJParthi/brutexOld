@@ -1,5 +1,5 @@
 //! PyO3 wrappers for the exec cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-//! #1724) — every export prefixed `exec_` (the `brutex.math` facade
+//! #1960) — every export prefixed `exec_` (the `brutex.math` facade
 //! collision law). Wrappers ONLY `.map_err(PyValueError::new_err)`; the pure
 //! cores return `Result<_, String>` so `cargo test` links zero libpython
 //! (the house `metrics.rs` split — wrappers live beside the module, NOT in
@@ -8,11 +8,14 @@
 //! Wire shapes (NO pyclasses — the Python seam immediately re-wraps into the
 //! existing frozen dataclasses, whose `__post_init__` re-validates every
 //! value): a charge stack crosses as the PINNED 17-slot i64 list
-//! (`ChargeStack::to_wire` order = the `brutex.costs.calculator.ChargeStack`
+//! (`ChargeStack::to_wire` order = the `brutex.costs.types.ChargeStack`
 //! NamedTuple order); materialize verdicts cross as
 //! `(kind, values | None)` with kind ∈ {"stale_bar", "tick_floor", "trade"}
 //! and the futures trade list carrying `[…17 wire…, mae_paisa, mfe_paisa]`
-//! (19 slots). Dates, Decimals, datetimes and callbacks never cross.
+//! (19 slots). Fills take the fill bars' FOUR extremes (entry high/low +
+//! exit high/low — the DEC-FILL-WORST-CASE-ONLY-001 adverse anchors); the
+//! stale gate is UNCONDITIONAL (the former `reject_stale` knob is DELETED).
+//! Dates, Decimals, datetimes and callbacks never cross.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -29,44 +32,67 @@ const KIND_STALE_BAR: &str = "stale_bar";
 const KIND_TICK_FLOOR: &str = "tick_floor";
 const KIND_TRADE: &str = "trade";
 
-/// `exec::money::round_to_paisa` (half-away-from-zero at scale 10^7).
+/// `exec::money::round_to_paisa` (ADVERSE CEILING at scale 10^7 —
+/// DEC-FILL-WORST-CASE-ONLY-001 permanent levy rounding).
 #[pyfunction]
 pub fn exec_round_to_paisa(amount_x_bps_x100: i128) -> PyResult<i64> {
     round_to_paisa(amount_x_bps_x100).map_err(PyValueError::new_err)
 }
 
-/// `exec::money::round_to_rupee` (half-away-from-zero to a multiple of 100).
+/// `exec::money::round_to_rupee` (ADVERSE CEILING to a multiple of 100).
 #[pyfunction]
-pub fn exec_round_to_rupee(amount_paisa: i64) -> i64 {
-    round_to_rupee(amount_paisa)
+pub fn exec_round_to_rupee(amount_paisa: i64) -> PyResult<i64> {
+    round_to_rupee(amount_paisa).map_err(PyValueError::new_err)
 }
 
-/// `exec::fills::apply_slippage` → `(buy_fill, sell_fill, realized_per_share)`.
+/// `exec::fills::apply_slippage` (worst-case bar-extreme anchors) →
+/// `(buy_fill, sell_fill, realized_per_share)`.
 #[pyfunction]
 pub fn exec_apply_slippage(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
 ) -> PyResult<(i64, i64, i64)> {
-    apply_slippage(entry_open_paisa, exit_open_paisa, is_long).map_err(PyValueError::new_err)
+    apply_slippage(
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
+        is_long,
+    )
+    .map_err(PyValueError::new_err)
 }
 
-/// `exec::fills::apply_futures_fill` → `(buy_fill, sell_fill, realized_per_unit)`.
+/// `exec::fills::apply_futures_fill` (worst-case bar-extreme anchors) →
+/// `(buy_fill, sell_fill, realized_per_unit)`.
 #[pyfunction]
 pub fn exec_apply_futures_fill(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
 ) -> PyResult<(i64, i64, i64)> {
-    apply_futures_fill(entry_open_paisa, exit_open_paisa, is_long).map_err(PyValueError::new_err)
+    apply_futures_fill(
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
+        is_long,
+    )
+    .map_err(PyValueError::new_err)
 }
 
 /// `exec::costs_options::option_charge_stack` → the pinned 17-slot wire list.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_option_charge_stack(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
     lot_size: i64,
     n_lots: i64,
@@ -79,8 +105,10 @@ pub fn exec_option_charge_stack(
     gst_rate: i64,
 ) -> PyResult<Vec<i64>> {
     option_charge_stack(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         is_long,
         lot_size,
         n_lots,
@@ -100,8 +128,10 @@ pub fn exec_option_charge_stack(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_futures_charge_stack(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     is_long: bool,
     lot_size: i64,
     n_lots: i64,
@@ -116,8 +146,10 @@ pub fn exec_futures_charge_stack(
     gst_rate: i64,
 ) -> PyResult<Vec<i64>> {
     futures_charge_stack(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         is_long,
         lot_size,
         n_lots,
@@ -137,15 +169,21 @@ pub fn exec_futures_charge_stack(
 
 /// `exec::exec_options::options_materialize_core` →
 /// `("stale_bar" | "tick_floor", None)` or `("trade", 17-slot wire list)`.
+///
+/// The two OPENS feed only the TICK_FLOOR gate; the four extremes feed the
+/// worst-case fills.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_options_materialize(
     entry_open_paisa: i64,
     exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     entry_volume: i64,
     exit_volume: i64,
     is_long: bool,
-    reject_stale: bool,
     lot_size: i64,
     n_lots: i64,
     brokerage_round_trip_paisa: i64,
@@ -159,10 +197,13 @@ pub fn exec_options_materialize(
     let verdict = options_materialize_core(
         entry_open_paisa,
         exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         entry_volume,
         exit_volume,
         is_long,
-        reject_stale,
         lot_size,
         n_lots,
         brokerage_round_trip_paisa,
@@ -186,14 +227,15 @@ pub fn exec_options_materialize(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_futures_materialize(
-    entry_open_paisa: i64,
-    exit_open_paisa: i64,
+    entry_high_paisa: i64,
+    entry_low_paisa: i64,
+    exit_high_paisa: i64,
+    exit_low_paisa: i64,
     entry_volume: i64,
     exit_volume: i64,
     path_highs_paisa: Vec<i64>,
     path_lows_paisa: Vec<i64>,
     is_long: bool,
-    reject_stale: bool,
     lot_size: i64,
     n_lots: i64,
     cost_free: bool,
@@ -207,14 +249,15 @@ pub fn exec_futures_materialize(
     gst_rate: i64,
 ) -> PyResult<(&'static str, Option<Vec<i64>>)> {
     let verdict = futures_materialize_core(
-        entry_open_paisa,
-        exit_open_paisa,
+        entry_high_paisa,
+        entry_low_paisa,
+        exit_high_paisa,
+        exit_low_paisa,
         entry_volume,
         exit_volume,
         &path_highs_paisa,
         &path_lows_paisa,
         is_long,
-        reject_stale,
         lot_size,
         n_lots,
         cost_free,

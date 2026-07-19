@@ -56,7 +56,31 @@
 # kernel).
 # Pre-slice-1 history: 599 mutants measured 2026-07-08 (metrics 358 +
 # trade_sim 167 + python 65 + lib 9).
-# Measurement history, kept honest (convergence round 1 — the counts here must
+#   src/metrics.rs   — fused per-mask equity fold + drawdown scan
+#                      (DEC-SWEEP-RUST-METRICS-001)
+#   src/trade_sim.rs — resident Stage-2 trade-sim kernel
+#                      (DEC-SWEEP-RUST-TRADESIM-001)
+#   src/python.rs    — PyO3 bridge (popcount/supermask counting the sweep calls;
+#                      pyo3 is unconditional in this crate — no feature flag needed)
+#   src/lib.rs       — decl surface + the #1258 SOURCE_DIGEST stamp + the
+#                      below_parallel_threshold dispatch predicate extracted by
+#                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
+#                      boundary itself stays mutation-gated)
+#   src/stats/*.rs   — Stage-3/4 statistics kernels (slice 6,
+#                      DEC-METRICS-RUST-STATS-001): the CPCV fold pass-count
+#                      in PR-1 (a silent mutant here flips cascade/candidate
+#                      verdicts); later slice PRs land inside the same glob.
+#                      Added EXPLICITLY — this file is an allowlist, so a new
+#                      module is NOT covered "automatically" (the #1614
+#                      unwired-gate lesson).
+# 680 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`, run from
+# this dir with the slice-6 stats scope added: metrics 358 + trade_sim 167 +
+# python 65 + lib 9 + stats/cpcv 81 — the prior 599 was the 2026-07-08
+# pre-slice-6 measurement). The +81 (+13.5%) growth stays inside the 6-shard
+# matrix budget: the #1597 rehearsal's worst fno-math shard ran 65 min vs the
+# 120-min cap, and 680/6 ≈ 113 mutants/shard vs the prior 100 — an ~13% load
+# rise on a 55-min margin; re-shard only if a scheduled run approaches the
+# cap (the pre-decided +1-shard dial).# Measurement history, kept honest (convergence round 1 — the counts here must
 # describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
 # extraction + .max() reshapes brought the pre-extraction 576 down to 556
 # (measured 2026-07-07), then the race-6 merge (1bb34cc8) folded main's
@@ -68,7 +92,7 @@
 # mutation.yml shard-budget bands absorb future small drift; this growth was
 # NOT small (+7.7%), so the matrix took the #1597 pre-decided +1 shard (5→6).
 #
-# --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+# --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
 # src/exec/ core files joined the scope: money.rs 35 + fills.rs 64 +
 # costs_options.rs 61 + costs_futures.rs 38 + exec_options.rs 12 +
 # exec_futures.rs 27 = 237 mutants measured 2026-07-11 (`cargo mutants
@@ -134,7 +158,24 @@
 #                 an in-crate wrapper-calling test module + scope entry is
 #                 a NAMED follow-up riding DEC-EXEC-RUST-STAGE2-001.
 #   src/exec/mod.rs — re-export surface, 0 mutants.
-examine_globs = [
+# DEC-ENUM-KERNEL-U128-001 (fenced additive scope entry — union seam with
+# sibling fno-math lanes): src/mask_word.rs joins the scope because the
+# width-generic MaskWord trait HOISTED there from trade_sim.rs (where its
+# mutants were previously counted + kill-spot-checked under the #1549 fold)
+# must STAY mutation-gated after the move — both the trade-sim walk and the
+# enum/count kernels ride its single `is_superset` method. Re-measured
+# 2026-07-17 on the MERGED tree (`cargo mutants --list | wc -l` from this
+# dir, the slice-6 stats scope + the mask_word hoist both in effect):
+# 692 total = metrics 358 + trade_sim 155 + stats/cpcv 81 + python 79 +
+# mask_word 10 + lib 9 — superseding BOTH pre-merge lane figures (this
+# lane's 611 = the same tree minus the stats scope; slice-6's 680 above =
+# the pre-hoist tree, trade_sim 167 / python 65). The hoist moved the
+# MaskWord-impl mutants out of trade_sim (167→155) into mask_word; the
+# u128 count twins + generic-core delegators grew python.rs 65→79.
+# 692/6 ≈ 116 mutants/shard stays inside the 6-shard matrix budget (see
+# mutation.yml's shard arithmetic — ≥ ~20 min margin at +20% on the worst
+# end); the #1597 pre-decided +1-shard dial stands if a scheduled run
+# approaches the cap.examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
     "src/python.rs",
@@ -149,6 +190,8 @@ examine_globs = [
     "src/exec/exec_options.rs",
     "src/exec/exec_futures.rs",
     # --- end slice-7 exec ---
+    "src/mask_word.rs",
+    "src/stats/*.rs",
 ]
 # The provably-unviable whole-fn constructor-guess class on the two pyclass
 # shim methods ONLY (rationale + verification in the count block above).

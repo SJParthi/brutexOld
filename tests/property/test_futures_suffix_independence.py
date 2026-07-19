@@ -122,8 +122,11 @@ class TestSuffixIndependence:
     def test_r18_entry_fills_at_the_signal_minute_never_a_later_bar(
         self, prices: list[int], spread: int
     ) -> None:
-        # [R18] the entry fill derives ONLY from the entry-minute bar's open
-        # (+1 tick): recompute independently from the input price list.
+        # [R18] the entry fill derives ONLY from the entry-minute bar under
+        # the ONE worst-case law (DEC-FILL-WORST-CASE-ONLY-001): its adverse
+        # HIGH + 1 tick — recomputed independently from the input price list
+        # (high = open + spread by the _bar helper's construction). A LATER
+        # bar's price can never leak into the fill.
         bars = {
             (_ENTRY + timedelta(minutes=i)).astimezone(UTC): _bar(
                 _ENTRY + timedelta(minutes=i), p, spread
@@ -134,9 +137,13 @@ class TestSuffixIndependence:
         signal = FuturesSignal(
             instrument="NIFTY", direction=TradeDirection.BULL, entry_ts=_ENTRY, exit_ts=exit_ts
         )
-        out = materialize_futures_trade(signal, resolver=_Resolver(), source=_DictSource(bars))
+        out = materialize_futures_trade(
+            signal,
+            resolver=_Resolver(),
+            source=_DictSource(bars),
+        )
         assert isinstance(out, MaterializedFuturesTrade)
-        assert out.buy_fill_paisa == prices[0] + 5
+        assert out.buy_fill_paisa == prices[0] + spread + 5
 
 
 class TestRankIndependence:

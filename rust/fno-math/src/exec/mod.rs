@@ -1,7 +1,8 @@
-//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1724).
+//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1960).
 //!
 //! Slice 7 / P8 of the Rust conversion program: everything from the moment
-//! prices are **integer paisa** — the R15 fill laws, BOTH charge stacks
+//! prices are **integer paisa** — the worst-case fill law
+//! (DEC-FILL-WORST-CASE-ONLY-001 adverse bar-extreme anchors), BOTH charge stacks
 //! (options + futures), and the post-I/O materialize verdict tails — as pure
 //! deterministic integer functions, bit-for-bit twins of the Python oracles
 //! in `brutex.costs.calculator` / `brutex.costs.futures_costs` /
@@ -13,9 +14,11 @@
 //!
 //! ## ⚠ TWO money laws live in this repo — do not confuse them
 //!
-//! * **`exec::money` (THIS tree): half-AWAY-FROM-ZERO** on exact integers —
-//!   the COST/money law (`brutex.money` Decimal `ROUND_HALF_UP` semantics,
-//!   DEC-MONEY-2DP-001 family). A tie at +0.5 rounds to +1, at −0.5 to −1.
+//! * **`exec::money` (THIS tree): ADVERSE CEILING** on exact integers — the
+//!   permanent worst-case levy-rounding law (`_round_levy_paisa` /
+//!   `_round_levy_rupee`, DEC-FILL-WORST-CASE-ONLY-001 — supersedes the
+//!   pre-#1825 half-away-from-zero levy rounding). Every fractional levy
+//!   rounds toward +∞ (never flatters the trade).
 //! * **`trading_core::indicators::round_half_even`: half-to-EVEN on f64** —
 //!   the INDICATOR level-snapping law (fib/pivot paisa levels). NEVER use it
 //!   for money; never use this tree for indicator levels.

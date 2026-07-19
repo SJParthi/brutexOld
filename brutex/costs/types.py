@@ -43,7 +43,58 @@ __all__ = [
     "TradeSide",
     "UnsupportedTradeOutcomeError",
     "UnverifiedCostRegimeError",
+    "require_bar_extremes",
 ]
+
+
+def require_bar_extremes(
+    *,
+    entry_bar_high_paisa: int | None,
+    entry_bar_low_paisa: int | None,
+    exit_bar_high_paisa: int | None,
+    exit_bar_low_paisa: int | None,
+) -> tuple[int, int, int, int]:
+    """Narrow the four validated fill-bar extremes from ``int | None`` to ``int``.
+
+    The ONE COMMON narrowing seam (Golden Rule #11) shared by
+    :func:`brutex.costs.calculator.compute_trade_cost` and
+    :func:`brutex.costs.futures_costs.compute_futures_trade_cost`: both
+    ``TradeInput`` and ``FuturesTradeInput`` validate all four extremes
+    non-``None`` at construction (the DEC-FILL-WORST-CASE-ONLY-001 refusal in
+    ``__post_init__``), so a ``None`` here is a broken dataclass invariant —
+    not a reachable state through a validated constructor. The explicit
+    ``raise AssertionError`` (the house invariant idiom — never a bare
+    ``assert``, which vanishes under ``python -O`` and trips bandit B101)
+    keeps the guard fail-loud in every runtime mode.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        ``(entry_high, entry_low, exit_high, exit_low)`` in paisa.
+
+    Raises
+    ------
+    AssertionError
+        If any extreme is ``None`` — a broken dataclass invariant (an
+        instance built past ``__post_init__``, e.g. via ``object.__new__``).
+    """
+    if (
+        entry_bar_high_paisa is None
+        or entry_bar_low_paisa is None
+        or exit_bar_high_paisa is None
+        or exit_bar_low_paisa is None
+    ):
+        raise AssertionError(
+            "fill-bar extremes are None past construction validation — a broken "
+            "TradeInput/FuturesTradeInput invariant (DEC-FILL-WORST-CASE-ONLY-001 "
+            "requires all four extremes at construction)"
+        )
+    return (
+        entry_bar_high_paisa,
+        entry_bar_low_paisa,
+        exit_bar_high_paisa,
+        exit_bar_low_paisa,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -253,6 +304,18 @@ class TradeInput:
         Required only when ``trade_outcome`` is ``EXPIRY_EXERCISE``
         or ``EXPIRY_ASSIGN``. Intrinsic value × n_shares. Track 2
         always uses 0 (never expires).
+    entry_bar_high_paisa, entry_bar_low_paisa, exit_bar_high_paisa, exit_bar_low_paisa : int | None
+        The fill bars' extremes in paisa — the worst-case fill anchors
+        (the option's OWN minute bar; ``OptionBar`` carries high/low).
+        REQUIRED — all four (DEC-FILL-WORST-CASE-ONLY-001: worst-case is
+        the ONLY fill law, so an input without its adverse anchors is
+        unpriceable and refuses fail-loud; the ``| None`` typing survives
+        only so the refusal is a validated ``ValueError``, never a silent
+        keyword omission). Each pair must bracket its bar's open
+        (``low <= open <= high``); positivity/tick floors on the extremes
+        are deliberately NOT demanded — a degenerate sub-tick LOW is
+        absorbed by the fill floor in ``_apply_slippage``, never a sim
+        crash.
     """
 
     entry_dt_ist: datetime
@@ -269,6 +332,10 @@ class TradeInput:
     gst_split: GstSplit = "intra_state"
     trade_outcome: TradeOutcome = "NORMAL_CLOSE"
     intrinsic_value_paisa_at_expiry: int = 0
+    entry_bar_high_paisa: int | None = None
+    entry_bar_low_paisa: int | None = None
+    exit_bar_high_paisa: int | None = None
+    exit_bar_low_paisa: int | None = None
 
     def __post_init__(self) -> None:
         # Lightweight sanity checks at boundaries only — internal
@@ -305,6 +372,41 @@ class TradeInput:
             if value not in allowed:
                 msg = f"{field_name} {value!r} is not a valid value; allowed: {sorted(allowed)}"
                 raise ValueError(msg)
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the four adverse-anchor extremes are REQUIRED unconditionally — an
+        # input without them cannot be priced and refuses fail-loud (never a
+        # silent open-anchored fill; the retired PRECISE law is deleted).
+        missing = [
+            name
+            for name in (
+                "entry_bar_high_paisa",
+                "entry_bar_low_paisa",
+                "exit_bar_high_paisa",
+                "exit_bar_low_paisa",
+            )
+            if getattr(self, name) is None
+        ]
+        if missing:
+            msg = (
+                f"the worst-case fill law needs the fill-bar extremes; missing {missing} "
+                f"(worst-case is the ONLY fill law — DEC-FILL-WORST-CASE-ONLY-001)"
+            )
+            raise ValueError(msg)
+        for label, open_p, high, low in (
+            (
+                "entry",
+                self.entry_bar_open_paisa,
+                self.entry_bar_high_paisa,
+                self.entry_bar_low_paisa,
+            ),
+            ("exit", self.exit_bar_open_paisa, self.exit_bar_high_paisa, self.exit_bar_low_paisa),
+        ):
+            if high is not None and high < open_p:
+                msg = f"{label}_bar_high_paisa {high} < {label}_bar_open_paisa {open_p}"
+                raise ValueError(msg)
+            if low is not None and low > open_p:
+                msg = f"{label}_bar_low_paisa {low} > {label}_bar_open_paisa {open_p}"
+                raise ValueError(msg)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -316,7 +418,7 @@ class ChargeStack(NamedTuple):
     """The 17 integer outputs of one round-trip charge-stack computation.
 
     Field ORDER is pinned — it mirrors the Rust ``exec::ChargeStack`` struct
-    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) field-for-field, and both
+    (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) field-for-field, and both
     project 1:1 onto the numeric fields of
     :class:`~brutex.costs.types.TradeCostBreakdown` /
     :class:`~brutex.costs.futures_costs.FuturesCostBreakdown`. All values are

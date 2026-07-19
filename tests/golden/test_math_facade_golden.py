@@ -36,6 +36,9 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
         "ResidentBars",
+        # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (a
+        # deliberate, reviewed surface addition; fenced additive entries).
+        "ResidentBarsU128",
         "ResidentSweepEnum",
         "ResidentSweepEnumU128",
         "ResidentSweepSim",
@@ -44,10 +47,12 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",
+        "count_supermask_u128s",
         "count_supermask_u64s",
+        "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
-        # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+        # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
         "exec_apply_futures_fill",
         "exec_apply_slippage",
         "exec_futures_charge_stack",
@@ -70,6 +75,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "ranking_passes_gates",
         "ranking_rank_order",
         "ranking_zscores",
+        "stats_cpcv_pass_count",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
