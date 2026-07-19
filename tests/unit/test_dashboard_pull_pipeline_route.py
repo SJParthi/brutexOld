@@ -31,6 +31,7 @@ from brutex.adapters.groww.symbol_form_preference import (
     form_winner_key,
 )
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.greeks_health import DEFAULT_GREEKS_FAILURE_THRESHOLD
@@ -1163,7 +1164,15 @@ def test_pull_pipeline_cross_list_selection_scopes_both_kinds(
     contract the fix relies on: ONE ``?symbols=`` comma list spanning BOTH
     instrument kinds resolves to BOTH targets (``resolve_pull_targets`` is
     kind-agnostic) and the spot phase receives BOTH instruments, in tick order.
+
+    EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration Law 2):
+    the cross-list contract is index+STOCK by construction; under the shipped
+    index4 default the P7 selection screen now refuses the stock tick (the
+    400 arm is pinned in ``test_dashboard_pull_scope_routes.py``), so this
+    mechanics pin runs under ``full`` (merge-base parity — the §5.6 widen
+    path).
     """
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
     with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
         store.upsert_many(
             [_nifty(), _adanient()],

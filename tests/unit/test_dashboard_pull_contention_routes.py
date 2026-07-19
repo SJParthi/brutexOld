@@ -41,6 +41,7 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard import app as app_module
 from brutex.dashboard import db_view
 from brutex.dashboard.app import DashboardState, build_app
@@ -244,7 +245,15 @@ class TestPullProgressServesLastKnown:
         stamp move recomputed the fold INLINE — with the fold parked, the
         route blocked for the whole hold (the operator's ~154 s feed drops).
         Now: the PRIOR stamp's counts serve within the budget and the fold
-        runs in ONE background revalidator (the production daemon runner)."""
+        runs in ONE background revalidator (the production daemon runner).
+
+        EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        Law 2): this test pins the SWR choreography by parking the PLAIN
+        ``_window_counts_total`` fold; under the shipped index4 default the
+        route rides the SCOPED fold instead, so the park never engages. The
+        choreography is scope-indifferent — ``full`` keeps the plain fold on
+        the compute path (merge-base parity)."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         _seed_ledger(lake, "NIFTY")
         first = client.get("/api/v1/universe/pull-progress")
         assert first.status_code == 200

@@ -97,7 +97,14 @@ def _key(symbol: str, *, market: str = "groww") -> WindowKey:
 
 def _save_phase_ledger(tmp_path: Path) -> None:
     """A ledger with a distinct status mix per bucket: spot SUCCESS+FAILED+PLANNED,
-    a futures SUCCESS, and an options PLANNED-only (the flush-lag shape)."""
+    a futures SUCCESS, and an options PLANNED-only (the flush-lag shape).
+
+    The F&O keys are IN-SCOPE NIFTY contract symbols (the §6 migration Law 3
+    fixture rename, DEC-UNIVERSE-INDEX-ONLY-001): the pre-#1934 bare sids
+    ("25"/"42") carried no decodable underlying, so the R11-scoped census the
+    route now rides classified them out-of-scope and the phase counts read 0
+    — this suite pins the phase-bucket MECHANICS, which are scope-indifferent.
+    """
     ledger = WindowLedger()
     ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
     ledger.record(
@@ -105,13 +112,13 @@ def _save_phase_ledger(tmp_path: Path) -> None:
     )
     ledger.plan(_key("SENSEX"), now=_NOW)
     ledger.record(
-        _key("25", market=GROWW_FUTURE_COVERAGE_MARKET),
+        _key("NSE-NIFTY-25Jan24-FUT", market=GROWW_FUTURE_COVERAGE_MARKET),
         raw_bars=7,
         error_type=None,
         bars_appended=7,
         now=_NOW,
     )
-    ledger.plan(_key("42", market=GROWW_OPTION_COVERAGE_MARKET), now=_NOW)
+    ledger.plan(_key("NSE-NIFTY-25Jan24-21000-CE", market=GROWW_OPTION_COVERAGE_MARKET), now=_NOW)
     save_window_ledger(ledger, tmp_path)  # store.path parent (tmp_path) is the lake root
 
 

@@ -25,6 +25,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard import app as _app_module
 from brutex.dashboard.app import (
     DashboardState,
@@ -678,15 +679,20 @@ class TestWindowStatusApi:
         # carries non-empty `futures` and `options` buckets — the contract the /universe
         # all-segments inline summary now relies on (it renders all three buckets, not
         # only `spot`). Pins that `_window_counts_total` keeps splitting the namespaces.
+        # IN-SCOPE NIFTY contract keys (the §6 migration Law 3 fixture rename,
+        # DEC-UNIVERSE-INDEX-ONLY-001): the pre-#1934 bare sids ("25"/"42")
+        # carried no decodable underlying, so the R11-scoped census the route
+        # now rides classified them out-of-scope; the bucket-split mechanics
+        # this test pins are scope-indifferent.
         ledger.record(
-            _key("25", market=GROWW_FUTURE_COVERAGE_MARKET),
+            _key("NSE-NIFTY-25Jan24-FUT", market=GROWW_FUTURE_COVERAGE_MARKET),
             raw_bars=7,
             error_type=None,
             bars_appended=7,
             now=now,
         )
         ledger.record(
-            _key("42", market=GROWW_OPTION_COVERAGE_MARKET),
+            _key("NSE-NIFTY-25Jan24-21000-CE", market=GROWW_OPTION_COVERAGE_MARKET),
             raw_bars=0,
             error_type="GrowwTimeoutError",
             bars_appended=0,
@@ -712,7 +718,10 @@ class TestWindowStatusApi:
 
         failed = client.get("/api/v1/coverage/windows?status=FAILED").json()
         # Both FAILED rows surface across the spot + options namespaces (severity-first).
-        assert {w["symbol"] for w in failed["windows"]} == {"BANKNIFTY", "42"}
+        assert {w["symbol"] for w in failed["windows"]} == {
+            "BANKNIFTY",
+            "NSE-NIFTY-25Jan24-21000-CE",
+        }
 
         page = client.get("/api/v1/coverage/windows?limit=1&offset=1").json()
         assert page["returned"] == 1
@@ -768,7 +777,10 @@ class TestWindowStatusApi:
         # PLANNED row (NULL last_attempt_at — attempted statuses only).
         ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=old)
         ledger.record(_key("BANKNIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=new)
-        ledger.record(_key("INFY"), raw_bars=5, error_type=None, bars_appended=5, now=new)
+        # INDIAVIX: an admitted-index key (the §6 migration Law 3 fixture
+        # rename, DEC-UNIVERSE-INDEX-ONLY-001 — the per-run counts mechanics
+        # are scope-indifferent; a stock key would now read out-of-scope).
+        ledger.record(_key("INDIAVIX"), raw_bars=5, error_type=None, bars_appended=5, now=new)
         ledger.plan(_key("SENSEX"), now=new)
         save_window_ledger(ledger, tmp_path)
         record_pull_start(
@@ -1037,9 +1049,10 @@ class TestCompletenessScoreboard:
         # verdict wrapper (same cache entry, same sharing law).
         real = _app_module.summarize_spot_verdict_datasets
 
-        def _counting(conn: object, lake: Path) -> list[dict[str, Any]]:
+        def _counting(conn: object, lake: Path, **kwargs: Any) -> list[dict[str, Any]]:
+            # ``**kwargs`` mirrors the seam's kw-only ``scope=`` (#1934 R2).
             calls["n"] += 1
-            return real(conn, lake)
+            return real(conn, lake, **kwargs)
 
         monkeypatch.setattr(_app_module, "summarize_spot_verdict_datasets", _counting)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
@@ -1094,7 +1107,9 @@ class TestCompletenessScoreboard:
         assert csv_resp.status_code == 200
         assert "SUMMARY — spot" in csv_resp.text  # section skeleton still renders
 
-    def test_reconcile_diagnostic_pinpoints_mnm_lake_key_divergence(self, tmp_path: Path) -> None:
+    def test_reconcile_diagnostic_pinpoints_mnm_lake_key_divergence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """DEC-COMPLETENESS-SPOT-KEY-RECOVER-001 e2e (the FIX of #907's diagnostic): a scored
         ``M&M`` whose lake partition keys on the DIVERGENT exchange-prefixed ``NSE-M&M`` is now
         RECOVERED — the read-side resolver strips the row's own ``NSE-`` prefix and groups the
@@ -1103,6 +1118,11 @@ class TestCompletenessScoreboard:
         partition key is genuinely drifted and should be cleaned up), so the operator both SEES
         the data AND is told to fix the stored key. Nothing is fabricated — only the partition's
         physically-present bar surfaces under the clean symbol."""
+        # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        # Law 2): this test pins STOCK-specific machinery; under the shipped
+        # index4 default the R2 read screen excludes the stock rows (the
+        # exclusion arms live in test_dashboard_coverage_scope_routes.py).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         s = InstrumentStore.open(tmp_path / "instruments.duckdb")
         s.upsert_many(
             [_eq("M&M")],  # the scored universe keys on the clean engine symbol_name ``M&M``
@@ -1147,12 +1167,19 @@ class TestCompletenessScoreboard:
         assert entry["stray_lake_symbols"] == [repr("NSE-M&M")]
         assert entry["unmatched_scored_symbols"] == [repr("M&M")]
 
-    def test_reconcile_gate_dedupes_repeat_scoreboard_polls(self, tmp_path: Path) -> None:
+    def test_reconcile_gate_dedupes_repeat_scoreboard_polls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """DEC-TELEMETRY-RECONCILE-LEDGERSAVE-001 production wiring: the per-app
         ``ReconcileLogGate`` built in ``build_app`` deduplicates the reconcile WARNING across
         repeat scoreboard polls of a STABLE drifted state — ONE warning for three requests
         (pre-change: one per request, the 953x/night storm) — while every response payload
         stays byte-identical (logging is the only delta)."""
+        # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        # Law 2): this test pins STOCK-specific machinery; under the shipped
+        # index4 default the R2 read screen excludes the stock rows (the
+        # exclusion arms live in test_dashboard_coverage_scope_routes.py).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
             s.upsert_many(
                 [_eq("M&M")],
@@ -1185,6 +1212,11 @@ class TestCompletenessScoreboard:
         scalar rides the real ``summarize_spot_datasets`` scan, the ledger rollup is
         settled (nothing left to re-pull), yet the range density (3 / ~60 sessions)
         honestly fails the 0.95 floor. Pre-fix this read a false ``full``."""
+        # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        # Law 2): this test pins STOCK-specific machinery; under the shipped
+        # index4 default the R2 read screen excludes the stock rows (the
+        # exclusion arms live in test_dashboard_coverage_scope_routes.py).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
             s.upsert_many(
                 [_eq("SPARSECO")],
@@ -1222,10 +1254,17 @@ class TestCompletenessScoreboard:
         # …and it does NOT inflate the FULL 1-minute aggregate.
         assert body["spot"]["by_category"]["equity"]["full_1minute"] == 0
 
-    def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(self, tmp_path: Path) -> None:
+    def test_reconcile_diagnostic_silent_when_lake_key_matches_scored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The clean counterpart: when the lake partition key EQUALS the scored ``symbol_name``
         (``M&M`` on both sides) the symbol scores normally and NO reconciliation WARNING fires —
         the diagnostic is silent in the healthy steady state."""
+        # EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        # Law 2): this test pins STOCK-specific machinery; under the shipped
+        # index4 default the R2 read screen excludes the stock rows (the
+        # exclusion arms live in test_dashboard_coverage_scope_routes.py).
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         s = InstrumentStore.open(tmp_path / "instruments.duckdb")
         s.upsert_many(
             [_eq("M&M")],

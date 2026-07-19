@@ -55,7 +55,10 @@ class _BlockedScan:
         self.release = threading.Event()
         self.calls = 0
 
-    def __call__(self, _conn: Any, _lake: Path) -> list[dict[str, Any]]:
+    def __call__(self, _conn: Any, _lake: Path, **_kwargs: Any) -> list[dict[str, Any]]:
+        # ``**_kwargs`` mirrors the production seam's kw-only ``scope=``
+        # (DEC-UNIVERSE-INDEX-ONLY-001 R2/R9 — the routes thread the read
+        # union; this stand-in pins the cold-wait choreography, not the scan).
         self.calls += 1
         self.entered.set()
         assert self.release.wait(timeout=30), "test orchestration failure"
