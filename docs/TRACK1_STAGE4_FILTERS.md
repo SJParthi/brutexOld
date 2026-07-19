@@ -27,7 +27,7 @@ the last two — Lockbox + Monte-Carlo).
 |---|---|---|---|---|
 | 1 | Top-K composite | "keep only the genuinely best candidates" — a ranking pre-filter | keep top-K per group | ✅ (staging — the launcher's per-tuple `--top` truncation, default 20; 1,000 is the production-envelope sizing. See `TRACK1_BACKTEST_SPEC.md` §Stage-4 #1, DEC-SPEC-TOPK-RECONCILE-001) |
 | 2 | **Deflated Sharpe** | "a high Sharpe is unremarkable once you tried thousands of strategies" | `DSR` clears the deflated bar | ✅ #430 |
-| 3 | **CPCV** | "it only worked on one lucky train/test split" | positive Sharpe on enough of the `C(16,8)` folds | ✅ #428 |
+| 3 | **CPCV** | "it only works on some train/test splits, not most" — general split/path-dependence resistance. **NOT a single-event killer** (verified 2026-07-18: a one-lucky-event fluke measured a 0.89 CPCV pass rate ≥ the 0.5 bar — 50% of `C(16,8)` folds structurally contain any one event's group, so the fluke passes most folds; the load-bearing anti-single-event filter is **DSR**, row 2, which red-flags it FAIL — DEC-EXTREME-EVENT-DOC-HONESTY-001) | positive Sharpe on enough of the `C(16,8)` folds | ✅ #428 |
 | 4 | **Reality Check / SPA** | "the *best-of-N* beating the benchmark is just best-of-N luck" | SPA p-value `< 0.05` | ✅ #431 |
 | 5 | **PBO** | "it's overfit — the in-sample best is below-median out-of-sample" | `PBO` probability low | ✅ #430 |
 | 6 | **Romano-Wolf** | "which specific strategies are real?" — multiple-testing, not Bonferroni | in the FWER rejection set | ✅ #431 |
