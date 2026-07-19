@@ -41,6 +41,9 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_g1_no_quarantine_seam_keeps_the_raw_abort": ("G1",),
     "test_g1_vix_trio_conflict_sails_past_the_quarantine": ("G1",),
     "test_r45_diffcheck_invoked_post_persist_with_kernel_bits": ("R45",),
+    "test_r45_apriori_arm_threads_the_executed_population": ("R45",),
+    "test_r45_apriori_extinct_tuple_threads_an_empty_population": ("R45",),
+    "test_r45_legacy_arm_call_shape_carries_no_population_kwarg": ("R45",),
 }
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -84,8 +87,8 @@ def _grid() -> SweepGridConfig:
     )
 
 
-def _run(out: Path, audit_path: Path, **overrides: Any) -> Any:
-    grid = _grid()
+def _run(out: Path, audit_path: Path, grid: SweepGridConfig | None = None, **overrides: Any) -> Any:
+    grid = grid if grid is not None else _grid()
     tuple_ = next(iter_sweep_tuples(grid))
     with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
         return run_one_tuple(
@@ -186,9 +189,86 @@ def test_r45_diffcheck_invoked_post_persist_with_kernel_bits(tmp_path: Path) -> 
     out = tmp_path / "out"
     seen: list[dict[str, Any]] = []
 
-    def _diffcheck(*, bars: Any, bar_bits: Any, tuple_: Any, grid: Any) -> None:
+    def _diffcheck(
+        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+    ) -> None:
+        assert mask_population is None  # legacy arm — the kwarg is never passed
         seen.append({"n_bars": len(bars), "n_bits": len(bar_bits), "tuple": tuple_.instrument})
 
     summary = _run(out, tmp_path / "a.jsonl", diffcheck=_diffcheck)
     assert summary is not None
     assert seen == [{"n_bars": 40, "n_bits": 40, "tuple": "NIFTY"}]
+
+
+# ── R45 executed-population threading (round 3, MIGRATION.md #1752) ──
+
+
+def test_r45_apriori_arm_threads_the_executed_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apriori mode: ``run_one_tuple`` captures the tuple's candidate list
+    from ``run_persisted_sweep`` and hands it to the diffcheck as
+    ``mask_population=`` — a k=1 tuple's candidates are exactly the raw
+    singles (levels 1..k-1 are empty), so the threading is byte-checkable."""
+    monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+    seen: list[Any] = []
+
+    def _diffcheck(
+        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+    ) -> None:
+        seen.append(mask_population)
+
+    summary = _run(tmp_path / "out", tmp_path / "a.jsonl", diffcheck=_diffcheck)
+    assert summary is not None
+    assert seen == [[1 << b for b in range(5)]]  # the EXECUTED population, verbatim
+
+
+def test_r45_apriori_extinct_tuple_threads_an_empty_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EXTINCT tuple (level-1 frontier empty under an unreachable min-hits
+    floor) threads an EMPTY population — a real population, so the hook takes
+    its honest counted skip instead of the raw C(n, k) walk."""
+    monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[2],
+        condition_bits=[0, 1, 2, 3, 4],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap-g1",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+        min_hits=10_000,
+    )
+    seen: list[Any] = []
+
+    def _diffcheck(
+        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+    ) -> None:
+        seen.append(mask_population)
+
+    summary = _run(tmp_path / "out", tmp_path / "a.jsonl", grid=grid, diffcheck=_diffcheck)
+    assert summary is not None
+    assert summary.evaluated == 0  # genuinely extinct — nothing executed
+    assert seen == [[]]
+
+
+def test_r45_legacy_arm_call_shape_carries_no_population_kwarg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy mode keeps the pre-round-3 call shape VERBATIM — the kwarg is
+    never passed (every legacy TupleDiffCheck implementation stays valid)."""
+    monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+    shapes: list[list[str]] = []
+    summary = _run(
+        tmp_path / "out",
+        tmp_path / "a.jsonl",
+        diffcheck=lambda **kw: shapes.append(sorted(kw)),
+    )
+    assert summary is not None
+    assert shapes == [["bar_bits", "bars", "grid", "tuple_"]]

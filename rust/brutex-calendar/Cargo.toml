@@ -1,0 +1,90 @@
+# brutex-calendar — the calendar-leaf DECISION laws (Rust).
+#
+# DEC-RUST-CALENDAR-LEAVES-001 (lane T18): a byte-parity port of the PURE
+# decision laws of `brutex/calendars/observed_sessions.py`
+# (`classify_month_drift` + the overlay-sidecar whole-accept/whole-reject
+# validation) and `brutex/calendars/settle_evidence.py`
+# (`validate_evidence_payload` — every refusal message byte-identical to the
+# Python `ValueError` text, including CPython 3.12's C-accelerated
+# `datetime.fromisoformat` acceptance quirks, Python `repr()` value rendering
+# and `str(timedelta)` offset rendering). All I/O, logging, memoization and
+# env resolution STAY PYTHON — only ints/strings/bools/bytes cross the FFI.
+#
+# Pure-Rust-first (rlib, serde_json-only core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed / trading-core shape.
+
+[package]
+name = "brutex-calendar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Calendar-leaf decision laws (settle-evidence validator + observed-sessions drift classifier) for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors fno-math / trading-core / brutex-feed).
+publish = false
+
+[lib]
+name = "brutex_calendar"
+path = "src/lib.rs"
+# cdylib so `import brutex_calendar` finds the maturin-built extension; rlib
+# so `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+# JSON model for the validator/loader laws. `arbitrary_precision` keeps huge
+# int tokens lossless (Python json is arbitrary-precision — a
+# `margin_minutes: 10**30` must render its FULL digits in the refusal
+# message, never overflow); `preserve_order` keeps object iteration in
+# DOCUMENT order (Python dict insertion order — the per_day walk's FIRST
+# failing key decides which message fires).
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+# NOTE: the CPython `str.isprintable()` law is decided by the GENERATED
+# `src/py_printable_15_0.rs` range table (emitted from the golden-generator
+# CPython 3.12 / Unicode 15.0.0 itself — see
+# tests/goldens/generate_printable_table.py), NOT by a third-party Unicode
+# crate: the former `unicode-properties` dependency tracked Unicode 17.0 and
+# diverged from CPython on every codepoint assigned after 15.0 (refuter
+# finding F1, DEC-RUST-CALENDAR-LEAVES-001).
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into
+# the artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` /
+# `__source_digest__`. Build-script-only: it does NOT enter the shipped
+# rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# tests/source_digest_parity.rs re-includes the shared framing core to pin
+# the golden parity vector. Test-only.
+blake3 = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.
+# Deliberately NO `panic = "abort"` (the brutex-lake law, NOT the brutex-feed
+# one): the validator walks hostile JSON, so every `#[pyfunction]` body runs
+# under `std::panic::catch_unwind` and a panic must be able to UNWIND to that
+# belt and surface as a Python `RuntimeError` — never a process abort.
+
+[profile.bench]
+inherits = "release"
+debug = true

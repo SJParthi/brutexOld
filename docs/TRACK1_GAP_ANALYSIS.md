@@ -96,7 +96,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Stores it perfectly — content-addressed Parquet lake, prices snapped to 2 decimals, gaps flagged honestly | ✅ | #448, #449, #451 |
 | Discovers strategies — 52 market conditions → billions of combinations via fast u64 bit-masks | ✅ | (vocab + Stage 1A/1B) |
 | Simulates trades + computes 14 metrics (Sharpe, Sortino, Calmar, drawdown…) | ✅ | Stage 2 |
-| **Destroys lucky results** — 9 statistical overfitting filters (Deflated Sharpe, CPCV, SPA, PBO, Walk-Forward, Lockbox, Monte-Carlo) | ✅ | #470 + cascade |
+| **Destroys lucky results** — 9 statistical overfitting filters (Deflated Sharpe — the load-bearing single-event/fluke killer; CPCV — split-robustness, NOT a single-event killer; SPA, PBO, Walk-Forward, Lockbox, Monte-Carlo) | ✅ | #470 + cascade |
 | Native Rust speed kernel for the hot trade-sim loop | ✅ | #475 |
 | Live web dashboard + BLAKE3 tamper-proof audit log of every action | ✅ | #454, #456, #458 |
 | Auto-merge on green CI + Release-Please — zero clicks to ship a passing PR | ✅ | infra |

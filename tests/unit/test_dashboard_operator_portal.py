@@ -483,7 +483,9 @@ class TestLoadGenerationGuard:
         """T-N7: the `gen !== state.gen` guard on EVERY async render arm of
         the strategy panel (loadCandles · loadTrades · loadEquity then+catch
         · loadRow then+catch · loadManifestSymbol then+catch · the
-        mountFromLocation runs fallback = 9) — count-locked. HONEST scope
+        mountFromLocation runs fallback · the B1 loadBaseline arm — the
+        S2 club-fold reconcile port of DEC-RESULTS-TRUST-HONESTY-001's
+        buy-&-hold benchmark, 9 → 10) — count-locked. HONEST scope
         (COV-N2 reword; fix-round-2 reword — the earlier "the per-arm source
         pins around it do" over-claimed): the count pin catches a DROPPED
         guard and forces a conscious update when an arm is added; proving a
@@ -491,7 +493,7 @@ class TestLoadGenerationGuard:
         round-1 manifest-catch arm's lives in the test below."""
         js = _js(_STRATEGY_PANEL_JS)
         guards = js.count("if (gen !== state.gen) { return; }")
-        assert guards == 9, f"expected 9 gen guards, found {guards}"
+        assert guards == 10, f"expected 10 gen guards, found {guards}"
         # Every guard captures the generation BEFORE its fetch:
         assert js.count("var gen = state.gen;") >= 6
         # update() owns the ONE bump:
@@ -672,6 +674,8 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "scInstrument",
             "scMinWin",
             "scMinPf",
+            "scMinTrades",
+            "scMinDsr",
             "scMaxDd",
             "scVixLo",
             "scVixHi",
@@ -690,6 +694,8 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             ">Instrument<",
             ">Min win %<",
             ">Min PF<",
+            ">Min trades<",
+            ">Min DSR (tuple-N)<",
             ">Max |DD| (paisa)<",
             ">VIX band ≥<",
             ">VIX band ≤<",
@@ -739,7 +745,9 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "stWinRate",
             "stPf",
             "stTrades",
+            "stBench",
             "stVixBand",
+            "stBenchDetail",
             "stArith",
             "stExpectancy",
             "stRecovery",
@@ -802,6 +810,7 @@ _PANEL_INVENTORY: dict[str, dict[str, tuple[str, ...]]] = {
             "Edge — gross signal P&amp;L",
             "signal-only — costs modeled in the options-translation track",
             "source: none",
+            "benchmark: awaiting stored baseline artifact (R27)",
             "awaiting real run artifact — trades appear once the run's results-depth sidecars land",
             "family drill-down (R34) is a named later PR",
             # DEC-RESILIENCE-STREAKS-001: the honest signal-only caveat + the
@@ -1305,7 +1314,11 @@ class TestRunSwitchStopsTheOldRunChain:
         # standalone page's static awaiting copy) and BEFORE the fetch:
         no_run_at = update.index("if (!state.runId) { return; }")
         reset_at = update.index("resetPanelDom(); // NEW-R3-1: no previous-target residue")
-        fetch_at = update.index("loadManifestSymbol(loadRow);")
+        # B1 (S2 club-fold reconcile): the fetch entry now chains
+        # loadBaseline() ahead of loadRow() inside the manifest callback —
+        # the pin repoints to the same ONE fetch entry token; the ordering
+        # law (no-run early return < reset < fetch) is unchanged.
+        fetch_at = update.index("loadManifestSymbol(function () {")
         assert no_run_at < reset_at < fetch_at
 
     def test_reset_covers_story_trades_chart_and_equity(self) -> None:
@@ -1636,7 +1649,7 @@ var IDS = [
   "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
-  "stCascade", "stCascadeDeep",
+  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail",
   "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
   "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
   "stPage", "stEquityLabel", "stArrowNote"
@@ -1969,7 +1982,7 @@ var IDS = [
   "stDsr", "stCpcv", "stWinRate", "stPf", "stTrades", "stVixBand", "stArith",
   "stExpectancy", "stRecovery", "stLossStreak", "stMae", "stMfe",
   "stMinuteDd", "stExitMix", "stWorst5", "stTrendSplit", "stRegimeWonder",
-  "stCascade", "stCascadeDeep",
+  "stCascade", "stCascadeDeep", "stBench", "stBenchDetail",
   "stTradesBody", "stTradesNote", "stChartHost", "stEquityHost",
   "stChartCoords", "stChartError", "stTradesError", "stTradesSource",
   "stPage", "stEquityLabel", "stArrowNote"
