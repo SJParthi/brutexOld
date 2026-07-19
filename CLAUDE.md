@@ -3312,9 +3312,16 @@ hostile-review pass._
   registration site, doc-commented); the reconcile-diff + prefix-grouping
   laws deliberately LEFT in Python (dict-equality punning on arbitrary
   evidence dicts — a documented exclusion); nse.py is a separate later
-  slice (PR #1513 coordination). GATES: 37 cargo tests green; cargo fmt
-  --check / clippy --all-targets -D warnings / test --release green; wheel
-  built (cp312-abi3); zero Python-side gate exposure (no Python files
+  slice (PR #1513 coordination). REFUTER ROUND folded (refuter-confirmed
+  F1 unicode-table drift + F2 float-tie rounding, both message-byte-only —
+  no verdict/adopted drift in ~128k trials — fixed at ROOT: the GENERATED
+  CPython-3.12/Unicode-15.0 printability table replaces unicode-properties
+  + exact half-even shortest-float repr replaces `{:e}`; re-verified at
+  ≥100k-trial scale with ZERO mismatches, settle goldens 127 → 145 —
+  per-item record in MIGRATION.md #1957). GATES: 41 cargo tests green;
+  cargo fmt --check / clippy --all-targets -D warnings / test --release
+  green; wheel rebuilt (cp312-abi3) + the refuter harness rerun clean;
+  zero Python-side gate exposure (no Python files
   touched). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
   no new env vars.)

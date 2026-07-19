@@ -271,6 +271,46 @@ s_add("ignored_neg", _mut(ignored_records=-1))
 s_add("ignored_float", _mut(ignored_records=0.0))
 s_add("ignored_ok_valid", _mut(ignored_records=0))
 
+# ── refuter-round top-up (append-only — every case above stays byte-identical)
+# (i) float-repr decimal-TIE values in {value!r} sites (refuter finding F2:
+# 16–17-significant-digit values whose exact binary expansion is a halfway
+# decimal — CPython dtoa rounds the tie half-to-even).
+s_add("margin_float_tie", _mut(margin_minutes=1685650392397.1562))
+s_add("margin_float_tie_neg", _mut(margin_minutes=-1584234787577867.2))
+s_add("kind_float_tie", _mut(kind=-1584234787577867.2))
+s_add("days_float_tie", _mut(distinct_trading_days=230798374623274.25))
+# (ii) codepoints ASSIGNED after Unicode 15.0 (Cn to CPython 3.12 → escaped;
+# refuter finding F1) embedded at two distinct {value!r} sites.
+s_add("kind_post15_codepoint", _mut(kind="x\U0002ebf0"))
+s_add("perday_key_post15_codepoint", _perday("x\u088f", {"15:45": dict(CELL)}))
+# (iii) gate-tier audit sub-gaps:
+# ignored_records bool literals (the one named-field family with ZERO bool
+# coverage — the int-guard's bool arm now exercised on both polarities).
+s_add("ignored_bool_true", _mut(ignored_records=True))
+s_add("ignored_bool_false", _mut(ignored_records=False))
+# adopted_settle_ist strict-SHAPE refusals (newline/unicode-digit/short/long
+# existed only on earliest_all_pass_ist).
+s_add("adopted_newline", _mut(adopted_settle_ist="16:00\n"))
+s_add("adopted_unicode_digit", _mut(adopted_settle_ist="١٦:00"))
+s_add("adopted_short", _mut(adopted_settle_ist="6:00"))
+s_add("adopted_long", _mut(adopted_settle_ist="016:00"))
+# adopted != earliest + margin equality-MISMATCH — off-by-one BOTH directions
+# + a large-margin mismatch (the lone `arith` case was 1-only, +1 direction).
+s_add("arith_minus1", _mut(adopted_settle_ist="15:59"))
+s_add("arith_plus_hour", _mut(adopted_settle_ist="17:00"))
+s_add(
+    "arith_large_margin_off",
+    _mut(earliest_all_pass_ist="15:45", margin_minutes=240, adopted_settle_ist="20:45"),
+)
+# per-field bool refusals — the missing polarity for each 1-only family
+# (schema already carries both True and False).
+s_add("margin_bool_false", _mut(margin_minutes=False))
+s_add("days_bool_true", _mut(distinct_trading_days=True))
+s_add(
+    "perday_records_bool_false",
+    _perday("2026-07-11", {"15:45": {"records": False, "all_pass": True, "failed_checks": []}}),
+)
+
 settle_out = []
 for name, payload_json in settle_cases:
     payload = json.loads(payload_json)

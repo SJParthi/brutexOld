@@ -38,7 +38,7 @@ fn settle_goldens_byte_parity() {
         .and_then(Value::as_array)
         .expect("cases array");
     assert!(
-        cases.len() >= 100,
+        cases.len() >= 145,
         "battery unexpectedly small: {}",
         cases.len()
     );
