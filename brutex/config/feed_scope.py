@@ -171,7 +171,14 @@ DEFAULT_FEED_SCOPES: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 #: The env override knob (design §2.3 — the full grammar in the module doc).
-FEED_SCOPE_ENV: Final[str] = "BRUTEX_FEED_SCOPE"
+#: ``ENV_FEED_SCOPE`` is the canonical ``ENV_*``-pattern declaration the
+#: ``scripts/ops/print_env_schema.py`` registry greps for
+#: (DEC-ENV-REGISTRY-001, MIGRATION.md #244 — the config-package idiom:
+#: ``ENV_LAKE_ROOT``/``ENV_RUNTIME_FILE``/``ENV_PORT_*``);
+#: ``FEED_SCOPE_ENV`` is the name every consumer imports (kept — both name
+#: the ONE string, never two knobs).
+ENV_FEED_SCOPE: Final[str] = "BRUTEX_FEED_SCOPE"
+FEED_SCOPE_ENV: Final[str] = ENV_FEED_SCOPE
 
 #: The reserved feed label the read-union :class:`FeedScope` carries.
 READ_UNION_FEED: Final[str] = "<read-union>"
@@ -464,6 +471,7 @@ def _reset_for_tests() -> None:
 __all__ = [
     "DEFAULT_FEED",
     "DEFAULT_FEED_SCOPES",
+    "ENV_FEED_SCOPE",
     "FEED_SCOPE_ENV",
     "INDEX4_FNO_UNDERLYINGS",
     "INDEX4_UNDERLYINGS",

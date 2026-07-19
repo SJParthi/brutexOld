@@ -181,6 +181,25 @@ launchctl verification, recovery playbook, dead-man).
 
 ---
 
+## 9. Per-feed universe scope (DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934)
+
+Parsed FAIL-LOUD (`FeedScopeError`) at every CLI/dashboard entrypoint's
+eager-validation site — a set-but-junk value exits `EXIT_USER_ERROR` (CLI) /
+HTTP 400 (dashboard), never a silent coercion or a mid-pull crash. Blank or
+whitespace-only ≡ unset (the house tristate convention). Resolution is
+memoized per raw env string — a mid-process ENV flip is unsupported; the
+widen path is env change → master reload (auto-healed one-shot) → verify.
+
+| Env var | Default | Allowed | Module |
+|---|---|---|---|
+| `BRUTEX_FEED_SCOPE` | unset (= the shipped per-feed defaults: `groww=index4,dhan=index4`) | a bare token (`index4` \| `full`) applying to all scope-known feeds, XOR a per-feed CSV of `key=token` pairs (e.g. `groww=index4,gdfl=full`); mixing the forms, unknown tokens, empty/duplicate keys all refuse loudly | `brutex.config.feed_scope` |
+
+`index4` = exactly the 4 `V1_INDICES` pairs (`NSE-NIFTY`, `NSE-BANKNIFTY`,
+`BSE-SENSEX`, `NSE-INDIAVIX`) + the 3 F&O-bearing index chains; `full` = the
+pre-#1934 legacy admission rules (the widen path — pinned byte-identical).
+
+---
+
 ## Quick smoke test
 
 After setting env vars:
@@ -203,6 +222,7 @@ typos).
 * DEC-MONITOR-LOOP-001 (MIGRATION entry #242) — `BRUTEX_MONITOR_*`
 * DEC-STANDARD-MONITOR-001 (#243) — env-driven composer
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
+* DEC-UNIVERSE-INDEX-ONLY-001 (#1934) — `BRUTEX_FEED_SCOPE` per-feed universe scope
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
 * DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — live vendor contract

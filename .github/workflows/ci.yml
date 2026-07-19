@@ -1934,6 +1934,21 @@ jobs:
           else
             echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
           fi
+          # DEC-UNIVERSE-INDEX-ONLY-001 (MIGRATION.md #1934): the per-feed
+          # universe scope law — the config leaf (env grammar + memo law +
+          # registration seam + read union) and the read-side scope-filter
+          # leaf (dataset/window/contract predicates + the note/echo helpers).
+          # Both ship at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_feed_scope.py" > /dev/null; then
+            pytest --cov=brutex.config.feed_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_scope.py
+          else
+            echo "(brutex.config.feed_scope test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_scope_filter.py" > /dev/null; then
+            pytest --cov=brutex.data.scope_filter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_scope_filter.py
+          else
+            echo "(brutex.data.scope_filter test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.

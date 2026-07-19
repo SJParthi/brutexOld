@@ -22,6 +22,7 @@ from brutex.data.scope_filter import (
     classify_window_row,
     scope_admits_dataset,
     scope_admits_fno_contract,
+    scope_admitted_symbol_names,
     scope_excluded_echo,
     scope_note_suffix,
     window_scope_admit,
@@ -227,3 +228,16 @@ class TestScopeAdmitsFnoContract:
         wide = _full(monkeypatch)
         assert scope_admits_fno_contract("MCX", "ANYTHING", wide) is True
         assert scope_admits_fno_contract("NSE", "RELIANCE", wide) is True
+
+
+class TestScopeAdmittedSymbolNames:
+    """R11's SQL-bind name set (stage-3a gate completion — module-gate 100%)."""
+
+    def test_bounded_reads_the_four_exchange_folded_names(self) -> None:
+        assert scope_admitted_symbol_names(_index4()) == frozenset(
+            {"NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"}
+        )
+
+    def test_unbounded_reads_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty set under full — callers gate on ``scope.bounded()`` first."""
+        assert scope_admitted_symbol_names(_full(monkeypatch)) == frozenset()
