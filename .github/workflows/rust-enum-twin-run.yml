@@ -18,6 +18,17 @@
 name: Rust enum twin-run (real lake, M4 Pro)
 
 on:
+  # PUSH trigger (integration/club-r1-fnomath ONLY): workflow_dispatch cannot
+  # reach a workflow that is not on the default branch (a 404 from the API),
+  # but a push event reads + runs the workflow file FROM the pushed ref — the
+  # same mechanism bench-m4pro.yml uses to run on claude/** pushes on this
+  # self-hosted runner. This fires the #1479 real-lake twin-run parity gate
+  # (DEC-SWEEP-ENUM-RUST-001) automatically on every push to this branch, so
+  # the operator does not run it by hand. Scoped to this ONE branch so it can
+  # never auto-fire elsewhere. Dispatch is kept for the operator terminal path.
+  push:
+    branches:
+      - integration/club-r1-fnomath
   workflow_dispatch:
     inputs:
       twin_start:
@@ -85,3 +96,18 @@ jobs:
           name: rust-enum-twin-run-output
           path: twin_run_output.txt
           if-no-files-found: warn
+
+      - name: Publish twin-run result to job summary (PASS/FAIL line + both hash manifests)
+        if: always()
+        run: |
+          if [ -f twin_run_output.txt ]; then
+            {
+              echo '## Rust sweep-enum twin-run (real lake, M4 Pro) — #1479 parity gate'
+              echo ''
+              echo '```'
+              cat twin_run_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Rust sweep-enum twin-run — no twin_run_output.txt produced' >> "$GITHUB_STEP_SUMMARY"
+          fi
