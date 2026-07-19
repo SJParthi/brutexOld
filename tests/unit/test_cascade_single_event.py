@@ -218,6 +218,17 @@ def test_stage_rejects_fluke_in_cascade_when_on() -> None:
     assert rep.stage_survivors[FilterStage.SINGLE_EVENT_SENSITIVITY.value] == 0
 
 
+def test_stage_keeps_legit_candidate_when_on() -> None:
+    """A legit candidate SURVIVES the stage when ON (the keep branch; later
+    stages may still reject it — never at the single-event stage)."""
+    rets, ords = _per_bar(_steady_trades())
+    cfg = CascadeConfig(seed=7, single_event_max_best_day_pct=5.0)
+    rep = run_stage4_cascade([_candidate("legit", rets, ords)], cfg)
+    assert rep.stage_survivors[FilterStage.SINGLE_EVENT_SENSITIVITY.value] == 1
+    (verdict,) = rep.verdicts
+    assert verdict.rejected_at is not FilterStage.SINGLE_EVENT_SENSITIVITY
+
+
 def test_off_arm_stage_fully_absent() -> None:
     """knob None (default) → the verdict helper is NEVER invoked and the stage
     token is absent from stage_survivors (behavior identical to pre-change)."""
