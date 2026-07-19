@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog

@@ -350,13 +350,12 @@ class TestReconcile:
         recorded the vanished file on ``unreadable`` → a launch REFUSAL.
         """
         import errno
-        from types import SimpleNamespace
 
         from structlog.testing import capture_logs
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
         target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
-        real_read = pl.read_parquet
+        from brutex.data.guarded_read import read_parquet_regular as real_read
 
         def _vanishing_read(path: object, *args: object, **kwargs: object) -> object:
             if Path(str(path)) == target:
@@ -365,11 +364,13 @@ class TestReconcile:
                 raise FileNotFoundError(errno.ENOENT, "vanished mid-reconcile", str(target))
             return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        # Scope the shim to the module-level `pl` name (never the shared polars
-        # module object) so only the reconcile's reads are intercepted.
+        # Scope the shim to the reconcile's module-level read seam (the
+        # DEC-LAKE-READ-INODE-GUARD-001 guarded reader the loop now calls —
+        # never the shared guarded_read module object) so only the reconcile's
+        # reads are intercepted.
         monkeypatch.setattr(
-            "brutex.data.catalog_reconcile.pl",
-            SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions),
+            "brutex.data.catalog_reconcile.read_parquet_regular",
+            _vanishing_read,
         )
         with _open(tmp_path) as cat, capture_logs() as logs:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
@@ -482,22 +483,24 @@ class TestReconcile:
         Fails-before: round 1's "all OSError → benign" arm counted BOTH a
         benign ``skipped`` — a silent-partial sweep launch.
         """
-        from types import SimpleNamespace
 
         from structlog.testing import capture_logs
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
         target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
-        real_read = pl.read_parquet
+        from brutex.data.guarded_read import read_parquet_regular as real_read
 
         def _faulting_read(path: object, *args: object, **kwargs: object) -> object:
             if Path(str(path)) == target:
                 raise exc_factory(target)
             return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
 
+        # The reconcile's module-level read seam (DEC-LAKE-READ-INODE-GUARD-001
+        # guarded reader) — the same interception point the vanished-file test
+        # uses.
         monkeypatch.setattr(
-            "brutex.data.catalog_reconcile.pl",
-            SimpleNamespace(read_parquet=_faulting_read, exceptions=pl.exceptions),
+            "brutex.data.catalog_reconcile.read_parquet_regular",
+            _faulting_read,
         )
         with _open(tmp_path) as cat, capture_logs() as logs:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
