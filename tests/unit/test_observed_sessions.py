@@ -23,7 +23,10 @@ convention the file silences ``reportPrivateUsage`` at the top.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import os
+import signal
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -33,6 +36,7 @@ from brutex.calendars import observed_sessions as obs
 from brutex.calendars.nse import HolidayDataUnavailableError, is_trading_day
 from brutex.calendars.observed_sessions import (
     MAX_FLAGS_PER_MONTH,
+    MAX_OVERLAY_BYTES,
     MAX_OVERLAY_DAYS_PER_YEAR,
     OBSERVED_LABEL,
     OBSERVED_OVERLAY_VERSION,
@@ -144,6 +148,29 @@ def _seed_lake(
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
     return [e for e in logs if e["event"] == name]
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None, None, None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-5 FIFO defect is an ``open(2)`` that
+    blocks FOREVER (a reader-side FIFO open waits for a writer), so a plain
+    regression test would HANG rather than fail; the ``SIGALRM`` handler
+    raising interrupts the blocked syscall and fails the test instead (the
+    ``test_lake_stats_manifest`` round-6 watchdog pattern).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"sidecar read blocked > {seconds}s (FIFO open hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,11 +360,173 @@ class TestLoadObservedHolidays:
         assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
 
     def test_load_oserror_warns_empty(self, tmp_path: Path) -> None:
-        # The sidecar path being a DIRECTORY raises IsADirectoryError (an OSError).
+        # The sidecar path being a DIRECTORY fails closed as an OSError. Since
+        # review round 5 the mechanism is the not-regular clause (POSIX
+        # `os.open` on a directory SUCCEEDS, unlike the pre-fix `Path.open`
+        # whose IsADirectoryError this test originally pinned) — same WARN +
+        # empty-overlay degrade either way.
         overlay_path(tmp_path).mkdir(parents=True)
         with capture_logs() as logs:
             assert load_observed_holidays(tmp_path) == frozenset()
+        events = _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)
+        assert len(events) == 1
+        assert "non-regular" in str(events[0].get("error"))
+
+    def test_load_nesting_bomb_warns_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4 (fails-before: RecursionError ESCAPED all three catch
+        # clauses — the #1558-r2 SweepCheckpointStore nesting-bomb class): a
+        # '['*100k sidecar makes json.loads raise RecursionError; the loader
+        # must degrade to the empty overlay with ONE WARN, never a raw crash of
+        # the sweep launch / pull / dashboard page consuming it.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
         assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_load_invalid_utf8_warns_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4 (fails-before: UnicodeDecodeError — a ValueError, not
+        # an OSError — ESCAPED the read arm's catch on the old read_text path).
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xfe{")
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(_events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)) == 1
+
+    def test_load_oversized_sidecar_warns_empty(self, tmp_path: Path) -> None:
+        # Review round 4 (the #1614 bounded-read precedent): one byte over the
+        # 1 MiB cap is rejected fail-closed — WARN + empty overlay — without
+        # ever reading the plant whole (the read stops at cap + 1 bytes).
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b" " * (MAX_OVERLAY_BYTES + 1))
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        events = _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)
+        assert len(events) == 1
+        assert "oversized" in str(events[0].get("error"))
+
+    def test_load_exactly_at_cap_parses(self, tmp_path: Path) -> None:
+        # The boundary law: EXACTLY MAX_OVERLAY_BYTES parses normally (kills a
+        # `>` -> `>=` cap mutant) — JSON tolerates trailing whitespace padding.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(
+            {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("2026-05-12")]}
+        ).encode("utf-8")
+        path.write_bytes(body + b" " * (MAX_OVERLAY_BYTES - len(body)))
+        assert path.stat().st_size == MAX_OVERLAY_BYTES
+        with capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset({_DRIFT_DAY})
+        assert _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT) == []
+
+    def test_load_fifo_plant_fails_closed_never_hangs(self, tmp_path: Path) -> None:
+        # Review round 5 (fails-before: EMPIRICALLY REPRODUCED — a writer-less
+        # FIFO planted at the overlay path blocked POSIX open(2) FOREVER,
+        # before any fail-closed belt could fire, wedging every consumer:
+        # dashboard page / pull / the cmd_sweep_all overlay load — killed only
+        # by an external 5 s timeout, exit 124). The FULL #1614 shape
+        # (O_NONBLOCK + S_ISREG on the OPEN descriptor) fails closed instead:
+        # ONE WARN + the empty overlay, returning immediately.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        with _hang_watchdog(), capture_logs() as logs:
+            assert load_observed_holidays(tmp_path) == frozenset()
+        events = _events(logs, obs.OVERLAY_LOAD_FAILED_EVENT)
+        assert len(events) == 1
+        assert "non-regular" in str(events[0].get("error"))
+
+    def test_bounded_read_fd_close_discipline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fd ownership handoff is a REAL contract, pinned via an
+        ``os.close`` spy (review round 9 — the #1614
+        ``test_loader_fd_close_discipline`` shape verbatim-adapted; kills
+        every mutant of the ``owned`` handoff flag in
+        ``_bounded_sidecar_read``: a stuck-False sentinel LEAKS the fd of
+        every rejected non-regular read unobserved, a clobbered handoff
+        double-closes a descriptor the ``BufferedReader`` already owns —
+        the classic reused-fd corruption bug):
+
+        * ABSENT sidecar — ``os.open`` raised, nothing was opened, the
+          ``finally`` must close NOTHING;
+        * SERVED sidecar — ``os.fdopen`` took ownership, the ``finally``
+          must close NOTHING (the reader closes its own fd internally at
+          the C level, so the spy stays silent) and the read still returns
+          the bytes (parsed into the overlay set);
+        * NOT-REGULAR sidecar (directory AND FIFO plants) — opened but
+          never handed off, the ``finally`` must close EXACTLY the fd
+          ``os.open`` returned, once.
+        """
+        closed: list[int] = []
+        opened: list[int] = []
+        real_open, real_close = os.open, os.close
+
+        def _open_spy(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            fd = real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+            opened.append(fd)
+            return fd
+
+        def _close_spy(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(os, "open", _open_spy)
+        monkeypatch.setattr(os, "close", _close_spy)
+
+        def _drain() -> tuple[list[int], list[int]]:
+            """Snapshot-then-reset the spy ledgers for ONE arm's assertions.
+
+            Each arm below asserts on its OWN freshly-bound snapshot lists so
+            every pin is self-contained — the previous shape re-asserted the
+            identical comparison on the same live, never-rebound ledgers
+            (mutated only in place via ``clear``/``append``), which a
+            flow-sensitive static analysis reads as implied by the earlier
+            arm's assert and therefore always-true (CodeQL alert 1089,
+            py/redundant-comparison).
+            """
+            snapshot = (list(opened), list(closed))
+            opened.clear()
+            closed.clear()
+            return snapshot
+
+        # Absent: no fd exists, so no close may happen.
+        assert load_observed_holidays(tmp_path) == frozenset()
+        absent_opened, absent_closed = _drain()
+        assert absent_opened == [] and absent_closed == []
+
+        # Served: ownership moved to the BufferedReader — the frame's own
+        # finally must not (double-)close it, and the bytes are served
+        # (proven by the parsed overlay set).
+        path = self._write(
+            tmp_path,
+            {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("2026-05-12")]},
+        )
+        assert load_observed_holidays(tmp_path) == frozenset({_DRIFT_DAY})
+        served_opened, served_closed = _drain()
+        assert len(served_opened) == 1 and served_closed == []
+
+        # Not-regular (directory): opened (POSIX ``os.open`` on a directory
+        # SUCCEEDS, unlike ``Path.open``), never handed off — closed exactly
+        # once. This is the arm the surviving ``owned = True -> False``
+        # mutant leaks on: under it the closed ledger stays empty.
+        path.unlink()
+        path.mkdir()
+        with _hang_watchdog():
+            assert load_observed_holidays(tmp_path) == frozenset()
+        dir_opened, dir_closed = _drain()
+        assert len(dir_opened) == 1 and dir_closed == dir_opened
+
+        # Not-regular (FIFO): same law through the O_NONBLOCK open.
+        path.rmdir()
+        os.mkfifo(path)
+        with _hang_watchdog():
+            assert load_observed_holidays(tmp_path) == frozenset()
+        fifo_opened, fifo_closed = _drain()
+        assert len(fifo_opened) == 1 and fifo_closed == fifo_opened
 
 
 class TestWindowCovers:
@@ -700,6 +889,52 @@ class TestReadSidecarEntries:
             encoding="utf-8",
         )
         assert obs._read_sidecar_entries(path) == [good]
+
+    def test_nesting_bomb_reads_empty_never_raises(self, tmp_path: Path) -> None:
+        # Review round 4: the merge-side reader rides the SAME widened belt —
+        # a nesting-bomb sidecar reads as the tolerant empty entry list instead
+        # of crashing the manual detect run with a raw RecursionError.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        assert obs._read_sidecar_entries(path) == []
+
+    def test_oversized_sidecar_reads_empty(self, tmp_path: Path) -> None:
+        # Review round 4: the merge-side reader shares the bounded-read law.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b" " * (MAX_OVERLAY_BYTES + 1))
+        assert obs._read_sidecar_entries(path) == []
+
+    def test_exactly_at_cap_round_trips(self, tmp_path: Path) -> None:
+        # Review round 5: the at-cap twin of test_load_exactly_at_cap_parses —
+        # the merge-side cap compare had NO boundary pin of its own, so a
+        # `>` -> `>=` mutant on _read_sidecar_entries survived the whole
+        # covering suite (an exactly-1-MiB valid sidecar would read as [] and
+        # a merge rewrite would DROP previously-stored entries). EXACTLY
+        # MAX_OVERLAY_BYTES parses + the entry list round-trips.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        good = {
+            "date": "2026-05-12",
+            "detected_at": _NOW.isoformat(),
+            "month": "2026-05",
+            "label": OBSERVED_LABEL,
+        }
+        body = json.dumps({"version": OBSERVED_OVERLAY_VERSION, "entries": [good]}).encode("utf-8")
+        path.write_bytes(body + b" " * (MAX_OVERLAY_BYTES - len(body)))
+        assert path.stat().st_size == MAX_OVERLAY_BYTES
+        assert obs._read_sidecar_entries(path) == [good]
+
+    def test_fifo_plant_reads_empty_never_hangs(self, tmp_path: Path) -> None:
+        # Review round 5: the merge-side twin of the loader's FIFO regression —
+        # the shared _bounded_sidecar_read's O_NONBLOCK + S_ISREG guard fails
+        # closed as [] (the OSError belt) instead of blocking open(2) forever.
+        path = overlay_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        with _hang_watchdog():
+            assert obs._read_sidecar_entries(path) == []
 
     def test_compact_iso_entry_filtered(self, tmp_path: Path) -> None:
         # The merge-side reader applies the SAME canonical-form-only rule

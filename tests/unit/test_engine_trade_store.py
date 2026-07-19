@@ -211,6 +211,8 @@ class TestSidecarPathsFor:
             aggs=base / "bull_k3_deadbeef00000000.aggs.parquet",
             equity=base / "bull_k3_deadbeef00000000.equity.parquet",
             stamp=base / "bull_k3_deadbeef00000000.stamp.json",
+            resilience=base / "bull_k3_deadbeef00000000.resilience.parquet",
+            resilience_stamp=base / "bull_k3_deadbeef00000000.resilience.stamp.json",
         )
 
     def test_nothing_lands_inside_the_globbed_sweeps_tree(self, tmp_path: Path) -> None:
@@ -219,7 +221,14 @@ class TestSidecarPathsFor:
         root = tmp_path / "sweeps"
         store = root / "NIFTY" / "5minute" / "bull_k3_deadbeef00000000.parquet"
         mapped = sidecar_paths_for(store, root, run_id=_GRID_RUN)
-        for path in (mapped.trades, mapped.aggs, mapped.equity, mapped.stamp):
+        for path in (
+            mapped.trades,
+            mapped.aggs,
+            mapped.equity,
+            mapped.stamp,
+            mapped.resilience,
+            mapped.resilience_stamp,
+        ):
             assert not path.is_relative_to(root), path
 
     def test_rejects_store_outside_root(self, tmp_path: Path) -> None:
@@ -579,14 +588,18 @@ class TestLoadStampDamageMatrix:
         self, written: SidecarPaths, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # stat succeeds but the content read errors (I/O fault mid-validation).
-        original = Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the hash-tier read rides the guarded
+        # deadline reader now — fault THAT seam (Path.read_bytes is unused).
+        from brutex.engine import trade_store as ts_mod
 
-        def _flaky(self: Path) -> bytes:
-            if self == written.equity:
+        original = ts_mod.read_regular_bytes_deadline
+
+        def _flaky(path: Path, **kwargs: object) -> bytes:
+            if path == written.equity:
                 raise OSError("injected read fault")
-            return original(self)
+            return original(path, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(Path, "read_bytes", _flaky)
+        monkeypatch.setattr(ts_mod, "read_regular_bytes_deadline", _flaky)
         assert load_stamp(written) is None
 
 

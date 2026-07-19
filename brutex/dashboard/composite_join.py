@@ -124,7 +124,7 @@ def load_composite_index(results_root: Path) -> CompositeIndex:
     module docstring for the full tolerance law; this function NEVER raises
     on lake damage (state ``error`` is the last-resort degrade).
     """
-    import polars as pl
+    from brutex.data.guarded_read import read_parquet_regular
 
     run_id = newest_run_name(results_root)
     if run_id is None:
@@ -147,7 +147,7 @@ def load_composite_index(results_root: Path) -> CompositeIndex:
     skip_errors = movers_read_skip_errors()
     for path in paths:
         try:
-            frame = pl.read_parquet(path, columns=["run_id", "composite_score"])
+            frame = read_parquet_regular(path, columns=("run_id", "composite_score"))
         except skip_errors as exc:
             # One corrupt/unreadable sidecar never blanks the index — the
             # movers_resilient per-file skip class (counted + logged).

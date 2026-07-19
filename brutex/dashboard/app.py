@@ -304,6 +304,8 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
+    oneclick_preflight_for_plan,
+    resolve_oneclick_sweep_plan,
     resolve_sweep_request,
     run_sweep_from_request,
     sweep_progress_file,
@@ -8800,6 +8802,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         segment: str | None = Query(default=None),
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/sweep/run — launch the brute-force grid sweep from the dashboard.
 
@@ -8824,6 +8827,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
         partly-pulled lake simply sweeps whatever slices exist and reports the
         honest tuple count in the progress feed (Golden Rule #10).
+
+        This single-exchange surface stays available for a targeted launch;
+        the multi-exchange R2 "blank ⇒ all 3 (NIFTY-first)" ONE-CLICK
+        institutional button — with the full R4 preflight + R20 estimator —
+        is ``POST /api/v1/sweep/oneclick/run`` (gap-hunt ruling 1/2/9).
+        ``acknowledge_sla_overrun`` threads straight to ``cmd_sweep_all``'s
+        parameter of the same name (ruling 2) — the kwargs it builds now pin
+        the SAME institutional defaults (R5) as the one-click route.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -8844,6 +8855,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 segment=segment,
                 start=start,
                 end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
                 today=date.today(),
             )
         except ValueError as exc:
@@ -8866,9 +8878,36 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             end=request.end,
         )
 
+        sweep_succeeded = False
+
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run the grid sweep; the live tick streams to the progress file."""
-            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            """Background body: run the grid sweep; the live tick streams to the progress file.
+
+            A round-12 adversarial-refuter review found this returned the
+            bare exit code with no check — ``BackgroundPullJob`` silently
+            discards a non-zero int, so a genuine internal
+            ``cmd_sweep_all`` failure (e.g. the engine's own
+            ``max_combos``/grid-size construction guards, ADR-0007
+            condition 3) reported the SAME "done" finish detail as full
+            success, with ``on_success``/``mark_dirty`` firing on a run
+            that did nothing — the exact failure mode rounds 5-8 already
+            fixed for the multi-exchange one-click route's own ``_work``,
+            left open here. Mirrors that fix: a non-zero exit becomes a
+            named ``{"note": ...}`` finish detail (the SAME
+            ``BackgroundPullJob``/``_finish_detail`` contract), and
+            ``on_success`` (below) only fires on a REAL success.
+            """
+            nonlocal sweep_succeeded
+            code = run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            if code != 0:
+                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {code})"}
+            sweep_succeeded = True
+            return 0
+
+        def _on_success() -> None:
+            """Bump the write-generation iff the sweep genuinely succeeded (rounds 5-8 law)."""
+            if sweep_succeeded:
+                _summary_cache.mark_dirty()
 
         # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
         # _work never reports per-bar progress, so the _on_progress mark_dirty
@@ -8901,11 +8940,332 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
-            on_success=_summary_cache.mark_dirty,
+            on_success=_on_success,
             job_kind=JOB_KIND_SWEEP,
             cross_process_lock=False,
         )
         payload = request.to_dict()
+        payload["started"] = started
+        return JSONResponse(payload)
+
+    def _oneclick_plan_from_query(
+        *,
+        symbols: str | None,
+        intervals: str | None,
+        directions: str | None,
+        k: str | None,
+        sl: str | None,
+        tp: str | None,
+        top: int | None,
+        mode: str | None,
+        segment: str | None,
+        start: str | None,
+        end: str | None,
+        acknowledge_sla_overrun: bool,
+        run_id: str | None,
+    ) -> Any:
+        """Shared plan-resolution body for the one-click institutional routes below.
+
+        A thin route-layer wrapper over
+        :func:`~brutex.dashboard.sweep_runner.resolve_oneclick_sweep_plan` — a
+        bad field raises :class:`ValueError`, mapped to a 400 by the two
+        caller routes (never a deep background crash, Golden Rule #10).
+
+        run_id
+            Round-9 adversarial-refuter finding: the preflight (GET) and
+            launch (POST) routes each independently mint a fresh
+            ``sweep_run_id`` by default (``resolve_oneclick_sweep_plan``'s
+            own ``run_id_factory`` default), so a preflight's displayed id
+            NEVER matches the id the later launch actually uses — contrary
+            to ``OneClickSweepPlan``'s own R43 "one run_id threads
+            everything" documentation, which only actually holds WITHIN one
+            call. Passing the SAME caller-supplied ``run_id`` to both calls
+            (e.g. a future UI mints one client-side at first preflight and
+            reuses it through the confirm→launch step) achieves real
+            continuity; omitting it preserves the prior server-generated
+            behavior byte-for-byte.
+        """
+        if run_id is not None:
+            return resolve_oneclick_sweep_plan(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                today=date.today(),
+                run_id_factory=lambda: run_id,
+            )
+        return resolve_oneclick_sweep_plan(
+            symbols=symbols,
+            intervals=intervals,
+            directions=directions,
+            k=k,
+            sl=sl,
+            tp=tp,
+            top=top,
+            mode=mode,
+            segment=segment,
+            start=start,
+            end=end,
+            acknowledge_sla_overrun=acknowledge_sla_overrun,
+            today=date.today(),
+        )
+
+    @app.get("/api/v1/sweep/oneclick/preflight")
+    async def api_sweep_oneclick_preflight(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/oneclick/preflight — R4/R20: preflight + LIVE estimate, NEVER launches.
+
+        The one-click institutional sweep button's "on click, BEFORE any
+        compute" step (R20): resolves the (possibly cross-exchange, R2 "blank
+        ⇒ all 3") selection into a :class:`~brutex.dashboard.sweep_runner.OneClickSweepPlan`
+        and returns the composed ``{sweep_run_id, ok, refusals, clamps,
+        estimator}`` verdict — the proceed-dialog's data source. Pure
+        read-only: no lock is taken, no lake write happens, nothing is
+        launched — safe to poll repeatedly.
+
+        run_id
+            Optional caller-supplied id (round-9 adversarial-refuter
+            finding): omitted, this route mints a fresh ``sweep_run_id``
+            server-side EVERY call, so it never matches whatever the later
+            ``POST /oneclick/run`` call mints on its own — a future UI that
+            wants the id shown at preflight time to be THE id the eventual
+            launch uses should mint one client-side and pass the SAME value
+            to both calls.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        return JSONResponse(verdict)
+
+    @app.post("/api/v1/sweep/oneclick/run")
+    async def api_sweep_oneclick_run(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/sweep/oneclick/run — launch the ONE-CLICK institutional sweep.
+
+        R5's institutional flip (gates ON, top-1000, refuse-whole) fanned out
+        across every exchange group the selection needs (SENSEX/BSE vs
+        NIFTY·BANKNIFTY/NSE, ruling 9), sharing ONE logical ``sweep_run_id``.
+        Re-runs the SAME preflight :func:`api_sweep_oneclick_preflight` computes
+        — a refusal in ANY group refuses the WHOLE logical run (never a
+        partial silent launch): the response is ``{"started": false, ...the
+        verdict}`` (loud, not an HTTP error — R16 layer 2, "a run that starts
+        is provably runnable"). On ``ok`` every group's engine run executes
+        SEQUENTIALLY on the ONE single-flight background job (one lake, one
+        writer); a second click while running is the existing no-op.
+
+        run_id
+            Optional caller-supplied id — see
+            :func:`api_sweep_oneclick_preflight`'s parameter of the same
+            name (round-9 adversarial-refuter finding): pass the SAME value
+            given to that earlier preflight call to make this launch's
+            ``sweep_run_id`` match what the operator was shown before
+            confirming, instead of a fresh server-generated id.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        if not verdict["ok"]:
+            payload = dict(verdict)
+            payload["started"] = False
+            return JSONResponse(payload)
+
+        results_root = default_results_root(lake)
+        state.sweep_progress_path = sweep_progress_file(results_root)
+        _LOG.info(
+            "sweep.oneclick.run.requested",
+            sweep_run_id=plan.sweep_run_id,
+            groups=[req.exchange for req in plan.requests],
+        )
+
+        any_group_succeeded = False
+        # Cap on each individual per-group failure detail BEFORE it is joined
+        # into the shared finish-detail note (round-7 finding) — the note as
+        # a whole is truncated at pull_jobs._FINISH_DETAIL_MAX (500 chars);
+        # capping each group's own contribution keeps every group's
+        # identity+brief reason visible regardless of how verbose any ONE
+        # group's exception message is.
+        per_group_detail_max = 80
+        # Cap on how many failing groups are NAMED explicitly in the note
+        # (round-8 finding): even with every individual detail capped above,
+        # enough FAILING GROUPS (today structurally at most 2 — NIFTY/
+        # BANKNIFTY→NSE, SENSEX→BSE — but never assume that stays true) could
+        # still push the joined note past the framework's overall length cap,
+        # silently dropping later groups the same way round 7's bug did.
+        # Naming at most this many keeps the joined note comfortably inside
+        # that cap regardless of how many exchange groups ever exist.
+        max_named_failed_groups = 4
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: run every exchange group's engine run, sequentially.
+
+            A round-5 adversarial-refuter review found a bare non-zero
+            exit-code return is SILENTLY discarded by
+            :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` — the
+            finish detail stays the generic ``"done"`` and ``on_success``
+            still fires, so a genuine per-group ``cmd_sweep_all`` failure
+            inside this multi-exchange fan-out was invisible to the
+            operator (worse than the single-group case: a sibling group's
+            real success could mask it entirely). ``BackgroundPullJob``/
+            ``_finish_detail`` already special-case a ``Mapping`` carrying
+            a non-empty ``"note"`` string (the pipeline's own honesty
+            convention) — reusing that EXISTING contract here, with zero
+            changes to the shared job framework, surfaces a failed group's
+            exit code loudly in the finish detail instead of a false
+            "done".
+
+            A round-6 adversarial-refuter review found two follow-on gaps,
+            both fixed here:
+
+            1. A group that RAISES (rather than returning a non-zero code)
+               used to propagate straight out of this loop, aborting every
+               REMAINING group silently — group order is deterministic
+               (alphabetical by exchange), so a BSE-specific failure would
+               systematically starve the NSE (NIFTY/BANKNIFTY) group every
+               time they were requested together. Each group's call is now
+               individually isolated: an exception is folded into the SAME
+               ``failed`` list/note contract as a non-zero exit code, and
+               the loop always continues to the next group.
+            2. ``on_success`` used to fire unconditionally whenever this
+               function returned without raising — including the new
+               all-groups-failed ``{"note": ...}`` shape, wrongly marking
+               the results cache dirty when NO new data had actually
+               landed. ``on_success`` now only fires when at least one
+               group genuinely succeeded (see ``any_group_succeeded``
+               below) — a partial success still invalidates the cache
+               (real new data DID land for that group), but a total
+               failure does not.
+
+            A round-7 adversarial-refuter review found a third gap: the
+            job framework's finish detail is truncated at
+            :data:`~brutex.dashboard.pull_jobs._FINISH_DETAIL_MAX` (500
+            chars) — an unusually verbose exception message from the
+            alphabetically-FIRST failing group (e.g. a DuckDB error
+            embedding SQL) could push the note past that cap, silently
+            dropping every LATER group's identity/detail from what the
+            operator ever sees (structurally at most 2 groups today, but
+            never assume that stays true). Each per-group detail is now
+            truncated to ``per_group_detail_max`` chars BEFORE joining, so
+            every group's identity+brief reason always survives regardless
+            of how verbose any one exception's message is.
+            """
+            nonlocal any_group_succeeded
+            failed: list[tuple[str, str]] = []
+            for group_request in plan.requests:
+                try:
+                    code = run_sweep_from_request(
+                        group_request, lake_root=lake, results_root=results_root
+                    )
+                except Exception as exc:  # isolate one group's crash from its siblings
+                    detail = f"raised {exc!r}"
+                    failed.append((group_request.exchange, detail[:per_group_detail_max]))
+                    continue
+                if code != 0:
+                    failed.append((group_request.exchange, f"exit {code}"))
+                else:
+                    any_group_succeeded = True
+            if failed:
+                shown = failed[:max_named_failed_groups]
+                summary = ", ".join(f"{exchange} ({detail})" for exchange, detail in shown)
+                omitted = len(failed) - len(shown)
+                if omitted:
+                    summary += f", +{omitted} more"
+                return {
+                    "note": (
+                        f"oneclick sweep {plan.sweep_run_id}: "
+                        f"{len(failed)}/{len(plan.requests)} exchange group(s) FAILED — {summary}"
+                    )
+                }
+            return 0
+
+        def _on_success() -> None:
+            """Bump the write-generation iff at least ONE exchange group succeeded."""
+            if any_group_succeeded:
+                _summary_cache.mark_dirty()
+
+        started = _pull_job.start(
+            _work,
+            total=len(plan.requests),
+            detail=f"oneclick sweep {plan.sweep_run_id}",
+            on_success=_on_success,
+        )
+        payload = dict(verdict)
         payload["started"] = started
         return JSONResponse(payload)
 

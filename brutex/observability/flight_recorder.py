@@ -57,6 +57,7 @@ observability-only and never part of any run identity (I-2).
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 from collections.abc import Iterator, Mapping
@@ -65,6 +66,7 @@ from typing import Final
 
 import structlog
 
+from brutex.data.guarded_read import open_regular_binary
 from brutex.engine.run_layout import run_dir
 from brutex.orchestrator.audit import (
     AuditEntry,
@@ -176,7 +178,7 @@ def recorder_has_suspect(results_root: Path, run_id: str) -> bool:
     """
     path = recorder_path(results_root, run_id)
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with io.TextIOWrapper(open_regular_binary(path), encoding="utf-8") as handle:
             for raw in handle:
                 stripped = raw.strip()
                 if not stripped:

@@ -65,6 +65,8 @@ DATA only.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +76,7 @@ from brutex.dashboard.oneclick_artifacts import (
     canonical_record_bytes,
     chain_hash,
 )
+from brutex.engine.resilience_streaks import fold_resilience, resilience_payload
 from brutex.ranking.presets import DEFAULT_PRESET
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "oneclick"
@@ -165,6 +168,60 @@ def build_manifest() -> dict[str, Any]:
     }
 
 
+#: The account-equity base the resilience worst-streak % anchors on (the
+#: engine ``grid.start_equity_paisa`` — a stable fixture constant here).
+_RES_START_EQUITY_PAISA = 1_000_000
+#: The first trade instant (IST 09:15 as UTC — the fold reads IST calendar
+#: buckets off exit_ts, deterministic across TZs).
+_RES_EPOCH = datetime(2024, 1, 2, 9, 15, tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResTrade:
+    """A ``fold_resilience`` ``_TradeLike`` (frozen fields, not a namespace)."""
+
+    pnl_paisa: int
+    entry_ts: datetime
+    exit_ts: datetime
+
+
+def _resilience_block(rank: int) -> dict[str, Any]:
+    """The deterministic ``resilience`` block for one entry (the WRITER wraps
+    EVERY entry via ``project_resilience_annotation`` — mirrored here).
+
+    Most ranks carry a LIVE block folded from a deterministic per-rank trade
+    sequence; the zero-trades edge (``ZERO_TRADES_RANK``) carries the NULL
+    block (parity-failed / no trades → ``stats_live: false``, every field
+    ``None``), so the display layer's honest "—" degrade is exercised end-to-
+    end. All ₹ are GROSS, per-unit (Ruling 18)."""
+    if rank == ZERO_TRADES_RANK:
+        # A genuine 0-trade finalist → the fold's NULL record (n_trades 0).
+        return resilience_payload(
+            fold_resilience(
+                f"r-{rank}",
+                [],
+                parity_ok=True,
+                start_equity_paisa=_RES_START_EQUITY_PAISA,
+                fingerprint=f"fp-{rank}",
+            )
+        )
+    trades: list[_ResTrade] = []
+    count = 40 + (rank % 20)  # 40..59 trades — real losing runs + clustering
+    for i in range(count):
+        pnl_paisa = ((rank * 3 + i * 7) % 13 - 6) * 500  # −3000..3000 paisa
+        ts = _RES_EPOCH + timedelta(days=i * 9)  # ~9-day spacing (calendar span)
+        trades.append(_ResTrade(pnl_paisa=pnl_paisa, entry_ts=ts, exit_ts=ts))
+    return resilience_payload(
+        fold_resilience(
+            f"r-{rank}",
+            trades,
+            parity_ok=True,
+            start_equity_paisa=_RES_START_EQUITY_PAISA,
+            fingerprint=f"fp-{rank}",
+        )
+    )
+
+
 def build_top100_rows() -> list[dict[str, Any]]:
     """Return the 100 deterministic contract rows incl. the documented edge-class rows."""
     rows: list[dict[str, Any]] = []
@@ -232,6 +289,9 @@ def build_top100_rows() -> list[dict[str, Any]]:
             # Providers unwired in the fixture run (matches source flags).
             "reasons": None,
             "margin_roi": None,
+            # The sibling losing-streak resilience block (the writer wraps
+            # EVERY entry; a NULL block for the zero-trades edge).
+            "resilience": _resilience_block(rank),
         }
         rows.append(row)
     # Metric TIE pair (F-m2 golden): rank 42 shares rank 41's sharpe exactly.
