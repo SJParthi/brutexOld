@@ -143,6 +143,10 @@ Cargo.lock
 # (DEC-STRATEGIES-RUST-COMBO-001 — a NEW crate needs its own negation to be
 # addable; the FRESH lock is committed, never a copy of a sibling's).
 !rust/brutex-strategies/Cargo.lock
+# Same law for the brutex-refine Stage-3 CMA-ES kernel
+# (DEC-RUST-STAGE3-REFINE-001 — the DEFAULT-ON optimizer core; the
+# committed lock is load-bearing for --locked CI + Golden Rule #4).
+!rust/brutex-refine/Cargo.lock
 # brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
 # application BINARY crate: its lockfile is tracked for reproducible builds
 # (Golden Rule #4) + the security-audit Cargo.lock trigger.
