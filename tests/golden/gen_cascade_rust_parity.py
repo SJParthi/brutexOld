@@ -516,6 +516,93 @@ def capture_results_report() -> dict[str, Any]:
     }
 
 
+def capture_twin_detect() -> dict[str, Any]:
+    """Freeze the twin_detect law families (slice 2d)."""
+    from brutex.engine.twin_detect import FINGERPRINT_VERSION_PREFIX, TWIN_JACCARD_THRESHOLD
+
+    from tests.golden._twin_detect_parity_corpus import (
+        candidate_cases,
+        entry_set_cases,
+        fingerprint_cases,
+        group_cases,
+        jaccard_cases,
+        run_candidate_case,
+        run_entry_set_case,
+        run_fingerprint_case,
+        run_group_case,
+        run_jaccard_case,
+    )
+
+    constants = {
+        "fingerprint_version_prefix": FINGERPRINT_VERSION_PREFIX,
+        "twin_jaccard_threshold_repr": repr(TWIN_JACCARD_THRESHOLD),
+    }
+    return {
+        "constants": constants,
+        "fingerprint": [
+            {"name": name, "expect": run_fingerprint_case(trades)}
+            for name, trades in fingerprint_cases()
+        ],
+        "entry_set": [
+            {"name": name, "expect": run_entry_set_case(trades)}
+            for name, trades in entry_set_cases()
+        ],
+        "candidate": [
+            {"name": name, "expect": run_candidate_case(thunk)} for name, thunk in candidate_cases()
+        ],
+        "jaccard": [
+            {"name": name, "expect": run_jaccard_case(pair)} for name, pair in jaccard_cases()
+        ],
+        "group": [{"name": name, "expect": run_group_case(case)} for name, case in group_cases()],
+    }
+
+
+def capture_baseline() -> dict[str, Any]:
+    """Freeze the baseline compute/artifact law families (slice 2d)."""
+    from brutex.engine.baseline import _PAYLOAD_KEYS, _SESSION_FIELDS, BASELINE_SCHEMA_VERSION
+
+    from tests.golden._baseline_parity_corpus import (
+        compute_cases,
+        filename_cases,
+        load_cases,
+        price_str_cases,
+        run_compute_case,
+        run_filename_case,
+        run_load_case,
+        run_price_str_case,
+        run_series_ctor_case,
+        run_write_case,
+        series_ctor_cases,
+        write_cases,
+    )
+
+    constants = {
+        "schema_version": BASELINE_SCHEMA_VERSION,
+        "payload_keys": sorted(_PAYLOAD_KEYS),
+        "session_fields": _SESSION_FIELDS,
+    }
+    return {
+        "constants": constants,
+        "compute": [
+            {"name": name, "expect": run_compute_case(case)} for name, case in compute_cases()
+        ],
+        "series_ctor": [
+            {"name": name, "expect": run_series_ctor_case(thunk)}
+            for name, thunk in series_ctor_cases()
+        ],
+        "filename": [
+            {"name": name, "expect": run_filename_case(instrument)}
+            for name, instrument in filename_cases()
+        ],
+        "price_str": [
+            {"name": name, "expect": run_price_str_case(literal)}
+            for name, literal in price_str_cases()
+        ],
+        "write": [{"name": name, "expect": run_write_case(thunk)} for name, thunk in write_cases()],
+        "load": [{"name": name, "expect": run_load_case(raw)} for name, raw in load_cases()],
+    }
+
+
 def main() -> int:
     # PER-FILE refusal (slice 2a): each family whose fixture already exists is
     # skipped LOUDLY unless the regen env is set — so a later slice can add its
@@ -528,6 +615,8 @@ def main() -> int:
         "cascade_wire.json": capture_cascade_wire,
         "top100_artifact.json": capture_top100_artifact,
         "results_report.json": capture_results_report,
+        "twin_detect.json": capture_twin_detect,
+        "baseline.json": capture_baseline,
     }
     regen = os.environ.get(_REGEN_ENV) == "1"
     wrote = 0

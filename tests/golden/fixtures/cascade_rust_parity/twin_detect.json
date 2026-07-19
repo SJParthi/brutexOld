@@ -1,0 +1,657 @@
+{
+  "candidate": [
+    {
+      "expect": {
+        "bit_count": 2,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "5",
+        "run_id": "run-a"
+      },
+      "name": "ok_minimal"
+    },
+    {
+      "expect": {
+        "bit_count": 0,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "0",
+        "run_id": "run-a"
+      },
+      "name": "ok_mask_zero"
+    },
+    {
+      "expect": {
+        "bit_count": 1,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "True",
+        "run_id": "run-a"
+      },
+      "name": "ok_mask_bool_true_pun"
+    },
+    {
+      "expect": {
+        "bit_count": 0,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "False",
+        "run_id": "run-a"
+      },
+      "name": "ok_mask_bool_false_pun"
+    },
+    {
+      "expect": {
+        "bit_count": 2,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "5",
+        "run_id": "\u03c0-run-\u2602"
+      },
+      "name": "ok_unicode_run_id"
+    },
+    {
+      "expect": {
+        "bit_count": 2,
+        "entry_ts_us": [
+          1,
+          2
+        ],
+        "fingerprint": "01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563",
+        "mask_bits_repr": "5",
+        "run_id": " "
+      },
+      "name": "ok_whitespace_run_id_is_truthy"
+    },
+    {
+      "expect": {
+        "bit_count": 2,
+        "entry_ts_us": [
+          1704167160000000,
+          1704168960000000,
+          1704174360000000
+        ],
+        "fingerprint": "3668b5001c7847b066dd667cdecf9fc4efbfe517aa5f80766f3e82ffd5cfffcf",
+        "mask_bits_repr": "3",
+        "run_id": "run-from-trades"
+      },
+      "name": "ok_from_trades_binds_one_list"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.run_id must be non-empty",
+        "error_type": "TwinDetectError"
+      },
+      "name": "empty_run_id_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.mask_bits must be >= 0, got -1 (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "negative_mask_bits_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got '01A9FB5AB1EE32D82DD8765115C2DD6CE242DF12B280CAA4309D3A6BB5F05563' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_uppercase_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got '01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f0556' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_63_chars_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got '01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f05563a' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_65_chars_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got 'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_nonhex_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got '' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_empty_refused"
+    },
+    {
+      "expect": {
+        "error_str": "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, got '01a9fb5ab1ee32d82dd8765115c2dd6ce242df12b280caa4309d3a6bb5f0556\\n' (run_id 'run-a')",
+        "error_type": "TwinDetectError"
+      },
+      "name": "fp_trailing_newline_refused"
+    },
+    {
+      "expect": {
+        "error_str": "expected string or bytes-like object, got 'int'",
+        "error_type": "TypeError"
+      },
+      "name": "fp_int_type_escape"
+    },
+    {
+      "expect": {
+        "error_str": "expected string or bytes-like object, got 'NoneType'",
+        "error_type": "TypeError"
+      },
+      "name": "fp_none_type_escape"
+    }
+  ],
+  "constants": {
+    "fingerprint_version_prefix": "bxtwin1|",
+    "twin_jaccard_threshold_repr": "0.9"
+  },
+  "entry_set": [
+    {
+      "expect": [],
+      "name": "empty"
+    },
+    {
+      "expect": [
+        1704167160000000
+      ],
+      "name": "single_exact_us"
+    },
+    {
+      "expect": [
+        1704167580000000
+      ],
+      "name": "duplicate_entries_collapse"
+    },
+    {
+      "expect": [
+        1704167160000001,
+        1704167220999999
+      ],
+      "name": "mixed_with_microseconds"
+    },
+    {
+      "expect": [
+        -1
+      ],
+      "name": "pre_epoch_negative"
+    }
+  ],
+  "fingerprint": [
+    {
+      "expect": {
+        "fingerprint": "96f7a1310661bd4ddfa86916ab7579087c0ed7912f6cc0911022b74b872a8779"
+      },
+      "name": "empty_list_bare_prefix"
+    },
+    {
+      "expect": {
+        "fingerprint": "26e7d9a5a96f32cac29b987cbf42d2332354887e5b51d8c6f7a9fa72568f662e"
+      },
+      "name": "single_buy"
+    },
+    {
+      "expect": {
+        "fingerprint": "15a88fcb1ab66af062ac1115a2e17ce7e6d346f303b6cc853b897ae2385b13cf"
+      },
+      "name": "single_sell_same_shape"
+    },
+    {
+      "expect": {
+        "fingerprint": "3668b5001c7847b066dd667cdecf9fc4efbfe517aa5f80766f3e82ffd5cfffcf"
+      },
+      "name": "multi_chronological"
+    },
+    {
+      "expect": {
+        "fingerprint": "1f2cbd73923af925b8341165e2fe7d4b1b1e8a7261c90ac1e94648ab94e81c65"
+      },
+      "name": "multi_reversed_order_differs"
+    },
+    {
+      "expect": {
+        "fingerprint": "dedaf2af67907976429f45e3604923df6a775cdd5607adc91ba12e098394d1bc"
+      },
+      "name": "negative_pnl"
+    },
+    {
+      "expect": {
+        "fingerprint": "1bbf13a13e254fe2bcd147357b01f9970e42442d239e3927e7e61888b62b922e"
+      },
+      "name": "zero_pnl"
+    },
+    {
+      "expect": {
+        "fingerprint": "355aec6944c0a6c233cb519623d5af84b9ed0a51171b1c03adf4f9f166e95a82"
+      },
+      "name": "duplicate_timestamps_pair"
+    },
+    {
+      "expect": {
+        "fingerprint": "1024262ae5db05fc00a428dfaa0606fdcec15dc41c8b571ab67aa0e6e0ebd43f"
+      },
+      "name": "microsecond_precision"
+    },
+    {
+      "expect": {
+        "fingerprint": "451ac3a9b26b1b8285b09e9d10da3ce8974211cfff2d5b54b9acf0923aeb7b0c"
+      },
+      "name": "pre_epoch_negative_us"
+    },
+    {
+      "expect": {
+        "fingerprint": "7d19b2439d51f08da07fbb893716689964fd6b89082f800bcfa37c060119421f"
+      },
+      "name": "far_future_year_9999"
+    },
+    {
+      "expect": {
+        "fingerprint": "494c0d7e9ca281fc2d441e2815713a10df127f494ad197e544e59b64f9ca5247"
+      },
+      "name": "exit_before_entry_serializes"
+    },
+    {
+      "expect": {
+        "fingerprint": "36b5960850020a8f75101291bda1384f379f7a0daa758f3a0fecad0c3986018e"
+      },
+      "name": "identity_only_a"
+    },
+    {
+      "expect": {
+        "fingerprint": "36b5960850020a8f75101291bda1384f379f7a0daa758f3a0fecad0c3986018e"
+      },
+      "name": "identity_only_b_extras_differ"
+    },
+    {
+      "expect": {
+        "error_str": "can't subtract offset-naive and offset-aware datetimes",
+        "error_type": "TypeError"
+      },
+      "name": "naive_entry_ts_escape"
+    }
+  ],
+  "group": [
+    {
+      "expect": {
+        "family_by_run_id": {},
+        "members_by_family": []
+      },
+      "name": "empty_pool"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "only": "only"
+        },
+        "members_by_family": [
+          [
+            "only",
+            [
+              "only"
+            ]
+          ]
+        ]
+      },
+      "name": "singleton"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "a-three-bits": "b-one-bit",
+          "b-one-bit": "b-one-bit"
+        },
+        "members_by_family": [
+          [
+            "b-one-bit",
+            [
+              "a-three-bits",
+              "b-one-bit"
+            ]
+          ]
+        ]
+      },
+      "name": "tier1_same_fp_disjoint_entries_merge"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "aaa": "aaa",
+          "zzz": "aaa"
+        },
+        "members_by_family": [
+          [
+            "aaa",
+            [
+              "aaa",
+              "zzz"
+            ]
+          ]
+        ]
+      },
+      "name": "tier1_rep_tie_breaks_run_id_asc"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "x1": "x1",
+          "x2": "x1"
+        },
+        "members_by_family": [
+          [
+            "x1",
+            [
+              "x1",
+              "x2"
+            ]
+          ]
+        ]
+      },
+      "name": "tier2_boundary_0_90_inclusive"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "y1": "y1",
+          "y2": "y2"
+        },
+        "members_by_family": [
+          [
+            "y1",
+            [
+              "y1"
+            ]
+          ],
+          [
+            "y2",
+            [
+              "y2"
+            ]
+          ]
+        ]
+      },
+      "name": "tier2_just_below_stays_separate"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "c-a": "c-c",
+          "c-b": "c-c",
+          "c-c": "c-c"
+        },
+        "members_by_family": [
+          [
+            "c-c",
+            [
+              "c-a",
+              "c-b",
+              "c-c"
+            ]
+          ]
+        ]
+      },
+      "name": "tier2_transitive_chain_one_family"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "t1": "t1",
+          "t2": "t1",
+          "t3": "t3"
+        },
+        "members_by_family": [
+          [
+            "t1",
+            [
+              "t1",
+              "t2"
+            ]
+          ],
+          [
+            "t3",
+            [
+              "t3"
+            ]
+          ]
+        ]
+      },
+      "name": "threshold_one_only_identical_merge"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "t1": "t1",
+          "t2": "t1",
+          "t3": "t3"
+        },
+        "members_by_family": [
+          [
+            "t1",
+            [
+              "t1",
+              "t2"
+            ]
+          ],
+          [
+            "t3",
+            [
+              "t3"
+            ]
+          ]
+        ]
+      },
+      "name": "threshold_bool_true_pun_acts_as_one"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "e1": "e1",
+          "e2": "e1"
+        },
+        "members_by_family": [
+          [
+            "e1",
+            [
+              "e1",
+              "e2"
+            ]
+          ]
+        ]
+      },
+      "name": "empty_entry_sets_are_identical_behavior"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "h1": "h1",
+          "h2": "h1"
+        },
+        "members_by_family": [
+          [
+            "h1",
+            [
+              "h1",
+              "h2"
+            ]
+          ]
+        ]
+      },
+      "name": "custom_threshold_half_inclusive"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "r-01": "r-02",
+          "r-02": "r-02",
+          "r-03": "r-03",
+          "r-04": "r-03",
+          "r-05": "r-05"
+        },
+        "members_by_family": [
+          [
+            "r-02",
+            [
+              "r-01",
+              "r-02"
+            ]
+          ],
+          [
+            "r-03",
+            [
+              "r-03",
+              "r-04"
+            ]
+          ],
+          [
+            "r-05",
+            [
+              "r-05"
+            ]
+          ]
+        ]
+      },
+      "name": "mixed_pool_two_families_two_singletons"
+    },
+    {
+      "expect": {
+        "family_by_run_id": {
+          "m-00": "m-00",
+          "m-01": "m-00",
+          "m-02": "m-00",
+          "m-03": "m-00",
+          "m-04": "m-00",
+          "m-05": "m-00"
+        },
+        "members_by_family": [
+          [
+            "m-00",
+            [
+              "m-00",
+              "m-01",
+              "m-02",
+              "m-03",
+              "m-04",
+              "m-05"
+            ]
+          ]
+        ]
+      },
+      "name": "all_identical_fp_one_family"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: duplicate run_id 'dup' in the candidate pool",
+        "error_type": "TwinDetectError"
+      },
+      "name": "duplicate_run_id_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got 0.0",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_zero_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got -0.0",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_negative_zero_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got -0.1",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_negative_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got 1.0000001",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_above_one_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got nan",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_nan_refused"
+    },
+    {
+      "expect": {
+        "error_str": "group_twins: jaccard_threshold must be in (0.0, 1.0], got inf",
+        "error_type": "TwinDetectError"
+      },
+      "name": "threshold_inf_refused"
+    }
+  ],
+  "jaccard": [
+    {
+      "expect": "1.0",
+      "name": "empty_empty_defined_identical"
+    },
+    {
+      "expect": "0.0",
+      "name": "empty_vs_nonempty"
+    },
+    {
+      "expect": "0.0",
+      "name": "nonempty_vs_empty"
+    },
+    {
+      "expect": "0.0",
+      "name": "disjoint"
+    },
+    {
+      "expect": "1.0",
+      "name": "identical"
+    },
+    {
+      "expect": "0.3333333333333333",
+      "name": "one_of_three"
+    },
+    {
+      "expect": "0.3333333333333333",
+      "name": "half"
+    },
+    {
+      "expect": "0.9",
+      "name": "nine_of_ten_exact_boundary_value"
+    },
+    {
+      "expect": "0.8181818181818182",
+      "name": "nine_of_eleven_below_boundary"
+    },
+    {
+      "expect": "0.8947368421052632",
+      "name": "seventeen_of_nineteen"
+    },
+    {
+      "expect": "0.5",
+      "name": "subset_five_of_ten"
+    }
+  ]
+}

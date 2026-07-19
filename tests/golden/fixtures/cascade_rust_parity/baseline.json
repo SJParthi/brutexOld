@@ -1,0 +1,946 @@
+{
+  "compute": [
+    {
+      "expect": {
+        "anchor_open": "200.00",
+        "end": "2024-03-07",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "202.20"
+          ],
+          [
+            "2024-03-05",
+            "199.95"
+          ],
+          [
+            "2024-03-07",
+            "211.55"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "5.775"
+      },
+      "name": "three_sessions_two_bars"
+    },
+    {
+      "expect": {
+        "anchor_open": "200.00",
+        "end": "2024-03-07",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "202.20"
+          ],
+          [
+            "2024-03-05",
+            "199.95"
+          ],
+          [
+            "2024-03-07",
+            "211.55"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "5.775"
+      },
+      "name": "permuted_load_orders_reproduce"
+    },
+    {
+      "expect": {
+        "anchor_open": "123.45",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "124.56"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "0.8991494532199271"
+      },
+      "name": "single_session_single_bar"
+    },
+    {
+      "expect": {
+        "anchor_open": "50.00",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "50.00"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "0.0"
+      },
+      "name": "flat_close_equals_anchor_zero_return"
+    },
+    {
+      "expect": {
+        "anchor_open": "100.00",
+        "end": "2024-03-05",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "97.35"
+          ],
+          [
+            "2024-03-05",
+            "88.20"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 2 bars over 2 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "-11.8"
+      },
+      "name": "negative_return"
+    },
+    {
+      "expect": {
+        "anchor_open": "3",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "10"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "233.33333333333334"
+      },
+      "name": "nonterminating_division_anchor_3"
+    },
+    {
+      "expect": {
+        "anchor_open": "7.77",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "11.13"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "43.24324324324324"
+      },
+      "name": "nonterminating_division_anchor_7_77"
+    },
+    {
+      "expect": {
+        "anchor_open": "100.005",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "101.115"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "1.1099445027748613"
+      },
+      "name": "anchor_3dp_kept_verbatim_in_series"
+    },
+    {
+      "expect": {
+        "anchor_open": "99999999.98",
+        "end": "2024-03-05",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "99999999.99"
+          ],
+          [
+            "2024-03-05",
+            "99999999.97"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 2 bars over 2 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "-1.0000000002e-08"
+      },
+      "name": "huge_prices"
+    },
+    {
+      "expect": {
+        "anchor_open": "100.00",
+        "end": "2024-03-05",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "101.00"
+          ],
+          [
+            "2024-03-05",
+            "102.50"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 2 bars over 2 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "2.5"
+      },
+      "name": "ist_midnight_edge_next_session"
+    },
+    {
+      "expect": {
+        "anchor_open": "100.00",
+        "end": "2024-03-04",
+        "instrument": "NIFTY",
+        "sessions": [
+          [
+            "2024-03-04",
+            "103.33"
+          ]
+        ],
+        "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 3 bars over 1 session(s) (R27 same-bars law)",
+        "start": "2024-03-04",
+        "total_return_pct_repr": "3.33"
+      },
+      "name": "last_bar_per_session_wins"
+    },
+    {
+      "expect": {
+        "error_str": "compute_baseline: no bars for '\u03c0-index' \u2014 nothing to anchor",
+        "error_type": "BaselineError"
+      },
+      "name": "empty_bars_refused"
+    },
+    {
+      "expect": {
+        "error_str": "compute_baseline: duplicate bar timestamp datetime.datetime(2024, 3, 4, 3, 46, tzinfo=datetime.timezone.utc) \u2014 dedup at the lake read boundary before baselining",
+        "error_type": "BaselineError"
+      },
+      "name": "duplicate_timestamp_refused"
+    },
+    {
+      "expect": {
+        "error_str": "compute_baseline: first bar OPEN must be > 0, got 0.00 (corrupt stored bar)",
+        "error_type": "BaselineError"
+      },
+      "name": "zero_anchor_refused"
+    },
+    {
+      "expect": {
+        "error_str": "compute_baseline: first bar OPEN must be > 0, got -5.00 (corrupt stored bar)",
+        "error_type": "BaselineError"
+      },
+      "name": "negative_anchor_refused"
+    },
+    {
+      "expect": {
+        "error_str": "compute_baseline: duplicate bar timestamp datetime.datetime(2024, 3, 4, 3, 46, tzinfo=datetime.timezone.utc) \u2014 dedup at the lake read boundary before baselining",
+        "error_type": "BaselineError"
+      },
+      "name": "duplicate_beats_anchor_check"
+    }
+  ],
+  "constants": {
+    "payload_keys": [
+      "anchor_open",
+      "data_snapshot_hash",
+      "end",
+      "instrument",
+      "schema_version",
+      "sessions",
+      "source_note",
+      "start",
+      "total_return_pct"
+    ],
+    "schema_version": 1,
+    "session_fields": 2
+  },
+  "filename": [
+    {
+      "expect": {
+        "filename": "baseline-NIFTY.json"
+      },
+      "name": "plain"
+    },
+    {
+      "expect": {
+        "filename": "baseline-NSE-M&M.json"
+      },
+      "name": "ampersand_verbatim"
+    },
+    {
+      "expect": {
+        "filename": "baseline-\u03c0-index.json"
+      },
+      "name": "unicode_verbatim"
+    },
+    {
+      "expect": {
+        "filename": "baseline-a/b.json"
+      },
+      "name": "slash_verbatim"
+    },
+    {
+      "expect": {
+        "filename": "baseline-...json"
+      },
+      "name": "dotdot_verbatim"
+    },
+    {
+      "expect": {
+        "filename": "baseline- .json"
+      },
+      "name": "whitespace_is_truthy"
+    },
+    {
+      "expect": {
+        "error_str": "baseline_filename: instrument must be non-empty",
+        "error_type": "BaselineError"
+      },
+      "name": "empty_refused"
+    }
+  ],
+  "load": [
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-07",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "valid_roundtrip"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "unreadable"
+      },
+      "name": "missing_file_unreadable"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "not_json"
+      },
+      "name": "torn_json"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "not_object"
+      },
+      "name": "json_list_not_object"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "not_object"
+      },
+      "name": "json_string_not_object"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "not_object"
+      },
+      "name": "json_int_not_object"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "not_object"
+      },
+      "name": "json_null_not_object"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_key_set"
+      },
+      "name": "missing_key"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_key_set"
+      },
+      "name": "extra_key"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "schema_version_mismatch"
+      },
+      "name": "schema_version_2"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "schema_version_mismatch"
+      },
+      "name": "schema_version_str_1"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-07",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "schema_version_bool_true_pun_loads"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-07",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "schema_version_float_1_0_pun_loads"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_data_snapshot_hash"
+      },
+      "name": "snapshot_hash_int"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_data_snapshot_hash"
+      },
+      "name": "snapshot_hash_empty"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_sessions_shape"
+      },
+      "name": "sessions_dict_shape"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_sessions_shape"
+      },
+      "name": "sessions_entry_len_3"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_sessions_shape"
+      },
+      "name": "sessions_entry_float_price"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_sessions_shape"
+      },
+      "name": "sessions_entry_bool_price"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_sessions_shape"
+      },
+      "name": "sessions_entry_int_date"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_types"
+      },
+      "name": "instrument_int"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_types"
+      },
+      "name": "start_int"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_types"
+      },
+      "name": "source_note_null"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_total_return_pct"
+      },
+      "name": "total_return_str"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_total_return_pct"
+      },
+      "name": "total_return_bool_true_excluded"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_total_return_pct"
+      },
+      "name": "total_return_null"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-04",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "105.00"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.0"
+        }
+      },
+      "name": "total_return_int_loads"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "bad_iso_date"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "bad_decimal_junk"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "anchor_nan_comparison_invalid_operation"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "Infinity",
+          "end": "2024-03-07",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "anchor_infinity_loads"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-04",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "NaN"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "session_price_nan_loads"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "descending_sessions_rejected_by_series"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "start_mismatch_rejected_by_series"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "empty_instrument_rejected_by_series"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_field_values"
+      },
+      "name": "empty_sessions_rejected_by_series"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-07",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "duplicate_json_keys_last_wins"
+    },
+    {
+      "expect": {
+        "loaded": true,
+        "series": {
+          "anchor_open": "200.00",
+          "end": "2024-03-07",
+          "instrument": "BAD-\ud800",
+          "sessions": [
+            [
+              "2024-03-04",
+              "202.20"
+            ],
+            [
+              "2024-03-05",
+              "199.95"
+            ],
+            [
+              "2024-03-07",
+              "211.55"
+            ]
+          ],
+          "source_note": "buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "5.775"
+        }
+      },
+      "name": "surrogate_instrument_loads"
+    }
+  ],
+  "price_str": [
+    {
+      "expect": "1.01",
+      "name": "half_up_boundary"
+    },
+    {
+      "expect": "-1.01",
+      "name": "negative_half_away_from_zero"
+    },
+    {
+      "expect": "1.00",
+      "name": "below_boundary_truncates"
+    },
+    {
+      "expect": "0.00",
+      "name": "zero_pads"
+    },
+    {
+      "expect": "100.00",
+      "name": "exponent_form_expands"
+    },
+    {
+      "expect": "123.40",
+      "name": "one_dp_pads"
+    },
+    {
+      "expect": "0.01",
+      "name": "tiny_half_up"
+    },
+    {
+      "expect": "2.68",
+      "name": "two_675_exact_decimal"
+    },
+    {
+      "expect": "99999999.99",
+      "name": "already_2dp_identity"
+    }
+  ],
+  "series_ctor": [
+    {
+      "expect": {
+        "series": {
+          "anchor_open": "100.00",
+          "end": "2024-03-05",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "101.20"
+            ],
+            [
+              "2024-03-05",
+              "99.95"
+            ]
+          ],
+          "source_note": "note",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "-0.05"
+        }
+      },
+      "name": "ok_two_sessions"
+    },
+    {
+      "expect": {
+        "series": {
+          "anchor_open": "100.00",
+          "end": "2024-03-05",
+          "instrument": "NIFTY",
+          "sessions": [
+            [
+              "2024-03-04",
+              "101.20"
+            ],
+            [
+              "2024-03-05",
+              "99.95"
+            ]
+          ],
+          "source_note": "note",
+          "start": "2024-03-04",
+          "total_return_pct_repr": "True"
+        }
+      },
+      "name": "ok_bool_total_return_pun"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.instrument must be non-empty",
+        "error_type": "BaselineError"
+      },
+      "name": "empty_instrument_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.sessions must be non-empty",
+        "error_type": "BaselineError"
+      },
+      "name": "empty_sessions_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.sessions must be strictly ascending by date",
+        "error_type": "BaselineError"
+      },
+      "name": "equal_dates_not_ascending_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.sessions must be strictly ascending by date",
+        "error_type": "BaselineError"
+      },
+      "name": "descending_dates_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries start/end must equal the first/last session date, got start=2024-03-07 end=2024-03-05 vs sessions [2024-03-04 \u2026 2024-03-05]",
+        "error_type": "BaselineError"
+      },
+      "name": "start_mismatch_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries start/end must equal the first/last session date, got start=2024-03-04 end=2024-03-07 vs sessions [2024-03-04 \u2026 2024-03-05]",
+        "error_type": "BaselineError"
+      },
+      "name": "end_mismatch_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.anchor_open must be > 0, got 0.00",
+        "error_type": "BaselineError"
+      },
+      "name": "zero_anchor_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.anchor_open must be > 0, got -1.23",
+        "error_type": "BaselineError"
+      },
+      "name": "negative_anchor_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.total_return_pct must be finite, got nan",
+        "error_type": "BaselineError"
+      },
+      "name": "nan_total_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.total_return_pct must be finite, got inf",
+        "error_type": "BaselineError"
+      },
+      "name": "inf_total_refused"
+    },
+    {
+      "expect": {
+        "error_str": "BaselineSeries.total_return_pct must be finite, got -inf",
+        "error_type": "BaselineError"
+      },
+      "name": "negative_inf_total_refused"
+    }
+  ],
+  "write": [
+    {
+      "expect": {
+        "log_instrument": "NIFTY",
+        "log_sessions": 3,
+        "text": "{\"anchor_open\":\"200.00\",\"data_snapshot_hash\":\"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"end\":\"2024-03-07\",\"instrument\":\"NIFTY\",\"schema_version\":1,\"sessions\":[[\"2024-03-04\",\"202.20\"],[\"2024-03-05\",\"199.95\"],[\"2024-03-07\",\"211.55\"]],\"source_note\":\"buy-&-hold NIFTY: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 6 bars over 3 session(s) (R27 same-bars law)\",\"start\":\"2024-03-04\",\"total_return_pct\":5.775}\n"
+      },
+      "name": "canonical_three_sessions"
+    },
+    {
+      "expect": {
+        "log_instrument": "\u03c0-index",
+        "log_sessions": 1,
+        "text": "{\"anchor_open\":\"10.00\",\"data_snapshot_hash\":\"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"end\":\"2024-03-04\",\"instrument\":\"\\u03c0-index\",\"schema_version\":1,\"sessions\":[[\"2024-03-04\",\"11.00\"]],\"source_note\":\"buy-&-hold \\u03c0-index: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)\",\"start\":\"2024-03-04\",\"total_return_pct\":10.0}\n"
+      },
+      "name": "unicode_instrument_ascii_escaped"
+    },
+    {
+      "expect": {
+        "log_instrument": "BAD-\ud800",
+        "log_sessions": 1,
+        "text": "{\"anchor_open\":\"10.00\",\"data_snapshot_hash\":\"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"end\":\"2024-03-04\",\"instrument\":\"BAD-\\ud800\",\"schema_version\":1,\"sessions\":[[\"2024-03-04\",\"11.00\"]],\"source_note\":\"buy-&-hold BAD-\\ud800: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)\",\"start\":\"2024-03-04\",\"total_return_pct\":10.0}\n"
+      },
+      "name": "lone_surrogate_instrument_escaped"
+    },
+    {
+      "expect": {
+        "log_instrument": "SNAP",
+        "log_sessions": 1,
+        "text": "{\"anchor_open\":\"100.01\",\"data_snapshot_hash\":\"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"end\":\"2024-03-04\",\"instrument\":\"SNAP\",\"schema_version\":1,\"sessions\":[[\"2024-03-04\",\"101.12\"]],\"source_note\":\"buy-&-hold SNAP: anchor = first bar OPEN of the first session; one point per IST session = that session's LAST bar CLOSE; computed from the sweep's own 1 bars over 1 session(s) (R27 same-bars law)\",\"start\":\"2024-03-04\",\"total_return_pct\":1.1099445027748613}\n"
+      },
+      "name": "anchor_3dp_snaps_at_write"
+    },
+    {
+      "expect": {
+        "log_instrument": "NIFTY",
+        "log_sessions": 2,
+        "text": "{\"anchor_open\":\"100.00\",\"data_snapshot_hash\":\"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"end\":\"2024-03-05\",\"instrument\":\"NIFTY\",\"schema_version\":1,\"sessions\":[[\"2024-03-04\",\"101.20\"],[\"2024-03-05\",\"99.95\"]],\"source_note\":\"note\",\"start\":\"2024-03-04\",\"total_return_pct\":true}\n"
+      },
+      "name": "bool_total_serializes_as_true"
+    },
+    {
+      "expect": {
+        "error_str": "write_baseline: data_snapshot_hash must be non-empty",
+        "error_type": "BaselineError"
+      },
+      "name": "empty_snapshot_hash_refused"
+    }
+  ]
+}
