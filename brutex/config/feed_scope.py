@@ -3,7 +3,8 @@
 The runtime-dynamic 4-index universe cut: ONE per-feed map (``feed →
 FeedScope``) consulted by every admission predicate and every read-time
 enumeration filter. Today the map is ``{groww: index4, dhan: index4}``
-(:data:`DEFAULT_FEED_SCOPES` — the operator's 2026-07-17 map); a future GDFL
+(:data:`DEFAULT_FEED_SCOPES` — the coordinator-relayed 2026-07-17 per-feed
+map, directive (B) paraphrase, never operator wording); a future GDFL
 feed binds wider by CONFIG (``BRUTEX_FEED_SCOPE=gdfl=full``) plus its own
 adapter REGISTRATION, never by re-architecture (directive B).
 
@@ -163,9 +164,10 @@ class FeedScope:
 #: The acting-feed default for admission surfaces (design §2.4).
 DEFAULT_FEED: Final[str] = "groww"
 
-#: The operator's pre-laid scope DEFAULTS (the 2026-07-17 map). Scope-KNOWN
-#: keys — NOT an activity claim: dhan has NO adapter in-tree and is NOT an
-#: ACTIVE feed until one registers (§2.5).
+#: The pre-laid scope DEFAULTS (the coordinator-relayed 2026-07-17 per-feed
+#: map — directive (B), coordinator paraphrase, never operator wording).
+#: Scope-KNOWN keys — NOT an activity claim: dhan has NO adapter in-tree and
+#: is NOT an ACTIVE feed until one registers (§2.5).
 DEFAULT_FEED_SCOPES: Final[Mapping[str, str]] = MappingProxyType(
     {"groww": SCOPE_INDEX4, "dhan": SCOPE_INDEX4}
 )
@@ -269,12 +271,19 @@ def _parse_env_uncached(raw: str | None) -> _ParsedEnv | None:
 
 
 def _warn_once(event: str, feed_key: str, **fields: object) -> None:
-    """Emit *event* at WARNING once per ``(event, feed_key)`` per process."""
+    """Emit *event* at WARNING once per ``(event, feed_key)`` per process.
+
+    The ``feed`` field rides ``repr()`` (the #907 escaping discipline): the
+    §2.3 grammar deliberately ACCEPTS arbitrary unregistered keys (how a
+    GDFL binding is pre-laid), so an operator-typed control-char-bearing key
+    would otherwise ride raw into a rendered log stream — the sibling
+    ``_refuse`` path already interpolates ``{raw!r}``.
+    """
     with _LOCK:
         if (event, feed_key) in _warned:
             return
         _warned.add((event, feed_key))
-    _LOG.warning(event, feed=feed_key, **fields)
+    _LOG.warning(event, feed=repr(feed_key), **fields)
 
 
 def _emit_env_warnings(parsed: _ParsedEnv | None) -> None:

@@ -158,7 +158,7 @@ class TestEnvGrammar:
         assert resolve_feed_scope("dhan").token == SCOPE_FULL
         assert resolve_feed_scope("gdfl").token == SCOPE_INDEX4  # fail-closed
 
-    def test_defaults_map_is_the_operator_2026_07_17_map(self) -> None:
+    def test_defaults_map_is_the_coordinator_relayed_2026_07_17_map(self) -> None:
         assert dict(DEFAULT_FEED_SCOPES) == {"groww": SCOPE_INDEX4, "dhan": SCOPE_INDEX4}
         assert DEFAULT_FEED == "groww"
 
@@ -178,7 +178,7 @@ class TestFailClosedDefaultWarn:
         assert second.token == SCOPE_INDEX4
         events = [e for e in logs if e["event"] == "feed_scope.active_feed_fail_closed_default"]
         assert len(events) == 1
-        assert events[0]["feed"] == "gdfl"
+        assert events[0]["feed"] == repr("gdfl")
 
     def test_no_warn_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(FEED_SCOPE_ENV, raising=False)
@@ -209,7 +209,20 @@ class TestNonActiveKeyLaw:
         assert union.bounded()  # read union unchanged — grow is not ACTIVE
         warned = [e for e in logs if e["event"] == "feed_scope.unregistered_feed_binding"]
         assert len(warned) == 1
-        assert warned[0]["feed"] == "grow"
+        assert warned[0]["feed"] == repr("grow")
+
+    def test_control_char_key_warn_field_is_escaped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A control-char-bearing (grammar-accepted) unregistered key rides the
+
+        warn line ``repr()``-escaped — never a raw ESC/newline into a rendered
+        log stream (the #907 discipline; the ``_refuse`` path already reprs)."""
+        monkeypatch.setenv(FEED_SCOPE_ENV, "gr\x1bww=full")
+        with capture_logs() as logs:
+            resolve_feed_scope("groww")
+        warned = [e for e in logs if e["event"] == "feed_scope.unregistered_feed_binding"]
+        assert len(warned) == 1
+        assert warned[0]["feed"] == repr("gr\x1bww")
+        assert "\x1b" not in warned[0]["feed"]  # escaped, never a raw ESC
 
     def test_dhan_full_scope_known_but_adapterless_excluded_and_warned(
         self, monkeypatch: pytest.MonkeyPatch
@@ -226,7 +239,7 @@ class TestNonActiveKeyLaw:
         assert union.admitted_underlyings == INDEX4_UNDERLYINGS
         wide = [e for e in logs if e["event"] == "feed_scope.inactive_feed_wide_binding"]
         assert len(wide) == 1
-        assert wide[0]["feed"] == "dhan"
+        assert wide[0]["feed"] == repr("dhan")
         # dhan is scope-KNOWN, so NO unregistered_feed_binding warn.
         assert not [e for e in logs if e["event"] == "feed_scope.unregistered_feed_binding"]
 
