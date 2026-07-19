@@ -3561,7 +3561,9 @@ hostile-review pass._
   Cargo.lock, deliberately in NO workspace — the brutex-lake/brutex-data
   conventions; `src/lib.rs` registration-ONLY, every kernel in
   `src/nightly.rs` as a pure `*_impl` + a thin `nightly_*` face — ELEVEN
-  faces, the report sub-laws + the XML escape exposed for direct pinning;
+  faces, the report sub-laws + the XML escape as own faces so the
+  API-surface guard latches a stale wheel OFF (pinned directly by cargo,
+  transitively by the Python nets);
   CPython semantics mirrored EXACTLY: the `str.strip()` 10-byte set incl.
   0x1C–0x1F, `rem_euclid` for the pmset midnight wrap, `&`-first chained
   XML escape, f64-exact µs→s division; 24 cargo tests incl. the FULL

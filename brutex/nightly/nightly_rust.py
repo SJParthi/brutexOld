@@ -83,6 +83,14 @@ BURN_IN_SAMPLES: Final[int] = 16
 #: The process-local autorevert latch — ``[None]`` = live; a reason string
 #: latches the Rust path OFF for the remainder of the process (SHARED
 #: across kernels — module docstring layer 3).
+#:
+#: THREAD-SAFETY (hostile-review NIT, by design): this latch + the burn-in
+#: budgets + the warn-once memo below are process-local module state with NO
+#: locking — the nightly chain and its status probe are single-threaded
+#: orchestration. A hypothetical race could only mis-account a burn-in
+#: decrement or duplicate a warn-once line, never return a wrong value
+#: (every path serves either the crate value bit-compared against the
+#: oracle, or the oracle itself).
 _DISABLED_REASON: Final[list[str | None]] = [None]
 
 #: Per-kernel remaining burn-in budgets (lazily seeded; reset seam below).
