@@ -90,6 +90,7 @@ import structlog
 from brutex.dashboard.composite_join import COMPOSITE_STATE_ABSENT, CompositeIndex
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.oneclick_view import cascade_status_text
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.engine.cascade_join import (
     CascadeJoin,
     CascadeJoinError,
@@ -279,7 +280,7 @@ def load_cascade_join_file(results_root: Path, *, token: str | None = None) -> C
             ValueError(f"{size} bytes > the {CASCADE_REPORT_MAX_BYTES}-byte cap"),
         )
     try:
-        raw = path.read_bytes()
+        raw = read_regular_bytes_deadline(path, what="cascade report read")
     except OSError as exc:
         return _failed_load(_CASCADE_LOAD_UNREADABLE, path, token, exc)
     try:

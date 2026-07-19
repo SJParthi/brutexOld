@@ -55,6 +55,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.run_layout import run_dir
 from brutex.models import BruteXError
 
@@ -375,7 +376,7 @@ def load_manifest(results_root: Path, run_id: str) -> RunManifest:
     """
     path = manifest_path(results_root, run_id)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_regular_text(path)
     except OSError as exc:
         raise RunManifestError(f"cannot read manifest {path}: {exc}") from exc
     try:
