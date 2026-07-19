@@ -3875,10 +3875,10 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/kernel-cache-soak-harness`
-  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1969 (renumbered #1962 → #1969 at
+  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at
   the 2026-07-19 slice-5 merge-forward reconcile — main took #1962 for
-  DEC-RUST-CALENDAR-LEAVES-001; DEC-IDs are the stable handles per
-  DEC-LEDGER-RENUMBER-001)** — the §8 M4-Pro
+  DEC-RUST-CALENDAR-LEAVES-001 and split PRs #1703/#1704 reserve #1969/#1970;
+  DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)** — the §8 M4-Pro
   kernel-cache OFF↔ON A/B SOAK HARNESS: `scripts/ci/kernel_cache_soak.py`
   (run/verdict — preflight → arm OFF → arm ON as separate `brutex sweep-all`
   subprocesses against FRESH per-arm results roots, ps-polled per-worker +
@@ -3962,7 +3962,7 @@ hostile-review pass._
   lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives
-  in MIGRATION.md #1969 — this header carries the pointer, never the story.)
+  in MIGRATION.md #1971 — this header carries the pointer, never the story.)
   Earlier: `claude/rust-calendar-leaves`
   (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962** — entry number
   PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
@@ -11701,14 +11701,14 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/kernel-cache-soak-harness`
-  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1969 (renumbered #1962 → #1969 at slice-5 reconcile) —
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1971 (renumbered #1962 → #1971 at slice-5 reconcile) —
   the §8 M4-Pro kernel-cache OFF↔ON A/B soak harness gating the #1729
   default-ON flip: soak script + dispatch workflow + runbook + smoke/unit
   tests; records the landed PR-A truth (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
   MIGRATION.md #1729, train #1553 squash 42117b0f, default-OFF flag,
   soak-gated flip); the flip itself is NOT pre-approved; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1969 for the full blurb)
+  MIGRATION.md #1971 for the full blurb)
   Earlier: `claude/rust-calendar-leaves`
   (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
