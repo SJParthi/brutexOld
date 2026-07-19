@@ -29,16 +29,19 @@ removed with it) · **#1513** the session-integrity pack
 DEC-EXTENDED-SESSION-OUTAGE-001 #1746; the extended_session_trades golden
 REPRODUCE-ONLY re-verified on the merged tree via the member's own generator
 — byte-identical, no delta) · **#1539** DEC-PREBUILD-FRAME-WRITE-001
-(MIGRATION.md #1958, renumbered #1793 → #1795 → #1956 → #1958 — bare #1795
-may not coexist with main's landed #1795a–#1795d suffixed block, and the
-2026-07-18 merge-forward reconcile moved it again after main took #1956 for
-DEC-SWEEP-COVERAGE-SHARD-001; the
+(MIGRATION.md #1961, renumbered #1793 → #1795 → #1956 → #1958 → #1961 — bare #1795
+may not coexist with main's landed #1795a–#1795d suffixed block, the
+2026-07-18 merge-forward reconcile moved it after main took #1956 for
+DEC-SWEEP-COVERAGE-SHARD-001, and the 2026-07-19 club-O merge-forward
+reconcile moved it again after main took #1958 for
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001; the
 verify-or-degrade frame-direct derived-TF write, dark) · **#1399 SCOPED** —
 ONLY DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 (#1626; the bad-tick screen
 family #1625/#1687/#1688/#1683 was NOT folded — landed-differently vs the
 FOUR interlocking screen consumers main grew after the member's cut, the
 named residual lane in the vehicle PR body) · **#1358 RESIDUAL R1** —
-DEC-SWEEP-1DAY-FRESHNESS-GATE-001 (#1957; the derived-1day sweep-preflight
+DEC-SWEEP-1DAY-FRESHNESS-GATE-001 (#1960, renumbered #1957 → #1960 at the
+2026-07-19 club-O merge-forward reconcile; the derived-1day sweep-preflight
 gate, re-derived onto #1932's screened base read — the member's other
 backend features are FULLY SUPERSEDED by the landed #1795a/#1931/#1932 and
 its display buckets R2-R5 stay a named residual; #1358 NOT closed) ·
@@ -648,12 +651,14 @@ DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item record lives
 in the §1 Active-branch blurb + MIGRATION.md #1780 — this header carries the
 one-line summary, never the story.)
-Earlier: 2026-07-14 (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1958
-(renumbered #1793 → #1956 → #1958 — the first hop at the 2026-07-14
+Earlier: 2026-07-14 (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961
+(renumbered #1793 → #1795 → #1956 → #1958 → #1961 — the first hop at the 2026-07-14
 merge-reconcile, main took #1793 for DEC-SETTLE-EVIDENCE-ADOPTION-001 +
-#1794 for DEC-BULK-SPOT-COMPLETENESS-FLAG-001; the last hop at the
+#1794 for DEC-BULK-SPOT-COMPLETENESS-FLAG-001; then the
 2026-07-18 lap-8 merge-forward reconcile, main took #1956 for
-DEC-SWEEP-COVERAGE-SHARD-001; DEC-IDs are the stable handles per
+DEC-SWEEP-COVERAGE-SHARD-001; the last hop at the 2026-07-19 club-O
+merge-forward reconcile, main took #1958 for
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001; DEC-IDs are the stable handles per
 DEC-LEDGER-RENUMBER-001), branch `claude/prebuild-frame-write` — the
 verify-or-degrade FRAME-DIRECT
 derived-TF write, shipped DARK (default OFF via the tristate+`shadow`
@@ -678,7 +683,7 @@ speedup claimed (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³
 bars). Run identity / `data_snapshot_hash` / the 1-minute lake untouched;
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change. This header carries the pointer, never the story — the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1958.)
+lives in the §1 Active-branch blurb + MIGRATION.md #1961.)
 Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
@@ -3745,20 +3750,22 @@ hostile-review pass._
 - **Active branch:** `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
   scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
-  #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1957) →
+  #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1960) →
   #1579 LAST; #1590 closed-as-superseded (a subset of #1579). Union files
   docs/MIGRATION.md + CLAUDE.md woven per the club convention; ledger
-  renumber: #1539's #1795 → #1956 → #1958 (bare-vs-suffixed #1795a–d at
+  renumber: #1539's #1795 → #1956 → #1958 → #1961 (bare-vs-suffixed #1795a–d at
   assembly; then main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001, so the
-  2026-07-18 merge-forward reconcile moved it to #1958); every other member
+  2026-07-18 merge-forward reconcile moved it to #1958; then main's club-O
+  took #1957–#1959, so the 2026-07-19 merge-forward reconcile moved it to
+  #1961 and DEC-SWEEP-1DAY-FRESHNESS-GATE-001 #1957 → #1960); every other member
   number verified FREE on main (ceiling #1955 at assembly; gaps are legal
   per DEC-LEDGER-RENUMBER-001). The #1513
   extended-session trades golden re-verified REPRODUCE-ONLY on the merged
   tree (byte-identical). ENGINE semantics change only on Muhurat-crossing
   weekly-anchor grids (#1626); no lake/schema/scope/vocab/rate change. This
   blurb carries pointers, never round narration — each member's full record
-  lives in its own MIGRATION.md entry (#1941 · #1744-#1746 · #1958 · #1626 ·
-  #1957 · #1896/#1898) + the vehicle PR body, which also carries the #1358
+  lives in its own MIGRATION.md entry (#1941 · #1744-#1746 · #1961 · #1626 ·
+  #1960 · #1896/#1898) + the vehicle PR body, which also carries the #1358
   triage verdict, the #1618 delete-proof, and the #1399 screen-family
   deferral record.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
@@ -5678,7 +5685,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
   OUT of BruteX per DEC-LIVE-REMOVE-001.)
   Earlier: `claude/prebuild-frame-write`
-  (**DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1958** — the verify-or-degrade
+  (**DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961** — the verify-or-degrade
   FRAME-DIRECT derived-TF write, shipped DARK (default OFF). THE MEASURED ROOT
   (Phase-1 profiling, sandbox ratios — the operator M4-Pro measurement decides):
   the derived-TF prebuild is GIL-held Python, not I/O — the polars-frame →
@@ -5742,7 +5749,7 @@ hostile-review pass._
   their gates; the new battery 202 passed + 1 env-gated skip (239 + 2 after
   the reconcile fold); ruff/ruff-format clean; `mypy --strict` clean; pyright
   0 new vs the origin/main baseline. CI/CODEQL RECONCILE FOLD (2026-07-15 —
-  the per-item record lives in MIGRATION.md #1958): the 16 head pyright
+  the per-item record lives in MIGRATION.md #1961): the 16 head pyright
   errors fixed (TypedDict `_COORDS` kwargs; the bench probe import repointed
   to `pipeline_prebuild` + made load-bearing) and the 4 CodeQL alerts closed
   at root cause — `frame_to_candle_bars` rehomed to the NEW leaf
@@ -5753,8 +5760,9 @@ hostile-review pass._
   classifier re-export + identity pin stand), the integration A/B suite on
   ONE writer-module import style; entry renumbered #1793 → #1956 at the
   merge-reconcile (→ #1958 at the 2026-07-18 lap-8 merge-forward
+  reconcile; → #1961 at the 2026-07-19 club-O merge-forward
   reconcile). REVIEW ROUND 1 folded (2026-07-15 — the per-finding
-  record lives in MIGRATION.md #1958): the refuter-named byte-SAFE
+  record lives in MIGRATION.md #1961): the refuter-named byte-SAFE
   degrade-DIRECTION mutant class (invisible to the A/B sha256 differential
   by construction — a narrowed admission degrades to legacy's identical
   bytes) closed by a 10-mutant hand-kill census (4 already killed; 6
@@ -5771,7 +5779,7 @@ hostile-review pass._
   rust_metrics/rust_stage1a reconciled to the promoted
   `brutex.config.env_flags` home — docstring/comment-only, ENGINE
   UNCHANGED. REVIEW ROUND 3 folded (2026-07-15 — the per-finding record
-  lives in MIGRATION.md #1958): the refuter-confirmed MAJOR — the fresh
+  lives in MIGRATION.md #1961): the refuter-confirmed MAJOR — the fresh
   fast-lane snap's `_SNAP_PARSE_SCALE=17` conflated SIGNIFICANT with
   FRACTIONAL digits, so an 18-20-fractional-digit sub-0.1 repr just below a
   half-paisa boundary (`0.004999999999999996`) rounded ACROSS the boundary
@@ -11348,9 +11356,9 @@ hostile-review pass._
 
 - **Active feature branch:** `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
-  the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1957)
+  the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
   + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md
-  entries #1941 · #1744-#1746 · #1958 · #1626 · #1957 · #1896/#1898 for the
+  entries #1941 · #1744-#1746 · #1961 · #1626 · #1960 · #1896/#1898 for the
   full blurbs)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
@@ -11952,7 +11960,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1780 for the full blurb)
   Earlier: `claude/prebuild-frame-write`
-  (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1958 — the verify-or-degrade
+  (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961 — the verify-or-degrade
   FRAME-DIRECT derived-TF write, shipped DARK (default OFF via the
   tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒
   FAIL-SAFE OFF + warn-once, a recorded kill-must-kill deviation): the
@@ -11975,7 +11983,7 @@ hostile-review pass._
   (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³ bars); run
   identity / `data_snapshot_hash` / the 1-minute lake untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
-  §1 + MIGRATION.md #1958 for the full blurb)
+  §1 + MIGRATION.md #1961 for the full blurb)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
