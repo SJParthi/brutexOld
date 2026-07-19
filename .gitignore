@@ -147,6 +147,11 @@ Cargo.lock
 # application BINARY crate: its lockfile is tracked for reproducible builds
 # (Golden Rule #4) + the security-audit Cargo.lock trigger.
 !rust/brutexd/Cargo.lock
+# Same law for the brutex-ops backup decision kernel
+# (DEC-BACKUP-RUST-OPS-001 review-round fold — the ops-rust-parity lane runs
+# cargo `--locked`, so the lock MUST be tracked; the original push left it
+# gitignored by the global rule above and the lane failed on exactly that).
+!rust/brutex-ops/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

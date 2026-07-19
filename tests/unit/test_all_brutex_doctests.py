@@ -38,6 +38,8 @@ from pathlib import Path
 
 import brutex
 
+from tests.fakes.doctest_isolation import quiet_structlog
+
 #: The doctest SKIP directive, matched anywhere on a line (``# doctest: +SKIP``
 #: and multi-flag forms like ``# doctest: +ELLIPSIS, +SKIP``). Scanned as TEXT
 #: over every ``brutex/`` source file — a skipped example never executes and
@@ -67,16 +69,23 @@ def test_all_brutex_module_doctests() -> None:
     walk_errors: list[str] = []
     failures: list[tuple[str, int]] = []
     attempted = 0
-    for info in pkgutil.walk_packages(
-        brutex.__path__, prefix="brutex.", onerror=walk_errors.append
-    ):
-        if info.name in _SKIPPED_MODULES:
-            continue
-        module = importlib.import_module(info.name)
-        result = doctest.testmod(module, verbose=False)
-        attempted += result.attempted
-        if result.failed:
-            failures.append((info.name, result.failed))
+    # quiet_structlog: while testmod captures via a sys.stdout swap, a
+    # detached daemon from an earlier same-process test (the lake-heal L3
+    # StartupSweeper class) can write structlog lines into an example's
+    # captured output — the same cross-thread race that failed the
+    # combo_mask gate on CI shard 2 (run 29668853084); silenced for the
+    # capture window only, prior config restored on exit.
+    with quiet_structlog():
+        for info in pkgutil.walk_packages(
+            brutex.__path__, prefix="brutex.", onerror=walk_errors.append
+        ):
+            if info.name in _SKIPPED_MODULES:
+                continue
+            module = importlib.import_module(info.name)
+            result = doctest.testmod(module, verbose=False)
+            attempted += result.attempted
+            if result.failed:
+                failures.append((info.name, result.failed))
     assert not walk_errors, (
         f"pkgutil.walk_packages could not import package(s) {walk_errors} — "
         f"their whole subtree was pruned from the doctest walk; fix the import."
