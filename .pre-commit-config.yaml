@@ -22,6 +22,14 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # The tri-fold (PR #1698) sweep-core RAW evidence files (the pinned
+        # design doc + raw measurement JSONs) landed on main WITHOUT trailing
+        # newlines; they are committed byte-frozen evidence outside every CI
+        # gate, and "fixing" them in a merge-forward push range would diverge
+        # a vehicle branch from main — the DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # hook-scope posture applied at the hook level (brutex-ops
+        # merge-forward over main 1a3f4852).
+        exclude: ^docs/design/sweep_core/
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml
