@@ -3600,10 +3600,17 @@ hostile-review pass._
   cell (`axis_defaults_assumed` disclosed); O(finalists × window bars) per night, never
   O(1); diff/ledger glue is Python over the Rust kernels (Rust-optional, disclosed);
   W2's trailing_* ResultRow columns deliberately NOT added (fold seam disclosed). GATES:
-  `decay_math.py` 100.00% (200/68, 53 tests) · `decay.py` 100.00% (213/44, 34) ·
-  `champions.py` 100.00% (303/66, 46) + the touched chain/run/alerts/lockbox/
+  `decay_math.py` 100.00% (200/68, 53 tests) · `decay.py` 100.00% (213/44, 35) ·
+  `champions.py` 100.00% (343/76, 51) + the touched chain/run/alerts/lockbox/
   sweep_binding suites re-locked; cargo fmt/clippy `-D warnings`/test green (628);
-  frozen engine/sweep goldens byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  frozen engine/sweep goldens byte-untouched. HOSTILE-REVIEW ROUND 1 folded
+  (FIX-FIRST → all findings fixed, executed fail-before/pass-after each: the
+  state-leads/ledger-trails crash-convergence law · top100-file-mtime discovery
+  re-key · the LOUD join-key collision guard + the named follow-up
+  DEC-TOP100-AXIS-JOIN-KEY-001 · hostile-scope isolation · the shared leg
+  catalog · the negative-Sharpe disclosure — this header carries the pointer,
+  never the story; the per-finding record lives in MIGRATION.md #1981/#1982).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
@@ -10866,7 +10873,9 @@ hostile-review pass._
   nights, era-tagged annotation-only retirement) + the snapshot-free
   `run-delta.json` compare; flags `BRUTEX_NIGHTLY_DECAY` /
   `BRUTEX_NIGHTLY_CHAMPIONS` / `BRUTEX_DECAY_RUST` default ON (in-branch
-  flip recorded); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  flip recorded); hostile-review round 1 folded (state-leads/ledger-trails
+  crash convergence + the five sibling fixes — MIGRATION.md #1981/#1982);
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
   Active branch line — see §1 + MIGRATION.md #1981–#1983 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
