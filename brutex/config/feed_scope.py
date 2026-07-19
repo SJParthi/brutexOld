@@ -371,11 +371,38 @@ def resolve_read_scope() -> FeedScope:
     restart. Any ACTIVE feed bound ``full`` ⇒ the union is unbounded;
     non-active bindings never fold in. Since the union ⊇ every active feed's
     scope, a display can never hide what a producer admits.
+
+    A caller that ALSO folds :func:`scope_revision` into a cache key must use
+    :func:`read_scope_snapshot` instead of pairing two separate calls — the
+    pair law (§2.5 coherence).
+    """
+    return _read_union(os.environ.get(FEED_SCOPE_ENV), active_feeds())
+
+
+def read_scope_snapshot() -> tuple[FeedScope, str]:
+    """One COHERENT ``(read-union scope, scope_revision token)`` pair (§2.5).
+
+    Derives BOTH values from a SINGLE ``(env raw, active_feeds())`` snapshot,
+    so a concurrent §2.5 registration landing between two SEPARATE
+    :func:`resolve_read_scope` / :func:`scope_revision` reads can never pair
+    a pre-widening (narrow) scope with the post-widening token — which would
+    cache the narrow payload UNDER the post-widening key and keep serving it
+    to post-registration requests until an unrelated generation/master bump,
+    silently defeating the token fold's stated purpose. Every memo-key site
+    that threads the scope AND folds the token binds this helper
+    (source-pinned); a LONE token fold whose compute resolves the scope
+    lazily stays on :func:`scope_revision` — that ordering is benign (a
+    stale-token-keyed entry simply misses after the registration).
     """
     raw = os.environ.get(FEED_SCOPE_ENV)
+    active = active_feeds()
+    return _read_union(raw, active), _revision_token(raw, active)
+
+
+def _read_union(raw: str | None, active: frozenset[str]) -> FeedScope:
+    """Compute (memoized) the read union for one ``(raw, active)`` snapshot."""
     parsed = _parse_env(raw)
     _emit_env_warnings(parsed)
-    active = active_feeds()
     key = (raw, active)
     with _LOCK:
         cached = _union_memo.get(key)
@@ -432,10 +459,15 @@ def scope_revision() -> str:
     Moves on a §2.5 registration (and on an env change across restarts);
     folded into the non-expiring read-cache keys (the #1650
     ``master_revision``-fold idiom) so registration widening reaches primed
-    caches without a write-generation bump.
+    caches without a write-generation bump. A caller that ALSO threads the
+    read-union scope must use :func:`read_scope_snapshot` — the pair law.
     """
-    raw = os.environ.get(FEED_SCOPE_ENV)
-    basis = f"{raw!r}|{','.join(sorted(active_feeds()))}"
+    return _revision_token(os.environ.get(FEED_SCOPE_ENV), active_feeds())
+
+
+def _revision_token(raw: str | None, active: frozenset[str]) -> str:
+    """Derive the identity token for one ``(raw, active)`` snapshot."""
+    basis = f"{raw!r}|{','.join(sorted(active))}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
@@ -482,6 +514,7 @@ __all__ = [
     "FeedScopeError",
     "active_feeds",
     "note_feed_registered",
+    "read_scope_snapshot",
     "resolve_feed_scope",
     "resolve_read_scope",
     "scope_revision",

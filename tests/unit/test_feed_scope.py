@@ -30,6 +30,7 @@ from brutex.config.feed_scope import (
     FeedScopeError,
     active_feeds,
     note_feed_registered,
+    read_scope_snapshot,
     resolve_feed_scope,
     resolve_read_scope,
     scope_revision,
@@ -293,6 +294,78 @@ class TestActiveFeedsAndReadUnion:
         scope = resolve_feed_scope("groww")
         assert scope.admits_underlying(Exchange.NSE, "RELIANCE")
         assert scope.admits_fno_underlying(Exchange.BSE, "ANYTHING")
+
+
+class TestReadScopeSnapshot:
+    """The §2.5 PAIR LAW — ``read_scope_snapshot`` (DEC-UNIVERSE-INDEX-ONLY-001).
+
+    A memo-key site that threads the read-union scope AND folds the revision
+    token must derive BOTH from ONE ``(env, active)`` snapshot: two separate
+    ``resolve_read_scope()`` / ``scope_revision()`` reads racing a §2.5
+    registration could pair the pre-widening narrow scope with the
+    post-widening token — caching the narrow payload UNDER the post-widening
+    key, so post-registration requests keep hitting stale narrow data until
+    an unrelated generation bump."""
+
+    def test_parity_with_split_reads_in_quiescent_state(self) -> None:
+        scope, token = read_scope_snapshot()
+        assert scope == resolve_read_scope()
+        assert token == scope_revision()
+
+    def test_one_active_set_read_binds_both_halves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The coherence mechanism itself: the PAIR is derived from the FIRST
+        ``active_feeds()`` snapshot — a mutating stub that widens on every
+        LATER read (a registration landing mid-pair) proves the token still
+        matches the scope's own snapshot. A split
+        ``(resolve_read_scope(), scope_revision())`` implementation pairs the
+        narrow scope with the POST-widening token here — the exact stale-key
+        interleaving the pre-fix call sites allowed."""
+        import hashlib
+
+        monkeypatch.setenv(FEED_SCOPE_ENV, "gdfl=full")
+        calls: list[int] = []
+
+        def _mutating() -> frozenset[str]:
+            calls.append(1)
+            if len(calls) == 1:
+                return frozenset({"groww"})
+            return frozenset({"groww", "gdfl"})  # a registration mid-pair
+
+        monkeypatch.setattr(feed_scope, "active_feeds", _mutating)
+        scope, token = read_scope_snapshot()
+        # The scope is the FIRST snapshot's union (groww-only → bounded)...
+        assert scope.bounded()
+        # ... and the token is the SAME snapshot's token — never the widened
+        # set's (independent oracle: the documented (raw, active) basis).
+        narrow = hashlib.sha256(f"{'gdfl=full'!r}|groww".encode()).hexdigest()[:16]
+        wide = hashlib.sha256(f"{'gdfl=full'!r}|gdfl,groww".encode()).hexdigest()[:16]
+        assert token == narrow
+        assert token != wide
+
+    def test_registration_between_snapshots_moves_both(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(FEED_SCOPE_ENV, "gdfl=full")
+        narrow_scope, narrow_token = read_scope_snapshot()
+        assert narrow_scope.bounded()
+        note_feed_registered("gdfl")  # the §2.5 widening event — no env flip
+        wide_scope, wide_token = read_scope_snapshot()
+        assert not wide_scope.bounded()
+        assert wide_token != narrow_token
+
+    def test_memo_key_sites_bind_the_snapshot_pair(self) -> None:
+        """Source pin (the #1645 idiom): every dashboard site that threads the
+        read scope AND folds the token binds ``read_scope_snapshot()`` — the
+        split adjacent-pair shape may not reappear. Lone token folds whose
+        compute resolves the scope lazily stay legal (benign ordering)."""
+        root = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
+        app_src = (root / "app.py").read_text(encoding="utf-8")
+        warm_src = (root / "discovery_warm.py").read_text(encoding="utf-8")
+        for src in (app_src, warm_src):
+            assert "scope_token = scope_revision()" not in src
+            assert "scope_token=scope_revision()" not in src
+        assert app_src.count("read_scope_snapshot()") == 5  # 3 warm + movers + preopen
+        assert warm_src.count("read_scope_snapshot()") == 1
 
 
 class TestRegistrationSeam:

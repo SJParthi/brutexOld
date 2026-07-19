@@ -68,6 +68,7 @@ from brutex.config.feed_scope import (
     DEFAULT_FEED,
     FeedScope,
     FeedScopeError,
+    read_scope_snapshot,
     resolve_feed_scope,
     resolve_read_scope,
     scope_revision,
@@ -5073,8 +5074,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # read-union scope + fold the SAME `scope_revision()` token the
                 # route folds, so a warmed entry is actually HIT by the route's
                 # composite key (key parity, CLAUDE.md §11 COMMON).
-                read_scope = resolve_read_scope()
-                scope_token = scope_revision()
+                read_scope, scope_token = read_scope_snapshot()
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
                     def _spot_job() -> int:
@@ -5146,8 +5146,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
                 # DEC-UNIVERSE-INDEX-ONLY-001: warm ≡ route (scope + key fold) —
                 # see the spot warm job.
-                read_scope = resolve_read_scope()
-                scope_token = scope_revision()
+                read_scope, scope_token = read_scope_snapshot()
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -5221,8 +5220,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 warm_registry_token = _registry_key_component(lake_root)
                 # DEC-UNIVERSE-INDEX-ONLY-001: warm ≡ route (scope + key fold) —
                 # see the spot warm job.
-                read_scope = resolve_read_scope()
-                scope_token = scope_revision()
+                read_scope, scope_token = read_scope_snapshot()
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -8342,8 +8340,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # candidate discovery, and fold `scope_revision()` into the candidate
                 # keys (the #1650 master_revision-fold idiom) so a registration
                 # widening re-keys a primed cache with NO generation bump.
-                read_scope = resolve_read_scope()
-                scope_token = scope_revision()
+                read_scope, scope_token = read_scope_snapshot()
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -8707,11 +8704,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # sweeps-tree digest) runs HERE on the threadpool worker, never the loop.
             gen = _summary_cache.generation
             # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): thread the read-union
-            # scope + fold scope_revision() into the memo key (warm parity —
-            # discovery_warm seeds the SAME composite key).
-            read_scope = resolve_read_scope()
+            # scope + fold the COHERENT snapshot token into the memo key (warm
+            # parity — discovery_warm seeds the SAME composite key; the §2.5
+            # pair law — one snapshot, never a split scope/token read).
+            read_scope, scope_token = read_scope_snapshot()
             triples = _db_datasets_cache.get_or_compute(
-                preopen_datasets_key(report_basis, scope_token=scope_revision()),
+                preopen_datasets_key(report_basis, scope_token=scope_token),
                 generation=gen,
                 compute=lambda: resolve_report_datasets(lake, basis=report_basis, scope=read_scope),
             )

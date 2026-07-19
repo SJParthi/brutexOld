@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.config.feed_scope import resolve_read_scope, scope_revision
+from brutex.config.feed_scope import read_scope_snapshot
 from brutex.dashboard.db_view import (
     fno_candle_lake_schema,
     list_candle_datasets,
@@ -123,9 +123,10 @@ def preopen_datasets_key(basis: str, *, scope_token: str | None = None) -> str:
 
     *scope_token* is the DEC-UNIVERSE-INDEX-ONLY-001 fold (design §3 R1's memo
     law applied to R3's discovery memo): the production sites — the /reports
-    symbol route + this module's warm seeding — pass
-    :func:`~brutex.config.feed_scope.scope_revision`, so a registration
-    widening re-keys the memo with NO generation bump. ``None`` (a direct /
+    symbol route + this module's warm seeding — pass the token half of
+    :func:`~brutex.config.feed_scope.read_scope_snapshot` (the §2.5 pair
+    law — coherent with the threaded scope), so a registration widening
+    re-keys the memo with NO generation bump. ``None`` (a direct /
     legacy caller) keys the UNFILTERED compute separately — one entry can
     never serve two divergent computes.
     """
@@ -266,11 +267,11 @@ def warm_discovery_memos(
         )
 
         # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): the warm seeding threads
-        # the SAME read-union scope + folds the SAME scope_revision() token the
+        # the SAME read-union scope + folds the SAME snapshot token the
         # /reports route folds — key parity, or the seeded memo would never be
         # hit (and a registration widening re-keys it with NO generation bump).
-        read_scope = resolve_read_scope()
-        scope_token = scope_revision()
+        # ONE coherent snapshot (the §2.5 pair law) — never a split read.
+        read_scope, scope_token = read_scope_snapshot()
 
         def _preopen_compute(b: ReportBasis) -> Callable[[], list[tuple[str, str, str]]]:
             """Bind one basis's compute over the SHARED pre-walked candle list."""
