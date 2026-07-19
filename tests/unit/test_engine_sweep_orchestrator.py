@@ -441,6 +441,23 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="take_profits value\\s+on the Mode-A grid"):
             _grid(stage3_enable=True, stop_losses=[80], take_profits=[505])
 
+    def test_stage3_enable_wheelless_runtime_is_a_clean_config_valueerror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # DEC-RUST-STAGE3-REFINE-001 (#1960): GridAxis.normalize rides the
+        # brutex_refine wheel — an enabled grid on a wheel-less/flag-off box
+        # must fail fast at __post_init__ as the SAME clean config ValueError
+        # the CLI surfaces, never a raw RefineRustUnavailableError leak.
+        from brutex.engine.refine_rust import RefineRustUnavailableError
+        from brutex.engine.stage3_grid import GridAxis
+
+        def _boom(self: GridAxis, paisa: int) -> float:
+            raise RefineRustUnavailableError("the brutex_refine wheel is not importable")
+
+        monkeypatch.setattr(GridAxis, "normalize", _boom)
+        with pytest.raises(ValueError, match="requires the Stage-3\\s+Rust runtime"):
+            _grid(stage3_enable=True, stop_losses=[80])
+
     def test_stage3_enable_accepts_on_grid_axes(self) -> None:
         grid = _grid(stage3_enable=True, stop_losses=[80, 100], take_profits=[50, 120])
         assert grid.stage3_enable is True
