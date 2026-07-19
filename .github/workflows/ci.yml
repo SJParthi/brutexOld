@@ -2739,6 +2739,14 @@ jobs:
           else
             echo "(brutex.engine.cascade_rust test file not present yet — gate inactive)"
           fi
+          # DEC-RUST-CASCADE-RESULTS-001 slice 2a: the cascade_wire type-face
+          # shim over the Rust-hosted serialisation + parse laws — 100% from
+          # its stem suites + the frozen parity replay + the differential.
+          if compgen -G "tests/unit/test_engine_cascade_wire.py" > /dev/null; then
+            pytest --cov=brutex.engine.cascade_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_cascade_wire.py tests/unit/test_engine_cascade_wire_runcore.py tests/golden/test_cascade_wire_golden.py tests/property/test_cascade_wire_properties.py tests/golden/test_cascade_wire_rust_parity_golden.py tests/property/test_cascade_wire_rust_differential.py
+          else
+            echo "(brutex.engine.cascade_wire test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dashboard_composite_join.py" > /dev/null; then
             pytest --cov=brutex.dashboard.composite_join --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_composite_join.py
           else
