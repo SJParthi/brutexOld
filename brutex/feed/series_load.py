@@ -304,8 +304,8 @@ def _cut_owned_bars(
     :class:`~brutex.data.futures_series.FuturesSeriesError` (real FNO
     lake bars are post-2020 by the ``GROWW_HISTORY_FLOOR`` law — only
     planted/out-of-band data can reach the refusal, and a possibly-wrong
-    civil date must never silently re-own a bar). The development-stage
-    Python arm keeps the verbatim ``astimezone`` comprehension.
+    civil date must never silently re-own a bar). The cut always runs on
+    the wheel-required Rust kernel — no Python arm exists.
     """
     kept = require_feed_kernel().ownership_cut(  # type: ignore[attr-defined]
         [_ts_epoch_us(bar.timestamp) for bar in raw],
@@ -326,9 +326,9 @@ def _cut_owned_bars(
 def _boundary_break(*, prev_last: datetime, first: datetime) -> bool:
     """The boundary-monotonicity verdict between stitched segments.
 
-    Kernel arm: the Rust ``boundary_monotonic_break`` over exact epoch-µs
-    (`first <= prev_last`); development-stage Python arm: the verbatim
-    datetime comparison. The caller raises the unchanged
+    The verdict is the Rust ``boundary_monotonic_break`` over exact
+    epoch-µs (``first <= prev_last``) on the wheel-required kernel — no
+    Python arm exists. The caller raises the unchanged
     :class:`~brutex.data.futures_series.FuturesSeriesError` message.
     """
     return bool(

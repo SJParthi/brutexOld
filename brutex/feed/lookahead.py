@@ -266,8 +266,11 @@ class LookAheadBarrier:
 
 
 class _BarrierCoreLike(Protocol):
-    """Structural protocol of the verdict-coded core (Rust ``BarrierCore``
-    or the development-stage :class:`_PythonBarrierCore`)."""
+    """Structural protocol of the verdict-coded Rust ``BarrierCore``.
+
+    The wheel is REQUIRED — no Python core exists
+    (DEC-FEED-RUST-MATERIALIZE-002); the Protocol exists for typing only.
+    """
 
     @property
     def current_index(self) -> int: ...  # pragma: no cover — Protocol stub
