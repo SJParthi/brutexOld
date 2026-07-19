@@ -189,7 +189,8 @@ def evaluate_stratum(
     if n_stratum == 0:
         return verdict(
             "unproven_current_regime",
-            "no trades in the extreme-vol stratum (>= 2024-01-01) — unproven, not rejected",
+            "no trades in the extreme-vol stratum "
+            f"(>= {STRATUM_START.isoformat()}) — unproven, not rejected",
         )
     if n_stratum < MIN_STRATUM_TRADES:
         return verdict(

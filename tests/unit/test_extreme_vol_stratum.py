@@ -32,8 +32,11 @@ def test_classify_empty_and_single_entry_are_empty() -> None:
 
 
 def test_classify_boundary_exact_move_percent() -> None:
-    # Consecutive sessions 100.00 → X: 1.99% is calm, 2.00% (>=) and 2.01%
-    # are extreme (strict boundary law of EXTREME_DAILY_MOVE_PCT).
+    # Consecutive sessions 100.00 → X: 1.99% is calm, 2.00% and 2.01% are
+    # extreme. HONEST: the exact 2% edge is float-unreachable via close
+    # ratios (102.0/100.0 == 2.0000000000000018%, not exactly 2.0), so this
+    # pins behavior NEAR the boundary rather than the >= edge itself; the
+    # variance arm (exact 4.0) carries the true strict-boundary pin.
     d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
     assert classify_extreme_sessions({d1: 100.0, d2: 101.99}) == frozenset()
     assert classify_extreme_sessions({d1: 100.0, d2: 102.0}) == frozenset({d2})
