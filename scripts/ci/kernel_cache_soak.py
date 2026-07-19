@@ -59,11 +59,17 @@ HONEST LIMITS (Golden Rule #10)
   bias check).
 * The ABSOLUTE RSS/pool bars are measured at PINNED sizing: ``arm_env``
   explicitly sets ``BRUTEX_SWEEP_WORKERS`` + ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``
-  (the parent-resolved DEFAULT laws) beside the capacity pin, so a stray
-  ambient/``.env`` sizing value can never silently re-scope them
-  (fix-round-3 MINOR-1); the remaining symmetric sweep envs are echoed into
+  (the parent-resolved DEFAULT laws — the mem budget through the engine's own
+  resolver at the eval-pool divisor ``workers − 1``, the divisor the driver
+  itself exports per worker; fix-round-4 MAJOR corrected the round-3 ÷N pin)
+  beside the capacity pin, and the SEVEN ``BRUTEX_SWEEP_TRIPWIRE_*``
+  SUSPECT-latch thresholds at the engine defaults (fix-round-4 MINOR — they
+  shape the clean-exit bar itself), so a stray ambient/``.env`` value can
+  never silently re-scope the bars OR the judgment (fix-round-3 MINOR-1);
+  the remaining symmetric sweep envs are echoed into
   ``provenance.symmetric_env_echo`` (parent-environ view — dotenv values
-  are invisible there, which is exactly why the sizing envs are pinned).
+  are invisible there, which is exactly why the sizing/tripwire envs are
+  pinned).
 * A non-smoke report whose ``hardware_key`` is not the registered §8 M4-Pro
   envelope — or whose key came from the ``BRUTEX_BENCH_BASELINE_KEY`` env
   OVERRIDE rather than real hardware probes — can never read FLIP-READY: the
@@ -88,6 +94,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -120,8 +127,11 @@ WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 #: law the flip ships — so ``arm_env`` now PINS the parent-resolved default
 #: (:func:`resolve_pinned_mem_budget`) into both arms, mirroring the capacity
 #: precedent. The engine treats a SET value as the per-worker override
-#: (never divided), so pinning the default-law per-worker figure at the
-#: pinned worker count is byte-identical to the engine's own default.
+#: (never divided), so pinning the default-law per-worker figure is
+#: byte-identical to the engine's own default — which divides by the
+#: EVAL-POOL size ``workers − 1``, NOT by ``workers`` (fix-round-4 MAJOR,
+#: refuter-A: the round-3 pin used the wrong divisor; see
+#: :func:`resolve_pinned_mem_budget`).
 MEM_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
 #: Mirror of run_layout.MIRROR_ROOT_ENV (drift-pinned): the Row-15 forensics
 #: mirror root. Fix-round-3 NIT (refuter-A): both arms share ``run_id``
@@ -131,17 +141,39 @@ MEM_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
 #: ``<arm>/mirror/`` dir instead — per-arm forensics kept, the operator's
 #: shared mirror root untouched by a soak.
 RUN_MIRROR_ROOT_ENV: Final[str] = "BRUTEX_RUN_MIRROR_ROOT"
+#: The SEVEN sweep tripwire threshold knobs (observability/run_tripwires.py
+#: ``TripwireConfig.from_env`` — read EAGERLY in every ``sweep-all`` child).
+#: Fix-round-4 MINOR (refuter-A): these shape the SUSPECT latch — the
+#: CLEAN-EXIT bar itself (a loosened ``THROUGHPUT_FLOOR`` silences a genuine
+#: tripwire; a tightened ``RSS_BUDGET_FRACTION`` fires a spurious SUSPECT →
+#: judged FAIL), so like the sizing envs they are PINNED to the ENGINE
+#: DEFAULTS in both arm envs (:func:`resolve_pinned_tripwires` — dotenv-immune
+#: on the capacity precedent, values round-trip byte-identical through the
+#: engine's own ``from_env`` parser, drift-pinned), never merely echoed.
+TRIPWIRE_ENV_PINS: Final[tuple[str, ...]] = (
+    "BRUTEX_SWEEP_TRIPWIRE_RECONCILE_INTERVAL_S",
+    "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_FLOOR",
+    "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_DWELL",
+    "BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION",
+    "BRUTEX_SWEEP_TRIPWIRE_MEMORY_SLOPE_BYTES",
+    "BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL",
+    "BRUTEX_SWEEP_TRIPWIRE_ABSURD_PNL_PAISA",
+)
 #: The remaining SYMMETRIC sweep-reachable env knobs (fix-round-3 MINOR-1
-#: audit, refuter-A's enumeration): each reaches BOTH arms identically (same
-#: base env + same dotenv application in both children), so none can skew
-#: ARM IDENTITY or attribute an effect to the flag — they are deliberately
-#: NOT pinned (behavior toggles are the operator's box posture) but are
-#: ECHOED into ``provenance.symmetric_env_echo`` so the report states the
-#: sizing/behavior posture its absolute numbers were measured under.
+#: audit, refuter-A's enumeration; fix-round-4 adds the two sweep-path Rust
+#: toggles ``BRUTEX_FEED_RUST`` — the feed/replay bar-load choke point — and
+#: ``BRUTEX_STRATEGIES_RUST_COMBO``, the same class as the already-echoed
+#: ``BRUTEX_SWEEP_RUST_METRICS``/``_RUST_STAGE1A``): each reaches BOTH arms
+#: identically (same base env + same dotenv application in both children), so
+#: none can skew ARM IDENTITY or attribute an effect to the flag — they are
+#: deliberately NOT pinned (behavior toggles are the operator's box posture)
+#: but are ECHOED into ``provenance.symmetric_env_echo`` so the report states
+#: the sizing/behavior posture its absolute numbers were measured under.
 #: HONEST LIMIT: the echo is the PARENT-environ view — a ``.env``-file value
 #: the child's own ``bootstrap_env()`` injects is invisible here (disclosed
 #: in-report via ``symmetric_env_echo_scope``); the arm-identity-relevant
-#: sizing envs are PINNED instead, exactly because the echo cannot see dotenv.
+#: sizing + tripwire envs are PINNED instead, exactly because the echo cannot
+#: see dotenv.
 SYMMETRIC_ENV_ECHO: Final[tuple[str, ...]] = (
     "BRUTEX_SWEEP_BOUNDED_RANK",
     "BRUTEX_SWEEP_BUDGET_WORKERS",
@@ -166,6 +198,8 @@ SYMMETRIC_ENV_ECHO: Final[tuple[str, ...]] = (
     "BRUTEX_MAX_BLOOM_BYTES",
     "BRUTEX_POLARS_THREADS",
     "BRUTEX_DUCKDB_THREADS",
+    "BRUTEX_FEED_RUST",
+    "BRUTEX_STRATEGIES_RUST_COMBO",
 )
 #: The hardware-key env override (hardware_envelope.BENCH_BASELINE_KEY_ENV,
 #: drift-pinned): when set, ``hardware_key()`` returns it VERBATIM — a forged
@@ -576,26 +610,65 @@ def resolve_pinned_workers(cli_workers: int | None) -> tuple[int, str]:
 def resolve_pinned_mem_budget(workers: int) -> int:
     """The per-worker rank-region budget ``arm_env`` PINS into :data:`MEM_BUDGET_ENV`.
 
-    The engine's DEFAULT sizing law resolved PARENT-side: ``memory_budget_bytes``
-    with the sweep fraction/floor at the PINNED worker count and an EMPTY env
-    (an ambient/.env override is deliberately excluded — the flip ships the
-    DEFAULT law, so that is what the soak measures; ambient presence is echoed
-    separately). The engine resolves a SET :data:`MEM_BUDGET_ENV` value as the
-    per-worker override, never divided (``resolve_mem_budget_bytes``'s #1352
-    contract), so pinning this exact figure is byte-identical to each worker's
-    own default resolution at ``BRUTEX_SWEEP_BUDGET_WORKERS=<workers>`` —
-    drift-pinned in TestEngineDriftPins.
+    The engine's shipped DEFAULT sizing law, reproduced by CALLING the
+    engine's OWN resolver through its OWN exported seam — never a harness-side
+    re-derivation of fraction/floor/divisor. Fix-round-4 MAJOR (refuter-A):
+    the round-3 pin divided by *workers*, but the engine's default divides by
+    the EVAL-POOL size — ``ParallelGridDriver.run`` sets ``budget_workers =
+    pool_size = workers − 1`` (the writer-actor core is the parent and runs no
+    tuples) and ``_worker_init`` exports it as ``BRUTEX_SWEEP_BUDGET_WORKERS``,
+    so each worker's own default resolves ``total × 1/6 ÷ (workers − 1)``.
+    At N=8 the round-3 pin ran every judged arm at a budget 12.5% TIGHTER than
+    the law the flip ships (351,171,754 vs the true 401,339,148 on the
+    refuter's box) — a non-conservative absolute-RSS/headroom skew. The ONE
+    remaining harness-side mirror is the pool-size law ``max(1, workers − 1)``
+    (``cmd_run`` refuses ``workers < 2``, so the ``max`` is belt-and-braces);
+    it is drift-pinned in TestEngineDriftPins against the engine constants AND
+    non-tautologically against a REAL child's own resolution (the integration
+    ``budget_derived`` probe — a divisor drift on EITHER side fails). The
+    engine resolves a SET :data:`MEM_BUDGET_ENV` value as the per-worker
+    override, never divided (the #1352 contract), so pinning this exact figure
+    is byte-identical to each eval worker's own default resolution. An
+    ambient/.env override is deliberately excluded (the injected env carries
+    ONLY the exported pool size — the flip ships the DEFAULT law, so that is
+    what the soak measures; ambient presence is echoed separately).
     """
-    from brutex.config.hardware_envelope import memory_budget_bytes  # lazy: wheel env
-    from brutex.engine.sweep_mem_budget import DEFAULT_MEM_BUDGET_BYTES, MEM_BUDGET_FRACTION
-
-    return memory_budget_bytes(
-        fraction=MEM_BUDGET_FRACTION,
-        floor_bytes=DEFAULT_MEM_BUDGET_BYTES,
-        workers=workers,
-        env={},
-        env_var=MEM_BUDGET_ENV,
+    from brutex.engine.sweep_mem_budget import (  # lazy: wheel env
+        BUDGET_WORKERS_ENV,
+        resolve_mem_budget_bytes,
     )
+
+    # The ONE mirrored engine law: sweep_parallel.ParallelGridDriver.run —
+    # pool_size = self._workers - 1 — exported per worker by _worker_init.
+    pool_size = max(1, workers - 1)
+    return resolve_mem_budget_bytes({BUDGET_WORKERS_ENV: str(pool_size)})
+
+
+def resolve_pinned_tripwires() -> dict[str, str]:
+    """Engine-DEFAULT tripwire thresholds, pinned into both arm envs.
+
+    Fix-round-4 MINOR (refuter-A): the seven ``BRUTEX_SWEEP_TRIPWIRE_*``
+    knobs are read eagerly in every ``sweep-all`` child and shape the SUSPECT
+    latch — the CLEAN-EXIT bar — so an ambient/``.env`` value would silently
+    re-scope the judged bar with zero report trace. The values come from the
+    engine's OWN ``TripwireConfig()`` defaults (never re-minted constants)
+    and round-trip byte-identically through the engine's own ``from_env``
+    parser (drift-pinned in TestEngineDriftPins). Echoed into
+    ``provenance.tripwire_env_pinned`` so the report states the SUSPECT bar
+    its clean-exit verdicts were judged under.
+    """
+    from brutex.observability.run_tripwires import TripwireConfig  # lazy: wheel env
+
+    cfg = TripwireConfig()
+    return {
+        "BRUTEX_SWEEP_TRIPWIRE_RECONCILE_INTERVAL_S": repr(cfg.reconcile_interval_s),
+        "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_FLOOR": repr(cfg.throughput_floor_fraction),
+        "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_DWELL": str(cfg.throughput_dwell),
+        "BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION": repr(cfg.rss_budget_fraction),
+        "BRUTEX_SWEEP_TRIPWIRE_MEMORY_SLOPE_BYTES": str(cfg.memory_slope_bytes_per_tuple),
+        "BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL": str(cfg.memory_dwell),
+        "BRUTEX_SWEEP_TRIPWIRE_ABSURD_PNL_PAISA": str(cfg.absurd_pnl_paisa),
+    }
 
 
 def redact_home(path_str: str) -> str:
@@ -656,6 +729,7 @@ def arm_env(
     capacity: int,
     mem_budget_bytes: int,
     mirror_root: Path,
+    tripwires: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """One arm's spawn environment — every arm-identity env EXPLICITLY SET.
 
@@ -684,10 +758,15 @@ def arm_env(
       ``BRUTEX_SWEEP_WORKERS=1`` sequential bypass, which now cannot even
       reach the child),
     * :data:`MEM_BUDGET_ENV` — PINNED to *mem_budget_bytes*, the
-      parent-resolved DEFAULT sizing law per worker
-      (:func:`resolve_pinned_mem_budget`; fix-round-3 MINOR-1 — the absolute
-      RSS/pool bars are measured at KNOWN sizing, never a stray ``.env``
-      budget's),
+      parent-resolved DEFAULT sizing law per eval worker
+      (:func:`resolve_pinned_mem_budget` — the engine's own resolver at the
+      exported eval-pool divisor ``workers − 1``, fix-round-4 MAJOR; the
+      absolute RSS/pool bars are measured at KNOWN sizing, never a stray
+      ``.env`` budget's),
+    * the SEVEN :data:`TRIPWIRE_ENV_PINS` — PINNED to the engine-default
+      thresholds (*tripwires*, default :func:`resolve_pinned_tripwires`;
+      fix-round-4 MINOR — they shape the SUSPECT latch = the clean-exit bar,
+      so an ambient/``.env`` value would re-scope the JUDGMENT itself),
     * :data:`RUN_MIRROR_ROOT_ENV` — the arm's OWN ``<arm>/mirror`` dir
       (fix-round-3 NIT: both arms share ``run_id``, so the default shared
       ``~/.brutex/runs/<run_id>/`` forensics mirror was clobbered cross-arm;
@@ -708,6 +787,7 @@ def arm_env(
     env[MEM_BUDGET_ENV] = str(mem_budget_bytes)
     env[RUN_MIRROR_ROOT_ENV] = str(mirror_root)
     env[RESULTS_DEPTH_ENV] = "0" if results_depth_off else "1"
+    env.update(resolve_pinned_tripwires() if tripwires is None else tripwires)
     return env
 
 
@@ -1016,13 +1096,16 @@ def render_summary(report: dict[str, Any]) -> str:
         )
         + ") — the flip DEC must weigh whether this capacity covers the operator's grids "
         "(widen via --fib-anchors / --price-source-cells)",
-        f"- sizing PINNED in both arm envs (fix-round-3 MINOR-1): "
+        f"- sizing PINNED in both arm envs (fix-round-3 MINOR-1 / fix-round-4 MAJOR): "
         f"workers={prov.get('sweep_workers_effective')} "
         f"({prov.get('sweep_workers_source')}) as {SWEEP_WORKERS_ENV}, "
         f"mem_budget={prov.get('mem_budget_bytes_effective')} bytes/worker (the "
-        f"RAM-derived DEFAULT law resolved parent-side) as {MEM_BUDGET_ENV} — an "
-        "ambient/.env sizing value can never re-scope the absolute RSS/pool bars; "
-        "the remaining symmetric envs are echoed in provenance.symmetric_env_echo",
+        "engine's RAM-derived DEFAULT law at the eval-pool divisor workers−1, "
+        f"resolved parent-side through the engine's own seam) as {MEM_BUDGET_ENV} — "
+        "an ambient/.env sizing value can never re-scope the absolute RSS/pool bars; "
+        "the SUSPECT-latch tripwire thresholds are pinned to the engine defaults "
+        "too (provenance.tripwire_env_pinned — fix-round-4); the remaining "
+        "symmetric envs are echoed in provenance.symmetric_env_echo",
         "",
         "## Identity (MEASURED)",
         "",
@@ -1224,6 +1307,10 @@ def collect_provenance(
         "sweep_workers_env_ambient_present": SWEEP_WORKERS_ENV in os.environ,
         "mem_budget_bytes_effective": mem_budget_bytes_effective,
         "mem_budget_env_ambient_present": MEM_BUDGET_ENV in os.environ,
+        # Fix-round-4 MINOR (refuter-A): the engine-default tripwire
+        # thresholds PINNED into both arm envs (they shape the SUSPECT latch
+        # = the clean-exit bar) — the report states the judgment posture.
+        "tripwire_env_pinned": resolve_pinned_tripwires(),
         # Fix-round-3 NIT-1 (refuter-A): the arm execution order — the SECOND
         # arm inherits a warm OS page-cache/import state, a systematic bias
         # inside the ≤ 1.02 wall band (see the summary's disclosure line).
@@ -1707,8 +1794,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(
         f"kernel-cache-soak: sizing PINNED — workers={workers_effective} "
-        f"({workers_source}), mem_budget={mem_budget_bytes} bytes/worker (the default "
-        f"law), arm order {'→'.join(a.upper() for a in arm_order)}"
+        f"({workers_source}), mem_budget={mem_budget_bytes} bytes/worker (the engine "
+        f"default law at eval-pool divisor {max(1, workers_effective - 1)}), tripwires "
+        f"at engine defaults, arm order {'→'.join(a.upper() for a in arm_order)}"
     )
     arms: dict[str, dict[str, Any]] = {}
     for arm_name in arm_order:
@@ -1732,6 +1820,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             # Fix-round-3 NIT: per-arm forensics mirror — the shared
             # ~/.brutex/runs/<run_id> default would be clobbered cross-arm.
             mirror_root=arm_dir / "mirror",
+            # Fix-round-4 MINOR: the SUSPECT-latch thresholds, pinned to the
+            # ONE provenance-echoed engine-default set for both arms.
+            tripwires=provenance["tripwire_env_pinned"],
         )
         print(f"kernel-cache-soak: arm {arm_name.upper()} starting ({' '.join(argv[3:])})")
         arms[arm_name] = run_arm(

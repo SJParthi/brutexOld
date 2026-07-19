@@ -13,11 +13,14 @@ asserted below, Golden Rule #10).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -29,6 +32,16 @@ pytest.importorskip("lmdb")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "kernel_cache_soak.py"
+
+
+def _load_script(name: str) -> ModuleType:
+    """Standalone-load the soak script (the sibling-contract idiom)."""
+    spec = importlib.util.spec_from_file_location(name, SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve via sys.modules
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(scope="module")
@@ -170,8 +183,6 @@ def test_non_smoke_refusal_retry_and_sweep_runs_identity(
     4. the sandbox (non-M4-Pro) verdict reads NOT-DECISION-GRADE, never
        FLIP-READY.
     """
-    import importlib.util
-
     base = tmp_path_factory.mktemp("kc-nonsmoke")
     out = base / "out"
 
@@ -198,11 +209,7 @@ def test_non_smoke_refusal_retry_and_sweep_runs_identity(
     assert not out.exists() or not any(out.iterdir())
 
     # Build the real-writer fixture lake via the script's own builder.
-    spec = importlib.util.spec_from_file_location("kernel_cache_soak_nonsmoke", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module  # dataclasses resolve via sys.modules
-    spec.loader.exec_module(module)
+    module = _load_script("kernel_cache_soak_nonsmoke")
     lake = module.build_smoke_lake(base)
 
     # 2) retry on the SAME --out with the real lake — the documented flow.
@@ -274,6 +281,129 @@ def test_non_smoke_refusal_retry_and_sweep_runs_identity(
     assert compare["diff_paths"] == []
     assert (out / "arm-on" / "sweep_runs").is_dir()  # results-depth really ran
 
+    # Fix-round-4 MAJOR: the echoed pinned budget IS the engine default at
+    # the eval-pool divisor (workers=2 → pool size 1), never a ÷N figure.
+    module = _load_script("kernel_cache_soak_nonsmoke_budget")
+    assert report["provenance"]["mem_budget_bytes_effective"] == module.resolve_pinned_mem_budget(2)
+    assert report["provenance"]["tripwire_env_pinned"] == module.resolve_pinned_tripwires()
+
     # 4) the sandbox verdict can never read FLIP-READY (non-M4-Pro probes).
     assert acceptance["verdict"].startswith(("NOT-DECISION-GRADE", "NOT-READY"))
     assert acceptance["verdict"] != "FLIP-READY"
+
+
+def test_real_child_default_budget_matches_pin(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Fix-round-4 MAJOR (refuter-A): the NON-TAUTOLOGICAL budget drift pin.
+
+    A REAL, UN-pinned ``brutex sweep-all`` child at ``BRUTEX_SWEEP_WORKERS=3``
+    traverses the ENGINE's own derivation chain — ``ParallelGridDriver.run``
+    sets ``budget_workers = pool_size = 3 − 1 = 2``, ``_worker_init`` exports
+    ``BRUTEX_SWEEP_BUDGET_WORKERS=2`` into each spawn worker, and the worker's
+    ``resolve_mem_budget_bytes()`` logs ONE
+    ``hardware_envelope.budget_derived … workers=2 derived_bytes=X`` line.
+    X (the CHILD-OBSERVED engine default) must equal the harness pin
+    (``resolve_pinned_mem_budget(3)`` — the value the report echoes) and the
+    engine default at the explicit N−1 divisor: echo == engine default ==
+    child-observed. A divisor drift on EITHER side — the harness re-adopting
+    ÷N (the round-3 defect) or the engine changing its pool law / export —
+    fails this pin; the round-3 unit pin passed the SAME divisor to both
+    sides and was structurally blind to exactly that.
+    """
+    from brutex.config.hardware_envelope import memory_budget_bytes
+    from brutex.engine.sweep_mem_budget import (
+        DEFAULT_MEM_BUDGET_BYTES,
+        MEM_BUDGET_FRACTION,
+    )
+
+    module = _load_script("kernel_cache_soak_childprobe")
+    expected = int(module.resolve_pinned_mem_budget(3))
+    if expected == DEFAULT_MEM_BUDGET_BYTES:
+        pytest.skip(
+            "derived budget equals the 8 GiB floor (RAM undetected or exactly "
+            "96 GiB) — the once-per-process budget_derived line deliberately "
+            "does not fire, so the child observation is unavailable here"
+        )
+    # Independent reference: the COMMON derivation at the EXPLICIT divisor.
+    assert expected == memory_budget_bytes(
+        fraction=MEM_BUDGET_FRACTION,
+        floor_bytes=DEFAULT_MEM_BUDGET_BYTES,
+        workers=2,
+        env={},
+    )
+
+    base = tmp_path_factory.mktemp("kc-childprobe")
+    lake = module.build_smoke_lake(base)
+    home = base / "home"
+    (home / ".brutex").mkdir(parents=True)
+    cwd = base / "cwd"
+    cwd.mkdir()
+    env = dict(os.environ)
+    # UN-pinned on purpose: the child must resolve the DEFAULT law itself.
+    for name in ("BRUTEX_SWEEP_MEM_BUDGET_BYTES", "BRUTEX_SWEEP_BUDGET_WORKERS"):
+        env.pop(name, None)
+    env.update(
+        {
+            "BRUTEX_SWEEP_WORKERS": "3",
+            "BRUTEX_LOG_LEVEL": "INFO",
+            "BRUTEX_RESULTS_DEPTH": "0",
+            "PYTHONHASHSEED": "0",
+            "HOME": str(home),  # dotenv isolation — no ~/.brutex/.env leaks
+        }
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "brutex.cli",
+            "sweep-all",
+            "--lake-root",
+            str(lake),
+            "--results-root",
+            str(base / "results"),
+            "--symbols",
+            "NIFTY",
+            "--intervals",
+            "1minute",
+            "--start",
+            "2026-01-05",
+            "--end",
+            "2026-01-17",
+            "--exchange",
+            "NSE",
+            "--segment",
+            "INDEX",
+            "--directions",
+            "BUY",
+            "--k",
+            "1",
+            "--conditions",
+            "0,1,2,3",
+            "--sl",
+            "none",
+            "--tp",
+            "none",
+            "--top",
+            "5",
+            "--no-options-sim",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=cwd,
+        env=env,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    observed: set[int] = set()
+    for raw in (proc.stderr + "\n" + proc.stdout).splitlines():
+        line = module.strip_ansi(raw)
+        if "hardware_envelope.budget_derived" not in line or "workers=2" not in line:
+            continue  # parent-side (workers=1) lines are a different resolver call
+        match = re.search(r"derived_bytes=(\d+)", line)
+        assert match is not None, line
+        observed.add(int(match.group(1)))
+    assert observed == {expected}, (
+        f"child-observed engine-default budget {observed or '{}'} != harness pin "
+        f"{expected} (echo == engine default == child-observed must hold)"
+    )

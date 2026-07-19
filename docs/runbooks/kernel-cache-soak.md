@@ -74,16 +74,25 @@
   state — a systematic ON-favoring bias INSIDE the ≤ 1.02 no-regression
   band, bounded by the preload share of a 2-4 h arm. It is disclosed on the
   summary; re-run with `--arm-order on-first` for a bias check.
-- **The ABSOLUTE RSS/pool bars are measured at PINNED sizing** (fix-round-3):
-  `BRUTEX_SWEEP_WORKERS` + `BRUTEX_SWEEP_MEM_BUDGET_BYTES` are explicitly
-  SET in both arm envs to the parent-resolved DEFAULT laws (dotenv-immune,
-  the capacity-pin mechanism), and the report echoes
-  `provenance.sweep_workers_effective` / `mem_budget_bytes_effective` — a
-  stray ambient/`.env` sizing value can never silently re-scope the 36 GiB
-  pool ceiling or the per-worker delta. The remaining symmetric sweep envs
-  are echoed in `provenance.symmetric_env_echo` (parent-environ view only —
-  dotenv values are invisible there, which is exactly why the sizing envs
-  are pinned rather than echoed).
+- **The ABSOLUTE RSS/pool bars are measured at PINNED sizing** (fix-round-3;
+  divisor corrected fix-round-4): `BRUTEX_SWEEP_WORKERS` +
+  `BRUTEX_SWEEP_MEM_BUDGET_BYTES` are explicitly SET in both arm envs to the
+  parent-resolved DEFAULT laws (dotenv-immune, the capacity-pin mechanism) —
+  the pinned budget is resolved through the engine's OWN seam at the
+  eval-pool divisor `workers − 1` (the parallel driver exports
+  `BRUTEX_SWEEP_BUDGET_WORKERS = workers − 1`; the writer-actor core runs no
+  tuples), byte-identical to each eval worker's own default and proven
+  against a REAL un-pinned child's `budget_derived` log line — and the
+  report echoes `provenance.sweep_workers_effective` /
+  `mem_budget_bytes_effective`. A stray ambient/`.env` sizing value can
+  never silently re-scope the 36 GiB pool ceiling or the per-worker delta.
+  The seven `BRUTEX_SWEEP_TRIPWIRE_*` SUSPECT-latch thresholds are likewise
+  pinned to the engine defaults in both arms (fix-round-4 — they shape the
+  clean-exit bar itself; echoed as `provenance.tripwire_env_pinned`). The
+  remaining symmetric sweep envs are echoed in
+  `provenance.symmetric_env_echo` (parent-environ view only — dotenv values
+  are invisible there, which is exactly why the sizing/tripwire envs are
+  pinned rather than echoed).
 - **Forensics mirrors are per-arm** (fix-round-3): both arms share `run_id`
   (grid identity — the cache flag is env, not grid), so the default shared
   `~/.brutex/runs/<run_id>/` Row-15 mirror would be clobbered cross-arm;
@@ -150,6 +159,9 @@
      (blank = `prev_day` / `hlc3:close`): the capacity-widening knobs — set
      both to soak a kernel-cache capacity > 1 (the report states the
      measured capacity; an unknown value is refused loudly).
+   - `arm_order` — `off-first` (default) or `on-first` (fenced to the two
+     literals): dispatch a second run with `on-first` for the §5.4 wall-bias
+     check (fix-round-4 — previously fallback-only).
 3. The Mac must be awake with the runner online (a queued dispatch on an
    offline runner is auto-cancelled by GitHub after 24 h with NO step run —
    and no issue filed; the ADR-0018 out-of-job-watchdog gap).
@@ -189,10 +201,12 @@ arm lands ≈ 2-4 h inside the budget, and widen `--fib-anchors` /
 `--price-source-cells` to soak a kernel-cache capacity > 1 (§1). `--workers`
 (≥ 2) pins `BRUTEX_SWEEP_WORKERS` for both arms; the default (unset)
 resolves the auto worker law parent-side (8 on the M4-Pro) and PINS that —
-the worker count and the per-worker `BRUTEX_SWEEP_MEM_BUDGET_BYTES` default
-are always explicitly set in both arm envs (fix-round-3 sizing pins, §1)
-and echoed into provenance. `--arm-order on-first` reverses the default
-OFF→ON order for a wall-bias check (§1). A sandbox mechanics check is
+the worker count, the per-eval-worker `BRUTEX_SWEEP_MEM_BUDGET_BYTES`
+default (the engine law at divisor `workers − 1`, fix-round-4) and the
+engine-default tripwire thresholds are always explicitly set in both arm
+envs (fix-round-3/4 sizing + judgment pins, §1) and echoed into provenance.
+`--arm-order on-first` reverses the default OFF→ON order for a wall-bias
+check (§1; also a dispatch input). A sandbox mechanics check is
 `python scripts/ci/kernel_cache_soak.py run --smoke --out /tmp/kc-soak`
 (never decision-grade — §1).
 
@@ -220,15 +234,17 @@ figures — and must quote the ACTUAL peaks/headroom, not just PASS/FAIL):
    `--fib-anchors`/`--price-source-cells` for a higher-capacity soak; the
    0.8 GiB ceiling targets the HIGH-capacity worst case, which a
    capacity-1 run does not exercise). The absolute bars are measured at the
-   PINNED default sizing — `provenance.sweep_workers_effective` +
-   `mem_budget_bytes_effective` state it (fix-round-3, §1).
+   PINNED default sizing — the engine's own law at the eval-pool divisor
+   `workers − 1` (fix-round-4) — `provenance.sweep_workers_effective` +
+   `mem_budget_bytes_effective` state it (fix-round-3/4, §1).
 4. **Wall neutral-or-better (hard):** `wall_ratio_on_over_off ≤ 1.02` — a
    NO-REGRESSION band, deliberately not a win gate. The VALUE section
    surfaces the actual win/loss: the flip should show net
    neutral-to-better, and a within-noise no-win flip is a YELLOW FLAG the
    DEC must address explicitly. Mind the disclosed OFF→ON warm-cache
    ordering bias inside this band (§1; `provenance.arm_order` records the
-   order — an `--arm-order on-first` re-run is the bias check).
+   order — an `--arm-order on-first` re-run is the bias check, dispatchable
+   via the `arm_order` workflow input since fix-round-4).
 5. **Telemetry invariants (hard):** ON arm exactly one
    `kernel_reuse_summary`; `builds_total + hits_total == tuples_done`;
    `builds_total ≤ keys × workers` (keys = the grid's

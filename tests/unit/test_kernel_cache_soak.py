@@ -68,6 +68,7 @@ def _arm_env(
     capacity: int = 1,
     mem_budget_bytes: int = 1_000_000,
     mirror_root: Path | None = None,
+    tripwires: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """``arm_env`` with defaulted fix-round-3 sizing/mirror kwargs (brevity)."""
     env: dict[str, str] = SOAK.arm_env(
@@ -78,6 +79,7 @@ def _arm_env(
         capacity=capacity,
         mem_budget_bytes=mem_budget_bytes,
         mirror_root=Path("/out/arm/mirror") if mirror_root is None else mirror_root,
+        tripwires=tripwires,
     )
     return env
 
@@ -622,6 +624,10 @@ class TestGridHelpers:
         assert env[SOAK.MEM_BUDGET_ENV] == "123456789"
         assert env[SOAK.RUN_MIRROR_ROOT_ENV] == "/out/arm-on/mirror"
         assert env["PATH"] == "/bin"
+        # Fix-round-4 MINOR: the SUSPECT-latch tripwire thresholds pinned to
+        # the engine defaults in every arm env.
+        for name, value in SOAK.resolve_pinned_tripwires().items():
+            assert env[name] == value
         off = _arm_env(cache_on=False, results_depth_off=False)
         assert off[SOAK.KERNEL_CACHE_ENV] == "0"
         # Fix-round-3 MINOR-1: SWEEP_WORKERS is now ALWAYS pinned (a dotenv
@@ -666,6 +672,30 @@ class TestGridHelpers:
         assert env[SOAK.RUN_MIRROR_ROOT_ENV] == "/out/arm-on/mirror"
         assert base[SOAK.MEM_BUDGET_ENV] == "536870912"  # caller's map untouched
 
+    def test_arm_env_pins_tripwires_over_ambient(self) -> None:
+        # Fix-round-4 MINOR (refuter-A): the tripwire knobs shape the SUSPECT
+        # latch — the clean-exit bar itself — so an ambient value (a loosened
+        # floor silencing a genuine tripwire, or a tightened RSS fraction
+        # firing a spurious SUSPECT → judged FAIL) is overridden by the
+        # engine-default pin in BOTH arms.
+        base = {
+            "BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION": "0.1",
+            "BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_FLOOR": "0.9",
+        }
+        for cache_on in (False, True):
+            env = _arm_env(dict(base), cache_on=cache_on, results_depth_off=False)
+            assert env["BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION"] == "0.85"
+            assert env["BRUTEX_SWEEP_TRIPWIRE_THROUGHPUT_FLOOR"] == "0.2"
+        # An explicit tripwires mapping (cmd_run passes the ONE
+        # provenance-echoed set) wins over the internal resolution.
+        env = _arm_env(
+            {},
+            cache_on=True,
+            results_depth_off=False,
+            tripwires={"BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL": "5"},
+        )
+        assert env["BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL"] == "5"
+
     def test_arm_env_dotenv_cannot_override_pinned_envs(self) -> None:
         # Fix-round-2 MAJOR-1 (refuter-1): the child `brutex sweep-all` runs
         # bootstrap_env(), whose apply_dotenv sets a .env key ONLY when it is
@@ -686,9 +716,20 @@ class TestGridHelpers:
             SOAK.MEM_BUDGET_ENV: "536870912",
             SOAK.SWEEP_WORKERS_ENV: "3",
             SOAK.RUN_MIRROR_ROOT_ENV: "/tmp/shared-mirror",
+            # Fix-round-4: one of each new audit class — a PINNED tripwire
+            # knob (must stay inert: it shapes the SUSPECT/clean-exit bar)…
+            "BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION": "0.1",
+            # …and an ECHOED (deliberately unpinned) rust toggle: dotenv MAY
+            # reach the child with it — symmetrically, in BOTH arms — which
+            # is exactly the disclosed symmetric-echo envelope.
+            "BRUTEX_FEED_RUST": "0",
         }
         applied = apply_dotenv(hostile, env=env)
-        assert applied == ()  # every pinned var already set → dotenv inert
+        # Every PINNED var already set → dotenv inert for them; the one
+        # deliberately-unpinned symmetric toggle is the only key applied
+        # (documents the pin-vs-echo class boundary).
+        assert applied == ("BRUTEX_FEED_RUST",)
+        assert "BRUTEX_FEED_RUST" in SOAK.SYMMETRIC_ENV_ECHO  # audited, not pinned
         assert env[SOAK.KERNEL_CAPACITY_ENV] == "1"
         assert env[SOAK.KERNEL_CACHE_ENV] == "0"
         assert env[SOAK.RESULTS_DEPTH_ENV] == "1"
@@ -696,6 +737,7 @@ class TestGridHelpers:
         assert env[SOAK.MEM_BUDGET_ENV] == "1000000"
         assert env[SOAK.SWEEP_WORKERS_ENV] == "2"
         assert env[SOAK.RUN_MIRROR_ROOT_ENV] == "/out/arm/mirror"
+        assert env["BRUTEX_SWEEP_TRIPWIRE_RSS_BUDGET_FRACTION"] == "0.85"
 
     def test_child_bootstrap_env_cannot_flip_arm_envs(self, tmp_path: Path) -> None:
         # The refuter-1 repro shape, end-to-end: a child process runs the
@@ -856,21 +898,63 @@ class TestEngineDriftPins:
         assert SOAK.MEM_BUDGET_ENV == sweep_mem_budget.MEM_BUDGET_ENV
 
     def test_pinned_mem_budget_resolves_verbatim_and_matches_default_law(self) -> None:
-        # Fix-round-3 MINOR-1: the pin is byte-identical to the engine's own
-        # DEFAULT — resolve_pinned_mem_budget(N) equals the engine's default
-        # resolution at BUDGET_WORKERS=N, and a SET MEM_BUDGET_ENV resolves
-        # verbatim (per-worker, never divided — the #1352 contract), so a
-        # pinned child measures exactly the default sizing law.
+        # Fix-round-4 MAJOR (refuter-A): the pin must equal the engine's own
+        # DEFAULT law, whose divisor is the EVAL-POOL size N−1 — never N.
+        # ParallelGridDriver.run sets budget_workers = pool_size = workers−1
+        # (the writer-actor core is the parent, it runs no tuples) and
+        # _worker_init exports it as BUDGET_WORKERS_ENV, so a worker's own
+        # default resolves total × 1/6 ÷ (N−1). The reference here is the
+        # COMMON hardware_envelope function with an EXPLICIT N−1 divisor — a
+        # code path independent of the harness's env-seam route, so a divisor
+        # drift on the harness side (÷N, ÷N−2, …) OR an engine seam-parse
+        # drift fails this pin (the round-3 pin passed the SAME `workers` to
+        # both sides, so the wrong divisor cancelled out — tautology killed).
+        from brutex.config.hardware_envelope import memory_budget_bytes
         from brutex.engine import sweep_mem_budget
 
+        for n in (2, 4, 8):
+            assert SOAK.resolve_pinned_mem_budget(n) == memory_budget_bytes(
+                fraction=sweep_mem_budget.MEM_BUDGET_FRACTION,
+                floor_bytes=sweep_mem_budget.DEFAULT_MEM_BUDGET_BYTES,
+                workers=n - 1,
+                env={},
+            )
+        # A SET MEM_BUDGET_ENV resolves verbatim (per-worker, never divided —
+        # the #1352 contract), so a pinned child measures exactly this figure.
         pinned = SOAK.resolve_pinned_mem_budget(4)
-        assert pinned == sweep_mem_budget.resolve_mem_budget_bytes({}, workers=4)
         assert (
             sweep_mem_budget.resolve_mem_budget_bytes(
                 {sweep_mem_budget.MEM_BUDGET_ENV: str(pinned)}, workers=999
             )
             == pinned
         )
+        # The pin travels the ENGINE's exported seam (BUDGET_WORKERS_ENV) —
+        # the exact env a real eval worker sees, name-drift-pinned.
+        assert SOAK.resolve_pinned_mem_budget(8) == sweep_mem_budget.resolve_mem_budget_bytes(
+            {sweep_mem_budget.BUDGET_WORKERS_ENV: "7"}
+        )
+
+    def test_pinned_tripwires_round_trip_engine_defaults(self) -> None:
+        # Fix-round-4 MINOR (refuter-A): the pinned tripwire strings must
+        # round-trip BYTE-IDENTICALLY through the engine's own from_env
+        # parser to the engine's own defaults — the SUSPECT latch (the
+        # clean-exit bar) is judged at exactly the shipped thresholds.
+        from brutex.observability import run_tripwires
+
+        pins = SOAK.resolve_pinned_tripwires()
+        assert set(pins) == set(SOAK.TRIPWIRE_ENV_PINS)
+        # Name drift pin: every pinned name IS an engine ENV_* constant.
+        engine_names = {
+            run_tripwires.ENV_RECONCILE_INTERVAL_S,
+            run_tripwires.ENV_THROUGHPUT_FLOOR,
+            run_tripwires.ENV_THROUGHPUT_DWELL,
+            run_tripwires.ENV_RSS_BUDGET_FRACTION,
+            run_tripwires.ENV_MEMORY_SLOPE_BYTES,
+            run_tripwires.ENV_MEMORY_DWELL,
+            run_tripwires.ENV_ABSURD_PNL_PAISA,
+        }
+        assert set(SOAK.TRIPWIRE_ENV_PINS) == engine_names
+        assert run_tripwires.TripwireConfig.from_env(pins) == run_tripwires.TripwireConfig()
 
     def test_mirror_root_env_name_and_semantics_match_engine(self) -> None:
         from brutex.engine import run_layout
@@ -1075,6 +1159,12 @@ class TestProvenanceCollection:
         assert prov["arm_order"] == ["on", "off"]
         assert prov["symmetric_env_echo"]["BRUTEX_SWEEP_STALL_SECONDS"] == "77"
         assert "BRUTEX_SWEEP_STALL_SECONDS" in prov["symmetric_env_audited"]
+        # Fix-round-4: the two sweep-path rust toggles joined the audit (the
+        # RUST_METRICS/RUST_STAGE1A echo precedent) and the SUSPECT-latch
+        # tripwire pins are echoed as the judgment posture.
+        assert "BRUTEX_FEED_RUST" in prov["symmetric_env_audited"]
+        assert "BRUTEX_STRATEGIES_RUST_COMBO" in prov["symmetric_env_audited"]
+        assert prov["tripwire_env_pinned"] == SOAK.resolve_pinned_tripwires()
         # HONEST: the echo is disclosed as the parent-environ view (dotenv
         # values the child injects are invisible — the pins cover those).
         assert "parent-environ" in prov["symmetric_env_echo_scope"]
@@ -1467,3 +1557,99 @@ class TestRunGuards:
         assert proc2.returncode == 2
         assert "lake preflight refused" in proc2.stderr
         assert "NOT empty" not in proc2.stderr
+
+
+class TestCmdRunWiring:
+    """Fix-round-4 (refuter-B MINOR-1): cmd_run WIRING pins for round-3's own
+    additions — the ``--arm-order`` lever and the GUARDED compare/summary
+    call sites. Both survived the full round-3 suite as mutants (M4: the flag
+    silently ignored; M6: the call site downgraded to the unguarded
+    ``compare_arms``) because every prior pin stopped at argparse /
+    ``collect_provenance`` / the guarded functions themselves."""
+
+    def _drive(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        arm_order: str,
+        crash_compare: bool = False,
+        crash_summary: bool = False,
+    ) -> tuple[int, list[str], Path]:
+        calls: list[str] = []
+
+        def fake_run_arm(**kwargs: Any) -> dict[str, Any]:
+            name = str(kwargs["name"])
+            calls.append(name)
+            arm_dir = kwargs["arm_dir"]
+            assert isinstance(arm_dir, Path)
+            arm_dir.mkdir(parents=True, exist_ok=True)
+            return _off_arm() if name == "off" else _arm()
+
+        out = tmp_path / "out"
+        lake = tmp_path / "lake"
+        lake.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(SOAK, "run_arm", fake_run_arm)
+        monkeypatch.setattr(SOAK, "build_smoke_lake", lambda root: lake)
+        monkeypatch.setattr(SOAK, "preflight_lake", lambda *a, **k: [])
+        monkeypatch.setattr(SOAK, "preflight_disk", lambda *a, **k: None)
+        if crash_compare:
+
+            def boom(_path: Path) -> dict[str, str]:
+                raise OSError(5, "mid-hash EIO")
+
+            monkeypatch.setattr(SOAK, "arm_identity_tree", boom)
+        if crash_summary:
+
+            def render_boom(_report: dict[str, Any]) -> str:
+                raise ValueError("render exploded")
+
+            monkeypatch.setattr(SOAK, "render_summary", render_boom)
+        args = SOAK.build_parser().parse_args(
+            ["run", "--smoke", "--out", str(out), "--arm-order", arm_order]
+        )
+        rc = int(SOAK.cmd_run(args))
+        return rc, calls, out
+
+    def test_cmd_run_honors_arm_order_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M4 killer: --arm-order on-first must reach the RUNNER (ON spawned
+        # first) AND the WRITTEN report's provenance — not just argparse.
+        _rc, calls, out = self._drive(tmp_path, monkeypatch, arm_order="on-first")
+        assert calls == ["on", "off"]
+        report = json.loads((out / "report" / "soak-report.json").read_text(encoding="utf-8"))
+        assert report["provenance"]["arm_order"] == ["on", "off"]
+        # The default order still runs OFF first (no inversion regression).
+        _rc, calls2, out2 = self._drive(tmp_path / "second", monkeypatch, arm_order="off-first")
+        assert calls2 == ["off", "on"]
+        report2 = json.loads((out2 / "report" / "soak-report.json").read_text(encoding="utf-8"))
+        assert report2["provenance"]["arm_order"] == ["off", "on"]
+
+    def test_cmd_run_compare_crash_still_ships_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M6 killer: the CALL SITE must be compare_arms_guarded — a mid-hash
+        # OSError between the arms degrades to a report-with-error on disk +
+        # rc 1 (the judged identity FAIL), never a traceback with no report.
+        rc, _calls, out = self._drive(
+            tmp_path, monkeypatch, arm_order="off-first", crash_compare=True
+        )
+        assert rc == 1
+        report = json.loads((out / "report" / "soak-report.json").read_text(encoding="utf-8"))
+        assert "OSError" in report["compare"]["compare_error"]
+        assert report["compare"]["identity_ok"] is False
+        assert report["acceptance"]["identity"].startswith("FAIL")
+
+    def test_cmd_run_summary_crash_still_ships_json_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The render_summary_guarded call-site twin: a render crash writes the
+        # error-stub summary while soak-report.json (written FIRST) survives.
+        _rc, _calls, out = self._drive(
+            tmp_path, monkeypatch, arm_order="off-first", crash_summary=True
+        )
+        summary = (out / "report" / "summary.md").read_text(encoding="utf-8")
+        assert "summary render FAILED" in summary
+        report = json.loads((out / "report" / "soak-report.json").read_text(encoding="utf-8"))
+        assert report["kind"] == "kernel-cache-soak"

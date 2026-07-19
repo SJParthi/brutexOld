@@ -3932,7 +3932,21 @@ hostile-review pass._
   verdict-time override belt attributes the LIVE env, never the stored
   probed key; the post-arm compare/summary crash window closed (the
   report-with-error still ships); `ps_bin`→`df_bin` + the ledger's bar-6
-  scope tightened; the per-finding record
+  scope tightened. FIX ROUND 4 folded (pre-open — the round-3 refuter
+  pair, 1 MAJOR): the mem-budget pin's DIVISOR corrected to the engine's
+  shipped default law — the engine divides the RAM-derived default by the
+  EVAL-POOL size `workers − 1` (the driver's exported
+  `BRUTEX_SWEEP_BUDGET_WORKERS` seam), not by `workers`;
+  `resolve_pinned_mem_budget` now calls the engine's own resolver through
+  that seam, the drift-pin is re-anchored non-tautologically (independent
+  explicit-divisor reference + a REAL un-pinned sweep-all child's own
+  `budget_derived` log line — echo == engine default == child-observed),
+  the SEVEN SUSPECT-latch `BRUTEX_SWEEP_TRIPWIRE_*` knobs are pinned to
+  engine defaults in both arms (the clean-exit bar is judged at the
+  shipped thresholds), the two sweep-path rust toggles join the symmetric
+  echo (25 names), the cmd_run wiring mutants (arm-order + guarded
+  compare/summary call sites) are killed by seam-level pins, and
+  `arm_order` is a fenced workflow dispatch input; the per-finding record
   lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives

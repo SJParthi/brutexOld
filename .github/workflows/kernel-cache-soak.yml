@@ -88,6 +88,10 @@ on:
         description: "Optional sweep-all --price-source-cells CSV (blank = hlc3:close). The second capacity-widening axis"
         required: false
         default: ""
+      arm_order:
+        description: "Arm execution order: off-first (default) or on-first. The SECOND arm inherits a warm OS page-cache/import state — dispatch on-first for the runbook §5.4 wall-bias check (fenced to the two literals in the plan job)"
+        required: false
+        default: "off-first"
 
 permissions:
   contents: read
@@ -116,6 +120,7 @@ jobs:
       budget_minutes: ${{ steps.derive.outputs.budget_minutes }}
       sample_interval_s: ${{ steps.derive.outputs.sample_interval_s }}
       max_tuples: ${{ steps.derive.outputs.max_tuples }}
+      arm_order: ${{ steps.derive.outputs.arm_order }}
     steps:
       - name: Validate inputs and derive timeout
         id: derive
@@ -127,6 +132,7 @@ jobs:
           BUDGET_MINUTES: ${{ github.event.inputs.budget_minutes || '600' }}
           SAMPLE_INTERVAL_S: ${{ github.event.inputs.sample_interval_s || '5' }}
           MAX_TUPLES: ${{ github.event.inputs.max_tuples || '' }}
+          ARM_ORDER: ${{ github.event.inputs.arm_order || 'off-first' }}
         run: |
           m=${BUDGET_MINUTES//_/}
           case "$m" in
@@ -185,6 +191,16 @@ jobs:
             fi
             t=$((10#$t))
           fi
+          # arm_order: a strict two-literal fence (fix-round-4, refuter-B
+          # NIT-1 — the runbook §5.4 bias check needed the fallback path;
+          # DATA-not-code like every other input, anything else REFUSED).
+          case "$ARM_ORDER" in
+            off-first|on-first) ;;
+            *)
+              echo "::error::arm_order='$ARM_ORDER' must be 'off-first' or 'on-first'." >&2
+              exit 1
+              ;;
+          esac
           # Fixed slack 45 (two wheel builds + two arm preloads) + m/6 for the
           # duration-LINEAR tail (the compare phase hashes the grown result
           # trees — SOAK-R7-4's linear-teardown law).
@@ -194,8 +210,9 @@ jobs:
             echo "budget_minutes=$m"
             echo "sample_interval_s=$s"
             echo "max_tuples=$t"
+            echo "arm_order=$ARM_ORDER"
           } >> "$GITHUB_OUTPUT"
-          echo "Soak plan: budget_minutes=$m timeout_minutes=$timeout_minutes sample_interval_s=$s max_tuples='${t:-}'"
+          echo "Soak plan: budget_minutes=$m timeout_minutes=$timeout_minutes sample_interval_s=$s max_tuples='${t:-}' arm_order=$ARM_ORDER"
 
   soak:
     name: Kernel-cache OFF↔ON A/B soak
@@ -313,6 +330,7 @@ jobs:
           BUDGET_MINUTES: ${{ needs.plan.outputs.budget_minutes }}
           SAMPLE_INTERVAL_S: ${{ needs.plan.outputs.sample_interval_s }}
           MAX_TUPLES: ${{ needs.plan.outputs.max_tuples }}
+          ARM_ORDER: ${{ needs.plan.outputs.arm_order }}
           LAKE_ROOT_INPUT: ${{ github.event.inputs.lake_root }}
           FIB_ANCHORS_INPUT: ${{ github.event.inputs.fib_anchors }}
           PRICE_SOURCE_CELLS_INPUT: ${{ github.event.inputs.price_source_cells }}
@@ -323,7 +341,9 @@ jobs:
           # RUNNER_TEMP is normally cleaned per job; clear any stale leftover
           # explicitly so a runner that skipped cleanup cannot resume-skid.
           rm -rf "$out"
-          args=(run --out "$out" --budget-minutes "$BUDGET_MINUTES" --sample-interval-s "$SAMPLE_INTERVAL_S")
+          # arm_order rides the plan job's two-literal fence (fix-round-4 —
+          # the runbook §5.4 bias check is now dispatchable, not fallback-only).
+          args=(run --out "$out" --budget-minutes "$BUDGET_MINUTES" --sample-interval-s "$SAMPLE_INTERVAL_S" --arm-order "$ARM_ORDER")
           if [ -n "$LAKE_ROOT_INPUT" ]; then
             args+=(--lake-root "$LAKE_ROOT_INPUT")
           fi
