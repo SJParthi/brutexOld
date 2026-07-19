@@ -3761,6 +3761,51 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python --locked
 
+  rust-brutex-ops:
+    name: Rust (brutex-ops build + clippy + test)
+    # THE UNIFIED OPS CRATE's per-PR cargo gate — DEC-BACKUP-RUST-OPS-001
+    # (MIGRATION.md #1962) + DEC-CROSSVERIFY-RUST-CORE-001 (#1963) +
+    # DEC-NIGHTLY-RUST-CORE-001 (#1964); the rust-brutex-strategies shape,
+    # `--locked` — the crate commits its Cargo.lock. The kernels are
+    # consumed ONLY through the three default-OFF import-guarded facades
+    # (brutex/backup/backup_rust.py, brutex/crossverify/rust_seam.py,
+    # brutex/nightly/nightly_rust.py — OPTIONAL kernel per
+    # tests/unit/test_run_builds_rust_kernels.py, never a turnkey build
+    # prerequisite), so this cargo gate is where the pure-Rust core is
+    # BUILT + tested per PR: the deadman verdict matrix + the FOUR backup
+    # template byte goldens, the crossverify M&M.csv golden literal, the
+    # nightly launchd-plist byte golden + semantic mirrors, and every
+    # proptest. pyo3 is OPTIONAL in the unified crate (the brutex-feed
+    # `python` feature shape) — the `--features python` check step proves
+    # the binding compiles; the WHEEL legs (maturin build + flag-ON parity)
+    # live in the dedicated non-required ops-rust-parity.yml lane.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-ops
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-ops -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --release --locked
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
+
   rust-brutexd:
     name: Rust (brutexd build + clippy + test)
     # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
@@ -5106,6 +5151,10 @@ jobs:
       # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-strategies
+      # DEC-NIGHTLY-RUST-CORE-001: the nightly ops decision-kernel crate
+      # gate — the PR that introduces a crate must gate that crate (the
+      # OPTIONAL kernel's own CI lane per test_run_builds_rust_kernels.py).
+      - rust-brutex-ops
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
@@ -5225,6 +5274,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutex-ops:${{ needs.rust-brutex-ops.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
@@ -5267,6 +5317,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutex-ops.result }}" \
             "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
