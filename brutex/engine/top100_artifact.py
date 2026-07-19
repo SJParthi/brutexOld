@@ -89,6 +89,7 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.resilience_streaks import project_resilience_annotation
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES
 from brutex.ranking.presets import (
@@ -106,6 +107,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
     from brutex.engine.cascade_join import CascadeJoin, CascadeVerdictView
     from brutex.engine.combo_aggregates import ComboAggregate
+    from brutex.engine.resilience_streaks import ResilienceStreaks
     from brutex.engine.results_store import ResultRow
     from brutex.engine.twin_detect import TwinFamilies
 
@@ -144,8 +146,10 @@ __all__ = [
 ]
 
 #: Artifact schema version — bump on ANY payload-shape change (a reader seeing
-#: an unknown version treats the artifact as absent → rebuild).
-TOP100_SCHEMA_VERSION: Final[int] = 1
+#: an unknown version treats the artifact as absent → rebuild). Bumped 1→2 by
+#: the resilience annotation (each entry now carries a top-level ``resilience``
+#: block; an old ``top100.json`` reads absent → rebuild).
+TOP100_SCHEMA_VERSION: Final[int] = 2
 
 #: The P2→P3 stage-stamp ``stage`` token, reused as the P3→P4 stamp shape.
 TOP100_STAGE: Final[str] = "top100"
@@ -290,6 +294,10 @@ class Top100Candidate:
     sl_paisa: int | None
     tp_paisa: int | None
     tuple_ref: str
+    #: The per-mask losing-streak resilience record (annotation-only; ``None``
+    #: when the resilience sidecar is absent → the entry carries an honest
+    #: all-``None`` ``resilience`` block, never a fabricated streak).
+    resilience: ResilienceStreaks | None = None
 
     def __post_init__(self) -> None:
         if self.row.run_id != self.agg.run_id:
@@ -613,10 +621,16 @@ def _entry_payload(
     join: CascadeJoin | None = None,
     join_state: str = CASCADE_STATE_NO_REPORT,
 ) -> dict[str, object]:
-    """Project one ranked candidate onto the binding entry shape (B5)."""
+    """Project one ranked candidate onto the binding entry shape (B5).
+
+    The resilience annotation lands as ONE additive top-level ``resilience``
+    key via :func:`brutex.engine.resilience_streaks.project_resilience_annotation`
+    (a ``None`` record → an honest all-``None`` block, never fabricated) — it
+    never rewrites a ranking field (annotation-never-reranks).
+    """
     row = candidate.row
     cascade, cpcv_rate = _cascade_payload(row.run_id, join=join, state=join_state)
-    return {
+    entry = {
         "rank": rank,
         "run_id": row.run_id,
         "mask_hex": f"{row.mask_bits:0{_MASK_HEX_WIDTH}x}",
@@ -635,6 +649,7 @@ def _entry_payload(
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
         "cascade": cascade,
     }
+    return project_resilience_annotation(entry, candidate.resilience)
 
 
 # ── Builder ──────────────────────────────────────────────────────────────────

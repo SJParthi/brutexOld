@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from brutex.adapters.ingest_common import CancelCheck
 from brutex.dashboard.fno_underlying import (
     primary_fno_underlying,
     resolve_fno_index_aliases,
@@ -301,6 +302,7 @@ def pull_historical_for_underlyings(
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -562,6 +564,10 @@ PersistentSymbolFormPreference` (durable across pulls); ``None`` (the default) i
         # — and the phase-(a)-folded prior-step verdict for the Greeks strict arm.
         underlying_kinds=_underlying_kind_map(tradable),
         prior_steps=prior_steps,
+        # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): threaded to the
+        # F&O (contract, interval) window boundary; the phase catches the
+        # propagated PullCancelled and stops gracefully (ledger persisted).
+        should_stop=should_stop,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

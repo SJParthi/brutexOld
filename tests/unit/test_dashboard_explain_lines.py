@@ -110,6 +110,42 @@ class TestExplainLookup:
         out = _node_call("E.AWAITING_TEXT")
         assert out == _EXPECTED_AWAITING_TEXT
 
+    def test_every_resilience_explain_key_has_a_nonempty_line(self) -> None:
+        """The panel/guide keys not covered by a screener column still hover."""
+        keys = [
+            "max_consecutive_losses",
+            "losing_streak_p50",
+            "losing_streak_p95",
+            "worst_streak_pnl",
+            "worst_streak_len",
+            "longest_underwater",
+            "worst_loss_month",
+            "win_rate_year_spread",
+            "resilience_guide",
+        ]
+        out = _node_call("ARGS[0].map((k) => E.explain(k))", json.dumps(keys))
+        assert all(isinstance(line, str) and line for line in out)
+        # R27 no-hallucination: the worst-streak line names the exact honest scope.
+        worst = _node_call('E.explain("worst_streak_pnl")')
+        assert "gross of" in worst and "per-unit (no position sizing)" in worst
+        # FIX 2 (R4): both SHARED tooltips (panel + /operator + /screener)
+        # distinguish the longest streak (by count) from the worst streak (by ₹
+        # — a shorter run of larger losses can cost more) SURFACE-AGNOSTICALLY:
+        # NO panel-specific "(see 'X')" cross-ref that dangles on /operator /
+        # /screener, and NO "THAT run's own length" (false where no length shows).
+        assert "measured in ₹" in worst and "different run" in worst
+        longest = _node_call('E.explain("max_consecutive_losses")')
+        assert "measured by count" in longest and "different run" in longest
+        for line in (worst, longest):
+            assert "(see '" not in line, line
+            assert "THAT run" not in line, line
+        # The new /screener worst_streak_len column hovers to its own line.
+        wlen = _node_call('E.explain("worst_streak_len")')
+        assert "consecutive losses" in wlen and "SHORTER" in wlen
+        # The win-rate-swing line names the ≥20-trade floor + the <2-year "—" rule.
+        swing = _node_call('E.explain("win_rate_year_spread")')
+        assert "at least 20 trades" in swing and "fewer than two" in swing
+
 
 class TestPaisaToRupees:
     """bxPaisaToRupees — exact integer/string conversion (DEC-MONEY-2DP-001)."""

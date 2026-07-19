@@ -332,12 +332,33 @@ def test_matrix_env_override_of_persisted_never_rewrites_config(tmp_path: Path) 
     assert str(other) not in conf, "an env override must never rewrite the persisted line"
 
 
-def test_auto_resume_enabled_by_default_via_persisted_config(up_text: str) -> None:
-    """``BRUTEX_AUTO_RESUME_ON_BOOT=1`` is persisted once; an explicit setting is respected."""
+def test_auto_resume_master_gate_documented_never_armed(up_text: str) -> None:
+    """Boot auto-resume ships OFF: the master gate is written COMMENTED, never armed.
+
+    DEC-AUTO-RESUME-DEFAULT-OFF-001 (operator directive): an auto-pull must
+    never launch without explicit opt-in. up.sh pre-arms ONLY the legacy
+    SUB-gate (``BRUTEX_AUTO_RESUME_ON_BOOT=1`` — inert on its own) so that one
+    flip (``BRUTEX_AUTO_RESUME=1``) restores the full prior behaviour, and
+    writes the master gate itself as a COMMENTED documentation line. The pass
+    message is honest — OFF by default, the exact opt-in named — never the
+    retired "auto-resume enabled" claim.
+    """
+    # The legacy sub-gate line is still written once (presence-guarded).
     assert "grep -q '^BRUTEX_AUTO_RESUME_ON_BOOT='" in up_text, "presence guard required"
-    assert "BRUTEX_AUTO_RESUME_ON_BOOT=1" in up_text
-    # Honest wiring: the flag resumes ONLY when the ledger shows unfinished work.
+    assert "printf 'BRUTEX_AUTO_RESUME_ON_BOOT=1" in up_text
+    # The master gate is written ONLY as a commented documentation line.
+    assert "printf '# BRUTEX_AUTO_RESUME=1" in up_text
+    assert "printf 'BRUTEX_AUTO_RESUME=1" not in up_text, (
+        "the master gate must NEVER be persisted uncommented — boot auto-resume "
+        "is OFF by default by operator directive (DEC-AUTO-RESUME-DEFAULT-OFF-001)"
+    )
+    # The pass message tells the truth: OFF by default + the exact opt-in flip.
+    assert "auto-resume is OFF by default" in up_text
+    assert "set BRUTEX_AUTO_RESUME=1" in up_text
+    # Honest wiring: even opted in, the resume fires ONLY on unfinished work.
     assert "unfinished work" in up_text
+    # The retired false claim must not resurface.
+    assert "auto-resume-on-boot enabled" not in up_text
 
 
 # --------------------------------------------------------------------------- #
