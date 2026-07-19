@@ -41,6 +41,7 @@ from typing import Any, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.run_layout import run_dir
 from brutex.engine.sweep_ops_rust import (
     routed_exit_status_resolution,
@@ -284,7 +285,7 @@ def read_exit_status(results_root: Path, run_id: str) -> dict[str, Any] | None:
     """
     path = exit_status_path(results_root, run_id)
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(read_regular_text(path))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(parsed, dict):

@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.sweep_checkpoint import (
     SweepCheckpoint,
     SweepCheckpointError,
@@ -186,7 +187,7 @@ class CheckpointCorruptionTracker:
         state_path = run_dir / CHECKPOINT_CORRUPTION_STATE_FILENAME
         consecutive = 0
         try:
-            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw = json.loads(read_regular_text(state_path))
         except (OSError, ValueError, TypeError):
             raw = None
         if isinstance(raw, dict):

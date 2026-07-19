@@ -63,7 +63,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:
     from brutex.data.greeks_enrich import GreeksEnrichTarget
@@ -117,6 +117,13 @@ class CliUserError(Exception):
 
 def _configure_sweep_logging() -> None:
     """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
+
+    ALSO the ``verify-acceptance`` stdout-purity guard (round 3 of
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1958): an unconfigured
+    process's structlog PrintLogger defaults to STDOUT, which buried the
+    acceptance human table under scan events and broke the ``--json``
+    machine contract (``json.loads(stdout)`` failed) — the seam below routes
+    every log line to STDERR, so stdout carries EXACTLY the table / JSON.
 
     A bare ``brutex sweep`` / ``sweep-all`` / ``sweep-daemon`` process
     previously ran with structlog UNCONFIGURED, whose default wrapper class
@@ -1855,6 +1862,130 @@ def build_parser() -> argparse.ArgumentParser:
             "plan (frozen evidence hashes) to <root>/heal/ for `brutex sweep-heal` "
             "(DEC-SWEEP-HEAL-001 condition C1 — heal evidence is never re-typed flags)"
         ),
+    )
+
+    # ── verify-acceptance (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, #1958) ──
+    # The operator acceptance verifier: 7 composed checks + gating teeth
+    # smoke + the frozen evidence report. All logic in brutex/acceptance/.
+    verify_acc = sub.add_parser(
+        "verify-acceptance",
+        help=(
+            "Operator acceptance verifier: uniqueness / derived TFs / "
+            "incremental pull / rate evidence / movers truth / data sanity / "
+            "latency over the REAL lake, with PASS/FAIL/ABSTAIN(named) "
+            "verdicts, a gating teeth smoke and a frozen evidence report "
+            "under <lake>/acceptance/. Exit: 0 clean, 1 usage, 2 SUSPECT "
+            "(teeth/internal/concurrent-run lock refusal), 3 findings, "
+            "4 inconclusive"
+        ),
+    )
+    verify_acc.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    verify_acc.add_argument(
+        "--checks",
+        default=None,
+        help="Comma list of {unique,tf,pull,rate,movers,sanity,latency}; default all 7",
+    )
+    verify_acc.add_argument(
+        "--full",
+        action="store_true",
+        help="Lift sampling + month bounds everywhere (cost warning printed first)",
+    )
+    verify_acc.add_argument(
+        "--sample",
+        type=int,
+        default=12,
+        help=(
+            "Sampled SPOT datasets beyond the engine set (the F&O contract "
+            "fill stays a FIXED seed-rotated 6/run — --full lifts both)"
+        ),
+    )
+    verify_acc.add_argument(
+        "--seed",
+        default=None,
+        help="Sampling seed; DEFAULT = the IST report date (deterministic daily rotation)",
+    )
+    verify_acc.add_argument(
+        "--months", type=int, default=6, help="Time-bound for non-engine scans (default 6)"
+    )
+    verify_acc.add_argument(
+        "--date", default=None, help="Movers/latency coordinate day (default: latest lake day)"
+    )
+    verify_acc.add_argument(
+        "--top-n", type=int, default=20, help="Movers cross-check depth (default 20, cap 100)"
+    )
+    verify_acc.add_argument(
+        "--latency-budget",
+        action="append",
+        default=None,
+        metavar="KEY=MS",
+        help="Override a documented latency budget (repeatable; echoed in the report)",
+    )
+    verify_acc.add_argument(
+        "--latency-rounds", type=int, default=5, help="Best-of-N for latency probes"
+    )
+    verify_acc.add_argument(
+        "--abstain-budget",
+        type=int,
+        default=3,
+        help="Max NON-structural abstains before exit 4 (structural abstains exempt)",
+    )
+    verify_acc.add_argument(
+        "--max-runtime-s",
+        type=float,
+        default=None,
+        help="Soft budget; unreached checks ABSTAIN(time_budget_exhausted)",
+    )
+    verify_acc.add_argument(
+        "--check-timeout-s",
+        type=float,
+        default=120.0,
+        help="HARD per-check wall-clock deadline; a hung check is abandoned + "
+        "recorded ERROR(check_timed_out) → exit 2, the run still finishes + "
+        "releases the single-flight lock. <=0 disables the watchdog (default 120)",
+    )
+    verify_acc.add_argument(
+        "--force-during-pull",
+        action="store_true",
+        help="Run data checks even while a pull looks active (default: they ABSTAIN)",
+    )
+    verify_acc.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the FULL poison battery before the real run",
+    )
+    verify_acc.add_argument(
+        "--self-test-only",
+        action="store_true",
+        help="Run the battery, print the per-poison table, exit",
+    )
+    verify_acc.add_argument(
+        "--no-self-test",
+        action="store_true",
+        help="Skip even the teeth smoke (report carries TEETH_SKIPPED)",
+    )
+    verify_acc.add_argument(
+        "--json", action="store_true", help="Machine summary on stdout (files always written)"
+    )
+    verify_acc.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help=(
+            "Report dir override (default <lake>/acceptance/<run_id>/). "
+            "An --out report is OFF-CHAIN: <lake>/acceptance/LATEST and the "
+            "deltas/streak chain are NOT updated"
+        ),
+    )
+    verify_acc.add_argument(
+        "--repro",
+        default=None,
+        metavar="CHECK_ID",
+        help="Print the exact repro command for one check id; exit 0",
     )
 
     # ── sweep-heal (DEC-SWEEP-HEAL-001) — quarantine, never delete ──
@@ -8117,13 +8248,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
     # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
-    # the last prebuild) would feed the engine stale bars AND hash them into the run
-    # identity as if canonical (Golden Rule #4) — refuse the launch loudly with the
-    # exact remedy instead. Verifiable pairs only (derived intraday TFs with BOTH a
-    # stored partition and a 1-minute base — the zero-bar preflight above owns the
-    # missing-data refusal; abstains never block). NO escape flag by design:
+    # the last prebuild, a kill-9 mid-incremental-re-derive) would feed the engine
+    # stale bars AND hash them into the run identity as if canonical (Golden
+    # Rule #4) — refuse the launch loudly with the exact remedy instead. Verifiable
+    # pairs only (derived TFs — the intraday TFs AND the derived `1day`
+    # (DEC-MOVERS-STORED-FRESHNESS-001 fold-in, each vs its own canonical law;
+    # round 2: the `1day` judged set is session-scoped to the 1m base's coverage
+    # — a vendor-era 1m-less day abstains per-bar — and the cutoff mirrors the
+    # writer's data-grounded DEFER-only law, so a truncated run day judged
+    # post-close never flags the writer's own deferred output) — with BOTH a
+    # stored partition and a 1-minute base; the zero-bar preflight above owns the
+    # missing-data refusal; abstains — incl. an FNO-segment `1day`, a different
+    # daily law — never block). NO escape flag by design:
     # Correctness > everything (the merge-readiness priority law) — the remedy is
-    # the pipeline's prebuild, never sweeping known-stale data.
+    # the pipeline's prebuild (plus `remediation()`'s delete-1day-partition
+    # escalation for the one residual class a latest-wins merge cannot heal),
+    # never sweeping known-stale data.
     from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
     from brutex.engine.sweep_preflight import preflight_derived_freshness
 
@@ -8154,6 +8294,41 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+
+    # WARN-only per-session bar-density NOTE (DEC-SESSION-DENSITY-CENSUS-001):
+    # name interior low-density sessions in the loaded 1-minute slices — the
+    # retro-lake census arm, over the SAME bars the sweep is about to consume
+    # (zero extra lake I/O) — so the operator never mistakes a lake hole for a
+    # strategy verdict. NEVER a refusal, NO escape flag (the
+    # one_day_trade_law_note posture): the sweep proceeds; remediation is a
+    # re-pull of the named window(s). The ONE census kill switch
+    # (BRUTEX_SESSION_DENSITY_CENSUS) gates THIS consumption too — the
+    # classifier/note builder carries no KILL-SWITCH read (its two threshold
+    # tunables stay documented fail-soft internal reads when not injected);
+    # callers gate, exactly like observe_session_density's ingest-tail check
+    # — so the switch genuinely kills ALL census output (review round-1 fix).
+    from brutex.calendars.observed_sessions import load_observed_holidays
+    from brutex.data.session_density import session_density_census_enabled
+    from brutex.engine.sweep_preflight import preflight_session_density
+
+    if session_density_census_enabled():
+        # Observed-holiday overlay threaded exactly like BOTH ingest wirings
+        # (review round-3 — the preflight arm previously dropped it, so an
+        # overlaid interior date false-flagged missing_session at every sweep
+        # launch while the ingest tail of the SAME census abstained). The
+        # loader NEVER raises (missing/corrupt sidecar -> empty overlay).
+        density_note = preflight_session_density(
+            slices, observed=load_observed_holidays(resolved_lake)
+        )
+        if not density_note.ok:
+            print(
+                f"[brutex] WARNING: {len(density_note.flagged)} low-density session(s) in "
+                "the loaded 1-minute slices (bar-density census, "
+                "DEC-SESSION-DENSITY-CENSUS-001) — remediation: re-pull the named "
+                "window(s); the sweep proceeds:"
+            )
+            for line in density_note.lines():
+                print(f"[brutex]   {line}")
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
@@ -9314,6 +9489,142 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
     )
     print(f"[brutex] report: {report_path(root)}")
     return EXIT_OK
+
+
+def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 100%-tested acceptance core
+    *,
+    lake_root: Path | None,
+    checks: str | None,
+    full: bool,
+    sample: int,
+    seed: str | None,
+    months: int,
+    date_str: str | None,
+    top_n: int,
+    latency_budget: list[str] | None,
+    latency_rounds: int,
+    abstain_budget: int,
+    max_runtime_s: float | None,
+    check_timeout_s: float,
+    force_during_pull: bool,
+    self_test: bool,
+    self_test_only: bool,
+    no_self_test: bool,
+    json_out: bool,
+    out_dir: Path | None,
+    repro: str | None,
+    argv: list[str],
+) -> int:
+    """``brutex verify-acceptance`` — thin shim over :mod:`brutex.acceptance`.
+
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). All verdict /
+    report / exit logic lives in the 100%-gated ``brutex/acceptance/``
+    package; this shim only resolves flags, prints the human table and maps
+    the returned exit code (0 clean / 1 usage / 2 SUSPECT / 3 findings /
+    4 inconclusive — the verify-family vocabulary). A SECOND concurrent run
+    against the same lake is REFUSED by the acceptance single-flight flock
+    (round-4 B4-1 — overlapping runs corrupted the audit hash chain) and
+    exits 2 (SUSPECT) naming the holder.
+    """
+    import json
+
+    from brutex.acceptance.checks import ALL_CHECK_IDS
+    from brutex.acceptance.report import render_human
+    from brutex.acceptance.run import RunConfig, repro_command, run_acceptance
+    from brutex.acceptance.selftest import render_battery_table, run_full_battery
+
+    if repro is not None:
+        if repro not in ALL_CHECK_IDS:
+            raise CliUserError(
+                f"unknown check id for --repro: {repro!r} (choose from {', '.join(ALL_CHECK_IDS)})"
+            )
+        print(repro_command(repro, seed=seed))
+        return EXIT_OK
+    if self_test_only:
+        result = run_full_battery()
+        print(render_battery_table(result), end="")
+        return EXIT_OK if result.verdict.value == "TEETH_PROVEN" else EXIT_INTERNAL_ERROR
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="verify-acceptance")
+    if checks is None:
+        selected = ALL_CHECK_IDS
+    else:
+        selected = tuple(tok.strip() for tok in checks.split(",") if tok.strip())
+        unknown = [tok for tok in selected if tok not in ALL_CHECK_IDS]
+        if unknown:
+            raise CliUserError(
+                f"unknown check id(s): {', '.join(unknown)} (choose from {', '.join(ALL_CHECK_IDS)})"
+            )
+        if not selected:
+            raise CliUserError("--checks resolved to an empty list")
+    budgets: dict[str, float] = {}
+    for token in latency_budget or []:
+        key, _, value = token.partition("=")
+        try:
+            budgets[key.strip()] = float(value)
+        except ValueError:
+            raise CliUserError(f"bad --latency-budget entry: {token!r} (expected KEY=MS)") from None
+    if top_n > 100:  # noqa: PLR2004 — the documented movers cross-check depth cap
+        raise CliUserError("--top-n is capped at 100")
+    if sample < 0:
+        # Round-3 NIT (C-F5): a negative N is a Python slice ([:-1] selects
+        # population−1 datasets) — a silent cost surprise, never a sample.
+        raise CliUserError("--sample must be >= 0")
+    if no_self_test and (self_test or self_test_only):
+        raise CliUserError("--no-self-test conflicts with --self-test/--self-test-only")
+    if full:
+        print(
+            "[brutex] --full lifts sampling AND month bounds: the unique/tf legs "
+            "become whole-lake full-history scans (minutes to hours on a deep lake).",
+            file=sys.stderr,
+        )
+    mode = "skipped" if no_self_test else ("full" if self_test else "smoke")
+    # <=0 disables the hard per-check watchdog (operator escape hatch).
+    watchdog_s = check_timeout_s if check_timeout_s > 0 else None
+    cfg = RunConfig(
+        lake_root=resolved,
+        checks=selected,
+        seed=seed,
+        sample_n=sample,
+        months=months,
+        full=full,
+        date=date_str,
+        top_n=top_n,
+        latency_rounds=latency_rounds,
+        latency_budget_overrides=budgets,
+        abstain_budget=abstain_budget,
+        max_runtime_s=max_runtime_s,
+        check_timeout_s=watchdog_s,
+        force_during_pull=force_during_pull,
+        self_test_mode=mode,
+        out_dir=out_dir,
+        argv=tuple(argv),
+    )
+    exit_code, report = run_acceptance(cfg)
+    if "error" in report:
+        print(f"[brutex] verify-acceptance SUSPECT: {report['error']}", file=sys.stderr)
+        if json_out:
+            # Round-4 NIT (B4-5): the machine contract holds on EVERY exit —
+            # an early-SUSPECT path (symlink refusal, single-flight lock
+            # refusal, audit-open failure) previously emitted ZERO stdout
+            # bytes, so `--json | jq` died on empty input. The error report
+            # is a minimal valid JSON object ({"error": ..., "run_id": ...}).
+            print(json.dumps(report, indent=1, sort_keys=True))
+        return exit_code
+    if "report_write_error" in report:
+        # Round-3 fix (C-F4): a report-write failure was near-silent
+        # interactively — one loud stderr line; the table/JSON below already
+        # carry the truthful SUSPECT exit 2 (run.py restamped overall).
+        print(
+            "[brutex] verify-acceptance SUSPECT: report write failed: "
+            f"{report['report_write_error']}",
+            file=sys.stderr,
+        )
+    if json_out:
+        print(json.dumps(report, indent=1, sort_keys=True))
+    else:
+        print(render_human(report), end="")
+    return exit_code
 
 
 def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 100%-tested barrier
@@ -10958,6 +11269,81 @@ _RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
 _RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
 _RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
 
+#: How many top-100 finalists get a losing-streak resilience line on the CLI.
+_RESILIENCE_REPORT_TOP_K: Final[int] = 5
+
+
+def _print_resilience_lines(
+    *,
+    out_root: Path,
+    grid: Any,
+    report: Any,
+    printer: Callable[[str], None] = print,
+) -> None:
+    """Print the per-finalist losing-streak resilience summary lines (top-K).
+
+    Reads the ``top100.json`` the pass just wrote (its ``resilience`` block per
+    entry — the sibling sidecar surface) and prints one
+    :func:`brutex.engine.resilience_streaks.render_resilience_line` per entry,
+    with an honesty footer naming the rows whose stats were NULL (parity-failed
+    or no trades). Additive DISPLAY only — annotation, never a re-rank.
+
+    Fenced: a resilience-surface failure NEVER changes the sweep exit path
+    (mirrors the pass fence); ``KeyboardInterrupt``/``SystemExit``/
+    ``MemoryError`` always re-raise raw.
+    """
+    import structlog
+
+    from brutex.engine.resilience_streaks import (
+        RESILIENCE_ANNOTATION_KEY,
+        render_resilience_line,
+    )
+    from brutex.engine.sweep_supervisor import grid_identity
+    from brutex.engine.top100_artifact import load_top100
+    from brutex.engine.trade_store import sweep_run_dir
+
+    if not report.top100_written:
+        return
+    try:
+        run_id = grid_identity(grid)
+        runs_dir = sweep_run_dir(out_root, run_id).parent
+        artifact = load_top100(runs_dir, run_id)
+        if artifact is None:
+            printer(
+                "[brutex] resilience — top100 unreadable for the summary lines "
+                "(the artifact rebuilds on the next 'brutex sweep-all')"
+            )
+            return
+        entries = artifact.entries[:_RESILIENCE_REPORT_TOP_K]
+        if not entries:
+            return
+        printer(
+            "[brutex] resilience — top strategies' losing-streak endurance "
+            "(signal-only, gross, per-unit):"
+        )
+        null_rows = 0
+        for entry in entries:
+            # render_resilience_line fail-loud validates that resilience is a
+            # Mapping; a raise here is caught by the fence below (never fails
+            # the sweep), so post-render the cast is sound.
+            printer(render_resilience_line(entry))
+            block = cast("Mapping[str, object]", entry[RESILIENCE_ANNOTATION_KEY])
+            if not block["stats_live"]:
+                null_rows += 1
+        if null_rows:
+            printer(
+                f"  ⚠ {null_rows} of {len(entries)} shown had NO resilience stats "
+                "(parity-failed or no trades)"
+            )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:  # fenced display surface — never fails the sweep
+        structlog.get_logger("brutex.cli").warning(
+            "cli.resilience_line.skipped",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
 
 def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
     *,
@@ -11133,12 +11519,14 @@ def _run_results_depth_adapter(
         f"[brutex] results-depth — tuples={report.tuples_processed} "
         f"skipped_current={report.tuples_skipped_current} "
         f"missing_store={report.tuples_missing_store} errored={report.tuples_errored} "
+        f"resilience_errored={report.resilience_errored} "
         f"captured={report.combos_captured} parity_failed={report.combos_parity_failed} "
         f"pool={report.pool} gate_passers={report.gate_passers} "
         f"baselines={report.baselines_written} "
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
+    _print_resilience_lines(out_root=out_root, grid=grid, report=report)
     return True
 
 
@@ -11183,6 +11571,25 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command is None or args.command == "version":
         return cmd_version()
+    if args.command in {"sweep", "sweep-all", "sweep-daemon", "verify-acceptance"}:
+        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
+        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
+        # module's first logger use — an unconfigured sweep process streamed
+        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
+        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
+        # call site covering all three sweep entries (sweep-daemon reuses
+        # cmd_sweep_all; the dashboard sweep job is already configured by
+        # cmd_dashboard at startup and the guard defers to it).
+        # verify-acceptance joined at round 3 of DEC-OPERATOR-ACCEPTANCE-
+        # VERIFY-001 (#1958): unconfigured structlog's default PrintLogger
+        # writes to STDOUT, so the acceptance checks' scan events buried the
+        # human table and made `--json` unparseable (`json.loads(stdout)`
+        # failed on the log prefix). The seam routes every log line to
+        # STDERR, keeping stdout = exactly the table / JSON summary. The
+        # guard sits ABOVE apply_polars_thread_bound() so even the polars
+        # bound's own once-per-process INFO event lands on stderr, never
+        # ahead of the table/JSON on stdout.
+        _configure_sweep_logging()
     # DEC-THREAD-BUDGET-BOUNDS-001 — bound the polars global thread pool ONCE
     # per process, at the ONE entrypoint every BruteX process (CLI fetch AND
     # the in-process uvicorn dashboard) enters, BEFORE the first lazy `import
@@ -11312,16 +11719,6 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
-    if args.command in {"sweep", "sweep-all", "sweep-daemon"}:
-        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
-        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
-        # module's first logger use — an unconfigured sweep process streamed
-        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
-        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
-        # call site covering all three sweep entries (sweep-daemon reuses
-        # cmd_sweep_all; the dashboard sweep job is already configured by
-        # cmd_dashboard at startup and the guard defers to it).
-        _configure_sweep_logging()
     if args.command == "backup":
         return cmd_backup(args)
     if args.command == "sweep":
@@ -11476,6 +11873,30 @@ def _dispatch(argv: list[str] | None) -> int:
             results_root=args.results_root,
             catalog_path=args.catalog_path,
             run_id=args.run_id,
+        )
+    if args.command == "verify-acceptance":
+        return cmd_verify_acceptance(
+            lake_root=args.lake_root,
+            checks=args.checks,
+            full=args.full,
+            sample=args.sample,
+            seed=args.seed,
+            months=args.months,
+            date_str=args.date,
+            top_n=args.top_n,
+            latency_budget=args.latency_budget,
+            latency_rounds=args.latency_rounds,
+            abstain_budget=args.abstain_budget,
+            max_runtime_s=args.max_runtime_s,
+            check_timeout_s=args.check_timeout_s,
+            force_during_pull=args.force_during_pull,
+            self_test=args.self_test,
+            self_test_only=args.self_test_only,
+            no_self_test=args.no_self_test,
+            json_out=args.json,
+            out_dir=args.out,
+            repro=args.repro,
+            argv=argv if argv is not None else sys.argv[1:],
         )
     if args.command == "verify-lookahead":
         return cmd_verify_lookahead(

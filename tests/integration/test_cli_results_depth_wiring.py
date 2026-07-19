@@ -303,7 +303,11 @@ def test_vix_lake_coordinate_is_real_and_stamps_every_captured_trade(
     from brutex.engine.trade_store import SidecarPaths, read_trade_page
 
     (run_dir,) = [p for p in (results_root.parent / "sweep_runs").iterdir() if p.is_dir()]
-    stamp_paths = sorted(run_dir.glob("results-depth/*/*/*.stamp.json"))
+    stamp_paths = sorted(
+        p
+        for p in run_dir.glob("results-depth/*/*/*.stamp.json")
+        if not p.name.endswith(".resilience.stamp.json")  # exclude the sibling resilience stamp
+    )
     assert stamp_paths
     stamped_rows = 0
     for stamp_path in stamp_paths:
@@ -314,6 +318,8 @@ def test_vix_lake_coordinate_is_real_and_stamps_every_captured_trade(
             aggs=base / f"{stem}.aggs.parquet",
             equity=base / f"{stem}.equity.parquet",
             stamp=stamp_path,
+            resilience=base / f"{stem}.resilience.parquet",
+            resilience_stamp=base / f"{stem}.resilience.stamp.json",
         )
         spans = json.loads(stamp_path.read_text(encoding="utf-8"))["trade_spans"]
         for run_id, (_start_row, count) in spans.items():

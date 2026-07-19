@@ -46,6 +46,7 @@ from typing import Any, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.sweep_liveness import (
     DEFAULT_FRESH_SECONDS,
     RunVerdict,
@@ -275,7 +276,7 @@ def spawn_detached_sweep(
 def _read_progress_mapping(path: Path) -> dict[str, Any] | None:
     """Read the progress JSON at *path*, or ``None`` (missing/corrupt — honest)."""
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(read_regular_text(path))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(parsed, dict):
