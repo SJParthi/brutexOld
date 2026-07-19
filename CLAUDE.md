@@ -35,7 +35,9 @@ parity invariant RE-DERIVED + golden-pinned at floor 8, `sweep_apriori.py`
 byte-untouched) + the instrument-scaled Stage-3 SL/TP axes (median-daily-range
 exact-integer derivation keeping the SAME 40×50 = 2,000-cell shape — Mode-A
 is the r=400-paisa identity anchor; SENSEX's absurd ₹2 ceiling becomes ₹450 at
-r=90,000 — + the ~5-cell log-spaced coarse nightly axis; the spec's "locked,
+r=90,000 — + the ~5-cell log-spaced coarse nightly axis (one single-cell
+sweep invocation per cell — the round-2 pairing-preserving conduit respec);
+the spec's "locked,
 never data-derived" Mode-A clause consciously superseded-in-part, historical
 text kept). BOTH default-OFF (knobs `BRUTEX_RESCUE_MIN_HITS` ·
 `BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS` —
@@ -3368,7 +3370,8 @@ hostile-review pass._
   executes zero rescue opcodes. **ITEM 7 — instrument-scaled Stage-3 SL/TP axes (#1978):** NEW leaf
   `brutex/engine/stage3_scale.py` — `median_daily_range_paisa(bars)` (per-IST-session max(high)−min(low)
   exact 2-dp paisa ints, LOWER median — deterministic; O(bars) once, zero vendor I/O) → `derive_scaled_axes`
-  (`sl_tick = max(1, ceil(r/(2·40)))`, `tp_tick = max(1, ceil(5r/(4·50)))`, axes `[tick, steps·tick]` —
+  (`sl_tick = ceil(r/(2·40))`, `tp_tick = ceil(5r/(4·50))`, axes `[tick, steps·tick]` — ticks ≥ 1
+  structurally, the dead `max(1, …)` clamps removed round 2 with in-code proofs;
   STRUCTURALLY the same 40×50 = 2,000-cell Mode-A shape for EVERY r, hypothesis-pinned over [1, 10¹²]);
   Mode-A is EXACTLY the r=400-paisa instance (the pinned identity anchor — the motivation in one number:
   Mode-A models a ₹4 median daily range; SENSEX-class r=90,000 turns the absurd ₹2 ceiling into ₹450);
@@ -3380,15 +3383,22 @@ hostile-review pass._
   the price_source precedent) ships with its one-line `canonical_trade_params` merge DEFERRED to the club
   fold (sweep_run.py triply contended — provably identity-neutral at default, test-pinned). The ~5-cell
   log-spaced COARSE axis (`COARSE_SCALE_LADDER` ×¼..×4; `coarse_sltp_cells` sl = ceil(r·m/4), tp = 2·sl —
-  the 2:1 W3-default, disclosed) enters the nightly key list via `nightly_sweep_kwargs(...,
-  sltp_scale_cells=…)` (default None ⇒ forwarded sl/tp BYTE-IDENTICAL key-for-key, pinned; armed ⇒ exactly
-  the two CSVs override) behind `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`; per-instrument staging = the
-  DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged-invocation precedent. RUST DISCLOSURE (recorded deviation): the
+  the 2:1 W3-default, disclosed) enters the nightly key list via the PLAN face
+  `nightly_sweep_invocations(..., sltp_scale_cells=…)` (default None ⇒ ONE invocation, forwarded sl/tp
+  BYTE-IDENTICAL key-for-key, pinned; armed ⇒ ONE cmd_sweep_all invocation PER CELL carrying that cell's
+  SINGLE-VALUE CSVs via the per-cell `sltp_cell_csv` — the round-2 PAIRING-PRESERVATION respec: the
+  round-1 two-CSV flatten was REFUTED by executed computation, `iter_sweep_tuples`' sl×tp product turned
+  5 paired cells into 25 with 6 inverted tp<sl; per-cell staging makes the 2:1 pairing survive BY
+  CONSTRUCTION, pinned through the real `_parse_paisa_list` + `iter_sweep_tuples` chain) behind
+  `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`; per-instrument staging = the
+  DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged-invocation precedent per cell. RUST DISCLOSURE (recorded deviation): the
   scaling law is O(1)-per-instrument config derivation, not a hot path, and the stage3 grid math is owned
   by the LIVE B2-2 `rust/brutex-refine` lane — the Rust mirror rides B2-2 (no parallel crate-skeleton
   edit). COMPUTE DISCLOSURE (both DECs): rescue multiplies simulated masks by the band fraction
   f = |hits∈[8,30)| / |hits≥30| (RescueLaneResult carries the measured counts; + staged B×O(bars) MC per
-  surviving candidate); the coarse axis multiplies an ARMED instrument's nightly cells ×≤5; BOTH OFF by
+  surviving candidate); the coarse axis is ≤5 SINGLE-CELL invocations (≤5 cells total) per ARMED
+  instrument — the round-1 "×≤5 cells in one invocation" claim was refuted (25-cell cross product) and
+  the round-2 per-cell conduit makes ≤5 true by construction; BOTH OFF by
   default ⇒ cost UNCHANGED. GATES (measured in the PR body): new modules 100.00% line+branch the ci.yml
   way; frozen goldens (run-identity + apriori parity + vocab) UNMODIFIED fixtures byte-untouched; cargo
   fmt/clippy -D warnings/test --release --locked green (binom kernel 10 in-crate tests); ruff/ruff-format/
@@ -3402,7 +3412,12 @@ hostile-review pass._
   `metrics_for_mask(reference_stamper=None)` SANCTIONED as the SIXTH discarded-stream site (R2 BLOCKER —
   the VIX pin map + §2 Rule 3 widened FIVE→SIX consciously); the two nonexistent test-file citations in
   #1977/#1978 corrected (R4); the env-knob "fail-loud" + coverage claims scoped honestly (R3/R4 — see
-  below). HONEST: the 100% coverage is unit/property-level — ZERO end-to-end production coverage until the
+  below). REFUTER ROUND 2 folded (2026-07-19 — the per-finding record lives in MIGRATION.md #1978): the
+  coarse-axis conduit RESPECIFIED pairing-preserving (the MAJOR above — Option P, per-cell staged
+  invocations via `nightly_sweep_invocations` + `sltp_cell_csv`, plural flattener deleted, downstream
+  semantics pinned through the real grid enumeration) + the lower-median docstring truth + the three dead
+  `max(1, …)` clamps removed with structural proofs + the band-reservation retirement annotation.
+  HONEST: the 100% coverage is unit/property-level — ZERO end-to-end production coverage until the
   club-fold binding (no production module imports the lane). ENGINE UNCHANGED when OFF —
   NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; new env vars `BRUTEX_RESCUE_MIN_HITS` +
@@ -10302,13 +10317,17 @@ hostile-review pass._
   clause consciously superseded-in-part with history kept; the default-OMIT
   axis fragment's `canonical_trade_params` merge deferred to the club fold —
   identity-neutral at default, pinned; the ~5-cell coarse nightly axis via
-  `nightly_sweep_kwargs(sltp_scale_cells=…)`, default None byte-identical).
+  the `nightly_sweep_invocations(sltp_scale_cells=…)` plan face — one
+  single-value-CSV invocation per cell, the round-2 pairing-preserving
+  respec; default None = one byte-identical invocation).
   BOTH default-OFF behind the knobs `BRUTEX_RESCUE_MIN_HITS` ·
   `BRUTEX_STAGE3_INSTRUMENT_SCALE` · `BRUTEX_NIGHTLY_SLTP_SCALE_AXIS`
   (fail-loud ONCE BOUND — no production reader until the club-fold binding;
   arming today is a clean silent no-op); hostile-review round 1 folded
   (binomial null respec + the SIXTH sanctioned VIX literal-None site +
   citation/honesty corrections — MIGRATION.md #1977 carries the record);
+  refuter round 2 folded (the coarse-conduit pairing-preserving respec +
+  NITs — MIGRATION.md #1978 carries the record);
   OFF = byte-identical, frozen goldens unmodified; ENGINE UNCHANGED when
   OFF — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1977–#1978 for the full blurb)

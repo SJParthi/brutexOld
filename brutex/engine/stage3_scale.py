@@ -20,15 +20,18 @@ Let ``r`` = the instrument's median daily range in paisa
 LOWER median over the sessions, exact ints end-to-end). Then for scale
 fraction ``num/den`` (defaults: SL span = r/2, TP span = 5r/4):
 
-* ``sl_tick = max(1, ceil(r · sl_num / (sl_den · 40)))``;
+* ``sl_tick = ceil(r · sl_num / (sl_den · 40))``;
   the SL axis is ``[sl_tick, 40·sl_tick]`` on the ``sl_tick`` grid —
   EXACTLY 40 steps (the Mode-A shape ``lo == tick``, ``hi == steps·tick``).
-* ``tp_tick = max(1, ceil(r · tp_num / (tp_den · 50)))``;
+* ``tp_tick = ceil(r · tp_num / (tp_den · 50))``;
   the TP axis is ``[tp_tick, 50·tp_tick]`` — EXACTLY 50 steps.
 
 ``ceil`` is exact integer ``-(-a // b)``; NO floats anywhere, so identical
 bars give identical axes on any platform (Golden Rule #4). The step counts
 are structurally invariant (property-pinned over the whole ``r`` domain).
+Each tick is ``>= 1`` STRUCTURALLY — ceil of a positive/positive ratio is
+``>= 1`` and every operand is validated ``>= 1`` first — so no ``max(1, …)``
+floor clamp exists (a round-2 refuter proved the clamp arm dead; removed).
 
 Run-identity law (Golden Rule #4)
 ---------------------------------
@@ -53,16 +56,35 @@ Coarse per-instrument default sweep axis (default-OFF)
 (×¼ ×½ ×1 ×2 ×4); :func:`coarse_sltp_cells` derives the 5 (SL, TP) int
 cells for an instrument (base SL = r/4 per cell scale, TP = 2·SL — the 2:1
 reward:risk W3-default, disclosed in MIGRATION.md #1978). The nightly key
-list consumes them via ``nightly_sweep_kwargs(..., sltp_scale_cells=…)``
+list consumes them via
+``nightly_sweep_invocations(..., sltp_scale_cells=…)``
 (``brutex/nightly/sweep_binding.py``) behind the
-:data:`NIGHTLY_SCALE_ENV` knob — default unset = OFF = the forwarded
-``sl``/``tp`` args byte-identical. HONEST (Golden Rule #10): both of this
+:data:`NIGHTLY_SCALE_ENV` knob — default unset = OFF = ONE invocation
+whose forwarded ``sl``/``tp`` args are byte-identical.
+
+PAIRING-PRESERVATION LAW (refuter round 2 — the conduit respecification):
+each ARMED invocation carries EXACTLY ONE (SL, TP) cell as SINGLE-VALUE
+``--sl``/``--tp`` CSVs (:func:`sltp_cell_csv`), one ``cmd_sweep_all``
+invocation per cell — the DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged
+cardinality-1-invocation precedent applied per CELL. The sweep grid takes
+the FULL CROSS PRODUCT of its ``stop_losses`` × ``take_profits`` axes
+(``iter_sweep_tuples``'s ``itertools.product``), so the round-1 design —
+flattening the 5 paired cells into one 5-value SL CSV + one 5-value TP CSV
+through a single invocation — was REFUTED by executed computation: it
+yielded 25 grid cells of which only 5 kept the 2:1 pairing and 6 were
+INVERTED (tp < sl). Per-cell staging makes the pairing survive to the grid
+BY CONSTRUCTION (a 1×1 product per invocation) and keeps the compute
+disclosure at ≤5 cells per armed instrument — pinned end-to-end through
+the REAL ``_parse_paisa_list`` + ``iter_sweep_tuples`` machinery in
+``tests/unit/test_nightly_sweep_binding.py``.
+
+HONEST (Golden Rule #10): both of this
 module's knob resolvers are fail-loud ONCE BOUND, but NO production code
 reads either knob until the deferred club-fold binding lands — setting them
-today is a clean silent no-op. Per-instrument staging follows the
-DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged-invocation precedent: one armed
-invocation per instrument (a single ``cmd_sweep_all`` call has one sl/tp
-list for all instruments), each ×5 cells — the compute disclosure.
+today is a clean silent no-op. Per-instrument staging follows the same
+staged-invocation precedent: one armed invocation per instrument × per
+cell (≤5 single-cell invocations per armed instrument — the compute
+disclosure).
 
 Honest envelope (Golden Rule #10)
 ---------------------------------
@@ -98,7 +120,7 @@ __all__ = [
     "median_daily_range_paisa",
     "resolve_instrument_scale_env",
     "resolve_nightly_scale_env",
-    "sltp_cells_csv",
+    "sltp_cell_csv",
 ]
 
 #: Fail-loud arming knob for the per-instrument Stage-3 axis derivation.
@@ -189,9 +211,11 @@ def median_daily_range_paisa(bars: Sequence[CandleBar]) -> int:
     Raises
     ------
     ValueError
-        If *bars* is empty, or every session's range is zero (a degenerate
-        flat fixture cannot scale a grid — refused loudly, never a zero-tick
-        axis).
+        If *bars* is empty, or the LOWER MEDIAN of the session ranges is
+        zero — i.e. at least half the sessions are flat (e.g. ranges
+        ``[0, 0, 5000]`` refuse even though one session moved; a
+        majority-degenerate series cannot scale a grid — refused loudly,
+        never a zero-tick axis).
     """
     from brutex.calendars.nse import IST
 
@@ -254,8 +278,12 @@ def derive_scaled_axes(
             raise ValueError(f"{name} parts must be >= 1, got ({num}, {den})")
     sl_steps = MODE_A_SL_AXIS.steps  # 40 — the locked Mode-A shape.
     tp_steps = MODE_A_TP_AXIS.steps  # 50
-    sl_tick = max(1, _ceil_div(median_range_paisa * sl_span[0], sl_span[1] * sl_steps))
-    tp_tick = max(1, _ceil_div(median_range_paisa * tp_span[0], tp_span[1] * tp_steps))
+    # tick >= 1 STRUCTURALLY: numerator = r·num >= 1 and denominator =
+    # den·steps >= 1 (all validated >= 1 above), and ceil(a/b) >= 1 for any
+    # a, b >= 1 — so a max(1, …) floor clamp would be dead code (round-2
+    # refuter proof; the clamp was removed rather than left mutant-immune).
+    sl_tick = _ceil_div(median_range_paisa * sl_span[0], sl_span[1] * sl_steps)
+    tp_tick = _ceil_div(median_range_paisa * tp_span[0], tp_span[1] * tp_steps)
     sl_axis = GridAxis(
         name="sl_paisa", lo_paisa=sl_tick, hi_paisa=sl_steps * sl_tick, tick_paisa=sl_tick
     )
@@ -301,11 +329,13 @@ def instrument_axis_params_fragment(sl_axis: GridAxis, tp_axis: GridAxis) -> dic
 def coarse_sltp_cells(median_range_paisa: int) -> tuple[tuple[int, int], ...]:
     """The ~5 log-spaced coarse (SL, TP) cells for one instrument — exact ints.
 
-    Per ladder scale ``num/den``: ``sl = max(1, ceil(r·num / (den·4)))``
-    (base SL = quarter-range at ×1) and ``tp = 2·sl`` (the 2:1 W3-default).
-    Duplicates (a tiny ``r`` collapsing neighbouring ladder rungs onto the
-    same cell) are dropped order-preserving — the axis is honestly "~5",
-    never a padded fake.
+    Per ladder scale ``num/den``: ``sl = ceil(r·num / (den·4))``
+    (base SL = quarter-range at ×1; ``sl >= 1`` structurally — ceil of
+    positive/positive with ``r >= 1`` validated below and the ladder
+    constants ``>= 1``, so no ``max(1, …)`` clamp exists) and ``tp = 2·sl``
+    (the 2:1 W3-default). Duplicates (a tiny ``r`` collapsing neighbouring
+    ladder rungs onto the same cell) are dropped order-preserving — the axis
+    is honestly "~5", never a padded fake.
 
     Raises
     ------
@@ -317,27 +347,30 @@ def coarse_sltp_cells(median_range_paisa: int) -> tuple[tuple[int, int], ...]:
     base_num, base_den = _COARSE_SL_BASE_FRACTION
     cells: list[tuple[int, int]] = []
     for num, den in COARSE_SCALE_LADDER:
-        sl = max(1, _ceil_div(median_range_paisa * base_num * num, base_den * den))
+        sl = _ceil_div(median_range_paisa * base_num * num, base_den * den)
         cell = (sl, _COARSE_TP_PER_SL * sl)
         if cell not in cells:
             cells.append(cell)
     return tuple(cells)
 
 
-def sltp_cells_csv(cells: Sequence[tuple[int, int]]) -> tuple[str, str]:
-    """Render coarse cells as the ``--sl`` / ``--tp`` CSV token pair.
+def sltp_cell_csv(cell: tuple[int, int]) -> tuple[str, str]:
+    """Render ONE coarse (SL, TP) cell as its ``--sl`` / ``--tp`` CSV pair.
 
-    The nightly conduit (``nightly_sweep_kwargs(..., sltp_scale_cells=…)``):
-    the returned strings are exactly the ``_parse_paisa_list`` vocabulary the
-    sweep CLI already parses. Raises ``ValueError`` on an empty sequence or a
-    non-positive paisa value (a junk plan must fail loudly at build time).
+    The nightly conduit
+    (``nightly_sweep_invocations(..., sltp_scale_cells=…)``): each returned
+    string is a SINGLE-VALUE ``_parse_paisa_list`` CSV, so the sweep grid's
+    ``stop_losses`` × ``take_profits`` cross product is structurally 1 × 1
+    per invocation and the cell's pairing survives to the grid BY
+    CONSTRUCTION. Deliberately SINGLE-cell (refuter round 2): the round-1
+    plural flattener (``sltp_cells_csv`` — all SLs in one CSV, all TPs in
+    the other, one invocation) was refuted — ``iter_sweep_tuples`` takes the
+    full sl × tp product, exploding 5 paired cells into 25 (6 of them
+    inverted ``tp < sl``); a per-cell renderer makes that shape
+    structurally impossible. Raises ``ValueError`` on a non-positive paisa
+    value (a junk plan must fail loudly at build time).
     """
-    if not cells:
-        raise ValueError("sltp_cells_csv: cells must be non-empty")
-    for sl, tp in cells:
-        if sl < 1 or tp < 1:
-            raise ValueError(f"sltp_cells_csv: cells must be positive paisa, got ({sl}, {tp})")
-    return (
-        ",".join(str(sl) for sl, _ in cells),
-        ",".join(str(tp) for _, tp in cells),
-    )
+    sl, tp = cell
+    if sl < 1 or tp < 1:
+        raise ValueError(f"sltp_cell_csv: cell must be positive paisa, got ({sl}, {tp})")
+    return (str(sl), str(tp))

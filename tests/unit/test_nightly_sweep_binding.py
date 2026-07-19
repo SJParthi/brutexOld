@@ -26,6 +26,7 @@ from brutex.nightly.sweep_binding import (
     SWEEP_FORWARDED_KEYS,
     SWEEP_SUPERVISOR_AUDIT_RELPATH,
     UNATTENDED_ESCAPE_FLAGS,
+    nightly_sweep_invocations,
     nightly_sweep_kwargs,
     probe_contract_artifacts,
     read_sweep_tail_counts,
@@ -453,56 +454,128 @@ def test_probe_sweep_runs_sibling_root_probed(tmp_path: Path) -> None:
 
 
 # ── DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001 (LANE W3): the default-OFF coarse
-# instrument-scaled SL/TP axis hook on nightly_sweep_kwargs. ──────────────────
+# instrument-scaled SL/TP axis PLAN face (nightly_sweep_invocations) —
+# refuter round 2's pairing-preservation respecification. ─────────────────────
 
 
-def test_sltp_scale_default_none_is_byte_identical(tmp_path: Path) -> None:
+def test_sltp_scale_default_none_is_one_byte_identical_invocation(tmp_path: Path) -> None:
     args = _namespace(sl="80", tp="50")
     base = nightly_sweep_kwargs(
         args, lake_root=tmp_path, start_default="2020-01-01", end_default="2026-07-17"
     )
-    hooked = nightly_sweep_kwargs(
+    plan = nightly_sweep_invocations(
         args,
         lake_root=tmp_path,
         start_default="2020-01-01",
         end_default="2026-07-17",
         sltp_scale_cells=None,
     )
-    assert hooked == base
-    assert hooked["sl"] == "80"
-    assert hooked["tp"] == "50"
+    assert plan == (base,)
+    assert plan[0]["sl"] == "80"
+    assert plan[0]["tp"] == "50"
 
 
-def test_sltp_scale_armed_overrides_exactly_the_two_csvs(tmp_path: Path) -> None:
+def test_sltp_scale_armed_one_invocation_per_cell_single_value_csvs(tmp_path: Path) -> None:
     from brutex.engine.stage3_scale import coarse_sltp_cells
 
     args = _namespace(sl="80", tp="50")
     base = nightly_sweep_kwargs(
         args, lake_root=tmp_path, start_default="2020-01-01", end_default="2026-07-17"
     )
-    armed = nightly_sweep_kwargs(
+    cells = coarse_sltp_cells(15_000)
+    plan = nightly_sweep_invocations(
         args,
         lake_root=tmp_path,
         start_default="2020-01-01",
         end_default="2026-07-17",
-        sltp_scale_cells=coarse_sltp_cells(15_000),
+        sltp_scale_cells=cells,
     )
-    assert armed["sl"] == "938,1875,3750,7500,15000"
-    assert armed["tp"] == "1876,3750,7500,15000,30000"
-    for key in SWEEP_FORWARDED_KEYS:
-        if key not in ("sl", "tp"):
-            assert armed[key] == base[key]
-    assert set(armed) == set(base)
+    # ONE invocation per cell — never a flattened multi-value CSV pair
+    # (refuter round 2: the flatten cross-multiplied 5 paired cells into 25).
+    assert len(plan) == len(cells) == 5
+    for invocation, (sl, tp) in zip(plan, cells, strict=True):
+        assert invocation["sl"] == str(sl)  # single-value CSV
+        assert invocation["tp"] == str(tp)
+        assert "," not in invocation["sl"] and "," not in invocation["tp"]
+        for key in SWEEP_FORWARDED_KEYS:
+            if key not in ("sl", "tp"):
+                assert invocation[key] == base[key]
+        assert set(invocation) == set(base)
+    # The invocations are independent dicts (a later mutation cannot alias).
+    assert len({id(invocation) for invocation in plan}) == len(plan)
 
 
 def test_sltp_scale_junk_plan_fails_loud(tmp_path: Path) -> None:
     import pytest
 
     with pytest.raises(ValueError, match="non-empty"):
-        nightly_sweep_kwargs(
+        nightly_sweep_invocations(
             _namespace(sl="80", tp="50"),
             lake_root=tmp_path,
             start_default="2020-01-01",
             end_default="2026-07-17",
             sltp_scale_cells=(),
         )
+
+
+def test_armed_plan_preserves_pairing_through_real_grid_enumeration(tmp_path: Path) -> None:
+    """The refuter-round-2 MAJOR's downstream-semantics pin (the M-c killer).
+
+    Drives the armed plan through the REAL consumption chain — the CLI's
+    ``_parse_paisa_list`` CSV vocabulary into a REAL ``SweepGridConfig`` and
+    the REAL ``iter_sweep_tuples`` enumeration (``itertools.product`` over
+    ``stop_losses`` × ``take_profits``) — and pins the EXACT resulting cell
+    census: each invocation enumerates EXACTLY its one (SL, TP) cell, the
+    whole plan enumerates EXACTLY the 5 paired cells (never the 25-cell
+    cross product), and every enumerated tuple keeps ``tp == 2·sl`` (zero
+    inverted ``tp < sl`` cells). Round 1 shipped a conduit this test refutes:
+    one invocation carrying 5-value SL/TP CSVs enumerated 25 cells, 6 of
+    them inverted.
+    """
+    from brutex.cli import _parse_paisa_list
+    from brutex.engine.stage3_scale import coarse_sltp_cells
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        iter_sweep_tuples,
+    )
+    from brutex.strategies.types import Side
+
+    cells = coarse_sltp_cells(15_000)
+    assert len(cells) == 5  # the NIFTY-class 5-rung plan (anti-vacuous)
+    plan = nightly_sweep_invocations(
+        _namespace(sl="80", tp="50"),
+        lake_root=tmp_path,
+        start_default="2020-01-01",
+        end_default="2026-07-17",
+        sltp_scale_cells=cells,
+    )
+    enumerated: list[tuple[int, int]] = []
+    for invocation, cell in zip(plan, cells, strict=True):
+        stop_losses = _parse_paisa_list(invocation["sl"])
+        take_profits = _parse_paisa_list(invocation["tp"])
+        grid = SweepGridConfig(
+            instruments=["NIFTY"],
+            timeframes=[Timeframe("1minute", 1)],
+            directions=[Side.BUY],
+            k_values=[1],
+            condition_bits=[0],
+            stop_losses=stop_losses,
+            take_profits=take_profits,
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap",
+            indicator_version="iv",
+            code_commit_sha="sha",
+        )
+        tuples = list(iter_sweep_tuples(grid))
+        assert len(tuples) == 1
+        for t in tuples:
+            assert t.sl_paisa is not None and t.tp_paisa is not None  # narrow int | None
+            enumerated.append((t.sl_paisa, t.tp_paisa))
+        # EXACTLY one (SL, TP) cell per invocation — the 1×1 product.
+        assert {(t.sl_paisa, t.tp_paisa) for t in tuples} == {cell}
+    # The whole plan: exactly the 5 PAIRED cells — never 25, never inverted.
+    assert enumerated == list(cells)
+    assert all(tp == 2 * sl for sl, tp in enumerated)
+    assert all(tp > sl for sl, tp in enumerated)  # zero inverted cells

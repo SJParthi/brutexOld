@@ -68,6 +68,7 @@ __all__ = [
     "SWEEP_SUPERVISOR_AUDIT_RELPATH",
     "UNATTENDED_ESCAPE_FLAGS",
     "ContractProbe",
+    "nightly_sweep_invocations",
     "nightly_sweep_kwargs",
     "probe_contract_artifacts",
     "read_sweep_tail_counts",
@@ -161,7 +162,6 @@ def nightly_sweep_kwargs(
     lake_root: Path | None,
     start_default: str,
     end_default: str,
-    sltp_scale_cells: Sequence[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Pure translation: parsed nightly args → the ``cmd_sweep_all`` kwargs.
 
@@ -171,22 +171,11 @@ def nightly_sweep_kwargs(
     *end_default* so this stays pure). The pinned escape-flag trio is
     STRUCTURALLY absent — even a Namespace carrying them contributes nothing.
 
-    ``sltp_scale_cells`` is the DEFAULT-OFF coarse instrument-scaled SL/TP
-    axis hook (DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, LANE W3): ``None`` (the
-    default — and whenever the
-    :data:`brutex.engine.stage3_scale.NIGHTLY_SCALE_ENV` knob is unset;
-    that knob's resolver is fail-loud ONCE BOUND, and nothing reads it
-    until the club-fold binding lands — the CALLER decides the plan here)
-    forwards the parsed ``sl``/``tp`` args BYTE-IDENTICALLY; a derived cell
-    plan (:func:`brutex.engine.stage3_scale.coarse_sltp_cells` — ~5
-    log-spaced (SL, TP) values off the instrument's median daily range)
-    overrides the two CSVs via
-    :func:`brutex.engine.stage3_scale.sltp_cells_csv`. Per-instrument
-    staging = one armed invocation per instrument (the
-    DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged precedent — a single
-    ``cmd_sweep_all`` call carries one sl/tp list for ALL its instruments);
-    arming the nightly runner loop itself is an operator flip with its own
-    compute disclosure (MIGRATION.md #1978).
+    The coarse instrument-scaled SL/TP axis rides the PLAN face
+    (:func:`nightly_sweep_invocations`) — this base builder deliberately
+    carries NO cell hook (refuter round 2: a multi-cell override on the ONE
+    kwargs dict can only flatten into two independent CSVs, which the sweep
+    grid cross-multiplies — the refuted design).
     """
     kwargs: dict[str, Any] = {}
     for key in SWEEP_FORWARDED_KEYS:
@@ -200,13 +189,72 @@ def nightly_sweep_kwargs(
             kwargs[key] = value if value else end_default
         else:
             kwargs[key] = getattr(args, key)
-    if sltp_scale_cells is not None:
-        # Local import — the nightly binding stays wheel-light at import
-        # (stage3_scale pulls the engine grid module only when armed).
-        from brutex.engine.stage3_scale import sltp_cells_csv
-
-        kwargs["sl"], kwargs["tp"] = sltp_cells_csv(sltp_scale_cells)
     return kwargs
+
+
+def nightly_sweep_invocations(
+    args: argparse.Namespace,
+    *,
+    lake_root: Path | None,
+    start_default: str,
+    end_default: str,
+    sltp_scale_cells: Sequence[tuple[int, int]] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """The nightly sweep PLAN: one ``cmd_sweep_all`` kwargs dict per invocation.
+
+    ``sltp_scale_cells`` is the DEFAULT-OFF coarse instrument-scaled SL/TP
+    axis hook (DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, LANE W3): ``None`` (the
+    default — and whenever the
+    :data:`brutex.engine.stage3_scale.NIGHTLY_SCALE_ENV` knob is unset;
+    that knob's resolver is fail-loud ONCE BOUND, and nothing reads it
+    until the club-fold binding lands — the CALLER decides the plan here)
+    yields EXACTLY ONE invocation whose kwargs are the
+    :func:`nightly_sweep_kwargs` base BYTE-IDENTICALLY (the parsed
+    ``sl``/``tp`` args forwarded verbatim).
+
+    PAIRING-PRESERVATION LAW (refuter round 2 — the conduit
+    respecification): an armed cell plan
+    (:func:`brutex.engine.stage3_scale.coarse_sltp_cells` — ~5 log-spaced
+    (SL, TP) pairs off the instrument's median daily range) yields ONE
+    invocation PER CELL, each overriding ``sl``/``tp`` with the cell's
+    SINGLE-VALUE CSVs via
+    :func:`brutex.engine.stage3_scale.sltp_cell_csv` — the
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged cardinality-1-invocation
+    precedent applied per cell. ``cmd_sweep_all`` cross-multiplies its
+    ``--sl`` × ``--tp`` CSVs (``iter_sweep_tuples``'s ``itertools.product``),
+    so the round-1 single-invocation flatten (5-value SL CSV × 5-value TP
+    CSV) was REFUTED by executed computation — 25 grid cells, only 5 paired,
+    6 INVERTED (tp < sl); per-cell invocations make the 2:1 pairing survive
+    to the grid BY CONSTRUCTION (a 1 × 1 product each) and keep the armed
+    compute at ≤5 cells per instrument (MIGRATION.md #1978). Pinned
+    end-to-end through the REAL ``_parse_paisa_list`` +
+    ``iter_sweep_tuples`` machinery in the stem test. An EMPTY armed plan
+    raises ``ValueError`` (a junk plan must fail loudly at build time).
+
+    Per-instrument staging = one armed plan per instrument; arming the
+    nightly runner loop itself (consuming this tuple, one ``cmd_sweep_all``
+    call per entry) is the deferred club-fold binding with its own compute
+    disclosure (MIGRATION.md #1978) — today's production nightly builds the
+    single default invocation only (``run_nightly`` executes
+    ``plan.sweep_kwargs`` once).
+    """
+    base = nightly_sweep_kwargs(
+        args, lake_root=lake_root, start_default=start_default, end_default=end_default
+    )
+    if sltp_scale_cells is None:
+        return (base,)
+    if not sltp_scale_cells:
+        raise ValueError("nightly_sweep_invocations: sltp_scale_cells must be non-empty")
+    # Local import — the nightly binding stays wheel-light at import
+    # (stage3_scale pulls the engine grid module only when armed).
+    from brutex.engine.stage3_scale import sltp_cell_csv
+
+    invocations: list[dict[str, Any]] = []
+    for cell in sltp_scale_cells:
+        invocation = dict(base)
+        invocation["sl"], invocation["tp"] = sltp_cell_csv(cell)
+        invocations.append(invocation)
+    return tuple(invocations)
 
 
 def read_sweep_tail_counts(audit_path: Path, *, since_utc: float) -> Mapping[str, int] | None:

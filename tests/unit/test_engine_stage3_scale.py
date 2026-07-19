@@ -30,7 +30,7 @@ from brutex.engine.stage3_scale import (
     median_daily_range_paisa,
     resolve_instrument_scale_env,
     resolve_nightly_scale_env,
-    sltp_cells_csv,
+    sltp_cell_csv,
 )
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -226,16 +226,18 @@ class TestCoarseCells:
         with pytest.raises(ValueError, match="median_range_paisa"):
             coarse_sltp_cells(0)
 
-    def test_csv_conduit(self) -> None:
-        sl_csv, tp_csv = sltp_cells_csv(((938, 1_876), (1_875, 3_750)))
-        assert sl_csv == "938,1875"
-        assert tp_csv == "1876,3750"
+    def test_csv_conduit_is_single_cell_single_value(self) -> None:
+        # Refuter round 2: the renderer is deliberately PER-CELL — a
+        # single-value CSV pair per invocation, never a flattened multi-value
+        # pair (which the sweep grid would cross-multiply, 5 cells → 25).
+        assert sltp_cell_csv((938, 1_876)) == ("938", "1876")
+        assert sltp_cell_csv((15_000, 30_000)) == ("15000", "30000")
 
     def test_csv_refuses_junk(self) -> None:
-        with pytest.raises(ValueError, match="non-empty"):
-            sltp_cells_csv(())
         with pytest.raises(ValueError, match="positive paisa"):
-            sltp_cells_csv(((0, 10),))
+            sltp_cell_csv((0, 10))
+        with pytest.raises(ValueError, match="positive paisa"):
+            sltp_cell_csv((10, 0))
 
 
 # ── Env knobs (fail-loud truth tables) ───────────────────────────────────────
