@@ -126,7 +126,7 @@ $ .venv/bin/mypy --strict brutex → clean (496 files; the single stage3_refine 
 | 8 | Functionality completeness | ✅ all TEN named kernels routed; nothing else touched |
 | 9 | Regression coverage | ✅ flag-OFF byte-identity spies + 466 pre-existing tests unmodified |
 | 10 | 7 test types | ✅ unit + integration-shaped seam suites + golden (plist byte + real-wheel) + property-style parametrized matrices + cargo tests; bench N/A (once-per-night path, no O(1) SLA claimed); mutation wired weekly |
-| 11 | CI every push | ✅ discovery coverage gate folds the new stem-matched suites automatically (zero ci.yml edits) |
+| 11 | CI every push | ✅ discovery coverage gate folds the new stem-matched suites automatically; ci.yml gains exactly the new `rust-brutex-ops` cargo crate-gate job (fmt/check/clippy/test `--locked`, in ci-ok's needs + result loop) and `brutex_ops` is registered OPTIONAL in the turnkey-build guard (facade + own CI lane — the merge-reconcile fix round) |
 | 12 | O(1) hot path | N/A — nightly orchestration, not a hot path (honest) |
 | 13 | Audit chain | ✅ untouched (direct file appends, not structlog; no audit surface changed) |
 | 14 | Observability | ✅ structlog events: `nightly_rust.engaged` / `.fallback` / `.disabled` / `.kernel_autoreverted` / `.burn_in_complete` |

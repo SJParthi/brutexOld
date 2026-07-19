@@ -190,6 +190,23 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-NIGHTLY-RUST-CORE-001 (MIGRATION.md #1960): brutex_ops is the
+    # default-OFF nightly ops-kernel crate (the chain/report/schedule pure
+    # decision laws). It is consumed ONLY through the import-guarded facade
+    # brutex/nightly/nightly_rust.py (`importlib.import_module("brutex_ops")`
+    # inside `_resolve_crate` — an absent or stale wheel latches the
+    # `BRUTEX_NIGHTLY_RUST` flag OFF with one loud WARN and the verbatim
+    # Python oracle serves, byte-identical). It is deliberately NOT a turnkey
+    # build prerequisite: never module-top imported, in NO cargo workspace,
+    # gated by its OWN CI lane — the `rust-brutex-ops` cargo job in
+    # .github/workflows/ci.yml (fmt + check + clippy + test `--locked`
+    # against the committed Cargo.lock). A module-top `import brutex_ops`
+    # anywhere in brutex/ would make a clean clone crash-prone again — the
+    # inverse pin (test_optional_kernel_never_module_top_imported) forbids it.
+    "brutex_ops": (
+        "brutex/nightly/nightly_rust.py",
+        ".github/workflows/ci.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {

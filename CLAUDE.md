@@ -3608,8 +3608,13 @@ hostile-review pass._
   coverage
   100.00% line+branch the ci.yml way on all four touched modules
   (`nightly_rust.py` 116/38 · `chain.py` 234/66 · `report.py` 128/28 ·
-  `schedule.py` 198/54 — the discovery gate's stem law, ZERO ci.yml
-  edits); cargo fmt/clippy `-D warnings`/test --release green (24); the
+  `schedule.py` 198/54 — the discovery gate's stem law; ci.yml gains
+  EXACTLY the NEW `rust-brutex-ops` cargo crate-gate job in ci-ok's
+  needs + result loop, and `brutex_ops` is registered OPTIONAL in the
+  `test_run_builds_rust_kernels.py` turnkey-build guard — facade + own
+  CI lane, the 2026-07-19 merge-reconcile fix round); cargo
+  fmt/clippy `--locked -D warnings`/test --release --locked green (24);
+  the
   wheel built + import-smoked; ruff check + format clean; `mypy --strict`
   clean (the single `cma` import-not-found is the env-only baseline);
   pyright 0 errors on every touched file; mutation.yml
