@@ -272,15 +272,26 @@ class WheelSpec:
 
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
-#: target's build list (Makefile:90-105: fno-math, trading-core, brutex-feed;
-#: brutex-lake ABSENT — coordinator policy, excluded pending
-#: DEC-BRUTEX-LAKE-BOX-WHEEL-001), drift-pinned by a test that PARSES the
-#: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
-#: equality (§10 test 16).  Runtime behavior stays a deterministic constant
-#: (the lane must run mid-update on a possibly-broken tree); CI catches drift.
+#: target's build list (Makefile:90-110: fno-math, trading-core, brutex-lake,
+#: brutex-feed), drift-pinned by a test that PARSES the Makefile's
+#: ``cd rust/<crate> && … maturin develop`` lines and asserts set equality
+#: (§10 test 16).  Runtime behavior stays a deterministic constant (the lane
+#: must run mid-update on a possibly-broken tree); CI catches drift.
+#:
+#: brutex-lake joined REQUIRED when DEC-RUST-LAKE-WAVED-001 (W-6a,
+#: MIGRATION.md #1954) made the ``brutex_lake`` wheel the ONE production arm
+#: (a missing/stale wheel is the fail-loud ``LakeRustWavedUnavailableError``)
+#: and landed its required Makefile block — the exact drift-pin pickup
+#: DEC-BOX-AUTODEPLOY-LANE-001 (#1939) designed, superseding that entry's
+#: pending-exclusion clause (DEC-BRUTEX-LAKE-BOX-WHEEL-001).  HONEST residual:
+#: the §4.5 gate smoke / §4.6 rollback smoke + doctor coherence checks still
+#: cover trading_core + fno_math only — brutex_lake gets BUILD +
+#: required-failure coverage here; its import-smoke/doctor stages remain the
+#: (narrowed) DEC-BRUTEX-LAKE-BOX-WHEEL-001 follow-up scope.
 WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
+    WheelSpec("brutex_lake", "rust/brutex-lake", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
 )
 
