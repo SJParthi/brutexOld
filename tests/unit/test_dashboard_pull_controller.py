@@ -1762,10 +1762,23 @@ class TestScreenPullScope:
                 [_equity("TCS"), _equity("RELIANCE"), _equity("TCS"), _index("NIFTYIT")]
             )
         msg = str(exc.value)
-        # Sorted + de-duplicated offender list, the DEC, and the remediation.
-        assert "out-of-scope instrument(s) refused: NIFTYIT, RELIANCE, TCS" in msg
+        # Sorted + de-duplicated + repr()'d offender list (the #907 raw-name
+        # convention — vendor-CSV-derived names), the DEC, the remediation.
+        assert "out-of-scope instrument(s) refused: 'NIFTYIT', 'RELIANCE', 'TCS'" in msg
         assert "DEC-UNIVERSE-INDEX-ONLY-001" in msg
         assert "no vendor pull is issued" in msg
+
+    def test_message_reprs_control_char_names(self) -> None:
+        """A control-char-bearing symbol_name from a hostile/corrupt master
+        rides the refusal ESCAPED — never a raw newline/ESC into a console or
+        log rendering of the ValueError/400 detail (the #907 convention the
+        sibling route details already follow)."""
+        with pytest.raises(ValueError) as exc:
+            screen_pull_scope([_equity("BAD\nNAME\x1b")])
+        msg = str(exc.value)
+        assert "\n" not in msg.split(" — ", maxsplit=1)[0]  # the offender list is escaped
+        assert "\x1b" not in msg
+        assert "'BAD\\nNAME\\x1b'" in msg
 
     def test_bounded_scope_that_admits_stocks_passes_the_equity(self) -> None:
         # Defensive-arm pin: a (hypothetical) BOUNDED scope whose token admits

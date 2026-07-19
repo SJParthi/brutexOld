@@ -442,8 +442,13 @@ def screen_pull_scope(
         elif not scope.admits_stocks():
             refused.append(instrument.symbol_name)
     if refused:
+        # repr() each name — the #907 raw-name convention: symbol_name comes
+        # from the vendor instrument-master CSV, so a control-char-bearing
+        # name from a hostile/corrupt master never rides an error/log
+        # rendering raw (the sibling route details already repr).
+        offenders = ", ".join(repr(name) for name in sorted(set(refused)))
         raise ValueError(
-            f"out-of-scope instrument(s) refused: {', '.join(sorted(set(refused)))} — "
+            f"out-of-scope instrument(s) refused: {offenders} — "
             "the pull universe is index-only (DEC-UNIVERSE-INDEX-ONLY-001); "
             "stored data stays readable in /db, but no vendor pull is issued"
         )
