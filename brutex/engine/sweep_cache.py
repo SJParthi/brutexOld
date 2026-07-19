@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
@@ -509,17 +511,78 @@ class SweepCache:
             open leaks no LMDB environment.
         ValueError
             If either knob (explicit or env) is not a positive integer.
+        LmdbCorruptEnvError
+            If the L2 exact store's ``data.mdb`` is corrupt AND a SECOND
+            open fails after the quarantine-and-rebuild-once recovery
+            (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1920). A
+            FIRST corruption is recovered transparently (quarantined aside,
+            rebuilt empty) — the store is a rebuildable dedup accelerator, so
+            an emptied set only ever causes a wasted recompute, never a wrong
+            result (Golden Rule #7).
         """
         # Imported lazily: both pull runtime-only deps (fastbloom_rs / lmdb) and
         # keep this module importable (for the per-module coverage gate) without
         # touching the orchestrator package init chain at import time.
-        from brutex.data.lmdb_membership import LmdbMembership
-        from brutex.orchestrator.bloom import BloomFilter
+        import lmdb
+
+        from brutex.data.lmdb_membership import LmdbCorruptEnvError
 
         resolved_capacity = resolve_sweep_cache_bloom_capacity(bloom_capacity)
         resolved_map_mb = resolve_sweep_cache_map_mb(map_size_mb)
         path.mkdir(parents=True, exist_ok=True)
-        exact = LmdbMembership.open(path / _EXACT_SUBDIR, map_size_mb=resolved_map_mb)
+        exact_dir = path / _EXACT_SUBDIR
+        try:
+            bloom, exact = cls._open_exact_and_bloom(
+                exact_dir, resolved_capacity, bloom_fpr, resolved_map_mb
+            )
+        except (LmdbCorruptEnvError, lmdb.Error) as exc:
+            # The L2 exact store is a losslessly-rebuildable dedup ACCELERATOR:
+            # an emptied membership set can only ever cause a wasted recompute,
+            # never a wrong result (the recorded combos re-run + re-record; the
+            # ResultsStore idempotence keystone re-flushes byte-identical rows,
+            # Golden Rule #7). So quarantine the corrupt env aside (bytes
+            # PRESERVED, never deleted — lake_heal philosophy) and rebuild a
+            # fresh empty store ONCE. A SECOND failure propagates typed (below).
+            # A wall refusal / Bloom config error (SweepCacheCapacityError) is
+            # NOT an LMDB corruption and is NOT caught here — it still propagates
+            # as before via `_open_exact_and_bloom`'s own env-leak guard.
+            quarantined_to = cls._quarantine_corrupt_exact(exact_dir)
+            if quarantined_to is not None:
+                _LOG.warning(
+                    "sweep_cache.corrupt_quarantined",
+                    path=str(exact_dir),
+                    quarantined_to=str(quarantined_to),
+                    error_type=type(exc).__name__,
+                    note=(
+                        "dedup accelerator rebuilt empty — affected tuples recompute, "
+                        "results byte-identical"
+                    ),
+                )
+            bloom, exact = cls._open_exact_and_bloom(
+                exact_dir, resolved_capacity, bloom_fpr, resolved_map_mb
+            )
+        return cls(bloom=bloom, exact=exact)
+
+    @classmethod
+    def _open_exact_and_bloom(
+        cls,
+        exact_dir: Path,
+        resolved_capacity: int,
+        bloom_fpr: float,
+        resolved_map_mb: int,
+    ) -> tuple[BloomFilter, LmdbMembership]:
+        """Open the L2 exact store + build the pre-sized L1 Bloom for ONE attempt.
+
+        The single open+rebuild unit both :meth:`open` and its
+        quarantine-and-rebuild retry call. A corrupt ``data.mdb`` surfaces here
+        as an :class:`~brutex.data.lmdb_membership.LmdbCorruptEnvError` (at the
+        ``LmdbMembership.open`` boundary) or a raw ``lmdb.Error`` (a mid-rebuild
+        cursor/read fault); the env is never leaked on any post-open failure.
+        """
+        from brutex.data.lmdb_membership import LmdbMembership
+        from brutex.orchestrator.bloom import BloomFilter
+
+        exact = LmdbMembership.open(exact_dir, map_size_mb=resolved_map_mb)
         try:
             # Pre-size the Bloom from the persisted ground truth BEFORE building
             # it (STEP-1 auto-grow, DEC-ENGINE-MISC-PACK-001) — the wall refusal
@@ -529,11 +592,49 @@ class SweepCache:
             cls._rebuild_bloom_from_exact(bloom, exact, bloom_capacity=effective_capacity)
         except Exception:
             # Never leak the LMDB env on a refused open (a wall refusal, a Bloom
-            # config error, a rebuild fault) — the operator's very next action is
-            # re-opening the SAME path. Narrowly re-raised as-is.
+            # config error, a mid-rebuild lmdb fault) — the operator's very next
+            # action is re-opening the SAME path. Narrowly re-raised as-is.
             exact.close()
             raise
-        return cls(bloom=bloom, exact=exact)
+        return bloom, exact
+
+    @staticmethod
+    def _quarantine_corrupt_exact(exact_dir: Path) -> Path | None:
+        """Atomically rename a corrupt exact-store dir aside; return the new path.
+
+        The bytes are PRESERVED (renamed, never deleted — the lake_heal
+        philosophy) to a sibling ``<name>.corrupt-<ns>`` whose nanosecond stamp
+        makes repeated quarantines collision-free. A fresh empty exact store is
+        then rebuilt at the original path by :meth:`open` (recompute-safe,
+        Golden Rule #7).
+
+        **Crash idempotence:** the rename is atomic. A crash AFTER the rename
+        leaves the original path absent → the next open creates a fresh env; a
+        crash BEFORE it re-detects the same corruption on the next open and
+        re-quarantines it under a NEW nanosecond stamp.
+
+        **Rename-failure belt (review round 1):** an ``OSError`` from the rename
+        itself — e.g. ``FileNotFoundError`` when the env dir VANISHED under us (a
+        concurrent quarantine won the race) — logs one
+        ``sweep_cache.quarantine_rename_failed`` WARN and returns ``None`` so
+        :meth:`open` continues to the reopen attempt instead of dying on a raw
+        traceback: a vanished dir reopens FRESH (nothing left to quarantine); a
+        still-in-place corrupt env (``EACCES`` etc.) re-detects on the reopen and
+        the SECOND failure propagates TYPED as before.
+        """
+        quarantined = exact_dir.with_name(f"{exact_dir.name}.corrupt-{time.time_ns()}")
+        try:
+            os.rename(exact_dir, quarantined)
+        except OSError as exc:
+            _LOG.warning(
+                "sweep_cache.quarantine_rename_failed",
+                path=str(exact_dir),
+                quarantined_to=str(quarantined),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
+        return quarantined
 
     @staticmethod
     def _rebuild_bloom_from_exact(
