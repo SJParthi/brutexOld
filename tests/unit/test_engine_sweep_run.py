@@ -2938,14 +2938,17 @@ class TestU128EnvelopeThroughSweep:
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
-        # Non-vacuous: all THREE masks (bit 1 + the live ST bits 64/65) fire
-        # real trades on the trending stream — the byte-equality below
-        # compares stores carrying real trade-bearing rows, never two
-        # empty/degenerate stores. Mask 0b10's trades are pinned via the
-        # independent
+        # Non-vacuous: all THREE masks fire real trades on the trending
+        # stream, and TWO persist — bit 1 (pf ≈ 2.75) and bit 65 (28W/9L,
+        # pf ≈ 2.85) pass the gates, while bit 64's pool is ALL-WINNER under
+        # the worst-case fill law (36W/0L → profit_factor=None →
+        # gate-rejected, the same DEC-FILL-WORST-CASE-ONLY-001 class that
+        # rejects bit 0's pool). The byte-equality below compares stores
+        # carrying real trade-bearing rows, never two empty/degenerate
+        # stores. Mask 0b10's trades are pinned via the independent
         # metrics oracle.
         assert wired.evaluated == 3
-        assert wired.persisted == 3
+        assert wired.persisted == 2
         direct = metrics_for_mask(
             bars,
             build_bar_bits(bars),
@@ -2959,7 +2962,7 @@ class TestU128EnvelopeThroughSweep:
         assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
-        assert wired.persisted == fallback.persisted == 3
+        assert wired.persisted == fallback.persisted == 2
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 
