@@ -5331,4 +5331,3 @@ update (PR #1336).
 | C31 | MINOR (SPEC) | SPEC §4 rows 2/9/13 rewritten to the locked architecture (columnar `fold_block`, trades never cross, `enumerate_prefilter`) with since-corrected notes. |
 | C48 | MINOR (SPEC) | SPEC §5's quoted single-`f` blended formula gets the WITHDRAWN banner treatment, pointing at DESIGN §9 (round-5 SPLIT form) + §9.1 (binding two-term law). |
 | C4 | MAJOR partial → completed (SPEC) | SPEC gains the LAUNCH-SURFACE section: SLA-guard recalibration obligation (launch-lane scope-sync wording — the ONE common estimate model), the dashboard dropped-return keep-or-fix named OPEN → coordinator, the sweep-daemon lane named, F6/F24/F25/F28 pasted VERBATIM (attributed; F6 carries the PR #1336 register update + cite correction), and the NEW machine-readable per-arm throughput-calibration deliverable (named DISTINCT from the stall-detection floor). |
-

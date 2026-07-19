@@ -29,6 +29,9 @@ structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.
 sys.path.insert(0, "/home/user/bruteX")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from brutex.engine.rust_trade_sim import ResidentTradeSim  # noqa: E402
+from brutex.engine.sweep_run import _trade_sim_chunk_masks  # noqa: E402
+from brutex.strategies.types import Side  # noqa: E402
 from measure_grid import (  # noqa: E402
     DENSITY_TARGETS,
     FIXL_BARS,
@@ -36,10 +39,6 @@ from measure_grid import (  # noqa: E402
     fixture_hash,
     synth_bars,
 )
-
-from brutex.engine.rust_trade_sim import ResidentTradeSim  # noqa: E402
-from brutex.engine.sweep_run import _trade_sim_chunk_masks  # noqa: E402
-from brutex.strategies.types import Side  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SL_PAISA = 8_00
@@ -66,7 +65,7 @@ def bench_calls(fn_one_call, mask_batches: list[list[int]], reps: int = REPS) ->
 
 
 def cell(sim: ResidentTradeSim, phase_masks: list[int], chunk: int, sl: int, tp: int) -> dict:
-    rust = sim._rust  # noqa: SLF001
+    rust = sim._rust
     assert rust is not None
 
     def k_count(b):
@@ -116,8 +115,11 @@ def main() -> None:
             "fno_math": "0.3.0 cp312-abi3-manylinux_2_34_x86_64 sha256=6397ca9d89935397daaf0941ae8094e34ec014a10a9015fb9caf3cc11832363d",
             "trading_core": "0.3.1 cp312-abi3-manylinux_2_34_x86_64 sha256=abbd38b648a9e53d96d8cc84cc7c9f5e10cdab829c4d203c8d56c548c86f10ed",
         },
-        "fixture": {"n_bars_max": len(all_bars), "sha256": fhash,
-                     "kind": "synthetic 1m-shaped, 374 bars/session, weekdays from 2020-01-02, seed 20260709"},
+        "fixture": {
+            "n_bars_max": len(all_bars),
+            "sha256": fhash,
+            "kind": "synthetic 1m-shaped, 374 bars/session, weekdays from 2020-01-02, seed 20260709",
+        },
         "sl_paisa": SL_PAISA,
         "tp_paisa": TP_PAISA,
         "density_targets": DENSITY_TARGETS,

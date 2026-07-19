@@ -272,6 +272,14 @@ ignore = [
 # Proof / smoke scripts — intentionally print to stdout and touch
 # private ._conn on the stores to show the underlying DuckDB guarantees.
 "scripts/**" = ["T201", "SLF001", "PLR2004", "S101", "PLR0915"]
+# One-off design-doc measurement scripts (docs/design/** — main-landed
+# perf-reconcile harnesses): outside the BINDING CI ruff scope
+# (`ruff check brutex tests`), but the range-scoped pre-push ruff hook lints
+# them whenever a merge-forward's pushed range includes them. The scripts
+# print their measurements (T201), assert invariants (S101), carry measured
+# magic numbers (PLR2004), seed non-crypto RNG for synthetic grids (S311),
+# and use the throwaway zip/next idioms (B905/RUF015) — the scripts/** class.
+"docs/design/**" = ["T201", "S101", "PLR2004", "S311", "B905", "RUF015"]
 # Placeholder shims need to mirror an eventual external module surface.
 "brutex/math/__init__.py" = ["A005"]  # shadows stdlib 'math' — deliberate re-export point
 # AWS token-minter Lambda (DEC-TOKEN-MINTER-CENTRAL-001, deploy/aws_token_minter/):

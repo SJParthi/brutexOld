@@ -29,7 +29,7 @@ import logging
 import statistics
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -87,7 +87,7 @@ def synth_bars(n_bars: int, seed: int = 20260709) -> list[CandleBar]:
             lo = min(o, c) - abs(rng.gauss(0, 1.5))
             bars.append(
                 CandleBar(
-                    timestamp=t.astimezone(timezone.utc),
+                    timestamp=t.astimezone(UTC),
                     open=Decimal(f"{o:.2f}"),
                     high=Decimal(f"{hi:.2f}"),
                     low=Decimal(f"{lo:.2f}"),
@@ -146,27 +146,24 @@ TP_PAISA = 12_00
 REPS = 7
 
 
-def time_cell(sim: ResidentTradeSim, masks: list[int], chunk: int,
-              sl: int = SL_PAISA, tp: int = TP_PAISA) -> dict:
-    rust = sim._rust  # noqa: SLF001 — profiling the raw kernel tiers
+def time_cell(
+    sim: ResidentTradeSim, masks: list[int], chunk: int, sl: int = SL_PAISA, tp: int = TP_PAISA
+) -> dict:
+    rust = sim._rust
     assert rust is not None
 
     def run_count() -> int:
         n = 0
         for i in range(0, len(masks), chunk):
             n += sum(
-                rust.count_trades(
-                    list(masks[i : i + chunk]), True, sl, tp, False, False, False
-                )
+                rust.count_trades(list(masks[i : i + chunk]), True, sl, tp, False, False, False)
             )
         return n
 
     def run_raw() -> int:
         n = 0
         for i in range(0, len(masks), chunk):
-            raw = rust.simulate_masks(
-                list(masks[i : i + chunk]), True, sl, tp, False, False, False
-            )
+            raw = rust.simulate_masks(list(masks[i : i + chunk]), True, sl, tp, False, False, False)
             n += sum(len(r) for r in raw)
         return n
 
@@ -242,7 +239,9 @@ def main() -> None:
         print(f"\nn_bars={n_bars} construct={construct_s:.1f}s chunk={chunk}", flush=True)
         for target in DENSITY_TARGETS:
             cell = time_cell(sim, masks_by_target[target], chunk)
-            cell.update(n_bars=n_bars, target=target, chunk=chunk, construct_s=round(construct_s, 2))
+            cell.update(
+                n_bars=n_bars, target=target, chunk=chunk, construct_s=round(construct_s, 2)
+            )
             results["cells"].append(cell)
             print(
                 f"  target={target:5d} trades/mask={cell['trades_per_mask']:8.1f} "
@@ -255,8 +254,9 @@ def main() -> None:
         # control cell: production-like SL/TP (Rs80/Rs120 - long holdings) at 48.6k
         if n_bars == 48_620:
             sim2 = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
-            ctl = time_cell(sim2, masks_by_target[45], _trade_sim_chunk_masks(n_bars),
-                            sl=80_00, tp=120_00)
+            ctl = time_cell(
+                sim2, masks_by_target[45], _trade_sim_chunk_masks(n_bars), sl=80_00, tp=120_00
+            )
             ctl.update(n_bars=n_bars, target="control_sl80_tp120", chunk=chunk)
             results["cells"].append(ctl)
             print(

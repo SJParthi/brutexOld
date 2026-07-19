@@ -82,6 +82,13 @@ repos:
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
           # files like sweep_supervisor.py (the same class as polars above).
           - blake3>=1.0
+          # starlette ships py.typed; without it the hook env degrades
+          # TrustedHostMiddleware to Any → a phantom "Class cannot subclass"
+          # [misc] on brutex/dashboard/trusted_host.py whenever a
+          # merge-forward's pushed range includes it (the same wheel-less-env
+          # class as polars/blake3 above; the BINDING venv-faithful
+          # `mypy --strict brutex` is clean on the file).
+          - starlette>=0.37
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

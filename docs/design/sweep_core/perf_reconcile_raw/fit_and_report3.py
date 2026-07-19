@@ -42,8 +42,12 @@ for key in KEYS:
         "rms_resid_pct": round(float(np.sqrt(np.mean(resid**2))), 1),
         "max_abs_resid_pct": round(float(np.max(np.abs(resid))), 1),
         "resid_by_cell": [
-            {"n_bars": c["n_bars"], "t": round(c["trades_per_mask"], 1),
-             "meas_us": round(float(yy), 1), "resid_pct": round(float(r), 1)}
+            {
+                "n_bars": c["n_bars"],
+                "t": round(c["trades_per_mask"], 1),
+                "meas_us": round(float(yy), 1),
+                "resid_pct": round(float(r), 1),
+            }
             for c, yy, r in zip(p_cells, y, resid)
         ],
     }
@@ -59,8 +63,10 @@ for nb in sorted({c["n_bars"] for c in p_cells}):
         y = np.array([c[key]["us_best"] for c in sub])
         A2 = np.vstack([np.ones_like(t), t]).T
         (b0, slope), *_ = np.linalg.lstsq(A2, y, rcond=None)
-        row[key] = {"walk_ns_per_bar": round(float(b0) * 1e3 / nb, 3),
-                    "trade_cost_us_per_trade": round(float(slope), 3)}
+        row[key] = {
+            "walk_ns_per_bar": round(float(b0) * 1e3 / nb, 3),
+            "trade_cost_us_per_trade": round(float(slope), 3),
+        }
     per_nb[str(nb)] = row
 out["per_n_bars_pinned_prod"] = per_nb
 
@@ -81,8 +87,18 @@ def predict(key: str, nb: int, tr: float) -> float:
 # disputed points under the PINNED production model (prod arm = production op)
 disp = {}
 for tag, nb, tr, claim_us in (
-    ("mine: 48,620 bars / 43.6 trades — claimed 62us (1.28 ns/bar), UNPINNED chunk-86", 48_620, 43.6, 62.0),
-    ("audit FIX-L: 604,485 bars / 1,423 trades — claimed 7,700us (12.8 ns/bar)", 604_485, 1423.0, 7700.0),
+    (
+        "mine: 48,620 bars / 43.6 trades — claimed 62us (1.28 ns/bar), UNPINNED chunk-86",
+        48_620,
+        43.6,
+        62.0,
+    ),
+    (
+        "audit FIX-L: 604,485 bars / 1,423 trades — claimed 7,700us (12.8 ns/bar)",
+        604_485,
+        1423.0,
+        7700.0,
+    ),
     ("audit FIX-L k=2 median: 604,485 bars / 1,532 trades", 604_485, 1532.0, None),
     ("audit FIX-M: 93,750 bars / ~250 trades — claimed 4.35 ns/bar (~408us)", 93_874, 250.0, 408.0),
 ):
@@ -92,7 +108,8 @@ for tag, nb, tr, claim_us in (
         row[key] = {"pred_us": round(p, 1), "eff_ns_per_bar": round(p * 1e3 / nb, 2)}
     if claim_us:
         row["claim_vs_pred_wrapper_pct"] = round(
-            100.0 * (claim_us - predict("prod_wrapper", nb, tr)) / predict("prod_wrapper", nb, tr), 1
+            100.0 * (claim_us - predict("prod_wrapper", nb, tr)) / predict("prod_wrapper", nb, tr),
+            1,
         )
     disp[tag] = row
 out["disputed_points"] = disp
@@ -102,8 +119,12 @@ out["disputed_points"] = disp
 # post-port floor: raw kernel (aggressive — per-trade marshal also ported) vs
 # wrapper (conservative — ClosedTrade materialisation kept in Python).
 camp_rows = []
-for label, t in (("zero-trade (7.7% of masks)", 0), ("sparse", 220), ("mid", 950),
-                 ("FIX-L k=2 median", 1532)):
+for label, t in (
+    ("zero-trade (7.7% of masks)", 0),
+    ("sparse", 220),
+    ("mid", 950),
+    ("FIX-L k=2 median", 1532),
+):
     kw = predict("prod_wrapper", 604_485, t) / 1e3
     kr = predict("prod_raw", 604_485, t) / 1e3
     row = {"density": label, "trades": t, "wrapper_ms": round(kw, 2), "raw_ms": round(kr, 2)}
@@ -116,8 +137,10 @@ out["campaign_604485_bars"] = camp_rows
 (HERE / "fit_results_pinned.json").write_text(json.dumps(out, indent=2))
 for key in KEYS:
     f = fits[key]
-    print(f"{key:15s} c0={f['c0_us']:8.1f}us walk={f['walk_rate_ns_per_bar']:7.3f}ns/bar "
-          f"trade={f['trade_cost_us_per_trade']:6.3f}us/tr R2={f['r2']} rms={f['rms_resid_pct']}%")
+    print(
+        f"{key:15s} c0={f['c0_us']:8.1f}us walk={f['walk_rate_ns_per_bar']:7.3f}ns/bar "
+        f"trade={f['trade_cost_us_per_trade']:6.3f}us/tr R2={f['r2']} rms={f['rms_resid_pct']}%"
+    )
 print("\nunpinned rayon kernel speedup:", json.dumps(ratio))
 print("\nper-n_bars (pinned prod):", json.dumps(per_nb, indent=1))
 print("\ndisputed:", json.dumps(disp, indent=1))
