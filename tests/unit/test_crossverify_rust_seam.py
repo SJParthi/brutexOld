@@ -226,17 +226,32 @@ class TestFlagOffNeverTouchesCrate:
 
         monkeypatch.setattr(rust_seam, "_resolve_crate", bomb)
 
-        class _Bomb(types.ModuleType):
-            def __getattr__(self, name: str) -> object:  # pragma: no cover
-                # RuntimeError, deliberately: AttributeError here would be
-                # ordinary __getattr__ fallback semantics (a silently defused
-                # bomb), and AssertionError in a special method trips CodeQL
-                # py/non-standard-exception-raised-in-special-method. Teeth
-                # are identical — the OFF path performs no crate touch, so
-                # ANY raise from here propagates and fails the test.
-                raise RuntimeError("flag-OFF touched brutex_ops")
+        class _RecordingSpy(types.ModuleType):
+            # A RECORDING spy, not a raising bomb: CodeQL
+            # py/unexpected-raise-in-special-method fires on ANY
+            # non-AttributeError raised from __getattr__, and raising
+            # AttributeError alone would be ordinary fallback semantics (a
+            # silently defused bomb — the seam's degrade set even catches
+            # it). Recording the access FIRST then raising the normal
+            # AttributeError keeps STRICTLY STRONGER teeth: a crate touch is
+            # detected by the explicit empty-accesses assert below even if
+            # the raise is swallowed by any guard. Dunder lookups are
+            # excluded — interpreter introspection probes are not crate
+            # touches; the seam handshake reads only the three plain-named
+            # callables.
+            accesses: list[str]
 
-        monkeypatch.setitem(sys.modules, "brutex_ops", _Bomb("brutex_ops"))
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+                self.accesses = []
+
+            def __getattr__(self, name: str) -> object:  # pragma: no cover
+                if not (name.startswith("__") and name.endswith("__")):
+                    self.accesses.append(name)
+                raise AttributeError(name)
+
+        spy = _RecordingSpy("brutex_ops")
+        monkeypatch.setitem(sys.modules, "brutex_ops", spy)
         assert render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session()) == (
             _oracle_bytes()
         )
@@ -246,6 +261,9 @@ class TestFlagOffNeverTouchesCrate:
             s3_key(prefix="crossverify/groww", day=_DAY, identity=_IDENTITY)
             == "crossverify/groww/2026-07-10/NSE_EQ/M&M.csv"
         )
+        # THE teeth: flag-OFF touched NO brutex_ops attribute — detected by
+        # the recording even if a future guard were to swallow the raise.
+        assert spy.accesses == []
 
     def test_explicit_falsy_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "0")
