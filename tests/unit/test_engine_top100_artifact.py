@@ -996,3 +996,92 @@ class TestCascadeJoinAtWriter:
         assert loaded is not None
         assert loaded.cascade_join == artifact.cascade_join
         assert loaded.entries[0]["cascade"] == artifact.entries[0]["cascade"]
+
+
+# ── DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 (LANE W3): the ADDITIVE quarantined
+# `provisional_specialists` rescue-lane section (the cascade_join
+# presence-tolerance precedent). ──────────────────────────────────────────────
+
+_RESCUE_SECTION: dict[str, object] = {
+    "schema_version": 1,
+    "rescue_min_hits": 8,
+    "main_min_hits": 30,
+    "binom_alpha": 1e-4,
+    "counts": {
+        "candidates_screened": 2,
+        "band": 1,
+        "simulated": 1,
+        "rescued": 1,
+        "validated": 0,
+    },
+    "entries": [
+        {
+            "mask": "0x3",
+            "low_support": True,
+            "hits": 9,
+            "total_trades": 9,
+            "winning_trades": 8,
+            "validated": False,
+            "fail_reasons": ["lockbox insufficient_n"],
+        }
+    ],
+}
+
+
+class TestProvisionalSpecialistsSection:
+    def test_none_emits_no_key_byte_identical(self) -> None:
+        """Rescue OFF ⇒ NO section key — pre-change payload bytes."""
+        artifact = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert artifact.provisional_specialists is None
+        assert "provisional_specialists" not in artifact.to_payload()
+        explicit = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            provisional_specialists=None,
+        )
+        assert explicit.rendered_bytes() == artifact.rendered_bytes()
+
+    def test_section_emits_on_present_and_round_trips(self, tmp_path: Path) -> None:
+        artifact = _build(
+            [make_candidate(1, fingerprint=fingerprint_seed(1))],
+            provisional_specialists=dict(_RESCUE_SECTION),
+        )
+        assert artifact.to_payload()["provisional_specialists"] == _RESCUE_SECTION
+        write_top100(tmp_path, artifact)
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.provisional_specialists == _RESCUE_SECTION
+        # QUARANTINED: the main entries are byte-identical with/without it.
+        bare = _build([make_candidate(1, fingerprint=fingerprint_seed(1))])
+        assert loaded.entries == bare.entries
+
+    def test_pre_change_artifact_loads_none(self, tmp_path: Path) -> None:
+        write_top100(tmp_path, _build([make_candidate(1, fingerprint=fingerprint_seed(1))]))
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.provisional_specialists is None
+        assert "provisional_specialists" not in loaded.to_payload()
+
+    def test_non_object_section_value_drops_to_none(self, tmp_path: Path) -> None:
+        """Presence-tolerance: a junk-SHAPED value is dropped, never a reject
+        (the artifact's stamp integrity is re-proven after the tamper)."""
+        import hashlib
+        import json as json_mod
+
+        write_top100(tmp_path, _build([make_candidate(1, fingerprint=fingerprint_seed(1))]))
+        artifact_path = tmp_path / _RUN / "top100.json"
+        payload = json_mod.loads(artifact_path.read_text(encoding="utf-8"))
+        payload["provisional_specialists"] = ["not", "an", "object"]
+        rendered = (
+            json_mod.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        )
+        artifact_path.write_text(rendered, encoding="utf-8")
+        stamp_path = tmp_path / _RUN / "top100.stamp.json"
+        stamp = json_mod.loads(stamp_path.read_text(encoding="utf-8"))
+        stamp["content_hash"] = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+        stamp_path.write_text(
+            json_mod.dumps(stamp, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+        loaded = load_top100(tmp_path, _RUN)
+        assert loaded is not None
+        assert loaded.provisional_specialists is None

@@ -337,6 +337,13 @@ class Top100Artifact:
     (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``{state, sweep_id, n_input,
     n_survived}``); ``None`` on a pre-change artifact read back by
     :func:`load_top100` (the key is then simply not re-emitted).
+    ``provisional_specialists`` is the ADDITIVE quarantined rescue-lane
+    section (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 — the
+    :func:`brutex.engine.rescue_lane.provisional_specialists_section`
+    payload, every entry tagged ``low_support: true``); ``None`` (the
+    default, and every rescue-OFF run) emits NO key, so pre-change artifacts
+    stay byte-identical and rescued rows can NEVER enter ``entries`` (the
+    main ranking).
     """
 
     schema_version: int
@@ -346,6 +353,7 @@ class Top100Artifact:
     baselines: Mapping[str, str]
     entries: tuple[Mapping[str, object], ...]
     cascade_join: Mapping[str, object] | None = None
+    provisional_specialists: Mapping[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Render the artifact's deterministic JSON payload (B5 shape)."""
@@ -359,6 +367,8 @@ class Top100Artifact:
         }
         if self.cascade_join is not None:
             payload["cascade_join"] = dict(self.cascade_join)
+        if self.provisional_specialists is not None:
+            payload["provisional_specialists"] = dict(self.provisional_specialists)
         return payload
 
     def rendered_bytes(self) -> bytes:
@@ -652,6 +662,7 @@ def build_top100(
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
     cascade_join: CascadeJoin | None = None,
+    provisional_specialists: Mapping[str, object] | None = None,
 ) -> Top100Artifact:
     """Build the global artifact from the pooled winners — one O(pool) pass.
 
@@ -693,6 +704,13 @@ def build_top100(
         stay ``not_validated``. The join is ANNOTATION-ONLY: ranking /
         preset order / family collapse are byte-untouched (R13 — a
         cascade-FAILED rank-1 stays rank-1, flagged never hidden).
+    provisional_specialists
+        The quarantined rescue-lane section
+        (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 —
+        :func:`brutex.engine.rescue_lane.provisional_specialists_section`),
+        or ``None`` (rescue OFF, the default) which emits NO key. ADDITIVE
+        ONLY: it never touches ``entries``/ranking — a rescued
+        (``low_support``) row can never be main-ranked.
 
     Raises
     ------
@@ -814,6 +832,9 @@ def build_top100(
         baselines=dict(baselines),
         entries=tuple(entries),
         cascade_join=cascade_meta,
+        # DEC-STAGE1B-LOW-SUPPORT-RESCUE-001: the quarantined rescue section
+        # rides the artifact ADDITIVELY — None (rescue OFF) emits no key.
+        provisional_specialists=provisional_specialists,
     )
     _LOG.info(
         "top100.built",
@@ -975,6 +996,9 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
     # re-emitted on a round-trip); a non-object value is dropped, never a
     # reject (the entries + stamp already proved integrity above).
     cascade_join_raw = payload.get("cascade_join")
+    # Same presence-tolerant law for the quarantined rescue-lane section
+    # (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001): absent/non-object ⇒ None.
+    provisional_raw = payload.get("provisional_specialists")
     return Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
@@ -983,4 +1007,5 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         baselines={str(key): str(value) for key, value in baselines.items()},
         entries=tuple(entries),
         cascade_join=cascade_join_raw if isinstance(cascade_join_raw, dict) else None,
+        provisional_specialists=provisional_raw if isinstance(provisional_raw, dict) else None,
     )
