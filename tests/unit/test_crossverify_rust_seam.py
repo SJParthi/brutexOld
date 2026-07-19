@@ -30,11 +30,11 @@ import sys
 import types
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog.testing
-from brutex.calendars.nse import get_session_checked
+from brutex.calendars.nse import TradingSession, get_session_checked
 from brutex.crossverify import canonical, csv_render, rust_seam
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.csv_render import CSV_HEADER, ExportContractError, ExportRow, render_day_csv
@@ -55,7 +55,27 @@ _IDENTITY = CanonicalIdentity(
 )
 
 
-def _session() -> object:
+class _FakeOpsModule(types.ModuleType):
+    """A fake ``brutex_ops`` with DECLARED seam attributes.
+
+    The declarations (``Any``) make direct attribute assignment legal under
+    pyright — a bare ``types.ModuleType`` refuses assigns to undeclared
+    attributes. Runtime behavior is identical to a plain module object.
+    """
+
+    __version__: str
+    crossverify_render_csv: Any
+    crossverify_canonical_identity: Any
+    crossverify_s3_key: Any
+
+
+class _FakePyo3Module(types.ModuleType):
+    """A fake ``pyo3_runtime`` with a DECLARED ``PanicException`` slot."""
+
+    PanicException: Any
+
+
+def _session() -> TradingSession:
     session = get_session_checked(_DAY)
     assert session is not None
     return session
@@ -83,9 +103,9 @@ def _oracle_bytes(n: int = 2) -> bytes:
     return csv_render._render_day_csv_python(identity=_IDENTITY, rows=_rows(n), session=_session())
 
 
-def _plant_crate(monkeypatch: pytest.MonkeyPatch, **functions: object) -> types.ModuleType:
+def _plant_crate(monkeypatch: pytest.MonkeyPatch, **functions: object) -> _FakeOpsModule:
     """Plant a fake ``brutex_ops`` module carrying *functions* (full API by default)."""
-    module = types.ModuleType("brutex_ops")
+    module = _FakeOpsModule("brutex_ops")
     module.__version__ = "0.0-test"
     defaults: dict[str, object] = {
         "crossverify_render_csv": lambda header, rows: (b"", None),
@@ -172,8 +192,22 @@ class TestFlagVocabulary:
         assert warns[0]["reason"] == "flag_unrecognised"
 
     def test_vocabulary_equality_pinned_to_engine(self) -> None:
-        """The LOCAL twin must never drift from the engine vocabulary."""
-        from brutex.engine import sweep_lookahead
+        """The LOCAL twin must never drift from the engine vocabulary.
+
+        The engine package hard-imports the ``fno_math`` wheel (the exact
+        reason the seam carries a LOCAL twin — module docstring), so this
+        pin skips LOUDLY where that wheel is absent: the ops-rust-parity
+        lane installs only ``brutex_ops`` (its job is real-crate drift,
+        not the engine). NOT a vacuous-green risk (the MINOR-1 class):
+        the pin's guaranteed executing home is main CI's ci.yml rust_seam
+        stanza, whose ``test`` job always installs the fno_math wheel —
+        and a missing wheel THERE fails hundreds of engine suites loudly.
+        """
+        sweep_lookahead = pytest.importorskip(
+            "brutex.engine.sweep_lookahead",
+            reason="fno_math wheel absent (the ops-rust-parity lane) — the "
+            "engine-vocabulary equality pin executes in main CI's test job",
+        )
 
         assert rust_seam._TRUTHY == sweep_lookahead._TRUTHY
         assert rust_seam._FALSY == sweep_lookahead._FALSY
@@ -228,7 +262,7 @@ class TestCrateGuards:
         monkeypatch.delitem(sys.modules, "brutex_ops", raising=False)
         real_import = rust_seam.importlib.import_module
 
-        def fake_import(name: str, *args: object) -> object:
+        def fake_import(name: str, *args: str | None) -> types.ModuleType:
             if name == "brutex_ops":
                 raise ImportError("no wheel")
             return real_import(name, *args)  # pragma: no cover — no other import fires
@@ -254,7 +288,7 @@ class TestCrateGuards:
     def test_stale_wheel_latches_crate_stale(
         self, monkeypatch: pytest.MonkeyPatch, flag_on: None
     ) -> None:
-        module = types.ModuleType("brutex_ops")
+        module = _FakeOpsModule("brutex_ops")
         module.crossverify_render_csv = lambda header, rows: (b"", None)
         # canonical + s3_key MISSING — a pre-crossverify-lane wheel.
         monkeypatch.setitem(sys.modules, "brutex_ops", module)
@@ -302,7 +336,7 @@ class TestPanicBelt:
     def test_import_error_gives_exception_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         real_import = rust_seam.importlib.import_module
 
-        def fake_import(name: str, *args: object) -> object:
+        def fake_import(name: str, *args: str | None) -> types.ModuleType:
             if name == "pyo3_runtime":
                 raise ImportError("absent")
             return real_import(name, *args)  # pragma: no cover — no other import fires
@@ -314,13 +348,13 @@ class TestPanicBelt:
         class PanicException(BaseException):
             pass
 
-        module = types.ModuleType("pyo3_runtime")
+        module = _FakePyo3Module("pyo3_runtime")
         module.PanicException = PanicException
         monkeypatch.setitem(sys.modules, "pyo3_runtime", module)
         assert rust_seam._panic_belt_errors() == (Exception, PanicException)
 
     def test_non_type_or_exception_alias_excluded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        module = types.ModuleType("pyo3_runtime")
+        module = _FakePyo3Module("pyo3_runtime")
         module.PanicException = "not a type"
         monkeypatch.setitem(sys.modules, "pyo3_runtime", module)
         assert rust_seam._panic_belt_errors() == (Exception,)
@@ -337,7 +371,7 @@ class TestPanicBelt:
         class PanicException(BaseException):
             pass
 
-        panic_module = types.ModuleType("pyo3_runtime")
+        panic_module = _FakePyo3Module("pyo3_runtime")
         panic_module.PanicException = PanicException
         monkeypatch.setitem(sys.modules, "pyo3_runtime", panic_module)
 
@@ -361,7 +395,7 @@ class TestPanicBelt:
         class PanicException(BaseException):
             pass
 
-        panic_module = types.ModuleType("pyo3_runtime")
+        panic_module = _FakePyo3Module("pyo3_runtime")
         panic_module.PanicException = PanicException
         monkeypatch.setitem(sys.modules, "pyo3_runtime", panic_module)
 
@@ -377,7 +411,7 @@ class TestPanicBelt:
             fno_expiry_iso=None,
             fno_is_future=False,
             fno_exchange=None,
-            python_oracle=lambda: ("o",) * 6,
+            python_oracle=lambda: ("o", "o", "o", "o", "o", "o"),
         )
         assert fields == ("o",) * 6
         assert rust_seam.rust_seam_disabled() is True
@@ -505,7 +539,7 @@ class TestDegradeSet:
             raise AttributeError("broken internals")
 
         _plant_crate(monkeypatch, crossverify_canonical_identity=boom)
-        kwargs: dict[str, object] = {
+        kwargs: dict[str, Any] = {
             "exchange": "NSE",
             "segment": "CASH",
             "lake_symbol": "M&M",
@@ -609,7 +643,7 @@ class TestRefusePoisonGates:
                 fno_expiry_iso=None,
                 fno_is_future=False,
                 fno_exchange=None,
-                python_oracle=lambda: ("x",) * 6,
+                python_oracle=lambda: ("x", "x", "x", "x", "x", "x"),
             )
         assert out == ("x",) * 6
         warns = [e for e in logs if e["event"] == "crossverify_rust.fallback"]
@@ -831,7 +865,7 @@ class TestWiredLawsFlagOn:
     ) -> None:
         received: list[tuple] = []
 
-        def spy_identity(*args: object) -> tuple | None:
+        def spy_identity(*args: Any) -> tuple | None:
             received.append(args)
             exchange, segment, lake_symbol = args[0], args[1], args[2]
             return canonical._identity_fields(

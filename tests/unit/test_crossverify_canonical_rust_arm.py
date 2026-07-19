@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import types
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from brutex.crossverify import canonical, rust_seam
@@ -41,12 +41,21 @@ def _fresh_seam() -> Iterator[None]:
     rust_seam.reset_crossverify_rust_for_tests()
 
 
-def _plant_spy_crate(monkeypatch: pytest.MonkeyPatch, received: list[tuple]) -> types.ModuleType:
+class _FakeOpsModule(types.ModuleType):
+    """A fake ``brutex_ops`` with DECLARED seam attributes (pyright-legal assigns)."""
+
+    __version__: str
+    crossverify_render_csv: Any
+    crossverify_canonical_identity: Any
+    crossverify_s3_key: Any
+
+
+def _plant_spy_crate(monkeypatch: pytest.MonkeyPatch, received: list[tuple]) -> _FakeOpsModule:
     """A faithful fake crate recording every canonical FFI argument tuple."""
-    module = types.ModuleType("brutex_ops")
+    module = _FakeOpsModule("brutex_ops")
     module.__version__ = "0.0-test"
 
-    def identity(*args: object) -> tuple[str, str, str, str, str, str] | None:
+    def identity(*args: Any) -> tuple[str, str, str, str, str, str] | None:
         received.append(tuple(args))
         exchange, segment, lake_symbol = args[0], args[1], args[2]
         return canonical._identity_fields(

@@ -173,7 +173,12 @@ jobs:
 
       - name: Seam unit suite (crate-free fakes) + REAL-wheel golden + differential
         # -rs surfaces any skip reason — the hard wheel-health gate above
-        # already FAILED the lane if the importorskip guard could fire.
+        # already FAILED the lane if the brutex_ops importorskip guard could
+        # fire. ONE expected loud skip remains: the engine-vocabulary
+        # equality pin needs the fno_math wheel this lane deliberately does
+        # not build — its guaranteed executing home is main CI's test job
+        # (wheel always installed there; a missing wheel THERE fails the
+        # engine suites loudly, so the skip is never vacuous).
         run: |
           pytest -rs -q \
             tests/unit/test_crossverify_rust_seam.py \

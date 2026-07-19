@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
-from brutex.calendars.nse import get_session_checked
+from brutex.calendars.nse import TradingSession, get_session_checked
 from brutex.crossverify import csv_render, rust_seam
 from brutex.crossverify.canonical import (
     CanonicalIdentity,
@@ -46,8 +46,11 @@ brutex_ops = pytest.importorskip(
 )
 
 _DAY = date(2026, 7, 10)
-_SESSION = get_session_checked(_DAY)
-assert _SESSION is not None
+_SESSION_PROBE = get_session_checked(_DAY)
+assert _SESSION_PROBE is not None
+#: The explicit rebind gives the module global the NARROWED declared type —
+#: pyright does not carry a module-level assert-narrow into function scopes.
+_SESSION: TradingSession = _SESSION_PROBE
 
 _SPOT_IDENTITY = CanonicalIdentity(
     exchange="NSE",

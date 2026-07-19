@@ -14,10 +14,10 @@ import sys
 import types
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from brutex.calendars.nse import get_session_checked
+from brutex.calendars.nse import TradingSession, get_session_checked
 from brutex.crossverify import csv_render, rust_seam
 from brutex.crossverify.canonical import CanonicalIdentity
 from brutex.crossverify.csv_render import ExportContractError, ExportRow, render_day_csv
@@ -37,7 +37,7 @@ _IDENTITY = CanonicalIdentity(
 )
 
 
-def _session() -> object:
+def _session() -> TradingSession:
     session = get_session_checked(_DAY)
     assert session is not None
     return session
@@ -72,9 +72,18 @@ def _fresh_seam() -> Iterator[None]:
     rust_seam.reset_crossverify_rust_for_tests()
 
 
-def _plant_faithful_crate(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+class _FakeOpsModule(types.ModuleType):
+    """A fake ``brutex_ops`` with DECLARED seam attributes (pyright-legal assigns)."""
+
+    __version__: str
+    crossverify_render_csv: Any
+    crossverify_canonical_identity: Any
+    crossverify_s3_key: Any
+
+
+def _plant_faithful_crate(monkeypatch: pytest.MonkeyPatch) -> _FakeOpsModule:
     """A fake crate whose assembly agrees with the ``csv.writer`` byte law."""
-    module = types.ModuleType("brutex_ops")
+    module = _FakeOpsModule("brutex_ops")
     module.__version__ = "0.0-test"
 
     def render(header: str, rows: list[list[str]]) -> tuple[bytes | None, tuple | None]:
