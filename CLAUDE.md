@@ -3983,7 +3983,7 @@ hostile-review pass._
   recorded); the B4 earliest-armed-wins collision law (`signals_dropped_collision`; one
   statement, THREE independent implementations — walker/kernel/diffcheck, one fixture through
   all three); the B6 bounded-distance selector refusal (`fill_selector_distance_refused`);
-  the B1 structural provenance law (primary-tree-only + no-Dhan-path AST pin + the snapshot
+  the B1 structural provenance law (primary-tree-only + no-retired-vendor-path AST pin + the snapshot
   belt); the §5b volume-0 ENGINE firewall (a printed 1m bar is REAL + TRADABLE — deliberately
   DISTINCT from the #1825 executor always-reject, two laws two surfaces). §6b: tf==1day is
   STRUCTURALLY EMPTY (`close_step_minutes` 375→1440 — the close instant is the next midnight,
