@@ -244,11 +244,16 @@ class TestStableViews:
         view = progress_stable_view({"state": "done", "belt_served": 7, "updated_at": 2.0})
         assert view == {"state": "done", "belt_served": 7}
 
-    def test_progress_volatile_keys_are_exactly_the_wall_clock_six(self) -> None:
+    def test_progress_volatile_keys_are_exactly_the_wall_clock_seven(self) -> None:
         # ``wall_time_utc`` joined the set when main's #1712 G4
         # (DEC-SWEEP-UNKILLABLE-CORE-001) made publish_progress always stamp
         # it from ``time.time()``; its G4 siblings ``pid``/``running`` are
         # deterministic in the in-process twin and stay compared.
+        # ``wall_time`` (the ``PROGRESS_WALL_TIME_KEY`` stamp in
+        # sweep_supervisor.py) joined at main's DEC-SWEEP-RUN-IDENTITY-COMPLETE-001
+        # train, folded into the denylist at the club-R1 merge-reconcile —
+        # wall-clock-derived by construction, the ``wall_time_utc`` sibling's
+        # exact class.
         assert {
             "combos_per_sec",
             "elapsed_seconds",
@@ -256,6 +261,7 @@ class TestStableViews:
             "started_at",
             "updated_at",
             "wall_time_utc",
+            "wall_time",
         } == PROGRESS_VOLATILE_KEYS
 
     def test_checkpoint_stable_view_drops_only_the_wall_clock(self) -> None:

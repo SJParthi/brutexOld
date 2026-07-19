@@ -179,21 +179,39 @@ def test_option_charge_stack_differential(
     gst: int,
 ) -> None:
     (eh, el), (xh, xl) = entry_bar, exit_bar
-    args = {
-        "is_long": is_long,
-        "lot_size": lot,
-        "n_lots": n_lots,
-        "brokerage_round_trip_paisa": brokerage,
-        "stt_rate": stt,
-        "etc_rate": etc,
-        "sebi_rate": sebi,
-        "ipft_rate": ipft,
-        "stamp_rate": stamp,
-        "gst_rate": gst,
-    }
-    got = exec_rust.charge_stack_option(eh, el, xh, xl, **args)
+    got = exec_rust.charge_stack_option(
+        eh,
+        el,
+        xh,
+        xl,
+        is_long=is_long,
+        lot_size=lot,
+        n_lots=n_lots,
+        brokerage_round_trip_paisa=brokerage,
+        stt_rate=stt,
+        etc_rate=etc,
+        sebi_rate=sebi,
+        ipft_rate=ipft,
+        stamp_rate=stamp,
+        gst_rate=gst,
+    )
     assert got is not None  # engaged (inputs are in-envelope by construction)
-    expected = _charge_stack_py(eh, el, xh, xl, **args)
+    expected = _charge_stack_py(
+        eh,
+        el,
+        xh,
+        xl,
+        is_long=is_long,
+        lot_size=lot,
+        n_lots=n_lots,
+        brokerage_round_trip_paisa=brokerage,
+        stt_rate=stt,
+        etc_rate=etc,
+        sebi_rate=sebi,
+        ipft_rate=ipft,
+        stamp_rate=stamp,
+        gst_rate=gst,
+    )
     assert tuple(got) == tuple(expected)
     # The algebraic law (also proptested cargo-side): net == gross − total.
     assert got.net_pnl_paisa == got.gross_pnl_paisa - got.total_charges_paisa
@@ -235,23 +253,43 @@ def test_futures_charge_stack_differential(
     gst: int,
 ) -> None:
     (eh, el), (xh, xl) = entry_bar, exit_bar
-    args = {
-        "is_long": is_long,
-        "lot_size": lot,
-        "n_lots": n_lots,
-        "cost_free": cost_free,
-        "brokerage_flat_paisa": flat,
-        "brokerage_turnover_bps_x100": turnover,
-        "stt_rate": stt,
-        "etc_rate": etc,
-        "sebi_rate": sebi,
-        "ipft_rate": ipft,
-        "stamp_rate": stamp,
-        "gst_rate": gst,
-    }
-    got = exec_rust.charge_stack_futures(eh, el, xh, xl, **args)
+    got = exec_rust.charge_stack_futures(
+        eh,
+        el,
+        xh,
+        xl,
+        is_long=is_long,
+        lot_size=lot,
+        n_lots=n_lots,
+        cost_free=cost_free,
+        brokerage_flat_paisa=flat,
+        brokerage_turnover_bps_x100=turnover,
+        stt_rate=stt,
+        etc_rate=etc,
+        sebi_rate=sebi,
+        ipft_rate=ipft,
+        stamp_rate=stamp,
+        gst_rate=gst,
+    )
     assert got is not None  # engaged
-    expected = _futures_charge_stack_py(eh, el, xh, xl, **args)
+    expected = _futures_charge_stack_py(
+        eh,
+        el,
+        xh,
+        xl,
+        is_long=is_long,
+        lot_size=lot,
+        n_lots=n_lots,
+        cost_free=cost_free,
+        brokerage_flat_paisa=flat,
+        brokerage_turnover_bps_x100=turnover,
+        stt_rate=stt,
+        etc_rate=etc,
+        sebi_rate=sebi,
+        ipft_rate=ipft,
+        stamp_rate=stamp,
+        gst_rate=gst,
+    )
     assert tuple(got) == tuple(expected)
     if cost_free:
         assert got.total_charges_paisa == 0

@@ -37,7 +37,7 @@ from brutex.costs.calculator import (
     _charge_stack_py,  # pyright: ignore[reportPrivateUsage] — the direct oracle arm
     compute_trade_cost,
 )
-from brutex.costs.types import TradeCostBreakdown, TradeInput
+from brutex.costs.types import TradeCostBreakdown, TradeInput, require_bar_extremes
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
 _LARGE = 100_000
@@ -53,6 +53,10 @@ def _trade() -> TradeInput:
         expiry_date=date(2026, 5, 21),
         entry_bar_open_paisa=9_995,
         exit_bar_open_paisa=12_005,
+        entry_bar_high_paisa=10_005,
+        entry_bar_low_paisa=9_990,
+        exit_bar_high_paisa=12_010,
+        exit_bar_low_paisa=11_995,
         side="long_call",
         n_lots=1,
         broker="groww",
@@ -115,9 +119,20 @@ class TestOffModeIsFree:
         def _direct() -> None:
             for _ in range(n_trades):
                 lot = get_lot_size(OptionsUnderlying.NIFTY, entry_date)
+                # Worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001): the stack
+                # takes the four bar extremes, narrowed by the COMMON
+                # ``require_bar_extremes`` seam exactly as compute_trade_cost does.
+                entry_high, entry_low, exit_high, exit_low = require_bar_extremes(
+                    entry_bar_high_paisa=trade.entry_bar_high_paisa,
+                    entry_bar_low_paisa=trade.entry_bar_low_paisa,
+                    exit_bar_high_paisa=trade.exit_bar_high_paisa,
+                    exit_bar_low_paisa=trade.exit_bar_low_paisa,
+                )
                 stack = _charge_stack_py(
-                    trade.entry_bar_open_paisa,
-                    trade.exit_bar_open_paisa,
+                    entry_high,
+                    entry_low,
+                    exit_high,
+                    exit_low,
                     is_long=True,
                     lot_size=lot,
                     n_lots=trade.n_lots,
