@@ -167,6 +167,9 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 (LANE W3): the rescue lane's exact
+    // binomial upper-tail gate — BORN-RUST, additive registration only.
+    m.add_function(wrap_pyfunction!(stats::binom::stats_binom_tail_log_sf, m)?)?;
     // ---- end stats module ----
     Ok(())
 }

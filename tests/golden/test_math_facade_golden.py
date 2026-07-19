@@ -51,6 +51,10 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
+        # DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 (LANE W3) — the rescue lane's
+        # exact binomial upper-tail gate (a deliberate, reviewed surface
+        # addition; fenced additive entry).
+        "stats_binom_tail_log_sf",
         "stats_cpcv_pass_count",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)

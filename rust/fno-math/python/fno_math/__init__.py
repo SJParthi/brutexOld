@@ -78,6 +78,10 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "popcount_bytes",
+    # DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 (LANE W3) — the rescue lane's exact
+    # binomial upper-tail gate (fenced additive entry; keep-both union seam
+    # with sibling fno-math lanes).
+    "stats_binom_tail_log_sf",
     "stats_cpcv_pass_count",
     "sweep_drawdown_stats",
 )
@@ -130,6 +134,7 @@ from ._fno_math import (  # noqa: E402
     count_supermasks_u64s_nthreads,
     count_supermasks_u128s,
     popcount_bytes,
+    stats_binom_tail_log_sf,
     stats_cpcv_pass_count,
     sweep_drawdown_stats,
 )
@@ -165,6 +170,7 @@ __all__ = [
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
     "popcount_bytes",
+    "stats_binom_tail_log_sf",
     "stats_cpcv_pass_count",
     "sweep_drawdown_stats",
 ]

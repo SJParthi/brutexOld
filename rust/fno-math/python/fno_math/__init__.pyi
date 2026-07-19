@@ -35,6 +35,7 @@ __all__ = [
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
     "popcount_bytes",
+    "stats_binom_tail_log_sf",
     "stats_cpcv_pass_count",
 ]
 
@@ -135,6 +136,17 @@ def count_supermasks_u64s_nthreads(
 
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
+    ...
+
+def stats_binom_tail_log_sf(n: int, k: int, p: float) -> float:
+    """`ln P(X >= k)` for `X ~ Binomial(n, p)` (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001).
+
+    The low-support rescue lane's exact binomial sign-test gate, computed in
+    log space (O(n) per call, O(1) space — never on the per-bar/per-mask hot
+    path). `-inf` for an empty tail (`k > n`, or `p == 0` with `k >= 1`);
+    `0.0` for a certain one (`k == 0`, or `p == 1` with `k <= n`). Raises
+    `ValueError` on `n < 0`, `k < 0`, or `p` outside `[0, 1]`/NaN.
+    """
     ...
 
 def stats_cpcv_pass_count(

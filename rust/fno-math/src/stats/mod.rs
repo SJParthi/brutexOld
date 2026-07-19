@@ -31,6 +31,11 @@
 //! compiled); claiming otherwise is FORBIDDEN. Per-call FFI copies are
 //! disclosed on each `#[pyfunction]`.
 //!
-//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1).
+//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1);
+//! [`binom`] — the exact binomial upper-tail gate for the low-support rescue
+//! lane (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001, LANE W3 — BORN-RUST, no Python
+//! production copy; claim class STRUCTURAL within one platform, cross-language
+//! bounded by the tests-side oracles, see its module docstring).
 
+pub mod binom;
 pub mod cpcv;
