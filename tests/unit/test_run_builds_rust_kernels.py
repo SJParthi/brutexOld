@@ -34,7 +34,7 @@ Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1796):
   future module-top import of an optional kernel FAILS here and forces its
   promotion into the required class (where the build-path guards then fire).
   A facade-LESS variant exists for a kernel shipped deliberately INERT
-  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1960 — no Python facade
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — no Python facade
   until the flip PR): its facade slot is ``None``, legal ONLY with a
   DEC-cited reason in ``INERT_FACADELESS_REASONS``; the CI-lane pin and the
   never-module-top-imported inverse pin stay LIVE for it.
@@ -205,7 +205,7 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
-    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1960): brutex_calendar is
+    # DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): brutex_calendar is
     # the calendar-leaf pure-law crate (classify_month_drift /
     # validate_settle_evidence / parse_observed_sidecar), shipped INERT —
     # consumed by NOTHING: it has NO Python facade yet (deliberate; the
@@ -234,7 +234,7 @@ OPTIONAL_KERNELS: dict[str, tuple[str | None, str]] = {
 # entry here and re-point the OPTIONAL_KERNELS facade slot.
 INERT_FACADELESS_REASONS: dict[str, str] = {
     "brutex_calendar": (
-        "DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1960): PR-1 ships the "
+        "DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): PR-1 ships the "
         "crate INERT — consumed by NOTHING; the guarded Python facade lands "
         "with the flip PR, which must re-point OPTIONAL_KERNELS at it."
     ),
@@ -338,7 +338,7 @@ def test_facadeless_registry_is_consistent() -> None:
 def test_facadeless_optional_kernel_cites_a_dec(import_name: str) -> None:
     """A facade-less INERT kernel's reason must CITE a DEC id.
 
-    Per DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1960): the crate ships
+    Per DEC-RUST-CALENDAR-LEAVES-001 (MIGRATION.md #1962): the crate ships
     INERT — the guarded facade lands with the flip PR. Until then the ONLY
     licence for a None facade slot is a documented reason naming the DEC
     that shipped the crate INERT; an undocumented None facade fails the

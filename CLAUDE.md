@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1960,
+_Last updated: 2026-07-19 (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962,
 branch `claude/rust-calendar-leaves` — PR-1 of the calendar-leaf Rust
 conversion: NEW standalone crate `rust/brutex-calendar` (pyo3 0.29
 abi3-py312, the brutex-feed house layout, catch_unwind FFI belts) hosting
@@ -39,7 +39,7 @@ LATER PRs, and PR-2 (market_hours + auto_pull_gate) stacks on this crate
 by another session (append-only registration). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in
-the §1 Active-branch blurb + MIGRATION.md #1960.)
+the §1 Active-branch blurb + MIGRATION.md #1962.)
 Earlier: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
 `integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
 scoped) as ONE merge event off main tip 3ee742b3, in binding order:
@@ -3770,7 +3770,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-calendar-leaves`
-  (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1960** — entry number
+  (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962** — entry number
   PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
   (pyo3 0.29 abi3-py312, the brutex-feed house layout — pure-Rust rlib core
@@ -3823,7 +3823,7 @@ hostile-review pass._
   CPython-3.12/Unicode-15.0 printability table replaces unicode-properties
   + exact half-even shortest-float repr replaces `{:e}`; re-verified at
   ≥100k-trial scale with ZERO mismatches, settle goldens 127 → 145 —
-  per-item record in MIGRATION.md #1960). T18 INDEPENDENT AUDIT folded
+  per-item record in MIGRATION.md #1962). T18 INDEPENDENT AUDIT folded
   (verdict CLEAN — detached-worktree byte-identical regen + 4,400 fresh
   hostile cases 0 mismatches; four non-blocking notes folded: the
   law-digest STALENESS pin tests/law_digest_pin.rs — the two Python law
@@ -11456,7 +11456,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-calendar-leaves`
-  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1960 — PR-1 of the
+  (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
   (pyo3 0.29 abi3-py312, brutex-feed layout, catch_unwind FFI belts)
   hosting the PURE decision laws of the two calendar leaves —
@@ -11473,7 +11473,7 @@ hostile-review pass._
   deletion + CI wiring are LATER PRs; PR-2 (market_hours + auto_pull_gate)
   stacks on this crate (append-only registration); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1960 for the full blurb)
+  MIGRATION.md #1962 for the full blurb)
   Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
   the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
