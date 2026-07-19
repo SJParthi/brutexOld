@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-17 (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md
-#1962, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
+#1997, branch `claude/rust-slice-t11-resample` — T11 "resample tails" of the
 ADR-0020 conversion: the DAILY residues (`fno_daily_resample` +
 `spot_daily_resample` cores) gain a Rust route behind the NEW independent
 default-OFF `BRUTEX_LAKE_RUST_RESAMPLE_DAILY` facade
@@ -33,9 +33,9 @@ real-wheel parity suite at CandleBar+Decimal-repr strength + whole-prebuild
 sha256 A/B (daily-ON and both-ON). Honesty banner verbatim: "expected payoff
 ≈ 0 — conversion is for uniformity, not speed". ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX. The per-item record lives in the §1 Active-branch
-blurb + MIGRATION.md #1962 — this header carries the pointer, never the
+blurb + MIGRATION.md #1997 — this header carries the pointer, never the
 story.)
-Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961
+Earlier: 2026-07-18 (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1996
 provisional, branch `claude/rust-observability-lane` — the observability
 Rust decision-kernel lane, FIRST CUT: the four pure detector/stamp laws
 (loop_watchdog `check_once` tiered stall machine · watchdog worker-heartbeat
@@ -74,9 +74,9 @@ wired). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
 REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; ONE
 new env var (`BRUTEX_OBSERVABILITY_RUST`). This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
-blurb + MIGRATION.md #1961.)
-Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960
-(renumbered #1954 → #1955 → #1960 — the last hop at the 2026-07-18
+blurb + MIGRATION.md #1996.)
+Earlier: 2026-07-18 (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1995
+(renumbered #1954 → #1955 → #1995 — the last hop at the 2026-07-18
 merge-reconcile, main took #1955 for DEC-STRATEGIES-RUST-COMBO-001;
 DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001), branch
 `claude/notify-rust-core` — the notification PURE laws convert to Rust
@@ -99,9 +99,9 @@ speed; ships INERT, a default flip needs its own DEC. NEW non-required
 notify-rust-parity.yml lane + the facade mutmut pair; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in the
-§1 Active-branch blurb + MIGRATION.md #1960.)
+§1 Active-branch blurb + MIGRATION.md #1995.)
 Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
-MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
+MIGRATION.md #1994, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
 persist the #1336 overfit fragment on their START records; NEW
@@ -120,7 +120,7 @@ digest VALUE-IDENTICAL (the review-fix NIT `float()` normalization on
 #1474's frozen `sweep_apriori.py` byte-untouched; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
 identity untouched. This header carries the pointer, never the story — the
-full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1994.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -677,14 +677,14 @@ DEC-FILL-WORST-CASE-001 (the global worst-case fill mode, CONSCIOUSLY
 EXCLUDED — its retired content is carried forward by PR #1587 /
 DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023, the
 surviving fill-law carrier): #1458
-DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848 — the
+DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1991 — the
 temporal-robustness YEAR GATE + per-period finalist stats, engine truth) ·
-#1459 DEC-RESULTS-TRUST-HONESTY-001 (MIGRATION.md #1849 — the /results trust +
-honesty pack, PR-B of #1848, coexisting with main's landed
+#1459 DEC-RESULTS-TRUST-HONESTY-001 (MIGRATION.md #1992 — the /results trust +
+honesty pack, PR-B of #1991, coexisting with main's landed
 DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749) · #1474
-DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1850 — Apriori-to-natural
+DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1993 — Apriori-to-natural
 EXTINCTION as the DEFAULT grid sweep exploration mode). Ledger renumbered to
-the coordinator-reserved S2 band #1848–#1850 (main took #1752/#1753 for
+the coordinator-reserved S2 band #1991–#1993 (main took #1752/#1753 for
 DEC-GROWW-ERRORCODE-ASCII-GUARD-001 / DEC-PREMERGE-M4PRO-NONBLOCK-001;
 DEC-LEDGER-RENUMBER-001). ENGINE run identity BYTE-IDENTICAL — the frozen
 _GOLDEN_CONTENT_HASH/_GOLDEN_RUN_ID + vocab_golden_vectors.json unchanged; the
@@ -3757,7 +3757,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-slice-t11-resample` (**DEC-LAKE-RUST-RESAMPLE-DAILY-001,
-  MIGRATION.md #1962** — T11 "resample tails" (phase A+B) of the ADR-0020
+  MIGRATION.md #1997** — T11 "resample tails" (phase A+B) of the ADR-0020
   conversion, closing the #1913-named follow-ups (daily residues ·
   session-fold · batch adoption). **ARM 1 (daily residues, NEW independent
   flag):** `fno_daily_resample.resample_1m_to_fno_daily` +
@@ -3830,11 +3830,11 @@ hostile-review pass._
   1day partition is the PDH/PDL anchor the sweep reads, so the parity gates
   are load-bearing.)
   Earlier: `claude/rust-observability-lane`
-  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961** — renumbered
-  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  (**DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1996** — renumbered
+  #1954 → #1956 → #1996 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync — main took #1954 for
   DEC-TEST-AWS-HERMETICITY-001 + #1955 for DEC-STRATEGIES-RUST-COMBO-001;
-  #1956 → #1961 at the 71fb2ee5 resync — main took #1956 for
+  #1956 → #1996 at the 71fb2ee5 resync — main took #1956 for
   DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master allocation;
   the DEC-ID is the stable handle per DEC-LEDGER-RENUMBER-001); the id itself is adopted from the coordinator
   partition's T27 row (the in-code citations swept from the spec's interim
@@ -3953,8 +3953,8 @@ hostile-review pass._
   lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
   routes; ONE new env var.)
   Earlier: `claude/notify-rust-core`
-  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960** — renumbered
-  #1954 → #1955 → #1960: first per the coordinator ledger allocation, then at
+  (**DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1995** — renumbered
+  #1954 → #1955 → #1995: first per the coordinator ledger allocation, then at
   the 2026-07-18 merge-reconcile (main took #1955 for
   DEC-STRATEGIES-RUST-COMBO-001); the DEC-ID is the stable handle per
   DEC-LEDGER-RENUMBER-001 — slice 1 of the notifications Rust lane: the
@@ -4048,9 +4048,9 @@ hostile-review pass._
   lake/schema/scope/vocab/rate change; no new routes; ONE new env var
   `BRUTEX_NOTIFY_RUST`, default OFF.)
   Earlier: `integration/club-s2-results-v2`
-  (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
+  (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1994** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
-  (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
+  (#1991–#1993) on this same branch. THE TRUE FAILURE MODE (stated
   precisely): the S2 club carries the default-on overfit DSR gate flip
   (fb06ca8a), whose #1336 law folds the ACTIVE overfit config into every
   tuple store's `_tuple_digest` ADDRESS — while `cmd_verify --recount`
@@ -4111,7 +4111,7 @@ hostile-review pass._
   shim, driven by the e2e suite; ruff/ruff-format clean; `mypy --strict`
   clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
   identity untouched — the recording is audit-PAYLOAD only. The full record
-  lives in MIGRATION.md #1851.)
+  lives in MIGRATION.md #1994.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -5948,7 +5948,7 @@ hostile-review pass._
   DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
   OUT of BruteX per DEC-LIVE-REMOVE-001.)
-  Earlier: `claude/sweep-temporal-robustness` (**DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1848** —
+  Earlier: `claude/sweep-temporal-robustness` (**DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1991** —
   folded FRESH into the club-S2-v2 rebuild off origin/main WITHOUT #1522
   (DEC-FILL-WORST-CASE-001 consciously EXCLUDED): the temporal-robustness YEAR GATE + per-period
   finalist stats (engine truth) — a one-lucky-year combo MUST NOT occupy a top-K slot. An opt-in
@@ -5967,9 +5967,9 @@ hostile-review pass._
   H₀ HONESTY: at defaults the gate passes 50% of pure noise over 7 judged years — a concentration
   filter, NOT a significance test. The /results year strip + temporal drill + cascade-verdict join are
   the named PR-B follow-up on this same DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
-  record lives in MIGRATION.md #1848.)
-  Earlier: `claude/results-trust-honesty` (**DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1849** —
-  the /results trust + honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1848), folded FRESH
+  record lives in MIGRATION.md #1991.)
+  Earlier: `claude/results-trust-honesty` (**DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1992** —
+  the /results trust + honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1991), folded FRESH
   into club-S2-v2 and NARROWED to coexist with main's landed
   DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749: the tuple-scoped DSR is NEVER presented unlabeled, the
   cascade's corrected search-N Deflated Sharpe is retained + labeled (`dsr_corrected` additive on
@@ -5977,8 +5977,8 @@ hostile-review pass._
   `_cascade_row_keys` OWNS the cascade join, #1459's marker emitter is the renamed
   `_verdict_marker_row_keys` (emit-on-present, `_verdict_marker_row_keys(None) == {}`); the
   `cpcv_pass_rate` (#1749) + `dsr_corrected` (#1459) union both ride `cascade_wire`. DISPLAY/read-side
-  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in MIGRATION.md #1849.)
-  Earlier: `claude/apriori-default-extinction` (**DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1850** —
+  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in MIGRATION.md #1992.)
+  Earlier: `claude/apriori-default-extinction` (**DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1993** —
   Apriori-to-natural-EXTINCTION becomes the DEFAULT sweep exploration mode: a `--k`-absent grid sweep
   walks the static k-ladder `1..n_unique` per cell until no combo survives min-hits (the anti-monotone
   extinction terminator), while an explicit numeric `--k` stays the legacy byte-identical arm —
@@ -5987,7 +5987,7 @@ hostile-review pass._
   pre-lake-I/O) and the `EXTINCTION_K_TOKEN = "extinction"` `--k` default; the frozen
   `brutex/engine/sweep_apriori.py` module ships ZERO-diff (fed, never edited); `cmd_sweep` (single-tuple
   int `--k`) deliberately untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
-  lives in MIGRATION.md #1850.)
+  lives in MIGRATION.md #1993.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -11547,7 +11547,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-slice-t11-resample`
-  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1962 — T11 "resample
+  (DEC-LAKE-RUST-RESAMPLE-DAILY-001, MIGRATION.md #1997 — T11 "resample
   tails" of the ADR-0020 conversion, closing the #1913-named follow-ups:
   the daily residues (`fno_daily_resample` + `spot_daily_resample` frame
   cores) route through the NEW `rust/brutex-lake/src/resample_daily.rs`
@@ -11564,12 +11564,12 @@ hostile-review pass._
   and both-ON); cargo 81 passed, crate stays 0.1.0, Cargo.lock untouched;
   honesty banner verbatim — payoff ≈ 0, uniformity not speed; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1962 for the full blurb)
+  see §1 + MIGRATION.md #1997 for the full blurb)
   Earlier: `claude/rust-observability-lane`
-  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1961 — renumbered
-  #1954 → #1956 → #1961 across the 2026-07-18 merge-reconciles (#1954 →
+  (DEC-RUST-OBSERVABILITY-001, MIGRATION.md #1996 — renumbered
+  #1954 → #1956 → #1996 across the 2026-07-18 merge-reconciles (#1954 →
   #1956 at the 3ee742b3 resync, main took #1954 for
-  DEC-TEST-AWS-HERMETICITY-001; #1956 → #1961 at the 71fb2ee5 resync,
+  DEC-TEST-AWS-HERMETICITY-001; #1956 → #1996 at the 71fb2ee5 resync,
   main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001 — per the queue-master
   allocation; DEC-LEDGER-RENUMBER-001) — the
   observability Rust decision-kernel lane, FIRST CUT: the four pure
@@ -11597,10 +11597,10 @@ hostile-review pass._
   DEC-RUST-OBSERVABILITY-TRIPWIRES-002 ·
   DEC-RUST-OBSERVABILITY-STAMP-PARSE-003 · the ci.yml crate job + weekly
   cargo-mutants wiring; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
-  §1's Active branch line — see §1 + MIGRATION.md #1961 for the full blurb)
+  §1's Active branch line — see §1 + MIGRATION.md #1996 for the full blurb)
   Earlier: `claude/notify-rust-core`
-  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1960 — renumbered
-  #1954 → #1955 → #1960, the last hop at the 2026-07-18 merge-reconcile
+  (DEC-NOTIFY-RUST-CORE-001, MIGRATION.md #1995 — renumbered
+  #1954 → #1955 → #1995, the last hop at the 2026-07-18 merge-reconcile
   (main took #1955 for DEC-STRATEGIES-RUST-COMBO-001; the DEC-ID is the
   stable handle per DEC-LEDGER-RENUMBER-001) — the
   notification PURE laws convert to
@@ -11617,9 +11617,9 @@ hostile-review pass._
   parity hazards — named follow-up DEC-NOTIFY-RUST-BUILDERS-002);
   expected payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1960 for the full blurb)
+  see §1 + MIGRATION.md #1995 for the full blurb)
   Earlier: `integration/club-s2-results-v2`
-  (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
+  (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1994 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant
   dual-chain `recorded_overfit_from_audit`; absent = legacy byte-identical),
@@ -11632,7 +11632,7 @@ hostile-review pass._
   normalization is the one sanctioned fragment edit) + #1474's frozen
   `sweep_apriori.py` byte-untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
-  §1 + MIGRATION.md #1851 for the full blurb)
+  §1 + MIGRATION.md #1994 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -12212,7 +12212,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1780 for the full blurb)
   Earlier: `claude/sweep-temporal-robustness`
-  (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1848 — folded FRESH into
+  (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1991 — folded FRESH into
   the club-S2-v2 rebuild off origin/main WITHOUT #1522 (DEC-FILL-WORST-CASE-001
   consciously EXCLUDED): the temporal-robustness YEAR GATE + per-period
   finalist stats — a combo that "only worked one lucky year" MUST NOT occupy a
@@ -12224,14 +12224,14 @@ hostile-review pass._
   REFERENCE-ONLY VIX trio (#1645) with NO fill-mode pin. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active-branch chain)
   Earlier: `claude/results-trust-honesty`
-  (DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1849 — the /results trust +
-  honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1848), coexisting
+  (DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1992 — the /results trust +
+  honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1991), coexisting
   with main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749: the tuple-scoped
   DSR is never presented unlabeled, the cascade's corrected search-N DSR is
   retained + labeled; DISPLAY/read-side; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/apriori-default-extinction`
-  (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1850 — Apriori-to-natural
+  (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1993 — Apriori-to-natural
   EXTINCTION becomes the DEFAULT sweep exploration mode: a `--k`-absent grid
   sweep walks the static k-ladder until no combo survives min-hits, while an
   explicit numeric `--k` stays the byte-identical legacy arm; the
