@@ -670,6 +670,53 @@ class TestEnrichGreeksLive:
         assert "[brutex] enrich-greeks done — contracts=? errored_targets=0" in captured.out
         assert "WARNING" not in captured.err
 
+    def test_live_scope_excluded_census_is_printed_on_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the LIVE arm's counted
+        census reaches stderr — the ``_capture_scope_excluded`` value flow +
+        the ``_print_greeks_scope_excluded("enrich-greeks", …)`` call at the
+        clean-done render (the greeks-backfill CLI + the ``--dry-run`` arm's
+        live sibling). The builder fake is FAITHFUL to the real
+        ``lake_target_builder``: ``on_scope_excluded`` fires INSIDE the
+        returned closure (discovery time, inside the fence) with the NONZERO
+        count of scope-gated stored contracts. Dropping the live print — or
+        zeroing the captured count — silences a stock-bearing lake's bulk
+        pass about the contracts the scope gated out; both mutants fail
+        HERE."""
+        _skip_account_lock(monkeypatch)
+        builder_calls: list[dict[str, Any]] = []
+
+        def _fake_builder(lake_root: Path, **kwargs: Any) -> Any:
+            builder_calls.append({"lake_root": lake_root, **kwargs})
+            on_scope_excluded = kwargs["on_scope_excluded"]
+
+            def _build() -> list[Any]:
+                on_scope_excluded(3)  # 3 stored stock contracts gated out
+                return []
+
+            return _build
+
+        monkeypatch.setattr(gep, "lake_target_builder", _fake_builder)
+
+        def _fake_pass(*, build_targets: Any, lake_root: Path) -> GreeksEnrichOutcome:
+            # Mirror the real pass contract: build_targets runs before ok=True.
+            list(build_targets())
+            return _OK_CLEAN
+
+        monkeypatch.setattr(gep, "run_greeks_enrich_pass", _fake_pass)
+
+        rc = cli.cmd_enrich_greeks(tmp_path, underlying=None, start=None, end=None, dry_run=False)
+        assert rc == cli.EXIT_OK
+        (call,) = builder_calls
+        assert callable(call["on_scope_excluded"])
+        captured = capsys.readouterr()
+        assert "[brutex] enrich-greeks done — contracts=0 errored_targets=0" in captured.out
+        assert (
+            "[brutex] enrich-greeks — 3 stored contract(s) excluded by scope "
+            "(DEC-UNIVERSE-INDEX-ONLY-001); their Greeks stamps stay inert" in captured.err
+        )
+
     def test_live_refused_under_peer_pull(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
