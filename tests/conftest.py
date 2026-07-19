@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 import pytest
+import structlog
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
@@ -270,6 +273,74 @@ def _inert_sweep_logging_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     from brutex import cli
 
     monkeypatch.setattr(cli, "_configure_sweep_logging", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _lake_heal_sweep_daemon_belt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No-op the dashboard-boot lake-heal sweep DAEMON launcher for every test.
+
+    The #1654-surfaced shard-2 doctest flake (PR #1666, CI jobs 88186693408 +
+    88192989598 — twice consecutively): tests that drive the REAL
+    ``cli.cmd_dashboard`` (six files stubbed the sibling launchers but not
+    this one — e.g. ``test_cli_serve_heartbeat_keepawake.py``) spawned a real
+    ``StartupSweeper`` daemon thread (``brutex-lake-heal-sweep``, via
+    ``cli._start_lake_heal_sweep``) that outlives its test un-joined. When it
+    later logs ``lake.invariant.scan_complete`` / ``lake_heal.sweep_complete``
+    via UNCONFIGURED structlog (default ``PrintLogger`` → the CURRENT
+    ``sys.stdout``), the lines land in whatever capture a LATER test has
+    installed — in shard 2 that was the ``combo_mask`` doctest's swapped-in
+    stdout buffer, turning ``bits_to_mask()``'s expected ``0`` into
+    ``<log line>\\n0``. #1654's test-file deletes reshuffled the round-robin
+    shard partition (``scripts/ci/shard_tests.py``) so the spawner and the
+    doctest gate first became shard neighbours there; the leak itself is
+    order-dependent, so this belt kills it suite-wide at the ONE spawn point
+    (Golden Rule #11 — instead of a seventh per-file stub copy).
+
+    The launcher body is ``# pragma: no cover`` glue; its WIRING tests
+    (``test_cli_run.py``) monkeypatch their own recorder/boom over this stub —
+    a test-level ``monkeypatch.setattr`` overrides the belt, exactly like the
+    AWS belt above. The sweeper's real behaviour stays covered by
+    ``test_lake_heal.py`` (``run_sync`` + the ``spawn`` seam) and
+    ``test_dashboard_lake_uniqueness.py``. Honest envelope: patched iff
+    ``brutex.cli`` is already imported at test setup (every current
+    ``cmd_dashboard`` caller imports it at module scope; the conditional keeps
+    the redteam python-only lane — which never imports cli — import-free, the
+    ``_isolate_run_forensics_mirror`` discipline).
+    """
+    cli_module = sys.modules.get("brutex.cli")
+    if cli_module is not None:
+        # No hasattr guard: a renamed launcher must fail LOUDLY here, not
+        # silently revive the daemon-leak class.
+        monkeypatch.setattr(cli_module, "_start_lake_heal_sweep", lambda *args, **kwargs: None)
+
+
+@pytest.fixture
+def _doctest_structlog_stderr() -> Iterator[None]:
+    """Route structlog's default sink to STDERR for a doctest-running test.
+
+    The doctest gates (``test_combo_mask_doctests.py`` +
+    ``test_all_brutex_doctests.py``) execute examples under
+    ``doctest.testmod``, which swaps ``sys.stdout`` for its capture buffer —
+    so ANY background thread logging via unconfigured structlog (default
+    ``PrintLogger`` writes to the current ``sys.stdout``) contaminates the
+    example's ``Got:`` output (the PR #1666 shard-2 flake; the
+    ``_lake_heal_sweep_daemon_belt`` above kills the known spawner, this
+    fixture makes the gates immune to the whole class). SINK-level only —
+    ``logger_factory`` → a ``PrintLoggerFactory`` bound to the ``sys.stderr``
+    OBJECT captured here (doctest never touches stderr); processors, levels
+    and event payloads are untouched (the #1630 sink-level posture), and the
+    prior configuration is snapshot/restored (the ``capture_logs`` idiom).
+    Honest envelope: a logger already CACHED under
+    ``cache_logger_on_first_use=True`` by an earlier explicit configure would
+    bypass the swap — no suite configuration does that (structlog's default
+    is uncached lazy proxies, re-resolved per call).
+    """
+    saved = structlog.get_config()
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stderr))
+    try:
+        yield
+    finally:
+        structlog.configure(**saved)
 
 
 @pytest.fixture(autouse=True)
