@@ -1,0 +1,606 @@
+{
+ "cases": [
+  {
+   "name": "empty",
+   "evidence": [],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "one_admitted",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [
+    [
+     "2026-05-13",
+     1
+    ]
+   ],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "skip_nonzero_bars",
+   "evidence": [
+    [
+     "2026-05-12",
+     false,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [
+    [
+     "2026-05-13",
+     1
+    ]
+   ],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "veto_failed",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     2
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [
+    "2026-05-13"
+   ],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "no_evidence_indices",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     2,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [
+    "2026-05-13"
+   ],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "no_evidence_indices_over",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     4,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [
+    "2026-05-13"
+   ],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "no_evidence_clean",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     0,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [
+    "2026-05-13"
+   ],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "veto_wins_over_no_evidence",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     2,
+     1,
+     1
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [
+    "2026-05-13"
+   ],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "clean_2_admitted",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     2,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [
+    [
+     "2026-05-13",
+     2
+    ]
+   ],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "three_at_cap",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-12",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13"
+   ],
+   "flagged": [
+    [
+     "2026-05-11",
+     1
+    ],
+    [
+     "2026-05-12",
+     1
+    ],
+    [
+     "2026-05-13",
+     1
+    ]
+   ],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "four_over_month_cap",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-12",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-14",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13",
+    "2026-05-14"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": true,
+   "over_year_cap": false
+  },
+  {
+   "name": "month_cap_wins_over_year",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-12",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-14",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 8,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13",
+    "2026-05-14"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": true,
+   "over_year_cap": false
+  },
+  {
+   "name": "year_cap_exact_8",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-12",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 5,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13"
+   ],
+   "flagged": [
+    [
+     "2026-05-11",
+     1
+    ],
+    [
+     "2026-05-12",
+     1
+    ],
+    [
+     "2026-05-13",
+     1
+    ]
+   ],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": false
+  },
+  {
+   "name": "year_cap_over",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-12",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 6,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": true
+  },
+  {
+   "name": "year_cap_existing_only",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 8,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": true
+  },
+  {
+   "name": "custom_month_cap_0",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 0,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": true,
+   "over_year_cap": false
+  },
+  {
+   "name": "custom_year_cap_0",
+   "evidence": [
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 0,
+   "candidates": [
+    "2026-05-13"
+   ],
+   "flagged": [],
+   "vetoed_failed": [],
+   "no_evidence": [],
+   "over_month_cap": false,
+   "over_year_cap": true
+  },
+  {
+   "name": "mixed_order",
+   "evidence": [
+    [
+     "2026-05-11",
+     true,
+     3,
+     1,
+     1
+    ],
+    [
+     "2026-05-12",
+     true,
+     1,
+     1,
+     0
+    ],
+    [
+     "2026-05-13",
+     true,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-14",
+     false,
+     3,
+     1,
+     0
+    ],
+    [
+     "2026-05-15",
+     true,
+     3,
+     3,
+     0
+    ]
+   ],
+   "existing_year_overlay_days": 0,
+   "max_flags_per_month": 3,
+   "max_overlay_days_per_year": 8,
+   "candidates": [
+    "2026-05-11",
+    "2026-05-12",
+    "2026-05-13",
+    "2026-05-15"
+   ],
+   "flagged": [
+    [
+     "2026-05-13",
+     1
+    ],
+    [
+     "2026-05-15",
+     3
+    ]
+   ],
+   "vetoed_failed": [
+    "2026-05-11"
+   ],
+   "no_evidence": [
+    "2026-05-12"
+   ],
+   "over_month_cap": false,
+   "over_year_cap": false
+  }
+ ]
+}

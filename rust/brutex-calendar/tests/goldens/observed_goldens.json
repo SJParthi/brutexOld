@@ -1,0 +1,174 @@
+{
+ "cases": [
+  {
+   "name": "valid_two",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}, {\"date\": \"2026-05-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-05\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2026-01-13",
+    "2026-05-13"
+   ]
+  },
+  {
+   "name": "valid_empty",
+   "payload_json": "{\"version\": 1, \"entries\": []}",
+   "days": []
+  },
+  {
+   "name": "valid_dup_collapse",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}, {\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2026-01-13"
+   ]
+  },
+  {
+   "name": "valid_extra_keys",
+   "payload_json": "{\"version\": 1, \"junk\": {\"nested\": [1, 2]}, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}, \"extra_field\": \"kept\"}]}",
+   "days": [
+    "2026-01-13"
+   ]
+  },
+  {
+   "name": "valid_version_true_punning",
+   "payload_json": "{\"version\": true, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2026-01-13"
+   ]
+  },
+  {
+   "name": "valid_version_float_punning",
+   "payload_json": "{\"version\": 1.0, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2026-01-13"
+   ]
+  },
+  {
+   "name": "reject_version_1e0_check",
+   "payload_json": "{\"version\": 1e0, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2026-01-13"
+   ]
+  },
+  {
+   "name": "reject_version_str",
+   "payload_json": "{\"version\": \"1\", \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_version_2",
+   "payload_json": "{\"version\": 2, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_version_missing",
+   "payload_json": "{\"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_root_list",
+   "payload_json": "[1, 2]",
+   "days": null
+  },
+  {
+   "name": "reject_root_str",
+   "payload_json": "\"x\"",
+   "days": null
+  },
+  {
+   "name": "reject_entries_missing",
+   "payload_json": "{\"version\": 1}",
+   "days": null
+  },
+  {
+   "name": "reject_entries_dict",
+   "payload_json": "{\"version\": 1, \"entries\": {}}",
+   "days": null
+  },
+  {
+   "name": "reject_entry_nondict",
+   "payload_json": "{\"version\": 1, \"entries\": [\"x\"]}",
+   "days": null
+  },
+  {
+   "name": "reject_label_missing",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_label_wrong",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_label_case",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"Observed-Not-Official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_label_int",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": 7, \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_int",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": 20260113, \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_missing",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_compact",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"20260513\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_week",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-W20-3\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_unpadded",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-5-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_unreal",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-02-30\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_month13",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-13-01\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_year0",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"0000-01-01\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "valid_leap",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2024-02-29\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2024-02\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": [
+    "2024-02-29"
+   ]
+  },
+  {
+   "name": "reject_nonleap",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2023-02-29\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2023-02\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_one_bad_rejects_all",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}, {\"date\": \"2026-05-13\", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-05\", \"label\": \"wrong\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  },
+  {
+   "name": "reject_date_trailing",
+   "payload_json": "{\"version\": 1, \"entries\": [{\"date\": \"2026-01-13 \", \"detected_at\": \"2026-07-04T10:00:00+00:00\", \"month\": \"2026-01\", \"label\": \"observed-not-official\", \"evidence\": {\"zero_bar_indices\": [], \"clean_success_windows\": 1, \"failed_windows_touching\": 0}}]}",
+   "days": null
+  }
+ ]
+}
