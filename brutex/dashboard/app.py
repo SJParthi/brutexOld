@@ -239,6 +239,7 @@ from brutex.dashboard.pull_controller import (
     default_date_range,
     pull_all_spot,
     pull_candles,
+    refuse_empty_kind_selection,
     resolve_candle_range,
     resolve_fetch_intervals,
     resolve_pull_symbols,
@@ -3784,7 +3785,18 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
                 return [instrument], f"{symbol} spot"
             if kind is not None:
-                return _select_bulk_targets(kind), f"{kind} spot"
+                selected = _select_bulk_targets(kind)
+                # Empty-kind refusal (DEC-UNIVERSE-INDEX-ONLY-001, review
+                # item 1(i)): under the bounded index4 default a ?kind=stock
+                # selection self-narrows to ZERO rows — refuse loudly naming
+                # the DEC instead of launching a silent 0-instrument job.
+                # Tight per-call mapping (the arm-(iv)/(v) idiom); the
+                # HTTPException propagates through the offload.
+                try:
+                    refuse_empty_kind_selection(kind, selected)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return selected, f"{kind} spot"
             raise HTTPException(
                 status_code=400,
                 detail="pull-all requires ?symbols=..., ?symbol=... or ?kind=...",
@@ -4014,6 +4026,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 label = f"{symbol} metadata"
             elif kind is not None:
                 selected = _select_bulk_targets(kind)
+                # Empty-kind refusal (DEC-UNIVERSE-INDEX-ONLY-001, review
+                # item 1(ii)): under the bounded index4 default a ?kind=stock
+                # selection self-narrows to ZERO rows — refuse loudly naming
+                # the DEC instead of falling into the reference-only note with
+                # a false "all 0 selected are reference-only" attribution.
+                # Tight per-call mapping (the arm-(iii)/(iv) idiom); the
+                # HTTPException propagates through the offload.
+                try:
+                    refuse_empty_kind_selection(kind, selected)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
                 label = f"{kind} metadata"
             else:
                 raise HTTPException(
@@ -4045,10 +4068,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 skipped_reference_only=skipped_reference_only,
                 skipped_count=len(skipped_reference_only),
             )
-            note = (
-                f"all {len(skipped_reference_only)} selected are reference-only "
-                "(no F&O chain) — nothing to pull"
-            )
+            if not instruments:
+                # ZERO instruments selected at all — never claim
+                # "reference-only" for an empty set (DEC-UNIVERSE-INDEX-ONLY-001,
+                # review item 1(ii)). Reachable only on the FULL-scope /
+                # empty-classification degenerate: the bounded-scope kind arm
+                # 400s upstream via refuse_empty_kind_selection, and the
+                # symbols/symbol arms fail closed on an empty selection.
+                note = "0 instruments selected — nothing to pull"
+            else:
+                note = (
+                    f"all {len(skipped_reference_only)} selected are reference-only "
+                    "(no F&O chain) — nothing to pull"
+                )
             return JSONResponse(
                 {
                     "started": False,
@@ -4435,6 +4467,25 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             entirely for an empty selection (the pre-offload order — the map was
             never built when the 400 fired first).
             """
+
+            def _select_kind_scope_checked(bulk_kind: str) -> list[Instrument]:
+                """The ?kind= bulk arm's empty-selection refusal (item 1(iii)).
+
+                Under the bounded index4 default a ?kind=stock selection
+                self-narrows to ZERO instruments, which pre-fix fell through
+                to the DEAD-END "no cached contracts matched — pull expiries +
+                contracts first" 400 (that metadata pull is itself refused
+                under the same scope) — refuse loudly naming the DEC instead
+                (DEC-UNIVERSE-INDEX-ONLY-001). Tight per-call mapping; the
+                HTTPException propagates through the offload verbatim.
+                """
+                selected_kind = _select_bulk_targets(bulk_kind)
+                try:
+                    refuse_empty_kind_selection(bulk_kind, selected_kind)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return selected_kind
+
             with RegistryStore.open(registry_path) as registry:
                 rows = _resolve_historical_contracts(
                     registry,
@@ -4444,7 +4495,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     expiry_date=expiry_date,
                     kind=kind,
                     all_cached=all,
-                    select_kind=_select_bulk_targets,
+                    select_kind=_select_kind_scope_checked,
                 )
             # P8 explicit-arm refusal (DEC-UNIVERSE-INDEX-ONLY-001): an explicit
             # contract/contracts/underlying ask resolving ONLY out-of-scope

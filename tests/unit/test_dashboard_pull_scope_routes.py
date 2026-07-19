@@ -522,6 +522,156 @@ class TestP8HistoricalRouteArms:
         ]
 
 
+# ── the empty ?kind= bulk-selection arms (the #1934 review's item 1) ─────────
+
+
+class TestEmptyKindSelectionArms:
+    """The three ``?kind=`` bulk arms refuse an EMPTY scope-narrowed selection.
+
+    Under the shipped ``index4`` default a ``?kind=stock`` bulk selection
+    legitimately self-narrows to ZERO instruments (the classifier is
+    scope-aware) — each arm must answer the loud scope-naming 400
+    (DEC-UNIVERSE-INDEX-ONLY-001), never a silent 0-instrument job (arm i),
+    a false "all 0 selected are reference-only" note (arm ii), or the
+    dead-end "pull expiries + contracts first" remediation whose metadata
+    pull is itself refused under the same scope (arm iii).
+    """
+
+    def _assert_refused(self, client: TestClient, resp: Any, pulled: list[str]) -> None:
+        assert resp.status_code == 400, resp.text  # [FB] merge-base: 200 / dead-end 400
+        detail = resp.json()["detail"]
+        assert _DEC in detail
+        assert "kind='stock'" in detail  # the repr()'d kind names the selection
+        _drain_if_started(client)
+        assert pulled == []  # zero vendor work + no job behind the refusal
+
+    def test_pull_all_kind_stock_refused_400(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[FB] arm (i) — POST /pull-all?kind=stock launched a silent
+        0-instrument "stock spot" job pre-fix; now a loud scope-naming 400."""
+        _pin_creds_present(monkeypatch)
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        resp = client.post("/api/v1/universe/pull-all", params={"kind": "stock", "dry_run": "true"})
+        self._assert_refused(client, resp, pulled)
+
+    def test_pull_expiries_contracts_kind_stock_refused_400(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[FB] arm (ii) — the metadata route's ?kind=stock answered a FALSE
+        started:false "all 0 selected are reference-only (no F&O chain)"
+        attribution pre-fix (the stocks are scope-excluded, not
+        reference-only); now a loud scope-naming 400."""
+        _pin_creds_present(monkeypatch)
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        resp = client.post(
+            "/api/v1/universe/pull-expiries-contracts",
+            params={"kind": "stock", "dry_run": "true"},
+        )
+        self._assert_refused(client, resp, pulled)
+        assert "reference-only" not in resp.json()["detail"]
+
+    def test_pull_historical_kind_stock_refused_400(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[FB] arm (iii) — /pull-historical?kind=stock answered the DEAD-END
+        "no cached contracts matched — pull expiries + contracts first" 400
+        pre-fix (that metadata pull is itself a scope no-op under index4);
+        now the refusal names the DEC instead of the unreachable button."""
+        _pin_creds_present(monkeypatch)
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        _seed_registry(_lake_root(store), with_stock=True)
+        resp = client.post(
+            "/api/v1/universe/pull-historical",
+            params={"kind": "stock", "dry_run": "true"},
+        )
+        self._assert_refused(client, resp, pulled)
+        assert "no cached contracts matched" not in resp.json()["detail"]
+
+    def test_kind_index_still_pulls_on_all_three_arms(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Steady-state parity: a POPULATED ?kind=index selection is
+        byte-unchanged on every arm (the refusal fires only on EMPTY)."""
+        _pin_creds_present(monkeypatch)
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        _seed_registry(_lake_root(store), with_stock=False)
+        resp = client.post("/api/v1/universe/pull-all", params={"kind": "index", "dry_run": "true"})
+        assert resp.status_code == 200, resp.text
+        assert _wait_for_job(client)["state"] == "done"
+        assert "NIFTY" in pulled
+        resp = client.post(
+            "/api/v1/universe/pull-expiries-contracts",
+            params={"kind": "index", "dry_run": "true"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["started"] is True
+        assert _wait_for_job(client)["state"] == "done"
+        resp = client.post(
+            "/api/v1/universe/pull-historical",
+            params={"kind": "index", "dry_run": "true"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["selected"] == 3
+        assert _wait_for_job(client)["state"] == "done"
+
+    def test_full_scope_widen_kind_stock_still_pulls(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The widen pin (law 6): under ``full`` the empty-kind refusal never
+        fires and a POPULATED ?kind=stock selection pulls merge-base-identically
+        (the lean store's persisted EQ rows are F&O-eligible by construction)."""
+        _pin_creds_present(monkeypatch)
+        monkeypatch.setenv(_SCOPE_ENV, "full")
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        resp = client.post("/api/v1/universe/pull-all", params={"kind": "stock", "dry_run": "true"})
+        assert resp.status_code == 200, resp.text
+        assert _wait_for_job(client)["state"] == "done"
+        assert "RELIANCE" in pulled
+
+    def test_zero_selected_note_never_claims_reference_only(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """[FB] the FULL-scope / empty-classification degenerate: an
+        INDEX-only store's ?kind=stock under ``full`` selects ZERO rows —
+        the metadata arm keeps its merge-base started:false no-op shape but
+        the note must never claim "all 0 selected are reference-only" for a
+        set nothing was selected INTO (the #1934 review's item 1(ii) tail)."""
+        del store  # a dedicated INDEX-only store — the shared fixture carries a stock
+        monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+        _pin_creds_present(monkeypatch)
+        monkeypatch.setenv(_SCOPE_ENV, "full")
+        pulled: list[str] = []
+        _wire_offline_pulls(monkeypatch, pulled)
+        index_only = InstrumentStore.open(tmp_path / "index_only.duckdb")
+        try:
+            index_only.upsert_many(
+                [_index("NIFTY", 13)],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r1",
+                csv_source_sha256="0" * 64,
+            )
+            with TestClient(build_app(DashboardState(), instrument_store=index_only)) as raw_client:
+                resp = raw_client.post(
+                    "/api/v1/universe/pull-expiries-contracts",
+                    params={"kind": "stock", "dry_run": "true"},
+                )
+                assert resp.status_code == 200, resp.text
+                body = resp.json()
+                assert body["started"] is False
+                assert body["note"] == "0 instruments selected — nothing to pull"
+                assert "reference-only" not in body["note"]
+                _drain_if_started(raw_client)
+        finally:
+            index_only.close()
+        assert pulled == []
+
+
 # ── the greeks-backfill eager scope-env 400 (design §2.3) ────────────────────
 
 

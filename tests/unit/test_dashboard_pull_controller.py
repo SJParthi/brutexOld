@@ -57,6 +57,7 @@ from brutex.dashboard.pull_controller import (
     parse_symbol_list,
     pull_all_spot,
     pull_candles,
+    refuse_empty_kind_selection,
     register_pull_meter,
     resolve_candle_range,
     resolve_fetch_intervals,
@@ -1855,6 +1856,68 @@ class TestScreenPullScopeWired:
         )
         assert [i.symbol_name for i in out] == ["RELIANCE"]
         assert source == "single"
+
+
+class TestRefuseEmptyKindSelection:
+    """The empty ``?kind=`` bulk-selection refusal — the P7 screen's bulk-arm
+    sibling (DEC-UNIVERSE-INDEX-ONLY-001, the #1934 review's item 1). Runs
+    under the SHIPPED ``index4`` default (the conftest-forced env)."""
+
+    def test_empty_selection_refused_under_shipped_default(self) -> None:
+        # [FB] fails-before: without the helper an empty ?kind=stock bulk
+        # selection sailed into a silent 0-instrument job / a false
+        # "all 0 selected are reference-only" note / a dead-end remediation.
+        with pytest.raises(ValueError, match="DEC-UNIVERSE-INDEX-ONLY-001"):
+            refuse_empty_kind_selection("stock", [])
+
+    def test_message_names_kind_count_and_remediation(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            refuse_empty_kind_selection("stock", [])
+        msg = str(exc.value)
+        assert "kind='stock'" in msg  # repr()'d — the #907 convention
+        assert "admitted 0 instruments" in msg
+        assert "stored data stays readable in /db" in msg
+        assert "no vendor pull is issued" in msg
+
+    def test_nonempty_selection_always_passes(self) -> None:
+        # Zero behavior change for every populated arm (the shipped
+        # ?kind=index selection under the index4 default).
+        refuse_empty_kind_selection("index", [_index("NIFTY")])  # no raise
+
+    def test_full_scope_is_a_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bounded-gate law (the screen_pull_scope sibling): under an
+        # UNBOUNDED scope an empty selection is a store-content question, not
+        # a scope one — the §5.6 widen path stays merge-base-identical.
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        refuse_empty_kind_selection("stock", [])  # no raise
+
+    def test_explicit_scope_overrides_the_default_both_directions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.config.feed_scope import DEFAULT_FEED, resolve_feed_scope
+
+        bounded = resolve_feed_scope(DEFAULT_FEED)  # the shipped index4 default
+        assert bounded.bounded()
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+        full = resolve_feed_scope(DEFAULT_FEED)
+        assert not full.bounded()
+        # An explicit BOUNDED scope refuses even while the env default is full …
+        with pytest.raises(ValueError, match="DEC-UNIVERSE-INDEX-ONLY-001"):
+            refuse_empty_kind_selection("stock", [], scope=bounded)
+        # … and an explicit FULL scope passes even under the index4 env default.
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "index4")
+        refuse_empty_kind_selection("stock", [], scope=full)  # no raise
+
+    def test_control_char_kind_rides_escaped(self) -> None:
+        # Defensive log-injection pin: *kind* is validated upstream ("index" /
+        # "stock"), but the helper reprs it regardless — a hostile token never
+        # rides a ValueError/400 detail raw.
+        with pytest.raises(ValueError) as exc:
+            refuse_empty_kind_selection("bad\nkind\x1b", [])
+        msg = str(exc.value)
+        assert "\n" not in msg
+        assert "\x1b" not in msg
+        assert "'bad\\nkind\\x1b'" in msg
 
 
 class TestPullPopulatesLedger:

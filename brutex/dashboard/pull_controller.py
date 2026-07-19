@@ -454,6 +454,44 @@ def screen_pull_scope(
         )
 
 
+def refuse_empty_kind_selection(
+    kind: str,
+    selected: Sequence[Instrument],
+    *,
+    scope: FeedScope | None = None,
+) -> None:
+    """Refuse an EMPTY bulk ``?kind=`` selection under a bounded scope.
+
+    The P7 screen's bulk-arm sibling (DEC-UNIVERSE-INDEX-ONLY-001, the #1934
+    review's item 1): under the shipped ``index4`` default the ONE classifier
+    legitimately self-narrows a ``?kind=stock`` selection to ZERO instruments,
+    which pre-fix let the three ``?kind=`` route arms reach dishonest steady
+    states — a silently-launched 0-instrument "stock spot" job, a false
+    "all 0 selected are reference-only" note, and a dead-end "pull expiries +
+    contracts first" remediation (that metadata pull is itself a scope no-op).
+    An empty *kind* selection under a ``bounded()`` acting *scope* now raises
+    :class:`ValueError` naming the DEC (the routes map it to a 400 — the P7/P8
+    refusal-wording law: out-of-scope ⇒ a loud refusal naming the DEC, never a
+    silent no-op). Under an UNBOUNDED (``full``) scope this is a PASS-THROUGH:
+    an empty selection there is a store-content question, not a scope one, so
+    the §5.6 widen path stays merge-base-identical (the bounded-gate law
+    ``screen_pull_scope`` follows). A NON-empty selection always passes —
+    zero behavior change for every populated arm. *kind* is repr()'d into the
+    refusal (the #907 convention — validated upstream, escaped regardless).
+    """
+    if selected:
+        return
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
+    if not scope.bounded():
+        return
+    raise ValueError(
+        f"the bulk kind={kind!r} selection admitted 0 instruments — "
+        "the pull universe is index-only (DEC-UNIVERSE-INDEX-ONLY-001); "
+        "stored data stays readable in /db, but no vendor pull is issued"
+    )
+
+
 def resolve_pull_symbols(
     symbols: str, lookup: Callable[[str], Instrument | None]
 ) -> list[Instrument]:
