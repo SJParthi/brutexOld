@@ -1,6 +1,6 @@
 """Deterministic daily-rotating sampler + coverage ledger (design §3, ONE law).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). The engine set is
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). The engine set is
 ALWAYS in scope; a seeded fill of ``--sample N`` extra datasets rotates daily
 (``seed = --seed or the IST report date``), so a nightly cron covers the whole
 population in ~⌈population/N⌉ nights with zero configuration and any night is

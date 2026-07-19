@@ -1,6 +1,6 @@
 """Independent-leg primitives vs hand-computed vectors + hypothesis references.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). The fenced module is
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). The fenced module is
 the ONE independent-recompute surface — these pins prove its hand math against
 brute-force references, incl. the ±0.005 half-up boundary, the HLC3
 318660≠320000 golden (#899) and the #1601 bucket-anchor 15:27→15:29 law.

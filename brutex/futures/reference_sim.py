@@ -18,7 +18,11 @@ executor's pricing logic: it never imports
 :func:`~brutex.futures.executor.materialize_futures_trade`. The fill/P&L
 arithmetic below is re-derived from scratch in exact :class:`~decimal.Decimal`
 RUPEES (production computes in int64 paisa) — two different number pipelines
-that must land on the same integer.
+that must land on the same integer. The worst-case fill LAW — the ONLY law,
+DEC-FILL-WORST-CASE-ONLY-001 — is independently RE-STATED below (entry HIGH
++ 0.05 / exit LOW − 0.05 for a bull; the exact mirror for a bear; every
+fill floored at one tick), never imported, so the differential stays a
+genuine cross-derivation, not a tautology.
 
 ## Scope (honest)
 
@@ -70,8 +74,8 @@ class DifferentialReport:
         How many samples were arithmetically compared (policy-skipped samples
         excluded).
     n_skipped_policy
-        Samples excluded because production rejected them on an OPT-IN POLICY
-        gate (``STALE_BAR``) the naive path deliberately does not model —
+        Samples excluded because production rejected them on the STALE_BAR
+        POLICY gate the naive path deliberately does not model —
         counted openly, never silently absorbed.
     """
 
@@ -95,11 +99,15 @@ def naive_reference_futures_pnl(
     """Naively re-price one signal; net P&L in paisa, or ``None`` if unpriceable.
 
     The from-scratch re-derivation: resolve the front month through the shared
-    reader seam, read the exact entry/exit bars, fill at OPEN ± one tick
-    adverse (floored at one tick), P&L = (sell − buy) × lot × n_lots — all in
-    exact Decimal rupees, converted to paisa only at the very end. Costs are
-    zero (cost-free index scope); anything outside that scope, or any missing
-    lot/contract/bar, returns ``None`` (production rejects those trades).
+    reader seam, read the exact entry/exit bars, fill ± one tick adverse
+    (floored at one tick) around the bar's ADVERSE EXTREME — the ONLY fill
+    law (DEC-FILL-WORST-CASE-ONLY-001, independently RE-STATED here: bull
+    buys at entry HIGH + 0.05 and sells at exit LOW − 0.05; bear mirrored —
+    sells at entry LOW − 0.05, covers at exit HIGH + 0.05), P&L =
+    (sell − buy) × lot × n_lots — all in exact Decimal rupees, converted to
+    paisa only at the very end. Costs are zero (cost-free index scope);
+    anything outside that scope, or any missing lot/contract/bar, returns
+    ``None`` (production rejects those trades).
 
     Parameters
     ----------
@@ -130,14 +138,12 @@ def naive_reference_futures_pnl(
     )
     if window is None:
         return None
-    entry_open = window.entry_bar.open
-    exit_open = window.exit_bar.open
     if signal.direction == TradeDirection.BULL:
-        buy = max(entry_open + _NAIVE_TICK, _NAIVE_TICK)
-        sell = max(exit_open - _NAIVE_TICK, _NAIVE_TICK)
+        buy = max(window.entry_bar.high + _NAIVE_TICK, _NAIVE_TICK)
+        sell = max(window.exit_bar.low - _NAIVE_TICK, _NAIVE_TICK)
     else:
-        sell = max(entry_open - _NAIVE_TICK, _NAIVE_TICK)
-        buy = max(exit_open + _NAIVE_TICK, _NAIVE_TICK)
+        sell = max(window.entry_bar.low - _NAIVE_TICK, _NAIVE_TICK)
+        buy = max(window.exit_bar.high + _NAIVE_TICK, _NAIVE_TICK)
     pnl_rupees = (sell - buy) * lot * n_lots
     # Bars are 2dp-snapped at the lake-write boundary and the tick is 2dp, so
     # ×100 is exact — no rounding decision hides here.
@@ -165,7 +171,7 @@ def differential_spot_check(
     resolver, source, n_lots
         Threaded to :func:`naive_reference_futures_pnl`.
     policy_skipped
-        Optional 1:1 flags marking samples production rejected on the OPT-IN
+        Optional 1:1 flags marking samples production rejected on the
         ``STALE_BAR`` policy — those are excluded from the arithmetic compare
         and counted in ``n_skipped_policy``.
 

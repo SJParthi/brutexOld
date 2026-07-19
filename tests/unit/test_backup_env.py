@@ -374,11 +374,19 @@ class TestVerifySubset:
         ],
     )
     def test_verify_subset_valid_shapes_pass_through(self, tmp_path: Path, value: str) -> None:
-        """auto | none | every restic-valid passthrough shape resolves unchanged, no WARN."""
+        """auto | none | every restic-valid passthrough shape resolves unchanged, no WARN.
+
+        The assertion is the docstring's own "no WARN" law (level-scoped,
+        not logs == [] — DEC-CONFIG-RUST-LEAVES-001 milestone 3: with
+        BRUTEX_CORE_RUST_BACKUPENV=1 the parity lane re-runs this file
+        VERBATIM and the seam's once-per-process ``backup_env_rust.engaged``
+        INFO would otherwise false-fail the first engaging param; a WARN or
+        ERROR still fails exactly as before).
+        """
         with structlog.testing.capture_logs() as logs:
             cfg = resolve_backup_env({BACKUP_VERIFY_SUBSET_ENV: value}, home=tmp_path)
         assert cfg.verify_subset == value
-        assert logs == []
+        assert [entry for entry in logs if entry["log_level"] != "info"] == []
 
     @pytest.mark.parametrize(
         "value",

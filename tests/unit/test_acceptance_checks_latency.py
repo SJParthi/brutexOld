@@ -1,6 +1,6 @@
 """Latency-check pins: measured numbers always emitted; budgets gate warm only.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Timing rides an
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Timing rides an
 injected fake clock — no CI wall-clock flake.
 """
 

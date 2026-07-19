@@ -1,6 +1,6 @@
 """Frozen-schema golden: the v1 report shape for a pinned lake+clock+seed.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Volatile cells
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Volatile cells
 (run-id nonce, wall-clock durations, box fingerprint, RSS/latency numbers)
 are normalised by an EXPLICIT allowlist; everything else — key sets, verdict
 tokens, abstain reasons, evidence keys, coverage blocks, totals — is
@@ -67,7 +67,7 @@ class TestReportGolden:
     ) -> None:
         # Pin the HEADLESS shape hermetically: no rotating structlog sink (a
         # nightly-cron box never ran the dashboard) → rate.log_window abstains
-        # the structural ``no_rate_log_configured`` (round-8, MIGRATION #1756).
+        # the structural ``no_rate_log_configured`` (round-8, MIGRATION #1958).
         monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
         monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path / "no-such-logs"))
         got = _normalise(_build_report(tmp_path))

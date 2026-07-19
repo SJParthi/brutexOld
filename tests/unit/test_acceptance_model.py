@@ -1,6 +1,6 @@
 """Model-layer pins: roll-up truth table, evidence invariants, exit-code law.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). These are the
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). These are the
 mutant-killers for the verdict/exit laws — the whole command's honesty rests
 on them.
 """
@@ -55,7 +55,7 @@ class TestSchemaTokens:
                     AbstainReason.NO_PER_CALL_PERSISTENCE,
                     AbstainReason.NO_PER_CALL_LOG,
                     AbstainReason.NO_OI_COMPARE_SEAM,
-                    # Round-8 (MIGRATION.md #1756): an ABSENT rotating-log sink
+                    # Round-8 (MIGRATION.md #1958): an ABSENT rotating-log sink
                     # (headless / dashboard never run) is a standing by-design
                     # gap, budget/streak-EXEMPT so it never turns a healthy
                     # headless lake permanently amber.
@@ -86,12 +86,12 @@ class TestSchemaTokens:
             "no_instrument_store",
             "out_of_calendar_coverage",
             "time_budget_exhausted",
-            # Round-2 review folds (MIGRATION.md #1756): the registry
+            # Round-2 review folds (MIGRATION.md #1958): the registry
             # schema-drift refusal (fix 2) + the non-default-law replan
             # shape routing (fix 3) — extensions are reviewed acts.
             "registry_schema_drift",
             "non_default_window_shape",
-            # Round-6 F2 (MIGRATION.md #1756): a movers route 400/500 is a
+            # Round-6 F2 (MIGRATION.md #1958): a movers route 400/500 is a
             # genuine route/data error, NOT an absent master (Golden Rule #10).
             "route_error",
         }

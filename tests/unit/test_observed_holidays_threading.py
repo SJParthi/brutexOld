@@ -165,16 +165,32 @@ class TestOptionSpineThreading:
 
 
 class TestScopeLock:
-    """The overlay must NEVER reach pull window planning or the engine (regression)."""
+    """The overlay must NEVER reach pull window planning or the engine (regression).
+
+    SANCTIONED pin evolution (DEC-SEED-OBSERVED-OVERLAY-001): the cold-start SEED
+    (``seed_enclosed_windows`` — the continuity GATE, a refusal/permit decision
+    over already-planned windows, not window planning) now DOES take ``observed=``
+    so seed-time and fetch-time verdicts share one calendar. Window PLANNING
+    (``plan_windows`` / ``default_fno_minute_window``) stays overlay-blind — the
+    scope lock this class exists for."""
 
     def test_pull_planning_never_receives_overlay(self) -> None:
         from brutex.adapters.groww.contract_bounds import default_fno_minute_window
-        from brutex.data.window_ledger_store import plan_windows, seed_enclosed_windows
+        from brutex.data.window_ledger_store import plan_windows
 
-        for fn in (plan_windows, seed_enclosed_windows, default_fno_minute_window):
+        for fn in (plan_windows, default_fno_minute_window):
             params = inspect.signature(fn).parameters
             assert "observed" not in params, fn.__name__
             assert "observed_holidays" not in params, fn.__name__
+
+    def test_seed_gate_now_receives_overlay_sanctioned(self) -> None:
+        # DEC-SEED-OBSERVED-OVERLAY-001 — the deliberate pin FLIP: the seed gate
+        # takes the overlay (default frozenset() = byte-identical pre-threading).
+        from brutex.data.window_ledger_store import seed_enclosed_windows
+
+        params = inspect.signature(seed_enclosed_windows).parameters
+        assert "observed" in params
+        assert params["observed"].default == frozenset()
 
     def test_fib_definitions_engine_uses_default_overlay(
         self, monkeypatch: pytest.MonkeyPatch

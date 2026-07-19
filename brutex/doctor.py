@@ -375,6 +375,15 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     must never red the doctor. SPOT + FUT verdicts are unchanged (the gate
     is the COMMON :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
 
+    Screen parity (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001): the 1-minute
+    BASE read runs the SAME bad-tick screen the prebuild's read runs (one
+    ``BRUTEX_BAD_TICK_SCREEN`` switch — screened-vs-screened), so a lake
+    whose stored 1-minute legitimately holds a self-consistent >=4x
+    in-session spike (exactly the class the screen exists for) no longer
+    reads a permanent false FAIL. A lake that STAYS stale after a prebuild
+    re-run holds ghost bucket(s) with no surviving screened source — the
+    FAIL detail names the escape (DEC-DERIVED-GHOST-BUCKET-PRUNE-001).
+
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
     polars is unavailable.
@@ -396,12 +405,21 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
 
         interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
 
-        def _read(symbol_dir: Path, interval: str) -> pl.DataFrame:
+        def _read(
+            symbol_dir: Path, interval: str, *, screen_bad_ticks: bool = False
+        ) -> pl.DataFrame:
             # ONE COMMON reader with the sweep-preflight freshness gate
             # (DEC-SUSPICION-SWEEP-FIXES-001 G1) — keep-FIRST read dedup BEFORE
             # the sort (DEC-LAKE-READ-UNIQUE-001), doctor-labelled dedup source.
+            # The 1-minute BASE read opts into the prebuild-parity bad-tick
+            # screen (DEC-DERIVED-FRESHNESS-SCREEN-PARITY-001 — screened-vs-
+            # screened, one BRUTEX_BAD_TICK_SCREEN switch); the stored DERIVED
+            # reads stay unscreened (they are the prebuild's screened output).
             return read_lake_bars_frame(
-                symbol_dir, interval, source=f"doctor:{symbol_dir.name}/{interval}"
+                symbol_dir,
+                interval,
+                source=f"doctor:{symbol_dir.name}/{interval}",
+                screen_bad_ticks=screen_bad_ticks,
             )
 
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
@@ -422,7 +440,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             )
             if not stored_intervals:
                 continue
-            df_1m = _read(symbol_dir, "1minute")
+            df_1m = _read(symbol_dir, "1minute", screen_bad_ticks=True)
             stale: list[str] = []
             for interval in stored_intervals:
                 tf_minutes = parse_label(interval_to_label[interval])
@@ -437,7 +455,12 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                     detail=(
                         f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
                         f"{stale} — re-derive via the pipeline's automatic prebuild "
-                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001)"
+                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001); "
+                        "if it stays stale after that prebuild, the stored table holds "
+                        "ghost bucket(s) with no surviving screened 1-minute source "
+                        "(the latest-wins derived writer never deletes — "
+                        "DEC-DERIVED-GHOST-BUCKET-PRUNE-001): delete the symbol's "
+                        "derived TF partition dirs, then re-run the prebuild"
                     ),
                 )
             return CheckResult(
@@ -663,8 +686,13 @@ def _check_one_wheel_freshness(
     by the SIBLING :func:`_check_one_wheel_source_digest` stage
     (DEC-RUST-SOURCE-DIGEST-TWIN-001: the build.rs-baked source digest vs the
     Python-twin recompute over the repo crate tree), which closed the
-    follow-up previously named here; the CI golden/parity suites remain the
-    behavioral correctness proof. Likewise, a NON-editable wheel install whose
+    follow-up previously named here; behavioral correctness itself is proven
+    by LAYERED CI nets — the in-crate cargo bit-level tests (exact-value +
+    bitwise-refold pins, cargo-mutants-gated) at the Rust-source level, plus
+    the Python-side parity/golden suites whose ULP-boundary discriminators
+    kill rounding-order drift in the shipped WHEEL itself (refuter round 5,
+    MIGRATION.md #1928 — value-level parity cases alone were proven blind to
+    a 1-ULP fold-op-order mutant wheel). Likewise, a NON-editable wheel install whose
     default fingerprint ships inside the wheel itself self-snapshots at
     build time; the check has teeth when the fingerprint read is the repo
     checkout's (the editable/`maturin develop` layout).
@@ -789,8 +817,11 @@ def check_fno_math_wheel_freshness(
     ``ResidentSweepSim`` UNFLAGGED into the sweep hot path, so a stale
     installed ``_fno_math`` wheel is an always-on production risk (this very
     container shipped a stale wheel that SIGABRTed suites). Runtime
-    stale-wheel tripwire only — the CI golden/parity suites remain the
-    correctness proof.
+    stale-wheel tripwire only — correctness itself is proven by the layered
+    CI nets: the in-crate cargo bit-level tests at the Rust-source level plus
+    the Python-side parity/golden suites, whose ULP-boundary discriminators
+    reach WHEEL-level rounding-order drift too (refuter round 5, MIGRATION.md
+    #1928 — value-level parity cases alone were proven blind to that class).
 
     Parameters
     ----------

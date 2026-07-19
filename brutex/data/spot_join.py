@@ -115,7 +115,10 @@ def spot_close_by_ts_window(
         if not files:
             continue
         frame = (
-            pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore")
+            # glob=False: LITERAL month-file list (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
+            # underlying dir must never glob-read its siblings' spot closes.
+            pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore", glob=False)
             .select("timestamp", "close")
             .filter(pl.col("close").is_not_null())
             .collect()

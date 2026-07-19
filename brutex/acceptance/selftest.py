@@ -1,6 +1,6 @@
 """Self-test law (§7): teeth smoke (3 poisons, gating) + the full poison battery.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). A verifier that cannot
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). A verifier that cannot
 demonstrate it detects planted poison ON THIS BOX withholds all real-lake
 verdicts (exit 2). The twin lake is built with the REAL production writers
 (``ParquetWriter``, the real resamplers, the real ledger/bridge writers —
@@ -451,6 +451,9 @@ _LEDGER_FIELDS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    # DEC-STREAK-PROVENANCE-001 (club-P, PR #1547) appended the provenance
+    # column LAST — the mirror follows the ledger's appended-LAST law.
+    "streak_provenance",
 )
 
 

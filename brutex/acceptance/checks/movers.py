@@ -1,6 +1,6 @@
 """Check 5 — movers page-vs-DB truth: the ONE independent-recompute surface.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Leg A is the REAL wire
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Leg A is the REAL wire
 — in-process ``build_app`` + ``TestClient`` ``GET /api/v1/movers`` against the
 real lake (the DEC-SURFACE-TRIAL-001 precedent, GET-only). Leg B is the FENCED
 :mod:`brutex.acceptance.independent` recompute from the raw month parquet

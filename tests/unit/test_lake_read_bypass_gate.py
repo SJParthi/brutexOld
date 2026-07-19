@@ -109,6 +109,12 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
         "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
     ),
+    "brutex/engine/resilience_streaks.py": (
+        "reads its OWN stamp-validated <stem>.resilience.parquet sidecar (+ the "
+        "run_id-keyed trades sidecar for the adoption backfill) — run_id-keyed "
+        "engine artifacts under sweep_runs/, not lake bars; dedup identity does "
+        "not apply (DEC-SWEEP-RESULTS-DEPTH-001, losing-streak resilience)"
+    ),
     "brutex/dashboard/oneclick_artifacts.py": (
         "display-zone read of the results-depth EQUITY sidecar "
         "(<stem>.equity.parquet under sweep_runs/, run_id-keyed — the "
@@ -127,6 +133,13 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
+    ),
+    "brutex/data/lake_rust_ledger_render.py": (
+        "burn-in ROW-EQUIVALENCE readback — pq.read_table over the IN-MEMORY "
+        "just-rendered WINDOW-LEDGER parquet bytes (the rust arm vs the pyarrow "
+        "oracle, io.BytesIO — never a lake file, never bar/options rows); the "
+        "window_ledger_store sidecar class one seam over "
+        "(DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001)"
     ),
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"

@@ -1,6 +1,6 @@
 """Full-stack e2e: real-writer lake → run_acceptance → schema/audit/exit/deltas.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Drives the WHOLE
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Drives the WHOLE
 pipeline (real teeth smoke + all 7 checks + the real dashboard client) on a
 real-writer twin lake, twice — the second run proves the report chain
 (deltas + streaks) end to end.

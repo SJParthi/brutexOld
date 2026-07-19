@@ -68,15 +68,49 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
+def _bar_ohlc(day: int, minute: int, o: float, h: float, lo: float, c: float) -> CandleBar:
+    """One IST-session minute bar with EXPLICIT extremes (worst-case fixture)."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(h, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
 def _trending_bars(n_days: int, per_day: int) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos clear the rank gates."""
+    """The worst-case-rankable gap-up recipe (DEC-FILL-WORST-CASE-ONLY-001).
+
+    Narrow gap-up bars (range 0.50 < the SL 0.80), a shallow bearish bar each
+    7-bar cycle, and a DEEP bearish bar (range 0.85) every 4th cycle whose
+    stop-out keeps profit_factor finite — BUY combos clear the rank gates
+    under the one worst-case law at sl=80/tp=50.
+    """
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            bars.append(_bar_ohlc(d, m, o, h, lo, c))
+            price = c
     return bars
 
 

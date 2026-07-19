@@ -1,6 +1,6 @@
 # Runbook — `brutex verify-acceptance` (the operator acceptance verifier)
 
-> DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756.
+> DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1958.
 > ONE command that verifies the 7 acceptance classes on the REAL lake and
 > writes a hash-chained evidence report (tamper-EVIDENT against accidental
 > damage — see the §5 honest limit). Read-only on the lake (instruments.duckdb

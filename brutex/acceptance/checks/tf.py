@@ -1,6 +1,6 @@
 """Check 2 — derived-timeframe correctness (19 intraday TFs composed + 1day NEW).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Intraday freshness rides
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958). Intraday freshness rides
 the SAME seam the sweep preflight G1 gate + doctor consume
 (:func:`~brutex.data.tf_autoderive.lake_derived_freshness_verdicts` — exact
 OHLCV value equality after keep-first dedup, no tolerance). The 1day compare
