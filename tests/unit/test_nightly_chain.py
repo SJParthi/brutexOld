@@ -11,6 +11,7 @@ matrix (6 pass-through; SUSPECT→2 on all-green), the T1/T2 tripwires, and the
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from collections.abc import Callable, Mapping
 
@@ -587,11 +588,27 @@ def test_report_to_dict_golden() -> None:
         # re-locked for the two ADDITIVE keys (emitted always; None = absent).
         "box_update": None,
         "env_preflight": None,
+        # DEC-NIGHTLY-DECAY-R48-001 + DEC-CHAMPION-CHALLENGER-001 (LANE W5) —
+        # re-locked again for the two ADDITIVE adaptation-leg blocks.
+        "decay": None,
+        "champions": None,
         "ok": False,
         "suspect": False,
         "blocker": None,
         "exit_code": 0,
     }
+
+
+def test_report_to_dict_decay_champions_non_none() -> None:
+    """The LANE-W5 additive blocks serialize as plain dicts when present."""
+    filled = dataclasses.replace(
+        _report(),
+        decay={"status": "ok", "decayed": 1},
+        champions={"status": "ok", "transitions": []},
+    )
+    got = filled.to_dict()
+    assert got["decay"] == {"status": "ok", "decayed": 1}
+    assert got["champions"] == {"status": "ok", "transitions": []}
 
 
 def test_tripwire_to_dict_golden() -> None:

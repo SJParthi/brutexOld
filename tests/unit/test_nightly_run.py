@@ -1315,3 +1315,124 @@ def test_box_update_note_quiet_statuses_are_silent() -> None:
     assert _box_update_note({"status": "disabled"}) is None
     note = _box_update_note({"status": "updated", "wheels": "junk-not-a-list"})
     assert note == "📦 box-update: updated ?→? · wheels ok 0/0 · gate skipped"
+
+
+# ── LANE W5: decay + champions adaptation legs (report-level blocks) ─────
+
+
+def test_wet_run_carries_decay_and_champions_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wet run RUNS both guarded legs post-chain and threads their blocks
+    into the report + report.json (the #1939 report-level-block law). Over a
+    lake with no top100 artifact both legs read the honest quiet skip — and
+    the quiet statuses add NO honesty-note line."""
+    lake, results = _lake(tmp_path)
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results)
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    assert report.decay == {"status": "skipped", "reason": "no_top100_artifact"}
+    assert report.champions == {"status": "skipped", "reason": "no_top100_artifact"}
+    on_disk = json.loads(
+        (nightly_dir(results, report.nightly_id) / "report.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["decay"] == {"status": "skipped", "reason": "no_top100_artifact"}
+    assert on_disk["champions"] == {"status": "skipped", "reason": "no_top100_artifact"}
+    assert not any(n.startswith(("📉", "🏆")) for n in report.honesty_notes)
+
+
+def test_dry_run_never_runs_the_adaptation_legs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dry-runs carry None blocks — the legs are NEVER invoked (the
+    box_update dry-run law)."""
+    lake, results = _lake(tmp_path)
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results)
+
+    def _boom(**kwargs: Any) -> dict[str, object]:
+        raise AssertionError("the decay leg must not run on a dry-run")
+
+    monkeypatch.setattr("brutex.nightly.decay.run_decay_leg_guarded", _boom)
+    monkeypatch.setattr("brutex.nightly.champions.run_champions_leg_guarded", _boom)
+    report = run_nightly(_plan(lake, results, tmp_path, dry_run=True), seams=seams)
+    assert report.decay is None
+    assert report.champions is None
+
+
+def test_decay_note_arms() -> None:
+    """The 📉 one-liner: silent on absent/disabled/skipped/quiet-ok; fires on
+    DECAYED entries and on error statuses."""
+    from brutex.nightly.run import _decay_note
+
+    assert _decay_note(None) is None
+    assert _decay_note({"status": "disabled"}) is None
+    assert _decay_note({"status": "skipped", "reason": "no_top100_artifact"}) is None
+    assert _decay_note({"status": "ok", "decayed": 0, "checked": 3}) is None
+    assert _decay_note({"status": "ok", "checked": 3}) is None  # decayed absent
+    note = _decay_note(
+        {
+            "status": "ok",
+            "decayed": 2,
+            "checked": 5,
+            "run_id": "a" * 64,
+            "window_sessions": 63,
+        }
+    )
+    assert note is not None
+    assert note.startswith("📉 decay: 2/5")
+    assert "trailing 63 sessions" in note
+    err = _decay_note({"status": "error", "error": "boom"})
+    assert err == "📉 decay leg: error — boom"
+
+
+def test_champions_note_arms() -> None:
+    """The 🏆 one-liner: silent on quiet statuses + transition-free nights;
+    fires on promoted/seeded/retire-flagged and on error statuses."""
+    from brutex.nightly.run import _champions_note
+
+    assert _champions_note(None) is None
+    assert _champions_note({"status": "disabled"}) is None
+    assert _champions_note({"status": "skipped", "reason": "no_top100_artifact"}) is None
+    assert _champions_note({"status": "ok", "transitions": []}) is None
+    assert _champions_note({"status": "ok", "transitions": "junk"}) is None
+    quiet = _champions_note({"status": "ok", "transitions": [{"action": "RETAINED"}, "junk"]})
+    assert quiet is None  # RETAINED-only nights are the steady state
+    note = _champions_note(
+        {
+            "status": "ok",
+            "transitions": [
+                {"action": "PROMOTED"},
+                {"action": "SEEDED"},
+                {"action": "RETIRE_FLAGGED"},
+            ],
+        }
+    )
+    assert note == (
+        "🏆 champions: 1 promoted · 1 seeded · 1 retire-flagged (ledger champions/champions.jsonl)"
+    )
+    err = _champions_note({"status": "env_error", "error": "junk env"})
+    assert err == "🏆 champions leg: env_error — junk env"
+
+
+def test_wet_run_notes_surface_noteworthy_leg_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Noteworthy leg blocks land as honesty-note lines on the report."""
+    lake, results = _lake(tmp_path)
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results)
+    monkeypatch.setattr(
+        "brutex.nightly.decay.run_decay_leg_guarded",
+        lambda **kwargs: {
+            "status": "ok",
+            "decayed": 1,
+            "checked": 2,
+            "run_id": "a" * 64,
+            "window_sessions": 63,
+        },
+    )
+    monkeypatch.setattr(
+        "brutex.nightly.champions.run_champions_leg_guarded",
+        lambda **kwargs: {"status": "ok", "transitions": [{"action": "SEEDED"}]},
+    )
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    assert any(n.startswith("📉 decay: 1/2") for n in report.honesty_notes)
+    assert any(n.startswith("🏆 champions: 0 promoted · 1 seeded") for n in report.honesty_notes)

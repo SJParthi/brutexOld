@@ -450,3 +450,13 @@ def test_probe_sweep_runs_sibling_root_probed(tmp_path: Path) -> None:
     probe = probe_contract_artifacts(results, since_utc=1_000.0)
     assert probe.found == ("run_manifest", "top100")
     assert probe.paths["top100"] == str(sibling_run / "top100.json")
+
+
+def test_contract_run_roots_public_face_matches_private_law(tmp_path: Path) -> None:
+    """DEC-NIGHTLY-DECAY-R48-001: the PUBLIC run-roots face delegates to the
+    ONE private law (§11 COMMON — imported, never re-typed)."""
+    from brutex.nightly.sweep_binding import _contract_run_roots, contract_run_roots
+
+    results = tmp_path / "sweeps"
+    assert contract_run_roots(results) == _contract_run_roots(results)
+    assert any(p.name == "sweep_runs" for p in contract_run_roots(results))

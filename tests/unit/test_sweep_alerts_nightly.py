@@ -246,3 +246,74 @@ def test_deadman_disabled_and_publish_raise_are_best_effort() -> None:
         )
         is False
     )
+
+
+# ── LANE W5: strategy_decayed + champion_promoted ───────────────────────
+
+
+def test_strategy_decayed_is_phase_blocked_warn_with_run_dedupe() -> None:
+    """DEC-NIGHTLY-DECAY-R48-001: one aggregated WARN per sweep run id."""
+    notifier = FakeNotifier()
+    alerter = SweepAlerter(notifier=notifier)
+    assert (
+        alerter.strategy_decayed(
+            run_id="a" * 64, decayed=2, checked=5, detail="rank 1 sharpe 0.1<0.7x"
+        )
+        is True
+    )
+    [event] = notifier.published
+    assert event.kind == TelegramEventKind.PHASE_BLOCKED
+    assert event.severity == TelegramSeverity.WARN
+    assert event.dedupe_key == f"strategy-decayed:{'a' * 64}"
+    assert "2 of 5" in event.message
+    assert "DECAYED" in event.message
+    assert "retire\\-flagged" in event.message  # MarkdownV2-escaped body
+
+
+def test_strategy_decayed_disabled_and_publish_raise_are_best_effort() -> None:
+    assert (
+        SweepAlerter(resolver=lambda: None).strategy_decayed(
+            run_id="r", decayed=1, checked=1, detail="d"
+        )
+        is False
+    )
+    assert (
+        SweepAlerter(notifier=FakeNotifier(raise_on_publish=True)).strategy_decayed(
+            run_id="r", decayed=1, checked=1, detail="d"
+        )
+        is False
+    )
+
+
+def test_champion_promoted_is_run_complete_info_with_scope_dedupe() -> None:
+    """DEC-CHAMPION-CHALLENGER-001: INFO, deduped per (scope, run_id)."""
+    notifier = FakeNotifier()
+    alerter = SweepAlerter(notifier=notifier)
+    assert (
+        alerter.champion_promoted(
+            scope="NIFTY/1minute/bull", run_id="b" * 64, rank=3, detail="sharpe 1.5 vs 1.0"
+        )
+        is True
+    )
+    [event] = notifier.published
+    assert event.kind == TelegramEventKind.RUN_COMPLETE
+    assert event.severity == TelegramSeverity.INFO
+    assert event.dedupe_key == f"champion-promoted:NIFTY/1minute/bull:{'b' * 64}"
+    assert "Champion promoted" in event.message
+    assert "NIFTY/1minute/bull" in event.message
+    assert "never deleted" in event.message
+
+
+def test_champion_promoted_disabled_and_publish_raise_are_best_effort() -> None:
+    assert (
+        SweepAlerter(resolver=lambda: None).champion_promoted(
+            scope="s", run_id="r", rank=1, detail="d"
+        )
+        is False
+    )
+    assert (
+        SweepAlerter(notifier=FakeNotifier(raise_on_publish=True)).champion_promoted(
+            scope="s", run_id="r", rank=1, detail="d"
+        )
+        is False
+    )
