@@ -31,8 +31,9 @@ verify loop). Closes #1699 / #1605 / #1700. Both members were proven
 merge-ready on their own laps; this vehicle's lap proves the FOLD.
 Near-file-disjoint (metrics tree vs ci.yml + one redteam test); the hub
 files (docs/MIGRATION.md · CLAUDE.md · ci.yml) are union-reconciled and
-each member keeps its OWN ledger entries as-is (metrics #1974–#1976 +
-#1700's own entry) — no renumber here. ENGINE UNCHANGED —
+each member keeps its OWN ledger entries as-is (metrics #1974–#1976;
+#1700 is CI/test-only — a `ci(...)` change under the test-only exemption,
+no ledger entry) — no renumber here. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This
 header carries the pointer, never the story — the full record lives in
 the §1 Active-branch blurb + MIGRATION.md #1974–#1976.)
@@ -3946,7 +3947,8 @@ hostile-review pass._
   construction (the #1699 metrics tree vs #1700's ci.yml + one redteam
   test); the hub files (docs/MIGRATION.md · CLAUDE.md · ci.yml) are
   union-reconciled keep-both, and each member KEEPS its own ledger
-  entries as-is (metrics #1974–#1976 + #1700's own entry) — NO renumber
+  entries as-is (metrics #1974–#1976; #1700 is CI/test-only — a `ci(...)`
+  change under the test-only exemption, no ledger entry) — NO renumber
   here (cross-lane disjointness is a separate reservation-map + at-land
   reconcile). Byte-containment proven: the vehicle diff == the union of
   the two members' file sets modulo the hub union files, each member's
