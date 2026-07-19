@@ -84,6 +84,7 @@ from brutex.engine.tuple_complete import (
 from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -1814,6 +1815,132 @@ def recorded_overfit_from_audit(results_root: Path) -> OverfitGateConfig | None:
     return _overfit_from_recorded_leg(winner_leg, audit_path=winner_path)
 
 
+# ── Temporal-gate recount support (DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001) ────
+
+#: The exact key set ``sweep_run`` emits on every configured ``SWEEP_START``
+#: ``temporal_gate`` payload (the provenance-without-re-key channel of
+#: DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — the recount reader's fail-closed
+#: contract: a payload missing any key is a malformed tree, not a verifiable
+#: one (the Stage-3 knobs discipline).
+_TEMPORAL_GATE_KEYS: Final[tuple[str, ...]] = (
+    "mode",
+    "min_profitable_years_fraction",
+    "max_single_year_pnl_share",
+    "min_edge_year_sessions",
+    "min_judged_years",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedTemporalAudit:
+    """The tree's recorded temporal-gate history (``recorded_temporal_from_audit``).
+
+    ``config`` is the ONE recorded
+    :class:`~brutex.ranking.temporal.TemporalRobustnessConfig` when every
+    ``SWEEP_START`` line agrees (``None`` for a temporal-less tree — absent
+    audit, no ``SWEEP_START`` lines, or every line lacking the
+    ``temporal_gate`` key); ``consistent`` is ``False`` when the history is
+    MIXED (the ledgered resume envelope: the completion sentinel excludes the
+    gate config, so a resumed grid can mix gate regimes per tuple), in which
+    case ``config`` is ``None`` — one shadow config cannot reproduce a
+    mixed-regime tree, so the recount must degrade to INCONCLUSIVE, never
+    condemn.
+    """
+
+    config: TemporalRobustnessConfig | None
+    consistent: bool
+
+
+def recorded_temporal_from_audit(audit_path: Path) -> RecordedTemporalAudit:
+    """Read the tree's recorded temporal-gate config from its audit log.
+
+    The Tier-3 recount seam (DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 — the
+    recording+recovery channel the #1851 env-only resolve deferred to, the
+    condition-B1 twin of :func:`recorded_stage3_from_audit`): the launcher
+    threads ``SweepGridConfig.temporal`` (the shipped CLI default is
+    ``observe``) and BOTH modes capture the four emit-on-present period-stats
+    columns at the finalist re-sim — so a shadow re-sweep that does NOT run
+    the tree's RECORDED temporal regime byte-diverges on the columns (and, in
+    ``gate`` mode, on WHICH rows persist) and false-condemns every good store
+    as verdict-grade ``recount_divergence`` corruption (the VIX-stamper
+    round-2 BLOCKER class one config over). The gate config never enters run
+    identity, so the tree's own hash-chained ``SWEEP_START``
+    ``temporal_gate`` payloads (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001's
+    provenance-without-re-key channel) are the ONE recorded channel — never
+    the verify-time environment (``$BRUTEX_TEMPORAL`` must not be consulted:
+    an operator verifying under a different env than the launch would
+    otherwise re-introduce the false divergence this reader kills).
+
+    Returns the no-history record (``config=None, consistent=True``) when the
+    file is absent. Streams the chain via
+    :func:`brutex.orchestrator.audit.iter_entries` — O(1) peak memory in
+    chain length (DEC-AUDIT-READERS-STREAM-001). HONEST residual: an
+    audit-less recount (rotated chain + explicit ``--data-snapshot-hash`` /
+    ``--indicator-version`` / ``--code-commit-sha`` overrides) has no
+    recorded channel and recounts temporal-less — over a temporal-recorded
+    tree that still byte-diverges (the Stage-3 audit-less-knobs residual's
+    exact shape).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable (an :class:`AuditError` at the
+        ``iter_entries`` call or mid-iteration), a ``temporal_gate`` payload
+        is not a mapping / is missing a key, or its values do not form a
+        valid :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`
+        (a malformed tree is not a verifiable tree). An unreadable chain
+        raising here never widens the m2 survival law: the consumer reads
+        this chain (``audit/sweep-all.jsonl``) only on a ``--recount``
+        verify, whose own ``recorded_audit_facts`` already hard-fails on the
+        SAME unreadable file first.
+    """
+    if not audit_path.exists():
+        return RecordedTemporalAudit(config=None, consistent=True)
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    seen: set[TemporalRobustnessConfig | None] = set()
+    try:
+        # The try spans the ITERATION (streaming AuditError raises mid-loop).
+        for entry in iter_entries(audit_path):
+            if entry.action != "SWEEP_START":
+                continue
+            raw = entry.payload.get("temporal_gate")
+            if raw is None:
+                seen.add(None)
+                continue
+            if not isinstance(raw, Mapping):
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a mapping"
+                )
+            missing = [key for key in _TEMPORAL_GATE_KEYS if key not in raw]
+            if missing:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) missing {missing}"
+                )
+            try:
+                seen.add(
+                    TemporalRobustnessConfig(
+                        min_profitable_years_fraction=float(raw["min_profitable_years_fraction"]),
+                        max_single_year_pnl_share=float(raw["max_single_year_pnl_share"]),
+                        min_edge_year_sessions=int(raw["min_edge_year_sessions"]),
+                        min_judged_years=int(raw["min_judged_years"]),
+                        mode=str(raw["mode"]),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise SweepVerifyError(
+                    f"SWEEP_START temporal_gate payload at {audit_path} "
+                    f"(seq {entry.seq}) is not a valid gate config: {exc}"
+                ) from exc
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    if len(seen) > 1:
+        return RecordedTemporalAudit(config=None, consistent=False)
+    return RecordedTemporalAudit(config=next(iter(seen), None), consistent=True)
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
@@ -2610,6 +2737,7 @@ __all__ = [
     "RecordedContext",
     "RecordedStage3Audit",
     "RecordedStage3Knobs",
+    "RecordedTemporalAudit",
     "SweepVerifyError",
     "TreeVerifyReport",
     "VerifyFinding",
@@ -2620,6 +2748,7 @@ __all__ = [
     "recorded_overfit_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
+    "recorded_temporal_from_audit",
     "stale_roll_schedule_refusal",
     "verify_identity",
     "verify_structural",

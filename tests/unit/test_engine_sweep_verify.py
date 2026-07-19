@@ -53,6 +53,7 @@ from brutex.engine.sweep_verify import (
     recorded_overfit_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
+    recorded_temporal_from_audit,
     stale_roll_schedule_refusal,
     verify_identity,
     verify_structural,
@@ -73,6 +74,7 @@ from brutex.engine.tuple_complete import (
 )
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking import OverfitGateConfig
+from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
 
@@ -2929,6 +2931,194 @@ class TestRecordedStage3FromAudit:
         record = recorded_stage3_from_audit(path)
         assert record.knobs is not None
         assert record.knobs.stage3_top_k == 3
+
+
+class TestRecordedTemporalFromAudit:
+    """The Tier-3 temporal recount reader (DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001).
+
+    The condition-B1 twin of ``recorded_stage3_from_audit``: the shadow
+    re-sweep must run the tree's RECORDED temporal regime (BOTH modes capture
+    the four emit-on-present period-stats columns at the finalist re-sim), so
+    the reader derives it from the hash-chained ``SWEEP_START``
+    ``temporal_gate`` payloads — never the verify-time ``$BRUTEX_TEMPORAL``
+    environment. Fails-before: without the reader + its cli threading, the
+    recount resolved the regime from the verify-time ENV (the #1851 residual)
+    — any tree recounted under a different env than its launch byte-diverged
+    on the period-stats columns and read a false verdict-grade CORRUPT.
+    """
+
+    def _gate_payload(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "mode": "observe",
+            "min_profitable_years_fraction": 0.5,
+            "max_single_year_pnl_share": 0.6,
+            "min_edge_year_sessions": 120,
+            "min_judged_years": 2,
+        }
+        base.update(overrides)
+        return base
+
+    def _start_payload(self, temporal: dict[str, object] | object | None) -> dict[str, object]:
+        payload: dict[str, object] = {"instrument": "NSE-NIFTY", "k": 1}
+        if temporal is not None:
+            payload["temporal_gate"] = temporal
+        return payload
+
+    def test_absent_audit_is_no_history(self, tmp_path: Path) -> None:
+        record = recorded_temporal_from_audit(tmp_path / "nope.jsonl")
+        assert record.config is None
+        assert record.consistent is True
+
+    def test_temporal_less_sweep_starts_read_none_consistent(self, tmp_path: Path) -> None:
+        """A pre-temporal / --temporal-mode off tree recounts temporal-less."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+        record = recorded_temporal_from_audit(path)
+        assert record.config is None
+        assert record.consistent is True
+
+    def test_reads_the_recorded_config(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(
+                    self._gate_payload(mode="gate", min_profitable_years_fraction=0.25)
+                ),
+            )
+            # Non-SWEEP_START entries are ignored (never parsed for the key).
+            audit.append(action="TUPLE_DONE", subject="s", payload={"temporal_gate": "junk"})
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is True
+        assert record.config == TemporalRobustnessConfig(
+            min_profitable_years_fraction=0.25,
+            max_single_year_pnl_share=0.6,
+            min_edge_year_sessions=120,
+            min_judged_years=2,
+            mode="gate",
+        )
+
+    def test_agreeing_repeat_lines_stay_consistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is True
+        assert record.config is not None and record.config.mode == "observe"
+
+    def test_mixed_configured_and_configless_lines_flag_inconsistent(self, tmp_path: Path) -> None:
+        """The ledgered resume envelope: gate regimes can mix per tuple."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(None))
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is False
+        assert record.config is None  # one shadow config cannot reproduce the tree
+
+    def test_disagreeing_configs_flag_inconsistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(self._gate_payload(mode="gate")),
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.consistent is False
+        assert record.config is None
+
+    def test_non_mapping_payload_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload("junk"))
+        with pytest.raises(SweepVerifyError, match="not a mapping"):
+            recorded_temporal_from_audit(path)
+
+    def test_missing_key_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        gate = self._gate_payload()
+        del gate["min_judged_years"]
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=self._start_payload(gate))
+        with pytest.raises(SweepVerifyError, match="missing"):
+            recorded_temporal_from_audit(path)
+
+    def test_invalid_config_values_raise(self, tmp_path: Path) -> None:
+        """A tampered payload never constructs a config silently (fail closed)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(self._gate_payload(min_profitable_years_fraction=1.5)),
+            )
+        with pytest.raises(SweepVerifyError, match="not a valid gate config"):
+            recorded_temporal_from_audit(path)
+
+    def test_uncoercible_value_raises(self, tmp_path: Path) -> None:
+        """A non-numeric fraction maps to the SAME typed refusal (TypeError arm)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._start_payload(
+                    self._gate_payload(min_profitable_years_fraction=[0.5])
+                ),
+            )
+        with pytest.raises(SweepVerifyError, match="not a valid gate config"):
+            recorded_temporal_from_audit(path)
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_temporal_from_audit(path)
+
+    def test_mid_chain_corruption_after_valid_line_still_maps(self, tmp_path: Path) -> None:
+        """The try spans the streaming iteration (DEC-AUDIT-READERS-STREAM-001)."""
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_temporal_from_audit(path)
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin: the reader rides ``iter_entries``, never the
+        whole-chain ``read_entries`` list (the stage3 reader's discipline)."""
+        from brutex.orchestrator import audit as audit_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(audit_mod, "read_entries", _boom)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START", subject="s", payload=self._start_payload(self._gate_payload())
+            )
+        record = recorded_temporal_from_audit(path)
+        assert record.config is not None and record.config.mode == "observe"
 
 
 class TestCellRecountCodes:

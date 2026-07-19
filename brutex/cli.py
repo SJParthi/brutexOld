@@ -10570,6 +10570,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         plan_expected_stores,
         recorded_audit_facts,
         recorded_overfit_from_audit,
+        recorded_temporal_from_audit,
         verify_identity,
         verify_structural,
     )
@@ -10854,45 +10855,53 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     elif max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
     # Temporal-robustness parity for the Tier-3 shadow re-sweep
-    # (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 × DEC-SWEEP-OVERFIT-RECOUNT-
-    # RECOVERY-001, the reconcile-round-2 fix — MIGRATION.md #1851): the
-    # launcher resolves `--temporal-mode` > $BRUTEX_TEMPORAL > the shipped
-    # OBSERVE default and threads it as `grid.temporal`, which stamps the
-    # four optional per-period stats columns onto every persisted finalist
-    # row carrying trades. The temporal config is IDENTITY-EXEMPT (never in
-    # `_tuple_digest`), so a temporal-blind verify grid planned the SAME
-    # store addresses yet its shadow re-sweep rendered rows WITHOUT the
-    # columns — every default-launched tree whose finalists held trades read
-    # a recount_divergence FALSE-CORRUPT under a fully matched context (the
-    # residual the #1851 grid_mismatch recovery unmasked; executing pins:
-    # the 3 recount tests in tests/integration/test_cli_sweep_all_vix_stamp.py
-    # + test_sweep_all_futures_launch.py::
-    # test_sweep_verify_recount_round_trips_a_futures_tree — all 4 FAIL
-    # without this block). Resolve here EXACTLY as the launcher's default arm
-    # does — ENV-ONLY: sweep-verify takes NO --temporal-mode flag, so the
-    # only way to match a non-default launch is exporting the SAME
-    # $BRUTEX_TEMPORAL at verify time; junk $BRUTEX_TEMPORAL fails loud
-    # pre-plan. HONEST residual (SYMMETRIC, both directions): temporal mode
-    # is not yet recorded on the START payload, so ANY tree launched under a
-    # NON-default mode recounted under a mismatched env byte-diverges —
-    # including the off-launched case: a legitimately `--temporal-mode off`
-    # tree that previously verified clean now reads a LOUD rc-3 false-corrupt
-    # recount_divergence when recounted under the default OBSERVE env
-    # (narrow, loud, never a false-clean; remediation today =
-    # BRUTEX_TEMPORAL=off at verify). Recording+recovery à la the
-    # gate_config channel is the IMMEDIATE next item —
-    # DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 (MIGRATION.md #1851
-    # reconcile-round-2 note; the defer is coordinator-accepted on the
-    # identity-exemption risk argument: temporal never enters
-    # `_tuple_digest`, so a wrong resolution mis-COLUMNS a shadow row —
-    # never mis-ADDRESSES the tree).
-    try:
-        temporal_config = resolve_temporal_config(None, None, None)
-    except CliUserError as exc:
-        print(f"[brutex] {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
-    if temporal_config is not None:
-        grid_kwargs["temporal"] = temporal_config
+    # (DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 — the recorded channel #1851's
+    # env-only resolve DEFERRED to, now landed; parent
+    # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): the launcher resolves
+    # `--temporal-mode` > $BRUTEX_TEMPORAL > the shipped OBSERVE default and
+    # threads it as `grid.temporal`, which stamps the four optional
+    # per-period stats columns onto every persisted finalist row carrying
+    # trades — so the shadow re-sweep MUST run the SAME temporal regime the
+    # tree RECORDED or it byte-diverges on the columns (and a gate-mode tree
+    # additionally on WHICH rows persist) and false-condemns every good
+    # store as verdict-grade CORRUPT. The gate config never enters run
+    # identity (`_tuple_digest`), so the recorded channel is the tree's OWN
+    # hash-chained SWEEP_START `temporal_gate` payloads
+    # (recorded_temporal_from_audit) — NEVER the verify-time $BRUTEX_TEMPORAL
+    # environment (#1851's env-only resolve is REPLACED, not demoted: a
+    # verify under a different env than the launch must still round-trip,
+    # and an env fallback would silently re-introduce the same mismatch
+    # class — the shipped env default resolves OBSERVE, so an audit-less
+    # off-launched tree would grow phantom columns). A MIXED history (a
+    # resumed grid can mix gate regimes per tuple — the ledgered honest
+    # envelope; the completion sentinel excludes the gate config) is a
+    # context MISMATCH: one shadow config cannot reproduce the per-tuple
+    # capture, so it rides the recount `mismatches` ladder below and
+    # divergence degrades to INCONCLUSIVE, never heal-grade. HONEST residual
+    # (the Stage-3 audit-less-knobs shape, narrowed from #1851's SYMMETRIC
+    # env residual): an audit-less recount (rotated/absent chain + explicit
+    # --data-snapshot-hash/--indicator-version/--code-commit-sha overrides)
+    # has no recorded channel and recounts temporal-less — over a
+    # temporal-recorded tree that still byte-diverges LOUDLY (never a
+    # false-clean). Read on the recount arm only — temporal is
+    # identity-exempt, so Tier-1/2 never need it (the recorded_apriori
+    # consulted-only-when-it-can-matter law).
+    temporal_mismatch: str | None = None
+    if recount:
+        try:
+            temporal_audit = recorded_temporal_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        except SweepVerifyError as exc:
+            print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if not temporal_audit.consistent:
+            temporal_mismatch = (
+                "temporal_gate: the audit records MIXED temporal-gate configs across "
+                "SWEEP_START entries (a resumed grid can mix gate regimes per tuple — "
+                "DEC-SWEEP-TEMPORAL-ROBUSTNESS-001), so ONE shadow config cannot "
+                "reproduce the tree's per-tuple capture"
+            )
+        elif temporal_audit.config is not None:
+            grid_kwargs["temporal"] = temporal_audit.config
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
@@ -11103,6 +11112,13 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         # read verdict-grade recount_divergence (the false-corrupt hazard).
         if mode_mismatch is not None:
             mismatches.append(mode_mismatch)
+        # Temporal-regime parity (DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001): a
+        # MIXED per-tuple temporal history is a CONTEXT mismatch — it rides
+        # the SAME refuse/inconclusive ladder, so its byte-divergence can
+        # never read verdict-grade recount_divergence (the false-corrupt
+        # hazard; the exploration-mode precedent above).
+        if temporal_mismatch is not None:
+            mismatches.append(temporal_mismatch)
         # F16 schedule evidence (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a lake
         # that gained/lost a contract since the recorded run is surfaced with
         # BOTH schedules named — not just a bare snapshot-hash diff.
