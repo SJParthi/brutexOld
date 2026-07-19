@@ -2420,6 +2420,64 @@ class TestWindowPayloadReadScope:
         since_counts = payload["counts_since_pull_start"]
         assert since_counts == payload["counts"]  # every seeded row is post-since + in scope
 
+    def test_scoped_duckdb_equals_python_fold_with_pending_deltas(self, tmp_path: Path) -> None:
+        """The r4 item-2 pin — the MID-PULL production shape: bounded scope ×
+        the base+delta latest-wins fold source.
+
+        Mid-pull the ledger source becomes the 2-param latest-wins subquery
+        (``(files_list, base)`` — a LIST bind) while every route now threads a
+        bounded scope; no other test combined the two, so a positional
+        interleave regression in the three scoped queries (the counts-scoped
+        CASE binds BEFORE the source — a SELECT-list predicate textually
+        precedes the FROM; since/page bind source-first) would ship green and
+        silently degrade every mid-pull census/phase poll to the legacy fold.
+        Pins the delta-shape scoped payload SQL == Python, with the fast path
+        PROVEN engaged (``counts_since_pull_start`` is fast-path-only — the
+        legacy fold omits it, so a degrade cannot pass vacuously).
+        """
+        from brutex.data.window_ledger_store import append_ledger_delta, load_window_ledger
+
+        _seed_mixed_scope_ledger(tmp_path)
+        live = load_window_ledger(tmp_path)
+        # A NEW admitted-index row + a NEW stock row + a latest-wins
+        # OVERWRITE of an existing admitted base row — all three delta shapes.
+        for security_id, bars in (("SENSEX", 7), ("TCS", 7), ("NIFTY", 9)):
+            live.record(
+                _window_key(security_id),
+                raw_bars=bars,
+                error_type=None,
+                bars_appended=bars,
+                now=_WINDOW_NOW,
+            )
+        assert append_ledger_delta(live, tmp_path) == 3
+        scope = resolve_feed_scope("groww")
+        conn = duckdb.connect()
+        try:
+            duck = build_window_payload(
+                tmp_path,
+                symbol_for_id=_R11_SID_MAP,
+                scope=scope,
+                conn=conn,
+                since="2020-01-01T00:00:00+00:00",
+            )
+        finally:
+            conn.close()
+        python_fold = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope)
+        # The fast-path witness: a degraded (legacy-fold) serve OMITS the
+        # per-run figure, so this key proves all three scoped queries ran.
+        assert duck["counts_since_pull_start"] == duck["counts"]
+        assert duck["counts"] == python_fold["counts"]
+        assert duck["count"] == python_fold["count"]
+        assert duck["matched"] == python_fold["matched"]
+        assert duck["out_of_scope"] == python_fold["out_of_scope"]
+        symbols = {w["symbol"] for w in duck["windows"]}
+        assert symbols == {w["symbol"] for w in python_fold["windows"]}
+        # The delta rows genuinely landed: SENSEX is delta-only + admitted;
+        # TCS is delta-only + excluded (never served, counted).
+        assert "SENSEX" in symbols
+        assert "TCS" not in symbols
+        assert duck["out_of_scope"]["windows"] == 4  # RELIANCE spot+FUT, 500325|, TCS
+
 
 class TestWindowScopeBindEdges:
     """R11 bind-edge coverage: empty admitted sets + the records fallback."""
