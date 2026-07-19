@@ -1,0 +1,43 @@
+# Maturin build config for brutex-ops (DEC-CROSSVERIFY-RUST-CORE first cut).
+#
+# Mixed Python + Rust layout (the brutex-feed / trading-core shape): the
+# cdylib ships as the private submodule `brutex_ops._brutex_ops`;
+# `python/brutex_ops/__init__.py` re-exports it. `features = ["python"]`
+# turns on the optional pyo3 dependency (extension-module + abi3-py312) so
+# the wheel includes the binding.
+#
+# DELIBERATELY not installed by the main CI test job: the facade
+# (`brutex/crossverify/rust_seam.py`) is default-OFF and degrades loudly to
+# the Python oracles when the crate is absent; only the dedicated
+# non-required `.github/workflows/ops-rust-parity.yml` lane builds +
+# installs it and runs the flag-ON golden/differential legs (the
+# brutex-lake lane posture).
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-ops"
+version = "0.1.0"
+description = "BruteX ops-lane Rust kernels — cross-verify CSV byte assembly + canonical identity/S3-key laws."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "brutex_ops._brutex_ops"
+features = ["python"]
+strip = true
+# The committed Cargo.lock is the dependency pin — a wheel build must never
+# silently re-resolve it (the brutex-lake `locked = true` posture).
+locked = true
