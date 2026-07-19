@@ -1,0 +1,144 @@
+# sweep-ops-rust-parity.yml — the brutex-sweep-ops crate build + parity lane.
+#
+# DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #1957; ADR-0020 slice T15).
+# The sweep-ops Rust seams are DEFAULT-OFF behind BRUTEX_SWEEP_OPS_RUST and
+# the main CI test job deliberately never installs the crate (the facade
+# degrades loudly to the Python oracles when it is absent), so this
+# dedicated lane is where the crate has teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test --release (--locked
+#      everywhere — the committed Cargo.lock is enforced; the cargo tests
+#      carry the per-law unit matrices incl. the round-half-even tie pins
+#      and the exact-int/f64 division band edges).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The REAL-wheel parity suite
+#      (tests/integration/test_sweep_ops_rust_parity.py — every routed law
+#      flag-ON vs the Python oracle, incl. the hypothesis differential
+#      over the gated domain) plus the wheel-free facade unit matrix
+#      (tests/unit/test_engine_sweep_ops_rust.py).
+#   4. The flag-ON verbatim legs: the UNMODIFIED stem suites of every
+#      routed module re-run byte-identically under BRUTEX_SWEEP_OPS_RUST=1
+#      with the real wheel installed (the data-rust-parity heal-twin
+#      precedent) — run_layout / sweep_identity / sweep_stall_policy
+#      (slices 0/1) + sweep_progress / sweep_sla_guard / sweep_mem_budget /
+#      sweep_preflight / sweep_liveness (slice 1b).
+#
+# NOT a required gate: it gates the FUTURE default-ON flip, which must cite
+# a fresh green run of this lane as a stated precondition — a red run here
+# blocks re-engaging the flag, never an unrelated merge.
+#
+# COST HONESTY: the crate is stdlib-pure Rust (no polars graph) — a cold
+# run compiles in ~seconds, so no cargo cache is carried (the lake lane's
+# cache machinery earns its keep against a ~6.5 min polars build; here it
+# would be pure config surface).
+
+name: sweep-ops-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-sweep-ops/**"
+      - "brutex/engine/sweep_ops_rust.py"
+      - "tests/unit/test_engine_sweep_ops_rust.py"
+      - "tests/fakes/sweep_ops_crate.py"
+      - "tests/integration/test_sweep_ops_rust_parity.py"
+      - ".github/workflows/sweep-ops-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-sweep-ops/**"
+      - "brutex/engine/sweep_ops_rust.py"
+      - "tests/unit/test_engine_sweep_ops_rust.py"
+      - "tests/fakes/sweep_ops_crate.py"
+      - "tests/integration/test_sweep_ops_rust_parity.py"
+      - ".github/workflows/sweep-ops-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Cargo network resilience — the ci.yml convention.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  sweep-ops-rust-parity:
+    name: brutex-sweep-ops build + sweep-ops parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-sweep-ops
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings (--locked, both feature arms)
+        working-directory: rust/brutex-sweep-ops
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked --features python -- -D warnings
+
+      - name: cargo test (the per-law unit matrices, --locked)
+        working-directory: rust/brutex-sweep-ops
+        run: cargo test --release --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (dev extras) + the brutex-sweep-ops wheel
+        # Belt-and-suspenders crates.io flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-sweep-ops; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-sweep-ops failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-sweep-ops failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Facade matrix + real-wheel parity suite
+        # With the wheel installed the parity suite cannot module-skip —
+        # -rs surfaces any skip reason in the log as belt-and-suspenders.
+        run: |
+          pytest -rs -q \
+            tests/unit/test_engine_sweep_ops_rust.py \
+            tests/integration/test_sweep_ops_rust_parity.py
+
+      - name: Flag-ON verbatim legs (the UNMODIFIED routed-module stem suites)
+        run: |
+          BRUTEX_SWEEP_OPS_RUST=1 pytest -rs -q \
+            tests/unit/test_engine_run_layout.py \
+            tests/unit/test_engine_sweep_identity.py \
+            tests/unit/test_engine_sweep_stall_policy.py \
+            tests/unit/test_engine_sweep_progress.py \
+            tests/unit/test_engine_sweep_sla_guard.py \
+            tests/unit/test_engine_sweep_mem_budget.py \
+            tests/unit/test_engine_sweep_preflight.py \
+            tests/unit/test_engine_sweep_liveness.py
