@@ -87,6 +87,7 @@ reports the honest tuple/combo counts as they run.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -120,9 +121,14 @@ DEFAULT_ONECLICK_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY,SENSEX"
 DEFAULT_INTERVALS: Final[str] = "1minute,5minute,15minute"
 #: Default trade directions (both legs of a directional edge).
 DEFAULT_DIRECTIONS: Final[str] = "BUY,SELL"
-#: Default conditions-per-combo K values — institutional default k<=3 (O-f);
-#: mirrors the CLI ``--k`` default shape (a CSV of small depths).
-DEFAULT_K: Final[str] = "1,2,3"
+#: Default conditions-per-combo K values (mirrors the CLI ``--k`` default —
+#: since DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752, the
+#: Apriori-to-EXTINCTION token: per cell the k-ladder runs k=1,2,3,… until no
+#: combo survives min-hits. The ONE sanctioned second copy of the CLI token
+#: (`brutex.cli.EXTINCTION_K_TOKEN` — the dashboard must not import the CLI at
+#: module top), drift-PINNED against the CLI argparse ``--k`` default by test.
+#: A numeric K stays the classic fixed-K sweep, byte-identical.
+DEFAULT_K: Final[str] = "extinction"
 #: Default stop-loss / take-profit legs — a 3×3 on-grid paisa grid (O-g),
 #: chosen to satisfy the Mode-A CMA-ES refinement axes
 #: (:data:`brutex.engine.stage3_grid.MODE_A_SL_AXIS` = ``[5, 200]`` paisa
@@ -137,6 +143,14 @@ DEFAULT_TOP: Final[int] = 1000
 #: Default run-mode identity label stamped on the run hash — distinguishes
 #: an institutional launch from the retired light "A"-moded research runs.
 DEFAULT_MODE: Final[str] = "INSTITUTIONAL"
+#: The ONE-CLICK flow's own k default — merge-forward composition
+#: (DEC-SWEEP-APRIORI-DEFAULT-001 × DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001):
+#: the dashboard-wide :data:`DEFAULT_K` is the extinction token (the CLI-law
+#: drift pin), but the one-click preflight/estimator REQUIRES an enumerable
+#: numeric k CSV — so the institutional k<=3 default (O-f) lives on the
+#: one-click surface, where the estimator's tuple grid stays exactly
+#: computable ahead of launch.
+ONECLICK_K: Final[str] = "1,2,3"
 #: Default lake exchange / segment partition for the index sweep.
 DEFAULT_EXCHANGE: Final[str] = "NSE"
 DEFAULT_SEGMENT: Final[str] = "INDEX"
@@ -283,8 +297,23 @@ def _normalise_directions(value: str | None) -> str:
 
 
 def _normalise_k(value: str | None) -> str:
-    """Validate every K parses to an int in ``[1, TOTAL_CONDITIONS]``; return the CSV."""
+    """Validate K: the ``extinction`` token OR ints in ``[1, TOTAL_CONDITIONS]``.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001: a blank field falls to :data:`DEFAULT_K`
+    (the extinction token — the CLI default), which flows verbatim through the
+    1:1 ``cmd_sweep_all`` kwargs to the ONE CLI resolver; a numeric CSV
+    validates exactly as before (the legacy byte-identical arm). Mixing the
+    token with numbers is a 400 — the two grammars don't compose.
+    """
     tokens = _clean_csv(value, DEFAULT_K)
+    lowered = [tok.lower() for tok in tokens]
+    if DEFAULT_K in lowered:
+        if lowered != [DEFAULT_K]:
+            raise ValueError(
+                f"k must be either '{DEFAULT_K}' (the Apriori extinction default) or a "
+                f"CSV of whole numbers 1..{_MAX_K} — got {','.join(tokens)!r}"
+            )
+        return DEFAULT_K
     out: list[str] = []
     for token in tokens:
         try:
@@ -748,12 +777,47 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     ``cmd_sweep_all`` itself — the orchestration is exercised end-to-end by the CLI
     integration tests; the dashboard route tests replace THIS function with an
     offline fake (no lake, no sweep) to keep the unit suite hermetic.
+
+    ENV HYGIENE (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752): this is
+    the ONE in-process embedder of ``cmd_sweep_all``, whose extinction default
+    setdefault-writes ``BRUTEX_SWEEP_APRIORI`` into the process env for the
+    spawn workers. The dashboard process OUTLIVES the sweep job (unlike a CLI
+    run, which exits), so the flag is snapshot-restored here — success AND
+    raise — or a leak would silently flip a LATER explicit-K dashboard sweep
+    into apriori mode (different tallies + a raised max_combos ⇒ a different
+    sweep_id — a byte-identity violation). The single-flight job guarantees no
+    concurrent reader DURING the run.
+
+    SINGLE-FLIGHT DEPENDENCY (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
+    #1752 review fix round 2): the "no concurrent reader DURING the run"
+    claim above is not free-standing — it is EXACTLY the guarantee of the
+    dashboard route layer launching this shim through
+    ``BackgroundPullJob.start(job_kind=JOB_KIND_SWEEP)``
+    (:class:`brutex.dashboard.pull_jobs.BackgroundPullJob` — one background
+    job per process, a second ``start`` while a job runs is REFUSED). If a
+    future caller ever invokes this function OUTSIDE that single-flight job,
+    the env snapshot-restore below becomes a read-modify-write race against
+    any concurrent ``BRUTEX_SWEEP_APRIORI`` reader/writer in the same
+    process — re-establish an equivalent mutual exclusion first.
     """
     from brutex.cli import cmd_sweep_all
+    from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
 
-    return cmd_sweep_all(
-        **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root)
-    )
+    # INTERLEAVE HAZARD (see SINGLE-FLIGHT DEPENDENCY above): this snapshot →
+    # cmd_sweep_all's setdefault-write → the finally-restore is safe ONLY
+    # because BackgroundPullJob.start(job_kind=JOB_KIND_SWEEP) serialises the
+    # whole span — two interleaved runs would capture each other's
+    # mid-flight value as `before` and restore a stale flag.
+    before = os.environ.get(SWEEP_APRIORI_ENV)
+    try:
+        return cmd_sweep_all(
+            **build_sweep_kwargs(request, lake_root=lake_root, results_root=results_root)
+        )
+    finally:
+        if before is None:
+            os.environ.pop(SWEEP_APRIORI_ENV, None)
+        else:
+            os.environ[SWEEP_APRIORI_ENV] = before
 
 
 # ── multi-symbol / SENSEX fan-out (gap-hunt MAJOR #9, ruling 9) ──────────────
@@ -845,12 +909,17 @@ def resolve_oneclick_sweep_plan(
     raw_symbols = _clean_csv(symbols, DEFAULT_ONECLICK_SYMBOLS)
     groups = group_symbols_by_exchange(raw_symbols)
     run_id = run_id_factory()
+    # The one-click surface's OWN k default (merge-forward composition — see
+    # :data:`ONECLICK_K`): a blank/absent k resolves to the estimable
+    # institutional CSV HERE, never to the dashboard-wide extinction token
+    # (whose adaptive ladder the preflight estimator refuses by design).
+    resolved_k = k if k is not None and k.strip() else ONECLICK_K
     requests = tuple(
         resolve_sweep_request(
             symbols=",".join(groups[exchange]),
             intervals=intervals,
             directions=directions,
-            k=k,
+            k=resolved_k,
             sl=sl,
             tp=tp,
             top=top,
@@ -896,6 +965,20 @@ def _axes_counts(request: SweepRunRequest) -> tuple[list[int], int, int]:
     first (:func:`_dedup_axis`) so a repeated CSV token never inflates the
     estimate beyond what the engine will actually grid.
     """
+    if request.k.strip().lower() == DEFAULT_K:
+        # Merge-forward composition (DEC-SWEEP-APRIORI-DEFAULT-001 ×
+        # DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001): the extinction ladder is
+        # ADAPTIVE (k=1,2,3,… until no combo survives min-hits), so a preflight
+        # cannot enumerate its tuple grid ahead of time — refuse LOUDLY (the
+        # route's ValueError→400 lane) instead of a raw int() crash. The
+        # one-click flow's own default is the estimable institutional CSV
+        # (:data:`ONECLICK_K`), so this arm is reachable only by an EXPLICIT
+        # 'extinction' entry on the one-click form.
+        raise ValueError(
+            "the one-click preflight estimator needs a numeric k CSV — the "
+            "'extinction' ladder is adaptive and not estimable ahead of time; "
+            "use the classic sweep form (or the CLI) for an extinction run"
+        )
     k_values = [int(tok) for tok in _dedup_axis(request.k)]
     other_axes_product = (
         len(_dedup_axis(request.symbols))
@@ -1100,6 +1183,7 @@ __all__ = [
     "DEFAULT_SYMBOLS",
     "DEFAULT_TOP",
     "DEFAULT_TP",
+    "ONECLICK_K",
     "OneClickSweepPlan",
     "SweepRunRequest",
     "build_sweep_kwargs",

@@ -86,6 +86,23 @@ _TUPLE_DIGEST_LEN: Final[int] = 16
 #: SHA-256 hex length — the store's ``FlushResult.content_hash`` format.
 _CONTENT_HASH_LEN: Final[int] = 64
 
+#: The exploration-MODE-dependent census triple (DEC-SWEEP-APRIORI-DEFAULT-001,
+#: MIGRATION.md #1752 review fix round 2) — the ONE cross-module source of the
+#: :class:`TupleTrialStats` field names whose values legitimately depend on the
+#: sweep's exploration mode (legacy fixed-k enumeration vs the Apriori
+#: extinction frontier): the frontier prunes candidates EARLIER, so
+#: ``n_enumerated`` / ``n_conflict_pruned`` / ``n_minhits_dropped`` diverge
+#: between the two modes over the SAME bars while every result-bearing field
+#: (``n_backtested``, the Sharpe moments, the pairing identity) is
+#: mode-invariant. ``sweep_verify`` consumes this to attribute a MIXED-mode
+#: tree's confined sidecar recount residue non-corrupt (the ``VIX_FIELDS``
+#: precedent — one owner, imported never re-minted).
+MODE_CENSUS_FIELDS: Final[tuple[str, ...]] = (
+    "n_conflict_pruned",
+    "n_enumerated",
+    "n_minhits_dropped",
+)
+
 #: The exact payload keys a v1 sidecar must carry (sorted; the JSON contract).
 _PAYLOAD_KEYS: Final[tuple[str, ...]] = (
     "n_backtested",
@@ -469,6 +486,7 @@ def read_tuple_trial_stats(path: Path) -> TupleTrialStats:
 
 
 __all__ = [
+    "MODE_CENSUS_FIELDS",
     "TRIAL_STATS_SCHEMA_VERSION",
     "TRIAL_STATS_SUFFIX",
     "LeaderboardTrialStats",

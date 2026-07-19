@@ -78,9 +78,11 @@ from __future__ import annotations
 
 import heapq
 import json
+import math
+import os
 import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -89,20 +91,32 @@ import structlog
 from brutex.dashboard.composite_join import COMPOSITE_STATE_ABSENT, CompositeIndex
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.oneclick_view import cascade_status_text
+from brutex.dashboard.sweep_temporal_view import build_sidecar_index
+from brutex.engine.baseline import BaselineSeries, baseline_filename, load_baseline
 from brutex.engine.cascade_join import (
     CascadeJoin,
     CascadeJoinError,
     build_cascade_join,
     cascade_report_path,
 )
+from brutex.engine.cascade_wire import (
+    VerdictMarker,
+    load_verdict_markers,
+    report_group_count,
+    report_path,
+)
+from brutex.engine.period_stats import decode_judged_years, decode_period_stats, year_key
 from brutex.engine.results_store import (
     VIX_FIELDS,
     ResultRow,
     ResultsStore,
     ResultsStoreError,
 )
+from brutex.engine.trade_store import RESULTS_DEPTH_DIRNAME
 from brutex.money import format_inr, paisa_to_rupees
+from brutex.ranking import persisted_hard_gates_recheck
 from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
+from brutex.ranking.temporal import year_gate_diagnostic
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
 
@@ -123,6 +137,8 @@ __all__ = [
     "build_sweep_leaderboard",
     "load_cascade_join_file",
     "load_sweep_scan",
+    "parse_filter_float",
+    "parse_filter_int",
     "resolve_preset_param",
     "store_error_payload",
 ]
@@ -406,6 +422,13 @@ class SweepLeaderboard:
         ``absent`` state, keeping a no-report lake's payload BYTE-IDENTICAL
         to pre-change (pinned). ``cascade_flagged`` counts the cascade-FAIL
         rows on the RANKED page (the header chip — flagged, never excluded).
+    temporal_rows_with_data, temporal_rows_total
+        The header-chip coverage figures (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001,
+        graft 9): how many of the DISCOVERED rows (the whole scan, not the
+        filtered slice) carry stored temporal columns vs the total — so the
+        page can say "temporal stats: N/M rows" honestly.
+    cascade_report_present, cascade_report_groups, cascade_report_mtime_ns
+        The cascade-report envelope facts (see :class:`SweepScan`).
     """
 
     rows: tuple[dict[str, Any], ...]
@@ -425,20 +448,27 @@ class SweepLeaderboard:
     cascade_join_meta: dict[str, Any] | None = None
     composite_join_meta: dict[str, Any] | None = None
     cascade_flagged: int | None = None
+    temporal_rows_with_data: int = 0
+    temporal_rows_total: int = 0
+    cascade_report_present: bool = False
+    cascade_report_groups: int | None = None
+    cascade_report_mtime_ns: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
 
-        With no preset applied AND no cascade/composite join meta the payload
-        is BYTE-IDENTICAL to the pre-preset shape (no new keys — the
-        absent/blank arm of gap-register ruling 10 + the
-        DEC-RESULTS-CASCADE-VERDICT-JOIN-001 no-report byte-identity are BOTH
-        pinned by test). A preset-ranked payload gains exactly TWO additive
-        keys: ``preset`` (the applied token) and ``preset_inert_axes`` (the
-        EFFECTIVE inert axes of THIS build — see :attr:`inert_axes`). The
-        cascade/composite joins add their EMIT-ON-PRESENT meta keys
-        (``cascade_join`` / ``composite_join`` / ``cascade_flagged``) only
-        when the respective loader ran AND found something to report.
+        The pre-preset key set gained exactly TWO always-present ADDITIVE
+        envelope keys under DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (graft 9) —
+        ``temporal_coverage`` + ``cascade_report`` (both key-set pins updated
+        consciously); every pre-existing key is byte-identical, and the
+        DEC-RESULTS-CASCADE-VERDICT-JOIN-001 no-report byte-identity holds
+        MODULO those two envelope keys (their pins updated in the same
+        stroke). A preset-ranked payload additionally gains ``preset`` +
+        ``preset_inert_axes`` (the EFFECTIVE inert axes of THIS build — see
+        :attr:`inert_axes`; gap-register ruling 10). The cascade/composite
+        joins add their EMIT-ON-PRESENT meta keys (``cascade_join`` /
+        ``composite_join`` / ``cascade_flagged``) only when the respective
+        loader ran AND found something to report.
         """
         payload: dict[str, Any] = {
             "available": self.available,
@@ -453,6 +483,15 @@ class SweepLeaderboard:
             "mixed_snapshot_eras": self.mixed_snapshot_eras,
             "run_id_conflicts": self.run_id_conflicts,
             "rows": list(self.rows),
+            "temporal_coverage": {
+                "rows_with_data": self.temporal_rows_with_data,
+                "rows_total": self.temporal_rows_total,
+            },
+            "cascade_report": {
+                "present": self.cascade_report_present,
+                "groups": self.cascade_report_groups,
+                "mtime_ns": self.cascade_report_mtime_ns,
+            },
         }
         if self.preset is not None:
             payload["preset"] = self.preset
@@ -495,6 +534,16 @@ class SweepScan:
     snapshot_hashes
         The sorted distinct eras recorded for the coordinates the discovered
         rows cover (empty = honest "no signal").
+    verdicts
+        The cascade verdict-join map (``run_id → VerdictMarker`` — loaded
+        through the ONE engine loader
+        :func:`brutex.engine.cascade_wire.load_verdict_markers`; empty when
+        the report is absent/corrupt — chips read ``—``, never a fabricated
+        verdict). DEC-SWEEP-TEMPORAL-ROBUSTNESS-001.
+    cascade_report_present, cascade_report_groups, cascade_report_mtime_ns
+        The report envelope facts: whether ``<sweeps>/cascade/cascade-report.json``
+        exists, its group count (``None`` = absent/corrupt), and its raw
+        ``st_mtime_ns`` (surfaced so an OLD report is labeled, never hidden).
     """
 
     rows: tuple[ResultRow, ...]
@@ -506,6 +555,83 @@ class SweepScan:
     timeframes: tuple[str, ...]
     directions: tuple[str, ...]
     snapshot_hashes: tuple[str, ...]
+    verdicts: Mapping[str, VerdictMarker] = field(default_factory=dict)
+    #: Combo ``run_id`` → the STORED buy-&-hold facts of its producing
+    #: results-depth run (``{"total_return_pct": float, "window": str}``) —
+    #: DEC-RESULTS-TRUST-HONESTY-001 · B1. Resolved via the sidecar-stamp
+    #: index (the ONLY stored combo→run-dir mapping) + the engine's
+    #: validating baseline loader; a combo no depth run captured is simply
+    #: ABSENT (its row keys read null — never recomputed, never fabricated).
+    benchmarks: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    cascade_report_present: bool = False
+    cascade_report_groups: int | None = None
+    cascade_report_mtime_ns: int | None = None
+
+
+def _depth_run_dir(stamp: Path) -> Path | None:
+    """The results-depth RUN directory that owns *stamp*, or ``None``.
+
+    A stamp lives at ``<sweep_runs>/<run>/results-depth/**/*.stamp.json``
+    (the :func:`brutex.dashboard.sweep_temporal_view.build_sidecar_index`
+    glob), so the run dir is the parent of the ``results-depth`` path
+    component. Path-mechanical only; a stamp outside that shape (no
+    ``results-depth`` ancestor) reads ``None`` — the combo then simply has
+    no resolvable benchmark, never a guessed directory.
+    """
+    for parent in stamp.parents:
+        if parent.name == RESULTS_DEPTH_DIRNAME:
+            return parent.parent
+    return None
+
+
+def _benchmark_facts(lake_root: Path, rows: Sequence[ResultRow]) -> dict[str, dict[str, Any]]:
+    """Resolve each combo's STORED buy-&-hold benchmark facts (B1).
+
+    STORED values only (DEC-RESULTS-TRUST-HONESTY-001, audit BLOCKER 1 —
+    Golden Rule #1): the combo → run-dir mapping comes from the results-depth
+    sidecar STAMPS (:func:`build_sidecar_index` — the only durable record of
+    which depth run captured which combo), and the figures come from the
+    engine's VALIDATING :func:`brutex.engine.baseline.load_baseline` over
+    that run dir's ``baseline-<instrument>.json`` (R27). A combo with no
+    stamp, a run dir with no baseline for the combo's instrument, a damaged
+    baseline, or an instrument-mismatched artifact is simply ABSENT from the
+    map — its row keys read ``null``; nothing is recomputed at serve time
+    and nothing is fabricated.
+
+    Honest cost + freshness (Golden Rule #10): one O(run dirs × stamps)
+    index walk + one validated JSON load per DISTINCT baseline path (memoised
+    across rows), paid inside :func:`load_sweep_scan` — i.e. once per
+    ``sweep_results_revision`` under the route cache, never per poll. That
+    token watches the ``sweeps`` tree + audit chain, NOT ``sweep_runs/`` — a
+    standalone depth-pass rerun that writes ONLY run artifacts lands on the
+    next sweeps/audit movement (the production pass runs post-cascade inside
+    the same sweep, which moves the token).
+    """
+    index = build_sidecar_index(lake_root)
+    if not index:
+        return {}
+    facts: dict[str, dict[str, Any]] = {}
+    loaded: dict[Path, BaselineSeries | None] = {}
+    for row in rows:
+        paths = index.get(row.run_id)
+        if paths is None:
+            continue
+        run_dir = _depth_run_dir(paths.stamp)
+        if run_dir is None:
+            continue
+        baseline_path = run_dir / baseline_filename(row.instrument)
+        if baseline_path not in loaded:
+            loaded[baseline_path] = load_baseline(baseline_path)
+        series = loaded[baseline_path]
+        if series is None or series.instrument != row.instrument:
+            # Absent/damaged artifact (load_baseline logged the named reason)
+            # or a renamed/mismatched one — never served under the wrong name.
+            continue
+        facts[row.run_id] = {
+            "total_return_pct": series.total_return_pct,
+            "window": f"{series.start.isoformat()} → {series.end.isoformat()}",
+        }
+    return facts
 
 
 def load_sweep_scan(lake_root: Path) -> SweepScan:
@@ -545,6 +671,28 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
         covered_eras |= eras.get(key, frozenset())
     snapshot_hashes = tuple(sorted(covered_eras))
 
+    # Cascade verdict join (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): the map + the
+    # report envelope facts load ONCE per scan (= once per revision under the
+    # route cache — the #1533 spy discipline). Verdict LOGIC lives in
+    # ``cascade_wire`` (the module that owns the report format); this view only
+    # imports + folds by run_id. Absent/corrupt ⇒ empty map + honest envelope.
+    report_file = report_path(sweeps_root)
+    verdicts = load_verdict_markers(report_file)
+    try:
+        report_mtime_ns: int | None = os.stat(report_file).st_mtime_ns
+    except OSError:
+        report_mtime_ns = None
+    report_present = report_mtime_ns is not None
+    report_groups = report_group_count(report_file) if report_present else None
+
+    # Benchmark join (DEC-RESULTS-TRUST-HONESTY-001 · B1): resolved once per
+    # scan (= once per revision under the route cache). Honest cost (Golden
+    # Rule #10): one O(run dirs × stamps) sidecar-index walk + one small
+    # validated JSON load per DISTINCT (run dir, instrument) — bounded by the
+    # results-depth artifact tree, paid beside the already-O(stores × rows)
+    # scan, never per poll/click.
+    benchmarks = _benchmark_facts(lake_root, all_rows) if all_rows else {}
+
     return SweepScan(
         rows=tuple(all_rows),
         store_count=store_count,
@@ -555,6 +703,11 @@ def load_sweep_scan(lake_root: Path) -> SweepScan:
         timeframes=timeframes,
         directions=directions,
         snapshot_hashes=snapshot_hashes,
+        verdicts=verdicts,
+        benchmarks=benchmarks,
+        cascade_report_present=report_present,
+        cascade_report_groups=report_groups,
+        cascade_report_mtime_ns=report_mtime_ns,
     )
 
 
@@ -607,6 +760,86 @@ def resolve_preset_param(preset: str | None) -> str | None:
     if token in PRESETS:
         return token
     raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
+
+
+# ── Serving-side filter floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a) ──
+# OPERATOR CONTROLS, not a missing gate: the persisted boards are already
+# MIN_TRADES=30 pre-gated by construction (passes_gates runs at rank time);
+# these floors let the operator TIGHTEN a served view. Absent params are
+# byte-identical to the legacy payload (pinned). ``min_cpcv`` is honestly NOT
+# offered — no per-row CPCV value is persisted anywhere the view can read
+# (the cascade's CPCV verdict is a stage token, not a rate), and fabricating
+# one would violate Golden Rule #1.
+
+
+def parse_filter_float(name: str, raw: str | None) -> float | None:
+    """Parse one optional non-negative FLOAT filter param; junk raises ``ValueError``.
+
+    ``None``/blank → ``None`` (filter inactive — the byte-identical legacy
+    arm). A non-numeric, non-finite, or negative token raises a
+    :class:`ValueError` naming the parameter — the route maps it to a clean
+    400 (the ``resolve_preset_param`` refusal law: an explicit operator value
+    must refuse loudly, never be silently dropped).
+    """
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    try:
+        value = float(token)
+    except ValueError as exc:
+        raise ValueError(f"invalid {name} value {token!r}: expected a number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"invalid {name} value {token!r}: expected a finite value >= 0")
+    return value
+
+
+def parse_filter_int(name: str, raw: str | None) -> int | None:
+    """Parse one optional non-negative INT filter param; junk raises ``ValueError``.
+
+    The integer twin of :func:`parse_filter_float` (same blank/None/refusal
+    contract; a fractional token like ``"30.5"`` is junk for a trade COUNT).
+    """
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    try:
+        value = int(token)
+    except ValueError as exc:
+        raise ValueError(f"invalid {name} value {token!r}: expected an integer") from exc
+    if value < 0:
+        raise ValueError(f"invalid {name} value {token!r}: expected an integer >= 0")
+    return value
+
+
+def _passes_serve_filters(
+    row: ResultRow,
+    *,
+    min_trades: int | None,
+    min_pf: float | None,
+    min_dsr: float | None,
+    max_abs_dd_pct: float | None,
+) -> bool:
+    """Whether *row* clears every ACTIVE serving-side floor (inactive = pass).
+
+    Fail-closed under an ACTIVE floor (Golden Rule #1): a row that cannot
+    DEMONSTRATE the floor is excluded from that filtered view — a ``None``
+    ``profit_factor`` under ``min_pf``, a ``None`` ``deflated_sharpe`` under
+    ``min_dsr`` (the TUPLE-scoped figure; the page labels it so), and a
+    non-finite ``max_drawdown_pct`` under ``max_abs_dd_pct`` (NaN fails the
+    ``<=`` by construction). Exclusion here is the operator's explicit
+    request, never a silent drop — the unfiltered view still shows every row.
+    """
+    if min_trades is not None and row.total_trades < min_trades:
+        return False
+    if min_pf is not None and (row.profit_factor is None or not row.profit_factor >= min_pf):
+        return False
+    if min_dsr is not None and (row.deflated_sharpe is None or not row.deflated_sharpe >= min_dsr):
+        return False
+    return not (max_abs_dd_pct is not None and not abs(row.max_drawdown_pct) <= max_abs_dd_pct)
 
 
 def _preset_rank_record(
@@ -685,6 +918,8 @@ def store_error_payload(exc: ResultsStoreError) -> dict[str, Any]:
         "mixed_snapshot_eras": False,
         "run_id_conflicts": 0,
         "rows": [],
+        "temporal_coverage": {"rows_with_data": 0, "rows_total": 0},
+        "cascade_report": {"present": False, "groups": None, "mtime_ns": None},
     }
 
 
@@ -910,7 +1145,124 @@ def _rank_value(row: ResultRow, rank_by: str) -> int | float:
     return getattr(row, rank_by)  # type: ignore[no-any-return]
 
 
-def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, Any]:
+def _temporal_row_keys(row: ResultRow) -> dict[str, Any]:
+    """The additive per-row temporal display keys (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+    Recomputed from STORED inputs ONLY (the row's per-year cells + judged-years
+    column — never a re-simulation) through the SAME predicate core the
+    rank-time gate uses (:func:`brutex.ranking.temporal.year_gate_diagnostic`)
+    at the DEFAULT config — the UI labels the verdict "temporal @ defaults";
+    the producing run's rank-time verdict lives on the sweep audit chain. A
+    pre-extension row (no stored columns — the all-or-none store law) carries
+    honest ``None`` in EVERY key, never a fabricated verdict (Golden Rule #1).
+    ``max_quarter_share`` is the diagnostic scalar only — never gated
+    (a ~27-quarter denominator makes a single-quarter share a poor door; Q2).
+    """
+    if (
+        row.stats_by_year_json is None
+        or row.stats_by_quarter_json is None
+        or row.temporal_judged_years_json is None
+    ):
+        # The store's all-or-none column law means a loaded row is either fully
+        # populated or fully None — this single guard covers the pre-extension
+        # arm (and narrows every column non-None below).
+        return {
+            "stats_by_year": None,
+            "temporal_judged_years": None,
+            "max_year_share": None,
+            "max_quarter_share": None,
+            "year_gate_passed": None,
+            "year_gate_abstained": None,
+            "year_gate_reasons": None,
+        }
+    # Stored rows were validated at ResultRow construction (`_validate_temporal_columns`),
+    # so the decodes below cannot fail on a loaded row — a torn cell already
+    # surfaced at load as ResultsStoreSchemaError (the G14 law).
+    year_cells = decode_period_stats(row.stats_by_year_json, kind="year")
+    judged = decode_judged_years(row.temporal_judged_years_json)
+    pnl_by_year = {int(key): cell[1] for key, cell in year_cells.items()}
+    diag = year_gate_diagnostic(pnl_by_year, judged)
+    quarter_pnls = [
+        cell[1] for cell in decode_period_stats(row.stats_by_quarter_json, kind="quarter").values()
+    ]
+    positive_mass = sum(p for p in quarter_pnls if p > 0)
+    max_quarter_share: float | None = None
+    if positive_mass > 0:
+        max_quarter_share = max(p for p in quarter_pnls if p > 0) / positive_mass
+    return {
+        "stats_by_year": {key: list(cell) for key, cell in year_cells.items()},
+        "temporal_judged_years": [year_key(y) for y in judged],
+        "max_year_share": diag.max_year_share,
+        "max_quarter_share": max_quarter_share,
+        "year_gate_passed": diag.passed,
+        "year_gate_abstained": diag.abstained,
+        "year_gate_reasons": list(diag.reasons),
+    }
+
+
+def _verdict_marker_row_keys(verdict: VerdictMarker | None) -> dict[str, Any]:
+    """The additive per-row cascade-verdict MARKER keys (marker, never exclusion).
+
+    Renamed from ``_cascade_row_keys`` at the club S2 fold: main's
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 landed a SECOND emitter of that name
+    (the report-join keys below), so KEY OWNERSHIP is split to keep the two
+    coexisting cleanly — the landed join (:func:`_cascade_row_keys`) OWNS the
+    join-scoped ``cascade_rejected_at``/``cascade_provisional``/``cascade_detail``
+    (emit-on-present, fail-only for rejected_at), while this marker keeps ONLY
+    its DISTINCTIVE contribution: the ``cascade_verdict`` chip
+    (passed/rejected/ambiguous) + the corrected ``cascade_dsr*`` trio
+    (DEC-RESULTS-TRUST-HONESTY-001). This marker no longer duplicates the
+    join-owned keys, so a row carrying BOTH a marker and a join never
+    double-emits them (the landed join's tests require the key ABSENT on a
+    passing / no-rejected row — a null-filled marker duplicate would break
+    them); the rejected STAGE token reads from the join's ``cascade_rejected_at``
+    / ``cascade_status_text``, this marker's rejected signal is the chip.
+
+    ``None`` marker = this run_id is absent from the cascade report (or no
+    report exists) — NO keys are emitted (emit-on-present per the landed
+    byte-identity law; "not judged" renders from absence, NEVER "passed").
+    An :data:`~brutex.engine.cascade_wire.AMBIGUOUS_MARKER` (conflicting
+    duplicate verdicts) reads ``"ambiguous"`` — a loud ``?`` chip, never a
+    coin-flip; its dsr keys stay ``null`` (a conflicting figure is never
+    served). The three ``cascade_dsr*`` keys (DEC-RESULTS-TRUST-HONESTY-001,
+    audit BLOCKER 5) surface the cascade's OWN filter-#2 Deflated Sharpe —
+    the CORRECTED search-N figure when ``cascade_dsr_n_source`` reads
+    ``"leaderboard"``, the loudly-stamped legacy pool-N under-count when it
+    reads ``"pool"`` — beside the run-level ``cascade_dsr_n_trials`` N it was
+    deflated against; a pre-change report reads ``null`` in all three (never
+    a fabricated 0). Full precision, never rounded (CLAUDE.md §4).
+    """
+    if verdict is None:
+        # EMIT-ON-PRESENT (club S2 fold): a row absent from the cascade report
+        # — or a lake with NO report at all — emits NO marker keys, so the
+        # no-report payload stays BYTE-IDENTICAL to pre-change (the landed
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 byte-identity law; the client
+        # renders "—" from key ABSENCE exactly as from null — 1459's original
+        # always-present null-filled shape was narrowed to conform).
+        return {}
+    if verdict.ambiguous:
+        return {
+            "cascade_verdict": "ambiguous",
+            "cascade_dsr": None,
+            "cascade_dsr_n_trials": None,
+            "cascade_dsr_n_source": None,
+        }
+    return {
+        "cascade_verdict": "passed" if verdict.passed else "rejected",
+        "cascade_dsr": verdict.dsr_corrected,
+        "cascade_dsr_n_trials": verdict.dsr_n_trials,
+        "cascade_dsr_n_source": verdict.dsr_n_source,
+    }
+
+
+def _project_row(
+    row: ResultRow,
+    rank: int,
+    *,
+    snapshot_era: str,
+    verdict: VerdictMarker | None = None,
+    benchmark: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Project one :class:`ResultRow` into the leaderboard display dict.
 
     Money (``net_pnl``) goes through :func:`brutex.money.format_inr` (paisa → ``₹``,
@@ -929,8 +1281,18 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     ``snapshot_era`` is the row's honest data-era marker — the recorded
     ``data_snapshot_hash``, :data:`SNAPSHOT_ERA_AMBIGUOUS`, or
     :data:`SNAPSHOT_ERA_UNKNOWN` (DEC-RESULTS-SURFACE-HONESTY-001).
+    The temporal keys (:func:`_temporal_row_keys`) + cascade-verdict keys
+    (:func:`_cascade_row_keys`) are ADDITIVE per-row markers
+    (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — exactly the ``snapshot_era`` pattern:
+    marker, never exclusion; ``None``/``null`` = no stored data / not judged.
+    The two ``benchmark_*`` keys (DEC-RESULTS-TRUST-HONESTY-001 · B1) carry
+    the STORED buy-&-hold facts of the combo's producing results-depth run
+    (:func:`_benchmark_facts`): ``benchmark_return_pct`` (the R27
+    full-precision figure, never rounded) + ``benchmark_window`` (the series'
+    session span). Unresolvable ⇒ both ``null`` — rendered ``—``, never
+    recomputed at serve, never fabricated.
     """
-    return {
+    projected = {
         "rank": rank,
         "run_id": row.run_id,
         "snapshot_era": snapshot_era,
@@ -948,11 +1310,38 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
         "profit_factor": row.profit_factor,
         "win_rate": row.win_rate,
         "max_drawdown_pct": row.max_drawdown_pct,
+        # The two RISK/rank-axis scalars (DEC-RESULTS-TRUST-HONESTY-001, audit
+        # BLOCKER 6) under their bare ResultRow names: both were already
+        # rankable (RANKABLE_COLUMNS) yet invisible on the wire — a rank axis
+        # the operator can pick must be a value the page can show.
+        # ``max_drawdown_paisa`` is the row's ONLY authoritative absolute risk
+        # figure (int paisa magnitude); ``expectancy_paisa`` is the signed
+        # per-trade expectancy (int paisa) — exact ints, never floats.
+        "max_drawdown_paisa": row.max_drawdown_paisa,
+        "expectancy_paisa": row.expectancy_paisa,
         "deflated_sharpe": row.deflated_sharpe,
         "total_trades": row.total_trades,
         "winning_trades": row.winning_trades,
         "losing_trades": row.losing_trades,
+        # The serve-time hard-gate RE-CHECK belt (DEC-RESULTS-TRUST-HONESTY-001
+        # · B2a): "ok" | "marked" over the persisted doors via the ONE ranking
+        # predicate home — MARK, never drop (the snapshot_era pattern; protects
+        # legacy/non-gated stores). "marked" ⇒ the full rank-time gate would
+        # also reject; "ok" is necessary-not-sufficient (doors 4-5 need
+        # unpersisted inputs — see persisted_hard_gates_recheck).
+        "hard_gates_recheck": persisted_hard_gates_recheck(
+            total_trades=row.total_trades,
+            profit_factor=row.profit_factor,
+            max_drawdown_pct=row.max_drawdown_pct,
+            win_rate=row.win_rate,
+        ),
+        # STORED buy-&-hold benchmark facts (B1) — see the docstring above.
+        "benchmark_return_pct": None if benchmark is None else benchmark["total_return_pct"],
+        "benchmark_window": None if benchmark is None else benchmark["window"],
     }
+    projected.update(_temporal_row_keys(row))
+    projected.update(_verdict_marker_row_keys(verdict))
+    return projected
 
 
 # ═══ CASCADE VERDICT JOIN (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — BUILT) ═══
@@ -965,6 +1354,13 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
 # `snapshot_era` pattern (marker, never exclusion: a cascade-FAILED row stays
 # RANKED and is red-flagged client-side). Absence still means "not judged by
 # the latest cascade", never a fabricated verdict (Golden Rule #1).
+# The SIBLING marker join (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 /
+# DEC-RESULTS-TRUST-HONESTY-001) rides load_sweep_scan: the PURE loader in
+# `brutex.engine.cascade_wire.load_verdict_markers` feeds per-run_id
+# VerdictMarkers into `_project_row` via `_verdict_marker_row_keys`
+# (always-present null-filled keys incl. the corrected `cascade_dsr*`
+# trio) — the two joins read the SAME report and coexist deliberately
+# (club S2 fold).
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -1031,6 +1427,10 @@ def build_sweep_leaderboard(
     preset: str | None = None,
     cascade: CascadeJoinLoad | None = None,
     composite: CompositeIndex | None = None,
+    min_trades: int | None = None,
+    min_pf: float | None = None,
+    min_dsr: float | None = None,
+    max_abs_dd_pct: float | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
@@ -1087,6 +1487,16 @@ def build_sweep_leaderboard(
         ``composite_score`` (display) AND activates the preset composite
         axis honestly (:attr:`SweepLeaderboard.inert_axes`); ``absent``
         emits nothing.
+    min_trades, min_pf, min_dsr, max_abs_dd_pct
+        Optional serving-side floors (DEC-RESULTS-TRUST-HONESTY-001 · B2a) —
+        OPERATOR CONTROLS over an already-gated board, applied with the
+        axis filters before ranking (``total_rows`` counts the filtered
+        survivors). ``None`` (the default) = inactive = byte-identical legacy
+        output (pinned). ``min_dsr`` floors the TUPLE-scoped
+        ``deflated_sharpe`` (the page's label law); a row that cannot
+        demonstrate an active floor is excluded from that view — see
+        :func:`_passes_serve_filters`. ``min_cpcv`` is deliberately NOT
+        offered (no per-row CPCV value is persisted — never fabricated).
 
     Returns
     -------
@@ -1114,7 +1524,16 @@ def build_sweep_leaderboard(
         composite_of = composite.by_run_id
 
     filtered = [
-        r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
+        r
+        for r in scan.rows
+        if _matches(r, instrument=instrument, tf=tf, direction=direction)
+        and _passes_serve_filters(
+            r,
+            min_trades=min_trades,
+            min_pf=min_pf,
+            min_dsr=min_dsr,
+            max_abs_dd_pct=max_abs_dd_pct,
+        )
     ]
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
@@ -1157,7 +1576,13 @@ def build_sweep_leaderboard(
     matched_rows = 0
     flagged = 0
     for rank, r in enumerate(ordered[:depth], start=1):
-        projected = _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
+        projected = _project_row(
+            r,
+            rank,
+            snapshot_era=_row_snapshot_era(r, scan.eras),
+            verdict=scan.verdicts.get(r.run_id),
+            benchmark=scan.benchmarks.get(r.run_id),
+        )
         cascade_keys = _cascade_row_keys(r.run_id, cascade)
         if cascade_keys:
             projected.update(cascade_keys)
@@ -1219,4 +1644,12 @@ def build_sweep_leaderboard(
         cascade_join_meta=cascade_meta,
         composite_join_meta=composite_meta,
         cascade_flagged=flagged_out,
+        # Coverage over the WHOLE scan (all discovered rows), not the filtered
+        # slice — the header chip answers "how much of my results tree carries
+        # temporal stats", independent of the active filter (graft 9).
+        temporal_rows_with_data=sum(1 for r in scan.rows if r.stats_by_year_json is not None),
+        temporal_rows_total=len(scan.rows),
+        cascade_report_present=scan.cascade_report_present,
+        cascade_report_groups=scan.cascade_report_groups,
+        cascade_report_mtime_ns=scan.cascade_report_mtime_ns,
     )

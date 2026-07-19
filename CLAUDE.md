@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
+overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
+the overfit gate config the sweep RECORDED at launch (both grid launchers
+persist the #1336 overfit fragment on their START records; NEW
+`sweep_verify.recorded_overfit_from_audit` — dual-chain, TOLERANT per-chain
+read, absent gate_config = legacy byte-identical), so a healthy tree swept
+under the S2 club's default-on overfit DSR gate no longer reads a
+`grid_mismatch` FALSE POSITIVE on EVERY recount — an ALARM-FATIGUE
+regression (recount unusable on overfit trees), NOT a false-clean. Plus the
+(a) honesty floor: a MIXED-gate-config tree reads the honest
+`recount_mixed_mode_unverifiable` rc 4 (inconclusive), never
+CLEAN-by-silence; a corrupt supervisor chain on a cmd_sweep_all tree is
+honestly config-UNRECOVERABLE → the fold-base `grid_mismatch` rc 3, never a
+fabricated default. The #1336 `_tuple_digest` law untouched — every minted
+digest VALUE-IDENTICAL (the review-fix NIT `float()` normalization on
+`_gate_config_fragment`'s overfit leg is value-neutral, pin-proven) — +
+#1474's frozen `sweep_apriori.py` byte-untouched; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+identity untouched. This header carries the pointer, never the story — the
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -568,6 +589,28 @@ DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item record lives
 in the §1 Active-branch blurb + MIGRATION.md #1780 — this header carries the
 one-line summary, never the story.)
+Earlier: 2026-07-15 (CLUB S2 members, branch `integration/club-s2-results-v2`
+— the FRESH rebuild off main tip d6ac9f85 WITHOUT #1522
+DEC-FILL-WORST-CASE-001 (the global worst-case fill mode, CONSCIOUSLY
+EXCLUDED — its retired content is carried forward by PR #1587 /
+DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023, the
+surviving fill-law carrier): #1458
+DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848 — the
+temporal-robustness YEAR GATE + per-period finalist stats, engine truth) ·
+#1459 DEC-RESULTS-TRUST-HONESTY-001 (MIGRATION.md #1849 — the /results trust +
+honesty pack, PR-B of #1848, coexisting with main's landed
+DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749) · #1474
+DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1850 — Apriori-to-natural
+EXTINCTION as the DEFAULT grid sweep exploration mode). Ledger renumbered to
+the coordinator-reserved S2 band #1848–#1850 (main took #1752/#1753 for
+DEC-GROWW-ERRORCODE-ASCII-GUARD-001 / DEC-PREMERGE-M4PRO-NONBLOCK-001;
+DEC-LEDGER-RENUMBER-001). ENGINE run identity BYTE-IDENTICAL — the frozen
+_GOLDEN_CONTENT_HASH/_GOLDEN_RUN_ID + vocab_golden_vectors.json unchanged; the
+temporal-gate + results-store goldens re-locked to main's landed
+REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001 #1645), NO fill-mode pin.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; this header carries pointers, never
+the story; each member's full record lives in its §1 Active-branch blurb + its
+MIGRATION.md entry.)
 Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
@@ -3631,7 +3674,72 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `integration/club-s2-results-v2`
+  (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
+  overfit-recount recovery channel, folded onto the CLUB S2 members
+  (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
+  precisely): the S2 club carries the default-on overfit DSR gate flip
+  (fb06ca8a), whose #1336 law folds the ACTIVE overfit config into every
+  tuple store's `_tuple_digest` ADDRESS — while `cmd_verify --recount`
+  re-derived its expected-store plan config-BLIND, so plan∩found digests
+  were fully DISJOINT on every healthy overfit-gated tree and the recount
+  fired `grid_mismatch` (corrupt, rc 3) as a FALSE POSITIVE every time — an
+  ALARM-FATIGUE regression (recount unusable on overfit trees), NOT a
+  false-clean. THE FIX: (MINT) both launchers persist
+  `start_payload["gate_config"] = {"overfit": [dsr_min, weight,
+  default_skew, default_excess_kurtosis]}` — `sweep_supervisor` on
+  SUPERVISOR_START + `sweep_orchestrator`'s library `run_sweep_grid` on
+  GRID_SWEEP_START; an ungated grid writes NO key (absent ≠ default).
+  (VERIFY) NEW `sweep_verify.recorded_overfit_from_audit` mirrors
+  `recorded_apriori_from_audit` (dual-chain; last START per chain; latest
+  ts_utc across chains wins, supervisor keeps exact ties) with two
+  deliberate divergences — absent → None = legacy byte-identical, and a
+  TOLERANT per-chain read (an unreadable chain is skipped WHOLE with one
+  `sweep_verify.overfit_recovery_chain_unreadable` WARN — the mirror raises,
+  but this recovery is called UNCONDITIONALLY by cmd_verify); a malformed
+  recorded leg still raises `SweepVerifyError` (corrupt-or-absent, never a
+  fabricated config); cmd_verify reconciles via `dataclasses.replace(grid,
+  overfit=recorded)` iff recovered. HONEST SCOPE (the m2 executed-evidence
+  correction): cmd_sweep_all's ingest chain carries per-tuple SWEEP_START —
+  NOT the START family — so a corrupt SUPERVISOR chain leaves the config
+  UNRECOVERABLE and the verdict is the honest fold-base `grid_mismatch`
+  rc 3 (pinned: rc 3 + exactly one chain-unreadable WARN + no hard
+  EXIT_USER_ERROR — the interim non-tolerant read's rc-1 regression killed).
+  (a) HONESTY FLOOR (DIGEST-PRECISE since the review-fix round — the
+  designer MAJOR: the interim same-`{direction}_k{k}`-prefix glob read ANY
+  different-digest sibling as "mixed gate", but the #1336 digest folds the
+  FULL tuple incl. SL/TP/proximity/fib, so a benign INCOMPLETE single-config
+  multi-SL tree false-alarmed rc 4): a GRID tuple absent at the recovered
+  address reads `recount_mixed_mode_unverifiable` → rc 4 IFF the ORIGINAL
+  tree holds THIS EXACT tuple's store at the alternate-gate address —
+  re-planned via `dataclasses.replace(grid, overfit=…)` through the SAME
+  `tuple_store_path` law, never re-implemented digest math — (mixed-gate
+  tree, inconclusive under one recovered config), never CLEAN-by-silence
+  and never condemned; a same-prefix different-digest sibling (another
+  SL/TP) honestly reads `recount_original_absent`
+  (fails-before-pinned); the CELL arm stays `recount_original_absent`; the
+  probe is memoised per tuple (one `tuple_store_path` re-plan,
+  call-spy-pinned). REVIEW-FIX ROUND also folded: MINOR-1 —
+  `_overfit_from_recorded_leg` refuses NaN/±inf leg members (the supervisor
+  chain's json.dumps allows NaN; an adopted non-finite config would crash
+  cmd_verify's `allow_nan=False` dump — now the typed `SweepVerifyError`,
+  parametrized-pinned); MINOR-2 — the cmd_verify
+  `SweepVerifyError → EXIT_USER_ERROR` branch e2e-driven (a malformed
+  recorded gate_config.overfit on a VALID supervisor chain exits 1 with the
+  named stderr line); NIT — explicit `float()` normalization on the
+  `_gate_config_fragment` overfit leg (value-neutral for the all-float
+  `OverfitGateConfig` — the frozen default digest + gated e2e addresses
+  pass unmodified). UNTOUCHED: the #1336 `_tuple_digest` LAW (digests
+  value-identical; the NIT is the one sanctioned fragment edit) + #1474's
+  frozen `sweep_apriori.py`. GATES: `sweep_verify.py` 100.00% line+branch
+  standalone (635/268, the review-fix re-measure) + the ci.yml whole-engine
+  glob gate 100.00%; the
+  cli.py delta rides the pre-existing pragma-no-cover `cmd_sweep_verify`
+  shim, driven by the e2e suite; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
+  identity untouched — the recording is audit-PAYLOAD only. The full record
+  lives in MIGRATION.md #1851.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -5467,6 +5575,46 @@ hostile-review pass._
   DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
   OUT of BruteX per DEC-LIVE-REMOVE-001.)
+  Earlier: `claude/sweep-temporal-robustness` (**DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1848** —
+  folded FRESH into the club-S2-v2 rebuild off origin/main WITHOUT #1522
+  (DEC-FILL-WORST-CASE-001 consciously EXCLUDED): the temporal-robustness YEAR GATE + per-period
+  finalist stats (engine truth) — a one-lucky-year combo MUST NOT occupy a top-K slot. An opt-in
+  pre-rank SURVIVORS filter (doors → temporal → overfit/DSR; the DSR pool untouched, bit-identity
+  pinned), exact-Fraction P1 ≥ 0.5 profitable judged years / P2 positive-mass share ≤ 0.6, whole-gate
+  abstention < 2 judged years, gate|observe modes with the shipped `BRUTEX_TEMPORAL=observe` CLI
+  default, four optional emit-on-present ResultRow columns cross-sum-validated through the NEW
+  `brutex/engine/period_stats.py`, and the D16 append-enrichment rule. RUN IDENTITY BYTE-IDENTICAL —
+  the config does NOT enter mask_run_id/canonical_trade_params/_tuple_digest (the DSR precedent); the
+  frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` + the 400-case `vocab_golden_vectors.json` pass
+  UNMODIFIED. Golden re-lock provenance (RES-attributed): the temporal-gate store hash + the
+  results-store temporal fixture moved ONLY because main's landed REFERENCE-ONLY VIX trio
+  (DEC-VIX-STAMP-WIRE-001 #1645 — three always-emitted nullable Float64 columns) predates this fold —
+  NO fill-mode pin (#1522 out ⇒ the SweepRunConfig fill default is already PRECISE, the gate-ON hash
+  `8341bed7…` reproduced byte-for-byte, the temporal fixture byte-identical to prior-club's 8583).
+  H₀ HONESTY: at defaults the gate passes 50% of pure noise over 7 judged years — a concentration
+  filter, NOT a significance test. The /results year strip + temporal drill + cascade-verdict join are
+  the named PR-B follow-up on this same DEC. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
+  record lives in MIGRATION.md #1848.)
+  Earlier: `claude/results-trust-honesty` (**DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1849** —
+  the /results trust + honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1848), folded FRESH
+  into club-S2-v2 and NARROWED to coexist with main's landed
+  DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749: the tuple-scoped DSR is NEVER presented unlabeled, the
+  cascade's corrected search-N Deflated Sharpe is retained + labeled (`dsr_corrected` additive on
+  `CandidateVerdict`), and the Group-A cascade key ownership is resolved — #1749's join emitter
+  `_cascade_row_keys` OWNS the cascade join, #1459's marker emitter is the renamed
+  `_verdict_marker_row_keys` (emit-on-present, `_verdict_marker_row_keys(None) == {}`); the
+  `cpcv_pass_rate` (#1749) + `dsr_corrected` (#1459) union both ride `cascade_wire`. DISPLAY/read-side
+  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in MIGRATION.md #1849.)
+  Earlier: `claude/apriori-default-extinction` (**DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1850** —
+  Apriori-to-natural-EXTINCTION becomes the DEFAULT sweep exploration mode: a `--k`-absent grid sweep
+  walks the static k-ladder `1..n_unique` per cell until no combo survives min-hits (the anti-monotone
+  extinction terminator), while an explicit numeric `--k` stays the legacy byte-identical arm —
+  resolved by ONE pure CLI resolver (`resolve_sweep_exploration`) behind every grid surface, with the
+  `BRUTEX_SWEEP_APRIORI` tri-state as the loud kill switch (junk env on the DEFAULT path fails loud
+  pre-lake-I/O) and the `EXTINCTION_K_TOKEN = "extinction"` `--k` default; the frozen
+  `brutex/engine/sweep_apriori.py` module ships ZERO-diff (fed, never edited); `cmd_sweep` (single-tuple
+  int `--k`) deliberately untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
+  lives in MIGRATION.md #1850.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -11025,7 +11173,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `integration/club-s2-results-v2`
+  (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
+  overfit-recount recovery channel: the recount recovers the RECORDED
+  overfit gate config (mint on both launchers' START records; the tolerant
+  dual-chain `recorded_overfit_from_audit`; absent = legacy byte-identical),
+  killing the `grid_mismatch` FALSE-POSITIVE alarm on every healthy
+  overfit-gated tree — an ALARM-FATIGUE regression (recount unusable on
+  overfit trees), NOT a false-clean; + the (a) honesty floor
+  (`recount_mixed_mode_unverifiable` rc 4 on mixed-gate trees) and the
+  honest config-unrecoverable corrupt-supervisor rc 3; the #1336 digest
+  law untouched (digests value-identical — the review-fix NIT `float()`
+  normalization is the one sanctioned fragment edit) + #1474's frozen
+  `sweep_apriori.py` byte-untouched; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1851 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -11603,6 +11766,33 @@ hostile-review pass._
   DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1780 for the full blurb)
+  Earlier: `claude/sweep-temporal-robustness`
+  (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, MIGRATION.md #1848 — folded FRESH into
+  the club-S2-v2 rebuild off origin/main WITHOUT #1522 (DEC-FILL-WORST-CASE-001
+  consciously EXCLUDED): the temporal-robustness YEAR GATE + per-period
+  finalist stats — a combo that "only worked one lucky year" MUST NOT occupy a
+  top-K slot; ships the ENGINE TRUTH (predicate core, storage, rank-time gate,
+  capture, CLI); the /results DISPLAY surfaces are the named PR-B follow-up.
+  ENGINE run identity BYTE-IDENTICAL — the frozen
+  _GOLDEN_CONTENT_HASH/_GOLDEN_RUN_ID + vocab_golden_vectors.json are unchanged;
+  the temporal-gate + results-store goldens re-locked to main's landed
+  REFERENCE-ONLY VIX trio (#1645) with NO fill-mode pin. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active-branch chain)
+  Earlier: `claude/results-trust-honesty`
+  (DEC-RESULTS-TRUST-HONESTY-001, MIGRATION.md #1849 — the /results trust +
+  honesty pack (PR-B of DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 #1848), coexisting
+  with main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 #1749: the tuple-scoped
+  DSR is never presented unlabeled, the cascade's corrected search-N DSR is
+  retained + labeled; DISPLAY/read-side; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/apriori-default-extinction`
+  (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1850 — Apriori-to-natural
+  EXTINCTION becomes the DEFAULT sweep exploration mode: a `--k`-absent grid
+  sweep walks the static k-ladder until no combo survives min-hits, while an
+  explicit numeric `--k` stays the byte-identical legacy arm; the
+  `BRUTEX_SWEEP_APRIORI` tri-state is the loud kill switch; the frozen
+  `sweep_apriori.py` module is fed, never edited; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
@@ -12586,7 +12776,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1049-1050`; `cli.py:5459-5460` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:1049-1050`; `cli.py:5739-5740` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
