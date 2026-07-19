@@ -368,7 +368,12 @@ _ARM_FRESH: Final[int] = 9
 
 
 def _now_minus_seconds(now: datetime, stamp: datetime | None) -> float | None:
-    """``(now − stamp).total_seconds()`` — the oracle's own delta op, exact."""
+    """``(now − stamp).total_seconds()`` — the oracle's own delta op.
+
+    Exact RELATIVE to the oracle (both arms consume this identical float),
+    not exact in absolute terms — ``total_seconds()`` is a lossy float above
+    ~2**53 µs (review NIT-2 wording).
+    """
     if stamp is None:
         return None
     return (now - stamp).total_seconds()

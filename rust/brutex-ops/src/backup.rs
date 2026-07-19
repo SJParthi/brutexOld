@@ -124,7 +124,9 @@ pub fn should_alert_decision(
 ///
 /// Every `Option<f64>` input is the corresponding
 /// `(now − stamp).total_seconds()` computed PYTHON-side with the oracle's own
-/// datetime arithmetic (exact — integer µs → one correctly-rounded division),
+/// datetime arithmetic (exact RELATIVE to the oracle — both arms share the
+/// identical float; `total_seconds()` is itself lossy above ~2^53 µs, so not
+/// exact in absolute terms — review NIT-2 wording),
 /// so the ops left here are bit-identical to the oracle's:
 /// `hours = s / 3600.0`; the future-stamp checks are
 /// `(stamp − now).total_seconds() > tol` ≡ `-s > tol` (IEEE negation is
