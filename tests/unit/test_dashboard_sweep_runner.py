@@ -36,6 +36,7 @@ from brutex.dashboard.sweep_runner import (
     oneclick_preflight_for_plan,
     resolve_oneclick_sweep_plan,
     resolve_sweep_request,
+    sweep_finish_note,
     sweep_progress_file,
 )
 
@@ -757,6 +758,58 @@ class TestRunSweepFromRequestEnvHygiene:
             self._request(), lake_root=tmp_path, results_root=tmp_path / "results"
         )
         assert os.environ[SWEEP_APRIORI_ENV] == "0"  # pop-or-restore, verbatim
+
+
+# ── sweep_finish_note (G5b, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001) ────────────────
+
+
+class TestSweepFinishNote:
+    """The dashboard job's honest completion headline — every branch pinned."""
+
+    def test_summary_unavailable_exit_zero_is_done(self) -> None:
+        # A clean sweep with no captured summary keeps the back-compat "done".
+        assert (
+            sweep_finish_note(exit_code=0, tuples_failed=None, tuples_quarantined_prior=None)
+            == "done"
+        )
+
+    def test_summary_unavailable_nonzero_exit_names_it(self) -> None:
+        assert (
+            sweep_finish_note(exit_code=2, tuples_failed=None, tuples_quarantined_prior=None)
+            == "sweep did not run (exit 2)"
+        )
+
+    def test_clean_summary_zero_zero_is_sweep_complete(self) -> None:
+        assert (
+            sweep_finish_note(exit_code=0, tuples_failed=0, tuples_quarantined_prior=0)
+            == "sweep complete"
+        )
+
+    def test_clean_summary_zero_failed_none_quarantined(self) -> None:
+        # The quarantined-prior None branch (a summary predating the field).
+        assert (
+            sweep_finish_note(exit_code=0, tuples_failed=0, tuples_quarantined_prior=None)
+            == "sweep complete"
+        )
+
+    def test_failed_tuples_named(self) -> None:
+        note = sweep_finish_note(exit_code=1, tuples_failed=3, tuples_quarantined_prior=0)
+        assert note == (
+            "sweep complete — 3 tuple(s) FAILED and were skipped "
+            "(will redo next run; see sweep audit)"
+        )
+
+    def test_quarantined_prior_named(self) -> None:
+        note = sweep_finish_note(exit_code=0, tuples_failed=0, tuples_quarantined_prior=2)
+        assert note == "sweep complete — 2 tuple(s) quarantined from a prior run"
+
+    def test_failed_and_quarantined_both_named(self) -> None:
+        note = sweep_finish_note(exit_code=1, tuples_failed=3, tuples_quarantined_prior=2)
+        assert note == (
+            "sweep complete — 3 tuple(s) FAILED and were skipped "
+            "(will redo next run; see sweep audit); "
+            "2 tuple(s) quarantined from a prior run"
+        )
 
 
 # ── multi-symbol / SENSEX fan-out (gap-hunt MAJOR #9, ruling 9) ──────────────

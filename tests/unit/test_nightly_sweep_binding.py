@@ -345,7 +345,7 @@ def test_sweep_link_result_mapping(tmp_path: Path) -> None:
 
     refused = sweep_link_result(1, audit_path=audit, counts=None)
     assert refused.status is LinkStatus.REFUSED
-    assert "sweep preflight refused (exit 1)" in refused.detail
+    assert "sweep refused (exit 1 — preflight or run-end refusal" in refused.detail
     assert str(audit) in refused.detail
     assert refused.counts == {}  # unknown is EMPTY (rendered "?"), never -1
 

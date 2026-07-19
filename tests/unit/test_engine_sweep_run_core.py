@@ -1992,7 +1992,14 @@ def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
         sup.close()
         cache.close()
     assert summary.tuples_run == 2
-    assert seen == [1, 2]  # one tick per applied slot, in enumeration order
+    # one running tick per applied slot (enumeration order) and NO trailing
+    # finish duplicate — the #1445 G3 exact-count law (merge-fold reconcile,
+    # DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 ⇄ DEC-JOB-COOPERATIVE-CANCEL-001):
+    # cmd_sweep_all's parallel arm publishes the terminal done snapshot to the
+    # bridge itself after the driver returns (the tick shape is asserted
+    # precisely in test_engine_sweep_parallel_runcore.py::
+    # test_g3_writer_actor_ticks_on_progress_per_applied_tuple).
+    assert seen == [1, 2]
 
 
 def test_g06_cli_main_maps_refusals_to_clean_user_error(

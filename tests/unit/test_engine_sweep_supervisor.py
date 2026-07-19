@@ -62,10 +62,12 @@ from brutex.engine.sweep_supervisor import (
     SupervisedGridSummary,
     SweepGuards,
     _drive_watchdog,
+    deliver_summary_safe,
     grid_identity,
     idle_progress,
     progress_bridge_stale,
     publish_progress,
+    publish_progress_safe,
     read_progress,
     run_supervised_grid,
     tuple_cache_key,
@@ -78,6 +80,7 @@ from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 from hypothesis import assume, given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -505,6 +508,37 @@ class TestRunSupervisedGrid:
             )
         assert isinstance(summary, SupervisedGridSummary)
         assert summary.tuples_run == 1
+
+    def test_corrupt_checkpoint_resume_starts_fresh_and_completes(self, tmp_path: Path) -> None:
+        """G12: a corrupt resume checkpoint is quarantined; the sweep starts fresh.
+
+        A genuinely corrupt ``ckpt.json`` planted before the run no longer aborts
+        the whole sweep with a ``SweepCheckpointError`` (+ CRITICAL alert) — the
+        driver's ``load_or_quarantine`` renames it aside, logs LOUD, and the grid
+        completes from index 0.
+        """
+        pytest.importorskip("polars")
+        grid = _grid()
+        bars = _trending_bars()
+        (tmp_path / "ckpt.json").write_text("{corrupt-resume-checkpoint", encoding="utf-8")
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            assert summary.skipped_resume == 0  # fresh start — nothing resumed
+            assert summary.tuples_run == 1
+            assert guards.progress.snapshot().state == STATE_DONE
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+        assert list(tmp_path.glob("ckpt.json.corrupt-*"))  # forensic quarantine kept
 
     def test_no_bars_tuple_is_skipped_and_checkpointed(self, tmp_path: Path) -> None:
         grid = _grid()
@@ -1434,6 +1468,97 @@ class TestProgressBridgeStale:
         assert progress_bridge_stale(parsed, now=lambda: 1002.0, max_age_s=5.0) is False
 
 
+class TestPublishProgressSafe:
+    """G11: the fenced progress-hook wrapper (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
+
+    The progress file is a best-effort dashboard bridge; a failed publish must
+    NEVER kill a running multi-day sweep. ``publish_progress_safe`` swallows any
+    exception + logs ONE ``sweep.progress.publish_failed`` WARNING (checkpoint /
+    audit writes stay FATAL — only the progress hook is fenced).
+    """
+
+    @staticmethod
+    def _snapshot() -> SweepProgressSnapshot:
+        progress = SweepProgress()
+        progress.start(enumerated=1)
+        return progress.snapshot()
+
+    def test_normal_hook_is_called_through(self) -> None:
+        seen: list[SweepProgressSnapshot] = []
+        snap = self._snapshot()
+        with capture_logs() as logs:
+            publish_progress_safe(seen.append, snap)
+        assert seen == [snap]  # the hook ran, received the exact snapshot
+        assert not any(e["event"] == "sweep.progress.publish_failed" for e in logs)
+
+    def test_raising_hook_is_swallowed_and_logged(self) -> None:
+        def _boom(_snap: SweepProgressSnapshot) -> None:
+            raise OSError("read-only file system")
+
+        with capture_logs() as logs:
+            publish_progress_safe(_boom, self._snapshot())  # must NOT raise
+        failures = [e for e in logs if e["event"] == "sweep.progress.publish_failed"]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "OSError"
+        assert "read-only file system" in failures[0]["error"]
+
+
+class TestDeliverSummarySafe:
+    """G5b fence: the run-end summary hook is best-effort (review fold).
+
+    ``deliver_summary_safe`` runs AFTER a successful sweep whose results are
+    persisted; inside ``cmd_sweep_all`` it sits under ``sweep_abort_alert``, so a
+    raising consumer must NEVER propagate (it would fire a false CRITICAL abort
+    alert). Mirrors ``publish_progress_safe`` — swallow + one
+    ``sweep.on_summary_failed`` WARNING; a ``None`` hook is a no-op.
+    """
+
+    @staticmethod
+    def _summary() -> SupervisedGridSummary:
+        return SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=5,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=5,
+            ranked=2,
+            persisted=2,
+            tuples_failed=0,
+        )
+
+    def test_none_hook_is_a_noop(self) -> None:
+        # The ``on_summary is None`` early-return branch — nothing invoked/logged.
+        with capture_logs() as logs:
+            deliver_summary_safe(None, self._summary())
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_normal_hook_is_called_through(self) -> None:
+        seen: list[SupervisedGridSummary] = []
+        summary = self._summary()
+        with capture_logs() as logs:
+            deliver_summary_safe(seen.append, summary)
+        assert seen == [summary]  # invoked once with the exact summary
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_raising_hook_is_swallowed_and_logged(self) -> None:
+        def _boom(_summary: SupervisedGridSummary) -> None:
+            raise RuntimeError("consumer blew up")
+
+        with capture_logs() as logs:
+            deliver_summary_safe(_boom, self._summary())  # must NOT raise
+        failures = [e for e in logs if e["event"] == "sweep.on_summary_failed"]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "RuntimeError"
+        assert "consumer blew up" in failures[0]["error"]
+
+
 # ────── dataclasses ──────
 
 
@@ -1456,6 +1581,48 @@ def test_summary_and_guards_are_frozen() -> None:
     assert summary.sweep_id == "x"
     with pytest.raises((AttributeError, TypeError)):
         summary.persisted = 9  # type: ignore[misc]
+
+
+class TestRunSupervisedGridCorruptStoreContained:
+    """DB-02 supervisor twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1921).
+
+    A corrupt finalist store raised at LOAD on resume is CONTAINED to one tuple
+    (``tuples_failed``), fires the ``sweep_grid.tuple_store_corrupt`` WARN, and does
+    not abort the whole grid.
+    """
+
+    def test_corrupt_store_contained_tuple_failed(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        results_root = tmp_path / "results"
+        victim = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        victim_path = tuple_store_path(results_root, victim, grid)
+        victim_path.parent.mkdir(parents=True, exist_ok=True)
+        victim_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+
+        from structlog.testing import capture_logs
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 1
+        assert victim_path.read_bytes() == b"CORRUPT\x00\x01" * 40
+        failed = [e for e in read_entries(tmp_path / "sup.jsonl") if e.action == "TUPLE_FAILED"]
+        assert len(failed) == 1
+        assert "ResultsStoreSchemaError" in failed[0].payload["error"]
+        assert any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
 
 
 # ────── cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001) ──────
