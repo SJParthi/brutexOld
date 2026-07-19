@@ -224,6 +224,13 @@ def _run_arm(
         monkeypatch.delenv(lrw.LAKE_WAVED_RUST_ENV, raising=False)
         lrw.reset_lake_rust_waved_for_tests()
     report = scan_lake_invariants(lake, **case.scan_kwargs)
+    if flag_on:
+        # W-4 fold: the enumeration scan above now ALSO routes through the
+        # facade flag-ON (the scan seam), consuming the once-per-process
+        # ``lake_rust_waved.engaged`` INFO before the capture window opens.
+        # Re-arm the process view so the HEAL call's engagement witness
+        # (`_engaged`) keeps its teeth — the assertion set is unchanged.
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
     # The L3 denominator law (round 16-1): option files join the mass-rail
     # denominator — files_scanned = bars + options scanned.
     files_scanned = report.files_scanned + report.option_files_scanned

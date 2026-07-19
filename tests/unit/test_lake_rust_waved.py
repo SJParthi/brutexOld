@@ -73,10 +73,11 @@ def _fake_crate(
     heal: Any = None,
     token: Any = None,
     reconcile: Any = None,
+    scan: Any = None,
 ) -> types.ModuleType:
     """Build a fake ``brutex_lake`` module with injectable behaviour.
 
-    Carries the FULL W-1 + W-2 + W-3
+    Carries the FULL W-1 + W-2 + W-3 + W-4
     :data:`brutex.data.lake_rust_waved._CRATE_API` surface (the
     all-or-nothing import guard — a fake missing any name would latch
     ``crate_unavailable`` and every engaged-path test would silently
@@ -100,6 +101,9 @@ def _fake_crate(
     if reconcile is None:
         reconcile = lambda path, classify_home: _RECON_CLEAN_WIRE  # noqa: E731
     module.waved_reconcile_file = reconcile  # type: ignore[attr-defined]
+    if scan is None:
+        scan = lambda *args: _scan_clean_wire()  # noqa: E731
+    module.waved_scan_lake = scan  # type: ignore[attr-defined]
     return module
 
 
@@ -1377,3 +1381,666 @@ class TestReconcileFileSurface:
             ("/lake/bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet", (2024, 6)),
             ("/lake/bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet", None),
         ]
+
+
+# ---------------------------------------------------------------------------
+# W-4 — the lake_invariants whole-lake scan surface
+# ---------------------------------------------------------------------------
+
+
+def _scan_clean_wire(**overrides: Any) -> dict[str, Any]:
+    """A fresh clean-lake scan wire dict (the crate wire shape)."""
+    wire: dict[str, Any] = {
+        "findings": [],
+        "drift_insert_at": 0,
+        "events": [{"kind": "drift"}],
+        "files_scanned": 0,
+        "files_skipped": 0,
+        "series_scanned": 0,
+        "option_files_scanned": 0,
+        "option_files_skipped": 0,
+        "files_by_segment": [],
+        "engine_files": 0,
+        "engine_files_skipped": 0,
+        "first_skipped_parse": None,
+        "first_skipped_read": None,
+        "symbol_dirs": [],
+        "reads_performed": 0,
+    }
+    wire.update(overrides)
+    return wire
+
+
+def _scan_coords_wire(**overrides: Any) -> dict[str, Any]:
+    """A bars finding record's coords fields (the crate wire shape)."""
+    rec: dict[str, Any] = {
+        "exchange": "NSE",
+        "segment": "INDEX",
+        "symbol": "NIFTY",
+        "interval": "1minute",
+        "year": 2024,
+        "month": 6,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def _empty_scan_report(**overrides: Any) -> Any:
+    """A ``LakeScanReport`` with every counter zero (the clean-wire twin)."""
+    from brutex.data.lake_invariants import LakeScanReport
+
+    base: dict[str, Any] = {
+        "findings": (),
+        "files_scanned": 0,
+        "files_skipped": 0,
+        "series_scanned": 0,
+        "option_files_scanned": 0,
+        "option_files_skipped": 0,
+        "duration_s": 0.123,
+        "files_by_segment": (),
+        "engine_files": 0,
+        "engine_files_skipped": 0,
+        "first_skipped_path": None,
+    }
+    base.update(overrides)
+    return LakeScanReport(**base)
+
+
+class _CountingWholeLakeOracle:
+    """Scan-oracle stub counting invocations (returns an empty report)."""
+
+    def __init__(self, result: Any = None) -> None:
+        self.calls = 0
+        self._result = result if result is not None else _empty_scan_report()
+
+    def __call__(self) -> Any:
+        self.calls += 1
+        return self._result
+
+
+def _scan_call(
+    monkeypatch: pytest.MonkeyPatch,
+    module: types.ModuleType | None,
+    *,
+    oracle: Any = None,
+    months: Any = None,
+    include_bars: bool = True,
+    include_options: bool = True,
+    canonical_keys: Any = None,
+    per_file_pause: Any = None,
+) -> Any:
+    from pathlib import Path
+
+    _install_crate(monkeypatch, module)
+    return lrw.scan_lake_via_rust(
+        Path("/tmp/waved-scan-lake"),
+        exchange=None,
+        segment=None,
+        symbol=None,
+        interval=None,
+        months=months,
+        include_options=include_options,
+        include_bars=include_bars,
+        canonical_keys=canonical_keys,
+        per_file_pause=per_file_pause,
+        oracle=oracle if oracle is not None else _CountingWholeLakeOracle(),
+    )
+
+
+class TestScanWireValidation:
+    """Refuse-poison over the scan wire (every arm raises ``ValueError``)."""
+
+    def test_all_seven_finding_kinds_reconstruct(self) -> None:
+        from pathlib import Path
+
+        from brutex.data import lake_invariants as li
+
+        coords_rec = _scan_coords_wire()
+        records: list[dict[str, Any]] = [
+            {
+                "kind": "bars_dup",
+                "path": "/l/a",
+                **coords_rec,
+                "physical_rows": 4,
+                "unique_keys": 3,
+            },
+            {
+                "kind": "bars_foreign",
+                "path": "/l/b",
+                **coords_rec,
+                "foreign_rows": 2,
+                "overlap_rows": 1,
+            },
+            {"kind": "price", "path": "/l/c", **coords_rec, "bad_rows": 5},
+            {
+                "kind": "alien_bars",
+                "path": "/l/d",
+                **coords_rec,
+                "reason": "missing column(s): open",
+            },
+            {"kind": "alien_option", "path": "/l/e", "series": "S", "reason": "r"},
+            {
+                "kind": "option_dup",
+                "path": "/l/f",
+                "series": "S",
+                "physical_rows": 3,
+                "unique_keys": 2,
+            },
+            {
+                "kind": "option_foreign",
+                "path": "/l/g",
+                "series": "S",
+                "year": 2024,
+                "month": 7,
+                "foreign_rows": 1,
+                "overlap_rows": None,
+            },
+        ]
+        built = [lrw._scan_finding_from_wire(rec) for rec in records]
+        coords = li.PartitionCoords(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", year=2024, month=6
+        )
+        assert built[0] == li.IntraFileDup(
+            path=Path("/l/a"), coords=coords, physical_rows=4, unique_keys=3
+        )
+        assert built[1] == li.ForeignMonthRows(
+            path=Path("/l/b"), coords=coords, foreign_rows=2, overlap_rows=1
+        )
+        assert built[2] == li.PriceSanityRows(path=Path("/l/c"), coords=coords, bad_rows=5)
+        assert built[3] == li.SchemaAlienFile(
+            path=Path("/l/d"), reason="missing column(s): open", coords=coords
+        )
+        assert built[4] == li.SchemaAlienFile(path=Path("/l/e"), reason="r", series="S")
+        assert built[5] == li.OptionIntraFileDup(
+            path=Path("/l/f"), series="S", physical_rows=3, unique_keys=2
+        )
+        assert built[6] == li.OptionForeignMonthRows(
+            path=Path("/l/g"), series="S", year=2024, month=7, foreign_rows=1, overlap_rows=None
+        )
+
+    @pytest.mark.parametrize(
+        "rec",
+        [
+            "not-a-mapping",
+            {"kind": "unknown", "path": "/l/x"},
+            {"kind": "bars_dup", "path": 7},
+            {"kind": "bars_dup", "path": "/l/a", "exchange": 1},
+            {
+                "kind": "bars_dup",
+                "path": "/l/a",
+                "exchange": "NSE",
+                "segment": "INDEX",
+                "symbol": "N",
+                "interval": "1minute",
+                "year": "2024",
+                "month": 6,
+            },
+            {
+                "kind": "bars_dup",
+                "path": "/l/a",
+                **{
+                    "exchange": "NSE",
+                    "segment": "INDEX",
+                    "symbol": "N",
+                    "interval": "1minute",
+                    "year": 2024,
+                    "month": 6,
+                },
+                "physical_rows": True,
+                "unique_keys": 1,
+            },
+            {
+                "kind": "option_dup",
+                "path": "/l/f",
+                "series": "S",
+                "physical_rows": -1,
+                "unique_keys": 1,
+            },
+            {
+                "kind": "option_foreign",
+                "path": "/l/g",
+                "series": "S",
+                "year": 2024,
+                "month": 7,
+                "foreign_rows": 1,
+                "overlap_rows": True,
+            },
+            {
+                "kind": "option_foreign",
+                "path": "/l/g",
+                "series": "S",
+                "year": 2024,
+                "month": 7,
+                "foreign_rows": 1,
+                "overlap_rows": -2,
+            },
+        ],
+    )
+    def test_junk_finding_records_refuse(self, rec: Any) -> None:
+        with pytest.raises(ValueError, match="scan|unknown"):
+            lrw._scan_finding_from_wire(rec)
+
+    @pytest.mark.parametrize(
+        ("events", "include_bars", "match"),
+        [
+            ("junk", True, "must be a sequence"),
+            (["rec"], True, "must be a mapping"),
+            ([{"kind": "bogus"}], True, "unknown scan event kind"),
+            (
+                [
+                    {
+                        "kind": "log",
+                        "event": "other.event",
+                        "path": "p",
+                        "path_repr": False,
+                        "error": None,
+                        "error_repr": False,
+                    }
+                ],
+                True,
+                "unknown scan log event",
+            ),
+            (
+                [
+                    {
+                        "kind": "log",
+                        "event": "lake.invariant.scan_skip",
+                        "path": "p",
+                        "path_repr": "no",
+                        "error": None,
+                        "error_repr": False,
+                    }
+                ],
+                True,
+                "repr flags must be bools",
+            ),
+            (
+                [
+                    {
+                        "kind": "log",
+                        "event": "lake.invariant.scan_skip",
+                        "path": "p",
+                        "path_repr": False,
+                        "error": 7,
+                        "error_repr": False,
+                    }
+                ],
+                True,
+                "error must be None or a string",
+            ),
+            ([{"kind": "finding", "index": 3}], True, "index out of range"),
+            ([], True, "drift marker count"),
+            ([{"kind": "drift"}], False, "drift marker count"),
+        ],
+    )
+    def test_junk_event_streams_refuse(self, events: Any, include_bars: bool, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            lrw._scan_events_from_wire(events, finding_count=1, include_bars=include_bars)
+
+    @pytest.mark.parametrize(
+        ("mutate", "match"),
+        [
+            (lambda w: "junk", "must be a mapping"),
+            (lambda w: {**w, "findings": "junk"}, "findings must be a sequence"),
+            (lambda w: {**w, "drift_insert_at": 9}, "drift_insert_at out of range"),
+            (lambda w: {**w, "files_scanned": -1}, "non-negative int"),
+            (lambda w: {**w, "reads_performed": True}, "non-negative int"),
+            (lambda w: {**w, "files_by_segment": "junk"}, "files_by_segment must be a sequence"),
+            (lambda w: {**w, "files_by_segment": [("INDEX",)]}, "must be .segment, count."),
+            (lambda w: {**w, "files_by_segment": [(1, 2)]}, "must be .segment, count."),
+            (lambda w: {**w, "files_by_segment": [("INDEX", -1)]}, "count must be a non-negative"),
+            (lambda w: {**w, "first_skipped_parse": 7}, "None or a string"),
+            (lambda w: {**w, "symbol_dirs": "junk"}, "symbol_dirs must be a sequence"),
+            (lambda w: {**w, "symbol_dirs": [("NSE",)]}, "exchange, segment, symbols"),
+            (lambda w: {**w, "symbol_dirs": [(1, "INDEX", [])]}, "keys must be strings"),
+            (lambda w: {**w, "symbol_dirs": [("NSE", "INDEX", "N")]}, "names must be a sequence"),
+            (lambda w: {**w, "symbol_dirs": [("NSE", "INDEX", [7])]}, "names must be strings"),
+        ],
+    )
+    def test_junk_wire_shapes_refuse(self, mutate: Any, match: str) -> None:
+        from pathlib import Path
+
+        with pytest.raises(ValueError, match=match):
+            lrw._scan_report_from_wire(
+                mutate(_scan_clean_wire()),
+                lake_root=Path("/tmp/waved-scan-lake"),
+                canonical_keys=None,
+                include_bars=True,
+            )
+
+    def test_include_bars_false_requires_zero_drift_at(self) -> None:
+        from pathlib import Path
+
+        wire = _scan_clean_wire(
+            findings=[
+                {
+                    "kind": "option_dup",
+                    "path": "/l/f",
+                    "series": "S",
+                    "physical_rows": 3,
+                    "unique_keys": 2,
+                }
+            ],
+            drift_insert_at=1,
+            events=[{"kind": "finding", "index": 0}],
+        )
+        with pytest.raises(ValueError, match="drift_insert_at out of range"):
+            lrw._scan_report_from_wire(
+                wire, lake_root=Path("/l"), canonical_keys=None, include_bars=False
+            )
+
+    def test_first_skipped_parse_beats_read(self) -> None:
+        from pathlib import Path
+
+        wire = _scan_clean_wire(first_skipped_parse="/l/p", first_skipped_read="/l/r")
+        report, _events, _at, _n, _reads = lrw._scan_report_from_wire(
+            wire, lake_root=Path("/l"), canonical_keys=None, include_bars=True
+        )
+        assert report.first_skipped_path == "/l/p"
+        wire = _scan_clean_wire(first_skipped_read="/l/r")
+        report, *_rest = lrw._scan_report_from_wire(
+            wire, lake_root=Path("/l"), canonical_keys=None, include_bars=True
+        )
+        assert report.first_skipped_path == "/l/r"
+
+    def test_reports_equal_pops_only_the_wall_clock(self) -> None:
+        left = _empty_scan_report(duration_s=1.0)
+        right = _empty_scan_report(duration_s=2.0)
+        assert lrw._scan_reports_equal(left, right)
+        assert not lrw._scan_reports_equal(left, _empty_scan_report(files_scanned=1))
+
+
+class TestScanReplay:
+    """The ordered event replay through the Python sinks."""
+
+    def test_replay_covers_every_event_shape(self) -> None:
+        from pathlib import Path
+
+        from brutex.data import lake_invariants as li
+
+        coords = li.PartitionCoords(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", year=2024, month=6
+        )
+        drift = li.LegacyKeyDrift(
+            exchange="NSE",
+            segment="CASH",
+            drifted_symbol="NSE-M&M",
+            canonical_symbol="M&M",
+            drifted_dir=Path("/l/bars/NSE/CASH/NSE-M&M"),
+            intervals=("1minute",),
+            files=1,
+        )
+        findings: tuple[Any, ...] = (
+            li.IntraFileDup(path=Path("/l/a"), coords=coords, physical_rows=4, unique_keys=3),
+            drift,
+            li.OptionIntraFileDup(path=Path("/l/f"), series="S", physical_rows=3, unique_keys=2),
+        )
+        events: tuple[dict[str, Any], ...] = (
+            {
+                "kind": "log",
+                "event": "lake.invariant.scan_skip",
+                "path": "/l/raw",
+                "path_repr": False,
+                "error": "boom",
+                "error_repr": False,
+            },
+            {
+                "kind": "log",
+                "event": "lake.invariant.symlink_skipped",
+                "path": "/l/reprd",
+                "path_repr": True,
+                "error": None,
+                "error_repr": False,
+            },
+            {
+                "kind": "log",
+                "event": "lake.invariant.scan_skip",
+                "path": "/l/opt",
+                "path_repr": True,
+                "error": "polars boom",
+                "error_repr": True,
+            },
+            {"kind": "finding", "index": 0},
+            {"kind": "drift"},
+            {"kind": "finding", "index": 1},  # crate index 1 = post-drift shift
+        )
+        with capture_logs() as logs:
+            lrw._replay_scan_events(events, findings, drift_at=1, drift_len=1)
+        by_event = [(rec["event"], rec) for rec in logs]
+        assert by_event[0][0] == "lake.invariant.scan_skip"
+        assert by_event[0][1]["path"] == "/l/raw" and by_event[0][1]["error"] == "boom"
+        assert by_event[1][0] == "lake.invariant.symlink_skipped"
+        assert by_event[1][1]["path"] == repr("/l/reprd")
+        assert "error" not in by_event[1][1]
+        assert by_event[2][1]["path"] == repr("/l/opt")
+        assert by_event[2][1]["error"] == repr("polars boom")
+        assert by_event[3][0] == "lake.invariant.intra_file_dup"
+        assert by_event[4][0] == "lake.invariant.legacy_key_drift"
+        assert by_event[5][0] == "lake.invariant.option_intra_file_dup"
+
+
+class TestScanLakeSurface:
+    """The routed whole-lake scan — guards, burn-in, steady state, pause."""
+
+    def test_absent_crate_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oracle = _CountingWholeLakeOracle()
+        report = _scan_call(monkeypatch, None, oracle=oracle)
+        assert oracle.calls == 1 and report is oracle._result
+
+    def test_degrade_error_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _refuse(*_args: Any) -> Any:
+            raise ValueError("brutex-lake waved scan degraded: int()-ambiguous")
+
+        oracle = _CountingWholeLakeOracle()
+        with capture_logs() as logs:
+            report = _scan_call(monkeypatch, _fake_crate(scan=_refuse), oracle=oracle)
+        assert oracle.calls == 1 and report is oracle._result
+        assert any(rec.get("reason") == "scan_error" for rec in logs)
+        assert not lrw.rust_waved_disabled()
+
+    def test_escape_errors_reraise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _interrupt(*_args: Any) -> Any:
+            raise KeyboardInterrupt
+
+        oracle = _CountingWholeLakeOracle()
+        with pytest.raises(KeyboardInterrupt):
+            _scan_call(monkeypatch, _fake_crate(scan=_interrupt), oracle=oracle)
+        assert oracle.calls == 0
+
+    def test_panic_belt_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _FakePanicException(BaseException):
+            pass
+
+        panic_module = types.ModuleType("pyo3_runtime")
+        panic_module.PanicException = _FakePanicException  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", panic_module)
+
+        def _panic(*_args: Any) -> Any:
+            raise _FakePanicException("thread panicked")
+
+        oracle = _CountingWholeLakeOracle()
+        report = _scan_call(monkeypatch, _fake_crate(scan=_panic), oracle=oracle)
+        assert oracle.calls == 1 and report is oracle._result
+        assert lrw.rust_waved_disabled()
+
+    def test_refused_wire_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oracle = _CountingWholeLakeOracle()
+        with capture_logs() as logs:
+            report = _scan_call(
+                monkeypatch, _fake_crate(scan=lambda *a: {"findings": "junk"}), oracle=oracle
+            )
+        assert oracle.calls == 1 and report is oracle._result
+        assert any(rec.get("reason") == "scan_result_refused" for rec in logs)
+
+    def test_burn_in_match_serves_the_oracle_report(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oracle = _CountingWholeLakeOracle(_empty_scan_report())
+        report = _scan_call(monkeypatch, _fake_crate(), oracle=oracle)
+        assert oracle.calls == 1 and report is oracle._result
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_SCAN] == lrw.BURN_IN_SAMPLES - 1
+        assert not lrw.rust_waved_disabled()
+        # Burn-in never publishes the reads counter (the oracle served).
+        assert lrw.last_rust_scan_reads() is None
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oracle = _CountingWholeLakeOracle(_empty_scan_report(files_scanned=7))
+        with capture_logs() as logs:
+            report = _scan_call(monkeypatch, _fake_crate(), oracle=oracle)
+        assert report is oracle._result
+        assert lrw.rust_waved_disabled()
+        assert any(rec.get("reason") == "burn_in_scan_mismatch" for rec in logs)
+
+    def test_burn_in_completion_logs_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=1)
+        # The reset disarms the shape gate at remaining<=0 only; here one
+        # budget slot remains, so the next engaged call completes burn-in.
+        with capture_logs() as logs:
+            _scan_call(monkeypatch, _fake_crate(), oracle=_CountingWholeLakeOracle())
+        assert any(rec["event"] == "lake_rust_waved.burn_in_complete" for rec in logs)
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_SCAN] == 0
+
+    def test_unseen_shape_token_compares_past_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=1)
+        oracle_a = _CountingWholeLakeOracle()
+        _scan_call(monkeypatch, _fake_crate(), oracle=oracle_a)
+        assert lrw._BURN_IN_REMAINING[lrw.SURFACE_SCAN] == 0
+        # A NEW shape (options-only) still runs the comparator (oracle called)
+        # even with the count budget spent.
+        oracle_b = _CountingWholeLakeOracle()
+        wire = _scan_clean_wire(events=[])
+        report = _scan_call(
+            monkeypatch,
+            _fake_crate(scan=lambda *a: wire),
+            oracle=oracle_b,
+            include_bars=False,
+        )
+        assert oracle_b.calls == 1 and report is oracle_b._result
+
+    def test_steady_state_serves_the_crate_report(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        wire = _scan_clean_wire(
+            findings=[
+                {
+                    "kind": "option_dup",
+                    "path": "/l/f",
+                    "series": "S",
+                    "physical_rows": 3,
+                    "unique_keys": 2,
+                }
+            ],
+            events=[
+                {"kind": "drift"},
+                {
+                    "kind": "log",
+                    "event": "lake.invariant.symlink_skipped",
+                    "path": "/l/link",
+                    "path_repr": True,
+                    "error": None,
+                    "error_repr": False,
+                },
+                {"kind": "finding", "index": 0},
+            ],
+            option_files_scanned=1,
+            reads_performed=3,
+        )
+        oracle = _CountingWholeLakeOracle()
+        with capture_logs() as logs:
+            report = _scan_call(monkeypatch, _fake_crate(scan=lambda *a: wire), oracle=oracle)
+        assert oracle.calls == 0
+        assert report.option_files_scanned == 1 and len(report.findings) == 1
+        assert report.duration_s > 0.0
+        assert lrw.last_rust_scan_reads() == 3
+        names = [rec["event"] for rec in logs]
+        assert "lake.invariant.symlink_skipped" in names
+        assert "lake.invariant.option_intra_file_dup" in names
+        assert names[-1] == "lake.invariant.scan_complete"
+
+    def test_arguments_cross_with_vocabularies(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import partition as partition_mod
+        from brutex.data.lake_invariants import ENGINE_INDEX_COORDS
+
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        seen: list[tuple[Any, ...]] = []
+
+        def _record(*args: Any) -> Any:
+            seen.append(args)
+            return _scan_clean_wire()
+
+        _scan_call(
+            monkeypatch,
+            _fake_crate(scan=_record),
+            months=[(2024, 6)],
+        )
+        (args,) = seen
+        assert args[0] == "/tmp/waved-scan-lake"
+        assert args[5] == [(2024, 6)]
+        assert args[6] is True and args[7] is True
+        assert args[8] == sorted(partition_mod.VALID_EXCHANGES)
+        assert args[9] == sorted(partition_mod.VALID_SEGMENTS)
+        assert args[10] == sorted(partition_mod.VALID_INTERVALS)
+        assert set(args[11]) == set(partition_mod._FORBIDDEN_SYMBOL_CHARS)
+        assert args[12] == [tuple(c) for c in ENGINE_INDEX_COORDS]
+        assert args[13] is None  # no pause callback
+
+    def test_raising_pause_reraises_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        marker = RuntimeError("throttle exploded")
+
+        def _pause() -> None:
+            raise marker
+
+        def _tick_once(*args: Any) -> Any:
+            args[13]()  # the wrapped pause callback
+            raise AssertionError("unreachable — the wrap raises")
+
+        oracle = _CountingWholeLakeOracle()
+        with pytest.raises(RuntimeError) as caught:
+            _scan_call(
+                monkeypatch, _fake_crate(scan=_tick_once), oracle=oracle, per_file_pause=_pause
+            )
+        assert caught.value is marker
+        assert oracle.calls == 0  # NEVER folded into the degrade set
+
+    def test_pause_escape_without_capture_is_defensive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+
+        def _fake_escape(*_args: Any) -> Any:
+            raise lrw._PauseEscape
+
+        with pytest.raises(RuntimeError, match="pause escape without a captured exception"):
+            _scan_call(
+                monkeypatch,
+                _fake_crate(scan=_fake_escape),
+                per_file_pause=lambda: None,
+            )
+
+    def test_reset_clears_the_reads_counter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lrw.reset_lake_rust_waved_for_tests(remaining=0)
+        _scan_call(monkeypatch, _fake_crate(scan=lambda *a: _scan_clean_wire(reads_performed=9)))
+        assert lrw.last_rust_scan_reads() == 9
+        lrw.reset_lake_rust_waved_for_tests()
+        assert lrw.last_rust_scan_reads() is None
+
+    def test_populated_segments_and_symbol_dirs_reconstruct(self) -> None:
+        from pathlib import Path
+
+        wire = _scan_clean_wire(
+            files_scanned=2,
+            files_by_segment=[("CASH", 1), ("INDEX", 1)],
+            symbol_dirs=[("NSE", "CASH", ["M&M", "NSE-M&M"]), ("NSE", "INDEX", ["NIFTY"])],
+        )
+        report, _events, drift_at, drift_len, _reads = lrw._scan_report_from_wire(
+            wire, lake_root=Path("/tmp/waved-scan-lake"), canonical_keys=None, include_bars=True
+        )
+        assert report.files_by_segment == (("CASH", 1), ("INDEX", 1))
+        # The drift fold ran over the crate-enumerated dirs: NSE-M&M drifts
+        # against its sibling M&M (the lake_keys ladder — Python-side).
+        assert drift_at == 0 and drift_len == 1
+        from brutex.data.lake_invariants import LegacyKeyDrift
+
+        drift = report.findings[0]
+        assert isinstance(drift, LegacyKeyDrift)
+        assert drift.drifted_symbol == "NSE-M&M" and drift.canonical_symbol == "M&M"

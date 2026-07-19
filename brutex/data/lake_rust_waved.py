@@ -75,6 +75,30 @@ facade-side from the crate counts (dataclasses stay Python), value-equal to
 ``classify_bar_keys``' output by the frozen-dataclass equality the burn-in
 compares.
 
+## W-4 (this slice): the ``lake_invariants`` whole-lake scan
+
+:func:`scan_lake_via_rust` routes the WHOLE ``scan_lake_invariants`` body —
+the streamed bars-tree walk + per-file read/classify (dup / foreign+overlap
+/ price-sanity / alien-schema), the options-tree walk (symlink probes, key
+gate, dup / foreign / memoised-sibling overlap), every skip verdict and the
+counters — through ``brutex_lake.waved_scan_lake``. STAYS PYTHON (house
+laws i-ii): structlog (the crate returns an ORDERED event stream with
+per-site ``repr()`` flags this facade replays through the
+``lake_invariants`` logger + ``log_lake_finding``), the
+``detect_legacy_drift`` fold (needs the ``lake_keys`` ladder — run
+facade-side over the crate-enumerated symbol dirs and SPLICED at the
+crate's insert point), the injected ``per_file_pause`` callback (ticked by
+the crate through the FFI after every read attempt — the L3 throttle law),
+and the frozen finding dataclasses (rebuilt from the wire records).
+Read-only, so the full W-1 doctrine applies — degrade-to-oracle,
+refuse-poison wire validation, and the per-surface burn-in comparing the
+reports ORDER-EXACT with the wall clock popped (burn-in serves the ORACLE
+report so the replayed event stream never double-logs). The wire also
+carries the design-§F2 ``reads_performed`` counter
+(:func:`last_rust_scan_reads`) — the hook the delete-time read-count spy
+pins rebind onto. A raising pause callback re-raises VERBATIM via the
+``_PauseEscape`` parking wrap, never folded into the degrade set.
+
 ## The flag — ``BRUTEX_LAKE_WAVED_RUST`` (DEFAULT OFF)
 
 A truthy literal (``1/true/yes/on``) → ON; a falsy literal
@@ -114,25 +138,34 @@ test isolation only, never called from production paths.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import io
 import json
 import os
+import time
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
 from brutex.data.lake_rust_render import degrade_errors, panic_belt_errors
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from types import ModuleType
 
     import polars as pl
 
-    from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup, PartitionCoords
+    from brutex.data.lake_invariants import (
+        ForeignMonthRows,
+        IntraFileDup,
+        LakeFinding,
+        LakeScanReport,
+        PartitionCoords,
+    )
 
     #: The per-file reconcile scan wire ``(row_count, first_ts, last_ts,
     #: raw_hash, findings)`` — the W-3 seam's shared oracle/crate shape
@@ -154,6 +187,9 @@ SURFACE_CONTENT_TOKEN: Final[str] = "content_token"  # noqa: S105 — a surface 
 
 #: The W-3 surface token (the ``catalog_reconcile`` per-file scan).
 SURFACE_RECONCILE_FILE: Final[str] = "reconcile_file"
+
+#: The W-4 surface token (the ``lake_invariants`` whole-lake scan).
+SURFACE_SCAN: Final[str] = "scan_lake"
 
 #: Engaged calls compared against the Python oracle per process PER surface
 #: (the burn-in self-check) — 16, the render/resample/#1531 precedent.
@@ -178,6 +214,7 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
     SURFACE_READ_1M: BURN_IN_SAMPLES,
     SURFACE_CONTENT_TOKEN: BURN_IN_SAMPLES,
     SURFACE_RECONCILE_FILE: BURN_IN_SAMPLES,
+    SURFACE_SCAN: BURN_IN_SAMPLES,
 }
 
 #: Per-surface shape tokens already compared this process (the shape gate).
@@ -189,6 +226,7 @@ _BURN_IN_SHAPES_SEEN: Final[dict[str, set[str]]] = {
     SURFACE_READ_1M: set(),
     SURFACE_CONTENT_TOKEN: set(),
     SURFACE_RECONCILE_FILE: set(),
+    SURFACE_SCAN: set(),
 }
 
 #: Whether each surface's shape gate is armed (the resample-facade shape:
@@ -198,6 +236,7 @@ _BURN_IN_SHAPE_GATE: Final[dict[str, bool]] = {
     SURFACE_READ_1M: True,
     SURFACE_CONTENT_TOKEN: True,
     SURFACE_RECONCILE_FILE: True,
+    SURFACE_SCAN: True,
 }
 
 #: The crate API surface the import guard verifies — ALL-OR-NOTHING over
@@ -212,6 +251,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "waved_heal_batch",
     "waved_lake_content_token",
     "waved_reconcile_file",
+    "waved_scan_lake",
 )
 
 #: Once-per-process-per-reason warn memo + per-surface engaged latches.
@@ -288,6 +328,7 @@ def reset_lake_rust_waved_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None
         _BURN_IN_SHAPES_SEEN[surface].clear()
         _BURN_IN_SHAPE_GATE[surface] = remaining > 0
     _OBSERVABILITY_MEMO.clear()
+    _LAST_SCAN_READS[0] = None
 
 
 def _warn_once(reason: str, **context: object) -> None:
@@ -1006,18 +1047,532 @@ def reconcile_file_via_rust(
     return scan
 
 
+# ────────────────────────────────────────────────────────────────────────
+# W-4 — the ``lake_invariants`` whole-lake scan surface
+# ────────────────────────────────────────────────────────────────────────
+
+#: The most recent engaged Rust scan's ``_read_key_columns``-equivalent
+#: read-attempt count (the Wave-D design §F2 wire counter — the hook the
+#: delete-time read-count spy pins rebind onto). ``None`` until an engaged
+#: scan serves; reset by :func:`reset_lake_rust_waved_for_tests`.
+_LAST_SCAN_READS: Final[list[int | None]] = [None]
+
+#: The logger the scan-event replay writes through — the SAME structlog
+#: name as ``lake_invariants._LOG``, so a flag-ON replayed WARN is
+#: indistinguishable from the Python arm's at the sink (house law i:
+#: structlog stays Python — the crate returns event COORDINATES only).
+_LI_LOG = structlog.get_logger("brutex.data.lake_invariants")
+
+#: The two scan log-event names the crate may replay (refuse-poison
+#: vocabulary — any other token is a mis-shaped wire, served from the
+#: oracle).
+_SCAN_LOG_EVENTS: Final[frozenset[str]] = frozenset(
+    {"lake.invariant.scan_skip", "lake.invariant.symlink_skipped"}
+)
+
+#: The scan wire's ``files_by_segment`` entry arity — ``(segment, count)``.
+_SCAN_SEGMENT_PAIR_ARITY: Final[int] = 2
+
+#: The scan wire's ``symbol_dirs`` entry arity — ``(exchange, segment, symbols)``.
+_SCAN_SYMBOL_DIRS_ARITY: Final[int] = 3
+
+#: The scan event-record kind tokens (the crate wire contract).
+_SCAN_EVENT_KINDS: Final[frozenset[str]] = frozenset({"log", "finding", "drift"})
+
+
+class _PauseEscape(BaseException):
+    """Marker for a raising ``per_file_pause`` callback crossing the seam.
+
+    The facade wraps the injected pause callback so ITS OWN exception —
+    whatever class, ``KeyboardInterrupt`` included (hence the
+    ``BaseException`` base) — is parked and re-raised VERBATIM by
+    :func:`scan_lake_via_rust`, never mistaken for a crate degrade (a pause
+    raising ``ValueError`` would otherwise fold into ``degrade_errors()``
+    and re-run the whole oracle scan, doubling the callback's side effects
+    before the exception finally propagated).
+    """
+
+
+def _scan_coords_from_wire(rec: Mapping[str, object]) -> PartitionCoords:
+    """Build the ``PartitionCoords`` a bars-arm finding record carries."""
+    from brutex.data.lake_invariants import PartitionCoords
+
+    for key in ("exchange", "segment", "symbol", "interval"):
+        if not isinstance(rec.get(key), str):
+            raise ValueError(f"scan finding {key} must be a string")
+    if not _is_count(rec.get("year")) or not _is_count(rec.get("month")):
+        raise ValueError("scan finding year/month must be ints")
+    return PartitionCoords(
+        exchange=cast("str", rec["exchange"]),
+        segment=cast("str", rec["segment"]),
+        symbol=cast("str", rec["symbol"]),
+        interval=cast("str", rec["interval"]),
+        year=cast("int", rec["year"]),
+        month=cast("int", rec["month"]),
+    )
+
+
+def _scan_str(rec: Mapping[str, object], key: str) -> str:
+    """*rec[key]* as a genuine ``str`` (anything else refuses the wire)."""
+    value = rec.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"scan finding {key} must be a string")
+    return value
+
+
+def _scan_count(rec: Mapping[str, object], key: str) -> int:
+    """*rec[key]* as a genuine non-negative int (bool-punned ints refuse)."""
+    value = rec.get(key)
+    if not _is_count(value) or cast("int", value) < 0:
+        raise ValueError(f"scan {key} must be a non-negative int")
+    return cast("int", value)
+
+
+def _scan_overlap(rec: Mapping[str, object]) -> int | None:
+    """``overlap_rows`` — ``None`` (unresolved) or a non-negative int."""
+    value = rec.get("overlap_rows")
+    if value is None:
+        return None
+    if not _is_count(value) or cast("int", value) < 0:
+        raise ValueError("scan overlap_rows must be None or a non-negative int")
+    return cast("int", value)
+
+
+def _scan_finding_from_wire(rec: object) -> LakeFinding:
+    """Rebuild ONE frozen finding dataclass from its crate wire record.
+
+    Value-equal to the Python scanner's object by construction (same path
+    string, same coords/series/counts, same ``overlap_rows`` including the
+    honest ``None`` abstain) — pinned by the burn-in's normalized-report
+    compare and the poison-corpus differential. Raises ``ValueError`` on
+    ANY junk shape (refuse-poison — the caller serves the oracle).
+    """
+    from brutex.data import lake_invariants as li
+
+    if not isinstance(rec, Mapping):
+        raise ValueError(f"scan finding must be a mapping, got {type(rec).__name__}")
+    kind = rec.get("kind")
+    path = Path(_scan_str(rec, "path"))
+    if kind == "bars_dup":
+        return li.IntraFileDup(
+            path=path,
+            coords=_scan_coords_from_wire(rec),
+            physical_rows=_scan_count(rec, "physical_rows"),
+            unique_keys=_scan_count(rec, "unique_keys"),
+        )
+    if kind == "bars_foreign":
+        return li.ForeignMonthRows(
+            path=path,
+            coords=_scan_coords_from_wire(rec),
+            foreign_rows=_scan_count(rec, "foreign_rows"),
+            overlap_rows=_scan_overlap(rec),
+        )
+    if kind == "price":
+        return li.PriceSanityRows(
+            path=path,
+            coords=_scan_coords_from_wire(rec),
+            bad_rows=_scan_count(rec, "bad_rows"),
+        )
+    if kind == "alien_bars":
+        return li.SchemaAlienFile(
+            path=path, reason=_scan_str(rec, "reason"), coords=_scan_coords_from_wire(rec)
+        )
+    if kind == "alien_option":
+        return li.SchemaAlienFile(
+            path=path, reason=_scan_str(rec, "reason"), series=_scan_str(rec, "series")
+        )
+    if kind == "option_dup":
+        return li.OptionIntraFileDup(
+            path=path,
+            series=_scan_str(rec, "series"),
+            physical_rows=_scan_count(rec, "physical_rows"),
+            unique_keys=_scan_count(rec, "unique_keys"),
+        )
+    if kind == "option_foreign":
+        return li.OptionForeignMonthRows(
+            path=path,
+            series=_scan_str(rec, "series"),
+            year=_scan_count(rec, "year"),
+            month=_scan_count(rec, "month"),
+            foreign_rows=_scan_count(rec, "foreign_rows"),
+            overlap_rows=_scan_overlap(rec),
+        )
+    raise ValueError(f"unknown scan finding kind: {kind!r}")
+
+
+def _scan_events_from_wire(
+    events: object, *, finding_count: int, include_bars: bool
+) -> tuple[Mapping[str, object], ...]:
+    """Shape-validate the ordered replay stream (refuse-poison on ANY junk)."""
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
+        raise ValueError("scan events must be a sequence")
+    drift_markers = 0
+    validated: list[Mapping[str, object]] = []
+    for rec in events:
+        if not isinstance(rec, Mapping):
+            raise ValueError("scan event must be a mapping")
+        kind = rec.get("kind")
+        if kind not in _SCAN_EVENT_KINDS:
+            raise ValueError(f"unknown scan event kind: {kind!r}")
+        if kind == "log":
+            if _scan_str(rec, "event") not in _SCAN_LOG_EVENTS:
+                raise ValueError(f"unknown scan log event: {rec.get('event')!r}")
+            _scan_str(rec, "path")
+            if not isinstance(rec.get("path_repr"), bool) or not isinstance(
+                rec.get("error_repr"), bool
+            ):
+                raise ValueError("scan log repr flags must be bools")
+            if rec.get("error") is not None and not isinstance(rec.get("error"), str):
+                raise ValueError("scan log error must be None or a string")
+        elif kind == "finding":
+            index = _scan_count(rec, "index")
+            if index >= finding_count:
+                raise ValueError("scan finding event index out of range")
+        else:
+            drift_markers += 1
+        validated.append(rec)
+    if drift_markers != (1 if include_bars else 0):
+        raise ValueError(f"scan drift marker count {drift_markers} violates include_bars")
+    return tuple(validated)
+
+
+def _scan_report_from_wire(
+    wire: object,
+    *,
+    lake_root: Path,
+    canonical_keys: Collection[str] | None,
+    include_bars: bool,
+) -> tuple[LakeScanReport, tuple[Mapping[str, object], ...], int, int, int]:
+    """Wire dict → ``(report, events, drift_at, drift_len, reads_performed)``.
+
+    Runs the Python :func:`~brutex.data.lake_invariants.detect_legacy_drift`
+    fold (STAYS Python — it needs the ``lake_keys`` ladder + the instrument
+    vocabulary) over the crate's enumerated ``symbol_dirs`` and splices its
+    findings at the crate's ``drift_insert_at`` — exactly the Python
+    scanner's position (after the bars tree, before the options tree). The
+    report's ``duration_s`` is a placeholder 0.0 — the caller stamps the
+    real wall clock at serve time (the burn-in compare pops it either way).
+    Raises ``ValueError`` on ANY junk wire shape (refuse-poison).
+    """
+    from brutex.data import lake_invariants as li
+
+    if not isinstance(wire, Mapping):
+        raise ValueError(f"scan wire must be a mapping, got {type(wire).__name__}")
+    raw_findings = wire.get("findings")
+    if not isinstance(raw_findings, Sequence) or isinstance(raw_findings, (str, bytes)):
+        raise ValueError("scan findings must be a sequence")
+    findings = tuple(_scan_finding_from_wire(rec) for rec in raw_findings)
+    drift_at = _scan_count(wire, "drift_insert_at")
+    if drift_at > len(findings) or (not include_bars and drift_at != 0):
+        raise ValueError("scan drift_insert_at out of range")
+    events = _scan_events_from_wire(
+        wire.get("events"), finding_count=len(findings), include_bars=include_bars
+    )
+    counters = {
+        key: _scan_count(wire, key)
+        for key in (
+            "files_scanned",
+            "files_skipped",
+            "series_scanned",
+            "option_files_scanned",
+            "option_files_skipped",
+            "engine_files",
+            "engine_files_skipped",
+            "reads_performed",
+        )
+    }
+    by_segment_raw = wire.get("files_by_segment")
+    if not isinstance(by_segment_raw, Sequence) or isinstance(by_segment_raw, (str, bytes)):
+        raise ValueError("scan files_by_segment must be a sequence")
+    by_segment: list[tuple[str, int]] = []
+    for pair in by_segment_raw:
+        if (
+            not isinstance(pair, Sequence)
+            or len(pair) != _SCAN_SEGMENT_PAIR_ARITY
+            or not isinstance(pair[0], str)
+        ):
+            raise ValueError("scan files_by_segment entries must be (segment, count)")
+        if not _is_count(pair[1]) or cast("int", pair[1]) < 0:
+            raise ValueError("scan files_by_segment count must be a non-negative int")
+        by_segment.append((pair[0], cast("int", pair[1])))
+    for key in ("first_skipped_parse", "first_skipped_read"):
+        if wire.get(key) is not None and not isinstance(wire.get(key), str):
+            raise ValueError(f"scan {key} must be None or a string")
+    symbol_dirs_raw = wire.get("symbol_dirs")
+    if not isinstance(symbol_dirs_raw, Sequence) or isinstance(symbol_dirs_raw, (str, bytes)):
+        raise ValueError("scan symbol_dirs must be a sequence")
+    symbol_dirs: dict[tuple[str, str], list[str]] = {}
+    for entry in symbol_dirs_raw:
+        if not isinstance(entry, Sequence) or len(entry) != _SCAN_SYMBOL_DIRS_ARITY:
+            raise ValueError("scan symbol_dirs entries must be (exchange, segment, symbols)")
+        exchange_name, segment_name, names = entry
+        if not isinstance(exchange_name, str) or not isinstance(segment_name, str):
+            raise ValueError("scan symbol_dirs keys must be strings")
+        if not isinstance(names, Sequence) or isinstance(names, (str, bytes)):
+            raise ValueError("scan symbol_dirs names must be a sequence")
+        for name in names:
+            if not isinstance(name, str):
+                raise ValueError("scan symbol_dirs names must be strings")
+        symbol_dirs[(exchange_name, segment_name)] = list(names)
+    drift: tuple[LakeFinding, ...] = ()
+    if include_bars:
+        # The crate's symbol names arrive sorted (BTreeSet) — the exact
+        # ``{key: sorted(names)}`` shape the Python scanner feeds the fold.
+        drift = tuple(
+            li.detect_legacy_drift(symbol_dirs, lake_root=lake_root, canonical_keys=canonical_keys)
+        )
+    full = findings[:drift_at] + drift + findings[drift_at:]
+    first_skipped = wire.get("first_skipped_parse")
+    if first_skipped is None:
+        first_skipped = wire.get("first_skipped_read")
+    report = li.LakeScanReport(
+        findings=full,
+        files_scanned=counters["files_scanned"],
+        files_skipped=counters["files_skipped"],
+        series_scanned=counters["series_scanned"],
+        option_files_scanned=counters["option_files_scanned"],
+        option_files_skipped=counters["option_files_skipped"],
+        duration_s=0.0,
+        files_by_segment=tuple(by_segment),
+        engine_files=counters["engine_files"],
+        engine_files_skipped=counters["engine_files_skipped"],
+        first_skipped_path=cast("str | None", first_skipped),
+    )
+    return report, events, drift_at, len(drift), counters["reads_performed"]
+
+
+def _scan_reports_equal(left: LakeScanReport, right: LakeScanReport) -> bool:
+    """Order-exact report equality with the wall clock popped.
+
+    STRONGER than the poison-corpus harness's normalized verdict (which
+    sorts findings and folds the lake root): both arms scanned the SAME
+    lake, so paths compare raw, and the findings ORDER is part of the law
+    (the event replay indexes into it). The census is a pure function of
+    the report, so report equality implies census equality — comparing it
+    here would add cost with zero discrimination power.
+    """
+    left_raw = dataclasses.asdict(left)
+    right_raw = dataclasses.asdict(right)
+    left_raw.pop("duration_s")
+    right_raw.pop("duration_s")
+    return left_raw == right_raw
+
+
+def _replay_scan_events(
+    events: tuple[Mapping[str, object], ...],
+    findings: tuple[LakeFinding, ...],
+    *,
+    drift_at: int,
+    drift_len: int,
+) -> None:
+    """Replay the crate's ordered event stream through the Python sinks.
+
+    House law i — structlog stays Python: log WARNs write through the SAME
+    logger name as ``lake_invariants._LOG`` with the crate's per-site
+    ``repr()`` flags (the #907/#1594 log-injection law); finding events
+    replay :func:`~brutex.data.lake_invariants.log_lake_finding` at the
+    exact Python log position (dup/price/alien at classification, foreign
+    at overlap resolution); the drift marker logs the spliced drift
+    findings in order. A crate finding index at/after ``drift_at`` shifts
+    past the spliced drift block.
+
+    HONEST (recorded deviation): a skip event's ``error`` text is the
+    RUST-side exception rendering — same event name, same path, same count,
+    different message bytes than the Python arm's (the harness's "log TEXT
+    is deliberately NOT compared" law; readiness doc §3).
+    """
+    from brutex.data.lake_invariants import log_lake_finding
+
+    for rec in events:
+        kind = rec["kind"]
+        if kind == "log":
+            path_text = cast("str", rec["path"])
+            path_value = repr(path_text) if rec["path_repr"] else path_text
+            error = rec.get("error")
+            if error is None:
+                _LI_LOG.warning(cast("str", rec["event"]), path=path_value)
+            else:
+                error_text = cast("str", error)
+                error_value = repr(error_text) if rec["error_repr"] else error_text
+                _LI_LOG.warning(cast("str", rec["event"]), path=path_value, error=error_value)
+        elif kind == "finding":
+            index = cast("int", rec["index"])
+            log_lake_finding(findings[index if index < drift_at else index + drift_len])
+        else:  # drift — log the spliced Python drift findings in order
+            for finding in findings[drift_at : drift_at + drift_len]:
+                log_lake_finding(finding)
+
+
+def last_rust_scan_reads() -> int | None:
+    """The engaged Rust scan's most recent read-attempt count (§F2 seam).
+
+    ``None`` until an engaged scan serves in this process. The Wave-D
+    delete step rebinds the ``_read_key_columns`` read-count spy pins onto
+    this counter once the Python core is gone (design §F2 — the wire
+    carries it NOW so the pins survive the delete).
+    """
+    return _LAST_SCAN_READS[0]
+
+
+def scan_lake_via_rust(
+    lake_root: Path,
+    *,
+    exchange: str | None,
+    segment: str | None,
+    symbol: str | None,
+    interval: str | None,
+    months: Collection[tuple[int, int]] | None,
+    include_options: bool,
+    include_bars: bool,
+    canonical_keys: Collection[str] | None,
+    per_file_pause: Callable[[], None] | None,
+    oracle: Callable[[], LakeScanReport],
+) -> LakeScanReport:
+    """The routed whole-lake invariant scan — called by ``scan_lake_invariants`` ONLY flag-ON.
+
+    Read-only, so the full W-1 fail-closed doctrine applies (module
+    docstring): guard latches / crate refusals / refuse-poison wire shapes
+    serve ``oracle()`` — the verbatim Python scanner. The crate returns the
+    findings + counters + an ORDERED event stream; this facade rebuilds the
+    frozen dataclasses, runs the Python ``detect_legacy_drift`` fold over
+    the crate-enumerated symbol dirs (the fold STAYS Python — house law
+    ii), splices its findings at the crate's insert point, and replays the
+    log/finding events through the Python sinks (house law i). The first
+    :data:`BURN_IN_SAMPLES` engaged calls (plus each unseen shape token)
+    run BOTH arms and compare the reports order-exact (wall clock popped);
+    ANY difference ships the ORACLE report and autoreverts the whole waved
+    seam. Burn-in calls SERVE the oracle report (its logs already fired —
+    replaying the crate stream too would double-log) and tick the injected
+    pause callback in BOTH arms (the read_1m double-run property,
+    documented).
+
+    A raising *per_file_pause* re-raises VERBATIM (class + message) via the
+    :class:`_PauseEscape` parking wrap — never folded into the degrade set.
+    """
+    crate = _crate_ready()
+    if crate is None:
+        return oracle()
+    from brutex.data import lake_invariants as li
+    from brutex.data import partition as partition_mod
+
+    started = time.perf_counter()
+    pause_error: list[BaseException] = []
+    pause_arg: Callable[[], None] | None = None
+    if per_file_pause is not None:
+        pause = per_file_pause
+
+        def _ticked() -> None:
+            try:
+                pause()
+            except BaseException as exc:
+                pause_error.append(exc)
+                raise _PauseEscape from exc
+
+        pause_arg = _ticked
+    try:
+        wire = crate.waved_scan_lake(
+            str(lake_root),
+            exchange,
+            segment,
+            symbol,
+            interval,
+            None if months is None else [(int(year), int(month)) for year, month in months],
+            include_bars,
+            include_options,
+            sorted(partition_mod.VALID_EXCHANGES),
+            sorted(partition_mod.VALID_SEGMENTS),
+            sorted(partition_mod.VALID_INTERVALS),
+            # The forbidden-chars vocabulary is DATA crossing the FFI —
+            # imported from its ONE partition.py home (§11 COMMON; a
+            # re-minted copy could silently drift from the writer law).
+            "".join(
+                sorted(partition_mod._FORBIDDEN_SYMBOL_CHARS)  # pyright: ignore[reportPrivateUsage]
+            ),
+            [(exch, seg, sym) for exch, seg, sym in li.ENGINE_INDEX_COORDS],
+            pause_arg,
+        )
+    except _PauseEscape as marker:
+        if pause_error:
+            raise pause_error[0] from None
+        raise RuntimeError("scan pause escape without a captured exception") from marker
+    except degrade_errors() as exc:
+        # The degrade-to-oracle law: a crate refusal (an int()-ambiguous dir
+        # name, an unmappable dtype, a non-UTF-8 path …) re-runs the oracle,
+        # whose verdict — findings, skips, or a raise — always wins.
+        _warn_once("scan_error", error_detail=repr(exc))
+        return oracle()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        # The escape set (the errors.py doctrine) — never a fallback.
+        raise
+    except panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return oracle()
+    try:
+        report, events, drift_at, drift_len, reads = _scan_report_from_wire(
+            wire, lake_root=lake_root, canonical_keys=canonical_keys, include_bars=include_bars
+        )
+    except ValueError as exc:
+        # Refuse-poison gate: a mis-shaped wire is a crate BUG — served
+        # loudly from the oracle.
+        _warn_once("scan_result_refused", error_detail=repr(exc))
+        return oracle()
+    shape_token = f"bars={include_bars}/options={include_options}/scoped={months is not None}"
+    shape_unseen = (
+        _BURN_IN_SHAPE_GATE[SURFACE_SCAN] and shape_token not in _BURN_IN_SHAPES_SEEN[SURFACE_SCAN]
+    )
+    if _BURN_IN_REMAINING[SURFACE_SCAN] > 0 or shape_unseen:
+        # Layer 3 — the burn-in self-check. The ORACLE report is served
+        # either way: its logs fired naturally inside oracle(), so the
+        # crate event stream is deliberately NOT replayed on a burn-in call
+        # (no double-log); the engaged replay path is exercised by the
+        # steady-state differential with the burn-in disarmed.
+        oracle_report = oracle()
+        if not _scan_reports_equal(report, oracle_report):
+            _disable(
+                "burn_in_scan_mismatch",
+                error=True,
+                surface=SURFACE_SCAN,
+                shape_token=shape_token,
+                lake=str(lake_root),
+            )
+            return oracle_report
+        _BURN_IN_SHAPES_SEEN[SURFACE_SCAN].add(shape_token)
+        if _BURN_IN_REMAINING[SURFACE_SCAN] > 0:
+            _BURN_IN_REMAINING[SURFACE_SCAN] -= 1
+            if _BURN_IN_REMAINING[SURFACE_SCAN] == 0:
+                _LOG.info(
+                    "lake_rust_waved.burn_in_complete",
+                    surface=SURFACE_SCAN,
+                    samples=BURN_IN_SAMPLES,
+                )
+        return oracle_report
+    _LAST_SCAN_READS[0] = reads
+    report = dataclasses.replace(report, duration_s=time.perf_counter() - started)
+    _replay_scan_events(events, report.findings, drift_at=drift_at, drift_len=drift_len)
+    _LI_LOG.info(
+        "lake.invariant.scan_complete",
+        files=report.files_scanned + report.option_files_scanned,
+        findings=len(report.findings),
+        duration_ms=round(report.duration_s * 1000.0, 3),
+    )
+    return report
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "LAKE_WAVED_RUST_ENV",
     "SURFACE_CONTENT_TOKEN",
     "SURFACE_READ_1M",
     "SURFACE_RECONCILE_FILE",
+    "SURFACE_SCAN",
     "env_flag_tristate",
     "heal_batch_via_rust",
     "lake_content_token_via_rust",
     "lake_rust_waved_enabled",
+    "last_rust_scan_reads",
     "read_1m_via_rust",
     "reconcile_file_via_rust",
     "reset_lake_rust_waved_for_tests",
     "rust_waved_disabled",
+    "scan_lake_via_rust",
 ]

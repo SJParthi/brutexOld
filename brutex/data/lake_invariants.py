@@ -1191,6 +1191,15 @@ def scan_lake_invariants(
 ) -> LakeScanReport:
     """The ONE bounded scanner over ``bars/`` (+ optionally ``options/``).
 
+    Wave-D seam (ADR-0020, DEC-RUST-LAKE-WAVED-001): when — and ONLY when —
+    ``BRUTEX_LAKE_WAVED_RUST`` is truthy, the scan routes through
+    :func:`brutex.data.lake_rust_waved.scan_lake_via_rust` with the verbatim
+    Python body below as the live parity oracle (degrade-to-oracle +
+    refuse-poison + burn-in — the facade's full W-1 doctrine). Flag OFF (the
+    default) never imports the routing function and is byte-identical
+    (spy-pinned). The ``detect_legacy_drift`` fold + all structlog output
+    stay Python on BOTH arms (Wave-D house laws i-ii).
+
     Cost honesty (Golden Rule #10): O(files-in-scope) TOTAL, per file
     O(footer + ONE key-column read) — the column read scales with the file's
     ROW COUNT, so this is NOT O(1); L2 bounds it by coordinates × *months*, L3
@@ -1254,6 +1263,60 @@ def scan_lake_invariants(
     -------
     LakeScanReport
         Findings + scan counters (``duration_s`` wall clock).
+    """
+    from brutex.data.lake_rust_waved import lake_rust_waved_enabled
+
+    def _python_arm() -> LakeScanReport:
+        return _scan_lake_invariants_python(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            months=months,
+            include_options=include_options,
+            include_bars=include_bars,
+            canonical_keys=canonical_keys,
+            per_file_pause=per_file_pause,
+        )
+
+    if lake_rust_waved_enabled():
+        from brutex.data.lake_rust_waved import scan_lake_via_rust
+
+        return scan_lake_via_rust(
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            months=months,
+            include_options=include_options,
+            include_bars=include_bars,
+            canonical_keys=canonical_keys,
+            per_file_pause=per_file_pause,
+            oracle=_python_arm,
+        )
+    return _python_arm()
+
+
+def _scan_lake_invariants_python(
+    lake_root: Path,
+    *,
+    exchange: str | None = None,
+    segment: str | None = None,
+    symbol: str | None = None,
+    interval: str | None = None,
+    months: Collection[tuple[int, int]] | None = None,
+    include_options: bool = True,
+    include_bars: bool = True,
+    canonical_keys: Collection[str] | None = None,
+    per_file_pause: Callable[[], None] | None = None,
+) -> LakeScanReport:
+    """The verbatim Python scanner body — the Wave-D seam's live parity oracle.
+
+    Every law lives on the public :func:`scan_lake_invariants` docstring;
+    this twin exists so the flag-ON facade can re-run the EXACT Python arm
+    as its degrade/burn-in oracle (the ``read_1m`` seam precedent).
     """
     started = time.perf_counter()
     month_scope = set(months) if months is not None else None

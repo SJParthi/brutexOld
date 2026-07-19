@@ -37,6 +37,7 @@
 pub mod heal;
 pub mod read;
 pub mod reconcile;
+pub mod scan;
 
 /// One per-session bad-tick WARN record the Python shell replays through
 /// `brutex.data.bad_tick.emit_bad_tick_warn` (the SINGLE emission seam —
