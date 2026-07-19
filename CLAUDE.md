@@ -3401,7 +3401,9 @@ hostile-review pass._
   the round-2 per-cell conduit makes ≤5 true by construction; BOTH OFF by
   default ⇒ cost UNCHANGED. GATES (measured in the PR body): new modules 100.00% line+branch the ci.yml
   way; frozen goldens (run-identity + apriori parity + vocab) UNMODIFIED fixtures byte-untouched; cargo
-  fmt/clippy -D warnings/test --release --locked green (binom kernel 10 in-crate tests); ruff/ruff-format/
+  fmt/clippy -D warnings/test --release --locked green (binom kernel 9 in-crate tests in stats/binom.rs;
+  a cargo `binom` name filter reads 10 via the cpcv sibling's `enumerator_is_complete_at_binomial_count`);
+  ruff/ruff-format/
   `mypy --strict`/pyright clean; the 7-type battery (unit/integration/property/golden/bench + hand-applied
   mutants on the floor/band/fragment laws). HOSTILE-REVIEW ROUND 1 folded (2026-07-19, same branch,
   pre-PR — the per-finding record lives in MIGRATION.md #1977): the binomial gate RESPECIFIED onto the
