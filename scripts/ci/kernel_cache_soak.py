@@ -159,16 +159,31 @@ TRIPWIRE_ENV_PINS: Final[tuple[str, ...]] = (
     "BRUTEX_SWEEP_TRIPWIRE_MEMORY_DWELL",
     "BRUTEX_SWEEP_TRIPWIRE_ABSURD_PNL_PAISA",
 )
-#: The remaining SYMMETRIC sweep-reachable env knobs (fix-round-3 MINOR-1
+#: The AUDITED symmetric sweep-reachable env knobs (fix-round-3 MINOR-1
 #: audit, refuter-A's enumeration; fix-round-4 adds the two sweep-path Rust
 #: toggles ``BRUTEX_FEED_RUST`` — the feed/replay bar-load choke point — and
 #: ``BRUTEX_STRATEGIES_RUST_COMBO``, the same class as the already-echoed
-#: ``BRUTEX_SWEEP_RUST_METRICS``/``_RUST_STAGE1A``): each reaches BOTH arms
+#: ``BRUTEX_SWEEP_RUST_METRICS``/``_RUST_STAGE1A``; fix-round-5 adds five
+#: more wall-posture Rust toggles from refuter-A's round-4 re-enumeration —
+#: ``BRUTEX_CORE_RUST_MONEY``/``BRUTEX_CORE_RUST_HWENV``/``BRUTEX_DATA_RUST``
+#: /``BRUTEX_LAKE_RUST_LOCKS`` proven consulted in the harness's OWN smoke
+#: child via their ``flag_unrecognised`` warns, plus ``BRUTEX_STATS_RUST``
+#: statically sweep-reachable through the cascade CPCV scoring path):
+#: each reaches BOTH arms
 #: identically (same base env + same dotenv application in both children), so
 #: none can skew ARM IDENTITY or attribute an effect to the flag — they are
 #: deliberately NOT pinned (behavior toggles are the operator's box posture)
 #: but are ECHOED into ``provenance.symmetric_env_echo`` so the report states
 #: the sizing/behavior posture its absolute numbers were measured under.
+#: COMPLETENESS ENVELOPE (honest, fix-round-5): this list covers the
+#: ENUMERATED audit — refuter-A's grep re-enumeration of the ``BRUTEX_*``
+#: namespace + the executed in-child ``flag_unrecognised`` probes
+#: (rounds 3-4, 2026-07-19) — it is NOT a proof of absolute completeness.
+#: Any un-enumerated env remains SYMMETRIC across both arms by the
+#: ``arm_env`` construction itself (same base env + same dotenv application
+#: in both children), so a missed name can dull the echo's posture
+#: disclosure but can never skew arm identity or attribute an effect to the
+#: flag; symmetry, not enumeration, is the load-bearing property.
 #: HONEST LIMIT: the echo is the PARENT-environ view — a ``.env``-file value
 #: the child's own ``bootstrap_env()`` injects is invisible here (disclosed
 #: in-report via ``symmetric_env_echo_scope``); the arm-identity-relevant
@@ -200,6 +215,11 @@ SYMMETRIC_ENV_ECHO: Final[tuple[str, ...]] = (
     "BRUTEX_DUCKDB_THREADS",
     "BRUTEX_FEED_RUST",
     "BRUTEX_STRATEGIES_RUST_COMBO",
+    "BRUTEX_CORE_RUST_MONEY",
+    "BRUTEX_CORE_RUST_HWENV",
+    "BRUTEX_DATA_RUST",
+    "BRUTEX_LAKE_RUST_LOCKS",
+    "BRUTEX_STATS_RUST",
 )
 #: The hardware-key env override (hardware_envelope.BENCH_BASELINE_KEY_ENV,
 #: drift-pinned): when set, ``hardware_key()`` returns it VERBATIM — a forged
@@ -775,8 +795,11 @@ def arm_env(
       ``sweep_runs/`` roots).
 
     The remaining sweep-reachable envs are SYMMETRIC by construction and
-    deliberately unpinned — audited in :data:`SYMMETRIC_ENV_ECHO`, echoed
-    into provenance.
+    deliberately unpinned — the ENUMERATED audit lives in
+    :data:`SYMMETRIC_ENV_ECHO` (echoed into provenance); an un-enumerated
+    env stays symmetric across both arms by this same construction (same
+    base env + same dotenv application in both children), so it can never
+    skew arm identity — see the completeness envelope on the constant.
     """
     env = dict(base)
     env[KERNEL_CACHE_ENV] = "1" if cache_on else "0"
@@ -1882,6 +1905,10 @@ def cmd_verdict(args: argparse.Namespace) -> int:
         report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return _fail_structural(f"cannot read report {path}: {exc}")
+    if not isinstance(report, dict):
+        # Fix-round-5 companion to the AttributeError net below: a top-level
+        # JSON array/scalar would crash `.get` before the shape net.
+        return _fail_structural(f"report shape invalid: top-level {type(report).__name__}")
     if report.get("kind") != REPORT_KIND or report.get("schema_version") != REPORT_SCHEMA_VERSION:
         return _fail_structural(
             f"not a {REPORT_KIND} v{REPORT_SCHEMA_VERSION} report: "
@@ -1911,7 +1938,12 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             hardware_key=report["provenance"].get("hardware_key"),
             hardware_key_source=key_source if isinstance(key_source, str) else None,
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        # AttributeError joined the net in fix-round-5 (refuter-A NIT-2): a
+        # hand-mangled report whose "provenance" is a JSON string or whose
+        # "arms" members are lists crashed `.get(...)` with a raw traceback
+        # at rc 1 (the judged-FAIL code) instead of the structural rc 2
+        # every sibling malformed shape gets.
         return _fail_structural(f"report shape invalid: {exc!r}")
     for name, status in acceptance.items():
         print(f"{name}: {status}")

@@ -1169,6 +1169,33 @@ class TestProvenanceCollection:
         # values the child injects are invisible — the pins cover those).
         assert "parent-environ" in prov["symmetric_env_echo_scope"]
 
+    def test_round5_rust_toggles_echo_when_planted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Fix-round-5 MINOR (refuter-A): the five wall-posture rust toggles
+        # proven consulted in the harness's own child (flag_unrecognised
+        # warns for CORE_RUST_MONEY/CORE_RUST_HWENV/DATA_RUST/
+        # LAKE_RUST_LOCKS; STATS_RUST statically sweep-reachable via the
+        # cascade CPCV path) joined the audit — planted values must appear
+        # in the echo, name-for-name.
+        round5 = (
+            "BRUTEX_CORE_RUST_MONEY",
+            "BRUTEX_CORE_RUST_HWENV",
+            "BRUTEX_DATA_RUST",
+            "BRUTEX_LAKE_RUST_LOCKS",
+            "BRUTEX_STATS_RUST",
+        )
+        for name in round5:
+            monkeypatch.setenv(name, "0")
+        prov = SOAK.collect_provenance(
+            lake_root=Path("/srv/lake"),
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        for name in round5:
+            assert name in prov["symmetric_env_audited"]
+            assert prov["symmetric_env_echo"][name] == "0"
+
     def test_hardware_key_source_probed_vs_env_override(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1354,6 +1381,26 @@ class TestVerdictSubcommand:
             json.dumps({"kind": SOAK.REPORT_KIND, "schema_version": 1}), encoding="utf-8"
         )
         assert self._run("verdict", "--report", str(path)).returncode == 2
+
+    def test_verdict_provenance_as_string_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-5 NIT (refuter-A): "provenance" as a JSON string crashed
+        # `.get(...)` with a raw AttributeError at rc 1 (the judged-FAIL
+        # code) — now the named structural refusal at rc 2.
+        path = self._write_report(tmp_path, provenance="junk")
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "report shape invalid" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_arm_members_as_lists_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-5 NIT (refuter-A): arms members as JSON lists crashed
+        # `.get(...)` downstream with a raw AttributeError at rc 1 — now the
+        # named structural refusal at rc 2.
+        path = self._write_report(tmp_path, arms={"off": [], "on": []})
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "report shape invalid" in proc.stderr
+        assert "Traceback" not in proc.stderr
 
     def test_usage_error(self) -> None:
         assert self._run().returncode == 2  # argparse usage → structural

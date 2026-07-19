@@ -89,10 +89,16 @@
   The seven `BRUTEX_SWEEP_TRIPWIRE_*` SUSPECT-latch thresholds are likewise
   pinned to the engine defaults in both arms (fix-round-4 — they shape the
   clean-exit bar itself; echoed as `provenance.tripwire_env_pinned`). The
-  remaining symmetric sweep envs are echoed in
+  AUDITED symmetric sweep envs are echoed in
   `provenance.symmetric_env_echo` (parent-environ view only — dotenv values
   are invisible there, which is exactly why the sizing/tripwire envs are
-  pinned rather than echoed).
+  pinned rather than echoed). The echo list is the ENUMERATED audit
+  (refuter-A's grep re-enumeration + executed in-child `flag_unrecognised`
+  probes, rounds 3-5, 2026-07-19), not a proof of absolute completeness —
+  an un-enumerated env stays symmetric across both arms by the arm-env
+  construction itself (same base env + same dotenv application in both
+  children), so it can dull the posture disclosure but never skew arm
+  identity or attribute an effect to the flag.
 - **Forensics mirrors are per-arm** (fix-round-3): both arms share `run_id`
   (grid identity — the cache flag is env, not grid), so the default shared
   `~/.brutex/runs/<run_id>/` Row-15 mirror would be clobbered cross-arm;
@@ -277,6 +283,8 @@ stored report any time with
 
 ## 7. FIRST MEASUREMENT
 
-_None yet. The harness has run only in `--smoke` mode (sandbox mechanics
-proof — not decision-grade). The first real M4-Pro soak's MEASURED summary
-block is pasted here by the flip PR._
+_None yet. The harness has run only in sandbox mechanics modes — `--smoke`
+plus bounded sandbox non-smoke runs (the tiny-fixture CI e2e + refuter
+validation runs; mechanics only) — no M4-Pro decision-grade run yet. The
+first real M4-Pro soak's MEASURED summary block is pasted here by the flip
+PR._
