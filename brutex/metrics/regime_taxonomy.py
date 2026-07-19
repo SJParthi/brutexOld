@@ -194,11 +194,11 @@ def trend_stratum_from_lens_token(token: str | None) -> TrendStratum:
         honest bucket, never a guess and never a raise — a future lens
         vocabulary extension degrades to UNKNOWN instead of crashing).
     """
-    if token == "up":  # noqa: S105 — lens trend token, not a secret
+    if token == "up":  # noqa: S105  # nosec B105 — lens trend token, not a secret
         return TrendStratum.UP
-    if token == "down":  # noqa: S105 — lens trend token, not a secret
+    if token == "down":  # noqa: S105  # nosec B105 — lens trend token, not a secret
         return TrendStratum.DOWN
-    if token == "sideways":  # noqa: S105 — lens trend token, not a secret
+    if token == "sideways":  # noqa: S105  # nosec B105 — lens trend token, not a secret
         return TrendStratum.CHOP
     return TrendStratum.UNKNOWN
 
