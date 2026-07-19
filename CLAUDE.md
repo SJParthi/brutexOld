@@ -3874,7 +3874,34 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-calendar-leaves`
+- **Active branch:** `claude/kernel-cache-soak-harness`
+  (**DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1969 (renumbered #1962 → #1969 at
+  the 2026-07-19 slice-5 merge-forward reconcile — main took #1962 for
+  DEC-RUST-CALENDAR-LEAVES-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001)** — the §8 M4-Pro
+  kernel-cache OFF↔ON A/B SOAK HARNESS: `scripts/ci/kernel_cache_soak.py`
+  (run/verdict — preflight → arm OFF → arm ON as separate `brutex sweep-all`
+  subprocesses against FRESH per-arm results roots, ps-polled per-worker +
+  pool RSS, #1729 telemetry harvest, the PR-A T3 ts-masked byte-identity
+  compare, ONE soak-report.json + a MEASURED/MODELED-tagged summary with the
+  VALUE section surfacing actual wall/RSS deltas + real headroom) + the
+  `workflow_dispatch`-only `[self-hosted, macos, m4pro]` workflow
+  `kernel-cache-soak.yml` (soak-selfhosted plan-job timing fences, SEC9-1
+  budget 1..1195, persist-credentials false, bounded 90 d artifact, issue
+  watchdog on failure||cancelled) + `docs/runbooks/kernel-cache-soak.md`
+  (acceptance bars + one-command fallback + the FIRST MEASUREMENT slot).
+  ALSO RECORDS THE LANDED PR-A TRUTH: the per-worker resident-kernel cache
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-001, MIGRATION.md #1729) is ON MAIN via the
+  train #1553 squash 42117b0f — a default-OFF flag
+  (`BRUTEX_SWEEP_WORKER_KERNEL_CACHE`), byte-identical ON≡OFF, its default-ON
+  flip soak-gated on exactly this harness's M4-Pro evidence. HONEST: the
+  harness + bars are coordinator-blessed; the FLIP is NOT pre-approved — a
+  separate later one-constant DEC needing the MEASURED numbers + operator
+  sign-off; the sandbox `--smoke` run proves MECHANICS only (verdict can
+  never read FLIP-READY). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; zero
+  `brutex/` source edits; no scope/vocab/rate change; the full record lives
+  in MIGRATION.md #1969 — this header carries the pointer, never the story.)
+  Earlier: `claude/rust-calendar-leaves`
   (**DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962** — entry number
   PROVISIONAL, renumber-at-landing per DEC-LEDGER-RENUMBER-001 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
@@ -11611,7 +11638,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-calendar-leaves`
+- **Active feature branch:** `claude/kernel-cache-soak-harness`
+  (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001, MIGRATION.md #1969 (renumbered #1962 → #1969 at slice-5 reconcile) —
+  the §8 M4-Pro kernel-cache OFF↔ON A/B soak harness gating the #1729
+  default-ON flip: soak script + dispatch workflow + runbook + smoke/unit
+  tests; records the landed PR-A truth (DEC-SWEEP-WORKER-KERNEL-CACHE-001,
+  MIGRATION.md #1729, train #1553 squash 42117b0f, default-OFF flag,
+  soak-gated flip); the flip itself is NOT pre-approved; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1969 for the full blurb)
+  Earlier: `claude/rust-calendar-leaves`
   (DEC-RUST-CALENDAR-LEAVES-001, MIGRATION.md #1962 — PR-1 of the
   calendar-leaf Rust conversion: NEW standalone crate `rust/brutex-calendar`
   (pyo3 0.29 abi3-py312, brutex-feed layout, catch_unwind FFI belts)
