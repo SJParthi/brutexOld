@@ -12,10 +12,10 @@
 //! `checked_mul` Err rows).
 
 use brutex_observability::{
-    COUNTER_OVERFLOW_MSG, CounterOverflow, RSS_OVERFLOW_MSG, RssOverflow, SummaryLenMismatch,
-    TW_CLEAR, TW_FIRE, TW_NONE, normalized_ru_maxrss_bytes, tripwire_memory_budget,
-    tripwire_memory_slope, tripwire_reconcile_counts, tripwire_stage_missing,
-    tripwire_summary_classify, tripwire_throughput_watch,
+    COUNTER_OVERFLOW_MSG, CounterOverflow, RSS_OVERFLOW_MSG, RssOverflow, SUMMARY_LEN_MISMATCH_MSG,
+    SummaryLenMismatch, TW_CLEAR, TW_FIRE, TW_NONE, normalized_ru_maxrss_bytes,
+    tripwire_memory_budget, tripwire_memory_slope, tripwire_reconcile_counts,
+    tripwire_stage_missing, tripwire_summary_classify, tripwire_throughput_watch,
 };
 
 // ── T2 — count reconciliation ─────────────────────────────────────────────
@@ -47,21 +47,31 @@ fn t2_enumerated_drift_sets_bit_1() {
     );
 }
 
-/// Bit 2 — skipped exceeding evaluated (skipped ⊆ evaluated).
+/// Bit 2 — skipped exceeding evaluated (skipped ⊆ evaluated); the exact
+/// `skipped == evaluated` boundary is LEGAL (kills the `>`→`>=` mutant).
 #[test]
 fn t2_skipped_over_evaluated_sets_bit_2() {
     assert_eq!(
         tripwire_reconcile_counts(0, 10, 5, 6, 0, 10, None, false),
         1 << 2
     );
+    assert_eq!(
+        tripwire_reconcile_counts(0, 10, 5, 5, 0, 10, None, false),
+        0
+    );
 }
 
-/// Bit 3 — survivors exceeding evaluated.
+/// Bit 3 — survivors exceeding evaluated; the exact `survivors ==
+/// evaluated` boundary is LEGAL (kills the `>`→`>=` mutant).
 #[test]
 fn t2_survivors_over_evaluated_sets_bit_3() {
     assert_eq!(
         tripwire_reconcile_counts(0, 10, 5, 0, 6, 10, None, false),
         1 << 3
+    );
+    assert_eq!(
+        tripwire_reconcile_counts(0, 10, 5, 0, 5, 10, None, false),
+        0
     );
 }
 
@@ -198,6 +208,18 @@ fn t3_zero_peak_writes_peak_only() {
     let (peak, below, floor, code) =
         tripwire_throughput_watch(0.0, 0.0, 3, 0.2, 5).expect("in-domain");
     assert_eq!((peak, below, floor, code), (0.0, 3, 0.0, TW_NONE));
+}
+
+/// The peak fold is strict `>` — a rate EQUAL to the peak keeps the PRIOR
+/// peak object bitwise (rate −0.0 vs peak +0.0 compare equal but differ in
+/// bits: the strict `>` serves +0.0; a `>=` mutant would serve −0.0 —
+/// bitwise parity with the Python oracle's `rate if rate > peak else peak`).
+#[test]
+fn t3_equal_rate_keeps_prior_peak_bitwise() {
+    let (peak, below, floor, code) =
+        tripwire_throughput_watch(-0.0, 0.0, 3, 0.2, 5).expect("in-domain");
+    assert_eq!(peak.to_bits(), 0.0f64.to_bits());
+    assert_eq!((below, floor, code), (3, 0.0, TW_NONE));
 }
 
 /// A new record rate folds into the peak before the floor compare.
@@ -365,11 +387,13 @@ fn t5_empty_batch_is_legal() {
     assert!(nan.is_empty() && absurd.is_empty());
 }
 
-/// A length mismatch refuses with the typed error (the belt row).
+/// A length mismatch refuses with the typed error (the belt row) — and the
+/// Display message IS the exported const (kills the fmt-drop mutant).
 #[test]
 fn t5_length_mismatch_refuses() {
     let err = tripwire_summary_classify(&[1.0, 2.0], &[true], 10.0).unwrap_err();
     assert_eq!(err, SummaryLenMismatch);
+    assert_eq!(err.to_string(), SUMMARY_LEN_MISMATCH_MSG);
 }
 
 // ── T6 — stage-prerequisite membership ────────────────────────────────────

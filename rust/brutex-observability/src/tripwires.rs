@@ -144,7 +144,9 @@ pub fn tripwire_reconcile_counts(
 ) -> u32 {
     let mut mask: u32 = 0;
     if in_flight < 0 {
-        mask |= 1 << 0;
+        // Bit 0 — written without a shift op: `1 << 0` ≡ `1 >> 0` is an
+        // EQUIVALENT-mutant site (cargo-mutants `<<`→`>>`), removed by form.
+        mask |= 1;
     }
     if enumerated != total {
         mask |= 1 << 1;
