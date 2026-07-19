@@ -63,10 +63,10 @@ The flow of operations should be as follows :
 Note the code below in file at the top :
 
 ```javascript
-  //GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+  //GFDL TODO - please enter below the endpoint received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
   var wsUri = "ws://endpoint:port";
-  
-  //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in 
+
+  //GFDL TODO - please enter below the API Key received from GFDL team. If you dont have one, please contact us on sales@globaldatafeeds.in
   var password = "Enter API Access Key";
 ```
 
@@ -100,7 +100,7 @@ function doTest()
 	//GetExchanges();						//GFDL : Returns array of available exchanges configured for API Key
 
 	//GetInstrumentsOnSearch();				//GFDL : Returns array of max. 20 instruments by selected exchange and 'search string'
-	//GetInstruments();						//GFDL : Returns array of instruments by selected exchange 
+	//GetInstruments();						//GFDL : Returns array of instruments by selected exchange
 
 	//GetInstrumentTypes();					//GFDL : Returns list of Instrument Types (e.g. FUTIDX, FUTSTK, etc.)
 	//GetProducts();						//GFDL : Returns list of Products (e.g. NIFTY, BANKNIFTY, GAIL, etc.)
@@ -294,14 +294,14 @@ Note the code below in file at the top :
 
 ```python
 """
-GFDL TODO - please enter below the endpoint received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
-"""  
+GFDL TODO - please enter below the endpoint received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
+"""
 endpoint = "ws://endpoint:port/"
 
 """
-//GFDL TODO - please enter below the API Key received from GFDL team. 
-If you dont have one, please contact us on sales@globaldatafeeds.in 
+//GFDL TODO - please enter below the API Key received from GFDL team.
+If you dont have one, please contact us on sales@globaldatafeeds.in
 """
 accesskey = "Enter Your API Key Here"
 ```
@@ -321,8 +321,8 @@ accesskey = "Enter Your API Key Here"
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	/* 	GFDL : 	1. 	SubscribeRealtime : pushes realtime data every second for the subscribed instrument from server
-				2. 	So you will need to send this request only once and subscribe for the data.	
-				3.	Please note that if there is internet disconnection for any reason, you will need to 
+				2. 	So you will need to send this request only once and subscribe for the data.
+				3.	Please note that if there is internet disconnection for any reason, you will need to
 					subscribe to all the instruments again - to receive the data.
 				4.	To see this function in action, you should run it during market hours
 				5.	If you want to subscribe to data of multiple symbols, you will need to send 1 request each - for each symbol
@@ -335,24 +335,24 @@ accesskey = "Enter Your API Key Here"
 """
     Subscribing to realtime data of Futures & Options :
     ---------------------------------------------------
-	//Below request will subscribe to realtime data of Current Month Futures of NIFTY	
+	//Below request will subscribe to realtime data of Current Month Futures of NIFTY
 	//This example shows how to request data using Continuous Format
-	//Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month). 
+	//Similarly, you can send NIFTY-II (Near month), NIFTY-III (Far month).
 	//Below Symbol is Continuous Format of NIFTY Futures. It will never expire. So no change in code will be necessary.
 	//You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 	//CDS Examples : USDINR-I, USDINR-II, USDINR-III
 	//MCX Examples : NATURALGAS-I, NATURALGAS-II, NATURALGAS-III
-	
-	//Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month). 
+
+	//Similarly, you can send NIFTY20AUGFUT (near month), NIFTY20SEPFUT (far month).
 	//You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 	//NFO Options Examples : NIFTY02JUL2010000CE, RELIANCE30JUL201700CE
 	//CDS Futures Examples : USDINR20JULFUT, USDINR20AUGFUT, USDINR20SEPFUT
 	//CDS Options Examples : USDINR29JUL2075.5CE, EURINR29JUL2080CE
 	//MCX Options Examples : CRUDEOIL20JULFUT, CRUDEOIL20AUGFUT, CRUDEOIL20SEPFUT
-	//MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE	
+	//MCX Options Examples : CRUDEOIL20JUL2050PE, GOLD20JUL43700PE
 	//Important : Replace it with appropriate expiry date if this contract is expired
 
-	//Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month). 
+	//Similarly, you can send FUTIDX_NIFTY_27AUG2020_XX_0 (near month), FUTIDX_NIFTY_24SEP2020_XX_0 (far month).
 	//You can use same naming convention for Futures of Instruments from NFO, CDS, MCX Exchanges
 	//NFO Options Examples : OPTIDX_NIFTY_02JUL2020_CE_10000, OPTSTK_RELIANCE_30JUL2020_CE_1700
 	//CDS Futures Examples : FUTCUR_USDINR_26JUN2020_XX_0, FUTCUR_USDINR_29JUL2020_XX_0, FUTCUR_USDINR_27AUG2020_XX_0
@@ -367,24 +367,24 @@ accesskey = "Enter Your API Key Here"
     //Use NSE_IDX as Exchange
     //Please note that Indices Symbols have white space. For example, between NIFTY & 50, NIFTY & BANK above
 
-    Subscribing to realtime data of NSE Stocks 
+    Subscribing to realtime data of NSE Stocks
     ------------------------------------------
     //For EQ Series, use InstrumentIdentifier value BAJAJ-AUTO, RELIANCE, AXISBANK, LT, etc..
-	//To subscribe to realtime data of any other series, append the series name to symbol name 
+	//To subscribe to realtime data of any other series, append the series name to symbol name
 	//for example, to request data of RELIANCE CAPITAL from BE Series, use RELCAPITAL.BE
 	//EQ Series Symbols are mentioned without any suffix
 
-	// Please see symbol naming conventions here : 
+	// Please see symbol naming conventions here :
 	// https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/documentation-support/symbol-naming-convention/
 """
 async def SubscribeRealtime():
     print("Work in progress...")
-    async with websockets.connect(endpoint) as websocket:        
-        print("Connecting to endpoint : "+endpoint)        
+    async with websockets.connect(endpoint) as websocket:
+        print("Connecting to endpoint : "+endpoint)
         strMessage = '{"MessageType":"Authenticate","Password":"' + accesskey + '"}'
         await websocket.send(strMessage)
         print("Sent Authentication Message : "+strMessage)
-        response = await websocket.recv()       
+        response = await websocket.recv()
         allres = response.split(',')
         strComplete = allres[0].split(':')
         result = strComplete[1]
@@ -397,13 +397,13 @@ async def SubscribeRealtime():
             print("Authentication is Complete!!!")
             ExchangeName = "NFO"        #//GFDL : Supported Values : NFO, NSE, NSE_IDX, CDS, MCX. Mandatory Parameter
             InstIdentifier = "NIFTY-I"
-            Unsubscribe = "false"       ##GFDL : To stop data subscription for this symbol, send this value as "true"            
+            Unsubscribe = "false"       ##GFDL : To stop data subscription for this symbol, send this value as "true"
             strMessage = '{"MessageType":"SubscribeRealtime","Exchange":"' + ExchangeName + '","Unsubscribe":"' + Unsubscribe + '","InstrumentIdentifier":"' + InstIdentifier +'"}'
             await websocket.send(strMessage)
             print("Message sent : "+strMessage)
             print("Waiting for response...")
             now = datetime.datetime.now()
-            
+
             #Sample will stop running after 5 mins. To run for more time, modify code below suitably
             stime = now + datetime.timedelta(minutes = 5)
             response = await websocket.recv()
