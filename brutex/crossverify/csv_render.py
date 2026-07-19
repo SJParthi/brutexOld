@@ -32,6 +32,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
+from brutex.crossverify import rust_seam
 from brutex.dashboard._csv_utils import FormulaSafeWriter, csv_safe
 from brutex.data.session import IST
 from brutex.models import BruteXError
@@ -172,30 +173,29 @@ def _validate_cells(cells: Sequence[str], *, ts_label: str) -> None:
             )
 
 
-def render_day_csv(
+def _validated_cell_rows(
     *,
     identity: CanonicalIdentity,
     rows: Sequence[ExportRow],
     session: TradingSession,
-) -> bytes:
-    """Render one (symbol, day) file to the pinned contract bytes, or REFUSE.
+) -> list[list[str]]:
+    """The ONE validation + cell-build loop, shared by BOTH render arms.
 
-    Refuses (:class:`ExportContractError`): empty *rows*; non-increasing /
-    duplicate minutes; NaN / infinite / non-positive prices; negative
-    volume/oi; ``oi=None`` on a futures identity / ``oi`` present on spot;
-    any row outside the session's ``[open, close)`` IST window (or off the
-    minute grid); any cell the formula guard would mutate or that carries a
-    CSV metacharacter. Writes through :class:`FormulaSafeWriter` AFTER the
-    validations. O(rows); deterministic bytes.
+    Runs every refusal law in the pinned order — empty-set, per-row
+    ``_validate_row`` (Decimal/datetime/session laws), the strictly-
+    increasing minute law, then per-cell ``_validate_cells`` (formula-guard
+    mutation / metachar / control char) — and returns the pre-formatted
+    cell rows. Extracted from the original ``render_day_csv`` body
+    (DEC-CROSSVERIFY-RUST-CORE, the Slice-0 pattern) so the Python oracle
+    and the Rust-arm cell builder can never drift: there is exactly one
+    copy of the loop.
     """
     if not rows:
         raise ExportContractError(
             f"{identity.canonical_symbol}: empty row set — nothing to render "
             "(an absent day is a withheld file, never an empty one)"
         )
-    buf = io.StringIO()
-    writer = FormulaSafeWriter(csv.writer(buf, lineterminator=LINE_TERMINATOR))
-    writer.writerow(CSV_HEADER.split(","))
+    out: list[list[str]] = []
     previous: datetime | None = None
     for row in rows:
         _validate_row(row, identity=identity, session=session)
@@ -217,8 +217,64 @@ def render_day_csv(
             render_oi_cell(row.oi),
         ]
         _validate_cells(cells, ts_label=ts_cell)
+        out.append(cells)
+    return out
+
+
+def _render_day_csv_python(
+    *,
+    identity: CanonicalIdentity,
+    rows: Sequence[ExportRow],
+    session: TradingSession,
+) -> bytes:
+    """The verbatim Python render — the LIVE parity oracle (flag-OFF path).
+
+    The original ``render_day_csv`` body: the shared validation/cell loop
+    (:func:`_validated_cell_rows` — refusals raise before any byte exists,
+    exactly as the pre-extraction interleaved loop did, since the buffered
+    bytes were discarded on raise) writing through
+    :class:`FormulaSafeWriter` + ``csv.writer`` (QUOTE_MINIMAL — the
+    validated cells carry no metachar, so no quoting ever fires).
+    """
+    buf = io.StringIO()
+    writer = FormulaSafeWriter(csv.writer(buf, lineterminator=LINE_TERMINATOR))
+    writer.writerow(CSV_HEADER.split(","))
+    for cells in _validated_cell_rows(identity=identity, rows=rows, session=session):
         writer.writerow(cells)
     return buf.getvalue().encode("utf-8")
+
+
+def render_day_csv(
+    *,
+    identity: CanonicalIdentity,
+    rows: Sequence[ExportRow],
+    session: TradingSession,
+) -> bytes:
+    """Render one (symbol, day) file to the pinned contract bytes, or REFUSE.
+
+    Refuses (:class:`ExportContractError`): empty *rows*; non-increasing /
+    duplicate minutes; NaN / infinite / non-positive prices; negative
+    volume/oi; ``oi=None`` on a futures identity / ``oi`` present on spot;
+    any row outside the session's ``[open, close)`` IST window (or off the
+    minute grid); any cell the formula guard would mutate or that carries a
+    CSV metacharacter. Writes through :class:`FormulaSafeWriter` AFTER the
+    validations. O(rows); deterministic bytes.
+
+    DEC-CROSSVERIFY-RUST-CORE: behind the default-OFF
+    ``BRUTEX_CROSSVERIFY_RUST`` flag the final byte ASSEMBLY is routed
+    through :mod:`brutex.crossverify.rust_seam` — the SAME shared
+    validation/cell loop runs Python-side FIRST (every refusal raises the
+    exact pinned bytes before any FFI), so only pre-formatted strings
+    cross; flag OFF runs the verbatim Python body in place, byte-identical.
+    """
+    if not (rust_seam.crossverify_rust_enabled() and not rust_seam.rust_seam_disabled()):
+        return _render_day_csv_python(identity=identity, rows=rows, session=session)
+    cells_rows = _validated_cell_rows(identity=identity, rows=rows, session=session)
+    return rust_seam.routed_render_csv(
+        CSV_HEADER,
+        cells_rows,
+        python_render=lambda: _render_day_csv_python(identity=identity, rows=rows, session=session),
+    )
 
 
 __all__ = [

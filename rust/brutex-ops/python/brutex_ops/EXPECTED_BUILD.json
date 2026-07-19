@@ -1,11 +1,25 @@
 {
-  "_comment": "Wheel-source freshness fingerprint (DEC-BACKUP-RUST-OPS-001; the brutex_feed R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; pinned equal to brutex_ops._EXPECTED_COMPILED_SYMBOLS' non-dunder names by tests. Update this file in the SAME commit as any rust/brutex-ops surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught only by the facade's per-law 16-call burn-in bit-compare (brutex/backup/backup_rust.py).",
+  "_comment": "Wheel-source freshness fingerprint (the unified brutex-ops crate: DEC-BACKUP-RUST-OPS-001 + DEC-CROSSVERIFY-RUST-CORE-001 + DEC-NIGHTLY-RUST-CORE-001; the brutex_feed R2-CC-G1 pattern). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose; mirrors brutex_ops._EXPECTED_COMPILED_SYMBOLS. Update this file in the SAME commit as any rust/brutex-ops surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible BEHAVIORAL drift is caught only by each facade's per-law burn-in bit-compare (brutex/backup/backup_rust.py, brutex/crossverify/rust_seam.py, brutex/nightly/nightly_rust.py).",
   "crate_version": "0.1.0",
   "symbols": [
     "SOURCE_DIGEST",
     "__version__",
     "build_backup_argv",
+    "crossverify_canonical_identity",
+    "crossverify_render_csv",
+    "crossverify_s3_key",
     "evaluate_deadman_decision",
+    "nightly_audit_reconcile_detail",
+    "nightly_count_text",
+    "nightly_exit_code",
+    "nightly_first_breaker_index",
+    "nightly_parse_at",
+    "nightly_pmset_wake_command",
+    "nightly_render_launchd_plist",
+    "nightly_seconds_since_fire",
+    "nightly_summary_lines",
+    "nightly_verdict",
+    "nightly_xml_escape",
     "parse_backup_summary_snapshot_id",
     "parse_ls_file_paths",
     "parse_ls_snapshot_time_decision",
@@ -13,6 +27,7 @@
     "render_backup_plist",
     "render_cron_lines",
     "render_deadman_plist",
-    "render_drill_plist"
+    "render_drill_plist",
+    "version"
   ]
 }

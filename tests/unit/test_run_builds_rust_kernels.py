@@ -190,19 +190,25 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
-    # DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1957): brutex_ops is the
-    # default-OFF backup decision kernel (deadman verdict + template renders +
-    # restic parse/argv laws). It is consumed ONLY through the import-guarded
-    # facade brutex/backup/backup_rust.py
-    # (`importlib.import_module("brutex_ops")` inside `_resolve_crate` — an
-    # absent or stale wheel latches `crate_unavailable` with one loud WARN and
-    # every call serves the Python oracle, byte-identical). Deliberately NOT a
+    # THE UNIFIED OPS CRATE — DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1962) +
+    # DEC-CROSSVERIFY-RUST-CORE-001 (#1963) + DEC-NIGHTLY-RUST-CORE-001
+    # (#1964): brutex_ops is the ONE default-OFF ops decision-kernel crate
+    # (backup deadman verdict + template renders + restic parse/argv laws;
+    # cross-verify CSV byte assembly + canonical identity/S3-key law; the
+    # nightly chain/report/schedule pure decision laws). It is consumed ONLY
+    # through THREE import-guarded default-OFF facades —
+    # brutex/backup/backup_rust.py (BRUTEX_BACKUP_RUST),
+    # brutex/crossverify/rust_seam.py (BRUTEX_CROSSVERIFY_RUST) and
+    # brutex/nightly/nightly_rust.py (BRUTEX_NIGHTLY_RUST) — each resolving
+    # it lazily via `importlib.import_module("brutex_ops")`; an absent or
+    # stale wheel latches `crate_unavailable` with one loud WARN and the
+    # verbatim Python oracle serves, byte-identical. Deliberately NOT a
     # turnkey build prerequisite: never module-top imported, in NO cargo
-    # workspace, built ONLY by its own CI lane
-    # (.github/workflows/ops-rust-parity.yml — the #1960 review-round fold,
-    # which also closed the review's MINOR-1 no-CI-lane finding). A module-top
-    # `import brutex_ops` anywhere in brutex/ would reclassify it REQUIRED —
-    # the inverse pin below forbids exactly that.
+    # workspace, built by its OWN CI surfaces — the dedicated wheel lane
+    # .github/workflows/ops-rust-parity.yml (hard wheel-health gate + all
+    # three lanes' flag-ON parity legs) plus the `rust-brutex-ops` cargo job
+    # in ci.yml. A module-top `import brutex_ops` anywhere in brutex/ would
+    # reclassify it REQUIRED — the inverse pin below forbids exactly that.
     "brutex_ops": (
         "brutex/backup/backup_rust.py",
         ".github/workflows/ops-rust-parity.yml",

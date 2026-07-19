@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
+_Last updated: 2026-07-19 (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115 —
+renumbered #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 —
+#1960 had seven claimants; #1957 taken on main by
+DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001) —
+branch `claude/crossverify-rust-core` — the cross-verify Rust core, first
+cut: the TWO pure-law surfaces — the pinned CSV byte assembly
+(`csv_render.render_day_csv`) + the canonical identity mapper / S3-key law
+(`canonical.canonical_identity`/`s3_key`) — re-hosted on the NEW standalone
+`rust/brutex-ops` crate behind the NEW default-OFF `BRUTEX_CROSSVERIFY_RUST`
+flag via the NEW facade `brutex/crossverify/rust_seam.py` (the
+lake_rust_stats/lake_rust_render shape: import/API handshake · per-law
+16-call burn-in bit-compare + ship-the-ORACLE autorevert · narrow degrade
+set + pyo3 panic belt · refuse-poison gates), the verbatim Python bodies
+retained as the LIVE parity oracles. FFI = ints + pre-formatted strings
+ONLY (round_money/Decimal formatting stays Python; `parse_fno_symbol`
+never re-implemented; the S3-key day crosses pre-`isoformat()`-ed);
+refusals fire PYTHON-side pre-FFI with the exact pinned
+ExportContractError bytes. NO version guard (the #1914 stdlib precedent);
+built ONLY by the NEW non-required ops-rust-parity.yml lane (main CI
+crate-free by design; the lane carries a HARD wheel-health gate so a
+broken wheel can never green-vacuous-skip the drift teeth — the round-1
+hostile-review fold, 2 MINOR + 2 NIT, verdict SHIP). Flag OFF (default) is
+byte-identical + crate-untouched (bomb-spy-pinned); expected payoff ≈ 0 —
+uniformity, not speed; ships INERT — a default flip needs its own DEC.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; new env var BRUTEX_CROSSVERIFY_RUST. This header carries the
+pointer, never the story — the full record lives in the §1 Active-branch
+blurb + MIGRATION.md #2115.)
+Earlier: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
 `integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
 scoped) as ONE merge event off main tip 3ee742b3, in binding order:
 **#1618** DEC-DATA-PARSER-DEAD-DELETE-001 (MIGRATION.md #1941 — delete the
@@ -3816,7 +3844,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-lap8-lake-guards`
+- **Active branch:** `claude/crossverify-rust-core`
+  (**DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115** — renumbered
+  #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 — #1960
+  had seven claimants; #1957 taken on main by
+  DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001; DEC-IDs are the stable handles
+  per DEC-LEDGER-RENUMBER-001) — the cross-verify
+  Rust core, first cut: the two pure-law surfaces (the pinned CSV byte
+  assembly + the canonical identity/S3-key law) re-hosted on the NEW
+  standalone `rust/brutex-ops` crate behind the NEW default-OFF
+  `BRUTEX_CROSSVERIFY_RUST` flag via the NEW facade
+  `brutex/crossverify/rust_seam.py` — the sibling-facade shape (import/API
+  handshake, per-law 16-call burn-in + ship-the-oracle autorevert, narrow
+  degrade set + pyo3 panic belt, refuse-poison gates), the verbatim Python
+  bodies retained as the LIVE parity oracles; FFI = ints + pre-formatted
+  strings only (round_money stays Python; `parse_fno_symbol` never
+  re-implemented; the day crosses pre-isoformat()-ed); refusals fire
+  Python-side pre-FFI with the exact pinned ExportContractError bytes; NO
+  version guard (the #1914 stdlib precedent) — the burn-in + the flag-ON
+  golden corpus are the drift teeth; the crate lives in NO workspace, main
+  CI crate-free — the NEW non-required ops-rust-parity.yml lane builds the
+  wheel, runs the flag-ON golden + hypothesis differential legs behind a
+  HARD wheel-health gate, and re-runs the law suites VERBATIM flag-ON (the
+  non-perturbation leg); the round-1 hostile-review fold landed pre-open
+  (verdict SHIP — 2 MINOR: the lane's no-vacuous-skip gate + the
+  memo-clean golden engagement pin, teeth executed-verified; 2 NIT: the
+  documented lock-free concurrency envelope + repr() on the
+  burn_in_mismatch vendor fields per #907). GATES: cargo 13 unit + 5
+  proptests; rust_seam 172/60 · canonical 75/30 · csv_render 93/36 ALL
+  100.00% on their ci.yml stanzas; the pre-existing crossverify family
+  passes UNMODIFIED with the golden fixtures BYTE-UNTOUCHED; mypy --strict
+  0 new; pyright 0 errors. HONEST: default-OFF ships INERT (a default flip
+  needs its own DEC); payoff ≈ 0 — uniformity, not speed (ADR-0020 banner);
+  the burn-in-16 post-sample divergence envelope stands (#1531/#1892/#1914);
+  the Python↔Rust refusal-code constant sets carry no drift pin —
+  defense-in-depth only, Python authoritative. Named follow-ups:
+  DEC-CROSSVERIFY-RUST-DAYEXPORT-001 (the day_export decision table);
+  oracle deletion is a later lane. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; new env var
+  `BRUTEX_CROSSVERIFY_RUST`. The full record lives in MIGRATION.md #2115 —
+  this blurb is the pointer.)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
   scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
   #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1960) →
@@ -11446,7 +11515,26 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-lap8-lake-guards`
+- **Active feature branch:** `claude/crossverify-rust-core`
+  (DEC-CROSSVERIFY-RUST-CORE-001, MIGRATION.md #2115 — renumbered
+  #1957 → #1960 → #2115 (coordinator census pre-assign 2026-07-19 — #1960 had
+  seven claimants; #1957 taken on main) — the cross-verify Rust
+  core, first cut: the pinned CSV byte assembly + the canonical
+  identity/S3-key law re-hosted on the NEW standalone `rust/brutex-ops`
+  crate behind the NEW default-OFF `BRUTEX_CROSSVERIFY_RUST` flag via the
+  NEW facade `brutex/crossverify/rust_seam.py` (sibling-facade shape:
+  handshake + per-law 16-call burn-in with ship-the-oracle autorevert +
+  degrade/panic belts + refuse-poison gates); verbatim Python bodies stay
+  the LIVE parity oracles; FFI = ints + pre-formatted strings only
+  (round_money stays Python, `parse_fno_symbol` never re-implemented);
+  refusals fire Python-side pre-FFI; NO version guard (the #1914 stdlib
+  precedent); built ONLY by the NEW non-required ops-rust-parity.yml lane
+  behind a hard wheel-health gate; the round-1 hostile-review fold landed
+  (SHIP — 2 MINOR + 2 NIT); flag OFF byte-identical (bomb-spy-pinned);
+  payoff ≈ 0 — uniformity, not speed; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #2115 for the full blurb)
+  Earlier: `integration/club-lap8-lake-guards`
   (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
   the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
   + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md

@@ -1,12 +1,13 @@
 // build.rs — bake the crate-source BLAKE3 digest into the compiled artifact
-// (DEC-RUST-SOURCE-DIGEST-TWIN-001, docs/MIGRATION.md #1258; the brutex-feed
-// build.rs mirrored verbatim for brutex-ops — DEC-BACKUP-RUST-OPS-001).
+// (DEC-RUST-SOURCE-DIGEST-TWIN-001, docs/MIGRATION.md #1258).
 //
 // The digest (FRAMING v1 — see rust/source_digest_core.rs, the ONE shared
 // framing all kernel crates and the Python twin `brutex/wheel_digest.py`
 // mirror) covers `Cargo.toml` + `src/**/*.rs`, so ANY source change moves the
-// baked value. The crate re-exposes it as `brutex_ops::SOURCE_DIGEST` and
-// the PyO3 module exports `SOURCE_DIGEST` / `__source_digest__`.
+// baked value. The crate re-exposes it as `brutex_ops::SOURCE_DIGEST` and the
+// PyO3 module exports `SOURCE_DIGEST` / `__source_digest__` (the brutex-feed
+// pattern; a doctor wheel-freshness stage for this crate is future work, not
+// claimed here).
 
 include!("../source_digest_core.rs");
 
