@@ -3636,7 +3636,14 @@ hostile-review pass._
   the skipped fuzz lane (the brutex-strategies no-fuzz precedent) +
   DEC-REFINE-RUST-DOCTOR-STAGE-001 (doctor wheel-freshness stage) + the
   bugfix-reversion-check 2-wheel subset — all recorded in MIGRATION.md
-  #1957. ENGINE result UNCHANGED — NIFTY/BANKNIFTY/SENSEX (stage-3 is a
+  #1957. REVIEW ROUNDS: hostile-review round 1 SHIP (findings folded at
+  head — per-item record in MIGRATION.md #1957) + refuter round 2 CLEAN
+  (independent wheel rebuild; all nine claim families survived executed
+  refutation incl. cross-process seeded bit-identity, the 720-stream
+  OLD-vs-NEW select differential and the bit-for-bit digest
+  reproduction; one cosmetic NIT — the production-unreachable fail-loud
+  `_sharpe_of` NaN pass-through — named in #1957). ENGINE result
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX (stage-3 is a
   between-stage refinement layer; the mask/bar hot loop receives ZERO
   diffs; the frozen sweep-run goldens pass UNMODIFIED); F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
