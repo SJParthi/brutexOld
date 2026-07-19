@@ -185,7 +185,7 @@ curl --request POST \
 **Request Structure**
 
 ```
-{  
+{
     "NSE_FNO":[49081]
 }
 ```

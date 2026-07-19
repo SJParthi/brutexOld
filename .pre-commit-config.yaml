@@ -22,6 +22,11 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # Fuzzer corpus seeds are raw INPUT BYTES, not text — "fixing" the
+        # trailing newline rewrites the seed (e.g. the 2-byte \n\n
+        # crash-2-byte-header-underflow seed would shrink to 1 byte and no
+        # longer reproduce its crash). DEC-HOOK-HYGIENE-MAIN-001.
+        exclude: ^rust/brutex-feed/fuzz/seeds/
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-yaml

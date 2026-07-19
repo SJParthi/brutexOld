@@ -418,17 +418,17 @@ Pages in this file:
 <AccordionGroup>
 
   <Accordion title="What is the difference between Standalone type Results and Consolidated type Results?">
-  
-  **Standalone Financial Results**  
+
+  **Standalone Financial Results**
   These reflect only the financial performance of the parent company itself, excluding any subsidiaries or associate entities.
 
-  **Consolidated Financial Results**  
+  **Consolidated Financial Results**
   These present the combined financial performance of the parent company along with all its subsidiaries and associates, reported as a single economic entity.
 
   </Accordion>
 
   <Accordion title="What are the approximate counts for consolidated and standalone filings?">
-  
+
   In general:
 
   - Standalone filings are higher in number, as many companies either do not have subsidiaries or still file standalone statements separately.
@@ -437,7 +437,7 @@ Pages in this file:
   </Accordion>
 
   <Accordion title="Why do some companies publish only standalone financial statements?">
-  
+
   Companies may publish only standalone statements when:
 
   - They do not have subsidiaries, associates, or joint ventures.
@@ -450,7 +450,7 @@ Pages in this file:
   </Accordion>
 
   <Accordion title="How is the Financial Results period nomenclature defined?">
-  
+
   Financial results data is stored based on the Financial Year Start (Period Start Year), not the calendar year.
 
   The folder period nomenclature follows this format:
