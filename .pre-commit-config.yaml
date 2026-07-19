@@ -78,6 +78,15 @@ repos:
           # movers_snapshot.py (the same wheel-less-env class the
           # --follow-imports=silent note above documents).
           - polars>=1.0,<2.0
+          # blake3 + starlette: the same wheel-less-env phantom class — without
+          # them the hook env degrades blake3 digests to Any (no-any-return on
+          # sweep_cache/sweep_supervisor/token_cache) and TrustedHostMiddleware
+          # to Any (misc subclass error on trusted_host.py) at the pre-push
+          # stage of a merge-forward, while the BINDING venv-faithful
+          # `mypy --strict brutex` is clean on all four (2026-07-19 incident,
+          # the exact class the polars entry above documents).
+          - blake3>=1.0
+          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust
