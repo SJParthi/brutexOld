@@ -282,6 +282,11 @@ jobs:
           # sweep_audit import transitively needs fno_math (not installed in
           # this lane); report.py's flag-ON/real-wheel parity is already
           # covered by test_nightly_report_rust_seam.py + the golden above.
+          # The deselected exit-codes test is a CLI-constant drift pin, not
+          # an ops-seam test (`from brutex import cli` transitively imports
+          # trading_core, which this lane is deliberately free of); it still
+          # runs on main CI where trading_core exists.
           pytest -rs -q \
             tests/unit/test_nightly_chain.py \
-            tests/unit/test_nightly_schedule.py
+            tests/unit/test_nightly_schedule.py \
+            --deselect tests/unit/test_nightly_chain.py::test_exit_codes_drift_pinned_against_cli
