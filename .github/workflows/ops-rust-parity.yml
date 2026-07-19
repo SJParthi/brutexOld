@@ -42,7 +42,9 @@ on:
       - "brutex/crossverify/canonical.py"
       - "tests/unit/test_crossverify_rust_seam.py"
       - "tests/unit/test_crossverify_csv_render.py"
+      - "tests/unit/test_crossverify_csv_render_rust_arm.py"
       - "tests/unit/test_crossverify_canonical.py"
+      - "tests/unit/test_crossverify_canonical_rust_arm.py"
       - "tests/golden/test_crossverify_rust_golden.py"
       - "tests/golden/test_crossverify_golden.py"
       - "tests/golden/_crossverify_harness.py"
@@ -58,7 +60,9 @@ on:
       - "brutex/crossverify/canonical.py"
       - "tests/unit/test_crossverify_rust_seam.py"
       - "tests/unit/test_crossverify_csv_render.py"
+      - "tests/unit/test_crossverify_csv_render_rust_arm.py"
       - "tests/unit/test_crossverify_canonical.py"
+      - "tests/unit/test_crossverify_canonical_rust_arm.py"
       - "tests/golden/test_crossverify_rust_golden.py"
       - "tests/golden/test_crossverify_golden.py"
       - "tests/golden/_crossverify_harness.py"
@@ -167,5 +171,7 @@ jobs:
         run: |
           pytest -q \
             tests/unit/test_crossverify_csv_render.py \
+            tests/unit/test_crossverify_csv_render_rust_arm.py \
             tests/unit/test_crossverify_canonical.py \
+            tests/unit/test_crossverify_canonical_rust_arm.py \
             tests/golden/test_crossverify_golden.py
