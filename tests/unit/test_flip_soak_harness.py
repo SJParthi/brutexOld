@@ -248,6 +248,30 @@ class TestFlagRegistry:
                 twin_argv=("true",),
             )
 
+    def test_stage1a_row_pins_the_default_on_off_arm_kill_switch(
+        self, registry: ModuleType
+    ) -> None:
+        """DEC-STAGE1A-RUST-DEFAULT-ON-001 (#1938): the first DEFAULT-ON row.
+
+        Post-flip an UNSET env serves the RUST arm, so the OFF arm must pin
+        the explicit "0" kill switch via extra_env — without it the twin
+        degenerates to Rust-vs-Rust (vacuous byte identity). The arm's own
+        FLAG=1 assignment must therefore always be applied AFTER extra_env
+        (the precedence law) so the ON arm / drift leg still engage — pinned
+        at source level for the driver (its manage_env path is real-mode-only
+        and not reachable from the shared-CI dry tests).
+        """
+        spec = registry.spec_for("BRUTEX_SWEEP_RUST_STAGE1A")
+        assert spec.flag_class == registry.SWEEP_TWIN
+        assert spec.surface_prefix == "rust_stage1a"
+        assert spec.engaged_marker == r"rust_stage1a\.engaged"
+        assert ("BRUTEX_SWEEP_RUST_STAGE1A", "0") in spec.extra_env
+        assert ("BRUTEX_RESULTS_DEPTH", "0") in spec.extra_env
+        driver_source = (_SOAK_DIR / "flip_soak_driver.py").read_text(encoding="utf-8")
+        extra_env_at = driver_source.index("for key, value in spec.extra_env:")
+        flag_on_at = driver_source.index('os.environ[flag] = "1"')
+        assert extra_env_at < flag_on_at, "driver must apply extra_env BEFORE the DUT flag"
+
     def test_render_argv_substitutes_roots_and_scale(self, registry: ModuleType) -> None:
         spec = registry.spec_for("BRUTEX_SWEEP_RUST_ENUM")
         argv = registry.render_argv(spec, lake_root="/lake", results_root="/out", scale="smoke")
