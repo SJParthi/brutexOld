@@ -702,9 +702,10 @@ later-phase enhancement.
 ## 10A. Groww API Error Code Map (verified 2026-05-15 from annexure)
 
 Authoritative mapping from Groww's published error codes to BruteX
-orchestrator outcomes. Used by `brutex/orchestrator/retry.py` (the
-`BROKER_EXCEPTION_CLASSIFICATION` dict) and by the rate-limit
-downshift logic.
+orchestrator outcomes. Consumed by `brutex/adapters/groww/errors.py`
+(`is_retryable`) and the rate-limit downshift logic. (The historical
+`orchestrator/retry.py` `BROKER_EXCEPTION_CLASSIFICATION` dict was
+deleted as unwired scaffolding — MIGRATION.md #1969.)
 
 ### Data API Errors (we will see these most often)
 
@@ -910,7 +911,7 @@ concrete. Tracking checklist:
 | `brutex/data/partition.py` — add `IDX_I` to `VALID_SEGMENTS` (single Index segment for all 4 instruments) | edit | ⏳ |
 | `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |
 | `brutex/data/parquet_writer.py` — allow current-month grow | edit | ⏳ |
-| `brutex/orchestrator/state.py` — collapse `IngestPhase` to Track 1 phases | edit | ⏳ |
+| `brutex/orchestrator/events.py` — collapse `IngestPhase` to Track 1 phases *(moved from the deleted `state.py` — MIGRATION.md #1969)* | edit | ⏳ |
 | `brutex/universe.py` — add India VIX | edit (NOW) | ✅ |
 
 ---

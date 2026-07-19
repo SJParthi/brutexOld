@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+_Last updated: 2026-07-19 (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001,
+MIGRATION.md #1969, branch `claude/orch-dead-scaffold-salvage` — the
+orchestrator dead-scaffolding DELETION, re-landed standalone on current main
+(the salvage of the superseded slice-9 PR #1466 phase 2a, coordinator
+salvage-1 ruling 2026-07-19; principle authority: the operator's ratified
+"live code → Rust; DEAD/dormant code → DELETED, never blind-converted"
+override recorded in entry #1722): `orchestrator/{state,pipeline,retry,
+store,adaptive_rate_limiter}.py` DELETED (2,717 source lines + 11 test
+files) with the LIVE shapes moved verbatim to NEW stdlib-only
+`orchestrator/events.py` (IngestPhase · PipelineEventKind · PipelineEvent ·
+EventSubscriber · WorkItemState); `quota_tracker.py` TRIMMED in place
+544→132 (the load-bearing `DailyQuotaExceeded`/`QuotaInvariantError` keep
+their byte-stable import path; the dormant tracker machinery deleted behind
+the NEW structural `QuotaGate` Protocol on the ONE
+`RateController(quota_tracker=)` re-wire seam — explicitly superseding
+DEC-QUOTA-VERDICT-MOOT-001 #1591's KEEP-DORMANT clause for this module
+only); the ci.yml per-PR BLOCKING mutmut gate RETARGETED state.py →
+`brutex/data/partition.py` on MEASURED runs (111 mutants / 100.00% killed /
+258 s sandbox; step budget 300→600 s); ZERO production behavior change;
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1969.)
+Earlier: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
 MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
 overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
 the overfit gate config the sweep RECORDED at launch (both grid launchers
@@ -3917,7 +3939,60 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-s2-results-v2`
+- **Active branch:** `claude/orch-dead-scaffold-salvage`
+  (**DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1969** — the
+  orchestrator dead-scaffolding DELETION, re-landed STANDALONE on current
+  main as the salvage of the superseded slice-9 PR #1466 phase 2a
+  (coordinator salvage-1 ruling 2026-07-19; the old slice-9 branch's DEC +
+  entries #1727/#1727a/#1727b stay branch history — never merged; principle
+  authority: the operator's ratified "live code → Rust; DEAD/dormant code →
+  DELETED, never blind-converted" override, recorded in entry #1722).
+  DELETED with fresh zero-production-caller grep-proofs re-captured at this
+  head: `brutex/orchestrator/state.py` (527 ln — the never-wired 6-state
+  work-item FSM) · `pipeline.py` (737 ln — the PhaseRunner driver no
+  production module ever constructed) · `retry.py` (360 ln — the
+  vendor-exception classifier; the LIVE Groww retry ladder is
+  `adapters/groww/errors.is_retryable` + the client `max_attempts`) ·
+  `store.py` (619 ln — the LMDB WorkItemStore with zero constructions) ·
+  `adaptive_rate_limiter.py` (474 ln — the superseded env-var limiter with
+  zero imports), plus their 11 test files (≈6,165 lines). KEPT SHAPES (the
+  DEC-EXECUTION-TRIO-DELETE-001 #1550 precedent — live containers stay,
+  dead drivers die): NEW stdlib-only leaf `brutex/orchestrator/events.py`
+  holds the verbatim-moved LIVE shapes — IngestPhase · PipelineEventKind ·
+  PipelineEvent · EventSubscriber · WorkItemState (the last a deliberate
+  one-symbol widening: it types `PipelineEvent.item_state`, which
+  `dashboard/app.py` reads as `event.item_state.value`) — consumed by the
+  dashboard `DashboardState` panel + the Telegram subscriber factory
+  (`notifications/wiring.py`), both repointed; `quota_tracker.py` TRIMMED
+  in place 544→132: the load-bearing `DailyQuotaExceeded` /
+  `QuotaInvariantError` exceptions keep their byte-stable import path (both
+  ingest spines' `_GLOBAL_STOP_ERRORS`, `pull_jobs.is_pull_halt`, cli.py's
+  two halt sites — zero repoints) and the dormant tracker machinery
+  (LMDB persistence, IST rollover, the process-wide env registry,
+  `ClockSkewError`, `DAILY_QUOTA_LIMIT`) is deleted behind the NEW
+  structural `QuotaGate` Protocol on the ONE `RateController(quota_tracker=)`
+  re-wire seam — EXPLICITLY SUPERSEDING DEC-QUOTA-VERDICT-MOOT-001 #1591's
+  KEEP-DORMANT clause for this module only (its exception-sets-not-narrowed
+  pins PRESERVED; `test_quota_verdict_moot.py` rewritten as the trimmed
+  module's 100% gate, the AST zero-construction pin retired with the
+  class); `orchestrator/__init__.py` rewritten same-commit. GATES: the
+  ci.yml per-PR BLOCKING mutmut step RETARGETED state.py →
+  `brutex/data/partition.py` on MEASURED mutmut-2.5.1 runs (2026-07-19
+  sandbox: partition.py 111 mutants / 100.00% killed / 258 s wall — the one
+  measured zero-survivor candidate, step budget raised 300→600 s ≈ 2.3×
+  headroom; the smaller candidates FAILED the zero-survivor bar against
+  their single dedicated file — fno_symbol.py 67/71 killed / 162 s,
+  session.py 60/70 / 161 s — choice marked coordinator-reviewable);
+  the deleted modules' ci.yml per-module gates replaced by events.py +
+  trimmed-quota_tracker gates (both 100.00% line+branch); mutation.yml
+  loop pairs −3 (state/retry/store, −281 weekly mutants — margin only
+  widens); bench-m4pro.yml's stale `test_store_o1.py` token removed; the
+  #1929 `test_timestamp_ist_singlesource.py` `quota_tracker._IST` probe
+  dropped (the trimmed module is clock-free); docs/ENV_VARS/STANDARDS rows
+  reconciled. ZERO production behavior change; §2 Rule 6 values
+  byte-untouched; rust/ untouched. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+  Earlier: `integration/club-s2-results-v2`
   (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
   overfit-recount recovery channel, folded onto the CLUB S2 members
   (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
@@ -11759,7 +11834,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-s2-results-v2`
+- **Active feature branch:** `claude/orch-dead-scaffold-salvage`
+  (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1969 — the orchestrator
+  dead-scaffolding DELETION re-landed standalone on current main (the
+  salvage of the superseded slice-9 PR #1466 phase 2a):
+  state/pipeline/retry/store/adaptive_rate_limiter deleted with fresh
+  grep-proofs, live shapes kept in NEW `orchestrator/events.py` +
+  the trimmed `quota_tracker.py` (`DailyQuotaExceeded`/`QuotaInvariantError`
+  byte-stable + the `QuotaGate` Protocol — #1591's KEEP-DORMANT clause
+  superseded for this module only), the blocking mutmut gate retargeted to
+  `data/partition.py` (measured 111/111 killed / 258 s); ZERO production
+  behavior change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1969 for the full blurb)
+  Earlier: `integration/club-s2-results-v2`
   (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
   overfit-recount recovery channel: the recount recovers the RECORDED
   overfit gate config (mint on both launchers' START records; the tolerant
@@ -13393,7 +13480,13 @@ bruteX/
 │   ├── notifications/
 │   ├── observability/
 │   ├── options/                    ← expiry/strike/lot-size rules (lake)
-│   ├── orchestrator/               ← FSM + audit + rate limiter
+│   ├── orchestrator/               ← audit chain + rate limiter +
+│   │                                 live pipeline event shapes (the dead
+│   │                                 FSM/retry/pipeline/store/
+│   │                                 adaptive_rate_limiter scaffolding was
+│   │                                 DELETED + quota_tracker TRIMMED to its
+│   │                                 live exceptions + QuotaGate seam —
+│   │                                 MIGRATION.md #1969)
 │   ├── ranking/                    ← composite ranking + rejection gates
 │   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
 │   └── vocabulary/                 ← 52-condition evaluator (→ trading_core)

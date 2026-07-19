@@ -42,10 +42,9 @@ The original master checklist said "Phase 1 — Not started." That was 11 days s
 | Audit JSONL hash-chain | `brutex/orchestrator/audit.py` + 11.4 KB property tests | ✅ DONE |
 | Bloom + LMDB 4-tier dedup | `brutex/orchestrator/{bloom,store}.py` | ✅ DONE |
 | L3 replay oracle | `brutex/orchestrator/replay.py` | ✅ DONE |
-| Quota tracker + adaptive rate limiter | `brutex/orchestrator/{quota_tracker,rate_limiter}.py` | ✅ DONE |
-| Retry with exponential backoff | `brutex/orchestrator/retry.py` | ✅ DONE |
-| WorkItem FSM | `brutex/orchestrator/state.py` + 60 property invariants | ✅ DONE |
-| Pipeline + PhaseRunner | `brutex/orchestrator/pipeline.py` | ✅ DONE |
+| Rate limiter (+ the dormant `QuotaGate` quota seam) | `brutex/orchestrator/{rate_limiter,quota_tracker}.py` | ✅ DONE |
+| Retry with bounded backoff (live ladder) | `brutex/adapters/groww/errors.py::is_retryable` + client `max_attempts` | ✅ DONE |
+| WorkItem FSM / PhaseRunner scaffolding | DELETED as never-production-wired (MIGRATION.md #1969); live event shapes kept in `brutex/orchestrator/events.py` | 🗑 DELETED |
 | SLA breach detector | `brutex/observability/sla.py` | ✅ DONE |
 | Hung-worker watchdog | `brutex/observability/watchdog.py` | ✅ DONE |
 | MonitorLoop daemon | `brutex/observability/monitor.py` | ✅ DONE |

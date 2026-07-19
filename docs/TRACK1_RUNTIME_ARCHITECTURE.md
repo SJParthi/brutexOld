@@ -172,7 +172,7 @@ value: JSON dict(item_id, phase, content_hash, params, state, retry_count,
 
 - **PK:** `(phase, content_hash)` LMDB B+tree per sub-db
 - **O(1):** memory-mapped, effective O(1) for working set in page cache
-- **Code:** `brutex/orchestrator/store.py:198-426`, `brutex/orchestrator/state.py:148-214`
+- **Code:** HISTORICAL — the `orchestrator/store.py` WorkItemStore + `state.py` FSM scaffolding was deleted (MIGRATION.md #1969); the live LMDB O(1)-space tiers are `brutex/data/lmdb_membership.py` + `brutex/engine/sweep_cache.py`
 
 ### 3.5 Audit JSONL (hash-chained)
 
