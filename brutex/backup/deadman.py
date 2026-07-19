@@ -32,17 +32,19 @@ Fail-toward-alarm invariants:
 from __future__ import annotations
 
 import http.client
+import struct
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import urlsplit
 
 import structlog
 
+from brutex.backup import backup_rust
 from brutex.backup.errors import (
     EXIT_DEADMAN_BREACH,
     EXIT_OK,
@@ -67,6 +69,8 @@ from brutex.config.backup_env import DEEP_CHECK_INTERVAL_HOURS
 from brutex.notifications.sweep_alerts import SweepAlerter
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from brutex.backup.restic_runner import ResticRunner
     from brutex.config.backup_env import BackupEnvConfig
 
@@ -173,7 +177,64 @@ def _should_alert(
     return (now - last).total_seconds() >= realert_hours * _SECONDS_PER_HOUR
 
 
-def evaluate_deadman(
+# ── Detail builders — ONE source for BOTH the Python oracle and the Rust
+#    seam's report materialiser (the DEC-FEED-RUST-CORE-001 "messages moved
+#    verbatim" discipline; DEC-BACKUP-RUST-OPS-001). Each builder is one
+#    branch's f-string, byte-for-byte. ────────────────────────────────────
+
+
+def _detail_state_corrupt(state_error: str) -> str:
+    """The STATE_CORRUPT detail (F13)."""
+    return f"state.json corrupt: {state_error}"
+
+
+def _detail_never_no_file() -> str:
+    """The NEVER_SUCCEEDED missing-file detail (F12)."""
+    return "no backup state file — never succeeded (or state lost)"
+
+
+def _detail_clock_skew_running(running_since: datetime) -> str:
+    """The CLOCK_SKEW future-``running_since`` detail (F14)."""
+    return f"running_since {running_since.isoformat()} is in the future"
+
+
+def _detail_running(running_since: datetime) -> str:
+    """The RUNNING detail (F17b)."""
+    return f"backup running since {running_since.isoformat()}"
+
+
+def _detail_hung(running_since: datetime, max_runtime_hours: float) -> str:
+    """The HUNG detail (F17b)."""
+    return (
+        f"backup marked running since {running_since.isoformat()} "
+        f"≥ {max_runtime_hours:g} h — wedged"
+    )
+
+
+def _detail_never_no_stamp() -> str:
+    """The NEVER_SUCCEEDED no-success-stamp detail."""
+    return "state present but no success ever stamped"
+
+
+def _detail_clock_skew_success(last_success_at: datetime, now: datetime) -> str:
+    """The CLOCK_SKEW future-``last_success_at`` detail (F14)."""
+    return (
+        f"last_success_at {last_success_at.isoformat()} is in the future "
+        f"vs now {now.isoformat()} — poisoned stamp or clock skew"
+    )
+
+
+def _detail_overdue(elapsed: float, threshold_hours: float) -> str:
+    """The OVERDUE detail."""
+    return f"last success {elapsed:.1f} h ago > threshold {threshold_hours:g} h"
+
+
+def _detail_fresh(elapsed: float, threshold_hours: float) -> str:
+    """The FRESH detail."""
+    return f"last success {elapsed:.1f} h ago ≤ threshold {threshold_hours:g} h"
+
+
+def _evaluate_deadman_python(
     state: BackupState | None,
     sidecar: DeadmanState,
     *,
@@ -223,7 +284,7 @@ def evaluate_deadman(
             hours_since_success=None,
             threshold_hours=threshold_hours,
             should_alert=_should_alert(DeadmanVerdict.STATE_CORRUPT, sidecar, now, realert_hours),
-            detail=f"state.json corrupt: {state_error}",
+            detail=_detail_state_corrupt(state_error),
         )
     if state is None:
         return DeadmanReport(
@@ -231,23 +292,20 @@ def evaluate_deadman(
             hours_since_success=None,
             threshold_hours=threshold_hours,
             should_alert=_should_alert(DeadmanVerdict.NEVER_SUCCEEDED, sidecar, now, realert_hours),
-            detail="no backup state file — never succeeded (or state lost)",
+            detail=_detail_never_no_file(),
         )
     hours = _hours_since(now, state.last_success_at)
     if state.running_since is not None:
         elapsed_run_hours = (now - state.running_since).total_seconds() / _SECONDS_PER_HOUR
         if (state.running_since - now).total_seconds() > skew_tolerance_s:
             verdict = DeadmanVerdict.CLOCK_SKEW
-            detail = f"running_since {state.running_since.isoformat()} is in the future"
+            detail = _detail_clock_skew_running(state.running_since)
         elif elapsed_run_hours < max_runtime_hours:
             verdict = DeadmanVerdict.RUNNING
-            detail = f"backup running since {state.running_since.isoformat()}"
+            detail = _detail_running(state.running_since)
         else:
             verdict = DeadmanVerdict.HUNG
-            detail = (
-                f"backup marked running since {state.running_since.isoformat()} "
-                f"≥ {max_runtime_hours:g} h — wedged"
-            )
+            detail = _detail_hung(state.running_since, max_runtime_hours)
         return DeadmanReport(
             verdict=verdict,
             hours_since_success=hours,
@@ -261,7 +319,7 @@ def evaluate_deadman(
             hours_since_success=None,
             threshold_hours=threshold_hours,
             should_alert=_should_alert(DeadmanVerdict.NEVER_SUCCEEDED, sidecar, now, realert_hours),
-            detail="state present but no success ever stamped",
+            detail=_detail_never_no_stamp(),
         )
     if (state.last_success_at - now).total_seconds() > skew_tolerance_s:
         return DeadmanReport(
@@ -269,10 +327,7 @@ def evaluate_deadman(
             hours_since_success=hours,
             threshold_hours=threshold_hours,
             should_alert=_should_alert(DeadmanVerdict.CLOCK_SKEW, sidecar, now, realert_hours),
-            detail=(
-                f"last_success_at {state.last_success_at.isoformat()} is in the future "
-                f"vs now {now.isoformat()} — poisoned stamp or clock skew"
-            ),
+            detail=_detail_clock_skew_success(state.last_success_at, now),
         )
     elapsed = max(0.0, hours if hours is not None else 0.0)
     if elapsed > threshold_hours:
@@ -281,14 +336,198 @@ def evaluate_deadman(
             hours_since_success=hours,
             threshold_hours=threshold_hours,
             should_alert=_should_alert(DeadmanVerdict.OVERDUE, sidecar, now, realert_hours),
-            detail=f"last success {elapsed:.1f} h ago > threshold {threshold_hours:g} h",
+            detail=_detail_overdue(elapsed, threshold_hours),
         )
     return DeadmanReport(
         verdict=DeadmanVerdict.FRESH,
         hours_since_success=hours,
         threshold_hours=threshold_hours,
         should_alert=False,
-        detail=f"last success {elapsed:.1f} h ago ≤ threshold {threshold_hours:g} h",
+        detail=_detail_fresh(elapsed, threshold_hours),
+    )
+
+
+# ── The BRUTEX_BACKUP_RUST decision seam (DEC-BACKUP-RUST-OPS-001) ─────────
+#
+# Rust decides the ARM + verdict + should_alert + the two floats over
+# PRIMITIVE inputs; Python materialises the DeadmanReport (details via the
+# shared builders above — one source, both arms). Flag OFF serves
+# `_evaluate_deadman_python` verbatim, crate untouched.
+
+#: Detail-arm codes returned by ``brutex_ops.evaluate_deadman_decision`` —
+#: each names ONE oracle branch (the crate-side ``ARM_*`` twins).
+_ARM_STATE_CORRUPT: Final[int] = 1
+_ARM_NEVER_NO_FILE: Final[int] = 2
+_ARM_CLOCK_SKEW_RUNNING: Final[int] = 3
+_ARM_RUNNING: Final[int] = 4
+_ARM_HUNG: Final[int] = 5
+_ARM_NEVER_NO_STAMP: Final[int] = 6
+_ARM_CLOCK_SKEW_SUCCESS: Final[int] = 7
+_ARM_OVERDUE: Final[int] = 8
+_ARM_FRESH: Final[int] = 9
+
+
+def _now_minus_seconds(now: datetime, stamp: datetime | None) -> float | None:
+    """``(now − stamp).total_seconds()`` — the oracle's own delta op, exact."""
+    if stamp is None:
+        return None
+    return (now - stamp).total_seconds()
+
+
+def _pack_float(value: float | None) -> bytes | None:
+    """Bit-pattern key for a report float (signed zeros distinguished — #1531)."""
+    if value is None:
+        return None
+    return struct.pack("<d", value)
+
+
+def _deadman_outcome_key(outcome: tuple[str, object]) -> object:
+    """Burn-in comparison key: full report fields, floats bit-compared."""
+    kind, payload = outcome
+    if kind != "ok" or not isinstance(payload, DeadmanReport):
+        return backup_rust.default_outcome_key(outcome)
+    return (
+        kind,
+        payload.verdict,
+        _pack_float(payload.hours_since_success),
+        _pack_float(payload.threshold_hours),
+        payload.should_alert,
+        payload.detail,
+    )
+
+
+def _report_from_decision(
+    decision: object,
+    *,
+    state: BackupState | None,
+    now: datetime,
+    threshold_hours: float,
+    max_runtime_hours: float,
+    state_error: str | None,
+) -> DeadmanReport:
+    """Materialise a :class:`DeadmanReport` from a crate decision tuple.
+
+    Refuse-poison gate: a wrong-typed / arm-inconsistent decision raises
+    ``TypeError``/``ValueError`` into the seam's degrade set (oracle served
+    with one WARN) — never a silently wrong report.
+    """
+    arm, verdict_token, should_alert, hours, elapsed = cast(
+        "tuple[object, object, object, object, object]", decision
+    )
+    if (
+        not isinstance(arm, int)
+        or isinstance(arm, bool)
+        or not isinstance(verdict_token, str)
+        or not isinstance(should_alert, bool)
+        or not (hours is None or isinstance(hours, float))
+        or not isinstance(elapsed, float)
+    ):
+        raise TypeError(f"poisoned deadman decision {decision!r}")
+    verdict = DeadmanVerdict(verdict_token)
+    detail: str
+    if arm == _ARM_STATE_CORRUPT:
+        if state_error is None:
+            raise ValueError("STATE_CORRUPT arm without a state_error")
+        detail = _detail_state_corrupt(state_error)
+    elif arm == _ARM_NEVER_NO_FILE:
+        detail = _detail_never_no_file()
+    elif arm in (_ARM_CLOCK_SKEW_RUNNING, _ARM_RUNNING, _ARM_HUNG):
+        if state is None or state.running_since is None:
+            raise ValueError("running-family arm without a running_since stamp")
+        if arm == _ARM_CLOCK_SKEW_RUNNING:
+            detail = _detail_clock_skew_running(state.running_since)
+        elif arm == _ARM_RUNNING:
+            detail = _detail_running(state.running_since)
+        else:
+            detail = _detail_hung(state.running_since, max_runtime_hours)
+    elif arm == _ARM_NEVER_NO_STAMP:
+        detail = _detail_never_no_stamp()
+    elif arm == _ARM_CLOCK_SKEW_SUCCESS:
+        if state is None or state.last_success_at is None:
+            raise ValueError("success-skew arm without a last_success_at stamp")
+        detail = _detail_clock_skew_success(state.last_success_at, now)
+    elif arm == _ARM_OVERDUE:
+        detail = _detail_overdue(elapsed, threshold_hours)
+    elif arm == _ARM_FRESH:
+        detail = _detail_fresh(elapsed, threshold_hours)
+    else:
+        raise ValueError(f"unknown deadman decision arm {arm!r}")
+    return DeadmanReport(
+        verdict=verdict,
+        hours_since_success=hours,
+        threshold_hours=threshold_hours,
+        should_alert=should_alert,
+        detail=detail,
+    )
+
+
+def evaluate_deadman(
+    state: BackupState | None,
+    sidecar: DeadmanState,
+    *,
+    threshold_hours: float,
+    realert_hours: float,
+    skew_tolerance_s: float,
+    max_runtime_hours: float,
+    clock: Clock = _default_utc_clock,
+    state_error: str | None = None,
+) -> DeadmanReport:
+    """Evaluate the pure dead-man verdict (see :func:`_evaluate_deadman_python`).
+
+    The public entry — signature + behavior byte-identical to the retained
+    Python oracle. Under the default-OFF ``BRUTEX_BACKUP_RUST`` flag the
+    verdict DECISION routes through the ``brutex_ops`` crate
+    (DEC-BACKUP-RUST-OPS-001): the clock is read ONCE here (exactly one
+    ``clock()`` call either way — the ``run_deadman_check`` frozen-now
+    idiom), Python pre-computes the oracle's own ``total_seconds()`` deltas
+    (exact — integer-µs datetime arithmetic), Rust returns the primitive
+    decision, and the report is materialised via the SAME detail builders
+    the oracle uses.
+    """
+    now = clock()
+
+    def _oracle() -> DeadmanReport:
+        return _evaluate_deadman_python(
+            state,
+            sidecar,
+            threshold_hours=threshold_hours,
+            realert_hours=realert_hours,
+            skew_tolerance_s=skew_tolerance_s,
+            max_runtime_hours=max_runtime_hours,
+            clock=lambda: now,
+            state_error=state_error,
+        )
+
+    def _compute(crate: ModuleType) -> object:
+        decision = crate.evaluate_deadman_decision(
+            state_error is not None,
+            state is not None,
+            None if state is None else _now_minus_seconds(now, state.last_success_at),
+            None if state is None else _now_minus_seconds(now, state.running_since),
+            _now_minus_seconds(now, sidecar.last_overdue_alert_at),
+            threshold_hours,
+            realert_hours,
+            skew_tolerance_s,
+            max_runtime_hours,
+        )
+
+        def _materialise() -> DeadmanReport:
+            return _report_from_decision(
+                decision,
+                state=state,
+                now=now,
+                threshold_hours=threshold_hours,
+                max_runtime_hours=max_runtime_hours,
+                state_error=state_error,
+            )
+
+        return _materialise
+
+    return backup_rust.route_law(
+        "evaluate_deadman",
+        oracle=_oracle,
+        compute=_compute,
+        outcome_key=_deadman_outcome_key,
     )
 
 

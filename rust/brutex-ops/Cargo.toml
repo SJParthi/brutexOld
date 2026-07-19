@@ -1,0 +1,80 @@
+# brutex-ops — the ops (backup) DECISION kernel (Rust).
+#
+# DEC-BACKUP-RUST-OPS-001: a bit-identity-first port of the pure DECISION
+# plane of `brutex/backup/` — the dead-man verdict state machine
+# (`deadman.py::evaluate_deadman`), the four golden-pinned template renderers
+# (`schedule_render.py`), the restic `--json` output parsers + the fixed
+# `restic backup` argv builder (`restic_runner.py`). The kernel returns
+# PRIMITIVES ONLY (arm codes, verdict tokens, strings, floats); Python keeps
+# ALL I/O, subprocess, alerting, datetime parsing and error f-strings, so
+# nothing that reaches logged/raised/alerted output is ever re-implemented in
+# Rust without a live Python oracle (`brutex/backup/backup_rust.py` routes,
+# default-OFF behind `BRUTEX_BACKUP_RUST`).
+#
+# Pure-Rust-first (rlib, std + serde_json core) so `cargo test` links no
+# libpython; the PyO3 surface is behind the OPTIONAL `python` feature (turned
+# on by maturin for the wheel build) — the brutex-feed shape.
+
+[package]
+name = "brutex-ops"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Ops (backup) decision kernel — deadman verdict + template renders + restic parsers for BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it
+# from the SPDX license check (mirrors brutex-feed / fno-math / trading-core).
+publish = false
+
+[lib]
+name = "brutex_ops"
+path = "src/lib.rs"
+# cdylib so `import brutex_ops` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core needs NO Python. The PyO3 module is opt-in: `cargo test`
+# (default features) builds + links zero Python symbols. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# The restic `--json` parse twin (pure Rust, rlib-safe). Deliberately WITHOUT
+# `arbitrary_precision` / `preserve_order`: the Python facade's abstain rule
+# routes every serde-vs-CPython JSON dialect divergence (NaN/Infinity
+# literals, lone surrogates, huge ints) to the Python oracle, so the default
+# strict parser is the honest envelope.
+serde_json = "1"
+
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the sibling
+# kernels use the identical pin).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into the
+# artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Build-script-only: it does NOT enter the shipped rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — invariants + determinism over the pure core.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance-adjacent ops code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true
