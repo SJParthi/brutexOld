@@ -1,0 +1,1108 @@
+{
+  "config": "RAYON_NUM_THREADS=1 (production, sweep_parallel.py:558)",
+  "fits_pinned": {
+    "prod_count": {
+      "c0_us": -4.94,
+      "walk_rate_ns_per_bar": 6.2044,
+      "trade_cost_us_per_trade": 0.0201,
+      "r2": 0.99935,
+      "rms_resid_pct": 2.9,
+      "max_abs_resid_pct": 6.7,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 286.0,
+          "resid_pct": 3.8
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 288.4,
+          "resid_pct": 3.2
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 296.6,
+          "resid_pct": 1.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 318.2,
+          "resid_pct": -2.4
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 348.2,
+          "resid_pct": -6.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 341.2,
+          "resid_pct": -4.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 559.8,
+          "resid_pct": 3.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 555.4,
+          "resid_pct": 4.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 562.8,
+          "resid_pct": 3.5
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 579.6,
+          "resid_pct": 2.0
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 618.6,
+          "resid_pct": -2.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 608.5,
+          "resid_pct": -0.2
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 1961.1,
+          "resid_pct": -5.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1850.0,
+          "resid_pct": 0.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 1841.3,
+          "resid_pct": 1.1
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 1804.9,
+          "resid_pct": 3.6
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 1953.8,
+          "resid_pct": -3.6
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 1861.2,
+          "resid_pct": 1.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3742.4,
+          "resid_pct": 0.1
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 3773.0,
+          "resid_pct": -0.7
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 3757.8,
+          "resid_pct": -0.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 3767.4,
+          "resid_pct": -0.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 3706.7,
+          "resid_pct": 1.8
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 3780.5,
+          "resid_pct": -0.1
+        }
+      ]
+    },
+    "prod_raw": {
+      "c0_us": -4.61,
+      "walk_rate_ns_per_bar": 6.1506,
+      "trade_cost_us_per_trade": 0.3508,
+      "r2": 0.99901,
+      "rms_resid_pct": 3.4,
+      "max_abs_resid_pct": 7.2,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 286.6,
+          "resid_pct": 3.3
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 299.4,
+          "resid_pct": 3.5
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 373.9,
+          "resid_pct": 1.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 540.2,
+          "resid_pct": -1.1
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 834.8,
+          "resid_pct": -5.9
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 889.3,
+          "resid_pct": -7.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 555.1,
+          "resid_pct": 3.5
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 576.4,
+          "resid_pct": 2.0
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 614.0,
+          "resid_pct": 7.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 835.2,
+          "resid_pct": -2.9
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 1128.5,
+          "resid_pct": -7.0
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 1095.5,
+          "resid_pct": 0.1
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 1859.7,
+          "resid_pct": -1.0
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1826.0,
+          "resid_pct": 1.6
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 1891.1,
+          "resid_pct": 1.8
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 1998.7,
+          "resid_pct": 4.0
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 2253.0,
+          "resid_pct": 2.9
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 2343.1,
+          "resid_pct": 0.9
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3760.3,
+          "resid_pct": -1.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 3798.6,
+          "resid_pct": -1.8
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 3821.7,
+          "resid_pct": -0.6
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 4004.0,
+          "resid_pct": -1.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 4145.5,
+          "resid_pct": 1.1
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 4184.3,
+          "resid_pct": 1.2
+        }
+      ]
+    },
+    "prod_wrapper": {
+      "c0_us": -83.73,
+      "walk_rate_ns_per_bar": 6.195,
+      "trade_cost_us_per_trade": 4.1059,
+      "r2": 0.99267,
+      "rms_resid_pct": 7.8,
+      "max_abs_resid_pct": 20.8,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 300.6,
+          "resid_pct": -20.8
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 431.2,
+          "resid_pct": -8.2
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 1056.7,
+          "resid_pct": 15.6
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 2955.1,
+          "resid_pct": 2.4
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 6414.1,
+          "resid_pct": -6.9
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 6537.2,
+          "resid_pct": -1.5
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 576.0,
+          "resid_pct": -10.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 690.7,
+          "resid_pct": -1.9
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 1296.2,
+          "resid_pct": 15.7
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 3213.7,
+          "resid_pct": 2.4
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 5499.4,
+          "resid_pct": 10.6
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 6646.7,
+          "resid_pct": -0.3
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 1838.4,
+          "resid_pct": -2.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1961.6,
+          "resid_pct": -0.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 2672.8,
+          "resid_pct": 3.7
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 4301.7,
+          "resid_pct": 6.2
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 7942.7,
+          "resid_pct": -7.3
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 8192.2,
+          "resid_pct": -3.5
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3808.1,
+          "resid_pct": -3.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 3972.0,
+          "resid_pct": -3.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 4802.5,
+          "resid_pct": -3.0
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 6483.4,
+          "resid_pct": -0.5
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 9057.8,
+          "resid_pct": 2.1
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 9349.2,
+          "resid_pct": 4.6
+        }
+      ]
+    },
+    "serial_count": {
+      "c0_us": -12.49,
+      "walk_rate_ns_per_bar": 6.0908,
+      "trade_cost_us_per_trade": 0.0404,
+      "r2": 0.99981,
+      "rms_resid_pct": 2.2,
+      "max_abs_resid_pct": 7.5,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 284.7,
+          "resid_pct": -0.3
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 288.6,
+          "resid_pct": -1.1
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 309.0,
+          "resid_pct": -5.0
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 323.6,
+          "resid_pct": -3.8
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 367.8,
+          "resid_pct": -7.5
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 340.8,
+          "resid_pct": 1.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 552.3,
+          "resid_pct": 1.3
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 556.7,
+          "resid_pct": 0.8
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 564.4,
+          "resid_pct": 0.8
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 582.4,
+          "resid_pct": 0.7
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 629.1,
+          "resid_pct": -2.4
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 616.1,
+          "resid_pct": 0.6
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 1784.9,
+          "resid_pct": 1.7
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1811.9,
+          "resid_pct": 0.2
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 1790.2,
+          "resid_pct": 1.9
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 1821.4,
+          "resid_pct": 1.1
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 1862.6,
+          "resid_pct": 0.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 1884.5,
+          "resid_pct": -0.5
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3697.5,
+          "resid_pct": -0.8
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 3697.4,
+          "resid_pct": -0.7
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 3683.5,
+          "resid_pct": -0.1
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 3709.7,
+          "resid_pct": -0.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 3737.8,
+          "resid_pct": -0.4
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 3683.9,
+          "resid_pct": 1.2
+        }
+      ]
+    },
+    "serial_raw": {
+      "c0_us": -25.41,
+      "walk_rate_ns_per_bar": 6.3241,
+      "trade_cost_us_per_trade": 0.2063,
+      "r2": 0.99172,
+      "rms_resid_pct": 5.4,
+      "max_abs_resid_pct": 15.0,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 285.8,
+          "resid_pct": -0.9
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 294.7,
+          "resid_pct": -1.2
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 330.0,
+          "resid_pct": 0.8
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 405.1,
+          "resid_pct": 4.5
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 530.5,
+          "resid_pct": 7.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 588.6,
+          "resid_pct": 1.0
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 552.0,
+          "resid_pct": 3.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 559.4,
+          "resid_pct": 3.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 596.6,
+          "resid_pct": 3.7
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 693.9,
+          "resid_pct": 2.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 867.1,
+          "resid_pct": -2.1
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 824.9,
+          "resid_pct": 6.2
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 2116.1,
+          "resid_pct": -11.5
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1783.8,
+          "resid_pct": 5.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 1822.8,
+          "resid_pct": 5.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 1927.9,
+          "resid_pct": 4.4
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 2531.4,
+          "resid_pct": -15.0
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 2122.9,
+          "resid_pct": 2.7
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3690.0,
+          "resid_pct": 2.9
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 4085.4,
+          "resid_pct": -6.8
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 3634.9,
+          "resid_pct": 5.9
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 3997.1,
+          "resid_pct": -1.5
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 4038.9,
+          "resid_pct": 1.0
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 4005.7,
+          "resid_pct": 2.5
+        }
+      ]
+    },
+    "serial_wrapper": {
+      "c0_us": -337.8,
+      "walk_rate_ns_per_bar": 7.3162,
+      "trade_cost_us_per_trade": 3.4989,
+      "r2": 0.9834,
+      "rms_resid_pct": 25.0,
+      "max_abs_resid_pct": 88.7,
+      "resid_by_cell": [
+        {
+          "n_bars": 48620,
+          "t": 5.0,
+          "meas_us": 312.2,
+          "resid_pct": -88.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 43.5,
+          "meas_us": 443.8,
+          "resid_pct": -61.7
+        },
+        {
+          "n_bars": 48620,
+          "t": 244.5,
+          "meas_us": 941.2,
+          "resid_pct": -7.2
+        },
+        {
+          "n_bars": 48620,
+          "t": 683.9,
+          "meas_us": 2367.4,
+          "resid_pct": 1.8
+        },
+        {
+          "n_bars": 48620,
+          "t": 1401.3,
+          "meas_us": 4815.5,
+          "resid_pct": 2.2
+        },
+        {
+          "n_bars": 48620,
+          "t": 1514.5,
+          "meas_us": 4442.0,
+          "resid_pct": 19.7
+        },
+        {
+          "n_bars": 93874,
+          "t": 4.9,
+          "meas_us": 594.9,
+          "resid_pct": -38.5
+        },
+        {
+          "n_bars": 93874,
+          "t": 43.8,
+          "meas_us": 697.6,
+          "resid_pct": -28.0
+        },
+        {
+          "n_bars": 93874,
+          "t": 244.1,
+          "meas_us": 1342.4,
+          "resid_pct": -10.4
+        },
+        {
+          "n_bars": 93874,
+          "t": 680.0,
+          "meas_us": 2695.9,
+          "resid_pct": 1.2
+        },
+        {
+          "n_bars": 93874,
+          "t": 1359.9,
+          "meas_us": 4925.8,
+          "resid_pct": 3.7
+        },
+        {
+          "n_bars": 93874,
+          "t": 1493.5,
+          "meas_us": 5075.8,
+          "resid_pct": 9.8
+        },
+        {
+          "n_bars": 299948,
+          "t": 4.9,
+          "meas_us": 1903.2,
+          "resid_pct": -1.5
+        },
+        {
+          "n_bars": 299948,
+          "t": 43.9,
+          "meas_us": 1927.1,
+          "resid_pct": 4.3
+        },
+        {
+          "n_bars": 299948,
+          "t": 242.8,
+          "meas_us": 2599.9,
+          "resid_pct": 4.1
+        },
+        {
+          "n_bars": 299948,
+          "t": 680.1,
+          "meas_us": 4089.0,
+          "resid_pct": 3.6
+        },
+        {
+          "n_bars": 299948,
+          "t": 1360.4,
+          "meas_us": 6987.1,
+          "resid_pct": -5.3
+        },
+        {
+          "n_bars": 299948,
+          "t": 1493.4,
+          "meas_us": 8009.2,
+          "resid_pct": -11.6
+        },
+        {
+          "n_bars": 604485,
+          "t": 5.0,
+          "meas_us": 3809.2,
+          "resid_pct": 7.7
+        },
+        {
+          "n_bars": 604485,
+          "t": 43.9,
+          "meas_us": 3881.6,
+          "resid_pct": 9.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 242.9,
+          "meas_us": 4687.8,
+          "resid_pct": 5.3
+        },
+        {
+          "n_bars": 604485,
+          "t": 680.1,
+          "meas_us": 6325.6,
+          "resid_pct": 2.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 1361.5,
+          "meas_us": 9144.9,
+          "resid_pct": -3.2
+        },
+        {
+          "n_bars": 604485,
+          "t": 1489.1,
+          "meas_us": 9598.1,
+          "resid_pct": -3.2
+        }
+      ]
+    }
+  },
+  "per_n_bars_pinned_prod": {
+    "48620": {
+      "prod_count": {
+        "walk_ns_per_bar": 5.908,
+        "trade_cost_us_per_trade": 0.04
+      },
+      "prod_raw": {
+        "walk_ns_per_bar": 5.74,
+        "trade_cost_us_per_trade": 0.398
+      },
+      "prod_wrapper": {
+        "walk_ns_per_bar": 3.368,
+        "trade_cost_us_per_trade": 4.293
+      }
+    },
+    "93874": {
+      "prod_count": {
+        "walk_ns_per_bar": 5.916,
+        "trade_cost_us_per_trade": 0.04
+      },
+      "prod_raw": {
+        "walk_ns_per_bar": 5.854,
+        "trade_cost_us_per_trade": 0.394
+      },
+      "prod_wrapper": {
+        "walk_ns_per_bar": 5.101,
+        "trade_cost_us_per_trade": 3.933
+      }
+    },
+    "299948": {
+      "prod_count": {
+        "walk_ns_per_bar": 6.248,
+        "trade_cost_us_per_trade": 0.007
+      },
+      "prod_raw": {
+        "walk_ns_per_bar": 6.065,
+        "trade_cost_us_per_trade": 0.329
+      },
+      "prod_wrapper": {
+        "walk_ns_per_bar": 5.575,
+        "trade_cost_us_per_trade": 4.411
+      }
+    },
+    "604485": {
+      "prod_count": {
+        "walk_ns_per_bar": 6.219,
+        "trade_cost_us_per_trade": -0.008
+      },
+      "prod_raw": {
+        "walk_ns_per_bar": 6.244,
+        "trade_cost_us_per_trade": 0.28
+      },
+      "prod_wrapper": {
+        "walk_ns_per_bar": 6.354,
+        "trade_cost_us_per_trade": 3.774
+      }
+    }
+  },
+  "unpinned_rayon_speedup_kernel_prod_count": {
+    "48620": 3.77,
+    "93874": 3.69,
+    "299948": 3.51,
+    "604485": 3.0
+  },
+  "disputed_points": {
+    "mine: 48,620 bars / 43.6 trades \u2014 claimed 62us (1.28 ns/bar), UNPINNED chunk-86": {
+      "n_bars": 48620,
+      "trades": 43.6,
+      "claimed_us": 62.0,
+      "prod_count": {
+        "pred_us": 297.6,
+        "eff_ns_per_bar": 6.12
+      },
+      "prod_raw": {
+        "pred_us": 309.7,
+        "eff_ns_per_bar": 6.37
+      },
+      "prod_wrapper": {
+        "pred_us": 396.5,
+        "eff_ns_per_bar": 8.15
+      },
+      "claim_vs_pred_wrapper_pct": -84.4
+    },
+    "audit FIX-L: 604,485 bars / 1,423 trades \u2014 claimed 7,700us (12.8 ns/bar)": {
+      "n_bars": 604485,
+      "trades": 1423.0,
+      "claimed_us": 7700.0,
+      "prod_count": {
+        "pred_us": 3774.1,
+        "eff_ns_per_bar": 6.24
+      },
+      "prod_raw": {
+        "pred_us": 4212.5,
+        "eff_ns_per_bar": 6.97
+      },
+      "prod_wrapper": {
+        "pred_us": 9503.8,
+        "eff_ns_per_bar": 15.72
+      },
+      "claim_vs_pred_wrapper_pct": -19.0
+    },
+    "audit FIX-L k=2 median: 604,485 bars / 1,532 trades": {
+      "n_bars": 604485,
+      "trades": 1532.0,
+      "claimed_us": null,
+      "prod_count": {
+        "pred_us": 3776.3,
+        "eff_ns_per_bar": 6.25
+      },
+      "prod_raw": {
+        "pred_us": 4250.8,
+        "eff_ns_per_bar": 7.03
+      },
+      "prod_wrapper": {
+        "pred_us": 9951.3,
+        "eff_ns_per_bar": 16.46
+      }
+    },
+    "audit FIX-M: 93,750 bars / ~250 trades \u2014 claimed 4.35 ns/bar (~408us)": {
+      "n_bars": 93874,
+      "trades": 250.0,
+      "claimed_us": 408.0,
+      "prod_count": {
+        "pred_us": 582.5,
+        "eff_ns_per_bar": 6.21
+      },
+      "prod_raw": {
+        "pred_us": 660.5,
+        "eff_ns_per_bar": 7.04
+      },
+      "prod_wrapper": {
+        "pred_us": 1524.3,
+        "eff_ns_per_bar": 16.24
+      },
+      "claim_vs_pred_wrapper_pct": -73.2
+    }
+  },
+  "campaign_604485_bars": [
+    {
+      "density": "zero-trade (7.7% of masks)",
+      "trades": 0,
+      "wrapper_ms": 3.66,
+      "raw_ms": 3.71,
+      "speedup_resid0.4_floor_raw": 1.09,
+      "speedup_resid0.4_floor_wrapper": 1.11,
+      "speedup_resid0.58_floor_raw": 1.14,
+      "speedup_resid0.58_floor_wrapper": 1.16
+    },
+    {
+      "density": "sparse",
+      "trades": 220,
+      "wrapper_ms": 4.56,
+      "raw_ms": 3.79,
+      "speedup_resid0.4_floor_raw": 1.31,
+      "speedup_resid0.4_floor_wrapper": 1.09,
+      "speedup_resid0.58_floor_raw": 1.36,
+      "speedup_resid0.58_floor_wrapper": 1.13
+    },
+    {
+      "density": "mid",
+      "trades": 950,
+      "wrapper_ms": 7.56,
+      "raw_ms": 4.05,
+      "speedup_resid0.4_floor_raw": 1.97,
+      "speedup_resid0.4_floor_wrapper": 1.05,
+      "speedup_resid0.58_floor_raw": 2.01,
+      "speedup_resid0.58_floor_wrapper": 1.08
+    },
+    {
+      "density": "FIX-L k=2 median",
+      "trades": 1532,
+      "wrapper_ms": 9.95,
+      "raw_ms": 4.25,
+      "speedup_resid0.4_floor_raw": 2.44,
+      "speedup_resid0.4_floor_wrapper": 1.04,
+      "speedup_resid0.58_floor_raw": 2.48,
+      "speedup_resid0.58_floor_wrapper": 1.06
+    }
+  ]
+}
