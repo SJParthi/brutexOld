@@ -1571,6 +1571,58 @@ class TestSlidFillCounters:
         assert len(trades) == 1  # B3 terminal close on the shared bar
         assert trades[0].entry_ts == _ts(9, 20)
 
+    # ── Two-consecutive-slid-bars dedupe (fix-round-6 fill-law-1) ──────────
+    #
+    # A DEFERRED Mode-B exit (entry + exit on ONE decision bar) is counted at
+    # its MAPPED arm bar (design law 6: exec_idx(N) = the arm bar, NOT the
+    # §2.4 landing successor). When it physically lands on a slid successor
+    # whose OWN decision bar ALSO carries an exit signal, the direct arm must
+    # NOT re-count the same physical fill — a single exit fill contributes AT
+    # MOST ONE to exit_fill_slid_minutes (law 9 / §5.2: EVERY slid FILL is
+    # counted — a fill, once). tf=2 grid: decision [09:15, 09:17] (close
+    # instants 09:17 / 09:19); exec [09:15, 09:18, 09:20] → arm_source
+    # (-1, 0, 1), arm_slid (False, True, True) — the entry arm bar 09:18 AND
+    # the exit's landing 09:20 both slid.
+
+    def _two_slid_streams(self) -> tuple[list[CandleBar], list[CandleBar]]:
+        decision = [_flat(9, 15), _flat(9, 17)]
+        exec_1m = [_flat(9, 15), _flat(9, 18), _bar(9, 20, "100", "101", "99.50", "100")]
+        emap = build_exec_grid_map(decision, exec_1m, tf_minutes=2)
+        assert emap.arm_source == (-1, 0, 1)
+        assert emap.arm_slid == (False, True, True)
+        return decision, exec_1m
+
+    def test_deferred_exit_on_two_consecutive_slid_bars_counts_once(self) -> None:
+        # Entry+exit on decision 0 (slid arm 09:18) → deferred exit lands on
+        # the slid 09:20 successor, whose own decision (idx 1) ALSO fires exit.
+        # The deferred exit is counted ONCE (at its mapped arm bar), NOT twice.
+        decision, exec_1m = self._two_slid_streams()
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        trades, idxs = walker.run_with_exit_indices(decision, exec_1m, [True, False], [True, True])
+        assert len(trades) == 1
+        assert walker.fill_slid_minutes == 1
+        assert walker.exit_fill_slid_minutes == 1  # was 2 pre-dedupe
+        assert trades[0].entry_ts == _ts(9, 18)
+        assert trades[0].exit_ts == _ts(9, 20)
+        assert idxs == [2]
+
+    def test_deferred_exit_second_signal_is_pure_noop_on_fill(self) -> None:
+        # The second (successor) exit signal only ever moved the COUNTER — the
+        # physical trade is byte-identical to the single-exit run, proving the
+        # dedupe touches nothing but the observability count.
+        decision, exec_1m = self._two_slid_streams()
+        w2 = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        t2, _ = w2.run_with_exit_indices(decision, exec_1m, [True, False], [True, True])
+        w1 = TradeSimWalker(direction=Side.BUY, tf_minutes=2)
+        t1, _ = w1.run_with_exit_indices(decision, exec_1m, [True, False], [True, False])
+        # Same single deferred exit fill on the slid 09:20 successor either way.
+        assert w1.exit_fill_slid_minutes == 1
+        assert w2.exit_fill_slid_minutes == 1
+        assert len(t1) == len(t2) == 1
+        assert t1[0].pnl_paisa == t2[0].pnl_paisa
+        assert t1[0].entry_ts == t2[0].entry_ts == _ts(9, 18)
+        assert t1[0].exit_ts == t2[0].exit_ts == _ts(9, 20)
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Coarse decision TF over a REAL 1m execution stream

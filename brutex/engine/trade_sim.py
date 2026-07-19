@@ -281,8 +281,11 @@ class TradeSimWalker:
       ``collision_losers`` × the actual signal streams).
     * ``fill_slid_minutes`` / ``exit_fill_slid_minutes`` /
       ``forced_fill_slid_minutes`` — the widened SLID-fill counter family
-      (§5.2): entry fills / Mode-B exit fills consumed on a slid arm bar,
-      and forced closes displaced past the exact boundary minute.
+      (§5.2): entry fills / Mode-B exit fills whose MAPPED instant
+      ``exec_idx(N)`` (the arm bar — NOT the physical landing bar a §2.4
+      deferral relocates the fill to; design law 6) is a slid bar, and
+      forced closes displaced past the exact boundary minute. Each physical
+      fill counts AT MOST ONCE per class.
 
     Parameters
     ----------
@@ -375,6 +378,14 @@ class TradeSimWalker:
         # counter's consumption probe in the batch loop) — same contract as
         # ``_last_exit_idx``.
         self._last_exit_reason: str | None = None
+        # Whether the most recently closed trade's exit consumed a DEFERRED
+        # (same-bar §2.4) pending Mode-B exit rather than a directly-mapped
+        # one — recorded by ``_close`` (default ``False`` on every non-deferred
+        # close, so it can never read stale). Read by the batch loop's slid
+        # counter to DEDUPE a deferred exit that was already counted at its
+        # mapped arm bar (design law 6: the exit's slide is a property of
+        # ``exec_idx(N)`` = the arm bar, NOT its physical landing successor).
+        self._last_exit_was_deferred: bool = False
         # Public observability counters (class docstring).
         self.exits_deferred: int = 0
         self.signals_dropped_collision: int = 0
@@ -501,19 +512,35 @@ class TradeSimWalker:
                 exit_indices.append(self._last_exit_idx)
             if slid[j]:
                 # SLID-fill accounting (§5.2, the widened counter family):
-                # entry fills + Mode-B exit consumptions landing on a slid
-                # arm bar. Mask-dependent, hence counted here (silent — the
-                # capped WARNs are the map build's, mask-independent).
+                # entry fills + Mode-B exit fills whose MAPPED instant
+                # ``exec_idx(N)`` = this slid arm bar j (design law 6/9).
+                # Mask-dependent, hence counted here (silent — the capped
+                # WARNs are the map build's, mask-independent). Each physical
+                # exit fill contributes AT MOST ONE to
+                # ``exit_fill_slid_minutes``: the two exit arms below are
+                # MUTUALLY EXCLUSIVE by construction —
+                #   * ``opened_here`` owns a DEFERRED exit (entry + exit on
+                #     one decision bar → the exit's mapped instant IS this arm
+                #     bar j; §2.4 physically relocates its FILL to a successor,
+                #     but law 6 keeps its slide keyed to bar j — so it is
+                #     counted HERE, at its mapped slide, never at its landing);
+                #   * the direct arm owns a DIRECTLY-mapped exit whose fill bar
+                #     IS its mapped instant (``exec_idx(N) == j``), gated
+                #     ``not _last_exit_was_deferred`` so a deferred exit that
+                #     was already counted at its arm bar is NOT re-counted when
+                #     it lands on a slid successor whose own decision carried an
+                #     exit signal (the fix-round-6 consecutive-slid dedupe).
                 pos_after = self._position
                 opened_here = pos_after is not None and pos_after.entry_idx == j
                 if opened_here:
                     self.fill_slid_minutes += 1
                 if exit_due and (
-                    opened_here  # deferred onto the entry bar's successor
+                    opened_here  # deferred at its mapped arm bar (§2.4/law 6)
                     or (
                         pos_before is not None
                         and closed is not None
                         and self._last_exit_reason == _ExitReason.SIGNAL.value
+                        and not self._last_exit_was_deferred
                     )
                 ):
                     self.exit_fill_slid_minutes += 1
@@ -763,6 +790,7 @@ class TradeSimWalker:
         # ladder (both fill at the same adverse extreme; the REASON reads
         # ``signal``).
         if self._pending_exit is not None or exit_due:
+            was_deferred = self._pending_exit is not None
             reason = self._pending_exit if self._pending_exit is not None else _ExitReason.SIGNAL
             self._pending_exit = None
             open_paisa = _price_to_paisa(bar.open)
@@ -773,6 +801,7 @@ class TradeSimWalker:
                 exit_ts=bar.timestamp,
                 exit_idx=idx,
                 reason=reason,
+                deferred=was_deferred,
             )
 
         # (2) Forced session-close exit overrides SL/TP — fill at the
@@ -898,8 +927,15 @@ class TradeSimWalker:
         exit_ts: datetime,
         exit_idx: int,
         reason: _ExitReason,
+        deferred: bool = False,
     ) -> ClosedTrade:
-        """Build the :class:`ClosedTrade`, flatten the walker, and emit a log line."""
+        """Build the :class:`ClosedTrade`, flatten the walker, and emit a log line.
+
+        ``deferred`` records whether this exit consumed a DEFERRED (§2.4)
+        pending Mode-B exit — read by the batch loop's slid counter to dedupe
+        an already-counted deferred exit (see ``_last_exit_was_deferred``).
+        Every non-deferred close passes the default ``False``.
+        """
         # Lazy import (see the TYPE_CHECKING note above): keeps numpy out of the
         # ``brutex.engine`` collection-time import chain so the per-module
         # coverage gates don't trip numpy's "load once" guard. Cached after the
@@ -947,6 +983,7 @@ class TradeSimWalker:
         self._position = None
         self._last_exit_idx = exit_idx
         self._last_exit_reason = reason.value
+        self._last_exit_was_deferred = deferred
         _LOG.debug(
             "trade_sim.exit",
             exit_idx=exit_idx,
