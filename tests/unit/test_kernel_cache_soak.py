@@ -280,6 +280,10 @@ def _compare(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+#: A hardware key carrying the registered §8 M4-Pro signature.
+_M4PRO_KEY = "mac16-8-14c10p4e-48g-arm64"
+
+
 def _evaluate(
     off: dict[str, Any] | None = None,
     on: dict[str, Any] | None = None,
@@ -287,12 +291,19 @@ def _evaluate(
     *,
     keys: int = 6,
     smoke: bool = False,
+    hardware_key: str | None = _M4PRO_KEY,
 ) -> dict[str, str]:
     off = _off_arm() if off is None else off
     on = _arm() if on is None else on
     compare = _compare() if compare is None else compare
     result: dict[str, str] = SOAK.evaluate_acceptance(
-        off=off, on=on, compare=compare, deltas=SOAK.build_deltas(off, on), keys=keys, smoke=smoke
+        off=off,
+        on=on,
+        compare=compare,
+        deltas=SOAK.build_deltas(off, on),
+        keys=keys,
+        smoke=smoke,
+        hardware_key=hardware_key,
     )
     return result
 
@@ -322,9 +333,31 @@ class TestDeltasAndAcceptance:
             "wall_neutral": "PASS",
             "builds_bound": "PASS",
             "telemetry": "PASS",
+            "provenance": "PASS",
             "verdict": "FLIP-READY",
         }
         assert SOAK.judged_failures(acceptance) == []
+
+    def test_non_m4pro_hardware_is_never_flip_ready(self) -> None:
+        # R2 MINOR-4: bars all green on a laptop → NOT-DECISION-GRADE, not a
+        # judged FAILURE (rc stays 0 — honest lab evidence, not a harness bug).
+        acceptance = _evaluate(hardware_key="pc-8c8p0e-32g-x86-64")
+        assert acceptance["provenance"].startswith("NOT-DECISION-GRADE")
+        assert "14c10p4e-48g-arm64" in acceptance["provenance"]
+        assert acceptance["verdict"].startswith("NOT-DECISION-GRADE")
+        assert "FLIP-READY" not in acceptance["verdict"]
+        assert SOAK.judged_failures(acceptance) == []
+
+    def test_unavailable_hardware_key_is_never_flip_ready(self) -> None:
+        acceptance = _evaluate(hardware_key=None)
+        assert acceptance["provenance"].startswith("NOT-DECISION-GRADE")
+        assert "FLIP-READY" not in acceptance["verdict"]
+
+    def test_judged_failure_outranks_not_decision_grade(self) -> None:
+        acceptance = _evaluate(
+            compare=_compare(identity_ok=False), hardware_key="pc-8c8p0e-32g-x86-64"
+        )
+        assert acceptance["verdict"] == "NOT-READY(identity)"
 
     def test_identity_diff_blocks(self) -> None:
         acceptance = _evaluate(compare=_compare(identity_ok=False, diff_paths=["a", "b"]))
@@ -411,11 +444,14 @@ class TestDeltasAndAcceptance:
         assert "keys(6)" in acceptance["builds_bound"]
 
     def test_smoke_mode_unjudges_rss_and_wall(self) -> None:
-        # A smoke arm wildly over every ceiling must still be mechanics-green.
+        # A smoke arm wildly over every ceiling must still be mechanics-green
+        # even on non-M4-Pro hardware (the sandbox) — smoke is unaffected by
+        # the R2 MINOR-4 provenance bar.
         on = _arm(wall_s=500.0, worker_peak_rss_kib_max=10**9, pool_peak_rss_kib=10**9)
-        acceptance = _evaluate(on=on, smoke=True)
+        acceptance = _evaluate(on=on, smoke=True, hardware_key="sandbox-4c4p0e-8g-x86-64")
         assert acceptance["rss_envelope"] == "SMOKE-UNJUDGED"
         assert acceptance["wall_neutral"] == "SMOKE-UNJUDGED"
+        assert acceptance["provenance"] == "SMOKE-UNJUDGED"
         assert acceptance["verdict"] == "SMOKE-ONLY(mechanics green — NOT decision-grade)"
         assert SOAK.judged_failures(acceptance) == []
 
@@ -474,6 +510,165 @@ class TestGridHelpers:
         assert SOAK.SWEEP_WORKERS_ENV not in off
         assert SOAK.RESULTS_DEPTH_ENV not in off
 
+    def test_arm_env_pops_ambient_capacity_override(self) -> None:
+        # R2 MAJOR-1: an operator daemon's capacity override must NOT bleed
+        # into either arm — the soak measures the DEFAULT sizing law.
+        base = {"PATH": "/bin", SOAK.KERNEL_CAPACITY_ENV: "4"}
+        for cache_on in (False, True):
+            env = SOAK.arm_env(base, cache_on=cache_on, workers=None, results_depth_off=False)
+            assert SOAK.KERNEL_CAPACITY_ENV not in env
+        assert base[SOAK.KERNEL_CAPACITY_ENV] == "4"  # caller's map untouched
+
+    def test_effective_worker_kernel_capacity(self) -> None:
+        assert SOAK.effective_worker_kernel_capacity("prev_day", "hlc3:close") == 1
+        assert SOAK.effective_worker_kernel_capacity("prev_day,rolling_weekly", "hlc3:close") == 2
+        assert (
+            SOAK.effective_worker_kernel_capacity(
+                "prev_day,rolling_weekly,weekly_static", "hlc3:close,close:close"
+            )
+            == 6
+        )
+        # Blank axes floor at 1; an absurd fan-out clamps at the engine max.
+        assert SOAK.effective_worker_kernel_capacity("", "") == 1
+        wide = ",".join(f"a{i}" for i in range(100))
+        assert (
+            SOAK.effective_worker_kernel_capacity(wide, "hlc3:close")
+            == SOAK.WORKER_KERNEL_CAPACITY_MAX
+        )
+
+    def test_redact_home(self) -> None:
+        home = str(Path.home())
+        assert SOAK.redact_home(f"{home}/.brutex/lake") == "~/.brutex/lake"
+        assert SOAK.redact_home(home) == "~"
+        assert SOAK.redact_home("/srv/lake") == "/srv/lake"
+        # A sibling dir sharing the home PREFIX must not be redacted.
+        assert SOAK.redact_home(f"{home}2/lake") == f"{home}2/lake"
+
+    def test_parser_exposes_capacity_widening_knobs(self) -> None:
+        # R2 MAJOR-2: the grid-widening passthroughs exist and default unset.
+        args = SOAK.build_parser().parse_args(
+            [
+                "run",
+                "--out",
+                "x",
+                "--fib-anchors",
+                "prev_day,rolling_weekly",
+                "--price-source-cells",
+                "hlc3:close,close:close",
+            ]
+        )
+        assert args.fib_anchors == "prev_day,rolling_weekly"
+        assert args.price_source_cells == "hlc3:close,close:close"
+        default = SOAK.build_parser().parse_args(["run", "--out", "x"])
+        assert default.fib_anchors is None
+        assert default.price_source_cells is None
+
+
+class TestEngineDriftPins:
+    """R2 NIT-6: the script's re-derived key/capacity models are pinned to the
+    engine's OWN law (``sweep_parallel.worker_kernel_capacity_default``) — a
+    new swept kernel-key axis (proximity/prior_n/…) changes the engine
+    formula and breaks these pins LOUDLY instead of silently loosening the
+    ``builds ≤ keys × workers`` bound."""
+
+    def test_capacity_env_name_and_max_match_engine(self) -> None:
+        from brutex.engine import sweep_parallel
+
+        assert SOAK.KERNEL_CAPACITY_ENV == sweep_parallel.WORKER_KERNEL_CAPACITY_ENV
+        assert SOAK.WORKER_KERNEL_CAPACITY_MAX == sweep_parallel.WORKER_KERNEL_CAPACITY_MAX
+
+    @pytest.mark.parametrize(
+        ("fib_csv", "ps_csv"),
+        [
+            ("prev_day", "hlc3:close"),
+            ("prev_day,rolling_weekly", "hlc3:close"),
+            ("prev_day,rolling_weekly,weekly_static", "hlc3:close,close:close"),
+        ],
+    )
+    def test_capacity_matches_engine_default_law(self, fib_csv: str, ps_csv: str) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_parallel
+
+        # worker_kernel_capacity_default reads exactly the three axis lists;
+        # the CLI grid pins proximities to the singleton [None] (cli.py).
+        grid = SimpleNamespace(
+            proximities=[None],
+            fib_anchors=[tok for tok in fib_csv.split(",") if tok],
+            price_source_cells=[tok for tok in ps_csv.split(",") if tok],
+        )
+        engine_capacity = sweep_parallel.worker_kernel_capacity_default(grid)  # type: ignore[arg-type]
+        assert SOAK.effective_worker_kernel_capacity(fib_csv, ps_csv) == engine_capacity
+
+    def test_keys_fan_out_matches_engine_per_instrument_law(self) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_parallel
+
+        # keys = symbols × intervals × the engine's own per-(instrument, tf)
+        # kernel-key fan-out (unclamped here: product ≤ the capacity max).
+        grid = SimpleNamespace(
+            proximities=[None],
+            fib_anchors=["prev_day", "rolling_weekly"],
+            price_source_cells=["hlc3:close"],
+        )
+        per_instrument_tf = sweep_parallel.worker_kernel_capacity_default(grid)  # type: ignore[arg-type]
+        assert (
+            SOAK.keys_fan_out(
+                "NIFTY,BANKNIFTY",
+                "1minute,5minute,15minute",
+                "prev_day,rolling_weekly",
+                "hlc3:close",
+            )
+            == 2 * 3 * per_instrument_tf
+        )
+
+
+class TestProvenanceCollection:
+    def _grid(self) -> dict[str, str | None]:
+        return {
+            "symbols": "NIFTY",
+            "intervals": "1minute",
+            "fib_anchors": "prev_day,rolling_weekly",
+            "price_source_cells": None,
+        }
+
+    def test_capacity_echo_and_ambient_pop_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SOAK.KERNEL_CAPACITY_ENV, "4")
+        prov = SOAK.collect_provenance(
+            lake_root=Path("/srv/lake"),
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        assert prov["worker_kernel_capacity_effective"] == 2  # 2 anchors × default cell
+        assert prov["capacity_env_ambient_popped"] is True
+        monkeypatch.delenv(SOAK.KERNEL_CAPACITY_ENV)
+        prov = SOAK.collect_provenance(
+            lake_root=Path("/srv/lake"),
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        assert prov["capacity_env_ambient_popped"] is False
+
+    def test_lake_root_home_redacted_and_uname_hostname_free(self) -> None:
+        # R1 MINOR-1: the uploaded report must not leak the local username
+        # (home prefix) nor the hostname/kernel build string (`uname -a`).
+        prov = SOAK.collect_provenance(
+            lake_root=Path.home() / ".brutex" / "lake",
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        assert prov["lake_root"] == "~/.brutex/lake"
+        # `uname -sm` yields exactly "<kernel> <machine>" — two tokens, no
+        # hostname (or the honest "unavailable" where uname is absent).
+        assert prov["uname"] == "unavailable" or len(prov["uname"].split()) == 2
+
 
 class TestPreflight:
     def test_preflight_lake_sound_and_missing(self, tmp_path: Path) -> None:
@@ -504,12 +699,14 @@ class TestReportRendering:
         report: dict[str, Any] = SOAK.build_report(
             provenance={
                 "commit": "deadbeef",
-                "hardware_key": "m4pro-key",
+                "hardware_key": _M4PRO_KEY,
                 "lake_root": "/lake",
                 "started_utc": "2026-07-19T00:00:00+00:00",
                 "rss_method": "ps-poll-5.0s (peak is a LOWER BOUND on the true peak)",
                 "smoke": False,
                 "grid": {"keys_fan_out": 6},
+                "worker_kernel_capacity_effective": 1,
+                "capacity_env_ambient_popped": False,
             },
             off=off,
             on=on,
@@ -540,6 +737,9 @@ class TestReportRendering:
         assert "YELLOW FLAG" in text
         assert "NOT pre-approved" in text  # the flip-boundary honesty language
         assert "verdict: FLIP-READY" in text
+        # R2 MAJOR-2: the RSS capacity scoping is stated on the summary.
+        assert "RSS bar evaluated at kernel-cache capacity=1" in text
+        assert SOAK.KERNEL_CAPACITY_ENV in text
 
     def test_render_summary_smoke_banner(self) -> None:
         report = self._report()
@@ -551,7 +751,7 @@ class TestVerdictSubcommand:
     def _write_report(self, tmp_path: Path, **mutations: Any) -> Path:
         off, on = _off_arm(), _arm()
         report = SOAK.build_report(
-            provenance={"grid": {"keys_fan_out": 6}, "smoke": False},
+            provenance={"grid": {"keys_fan_out": 6}, "smoke": False, "hardware_key": _M4PRO_KEY},
             off=off,
             on=on,
             compare=_compare(**mutations.pop("compare", {})),
@@ -606,3 +806,57 @@ class TestVerdictSubcommand:
         proc = self._run("run", "--out", str(tmp_path / "out"), "--workers", "1", "--smoke")
         assert proc.returncode == 2
         assert "workers" in proc.stderr
+
+    def test_verdict_non_m4pro_report_reads_not_decision_grade(self, tmp_path: Path) -> None:
+        # R2 MINOR-4: bars green on foreign hardware → rc 0 (not a harness
+        # failure) but the verdict can never read FLIP-READY.
+        path = self._write_report(
+            tmp_path,
+            provenance={
+                "grid": {"keys_fan_out": 6},
+                "smoke": False,
+                "hardware_key": "pc-8c8p0e-32g-x86-64",
+            },
+        )
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 0
+        assert "NOT-DECISION-GRADE" in proc.stdout
+        assert "FLIP-READY" not in proc.stdout
+
+
+class TestRunGuards:
+    """cmd_run's structural refusals (R2 MAJOR-3 fresh-out + MINOR-5 fence).
+
+    Every guard fires BEFORE any lake build/arm spawn — cheap subprocess
+    probes."""
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args], capture_output=True, text=True, check=False
+        )
+
+    def test_run_refuses_nonempty_out(self, tmp_path: Path) -> None:
+        out = tmp_path / "used"
+        (out / "arm-off").mkdir(parents=True)
+        proc = self._run("run", "--smoke", "--out", str(out))
+        assert proc.returncode == 2
+        assert "NOT empty" in proc.stderr
+        assert "FRESH" in proc.stderr
+        assert "resume" in proc.stderr  # names the resume/cache-skip hazard
+
+    def test_run_refuses_out_that_is_a_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "file"
+        target.write_text("x", encoding="utf-8")
+        proc = self._run("run", "--smoke", "--out", str(target))
+        assert proc.returncode == 2
+        assert "not a directory" in proc.stderr
+
+    @pytest.mark.parametrize("budget", ["0", "-5", "1196"])
+    def test_run_refuses_out_of_fence_budget(self, tmp_path: Path, budget: str) -> None:
+        # R2 MINOR-5: the script enforces the SAME 1..1195 SEC9-1 law the
+        # workflow plan job fences — the one-command fallback cannot bypass it.
+        proc = self._run(
+            "run", "--smoke", "--out", str(tmp_path / "fresh"), "--budget-minutes", budget
+        )
+        assert proc.returncode == 2
+        assert "1..1195" in proc.stderr

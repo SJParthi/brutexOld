@@ -1495,3 +1495,116 @@ jobs:
         "a workflow-level env carrying only the implicit GITHUB_TOKEN was "
         "flagged — the workflow-scope carve-out regressed"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-hosted-runner trigger pin (DEC-SWEEP-WORKER-KERNEL-CACHE-SOAK-001
+# review R1 MINOR-2): no workflow whose jobs run on a `self-hosted`-labeled
+# runner may carry a FORK-REACHABLE trigger. workflow_dispatch/schedule/push
+# require repo write access; pull_request (+_target), workflow_run and the
+# comment-family triggers can be fired by a fork/stranger — on the operator's
+# PERSISTENT M4-Pro Mac that is arbitrary code execution. The safety of
+# kernel-cache-soak.yml / soak-selfhosted.yml / bench-m4pro.yml /
+# verify-m4pro.yml rested on trigger CHOICE + review only; this sweep makes
+# the convention mechanical.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Triggers a fork (or any non-writer) can cause to fire — directly
+#: (pull_request from a fork) or via a privileged follow-on (workflow_run /
+#: the comment family, which run in the base repo with base-repo secrets).
+_FORK_REACHABLE_TRIGGERS = frozenset(
+    {
+        "pull_request",
+        "pull_request_target",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "workflow_run",
+        "issue_comment",
+        "discussion_comment",
+        "fork",
+    }
+)
+
+
+def _workflow_uses_self_hosted_runner(workflow: dict[Any, Any]) -> bool:
+    """True iff ANY job's ``runs-on`` names a ``self-hosted`` label — the
+    string, list and group/labels-mapping spellings all stringified so a
+    respelled form cannot fail open (the `_workflow_triggers` normalization
+    lesson)."""
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        return False
+    for job in jobs.values():
+        if isinstance(job, dict) and "self-hosted" in str(job.get("runs-on", "")):
+            return True
+    return False
+
+
+def test_self_hosted_workflows_have_no_fork_reachable_trigger() -> None:
+    """Directory-wide: every self-hosted-labeled workflow is unreachable from
+    a fork. A future edit adding ``pull_request:`` (any spelling) to a
+    self-hosted workflow fails HERE, not in code review."""
+    self_hosted_names: list[str] = []
+    violations: list[str] = []
+    for path in _repo_workflow_files():
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(workflow, dict) or not _workflow_uses_self_hosted_runner(workflow):
+            continue
+        self_hosted_names.append(path.name)
+        reachable = sorted(
+            str(t) for t in _workflow_triggers(workflow) if str(t) in _FORK_REACHABLE_TRIGGERS
+        )
+        if reachable:
+            violations.append(f"{path.name}: fork-reachable trigger(s) {reachable}")
+    assert not violations, (
+        "self-hosted-labeled workflow(s) carry fork-reachable triggers — a fork "
+        "could execute arbitrary code on the operator's persistent Mac:\n  "
+        + "\n  ".join(violations)
+    )
+    # Liveness: the sweep must actually SEE the known self-hosted fleet — an
+    # empty (or shrunken) match set would pass vacuously.
+    for expected in (
+        "kernel-cache-soak.yml",
+        "soak-selfhosted.yml",
+        "bench-m4pro.yml",
+        "verify-m4pro.yml",
+    ):
+        assert expected in self_hosted_names, (
+            f"{expected} not detected as self-hosted — the runner-label sweep went "
+            f"vacuous (matched: {sorted(self_hosted_names)}); repoint the detector"
+        )
+
+
+def test_self_hosted_sweep_detector_catches_fork_trigger(tmp_path: Path) -> None:
+    """Teeth: a synthetic self-hosted workflow with each fork-reachable
+    spelling (mapping / list / scalar ``on:``) is DETECTED — the sweep's
+    negative assertion is not vacuous."""
+    for on_block in (
+        "on:\n  pull_request: {}\n",  # mapping
+        "on: [pull_request_target]\n",  # flow list
+        "on: issue_comment\n",  # scalar
+    ):
+        workflow = yaml.safe_load(
+            on_block
+            + """
+jobs:
+  soak:
+    runs-on: [self-hosted, macos, m4pro]
+    steps:
+      - run: echo hi
+"""
+        )
+        assert _workflow_uses_self_hosted_runner(workflow)
+        reachable = [t for t in _workflow_triggers(workflow) if str(t) in _FORK_REACHABLE_TRIGGERS]
+        assert reachable, f"fork-reachable trigger not detected for spelling: {on_block!r}"
+
+
+def test_kernel_cache_soak_workflow_is_dispatch_only() -> None:
+    """The soak workflow's trigger set is EXACTLY ``workflow_dispatch`` (the
+    most conservative of the self-hosted fleet — no cron, no push)."""
+    path = REPO_ROOT / ".github" / "workflows" / "kernel-cache-soak.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert set(_workflow_triggers(workflow)) == {"workflow_dispatch"}, (
+        "kernel-cache-soak.yml grew a trigger beyond workflow_dispatch — a soak "
+        "is an operator decision feeding one DEC (see the workflow header)"
+    )

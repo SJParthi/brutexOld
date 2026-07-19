@@ -14,6 +14,7 @@ asserted below, Golden Rule #10).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,8 +35,16 @@ SCRIPT = REPO_ROOT / "scripts" / "ci" / "kernel_cache_soak.py"
 def smoke_run(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    """ONE shared end-to-end ``run --smoke`` (two real sweep subprocesses)."""
+    """ONE shared end-to-end ``run --smoke`` (two real sweep subprocesses).
+
+    An ambient ``BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY`` is planted so the run
+    proves END-TO-END that the harness POPS it from both arm envs and echoes
+    the pop (R2 MAJOR-1) — the report must still measure the DEFAULT
+    capacity (1 on the smoke grid).
+    """
     out = tmp_path_factory.mktemp("kc-soak")
+    env = dict(os.environ)
+    env["BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"] = "7"  # must never reach an arm
     proc = subprocess.run(
         [
             sys.executable,
@@ -51,6 +60,7 @@ def smoke_run(
         text=True,
         check=False,
         cwd=REPO_ROOT,
+        env=env,
     )
     return proc, out
 
@@ -75,6 +85,10 @@ def test_smoke_report_mechanics(smoke_run: tuple[subprocess.CompletedProcess[str
     report = _report(out)
     assert report["kind"] == "kernel-cache-soak"
     assert report["provenance"]["smoke"] is True  # numbers unusable for the flip
+    # R2 MAJOR-1: the report states the EFFECTIVE capacity it measured (the
+    # smoke grid's single-anchor/single-source default = 1) + the pop flag.
+    assert report["provenance"]["worker_kernel_capacity_effective"] == 1
+    assert report["provenance"]["capacity_env_ambient_popped"] is True  # planted + popped
 
     # Byte identity held across the OFF/ON arms (the PR-A T3 law).
     compare = report["compare"]
@@ -112,9 +126,11 @@ def test_smoke_acceptance_is_mechanics_only(
     assert acceptance["clean_exit"] == "PASS"
     assert acceptance["telemetry"] == "PASS"
     assert acceptance["builds_bound"] == "PASS"
-    # A fixture grid can NEVER judge the RSS/wall bars nor read FLIP-READY.
+    # A fixture grid can NEVER judge the RSS/wall/provenance bars nor read
+    # FLIP-READY (the R2 MINOR-4 provenance bar leaves smoke unaffected).
     assert acceptance["rss_envelope"] == "SMOKE-UNJUDGED"
     assert acceptance["wall_neutral"] == "SMOKE-UNJUDGED"
+    assert acceptance["provenance"] == "SMOKE-UNJUDGED"
     assert acceptance["verdict"].startswith("SMOKE-ONLY")
 
 

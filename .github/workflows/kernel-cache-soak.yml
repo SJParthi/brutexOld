@@ -41,8 +41,14 @@
 # ---------------------------------
 # The soak grid is BOUNDED (each arm ≈ hours, never the full 2-4-day §8
 # sweep twice — structurally impossible under the token fence); RSS evidence
-# transfers because RSS is bar-DEPTH-driven, not tuple-count-driven, while
-# the full-grid wall saving stays MODELED in the report. Per-PID RSS via ps
+# keeps FULL bar depth (RSS is bar-DEPTH-driven, not tuple-count-driven) but
+# is SCOPED to the MEASURED kernel-cache capacity — the report echoes
+# provenance.worker_kernel_capacity_effective (any ambient
+# BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY is POPPED from both arm envs so the
+# DEFAULT sizing law is measured); widen the fib_anchors /
+# price_source_cells inputs to soak capacity > 1 — the flip DEC must weigh
+# whether the measured capacity covers the operator's grids. The full-grid
+# wall saving stays MODELED in the report. Per-PID RSS via ps
 # polling is a LOWER bound on the true peak (stamped in the report). The
 # lake location on the runner is UNVERIFIED (`BRUTEX_LAKE_ROOT` may not be
 # exported by the runner daemon) — the script preflights the lake SHAPE and
@@ -72,6 +78,14 @@ on:
         description: "RSS ps-poll cadence in seconds, 1..300"
         required: false
         default: "5"
+      fib_anchors:
+        description: "Optional sweep-all --fib-anchors CSV (blank = prev_day). Widens the kernel-cache capacity axis so the soak can measure capacity > 1 — the script/sweep-all refuse an unknown value loudly"
+        required: false
+        default: ""
+      price_source_cells:
+        description: "Optional sweep-all --price-source-cells CSV (blank = hlc3:close). The second capacity-widening axis"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -298,15 +312,27 @@ jobs:
           SAMPLE_INTERVAL_S: ${{ needs.plan.outputs.sample_interval_s }}
           MAX_TUPLES: ${{ needs.plan.outputs.max_tuples }}
           LAKE_ROOT_INPUT: ${{ github.event.inputs.lake_root }}
+          FIB_ANCHORS_INPUT: ${{ github.event.inputs.fib_anchors }}
+          PRICE_SOURCE_CELLS_INPUT: ${{ github.event.inputs.price_source_cells }}
         run: |
           set -u
           out="$RUNNER_TEMP/kernel-cache-soak"
+          # Fresh-out law (R2 MAJOR-3): the script REFUSES a non-empty --out.
+          # RUNNER_TEMP is normally cleaned per job; clear any stale leftover
+          # explicitly so a runner that skipped cleanup cannot resume-skid.
+          rm -rf "$out"
           args=(run --out "$out" --budget-minutes "$BUDGET_MINUTES" --sample-interval-s "$SAMPLE_INTERVAL_S")
           if [ -n "$LAKE_ROOT_INPUT" ]; then
             args+=(--lake-root "$LAKE_ROOT_INPUT")
           fi
           if [ -n "$MAX_TUPLES" ]; then
             args+=(--max-tuples "$MAX_TUPLES")
+          fi
+          if [ -n "$FIB_ANCHORS_INPUT" ]; then
+            args+=(--fib-anchors "$FIB_ANCHORS_INPUT")
+          fi
+          if [ -n "$PRICE_SOURCE_CELLS_INPUT" ]; then
+            args+=(--price-source-cells "$PRICE_SOURCE_CELLS_INPUT")
           fi
           python scripts/ci/kernel_cache_soak.py "${args[@]}"
 

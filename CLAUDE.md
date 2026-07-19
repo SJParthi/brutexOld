@@ -3898,7 +3898,17 @@ hostile-review pass._
   harness + bars are coordinator-blessed; the FLIP is NOT pre-approved — a
   separate later one-constant DEC needing the MEASURED numbers + operator
   sign-off; the sandbox `--smoke` run proves MECHANICS only (verdict can
-  never read FLIP-READY). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; zero
+  never read FLIP-READY). REVIEW-FIX ROUND folded (pre-open — the 3-lens
+  R1-security/R2-correctness/R3-docs session review): the ambient
+  `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` pop + effective-capacity echo, the
+  `--fib-anchors`/`--price-source-cells` capacity-widening knobs with the
+  RSS claim SCOPED to the measured capacity, the mechanical fresh-`--out`
+  refusal, the NOT-DECISION-GRADE provenance bar on non-M4-Pro hardware,
+  the script-side 1..1195 budget fence, the engine drift pins, the
+  `uname -sm` + home-redacted report provenance, and the directory-wide
+  no-fork-trigger-on-self-hosted redteam sweep; the per-finding record
+  lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives
   in MIGRATION.md #1969 — this header carries the pointer, never the story.)
   Earlier: `claude/rust-calendar-leaves`

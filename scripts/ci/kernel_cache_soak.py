@@ -40,8 +40,18 @@ HONEST LIMITS (Golden Rule #10)
   the RSS/wall bars are NOT judged, and the verdict can never read
   FLIP-READY. "Soak-passed" cannot be claimed from a smoke run.
 * The full-grid wall saving stays MODELED (extrapolated off the bounded soak
-  grid); the RSS evidence is decision-grade because RSS is bar-DEPTH-driven,
-  not tuple-count-driven (the harness design §2e).
+  grid); the RSS evidence keeps FULL bar depth (RSS is bar-DEPTH-driven, not
+  tuple-count-driven) but is SCOPED to the MEASURED kernel-cache capacity —
+  ``provenance.worker_kernel_capacity_effective`` (the grid-derived default;
+  any ambient ``BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY`` is POPPED from both arm
+  envs so the flip's default sizing law is what gets measured). The default
+  grid measures capacity=1; widen ``--fib-anchors`` / ``--price-source-cells``
+  to soak a higher capacity — the flip DEC must weigh whether the measured
+  capacity covers the operator's grids (R2 MAJOR-2 honesty scoping).
+* A non-smoke report whose ``hardware_key`` is not the registered §8 M4-Pro
+  envelope can never read FLIP-READY — the verdict reads NOT-DECISION-GRADE
+  (numbers from any other machine are UNVERIFIED lab evidence, the
+  DEC-SWEEP-CAP-BENCH-001 clause).
 """
 
 from __future__ import annotations
@@ -71,6 +81,14 @@ KERNEL_CACHE_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CACHE"
 SWEEP_WORKERS_ENV: Final[str] = "BRUTEX_SWEEP_WORKERS"
 LOG_LEVEL_ENV: Final[str] = "BRUTEX_LOG_LEVEL"
 RESULTS_DEPTH_ENV: Final[str] = "BRUTEX_RESULTS_DEPTH"
+#: The per-box capacity override lever (sweep_parallel.WORKER_KERNEL_CAPACITY_ENV).
+#: POPPED from both arm envs (R2 MAJOR-1): the flip ships the DEFAULT sizing
+#: law, so the evidence must measure it — an ambient operator override would
+#: silently re-scope the RSS bar. Drift-pinned against the engine constant in
+#: tests/unit/test_kernel_cache_soak.py (TestEngineDriftPins).
+KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
+#: Mirror of sweep_parallel.WORKER_KERNEL_CAPACITY_MAX (drift-pinned).
+WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
 
 #: Telemetry tokens harvested from each arm's stderr (structlog console lines).
 SUMMARY_EVENT: Final[str] = "sweep_parallel.kernel_reuse_summary"
@@ -91,6 +109,19 @@ POOL_PEAK_CEILING_KIB: Final[int] = 36 * 1024 * 1024
 #: no-win flip is a YELLOW FLAG surfaced by the VALUE section — the harness
 #: never gates on a WIN (measured value visibility, not wishful gating).
 WALL_RATIO_CEILING: Final[float] = 1.02
+#: The registered §8 M4-Pro envelope's hardware-key signature — cores/RAM/arch
+#: per the ONE ``format_hardware_key`` law (``…-14c10p4e-48g-arm64``; the Mac
+#: model-slug PREFIX is left free — model IDs vary across otherwise-identical
+#: boxes, and no committed bench baseline exists yet to read a full key from).
+#: A NON-smoke report whose key does not carry this suffix reads
+#: NOT-DECISION-GRADE, never FLIP-READY (R2 MINOR-4 / runbook §5 bar 6).
+M4PRO_KEY_SUFFIX: Final[str] = "-14c10p4e-48g-arm64"
+#: The workflow plan-job budget fence, mirrored script-side (R2 MINOR-5): the
+#: operator one-command fallback must obey the SAME 1..1195 law (SEC9-1 — the
+#: derived job timeout m + 45 + m/6 must stay under the 24-h token validity;
+#: a zero/negative budget would SIGTERM both arms instantly).
+BUDGET_MINUTES_MIN: Final[int] = 1
+BUDGET_MINUTES_MAX: Final[int] = 1195
 
 # ── The ts-masked identity-compare law (the PR-A T3 / runcore-byte-identity
 #    exclusion set, extended with the CLI-layout state dirs) ─────────────────
@@ -332,6 +363,11 @@ def exit_status_structural(off: dict[str, Any], on: dict[str, Any]) -> tuple[boo
     return True, "state/exit_code/suspect equal + clean"
 
 
+def _csv_count(csv: str) -> int:
+    """Non-blank token count of a comma-separated axis value."""
+    return len([tok for tok in csv.split(",") if tok.strip()])
+
+
 def keys_fan_out(symbols: str, intervals: str, fib_anchors: str, price_source_cells: str) -> int:
     """The grid's kernel-key fan-out — the ``builds ≤ keys × workers`` bound.
 
@@ -339,13 +375,48 @@ def keys_fan_out(symbols: str, intervals: str, fib_anchors: str, price_source_ce
     fib_anchor, price_source, roll_schedule)``; on the CLI grid the free axes
     are exactly symbols × intervals × fib-anchors × price-source cells
     (proximity is the singleton ``[None]``; prior_n/roll_schedule are fixed
-    per instrument).
+    per instrument). Re-derived here (the script cannot cheaply build a
+    ``SweepGridConfig``) but DRIFT-PINNED against the engine's own
+    ``worker_kernel_capacity_default`` formula in
+    tests/unit/test_kernel_cache_soak.py (TestEngineDriftPins, R2 NIT-6) —
+    a new swept kernel-key axis breaks the pin loudly.
     """
+    return (
+        _csv_count(symbols)
+        * _csv_count(intervals)
+        * _csv_count(fib_anchors)
+        * _csv_count(price_source_cells)
+    )
 
-    def n(csv: str) -> int:
-        return len([tok for tok in csv.split(",") if tok.strip()])
 
-    return n(symbols) * n(intervals) * n(fib_anchors) * n(price_source_cells)
+def effective_worker_kernel_capacity(fib_anchors: str, price_source_cells: str) -> int:
+    """The EFFECTIVE per-worker kernel-cache capacity both arms run at.
+
+    The arms run with :data:`KERNEL_CAPACITY_ENV` POPPED (R2 MAJOR-1), so the
+    engine resolves its grid-derived default —
+    ``min(max(1, proximities × fib_anchors × price_source_cells),
+    WORKER_KERNEL_CAPACITY_MAX)`` with proximity the CLI singleton ``[None]``
+    (``sweep_parallel.worker_kernel_capacity_default``; drift-pinned in
+    TestEngineDriftPins). Echoed into ``provenance`` so every report states
+    the capacity its RSS bar was evaluated at.
+    """
+    return min(
+        max(1, _csv_count(fib_anchors) * _csv_count(price_source_cells)),
+        WORKER_KERNEL_CAPACITY_MAX,
+    )
+
+
+def redact_home(path_str: str) -> str:
+    """Home-prefix-redact a path for the UPLOADED report (R1 MINOR-1).
+
+    The soak report is a public-repo Actions artifact (90 d) — a full
+    ``/Users/<user>/…`` lake path would disclose the operator's local
+    username. The full path stays in the LOCAL run log only.
+    """
+    home = str(Path.home())
+    if home and home != "/" and (path_str == home or path_str.startswith(home + os.sep)):
+        return "~" + path_str[len(home) :]
+    return path_str
 
 
 def build_sweep_argv(
@@ -391,8 +462,15 @@ def arm_env(
     workers: int | None,
     results_depth_off: bool,
 ) -> dict[str, str]:
-    """One arm's spawn environment — the flag + determinism/visibility pins."""
+    """One arm's spawn environment — the flag + determinism/visibility pins.
+
+    Any ambient :data:`KERNEL_CAPACITY_ENV` is POPPED (R2 MAJOR-1): the flip
+    ships the DEFAULT capacity sizing law, so both arms must measure it — an
+    operator daemon's per-box override would silently re-scope the RSS bar.
+    The pop is echoed in ``provenance.capacity_env_ambient_popped``.
+    """
     env = dict(base)
+    env.pop(KERNEL_CAPACITY_ENV, None)
     env[KERNEL_CACHE_ENV] = "1" if cache_on else "0"
     env[LOG_LEVEL_ENV] = "INFO"  # the telemetry MUST reach stderr (#1630 guard)
     env["PYTHONHASHSEED"] = "0"
@@ -494,14 +572,20 @@ def evaluate_acceptance(
     deltas: dict[str, Any],
     keys: int,
     smoke: bool,
+    hardware_key: str | None = None,
 ) -> dict[str, str]:
     """The acceptance block: PASS/FAIL per bar + an ADVISORY verdict.
 
     In ``--smoke`` mode the RSS/wall bars are stamped ``SMOKE-UNJUDGED`` (a
     fixture grid cannot produce decision-grade numbers) and the verdict can
     never read FLIP-READY; the mechanics bars (identity / clean exits /
-    telemetry) are always judged. The flip DEC quotes the RAW figures — this
-    block is advisory, never the decision.
+    telemetry) are always judged. A NON-smoke run whose *hardware_key* does
+    not carry the registered §8 M4-Pro signature
+    (:data:`M4PRO_KEY_SUFFIX`) reads a ``provenance`` bar of
+    NOT-DECISION-GRADE and the verdict can never read FLIP-READY either
+    (R2 MINOR-4 / runbook §5 bar 6 — UNVERIFIED lab evidence is not a
+    harness FAILURE, so it does not drive the exit code). The flip DEC
+    quotes the RAW figures — this block is advisory, never the decision.
     """
     identity = (
         "PASS"
@@ -552,6 +636,17 @@ def evaluate_acceptance(
         else:
             wall = f"FAIL(ON/OFF wall ratio {ratio:.3f} > {WALL_RATIO_CEILING})"
 
+    if smoke:
+        provenance_bar = "SMOKE-UNJUDGED"
+    elif isinstance(hardware_key, str) and hardware_key.endswith(M4PRO_KEY_SUFFIX):
+        provenance_bar = "PASS"
+    else:
+        provenance_bar = (
+            f"NOT-DECISION-GRADE(hardware_key {hardware_key!r} does not carry the "
+            f"registered §8 M4-Pro signature {M4PRO_KEY_SUFFIX!r} — UNVERIFIED lab "
+            "evidence, cannot feed the flip DEC)"
+        )
+
     checks = {
         "identity": identity,
         "clean_exit": clean,
@@ -559,6 +654,7 @@ def evaluate_acceptance(
         "wall_neutral": wall,
         "builds_bound": builds_bound,
         "telemetry": telemetry,
+        "provenance": provenance_bar,
     }
     failed = sorted(name for name, status in checks.items() if status.startswith("FAIL"))
     if smoke:
@@ -569,6 +665,11 @@ def evaluate_acceptance(
         )
     elif failed:
         verdict = f"NOT-READY({', '.join(failed)})"
+    elif provenance_bar != "PASS":
+        verdict = (
+            "NOT-DECISION-GRADE(non-M4-Pro hardware_key — bars green but the numbers "
+            "are UNVERIFIED lab evidence and cannot open the flip DEC)"
+        )
     else:
         verdict = "FLIP-READY"
     checks["verdict"] = verdict
@@ -642,6 +743,12 @@ def render_summary(report: dict[str, Any]) -> str:
         f"{fmt_kib(POOL_PEAK_CEILING_KIB - on['pool_peak_rss_kib']) if isinstance(on.get('pool_peak_rss_kib'), int) else '?'}",
         "- full-grid wall saving: MODELED only (extrapolated off this bounded grid; the "
         "2-4-day full sweep is never run twice in one job — SEC9-1 token fence)",
+        f"- RSS bar evaluated at kernel-cache capacity="
+        f"{prov.get('worker_kernel_capacity_effective')} (the grid-derived default; any "
+        f"ambient {KERNEL_CAPACITY_ENV} is POPPED from both arm envs"
+        + (" — one WAS set and popped" if prov.get("capacity_env_ambient_popped") else "")
+        + ") — the flip DEC must weigh whether this capacity covers the operator's grids "
+        "(widen via --fib-anchors / --price-source-cells)",
         "",
         "## Identity (MEASURED)",
         "",
@@ -676,7 +783,13 @@ def build_report(
     """Assemble the ONE machine-readable soak-report.json payload."""
     deltas = build_deltas(off, on)
     acceptance = evaluate_acceptance(
-        off=off, on=on, compare=compare, deltas=deltas, keys=keys, smoke=smoke
+        off=off,
+        on=on,
+        compare=compare,
+        deltas=deltas,
+        keys=keys,
+        smoke=smoke,
+        hardware_key=provenance.get("hardware_key"),
     )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -773,22 +886,34 @@ def collect_provenance(
         hw_key = hardware_key()
     except Exception:  # provenance echo only, never fatal
         hw_key = "unavailable"
+    # sweep-all's own defaults when the axes are unset (cli.py cmd_sweep_all).
+    fib_csv = grid.get("fib_anchors") or "prev_day"
+    ps_csv = grid.get("price_source_cells") or "hlc3:close"
     return {
         "commit": guarded(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]),
         "hardware_key": hw_key,
-        "uname": guarded(["uname", "-a"]),
+        # uname -sm (kernel + arch ONLY — never `-a`'s hostname/build string;
+        # the report is a public-repo artifact, R1 MINOR-1 / the
+        # bench_baseline posture).
+        "uname": guarded(["uname", "-sm"]),
         "sw_vers": guarded(["sw_vers", "-productVersion"]),
         "cpu_count": os.cpu_count(),
-        "lake_root": str(lake_root),
+        # Home-prefix-redacted for the uploaded artifact (R1 MINOR-1); the
+        # full path is printed to the LOCAL run log by cmd_run.
+        "lake_root": redact_home(str(lake_root)),
         "grid": {
             **{k: v for k, v in grid.items() if v is not None},
             "keys_fan_out": keys_fan_out(
                 grid.get("symbols") or "",
                 grid.get("intervals") or "",
-                grid.get("fib_anchors") or "prev_day",
-                grid.get("price_source_cells") or "hlc3:close",
+                fib_csv,
+                ps_csv,
             ),
         },
+        # The EFFECTIVE capacity both arms measure (R2 MAJOR-1: the ambient
+        # override is popped by arm_env, so the grid-derived default rules).
+        "worker_kernel_capacity_effective": effective_worker_kernel_capacity(fib_csv, ps_csv),
+        "capacity_env_ambient_popped": KERNEL_CAPACITY_ENV in os.environ,
         "budget_minutes": budget_minutes,
         "sample_interval_s": sample_interval_s,
         "rss_method": RSS_METHOD_TEMPLATE.format(interval=sample_interval_s),
@@ -1033,17 +1158,42 @@ def _previous_utc_day() -> str:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """The ``run`` subcommand — the full soak pipeline."""
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = out_dir / "report"
-    report_dir.mkdir(parents=True, exist_ok=True)
     smoke = bool(args.smoke)
+
+    if not BUDGET_MINUTES_MIN <= args.budget_minutes <= BUDGET_MINUTES_MAX:
+        # R2 MINOR-5: the one-command fallback bypasses the workflow plan-job
+        # fence — enforce the SAME 1..1195 law (SEC9-1) script-side.
+        return _fail_structural(
+            f"--budget-minutes {args.budget_minutes} outside "
+            f"{BUDGET_MINUTES_MIN}..{BUDGET_MINUTES_MAX} (the SEC9-1 law the workflow "
+            "plan job enforces: derived timeout m + 45 + m/6 must stay under the 24-h "
+            "self-hosted token validity; a zero/negative budget would SIGTERM both "
+            "arms instantly)"
+        )
 
     if args.workers is not None and args.workers < 2:
         return _fail_structural(
             "--workers must be >= 2: the kernel-cache telemetry lives in the parallel "
             "driver; a sequential run (workers=1) can never produce soak evidence"
         )
+
+    out_dir = Path(args.out)
+    if out_dir.exists() and not out_dir.is_dir():
+        return _fail_structural(f"--out {out_dir} exists and is not a directory")
+    if out_dir.is_dir() and any(out_dir.iterdir()):
+        # R2 MAJOR-3: the fresh-out law. run_id = grid_identity(grid) carries
+        # NO timestamp, so re-running into a used --out RESUMES the prior
+        # arms into fake instant walls / zero tuples — refuse, never wipe
+        # (the operator's dir, never delete data silently).
+        return _fail_structural(
+            f"--out {out_dir} is NOT empty — a prior run's arm/report artifacts would "
+            "resume/cache-skip both arms into fake instant walls (run_id carries no "
+            "timestamp). Use a FRESH --out per run: delete the old dir "
+            f"(`rm -rf {out_dir}`) or pass a new path"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = out_dir / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     if smoke:
         lake_root = build_smoke_lake(out_dir)
@@ -1071,8 +1221,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "sl": args.sl,
             "tp": args.tp,
             "top": str(args.top),
-            "fib_anchors": None,
-            "price_source_cells": None,
+            # R2 MAJOR-2: capacity-widening knobs — None keeps sweep-all's
+            # single-anchor/single-source default (capacity 1); the report
+            # states the measured capacity either way.
+            "fib_anchors": args.fib_anchors,
+            "price_source_cells": args.price_source_cells,
             "max_tuples": str(args.max_tuples) if args.max_tuples is not None else None,
         }
         workers = args.workers
@@ -1106,6 +1259,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         smoke=smoke,
     )
     keys = int(provenance["grid"]["keys_fan_out"])
+    # Full path in the LOCAL run log ONLY — the uploaded report carries the
+    # home-redacted form (R1 MINOR-1).
+    print(f"kernel-cache-soak: lake_root={lake_root}")
+    print(
+        "kernel-cache-soak: effective worker kernel capacity="
+        f"{provenance['worker_kernel_capacity_effective']} (grid-derived default)"
+    )
+    if provenance["capacity_env_ambient_popped"]:
+        print(
+            f"kernel-cache-soak: ambient {KERNEL_CAPACITY_ENV} detected — POPPED from "
+            "both arm envs: the soak measures the DEFAULT capacity sizing law "
+            "(R2 MAJOR-1)",
+            file=sys.stderr,
+        )
     deadline = time.monotonic() + args.budget_minutes * 60.0
 
     arms: dict[str, dict[str, Any]] = {}
@@ -1192,6 +1359,7 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             deltas=report["deltas"],
             keys=int(report["provenance"]["grid"]["keys_fan_out"]),
             smoke=bool(report["provenance"].get("smoke")),
+            hardware_key=report["provenance"].get("hardware_key"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         return _fail_structural(f"report shape invalid: {exc!r}")
@@ -1212,7 +1380,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--lake-root", default=None, help="lake root (default $BRUTEX_LAKE_ROOT → ~/.brutex/lake)"
     )
-    run.add_argument("--out", required=True, help="output dir (arms + report/ land here)")
+    run.add_argument(
+        "--out",
+        required=True,
+        help="output dir (arms + report/ land here) — must be FRESH (nonexistent or "
+        "empty): a used dir is refused, prior artifacts would resume the arms into "
+        "fake instant walls (R2 MAJOR-3)",
+    )
     run.add_argument("--symbols", default="NIFTY,BANKNIFTY")
     run.add_argument("--intervals", default="1minute,5minute,15minute")
     run.add_argument("--start", default=None, help="grid start (default 2020-01-01)")
@@ -1226,6 +1400,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--tp", default="none")
     run.add_argument("--top", type=int, default=20)
     run.add_argument(
+        "--fib-anchors",
+        default=None,
+        help="sweep-all --fib-anchors passthrough (CSV; default unset = prev_day). "
+        "Widens the kernel-cache capacity axis so the soak can exercise "
+        "capacity > 1 — the report states the measured capacity (R2 MAJOR-2)",
+    )
+    run.add_argument(
+        "--price-source-cells",
+        default=None,
+        help="sweep-all --price-source-cells passthrough (CSV; default unset = "
+        "hlc3:close). The second capacity-widening axis (R2 MAJOR-2)",
+    )
+    run.add_argument(
         "--max-tuples",
         type=int,
         default=None,
@@ -1238,7 +1425,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="explicit BRUTEX_SWEEP_WORKERS for both arms (>= 2; default: auto)",
     )
-    run.add_argument("--budget-minutes", type=int, default=600)
+    run.add_argument(
+        "--budget-minutes",
+        type=int,
+        default=600,
+        help=f"both-arms wall budget, fenced {BUDGET_MINUTES_MIN}..{BUDGET_MINUTES_MAX} "
+        "(the workflow plan-job SEC9-1 law, enforced script-side too)",
+    )
     run.add_argument("--sample-interval-s", type=float, default=5.0)
     run.add_argument(
         "--smoke",
