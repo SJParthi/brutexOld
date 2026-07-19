@@ -382,12 +382,14 @@ def route_law[T](
         # A panic escaping the crate's FFI boundary (or any
         # out-of-degrade-set Exception) marks a broken contract — latch OFF
         # and serve the oracle, never a new crash class into a backup path.
-        # HONEST (review NIT-1): rust/brutex-ops builds release with
-        # `panic = "abort"` (house-consistent), so a genuine runtime Rust
-        # panic SIGABRTs the process and never reaches this belt as a
-        # PanicException — the belt is live only for out-of-degrade-set
-        # PYTHON-side exceptions; the real panic guarantee is the kernel's
-        # panic-freedom (no unwrap/expect/unchecked indexing — verified).
+        # PANIC-PROFILE RULING (the brutex-ops unification, superseding the
+        # review NIT-1 note): the unified crate builds release with the
+        # cargo-default UNWIND (NO `panic = "abort"`), so a genuine runtime
+        # Rust panic DOES reach this belt as a catchable PanicException and
+        # degrades to the oracle — the belt is LIVE for both Rust panics
+        # and out-of-degrade-set Python-side exceptions. The kernel is
+        # still written structurally panic-free (no unwrap/expect/unchecked
+        # indexing — verified); the belt is defense-in-depth.
         _disable("crate_panic", law=law, error_detail=repr(exc))
         return oracle()
     if outcome_thunk is USE_ORACLE:

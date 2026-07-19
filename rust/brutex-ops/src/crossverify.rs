@@ -34,9 +34,10 @@
 //! strictly a refusal belt, never a publisher.
 //!
 //! Structurally panic-free: no indexing without a bounds check, no
-//! unwrap/expect on data (the release profile is `panic = "abort"` — a
-//! panic would bypass the facade's belt in release wheels, so none may
-//! exist).
+//! unwrap/expect on data. (The unified release profile keeps the
+//! cargo-default UNWIND — the unification panic-profile ruling — so a
+//! panic WOULD reach the facade's belt as a catchable PanicException;
+//! panic-freedom is still the discipline, the belt is defense-in-depth.)
 
 /// Refusal codes carried across the FFI as plain ints (the typed-code law).
 /// The facade maps a code onto the EXISTING `ExportContractError` semantics

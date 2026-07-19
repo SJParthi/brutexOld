@@ -1,7 +1,7 @@
 //! Property tests over the pure crossverify cores (dependency-free rlib).
 //!
 //! Invariants: the assembler never panics on arbitrary cell strings (the
-//! `panic = "abort"` release profile makes panic-freedom a hard law); an
+//! unification's unwind release profile still treats panic-freedom as law); an
 //! accepted render is exactly `header LF (join(cells, ',') LF)*`; every
 //! accepted cell survives byte-verbatim; the key-safe charset law is total.
 

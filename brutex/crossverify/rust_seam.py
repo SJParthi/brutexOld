@@ -284,9 +284,11 @@ def _panic_belt_errors() -> tuple[type[BaseException], ...]:
     the lake facades is deliberately not consulted (a polars-hosted
     PanicException is the SAME class object re-exported when both wheels
     are pyo3-built; the ``pyo3_runtime`` home is the canonical one). The
-    release crate profile is ``panic = "abort"``, so this belt is
-    defense-in-depth for non-abort builds (the crate cores are written
-    structurally panic-free regardless).
+    release crate profile keeps the cargo-default UNWIND (the unification
+    panic-profile ruling — NO ``panic = "abort"``), so a genuine runtime
+    Rust panic reaches this belt as a catchable PanicException and degrades
+    to the oracle (the crate cores are written structurally panic-free
+    regardless — the belt is defense-in-depth).
     """
     belt: list[type[BaseException]] = [Exception]
     try:
