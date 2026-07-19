@@ -323,9 +323,15 @@ def dedup_latest_source_sql(key_columns: Sequence[str]) -> str:
     filter — ghost-row safe by construction). The ``EXCLUDE`` keeps the outer
     ``SELECT *`` schema byte-identical to a plain ``read_parquet`` read.
 
-    Parameter-order law: the source binds (``[files_list, base_marker]``) come
-    FIRST in every consuming query — the subquery precedes WHERE/ORDER/LIMIT in
-    the text. HONEST envelope (Golden Rule #10): one such query is an O(total
+    Parameter-order law: binds follow the SQL TEXT's placeholder order. The
+    subquery precedes ``WHERE``/``ORDER``/``LIMIT``, so the source binds
+    (``[files_list, base_marker]``) come FIRST in consumers whose only OTHER
+    placeholders live in those trailing clauses — but a SELECT-list predicate
+    textually precedes the ``FROM`` and binds BEFORE the source (e.g.
+    ``db_view._window_counts_total_scoped``'s scope-classification ``CASE``,
+    DEC-UNIVERSE-INDEX-ONLY-001 #1934); never "normalize" such a consumer to
+    source-first — on the delta shape that binds the base-path marker into a
+    predicate placeholder. HONEST envelope (Golden Rule #10): one such query is an O(total
     physical rows) columnar hash-partition plus O(file-count) footer opens per
     execution — NOT O(page); callers memoise per content stamp.
 
