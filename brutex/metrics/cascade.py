@@ -42,6 +42,17 @@ where given (WFO ≥0.75 of walks, SPA p<0.05, MC p<0.01, Lockbox per #8); the
 DSR/CPCV/PBO cut-offs are conventional defaults flagged in :class:`CascadeConfig`
 (no invented spec number — Golden Rule #1).
 
+An OPTIONAL default-OFF **single-event sensitivity** stage
+(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001) runs between the hard gates and
+DSR when :attr:`CascadeConfig.single_event_max_best_day_pct` is set: group the
+candidate's per-bar returns by IST day (the ``worst5_days`` day law — the day
+ordinals ``build_candidate_input`` already carries) and FAIL iff the total is
+non-positive OR the total MINUS the best single day is strictly below X% of the
+total ("would you still be profitable without your best day?"). This gate is
+ADDITIONAL defense-in-depth for the windfall-fluke class; **DSR remains the
+load-bearing anti-single-event filter** — the gate never replaces it. ``None``
+(the default) means the stage does not run and is fully absent from behavior.
+
 Robustness (no degenerate input crashes the sweep)
 --------------------------------------------------
 A brute-force sweep feeds wildly varying candidates, so the orchestrator never
@@ -153,10 +164,16 @@ _COMPOSITE_WEIGHTS: Final[dict[str, float]] = {
 }
 
 
+#: DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001 — the single-event knob is a
+#: PERCENT: valid strictly between 0 and this full scale.
+_PCT_FULL_SCALE = 100.0
+
+
 class FilterStage(Enum):
     """The pipeline stage at which a candidate was rejected (or that it passed)."""
 
     HARD_GATES = "hard_gates"
+    SINGLE_EVENT_SENSITIVITY = "single_event_sensitivity"
     DEFLATED_SHARPE = "deflated_sharpe"
     CPCV = "cpcv"
     REALITY_CHECK_SPA = "reality_check_spa"
@@ -240,6 +257,46 @@ class CandidateInput:
             )
 
 
+def _single_event_verdict(c: CandidateInput, x_pct: float) -> str | None:
+    """The single-event sensitivity LAW — reject detail or ``None`` (pass).
+
+    Groups the candidate's per-bar ``returns`` by IST day using the SAME
+    per-bar day ordinals ``build_candidate_input`` carries (``lockbox_days``
+    is aligned 1:1 with ``returns`` — both are the whole-window per-bar
+    series; the ``worst5_days``/``ist_trade_date`` day law). Let
+    ``total = Σ returns`` and ``best`` = the max single-day sum. FAIL iff
+    ``total <= 0`` OR ``total − best < (x_pct/100)·total`` (strict ``<`` —
+    a remainder of exactly X% passes). Measured basis
+    (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001): the windfall fluke's
+    remainder is 0.3% of total (16× below the 5.0 default) while the
+    lumpiest legit comparator keeps 76.7% (15× above); the strict
+    ``total − best <= 0`` form is REFUTED (the fluke's scratches net
+    positive). Day ordinals that do not align with ``returns`` are an
+    evaluation failure → an honest reject detail (fail-safe, the CPCV
+    ValueError-arm posture), never a silent pass.
+    """
+    if len(c.lockbox_days) != len(c.returns):
+        return (
+            "single-event sensitivity could not be evaluated: day ordinals "
+            f"({len(c.lockbox_days)}) do not align with returns ({len(c.returns)})"
+        )
+    total = math.fsum(c.returns)
+    if total <= 0.0:
+        return f"single-event sensitivity: total return {total:.6g} <= 0"
+    day_sums: dict[int, list[float]] = {}
+    for day, r in zip(c.lockbox_days, c.returns, strict=True):
+        day_sums.setdefault(day, []).append(r)
+    best = max(math.fsum(values) for values in day_sums.values())
+    remaining = total - best
+    if remaining < (x_pct / _PCT_FULL_SCALE) * total:
+        remain_pct = remaining / total * _PCT_FULL_SCALE
+        return (
+            f"single-event sensitivity: total {total:.6g} minus best day {best:.6g} "
+            f"leaves {remaining:.6g} ({remain_pct:.4g}% of total) < {x_pct}% floor"
+        )
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class CascadeConfig:
     """Thresholds + seeds for the cascade. ``seed`` is mandatory (Golden Rule #4)."""
@@ -283,6 +340,34 @@ class CascadeConfig:
     # #9 Monte-Carlo (spec line 472: p < 0.01)
     mc_alpha: float = 0.01
     mc_n_permutations: int = 1000
+    #: Default-OFF single-event sensitivity gate
+    #: (DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001). ``None`` (the default)
+    #: means the stage is NOT run — fully absent from behavior (reports
+    #: byte-identical to pre-change). When set to X (percent, ``0 < X < 100``,
+    #: finite), a candidate FAILS iff its total per-bar return is
+    #: non-positive OR ``total − best_single_IST_day < (X/100)·total``
+    #: (strict ``<`` — exactly X% remaining passes). Validated at
+    #: construction: junk (non-finite, bool, ``<= 0`` or ``>= 100``) raises
+    #: :class:`ValueError` loudly. ADDITIONAL defense-in-depth only — DSR
+    #: remains the load-bearing anti-single-event filter.
+    single_event_max_best_day_pct: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the single-event knob up front (fail loud, Golden Rule #1)."""
+        x = self.single_event_max_best_day_pct
+        if x is None:
+            return
+        if (
+            isinstance(x, bool)
+            or not isinstance(x, (int, float))
+            or not math.isfinite(x)
+            or not 0.0 < float(x) < _PCT_FULL_SCALE
+        ):
+            raise ValueError(
+                "CascadeConfig.single_event_max_best_day_pct must be None (OFF) or a "
+                f"finite percent strictly between 0 and 100, got {x!r} "
+                "(DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001)"
+            )
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""
@@ -602,6 +687,24 @@ def run_stage4_cascade(
                 reject(c, FilterStage.HARD_GATES, reason)
         survivors = kept
     stage_survivors[FilterStage.HARD_GATES.value] = len(survivors)
+
+    # ── #1b SINGLE-EVENT SENSITIVITY (per-candidate, DEFAULT-OFF) ──
+    # DEC-SWEEP-SINGLE-EVENT-SENSITIVITY-GATE-001: runs ONLY when the knob is
+    # set — the None default leaves this block fully absent from behavior
+    # (stage_survivors carries no token, reports byte-identical). Additional
+    # defense-in-depth; DSR (#2) stays the load-bearing anti-single-event
+    # filter.
+    if config.single_event_max_best_day_pct is not None:
+        x_pct = config.single_event_max_best_day_pct
+        kept = []
+        for c in survivors:
+            detail = _single_event_verdict(c, x_pct)
+            if detail is None:
+                kept.append(c)
+            else:
+                reject(c, FilterStage.SINGLE_EVENT_SENSITIVITY, detail)
+        survivors = kept
+        stage_survivors[FilterStage.SINGLE_EVENT_SENSITIVITY.value] = len(survivors)
 
     # ── #2 DEFLATED SHARPE (per-candidate). The deflation inputs come from ONE
     # of two same-population sources (ADR-0008 condition 3 / DEC-TRIAL-STATS-
