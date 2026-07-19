@@ -19,11 +19,13 @@ The comparison is FOUR-strength:
 4. a convergence RE-SCAN (the second sweep's finding-type multiset — equal
    across arms; empty for the fully-healable classes).
 
-Engagement is asserted anti-vacuously: the ENGAGED cases (W-2b closes the
-set — dup + alien + foreign + option-foreign + drift) must run the crate
-core (no ``heal_degrade`` fallback event), the enveloped cases must DEGRADE
-pre-mutation to the Python core (the crate preflight's ``{"degrade": ...}``
-verdict) — either way the four-strength parity holds. A degrade-only pass
+Engagement is asserted anti-vacuously: the ENGAGED cases (W-2b closed the
+kind set; W-5 phase A closed the last two corpus-reachable degrade shapes —
+naive-ts source + symlink-loop dest, whose refusal VERDICTS the crate now
+owns byte-exactly) must run the crate core (no ``heal_degrade`` fallback
+event); an enveloped case would DEGRADE pre-mutation to the Python core
+(the crate preflight's ``{"degrade": ...}`` verdict — corpus-EMPTY since
+W-5) — either way the four-strength parity holds. A degrade-only pass
 over an engaged-set case FAILS loudly. The content-token twin is compared
 per case too (token string + skip-event replay parity).
 
@@ -100,21 +102,28 @@ _ENGAGED_CASES = frozenset(
         "option_foreign_month_overlap",
         "option_multi_month_overlap",
         "option_null_side_foreign_key",
-    }
-)
-
-#: Cases the crate is CONSULTED on but must DEGRADE pre-mutation (the D-22
-#: read-only preflight probes): a tz-NAIVE bars file is outside the W-2
-#: us/UTC bars envelope (Python's as-if-UTC routing heals it — the crate
-#: never risks a byte drift), and a symlink at a reassignment DESTINATION
-#: is the containment-rail class whose Python error path embeds
-#: exception-MESSAGE text the crate cannot reproduce byte-exactly.
-_CRATE_DEGRADE_CASES = frozenset(
-    {
+        # W-5 phase A (D-23): the two formerly-degrading corpus shapes now
+        # ENGAGE — the crate OWNS the refusal verdict, reproducing the
+        # Python arm's isolated-error MESSAGE byte-exactly: the naive-ts
+        # bars source (the `_read_existing_bars` → `CandleBar` tz-aware
+        # `WriterError`; the executed Python arm REFUSES, it does not heal
+        # as-if-UTC — only the SCANNER routes as-if-UTC) and the
+        # symlink-loop reassignment dest (pathlib ≤3.12's
+        # `Symlink loop from '…'` wrapped by `_assert_options_containment`).
         "bars_naive_timestamp_routing",
         "symlink_loop_partition_file",
     }
 )
+
+#: Cases the crate is CONSULTED on but must DEGRADE pre-mutation (the D-22
+#: read-only preflight probes). EMPTY since W-5 phase A (D-23) — every
+#: corpus-reachable heal shape engages; the remaining degrade classes
+#: (naive-ts DESTINATIONS / drifted-dir naive legacy files — the
+#: partial-mutation shapes, non-loop symlink dests, out-of-envelope frames,
+#: int()-ambiguous month tokens, non-UTF-8 components, the
+#: unknown-future-kind arm) are all corpus-UNREACHABLE, kept as the §B2
+#: pre-mutation degrade envelope and recorded for the W-6 delete decision.
+_CRATE_DEGRADE_CASES: frozenset[str] = frozenset()
 
 #: Cases whose batch never reaches the seam at all: the mass-heal rail
 #: refuses BEFORE the per-finding loop (shell policy — stays Python), so
@@ -388,9 +397,9 @@ class TestCrateEnvelopeDegrade:
     """The crate-preflight degrade arm — batches OUTSIDE the byte-parity
     envelope must degrade PRE-MUTATION to the Python core with full parity.
 
-    Two corpus cases exercise the W-2b MULTI-FILE degrade probes in the main
-    parametrized run (``_CRATE_DEGRADE_CASES``); the plants
-    here build IN-envelope-for-the-SCANNER files the CRATE refuses: a
+    The corpus itself carries NO degrade case since W-5 phase A (D-23 —
+    ``_CRATE_DEGRADE_CASES`` is empty); the plants here build
+    IN-envelope-for-the-SCANNER files the CRATE still refuses to own: a
     beyond-2^53-paisa price, a 17-column Greeks-overlay schema, and a MIXED
     dup+foreign batch (since W-2b BOTH kinds engage natively — the mixed
     test pins that the whole batch runs the crate core with parity).

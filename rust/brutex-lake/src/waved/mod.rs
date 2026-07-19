@@ -129,6 +129,74 @@ pub fn civil_date_iso(days_since_epoch: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Python `repr()` of a NAIVE `datetime` reconstructed from an epoch-µs
+/// physical value — e.g. `datetime.datetime(2024, 6, 3, 4, 1)` (the W-5
+/// phase-A crate-owned refusal message for a naive-timestamp bars file:
+/// `CandleBar.timestamp must be timezone-aware, got naive datetime {ts!r}`).
+///
+/// CPython's `datetime.__repr__` drops trailing ZERO components from the
+/// end only: `microsecond` when 0, then `second` when both are 0; hour +
+/// minute are ALWAYS printed. A naive datetime appends no tzinfo/fold.
+/// Callers gate the input to the `datetime`-representable µs range.
+pub fn py_naive_datetime_repr_us(us: i64) -> String {
+    const US_PER_DAY: i64 = 86_400_000_000;
+    let days = us.div_euclid(US_PER_DAY);
+    let rem = us.rem_euclid(US_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let secs = rem / 1_000_000;
+    let micro = rem % 1_000_000;
+    let hour = secs / 3_600;
+    let minute = (secs / 60) % 60;
+    let second = secs % 60;
+    let mut out = format!("datetime.datetime({year}, {month}, {day}, {hour}, {minute}");
+    if second != 0 || micro != 0 {
+        out.push_str(&format!(", {second}"));
+    }
+    if micro != 0 {
+        out.push_str(&format!(", {micro}"));
+    }
+    out.push(')');
+    out
+}
+
+/// Python `repr()` of a str for the ASCII-and-printable envelope — the
+/// `Symlink loop from {filename!r}` fragment of pathlib's ≤3.12 loop
+/// refusal (W-5 phase A). Quote selection + escape rules mirror CPython's
+/// `unicode_repr`: single quotes unless the string contains `'` and not
+/// `"`; backslash + the chosen quote escaped; `\t`/`\n`/`\r` named; other
+/// C0 controls + DEL as `\xhh`. Non-ASCII (≥ U+0080) code points pass
+/// through unescaped — byte-exact for PRINTABLE non-ASCII (the only
+/// non-ASCII shape a real path carries; a NON-printable non-ASCII char
+/// would diverge from CPython's `\u` escaping — outside the envelope,
+/// recorded in the Wave-D deviations).
+pub fn py_str_repr(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push(quote);
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +227,47 @@ mod tests {
             assert!((1..=31).contains(&cur.2));
             prev = cur;
         }
+    }
+
+    #[test]
+    fn py_naive_datetime_repr_matches_cpython_component_dropping() {
+        // 2024-06-03 04:01:00 → the corpus naive-routing plant's first row
+        // (probed against CPython: repr drops zero second + microsecond).
+        let base = 19_877i64 * 86_400_000_000 + (4 * 3_600 + 60) * 1_000_000;
+        assert_eq!(
+            py_naive_datetime_repr_us(base),
+            "datetime.datetime(2024, 6, 3, 4, 1)"
+        );
+        assert_eq!(
+            py_naive_datetime_repr_us(base + 5_000_000),
+            "datetime.datetime(2024, 6, 3, 4, 1, 5)"
+        );
+        assert_eq!(
+            py_naive_datetime_repr_us(base + 7),
+            "datetime.datetime(2024, 6, 3, 4, 1, 0, 7)"
+        );
+        // Midnight keeps hour + minute (CPython never drops them).
+        assert_eq!(
+            py_naive_datetime_repr_us(19_877 * 86_400_000_000),
+            "datetime.datetime(2024, 6, 3, 0, 0)"
+        );
+        // Pre-epoch (negative µs) rides div_euclid/rem_euclid correctly.
+        assert_eq!(
+            py_naive_datetime_repr_us(-86_400_000_000 + 1),
+            "datetime.datetime(1969, 12, 31, 0, 0, 0, 1)"
+        );
+    }
+
+    #[test]
+    fn py_str_repr_matches_cpython_quote_and_escape_rules() {
+        assert_eq!(py_str_repr("/tmp/a.parquet"), "'/tmp/a.parquet'");
+        assert_eq!(py_str_repr("it's"), "\"it's\"");
+        assert_eq!(py_str_repr("both'\""), "'both\\'\"'");
+        assert_eq!(py_str_repr("a\\b"), "'a\\\\b'");
+        assert_eq!(py_str_repr("a\tb\nc\rd"), "'a\\tb\\nc\\rd'");
+        assert_eq!(py_str_repr("\x01\x7f"), "'\\x01\\x7f'");
+        // Printable non-ASCII passes through (CPython repr keeps it).
+        assert_eq!(py_str_repr("café"), "'café'");
     }
 
     #[test]

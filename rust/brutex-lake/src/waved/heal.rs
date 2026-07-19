@@ -99,6 +99,13 @@ const BARS_COLUMNS: [&str; 7] = [
 pub(super) enum HealErr {
     /// The `_PER_FINDING_HEAL_ERRORS` twin — counted, batch continues.
     Isolated(String),
+    /// An isolated refusal whose MESSAGE the crate reproduces byte-exactly
+    /// from the Python arm (W-5 phase A — the crate OWNS the verdict, so the
+    /// read-only preflight must NOT degrade the batch for it). Handled at
+    /// the isolation loop exactly like [`HealErr::Isolated`]; the variant
+    /// exists so the preflight probes can DISTINGUISH a crate-owned refusal
+    /// (engage) from a message we cannot reproduce (degrade).
+    Refuse(String),
     /// Disk-full class — propagates as `OSError(errno)` for the shell's
     /// `lake_write_guard` → `LakeWriteHalt` mapping.
     Fatal(std::io::Error),
@@ -167,6 +174,35 @@ fn realpath_nonstrict(path: &Path) -> PathBuf {
             _ => return path.to_path_buf(),
         }
     }
+}
+
+/// The byte-exact Python refusal for a NAIVE-timestamp bars file (W-5
+/// phase A): `_read_existing_bars` wraps the first row's `CandleBar`
+/// tz-aware validation `ValueError` into
+/// `WriterError(f"corrupt existing partition {dest}: {exc}")`. Pure
+/// (pyo3-free) so the cargo suite can pin the bytes without libpython.
+pub(super) fn naive_ts_refusal_message(path: &Path, first_us: i64) -> String {
+    format!(
+        "corrupt existing partition {}: CandleBar.timestamp must be \
+         timezone-aware, got naive datetime {}",
+        path.display(),
+        super::py_naive_datetime_repr_us(first_us),
+    )
+}
+
+/// The byte-exact Python refusal for a symlink-LOOP containment dest (W-5
+/// phase A): Python ≤3.12 `Path.resolve(strict=False)` realpath leaves the
+/// loop unresolved, the ensuing `stat()` ELOOP converts to
+/// `RuntimeError(f"Symlink loop from {e.filename!r}")`, and
+/// `_assert_options_containment` wraps it. *looped* is the
+/// realpath-nonstrict output (the `e.filename` twin). Pure (pyo3-free).
+pub(super) fn symlink_loop_refusal_message(dest: &Path, looped: &Path) -> String {
+    format!(
+        "cannot resolve {} for the options-containment check: \
+         Symlink loop from {} — refusing to touch it",
+        dest.display(),
+        super::py_str_repr(&looped.to_string_lossy()),
+    )
 }
 
 /// The cross-process lock sidecar path —
@@ -482,7 +518,39 @@ pub(super) fn read_bars_file(
         ));
     }
     let ts = df.column("timestamp")?;
-    let DataType::Datetime(unit, Some(tz)) = ts.dtype() else {
+    let DataType::Datetime(unit, tz) = ts.dtype() else {
+        return Ok((
+            bytes,
+            hash,
+            Vec::new(),
+            Envelope::Degrade(format!(
+                "bars timestamp dtype {:?} not Datetime(UTC)",
+                ts.dtype()
+            )),
+        ));
+    };
+    let Some(tz) = tz else {
+        // A tz-NAIVE column (W-5 phase A, `bars_naive_timestamp_routing`):
+        // the Python arm's `_read_existing_bars` builds the FIRST physical
+        // row's `CandleBar` and refuses with the tz-aware validation message
+        // (`corrupt existing partition {path}: CandleBar.timestamp must be
+        // timezone-aware, got naive datetime {ts!r}` — the timestamp check
+        // runs FIRST in `_validate_price_bar`, so it wins regardless of the
+        // row's prices). Reproduced byte-exactly for the µs unit with a
+        // non-null in-range first stamp — the crate OWNS the refusal
+        // (`HealErr::Refuse`, never a whole-batch degrade). Every other
+        // naive shape (ms/ns unit, null / out-of-range first stamp — where
+        // the Python arm raises differently or panics) stays the degrade
+        // envelope.
+        if *unit == TimeUnit::Microseconds {
+            let phys_col = ts.to_physical_repr();
+            if let Ok(phys) = phys_col.i64()
+                && let Some(first) = phys.get(0)
+                && (DATETIME_MIN_US..=DATETIME_MAX_US).contains(&first)
+            {
+                return Err(HealErr::Refuse(naive_ts_refusal_message(path, first)));
+            }
+        }
         return Ok((
             bytes,
             hash,
@@ -871,7 +939,10 @@ fn preflight(lake_root: &Path, findings: &[Finding]) -> Option<String> {
                         return Some(format!("bars_envelope: {reason}"));
                     }
                     Ok(_) => {}
-                    Err(_) => {} // unreadable — both arms error identically
+                    // Unreadable — both arms error identically; a
+                    // `Refuse` (naive-ts, W-5 phase A) is the crate-owned
+                    // isolated verdict — engage, never degrade.
+                    Err(_) => {}
                 }
             }
             "OptionIntraFileDup" => {
@@ -960,6 +1031,17 @@ pub(super) fn assert_options_containment(lake_root: &Path, dest: &Path) -> Resul
             }
         },
         Err(err) => {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                // A symlink-LOOP dest (W-5 phase A, `symlink_loop_partition_file`):
+                // Python ≤3.12's `Path.resolve(strict=False)` realpath leaves
+                // the loop unresolved, the ensuing `stat()` ELOOP converts to
+                // `RuntimeError(f"Symlink loop from {e.filename!r}")`, and
+                // `_assert_options_containment` wraps it — reproduced
+                // byte-exactly on the realpath-nonstrict output (the crate
+                // OWNS the refusal, `HealErr::Refuse`).
+                let looped = realpath_nonstrict(dest);
+                return Err(HealErr::Refuse(symlink_loop_refusal_message(dest, &looped)));
+            }
             return Err(HealErr::Isolated(format!(
                 "cannot resolve {} for the options-containment check: {err} — refusing to touch it",
                 dest.display()
@@ -967,9 +1049,14 @@ pub(super) fn assert_options_containment(lake_root: &Path, dest: &Path) -> Resul
         }
     };
     if !resolved_parent.starts_with(&options_root) {
+        // Byte-aligned with the Python arm's message (W-5 phase A — not
+        // corpus-reachable while the preflight degrades redirecting symlink
+        // shapes, but fidelity is free here).
         return Err(HealErr::Isolated(format!(
-            "destination {} resolves outside the options tree — refusing to mutate",
-            dest.display()
+            "destination {} resolves outside the options tree ({} is not under {}) — refusing to mutate",
+            dest.display(),
+            resolved_parent.display(),
+            options_root.display()
         )));
     }
     let dest_is_symlink = std::fs::symlink_metadata(dest)
@@ -981,8 +1068,13 @@ pub(super) fn assert_options_containment(lake_root: &Path, dest: &Path) -> Resul
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
     if dest_is_symlink || parent_is_symlink {
+        // Byte-aligned with the Python round-6 in-lake swap rail message
+        // (W-5 phase A — the preflight degrades these shapes today, so the
+        // arm is TOCTOU defense-in-depth; fidelity is free).
         return Err(HealErr::Isolated(format!(
-            "destination {} is or sits behind a symlink inside the options tree — refusing",
+            "destination {} is or sits behind a symlink inside the options tree — \
+             the healer only targets real partition files in real series dirs; \
+             refusing to touch it",
             dest.display()
         )));
     }
@@ -1365,7 +1457,7 @@ pub(crate) fn heal_batch_core<'py>(
         match heal_one(&mut ctx, finding, &sink) {
             Ok(true) => ctx.healed += 1,
             Ok(false) => ctx.skipped += 1,
-            Err(HealErr::Isolated(message)) => {
+            Err(HealErr::Isolated(message)) | Err(HealErr::Refuse(message)) => {
                 ctx.errors += 1;
                 let (token, needs_repr) = finding_token(finding, &ctx);
                 sink.log(
@@ -1631,6 +1723,59 @@ mod tests {
         assert_eq!(snap_2dp(f64::NAN), None);
         assert_eq!(snap_2dp(f64::INFINITY), None);
         assert_eq!(snap_2dp(1.0e18), None);
+    }
+
+    #[test]
+    fn naive_ts_refusal_message_matches_the_python_writer_error_bytes() {
+        // W-5 phase A: the corpus plant's first row (2024-06-03 04:01 naive,
+        // epoch day 19,877) — probed against the executed Python arm:
+        // `corrupt existing partition <p>: CandleBar.timestamp must be
+        // timezone-aware, got naive datetime datetime.datetime(2024, 6, 3, 4, 1)`.
+        let first_us = 19_877i64 * 86_400_000_000 + (4 * 3_600 + 60) * 1_000_000;
+        assert_eq!(
+            naive_ts_refusal_message(Path::new("/lake/bars/06.parquet"), first_us),
+            "corrupt existing partition /lake/bars/06.parquet: CandleBar.timestamp \
+             must be timezone-aware, got naive datetime \
+             datetime.datetime(2024, 6, 3, 4, 1)"
+        );
+    }
+
+    #[test]
+    fn symlink_loop_refusal_message_matches_the_python_pathlib_bytes() {
+        // W-5 phase A: Python ≤3.12 pathlib's
+        // `RuntimeError("Symlink loop from '{p}'")` wrapped by
+        // `_assert_options_containment` (probed against the executed arm).
+        let dest = Path::new("/lake/options/SERIES/2024-07.parquet");
+        assert_eq!(
+            symlink_loop_refusal_message(dest, dest),
+            "cannot resolve /lake/options/SERIES/2024-07.parquet for the \
+             options-containment check: Symlink loop from \
+             '/lake/options/SERIES/2024-07.parquet' — refusing to touch it"
+        );
+    }
+
+    #[test]
+    fn realpath_nonstrict_resolves_ancestors_of_a_symlink_loop() {
+        // A SELF-loop final component: realpath (non-strict) resolves the
+        // real ancestors and keeps the loop name — the `e.filename` shape
+        // Python's stat() ELOOP reports (probed on CPython 3.12.3).
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-heal-loop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loop_path = dir.join("2024-07.parquet");
+        std::os::unix::fs::symlink(&loop_path, &loop_path).unwrap();
+        let resolved = realpath_nonstrict(&loop_path);
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&dir).unwrap().join("2024-07.parquet")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

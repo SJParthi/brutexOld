@@ -142,6 +142,13 @@ fn preflight_bars_dest(dest: &Path) -> Option<String> {
     match read_bars_file(dest) {
         Ok((_, _, _, Envelope::Ok)) => None,
         Ok((_, _, _, Envelope::Degrade(reason))) => Some(format!("bars_envelope: {reason}")),
+        // A naive-ts DESTINATION is NOT crate-owned (W-5 phase A): the
+        // Python arm errors MID-copy-forward — after earlier months may
+        // already have been written — a partial-mutation shape this slice
+        // deliberately leaves to the verbatim Python core.
+        Err(HealErr::Refuse(_)) => {
+            Some("bars_foreign: naive-timestamp destination outside the crate envelope".to_string())
+        }
         Err(_) => Some("bars_foreign: destination unreadable".to_string()),
     }
 }
@@ -159,6 +166,12 @@ pub(super) fn preflight_bars_foreign(lake_root: &Path, finding: &Finding) -> Opt
         Ok((_, _, _, Envelope::Degrade(reason))) => {
             return Some(format!("bars_envelope: {reason}"));
         }
+        // A naive-ts SOURCE (W-5 phase A, `bars_naive_timestamp_routing`):
+        // the heal refuses PRE-mutation with the byte-exact Python message
+        // (`HealErr::Refuse` at the per-finding loop) — the crate owns the
+        // verdict, so the batch ENGAGES; no destination is ever probed
+        // because the heal errors before touching one.
+        Err(HealErr::Refuse(_)) => return None,
         Err(_) => return Some("bars_foreign: source unreadable".to_string()),
     };
     let home = (finding.year, finding.month);
@@ -267,7 +280,19 @@ pub(super) fn preflight_option_foreign(finding: &Finding) -> Option<String> {
             Err(err) if err.kind() == ErrorKind::NotFound => continue, // fresh
             Err(_) => return Some("option_foreign: destination unprobeable".to_string()),
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Some("option_foreign: destination is a symlink".to_string());
+                // A symlink-LOOP dest is crate-owned (W-5 phase A,
+                // `symlink_loop_partition_file`): the containment rail
+                // reproduces Python's `Symlink loop from '…'` refusal
+                // byte-exactly, so the batch ENGAGES — stop probing (the
+                // heal refuses at THIS month, months processed in the same
+                // ascending order on both arms, so later months are never
+                // reached by either). Any other symlink dest stays the
+                // degrade envelope (its refusal wording depends on the
+                // link's resolution — not reproduced here).
+                match std::fs::canonicalize(&dest) {
+                    Err(err) if err.raw_os_error() == Some(libc::ELOOP) => break,
+                    _ => return Some("option_foreign: destination is a symlink".to_string()),
+                }
             }
             Ok(_) => {}
         }
@@ -357,6 +382,15 @@ pub(super) fn preflight_drift(lake_root: &Path, finding: &Finding) -> Option<Str
                     Ok((_, _, rows, Envelope::Ok)) => rows,
                     Ok((_, _, _, Envelope::Degrade(reason))) => {
                         return Some(format!("bars_envelope: {reason}"));
+                    }
+                    // A naive-ts LEGACY file is NOT crate-owned here (W-5
+                    // phase A): the Python drift merge errors MID-way with
+                    // per-file partial mutation possible — degrade.
+                    Err(HealErr::Refuse(_)) => {
+                        return Some(
+                            "drift: naive-timestamp legacy file outside the crate envelope"
+                                .to_string(),
+                        );
                     }
                     Err(_) => return Some("drift: legacy file unreadable".to_string()),
                 };
