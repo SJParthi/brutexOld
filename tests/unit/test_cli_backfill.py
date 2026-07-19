@@ -152,12 +152,17 @@ def test_cmd_doctor_defaults_audit_dir_and_runtime_file(
     monkeypatch.setattr(doctor_mod, "main", fake_main)
     rc = cli.cmd_doctor(None, None, None)
     assert rc == 0
+    # R12 (DEC-UNIVERSE-INDEX-ONLY-001, #1934): cmd_doctor threads the
+    # read-union scope into the doctor's derived-freshness verdict.
+    from brutex.config.feed_scope import resolve_read_scope
+
     assert seen == {
         "audit_file": None,
         "audit_dir": doctor_mod.DEFAULT_AUDIT_DIR,
         "runtime_file": doctor_mod.DEFAULT_RUNTIME_FILE,
         "live_subjects_file": None,
         "replay_action_filter": "add",
+        "scope": resolve_read_scope(),
     }
 
 
@@ -181,12 +186,15 @@ def test_cmd_doctor_threads_explicit_paths_and_exit_code(
         replay_action_filter="del",
     )
     assert rc == 5
+    from brutex.config.feed_scope import resolve_read_scope
+
     assert seen == {
         "audit_file": tmp_path / "a.jsonl",
         "audit_dir": tmp_path / "audit",
         "runtime_file": tmp_path / "runtime.json",
         "live_subjects_file": tmp_path / "subjects.txt",
         "replay_action_filter": "del",
+        "scope": resolve_read_scope(),
     }
 
 

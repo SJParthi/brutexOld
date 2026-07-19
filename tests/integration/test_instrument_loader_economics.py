@@ -27,8 +27,21 @@ from typing import Any
 
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.instrument_loader import load_instrument_master
 from brutex.data.instrument_store import InstrumentStore
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the pre-#1934 leg-economics FOLD mechanics over
+    index+stock fixtures (RELIANCE rows must persist for the lot/freeze fold
+    assertions); under ``BRUTEX_FEED_SCOPE=full`` those legacy rules are
+    byte-identical. The shipped index4-default guard arms live in
+    ``test_universe_index_only_scope.py`` + the scope-gate batteries."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 #: The canonical 21-column Groww instrument-master header.
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)

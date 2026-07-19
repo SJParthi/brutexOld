@@ -565,6 +565,39 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     }
 
 
+def test_private_helpers_default_scope_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``scope=None`` DEFAULT arms of ``_ntm_admission`` / ``_lean_universe``
+    resolve the acting feed's scope themselves (DEC-UNIVERSE-INDEX-ONLY-001 —
+    the defensive default; production threads the resolved scope explicitly).
+    Under the suite's index4 env the NTM path reads the dormant reason and the
+    lean filter runs the bounded arm — whitebox pins on the resolution line."""
+    import types
+
+    from brutex.config.feed_scope import FEED_SCOPE_ENV, SCOPE_INDEX4
+    from brutex.dashboard import instrument_loader as il
+
+    monkeypatch.setenv(FEED_SCOPE_ENV, SCOPE_INDEX4)
+    empty_index = types.SimpleNamespace(universe=[])
+    ids, note = il._ntm_admission(
+        empty_index,  # type: ignore[arg-type]  # (whitebox: untouched on the dormant arm)
+        fno_eligible=frozenset(),
+        fno_eligible_security_ids=frozenset(),
+        constituent_opener=None,
+        cache_dir=tmp_path / "cache",
+    )
+    assert ids == frozenset()
+    assert note["admitted"] is False and "dormant" in note["reason"]
+    lean, dropped, excluded = il._lean_universe(
+        empty_index,  # type: ignore[arg-type]
+        fno_eligible=frozenset(),
+        reference_security_ids=frozenset(),
+        fno_eligible_security_ids=frozenset(),
+    )
+    assert (lean, dropped, excluded) == ([], 0, {"idx": 0, "eq": 0})
+
+
 def test_non_fno_equity_dropped_from_lean_universe(tmp_path: Path) -> None:
     """A non-F&O equity that is NOT an NTM constituent is NOT persisted (lean ingest).
 
