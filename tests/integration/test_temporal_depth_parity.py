@@ -44,29 +44,49 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _bars() -> list[CandleBar]:
-    """The results-depth end-to-end fixture's 12-day upward-drift bars, verbatim."""
+    """The results-depth end-to-end fixture's worst-case-rankable bars, verbatim.
+
+    Re-copied 2026-07-19 (the ledger-#1848 temporal-golden re-lock): the donor
+    (``test_results_depth_end_to_end.py::_bars`` — the 12-day gap-up drift of
+    DEC-FILL-WORST-CASE-ONLY-001) was re-crafted when #1825 landed, but this
+    copy had rotted on the pre-#1825 upward-drift geometry whose every trade
+    LOSES under the adverse-max fill law — the observe-mode sweep persisted 0
+    finalists and the parity walk below compared nothing. The test's own
+    non-empty asserts (``stored_year_pnl`` + ``shared >= 1``) are the
+    anti-rot tooth that caught it (the #1553 fixture-rot repair pattern).
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for d in range(12):
         price = 100.0
         for m in range(120):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = (
                 datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
             ).astimezone(UTC)
-            hi = max(price, close) + 0.5
-            lo = min(price, close) - 0.5
             out.append(
                 CandleBar(
                     timestamp=ts,
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(hi, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
                     low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=100,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
