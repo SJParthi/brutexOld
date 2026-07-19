@@ -1,0 +1,962 @@
+{
+ "path_repr": "'/tmp/x.json'",
+ "cases": [
+  {
+   "name": "valid_base",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "valid_2359",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"23:49\", \"adopted_settle_ist\": \"23:59\", \"margin_minutes\": 10, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"23:49\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"23:49\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"23:49\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"23:49\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"23:49\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "23:59",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "root_list",
+   "payload_json": "[]",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got list)"
+  },
+  {
+   "name": "root_str",
+   "payload_json": "\"x\"",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got str)"
+  },
+  {
+   "name": "root_int",
+   "payload_json": "3",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got int)"
+  },
+  {
+   "name": "root_float",
+   "payload_json": "1.5",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got float)"
+  },
+  {
+   "name": "root_none",
+   "payload_json": "null",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got NoneType)"
+  },
+  {
+   "name": "root_bool",
+   "payload_json": "true",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': root is not a JSON object (got bool)"
+  },
+  {
+   "name": "schema_missing",
+   "payload_json": "{\"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got None"
+  },
+  {
+   "name": "schema_true",
+   "payload_json": "{\"schema\": true, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got True"
+  },
+  {
+   "name": "schema_false",
+   "payload_json": "{\"schema\": false, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got False"
+  },
+  {
+   "name": "schema_float",
+   "payload_json": "{\"schema\": 1.0, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got 1.0"
+  },
+  {
+   "name": "schema_two",
+   "payload_json": "{\"schema\": 2, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got 2"
+  },
+  {
+   "name": "schema_str",
+   "payload_json": "{\"schema\": \"1\", \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got '1'"
+  },
+  {
+   "name": "schema_huge",
+   "payload_json": "{\"schema\": 1000000000000000000000000000000, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got 1000000000000000000000000000000"
+  },
+  {
+   "name": "schema_neg",
+   "payload_json": "{\"schema\": -1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got -1"
+  },
+  {
+   "name": "schema_neg_zero",
+   "payload_json": "{\"schema\": -0, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': schema must be exactly 1, got 0"
+  },
+  {
+   "name": "kind_missing",
+   "payload_json": "{\"schema\": 1, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got None"
+  },
+  {
+   "name": "kind_wrong",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'groww-postclose'"
+  },
+  {
+   "name": "kind_int",
+   "payload_json": "{\"schema\": 1, \"kind\": 7, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 7"
+  },
+  {
+   "name": "kind_none",
+   "payload_json": "{\"schema\": 1, \"kind\": null, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got None"
+  },
+  {
+   "name": "kind_list",
+   "payload_json": "{\"schema\": 1, \"kind\": [\"a\"], \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got ['a']"
+  },
+  {
+   "name": "kind_ctrl",
+   "payload_json": "{\"schema\": 1, \"kind\": \"a\\u0001b\\tc\\nd\\\\e\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'a\\x01b\\tc\\nd\\\\e'"
+  },
+  {
+   "name": "kind_quote_s",
+   "payload_json": "{\"schema\": 1, \"kind\": \"it's\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got \"it's\""
+  },
+  {
+   "name": "kind_quote_d",
+   "payload_json": "{\"schema\": 1, \"kind\": \"say \\\"hi\\\"\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'say \"hi\"'"
+  },
+  {
+   "name": "kind_quote_both",
+   "payload_json": "{\"schema\": 1, \"kind\": \"both ' and \\\"\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'both \\' and \"'"
+  },
+  {
+   "name": "kind_nonascii",
+   "payload_json": "{\"schema\": 1, \"kind\": \"caf\\u00e9 \\u2603\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'café ☃'"
+  },
+  {
+   "name": "kind_nbsp",
+   "payload_json": "{\"schema\": 1, \"kind\": \"a\\u00a0b\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'a\\xa0b'"
+  },
+  {
+   "name": "kind_zwsp",
+   "payload_json": "{\"schema\": 1, \"kind\": \"a\\u200bb\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'a\\u200bb'"
+  },
+  {
+   "name": "kind_del",
+   "payload_json": "{\"schema\": 1, \"kind\": \"a\\u007fb\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'a\\x7fb'"
+  },
+  {
+   "name": "kind_float_sci",
+   "payload_json": "{\"schema\": 1, \"kind\": 1.5e+300, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 1.5e+300"
+  },
+  {
+   "name": "kind_float_small",
+   "payload_json": "{\"schema\": 1, \"kind\": 1e-05, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 1e-05"
+  },
+  {
+   "name": "kind_float_e16",
+   "payload_json": "{\"schema\": 1, \"kind\": 1e+16, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 1e+16"
+  },
+  {
+   "name": "kind_float_e15",
+   "payload_json": "{\"schema\": 1, \"kind\": 1000000000000000.0, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 1000000000000000.0"
+  },
+  {
+   "name": "kind_float_neg0",
+   "payload_json": "{\"schema\": 1, \"kind\": -0.0, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got -0.0"
+  },
+  {
+   "name": "kind_float_1e400",
+   "payload_json": "{\"schema\": 1, \"kind\": 1e400, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got inf"
+  },
+  {
+   "name": "kind_nested",
+   "payload_json": "{\"schema\": 1, \"kind\": {\"k\": [true, null, 1.0, \"x\"], \"m\": {}}, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got {'k': [True, None, 1.0, 'x'], 'm': {}}"
+  },
+  {
+   "name": "earliest_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist must be a string 'HH:MM', got None"
+  },
+  {
+   "name": "earliest_int",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": 1545, \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist must be a string 'HH:MM', got 1545"
+  },
+  {
+   "name": "earliest_newline",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\\n\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='15:45\\n' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "earliest_short",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"5:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='5:45' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "earliest_long",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"015:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='015:45' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "earliest_unicode_digit",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"\\u0661\\u0665:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='١٥:45' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "earliest_unreal",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"25:00\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='25:00' is not a real wall-clock time"
+  },
+  {
+   "name": "earliest_min60",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:60\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist='15:60' is not a real wall-clock time"
+  },
+  {
+   "name": "adopted_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must be a string 'HH:MM', got None"
+  },
+  {
+   "name": "adopted_float",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": 16.0, \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must be a string 'HH:MM', got 16.0"
+  },
+  {
+   "name": "adopted_unreal",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"99:99\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist='99:99' is not a real wall-clock time"
+  },
+  {
+   "name": "margin_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got None"
+  },
+  {
+   "name": "margin_bool",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": true, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got True"
+  },
+  {
+   "name": "margin_float",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15.0, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got 15.0"
+  },
+  {
+   "name": "margin_str",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": \"15\", \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got '15'"
+  },
+  {
+   "name": "margin_9",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"15:54\", \"margin_minutes\": 9, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes=9 is below the minimum 10"
+  },
+  {
+   "name": "margin_10_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"15:55\", \"margin_minutes\": 10, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "15:55",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "margin_241",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"19:46\", \"margin_minutes\": 241, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes=241 is above the maximum 240"
+  },
+  {
+   "name": "margin_240_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"19:45\", \"margin_minutes\": 240, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "19:45",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "margin_huge",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 1000000000000000000000000000000, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes=1000000000000000000000000000000 is above the maximum 240"
+  },
+  {
+   "name": "margin_neg_huge",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": -1000000000000000000000000000000, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes=-1000000000000000000000000000000 is below the minimum 10"
+  },
+  {
+   "name": "wrap_1440",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"23:50\", \"adopted_settle_ist\": \"00:00\", \"margin_minutes\": 10, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist + margin_minutes wraps past midnight ('23:50' + 10 min)"
+  },
+  {
+   "name": "wrap_past",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"23:45\", \"adopted_settle_ist\": \"00:15\", \"margin_minutes\": 30, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': earliest_all_pass_ist + margin_minutes wraps past midnight ('23:45' + 30 min)"
+  },
+  {
+   "name": "arith",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:01\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must equal earliest_all_pass_ist + margin_minutes ('15:45' + 15 min != '16:01')"
+  },
+  {
+   "name": "floor_1500",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:00\", \"adopted_settle_ist\": \"15:15\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist '15:15' is before the market-hours guard's BLOCK_END 15:35 IST (15:35-exact is allowed — the env-tier floor mirrored)"
+  },
+  {
+   "name": "floor_1534",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:20\", \"adopted_settle_ist\": \"15:34\", \"margin_minutes\": 14, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist '15:34' is before the market-hours guard's BLOCK_END 15:35 IST (15:35-exact is allowed — the env-tier floor mirrored)"
+  },
+  {
+   "name": "floor_1535_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:20\", \"adopted_settle_ist\": \"15:35\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:20\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:20\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:20\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:20\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:20\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "15:35",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "days_bool",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": false, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': distinct_trading_days must be an int (bool refused), got False"
+  },
+  {
+   "name": "days_4",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 4, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': distinct_trading_days=4 is below the minimum 5"
+  },
+  {
+   "name": "days_str",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": \"5\", \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': distinct_trading_days must be an int (bool refused), got '5'"
+  },
+  {
+   "name": "days_huge",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 1000000000000000000000000000000, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day support for the earliest all-pass slot '15:45' is 5 day(s) but distinct_trading_days claims 1000000000000000000000000000000"
+  },
+  {
+   "name": "perday_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day must be an object, got NoneType"
+  },
+  {
+   "name": "perday_list",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": [1], \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day must be an object, got list"
+  },
+  {
+   "name": "perday_str",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": \"x\", \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day must be an object, got str"
+  },
+  {
+   "name": "perday_empty",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day is empty — no observations"
+  },
+  {
+   "name": "perday_key_shape",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"20260711\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key '20260711' is not an ISO calendar day"
+  },
+  {
+   "name": "perday_key_unreal",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-02-30\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key '2026-02-30' is not a real calendar day"
+  },
+  {
+   "name": "perday_key_year0",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"0000-01-01\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key '0000-01-01' is not a real calendar day"
+  },
+  {
+   "name": "perday_key_month0",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-00-11\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key '2026-00-11' is not a real calendar day"
+  },
+  {
+   "name": "perday_key_day0",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-00\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key '2026-07-00' is not a real calendar day"
+  },
+  {
+   "name": "perday_key_leap_ok_support",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2024-02-29\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day support for the earliest all-pass slot '15:45' is 6 day(s) but distinct_trading_days claims 5"
+  },
+  {
+   "name": "perday_day_empty",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11'] must be a non-empty object of slots"
+  },
+  {
+   "name": "perday_day_list",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": [\"x\"]}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11'] must be a non-empty object of slots"
+  },
+  {
+   "name": "perday_slot_shape",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"1545\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11'] slot key '1545' is not HH:MM"
+  },
+  {
+   "name": "perday_slot_9999_accepted",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"99:99\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "perday_cell_str",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": \"x\"}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'] must be an object"
+  },
+  {
+   "name": "perday_records_0",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 0, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].records=0 is below the minimum 1"
+  },
+  {
+   "name": "perday_records_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].records must be an int (bool refused), got None"
+  },
+  {
+   "name": "perday_records_bool",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": true, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].records must be an int (bool refused), got True"
+  },
+  {
+   "name": "perday_allpass_int",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 3, \"all_pass\": 1, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].all_pass must be a bool"
+  },
+  {
+   "name": "perday_allpass_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 3, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].all_pass must be a bool"
+  },
+  {
+   "name": "perday_failedchecks_mixed",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 3, \"all_pass\": true, \"failed_checks\": [\"a\", 2]}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].failed_checks must be a list of strings, got ['a', 2]"
+  },
+  {
+   "name": "perday_failedchecks_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 3, \"all_pass\": true}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].failed_checks must be a list of strings, got None"
+  },
+  {
+   "name": "support_low",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 6, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day support for the earliest all-pass slot '15:45' is 5 day(s) but distinct_trading_days claims 6"
+  },
+  {
+   "name": "support_extra_day_false",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 1, \"all_pass\": false, \"failed_checks\": [\"x\"]}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "support_extra_day_true",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day support for the earliest all-pass slot '15:45' is 6 day(s) but distinct_trading_days claims 5"
+  },
+  {
+   "name": "gen_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc must be an ISO-8601 string, got None"
+  },
+  {
+   "name": "gen_int",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": 5, \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc must be an ISO-8601 string, got 5"
+  },
+  {
+   "name": "gen_junk",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"yesterday\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='yesterday' is not ISO-8601"
+  },
+  {
+   "name": "gen_naive",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00' is tz-naive (must be tz-aware)"
+  },
+  {
+   "name": "gen_naive_dateonly",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11' is tz-naive (must be tz-aware)"
+  },
+  {
+   "name": "gen_ist",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+05:30\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00+05:30' must be UTC (got offset 5:30:00)"
+  },
+  {
+   "name": "gen_neg_offset",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00-05:30\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00-05:30' must be UTC (got offset -1 day, 18:30:00)"
+  },
+  {
+   "name": "gen_z_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00Z\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00Z"
+  },
+  {
+   "name": "gen_lower_z",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00z\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00z' is not ISO-8601"
+  },
+  {
+   "name": "gen_minus0000_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00-00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00-00:00"
+  },
+  {
+   "name": "gen_secoffset",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00:01\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00+00:00:01' must be UTC (got offset 0:00:01)"
+  },
+  {
+   "name": "gen_usoffset_utc_quirk",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00:00.000001\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00:00.000001"
+  },
+  {
+   "name": "gen_frac_offset",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+05:30:15.123456\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00+05:30:15.123456' must be UTC (got offset 5:30:15.123456)"
+  },
+  {
+   "name": "gen_newline_sep_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11\\n05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11\n05:00:00+00:00"
+  },
+  {
+   "name": "gen_compact_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"20260711T050000Z\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "20260711T050000Z"
+  },
+  {
+   "name": "gen_week_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-W28-6T05:00:00Z\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-W28-6T05:00:00Z"
+  },
+  {
+   "name": "gen_offset_min75",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+05:75\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': generated_at_utc='2026-07-11T05:00:00+05:75' must be UTC (got offset 6:15:00)"
+  },
+  {
+   "name": "psv_missing",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': probe_script_version must be a non-empty string, got None"
+  },
+  {
+   "name": "psv_empty",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': probe_script_version must be a non-empty string, got ''"
+  },
+  {
+   "name": "psv_int",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": 3}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': probe_script_version must be a non-empty string, got 3"
+  },
+  {
+   "name": "checks_bad",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"checks\": [\"a\", 1]}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': checks must be a list of strings, got ['a', 1]"
+  },
+  {
+   "name": "checks_str",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"checks\": \"a\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': checks must be a list of strings, got 'a'"
+  },
+  {
+   "name": "checks_none",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"checks\": null}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': checks must be a list of strings, got None"
+  },
+  {
+   "name": "checks_ok_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"checks\": [\"a\", \"b\"]}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "slots_observed_bad",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"slots_observed\": [1.5]}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': slots_observed must be a list of strings, got [1.5]"
+  },
+  {
+   "name": "transcripts_bad",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"transcripts\": [null]}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': transcripts must be a list of strings, got [None]"
+  },
+  {
+   "name": "excluded_bad_val",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"excluded_days\": {\"2026-01-01\": 5}}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': excluded_days must be an object of strings, got {'2026-01-01': 5}"
+  },
+  {
+   "name": "excluded_list",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"excluded_days\": [\"x\"]}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': excluded_days must be an object of strings, got ['x']"
+  },
+  {
+   "name": "excluded_nested",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"excluded_days\": {\"a\": {\"b\": [1, \"x\", null, true]}}}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': excluded_days must be an object of strings, got {'a': {'b': [1, 'x', None, True]}}"
+  },
+  {
+   "name": "excluded_empty_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"excluded_days\": {}}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "excluded_ok_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"excluded_days\": {\"2026-01-01\": \"holiday\"}}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "ignored_neg",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"ignored_records\": -1}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': ignored_records=-1 is below the minimum 0"
+  },
+  {
+   "name": "ignored_float",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"ignored_records\": 0.0}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': ignored_records must be an int (bool refused), got 0.0"
+  },
+  {
+   "name": "ignored_ok_valid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"ignored_records\": 0}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "margin_float_tie",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 1685650392397.1562, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got 1685650392397.1562"
+  },
+  {
+   "name": "margin_float_tie_neg",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": -1584234787577867.2, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got -1584234787577867.2"
+  },
+  {
+   "name": "kind_float_tie",
+   "payload_json": "{\"schema\": 1, \"kind\": -1584234787577867.2, \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got -1584234787577867.2"
+  },
+  {
+   "name": "days_float_tie",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 230798374623274.25, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': distinct_trading_days must be an int (bool refused), got 230798374623274.25"
+  },
+  {
+   "name": "kind_post15_codepoint",
+   "payload_json": "{\"schema\": 1, \"kind\": \"x\\ud87a\\udff0\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': kind must be 'groww-postclose-settle-evidence', got 'x\\U0002ebf0'"
+  },
+  {
+   "name": "perday_key_post15_codepoint",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"x\\u088f\": {\"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day key 'x\\u088f' is not an ISO calendar day"
+  },
+  {
+   "name": "ignored_bool_true",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"ignored_records\": true}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': ignored_records must be an int (bool refused), got True"
+  },
+  {
+   "name": "ignored_bool_false",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"ignored_records\": false}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': ignored_records must be an int (bool refused), got False"
+  },
+  {
+   "name": "adopted_newline",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\\n\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist='16:00\\n' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "adopted_unicode_digit",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"\\u0661\\u0666:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist='١٦:00' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "adopted_short",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"6:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist='6:00' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "adopted_long",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"016:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist='016:00' is not strict ASCII HH:MM"
+  },
+  {
+   "name": "arith_minus1",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"15:59\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must equal earliest_all_pass_ist + margin_minutes ('15:45' + 15 min != '15:59')"
+  },
+  {
+   "name": "arith_plus_hour",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"17:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must equal earliest_all_pass_ist + margin_minutes ('15:45' + 15 min != '17:00')"
+  },
+  {
+   "name": "arith_large_margin_off",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"20:45\", \"margin_minutes\": 240, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': adopted_settle_ist must equal earliest_all_pass_ist + margin_minutes ('15:45' + 240 min != '20:45')"
+  },
+  {
+   "name": "margin_bool_false",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": false, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': margin_minutes must be an int (bool refused), got False"
+  },
+  {
+   "name": "days_bool_true",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": true, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': distinct_trading_days must be an int (bool refused), got True"
+  },
+  {
+   "name": "perday_records_bool_false",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-11\": {\"15:45\": {\"records\": false, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": false,
+   "msg": "settle evidence '/tmp/x.json': per_day['2026-07-11']['15:45'].records must be an int (bool refused), got False"
+  },
+  {
+   "name": "accept_margin_60_mid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:00\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 60, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_margin_120_mid",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"16:30\", \"adopted_settle_ist\": \"18:30\", \"margin_minutes\": 120, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "18:30",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_floor_1535_alt_arith",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:25\", \"adopted_settle_ist\": \"15:35\", \"margin_minutes\": 10, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:25\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:25\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:25\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:25\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:25\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "15:35",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_large_margin_evening",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"19:00\", \"adopted_settle_ist\": \"23:00\", \"margin_minutes\": 240, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"19:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"19:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"19:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"19:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"19:00\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "23:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_late_evening_2359",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"22:29\", \"adopted_settle_ist\": \"23:59\", \"margin_minutes\": 90, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"22:29\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"22:29\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"22:29\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"22:29\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"22:29\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "23:59",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_six_days_extra_slots",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 6, \"per_day\": {\"2026-07-06\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-13\": {\"15:35\": {\"records\": 2, \"all_pass\": false, \"failed_checks\": [\"count_short\"]}, \"15:45\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}, \"16:30\": {\"records\": 1, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_informational_full",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\", \"checks\": [\"count\", \"close_edge\", \"fut_oi\"], \"slots_observed\": [\"15:35\", \"15:45\", \"16:00\", \"16:30\", \"17:30\"], \"transcripts\": [\"postclose_settle_probe_20260706.jsonl\"], \"excluded_days\": {\"2026-07-04\": \"weekend\", \"2026-07-05\": \"weekend\"}, \"ignored_records\": 7}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00+00:00"
+  },
+  {
+   "name": "accept_gen_space_sep",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11 05:00:00+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11 05:00:00+00:00"
+  },
+  {
+   "name": "accept_gen_frac_us",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00:00.123456+00:00\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00:00.123456+00:00"
+  },
+  {
+   "name": "accept_gen_no_seconds_compact_offset",
+   "payload_json": "{\"schema\": 1, \"kind\": \"groww-postclose-settle-evidence\", \"earliest_all_pass_ist\": \"15:45\", \"adopted_settle_ist\": \"16:00\", \"margin_minutes\": 15, \"distinct_trading_days\": 5, \"per_day\": {\"2026-07-06\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-07\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-08\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-09\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}, \"2026-07-10\": {\"15:45\": {\"records\": 14, \"all_pass\": true, \"failed_checks\": []}}}, \"generated_at_utc\": \"2026-07-11T05:00+0000\", \"probe_script_version\": \"postclose-settle-probe/1\"}",
+   "ok": true,
+   "adopted": "16:00",
+   "generated": "2026-07-11T05:00+0000"
+  }
+ ]
+}

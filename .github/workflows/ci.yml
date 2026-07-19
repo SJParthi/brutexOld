@@ -3752,6 +3752,44 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python --locked
 
+  rust-brutex-calendar:
+    name: Rust (brutex-calendar build + clippy + test)
+    # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate's
+    # own gate (the rust-brutex-strategies shape — the rust-brutex-feed
+    # steps plus `--locked`, because the crate commits its Cargo.lock so
+    # the lockstep is enforced here too). The crate ships INERT (consumed
+    # by nothing Python-side yet); the 317 Python-generated goldens + the
+    # source-digest parity pins run inside `cargo test`. The mutation.yml
+    # wiring is the named follow-up DEC-RUST-CALENDAR-MUTATION-WIRE-001.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-calendar
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-calendar -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --release --locked
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by maturin at flip time, not here).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python --locked
+
   rust-brutexd:
     name: Rust (brutexd build + clippy + test)
     # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
@@ -5097,6 +5135,9 @@ jobs:
       # DEC-STRATEGIES-RUST-COMBO-001: the combo decision-kernel crate
       # gate — the PR that introduces a crate must gate that crate.
       - rust-brutex-strategies
+      # DEC-RUST-CALENDAR-LEAVES-001: the calendar-leaf decision-law crate
+      # gate — the PR that introduces a crate must gate that crate.
+      - rust-brutex-calendar
       # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
       # that introduces a crate must gate that crate (roadmap PR-1).
       - rust-brutexd
