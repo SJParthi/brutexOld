@@ -62,6 +62,18 @@ structlog, injected seams and exception TYPES stay Python).
    name guard somehow missed) raises ``RuntimeError`` naming the remedy:
    with no oracle, guessing at a poisoned wire would fabricate verdicts.
 
+## Cycle note (CodeQL py/cyclic-import — dispositioned, fix round)
+
+``lake_invariants`` ⇄ this module is a DELIBERATE two-way FUNCTION-LOCAL
+edge: ``scan_lake_invariants`` lazily imports :func:`scan_lake_via_rust`,
+and this facade lazily imports the finding dataclasses /
+``log_lake_finding`` back (plus a ``TYPE_CHECKING``-only block for the
+annotations). There is NO import-time cycle — every runtime edge resolves
+inside a call frame after both modules exist. Re-homing the finding
+dataclasses into a leaf module was assessed and DECLINED: every external
+consumer (census/CLI/doctor/tests) imports them from ``lake_invariants``,
+so the move buys nothing the lazy edge does not already guarantee.
+
 The per-process :data:`_LAST_SCAN_READS` slot (the §F2 read-count witness)
 is the one piece of process-local state;
 :func:`reset_lake_rust_waved_for_tests` clears it (tests only).
@@ -106,8 +118,6 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     #: raw_hash, findings)`` — the W-3 seam's wire shape (``None`` = a
     #: zero-row file, the caller's counted skip).
     WavedFileScan = tuple[int, object, object, str, tuple["IntraFileDup | ForeignMonthRows", ...]]
-
-_LOG = structlog.get_logger("brutex.data.lake_rust_waved")
 
 #: The RETIRED env flag (DEC-RUST-LAKE-WAVED-001 endgame): a SET value —
 #: any non-empty spelling — refuses loudly via

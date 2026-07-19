@@ -47,7 +47,7 @@ import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import structlog
 
@@ -69,15 +69,6 @@ from brutex.data.models import CatalogEntry
 from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 
 __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
-
-if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from brutex.data.lake_invariants import ForeignMonthRows, IntraFileDup
-
-    #: The per-file scan payload ``(row_count, first_ts, last_ts, raw_hash,
-    #: findings)`` — the Wave-D crate wire (``None`` = a zero-row file, the
-    #: caller's counted skip). ``first_ts``/``last_ts`` are the min/max
-    #: values; :func:`_as_utc` normalises them at ``CatalogEntry`` build.
-    _FileScan = tuple[int, object, object, str, tuple["IntraFileDup | ForeignMonthRows", ...]]
 
 #: One ``catalog.reconcile.parquet_skip`` warning per unreadable partition file, so a
 #: corrupt / present-but-unreadable Parquet that would otherwise crash the FIRST step of

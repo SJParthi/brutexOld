@@ -850,6 +850,10 @@ def scan_lake_invariants(
     LakeScanReport
         Findings + scan counters (``duration_s`` wall clock).
     """
+    # Lazy by design: lake_invariants ⇄ lake_rust_waved is a deliberate
+    # two-way FUNCTION-LOCAL edge (no import-time cycle — see the facade's
+    # module-docstring cycle note; CodeQL py/cyclic-import dispositioned
+    # at the DEC-RUST-LAKE-WAVED-001 fix round).
     from brutex.data.lake_rust_waved import scan_lake_via_rust
 
     return scan_lake_via_rust(

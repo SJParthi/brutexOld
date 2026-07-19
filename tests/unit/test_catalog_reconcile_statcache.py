@@ -171,7 +171,7 @@ class TestWarmLaunchReadCount:
         # pl.read_parquet / Path.read_bytes spies see nothing — the stat-cache
         # law is pinned one seam up: a warm launch dispatches ZERO per-file
         # facade scans (the cache skip happens BEFORE the crate call).
-        import brutex.data.catalog_reconcile as cr
+        from brutex.data import catalog_reconcile as cr
 
         lake = tmp_path / "lake"
         lake.mkdir()
@@ -184,7 +184,9 @@ class TestWarmLaunchReadCount:
         calls: list[str] = []
         real = cr.reconcile_file_via_rust
 
-        def _spy(*, path: str, coords: object) -> object:
+        from brutex.data.lake_invariants import PartitionCoords
+
+        def _spy(*, path: str, coords: PartitionCoords | None) -> object:
             calls.append(path)
             return real(path=path, coords=coords)
 

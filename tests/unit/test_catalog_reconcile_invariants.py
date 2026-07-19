@@ -173,14 +173,16 @@ class TestFreeClaim:
         # the per-file facade scan count is IDENTICAL with the check on and
         # off (W-6a: the read runs inside the crate — ONE native scan per
         # file either way; the pl.read_parquet spy would count zero).
-        import brutex.data.catalog_reconcile as cr
+        from brutex.data import catalog_reconcile as cr
 
         _write(tmp_path, [_bar(_ts(1))])
         _plant_raw(_dest(tmp_path, month=7), [_ts(2), _ts(3, month=7), _ts(3, month=7)])
         calls: list[str] = []
         real = cr.reconcile_file_via_rust
 
-        def _spy(*, path: str, coords: object) -> object:
+        from brutex.data.lake_invariants import PartitionCoords
+
+        def _spy(*, path: str, coords: PartitionCoords | None) -> object:
             calls.append(path)
             return real(path=path, coords=coords)
 

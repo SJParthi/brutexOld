@@ -356,7 +356,7 @@ class TestReconcile:
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
         target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
-        import brutex.data.catalog_reconcile as cr
+        from brutex.data import catalog_reconcile as cr
 
         real_scan = cr.reconcile_file_via_rust
 
@@ -491,7 +491,7 @@ class TestReconcile:
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
         target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
-        import brutex.data.catalog_reconcile as cr
+        from brutex.data import catalog_reconcile as cr
 
         real_scan = cr.reconcile_file_via_rust
 
@@ -557,12 +557,14 @@ class TestWavedSeam:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The positive dispatch pin (the retired bomb-spy's inversion).
-        import brutex.data.catalog_reconcile as cr
+        from brutex.data import catalog_reconcile as cr
 
         seen: list[str] = []
         real = cr.reconcile_file_via_rust
 
-        def _spy(*, path: str, coords: object) -> object:
+        from brutex.data.lake_invariants import PartitionCoords
+
+        def _spy(*, path: str, coords: PartitionCoords | None) -> object:
             seen.append(path)
             return real(path=path, coords=coords)
 

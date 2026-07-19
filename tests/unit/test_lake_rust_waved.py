@@ -380,14 +380,24 @@ class TestRead1mSurface:
             "[42]",
             '[{"session":"s","skipped":1}]',
             '[{"session":1,"skipped":1,"max_ratio":4.0,"first_prev_close":1.0,"first_close":2.0}]',
-            '[{"session":"s","skipped":true,"max_ratio":4.0,"first_prev_close":1.0,'
-            '"first_close":2.0}]',
-            '[{"session":"s","skipped":0,"max_ratio":4.0,"first_prev_close":1.0,'
-            '"first_close":2.0}]',
-            '[{"session":"s","skipped":1,"max_ratio":true,"first_prev_close":1.0,'
-            '"first_close":2.0}]',
-            '[{"session":"s","skipped":1,"max_ratio":"4","first_prev_close":1.0,'
-            '"first_close":2.0}]',
+            # Explicit parenthesized continuations (each pair is ONE
+            # deliberately wrapped JSON literal — never a missing comma).
+            (
+                '[{"session":"s","skipped":true,"max_ratio":4.0,"first_prev_close":1.0,'
+                '"first_close":2.0}]'
+            ),
+            (
+                '[{"session":"s","skipped":0,"max_ratio":4.0,"first_prev_close":1.0,'
+                '"first_close":2.0}]'
+            ),
+            (
+                '[{"session":"s","skipped":1,"max_ratio":true,"first_prev_close":1.0,'
+                '"first_close":2.0}]'
+            ),
+            (
+                '[{"session":"s","skipped":1,"max_ratio":"4","first_prev_close":1.0,'
+                '"first_close":2.0}]'
+            ),
         ],
         ids=[
             "non-json",
