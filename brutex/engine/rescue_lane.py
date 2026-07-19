@@ -142,6 +142,7 @@ __all__ = [
     "RESCUE_LOCKBOX_MIN_TRADES_DEFAULT",
     "RESCUE_MIN_HITS_DEFAULT",
     "RESCUE_MIN_HITS_ENV",
+    "RESCUE_SECTION_SCHEMA_VERSION",
     "RescueConfig",
     "RescueLaneResult",
     "RescueValidation",
@@ -151,6 +152,7 @@ __all__ = [
     "effective_apriori_min_hits",
     "provisional_specialists_section",
     "rescue_mc_seed",
+    "rescue_section_or_none",
     "resolve_rescue_min_hits_env",
     "run_rescue_lane",
 ]
