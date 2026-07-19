@@ -18,8 +18,8 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a,
-MIGRATION.md #1955, branch `claude/rust-cascade-results-s2` STACKED on the
+_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b,
+MIGRATION.md #1955 + #1956, branch `claude/rust-cascade-results-s2` STACKED on the
 slice-1 head — the `cascade_wire` SERIALISATION + PARSE LAW family moves to
 `rust/brutex-cascade/src/cascade_wire.rs` under the same capture-first
 compressed cycle (the 76-case parity corpus (62-test replay) FROZEN against the UNTOUCHED
@@ -36,11 +36,18 @@ copies + 178 pre-existing stem-suite tests UNMODIFIED + 3 hand-killed Rust
 mutants; the second-review FIX ROUND folded (the stage3 per-cell
 parse-order fix + the `float.__repr__` dumps arm — executed
 fail-before/pass-after; MIGRATION.md #1955);
-100.00% line+branch on the shim + the NEW dedicated ci.yml stanza. ENGINE
+100.00% line+branch on the shim + the NEW dedicated ci.yml stanza. SLICE 2b
+(same branch, MIGRATION.md #1956): `top100_artifact` follows the same
+capture-first cycle — the 86-case corpus (88-test replay) frozen FIRST, the
+build/render/gate/load laws crate-hosted behind a byte-exact type-face shim
+(file I/O + presets/ranking stay shim-side; the DISTINCT
+`dumps_sorted_surrogatepass` pyjson entry), 30 zero-divergence
+differentials + 5/5 hand-killed mutants, the latently-RED pre-existing
+top100 ci stanza widened → 218 tests / 100.00%. ENGINE
 UNCHANGED — the sweep hot path + run identity take ZERO diffs —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new env
 vars. This header carries the pointer, never the story — the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1955.)
+lives in the §1 Active-branch blurb + MIGRATION.md #1955 + #1956.)
 Earlier: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
 branch `claude/rust-cascade-results` — the cascade/results-depth Rust
 conversion PHASE A: the NEW standalone `rust/brutex-cascade` crate (pyo3
@@ -3292,7 +3299,8 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-cascade-results-s2`
-  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a, MIGRATION.md #1955** —
+  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b, MIGRATION.md #1955 +
+  #1956** —
   STACKED on the slice-1 head ef021b8; the T14 lane's second slice: the
   `cascade_wire` SERIALISATION + PARSE LAW family moves to
   `rust/brutex-cascade/src/cascade_wire.rs` and the module becomes a
@@ -3388,7 +3396,53 @@ hostile-review pass._
   select / exit_index / metrics-compute byte-untouched). ENGINE UNCHANGED —
   the sweep hot path + run identity take ZERO diffs —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
-  lake/schema/scope/vocab/rate change; no new routes; NO new env vars.)
+  lake/schema/scope/vocab/rate change; no new routes; NO new env vars.
+  SLICE 2b (same branch, MIGRATION.md #1956 — the `top100_artifact`
+  conversion, 986 LOC → a byte-exact type-face shim over
+  `rust/brutex-cascade/src/top100_artifact.rs`): CAPTURE-FIRST — the
+  86-case corpus + constants block (88-test replay: 13 gates · 8 presets ·
+  7 rank orders · 22 builds · 6 constructor refusals · 2 write-roundtrips ·
+  28 load scenarios) FROZEN at 68bc463a6 against the UNTOUCHED Python law
+  (the per-file regen refusal now covers all FIVE fixtures; slice-1/2a
+  fixtures byte-untouched; PYTHONHASHSEED-subprocess determinism); quirks
+  frozen AS LAW incl. the build-succeeds-then-render `allow_nan` ValueError,
+  the raw JSONDecodeError escape, TWO bool==int load PUNS
+  (`schema_version: true` + `rank: true`), the EXACT-float `cpcv_pass_pct`
+  product / absent-when-None law, the lone-surrogate `\ud800` escape, the
+  `-0.0`==`0.0` composite tie and all 19 `top100.load_invalid` reason
+  tokens. THE CUT (the slice-1 decision-kernel precedent): the crate
+  computes bytes + decisions (`_dumps` · gates · loads · the WHOLE build
+  pass · the stamp/artifact load ladder) while file I/O + `atomic_write_simple`
+  + the wall-clock stamp + the `resolve_preset`/`rank_candidates`
+  presets/ranking call boundary stay shim-side (`brutex/ranking/`
+  byte-untouched — consumed as passed callables; cascade_join verdicts as
+  data); construction-ORDER fidelity built in from the start (the 2a
+  MINOR-1 lesson). The DISTINCT `dumps_sorted_surrogatepass` pyjson entry
+  (the laws differ ONLY on the lone-surrogate arm; `dumps_sorted`
+  byte-unchanged; a lone-surrogate dict KEY still refuses — disclosed,
+  unreachable). The mid-flight `_cascade_payload` catch: the
+  cascade_join property suite direct-imports it — the census missed it,
+  caught by RUNNING the suite; kept as a crate delegate, suite green
+  unmodified. TESTS: the 88-test replay passed UNMODIFIED on the FIRST
+  post-wheel run; 30 hypothesis differentials vs verbatim 68bc463a6 oracle
+  copies — ZERO divergences incl. the multi-defect construction-order
+  battery; 5/5 hand-applied Rust mutants KILLED — the family-collapse
+  PREFER-drop mutant initially SURVIVED the entire pre-existing battery (a
+  genuine gap, closed with a deterministic anchor-family pin + a hypothesis
+  strategy branch, then re-applied + verified killed; the site-2 fold-flip
+  variant recorded EQUIVALENT — unique-run_id key tail); the pre-existing
+  top100 ci stanza was latently RED (99.32% unit-only at the Phase-B head)
+  and was WIDENED per the cascade_wire template → 218 tests / 100.00%
+  line+branch (132/16). GATES: cargo 46 `--locked -D warnings`
+  (Cargo.toml/lock byte-untouched); `mypy --strict` clean (477 files, 0
+  new); ruff clean; consumer batteries green (422 + 257 + 331 spot-checks +
+  319 slice-1/2a shim suites + 101 pre-existing top100). DISCLOSED
+  envelope: gate-int extraction beyond ±i64 refuses OverflowError
+  (int64-validated records — unreachable); `_dumps` has NO int-width
+  envelope (CPython-delegated ints, probed beyond 2**200). The slice-2b
+  hostile-review round is PENDING at the docs commit — recorded on #1956
+  when the verdict lands. ENGINE UNCHANGED — zero hot-path/run-identity
+  diffs; no new env vars; full record in MIGRATION.md #1956.)
   Earlier: `claude/rust-cascade-results`
   (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
   cascade/results-depth Rust conversion, PHASE A, under the operator's
@@ -10056,7 +10110,8 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-cascade-results-s2`
-  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICE 2a, MIGRATION.md #1955 —
+  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b, MIGRATION.md #1955 +
+  #1956 —
   STACKED on the slice-1 head: the `cascade_wire` SERIALISATION + PARSE LAW
   family moves to `rust/brutex-cascade/src/cascade_wire.rs` under the
   capture-first cycle (the 76-case parity corpus (62-test replay) frozen against the
@@ -10073,9 +10128,25 @@ hostile-review pass._
   per-cell parse-order fix + the `float.__repr__` dumps arm — executed
   fail-before/pass-after); 100.00% line+branch on the shim + the NEW
   dedicated ci.yml
-  stanza; ENGINE UNCHANGED — the sweep hot path + run identity take ZERO
-  diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
-  + MIGRATION.md #1955 for the full blurb)
+  stanza. SLICE 2b (same branch, MIGRATION.md #1956): `top100_artifact`
+  (986 LOC) follows the same capture-first cycle — the 86-case corpus
+  (88-test replay) frozen at 68bc463a6 BEFORE conversion (quirks frozen AS
+  LAW incl. the two bool==int load puns + the lone-surrogate escape + all
+  19 load_invalid tokens), the build/render/gate/load laws crate-hosted
+  behind a byte-exact type-face shim (file I/O + the presets/ranking call
+  boundary stay shim-side — `brutex/ranking/` byte-untouched; the DISTINCT
+  `dumps_sorted_surrogatepass` pyjson entry, `dumps_sorted` byte-unchanged;
+  the mid-flight `_cascade_payload` delegate catch — suite green
+  unmodified), the 88-test replay UNMODIFIED green on the FIRST post-wheel
+  run, 30 zero-divergence hypothesis differentials vs verbatim 68bc463a6
+  oracles incl. the multi-defect construction-order battery, 5/5
+  hand-killed Rust mutants (the PREFER-drop mutant's initial survival =
+  a genuine gap, closed then re-killed), the latently-RED pre-existing
+  top100 ci stanza widened → 218 tests / 100.00% (132/16); cargo 46;
+  the slice-2b hostile-review round pending — recorded on #1956 when the
+  verdict lands; ENGINE UNCHANGED — the sweep hot path + run identity take
+  ZERO diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1955 + #1956 for the full blurbs)
   Earlier: `claude/rust-cascade-results`
   (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954 — the T14
   cascade/results-depth Rust conversion PHASE A: the NEW
