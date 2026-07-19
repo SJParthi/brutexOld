@@ -92,6 +92,7 @@ from brutex.dashboard.oneclick_view import cascade_status_text
 from brutex.engine.cascade_join import (
     CascadeJoin,
     CascadeJoinError,
+    CascadeVerdictView,
     build_cascade_join,
     cascade_report_path,
 )
@@ -102,7 +103,13 @@ from brutex.engine.results_store import (
     ResultsStoreError,
 )
 from brutex.money import format_inr, paisa_to_rupees
-from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
+from brutex.ranking.presets import (
+    DEFAULT_PRESET,
+    PRESET_NAMES,
+    PRESETS,
+    RankRecord,
+    sort_by_preset,
+)
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
 
@@ -113,6 +120,9 @@ __all__ = [
     "MAX_TOP_N",
     "PRESET_INERT_AXES",
     "RANKABLE_COLUMNS",
+    "REGIME_REJECT_STAGES",
+    "REGIME_ROBUST_PRESET",
+    "REGIME_UNPROVEN_STATUSES",
     "SNAPSHOT_ERA_AMBIGUOUS",
     "SNAPSHOT_ERA_UNKNOWN",
     "STORE_ERROR_PUBLIC_DETAIL",
@@ -425,6 +435,13 @@ class SweepLeaderboard:
     cascade_join_meta: dict[str, Any] | None = None
     composite_join_meta: dict[str, Any] | None = None
     cascade_flagged: int | None = None
+    #: EMIT-ON-PRESENT (`DEC-REGIME-REJECT-TIER-001` PROPOSAL) — non-``None``
+    #: ONLY when the ``regime_robust`` preset is active: the count of filtered
+    #: rows EXCLUDED for a regime-stage cascade FAIL, and the count of RANKED
+    #: (included) rows carrying an honest-abstain regime status. Every other
+    #: preset / the default view emits neither key (byte-identity law).
+    regime_rejected_count: int | None = None
+    regime_unproven_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
@@ -463,6 +480,10 @@ class SweepLeaderboard:
             payload["composite_join"] = dict(self.composite_join_meta)
         if self.cascade_flagged is not None:
             payload["cascade_flagged"] = self.cascade_flagged
+        if self.regime_rejected_count is not None:
+            payload["regime_rejected_count"] = self.regime_rejected_count
+        if self.regime_unproven_count is not None:
+            payload["regime_unproven_count"] = self.regime_unproven_count
         return payload
 
 
@@ -586,6 +607,41 @@ def _clamp_top_n(top_n: int) -> int:
 # (PRESET_INERT_AXES itself is declared above SweepLeaderboard — its default.)
 
 
+# ── DEC-REGIME-REJECT-TIER-001 (PROPOSAL — operator-gated) ──────────────────
+# The READ-TIME ``?preset=regime_robust`` rejection tier: ranks EXACTLY like
+# the DEFAULT preset (the min_dd_first law — DELEGATED to
+# ``PRESETS[DEFAULT_PRESET]``, never a copy) but EXCLUDES rows whose JOINED
+# cascade verdict is a FAIL at one of the two regime-evidence stages
+# (``REGIME_REJECT_STAGES``). SEMANTIC OPTION A (shipped): ABSTAIN/unproven
+# verdict statuses (``REGIME_UNPROVEN_STATUSES`` on the additive
+# ``extreme_vol_status`` / ``regime_fragility_status`` verdict fields) are
+# INCLUDED in the ranked view but COUNTED on the payload
+# (``regime_unproven_count``), beside the excluded count
+# (``regime_rejected_count``). SEMANTIC OPTION B (NOT implemented — the
+# alternative the operator may rule instead): ALSO exclude the unproven rows,
+# so the preset serves only regime-PROVEN combos. Read-time only — zero
+# writer/artifact/engine change; the default (no-preset) payload stays
+# BYTE-IDENTICAL (negative-pinned), and a lake with NO cascade report serves
+# the preset honestly (nothing excluded, counts 0 — the composite preset's
+# absent-sidecar posture).
+
+#: The proposal preset token — accepted by the /results ``?preset=``
+#: vocabulary ONLY (deliberately NOT added to the engine-shared
+#: :data:`brutex.ranking.presets.PRESETS` registry: that table is the top100
+#: ARTIFACT's advertised vocabulary, and this tier ships read-time-only).
+REGIME_ROBUST_PRESET: Final[str] = "regime_robust"
+
+#: The cascade ``rejected_at`` stage tokens the ``regime_robust`` preset
+#: excludes (a FAIL at any OTHER stage stays ranked — red-flagged as today).
+REGIME_REJECT_STAGES: Final[frozenset[str]] = frozenset({"extreme_vol_stratum", "regime_fragility"})
+
+#: The honest-abstain statuses counted (NEVER excluded — option A) on the
+#: additive regime verdict fields.
+REGIME_UNPROVEN_STATUSES: Final[frozenset[str]] = frozenset(
+    {"unproven_current_regime", "insufficient_stratum_trades", "insufficient_strata"}
+)
+
+
 def resolve_preset_param(preset: str | None) -> str | None:
     """Validate the optional ``?preset=`` query token against the R30 registry.
 
@@ -604,9 +660,10 @@ def resolve_preset_param(preset: str | None) -> str | None:
     token = preset.strip()
     if not token:
         return None
-    if token in PRESETS:
+    if token in PRESETS or token == REGIME_ROBUST_PRESET:
         return token
-    raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
+    valid = ", ".join((*PRESET_NAMES, REGIME_ROBUST_PRESET))
+    raise ValueError(f"unknown ranking preset {token!r}; valid presets: {valid}")
 
 
 def _preset_rank_record(
@@ -1116,6 +1173,15 @@ def build_sweep_leaderboard(
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
     ]
+    regime_rejected: int | None = None
+    regime_unproven: int | None = None
+    if resolved_preset == REGIME_ROBUST_PRESET:
+        # DEC-REGIME-REJECT-TIER-001 (PROPOSAL, option A): exclude the
+        # regime-stage FAILs BEFORE ranking (the top-N fills with the next
+        # best), count the honest abstains among the KEPT rows. Reads ONLY
+        # the existing cascade join overlay — cascade=None / an absent
+        # report excludes NOTHING (honest counts of 0).
+        filtered, regime_rejected, regime_unproven = _regime_robust_filter(filtered, cascade)
     if resolved_preset is None:
         # Deterministic rank: by the chosen column descending, ties broken by run_id
         # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
@@ -1146,10 +1212,16 @@ def build_sweep_leaderboard(
         # a stable multi-pass composite (None-after-scored, the top_k two-pass
         # idiom) shared verbatim with the engine's top100 writer — bounding it
         # here would re-derive the rule this adapter is pinned never to.
+        # ``regime_robust`` DELEGATES its whole ordering to the DEFAULT
+        # preset (the min_dd_first law) — the tier changes MEMBERSHIP only,
+        # never the ranking rule (DEC-REGIME-REJECT-TIER-001 proposal).
+        preset_token = (
+            DEFAULT_PRESET if resolved_preset == REGIME_ROBUST_PRESET else resolved_preset
+        )
         ordered = list(
             sort_by_preset(
                 filtered,
-                preset=PRESETS[resolved_preset],
+                preset=PRESETS[preset_token],
                 record_of=lambda r: _preset_rank_record(r, composite_of),
             )
         )
@@ -1219,4 +1291,44 @@ def build_sweep_leaderboard(
         cascade_join_meta=cascade_meta,
         composite_join_meta=composite_meta,
         cascade_flagged=flagged_out,
+        regime_rejected_count=regime_rejected,
+        regime_unproven_count=regime_unproven,
     )
+
+
+def _regime_robust_filter(
+    rows: list[ResultRow], cascade: CascadeJoinLoad | None
+) -> tuple[list[ResultRow], int, int]:
+    """Apply the ``regime_robust`` membership law (option A) over *rows*.
+
+    Returns ``(kept, rejected_count, unproven_count)``: a row whose joined
+    cascade verdict is a FAIL (``passed=False``) at a
+    :data:`REGIME_REJECT_STAGES` stage is EXCLUDED + counted; a KEPT row whose
+    verdict carries a :data:`REGIME_UNPROVEN_STATUSES` status on EITHER
+    additive regime field is counted (never excluded — option A). Rows with
+    no joined verdict (no report · absent/failed load · unmatched run_id ·
+    a duplicate-excluded candidate) are KEPT uncounted — annotation-absence
+    is not evidence (Golden Rule #1).
+    """
+    verdicts: Mapping[str, CascadeVerdictView] = {}
+    if cascade is not None and cascade.join is not None:
+        verdicts = cascade.join.by_candidate
+    kept: list[ResultRow] = []
+    rejected = 0
+    unproven = 0
+    for row in rows:
+        verdict = verdicts.get(row.run_id)
+        if (
+            verdict is not None
+            and not verdict.passed
+            and verdict.rejected_at in REGIME_REJECT_STAGES
+        ):
+            rejected += 1
+            continue
+        if verdict is not None and (
+            verdict.extreme_vol_status in REGIME_UNPROVEN_STATUSES
+            or verdict.regime_fragility_status in REGIME_UNPROVEN_STATUSES
+        ):
+            unproven += 1
+        kept.append(row)
+    return kept, rejected, unproven
