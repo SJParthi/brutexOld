@@ -2112,3 +2112,353 @@ class TestBuildWindowPayloadLegacyOffset:
         assert payload["source"] == "status_log"
         assert [w["symbol"] for w in payload["windows"]] == ["CCC"]
         assert payload["returned"] == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R11 window-census read scope (DEC-UNIVERSE-INDEX-ONLY-001, #1934)
+# ────────────────────────────────────────────────────────────────────────
+
+from typing import Any  # noqa: E402
+
+from brutex.config.feed_scope import SCOPE_FULL, FeedScope, resolve_feed_scope  # noqa: E402
+
+_R11_FULL_SCOPE = FeedScope(
+    feed="test", token=SCOPE_FULL, admitted_underlyings=None, fno_underlyings=None
+)
+#: The route-shaped sid map — post-prune the 4-row store maps every INDEX sid.
+_R11_SID_MAP = {"13": "NIFTY", "25": "BANKNIFTY", "1": "SENSEX", "21": "INDIAVIX"}
+
+
+class _CountingWindowCache:
+    """A dict-backed WindowCountsCache spy — counts distinct computes."""
+
+    def __init__(self) -> None:
+        self.data: dict[tuple[str, int], Any] = {}
+        self.computes = 0
+        self.keys: list[str] = []
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Any) -> Any:
+        slot = (key, generation)
+        if slot not in self.data:
+            self.computes += 1
+            self.keys.append(key)
+            self.data[slot] = compute()
+        return self.data[slot]
+
+
+def _seed_mixed_scope_ledger(tmp_path: Path) -> None:
+    """Spot + modern-F&O + legacy windows for BOTH in- and out-of-scope names."""
+    ledger = WindowLedger()
+    # Spot: an admitted index + a stored-only stock.
+    ledger.record(
+        _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+    )
+    ledger.record(
+        _window_key("RELIANCE"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+    )
+    # Modern F&O contract windows (security_id = the vendor contract symbol).
+    for contract in ("NSE-NIFTY-25Jan24-FUT", "NSE-RELIANCE-25Jan24-FUT"):
+        ledger.record(
+            WindowKey(
+                market=GROWW_FUTURE_COVERAGE_MARKET,
+                security_id=contract,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+            ),
+            raw_bars=3,
+            error_type=None,
+            bars_appended=3,
+            now=_WINDOW_NOW,
+        )
+    # Legacy sid|segment option windows: an admitted-index sid + a stock sid
+    # the pruned map no longer knows (→ legacy_unresolved).
+    for sid in ("25|NSE_FNO", "500325|NSE_FNO"):
+        ledger.record(
+            _option_window_key(security_id=sid),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=_WINDOW_NOW,
+        )
+    save_window_ledger(ledger, tmp_path)
+
+
+class TestWindowPayloadReadScope:
+    """R11 — the census narrows; the /db raw grid + defaulted callers never do."""
+
+    def test_python_fold_filters_and_counts(self, tmp_path: Path) -> None:
+        """[FB] stock spot + stock-F&O + unmapped-legacy windows excluded + counted."""
+        _seed_mixed_scope_ledger(tmp_path)
+        payload = build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, scope=resolve_feed_scope("groww")
+        )
+        symbols = {w["symbol"] for w in payload["windows"]}
+        assert "RELIANCE" not in symbols
+        assert not any("RELIANCE" in s for s in symbols)
+        assert "NIFTY" in symbols
+        assert any("BANKNIFTY" in s for s in symbols)  # legacy index sid KEPT via the map
+        assert payload["count"] == 3  # NIFTY spot + NIFTY FUT + the legacy 25| window
+        assert payload["out_of_scope"] == {
+            "windows": 3,
+            "legacy_unresolved": 1,
+            "dec": "DEC-UNIVERSE-INDEX-ONLY-001",
+        }
+
+    def test_duckdb_path_equals_python_fold(self, tmp_path: Path) -> None:
+        """The SQL≡Python equivalence pin over the fixture corpus (§6#8)."""
+        _seed_mixed_scope_ledger(tmp_path)
+        scope = resolve_feed_scope("groww")
+        python_payload = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope)
+        duck_payload = build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope, conn=duckdb.connect()
+        )
+        assert duck_payload["counts"] == python_payload["counts"]
+        assert duck_payload["count"] == python_payload["count"]
+        assert duck_payload["matched"] == python_payload["matched"]
+        assert duck_payload["out_of_scope"] == python_payload["out_of_scope"]
+        assert {w["symbol"] for w in duck_payload["windows"]} == {
+            w["symbol"] for w in python_payload["windows"]
+        }
+
+    def test_default_none_serves_everything_no_census_key(self, tmp_path: Path) -> None:
+        """Law 0: a defaulted caller (scope=None) is the unfiltered legacy payload."""
+        _seed_mixed_scope_ledger(tmp_path)
+        for conn in (None, duckdb.connect()):
+            payload = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP, conn=conn)
+            assert "out_of_scope" not in payload
+            assert payload["count"] == 6
+            assert any(w["symbol"] == "RELIANCE" for w in payload["windows"])
+
+    def test_unbounded_scope_is_pass_through(self, tmp_path: Path) -> None:
+        _seed_mixed_scope_ledger(tmp_path)
+        wide = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP, scope=_R11_FULL_SCOPE)
+        default = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP)
+        assert wide == default
+
+    def test_index_windows_byte_identical_under_scope(self, tmp_path: Path) -> None:
+        """An index-only ledger under the bounded scope: payload byte-identical."""
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+        scoped = build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, scope=resolve_feed_scope("groww")
+        )
+        default = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP)
+        assert scoped == default
+
+    def test_multipage_stock_dominated_pages_with_no_holes(self, tmp_path: Path) -> None:
+        """Σ page rows == matched — the offset pager never blank-walks (§6#8)."""
+        ledger = WindowLedger()
+        for i in range(37):
+            ledger.record(
+                _window_key(f"STOCK{i:03d}"),
+                raw_bars=2,
+                error_type=None,
+                bars_appended=2,
+                now=_WINDOW_NOW,
+            )
+        for symbol in ("NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX", "NSE-NIFTY"):
+            ledger.record(
+                _window_key(symbol), raw_bars=2, error_type=None, bars_appended=2, now=_WINDOW_NOW
+            )
+        save_window_ledger(ledger, tmp_path)
+        scope = resolve_feed_scope("groww")
+        conn = duckdb.connect()
+        first = build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope, conn=conn, limit=2
+        )
+        assert first["matched"] == 5  # the 4 admitted + the recovered NSE-NIFTY drift form
+        assert first["out_of_scope"]["windows"] == 37
+        collected: list[str] = []
+        offset = 0
+        while True:
+            page = build_window_payload(
+                tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope, conn=conn, limit=2, offset=offset
+            )
+            if not page["windows"]:
+                break
+            collected.extend(w["symbol"] for w in page["windows"])
+            offset += 2
+        assert len(collected) == first["matched"]
+        assert set(collected) == {"NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX", "NSE-NIFTY"}
+
+    def test_phase_progress_shares_one_scoped_counts_entry(self, tmp_path: Path) -> None:
+        """The two-route consistency pin: ONE cached entry, EQUAL counts (§6#8)."""
+        from brutex.data.window_ledger_store import ledger_path
+
+        _seed_mixed_scope_ledger(tmp_path)
+        scope = resolve_feed_scope("groww")
+        cache = _CountingWindowCache()
+        conn = duckdb.connect()
+        payload = build_window_payload(
+            tmp_path,
+            symbol_for_id=_R11_SID_MAP,
+            scope=scope,
+            conn=conn,
+            count_cache=cache,
+            limit=0,
+        )
+        phases = phase_progress_payload(
+            conn,
+            ledger_path(tmp_path),
+            current_phase="",
+            count_cache=cache,
+            scope=scope,
+            symbol_for_id=_R11_SID_MAP,
+        )
+        # ONE shared counts entry — the second route was a cache HIT.
+        assert cache.computes == 1
+        assert len(set(cache.keys)) == 1
+        by_phase = {row["phase"]: row for row in phases}
+        counts = payload["counts"]
+        for bucket in ("spot", "futures", "options"):
+            expected_total = sum(counts[bucket].values())
+            assert by_phase[bucket]["total"] == expected_total
+
+    def test_defaulted_caller_keys_separately_from_threaded(self, tmp_path: Path) -> None:
+        """The Rev-5 key law: unfiltered vs scoped computes can never share an entry."""
+        _seed_mixed_scope_ledger(tmp_path)
+        cache = _CountingWindowCache()
+        conn = duckdb.connect()
+        build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, conn=conn, count_cache=cache, limit=0
+        )
+        build_window_payload(
+            tmp_path,
+            symbol_for_id=_R11_SID_MAP,
+            scope=resolve_feed_scope("groww"),
+            conn=conn,
+            count_cache=cache,
+            limit=0,
+        )
+        assert cache.computes == 2
+        assert len(set(cache.keys)) == 2
+        unfiltered_keys = [k for k in cache.keys if k.endswith("|unfiltered")]
+        assert len(unfiltered_keys) == 1
+
+    def test_stock_planned_population_no_longer_pins_futures_phase(self, tmp_path: Path) -> None:
+        """The fno_current_phase_from_counts fixture arm (§6#8): a residual
+        stock futures PLANNED population reads phantom pending at merge-base
+        (scope=None parity arm) and no pending at head under the scope."""
+        from brutex.data.window_ledger_store import ledger_path
+
+        ledger = WindowLedger()
+        ledger.plan(
+            WindowKey(
+                market=GROWW_FUTURE_COVERAGE_MARKET,
+                security_id="NSE-RELIANCE-25Jan24-FUT",
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+            ),
+            now=_WINDOW_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+        conn = duckdb.connect()
+        unfiltered = phase_progress_payload(
+            conn, ledger_path(tmp_path), current_phase="", count_cache=None
+        )
+        scoped = phase_progress_payload(
+            conn,
+            ledger_path(tmp_path),
+            current_phase="",
+            count_cache=None,
+            scope=resolve_feed_scope("groww"),
+            symbol_for_id=_R11_SID_MAP,
+        )
+        unfiltered_fut = next(r for r in unfiltered if r["phase"] == "futures")
+        scoped_fut = next(r for r in scoped if r["phase"] == "futures")
+        assert unfiltered_fut["pending"] > 0  # merge-base parity: phantom pending
+        assert scoped_fut["pending"] == 0
+
+    def test_since_counts_ride_the_same_admit_filter(self, tmp_path: Path) -> None:
+        _seed_mixed_scope_ledger(tmp_path)
+        conn = duckdb.connect()
+        payload = build_window_payload(
+            tmp_path,
+            symbol_for_id=_R11_SID_MAP,
+            scope=resolve_feed_scope("groww"),
+            conn=conn,
+            since="2020-01-01T00:00:00+00:00",
+            limit=0,
+        )
+        since_counts = payload["counts_since_pull_start"]
+        assert since_counts == payload["counts"]  # every seeded row is post-since + in scope
+
+
+class TestWindowScopeBindEdges:
+    """R11 bind-edge coverage: empty admitted sets + the records fallback."""
+
+    def test_empty_bounded_scope_admits_nothing_sql_equals_python(self, tmp_path: Path) -> None:
+        """A bounded scope with EMPTY admitted sets + no sid map: every window
+        excluded; legacy rows (no known sids at all) read legacy_unresolved."""
+        _seed_mixed_scope_ledger(tmp_path)
+        empty_scope = FeedScope(
+            feed="test",
+            token="index4",
+            admitted_underlyings=frozenset(),
+            fno_underlyings=frozenset(),
+        )
+        duck = build_window_payload(tmp_path, scope=empty_scope, conn=duckdb.connect())
+        python_fold = build_window_payload(tmp_path, scope=empty_scope)
+        assert duck["count"] == 0
+        assert duck["windows"] == []
+        assert duck["out_of_scope"] == {
+            "windows": 6,
+            "legacy_unresolved": 2,
+            "dec": "DEC-UNIVERSE-INDEX-ONLY-001",
+        }
+        assert python_fold["out_of_scope"] == duck["out_of_scope"]
+        assert python_fold["counts"] == duck["counts"]
+
+    def test_scoped_since_counts_ride_the_cache(self, tmp_path: Path) -> None:
+        """The scoped since arm shares the counts cache (isolated compute twin)."""
+        _seed_mixed_scope_ledger(tmp_path)
+        cache = _CountingWindowCache()
+        payload = build_window_payload(
+            tmp_path,
+            symbol_for_id=_R11_SID_MAP,
+            scope=resolve_feed_scope("groww"),
+            conn=duckdb.connect(),
+            count_cache=cache,
+            since="2020-01-01T00:00:00+00:00",
+            limit=0,
+        )
+        assert payload["counts_since_pull_start"] == payload["counts"]
+        assert cache.computes == 2  # ONE lifetime + ONE since entry
+        assert all("|s=" in key or key.endswith("|unfiltered") for key in cache.keys)
+
+    def test_phase_records_fallback_applies_the_scope_filter(self, tmp_path: Path) -> None:
+        """The degraded phases never widen past the census (R11 fallback arm)."""
+        from brutex.data.window_ledger_store import ledger_path
+
+        _seed_mixed_scope_ledger(tmp_path)
+        ledger_file = ledger_path(tmp_path)
+        deltas = ledger_file.parent / "deltas"
+        deltas.mkdir(exist_ok=True)
+        # A junk pending delta: keeps the deltas-pending branch alive (the
+        # records fold skips the bad delta file-granularly).
+        (deltas / "00000001-1.parquet").write_bytes(b"not-a-parquet")
+
+        class _Boom:
+            def execute(self, *args: Any, **kwargs: Any) -> Any:
+                raise duckdb.Error("boom")
+
+        phases = phase_progress_payload(
+            _Boom(),
+            ledger_file,
+            current_phase="",
+            count_cache=None,
+            retry_sleep=lambda _s: None,
+            scope=resolve_feed_scope("groww"),
+            symbol_for_id=_R11_SID_MAP,
+        )
+        by_phase = {row["phase"]: row for row in phases}
+        # RELIANCE spot + the stock FUT + the unmapped legacy sid are filtered
+        # out of the degraded fold too: 1 spot / 1 futures / 1 options remain.
+        assert by_phase["spot"]["total"] == 1
+        assert by_phase["futures"]["total"] == 1
+        assert by_phase["options"]["total"] == 1

@@ -900,3 +900,78 @@ class TestLakeUniquenessSkipHonesty:
     def test_clean_engine_still_passes(self, tmp_path: Path) -> None:
         _write_engine_partition(tmp_path)
         assert check_lake_uniqueness(tmp_path).status == "PASS"
+
+
+class TestDerivedFreshnessScope:
+    """R12 — the read-scope gate beside the option-contract skip (#1934)."""
+
+    @staticmethod
+    def _write(lake_root: Path, segment: str, symbol: str, interval: str, frame: object) -> None:
+        import polars as pl
+
+        out = lake_root / "bars" / "NSE" / segment / symbol / interval / "2025"
+        out.mkdir(parents=True, exist_ok=True)
+        assert isinstance(frame, pl.DataFrame)
+        frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
+
+    def test_stale_out_of_scope_stock_skipped_verdict_attested_by_index(
+        self, tmp_path: Path
+    ) -> None:
+        """[FB] sorted order puts CASH/<stock> first: at merge-base (the
+        ``scope=None`` parity arm) a frozen STALE stock partition FAILs the
+        whole-lake verdict; under the read scope it is skipped + counted and
+        the verdict is attested by the IN-scope index."""
+        import polars as pl
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        self._write(tmp_path, "CASH", "RELIANCE", "1minute", df_1m)
+        self._write(tmp_path, "CASH", "RELIANCE", "5minute", stale)
+        self._write(tmp_path, "INDEX", "NIFTY", "1minute", df_1m)
+        self._write(tmp_path, "INDEX", "NIFTY", "5minute", resample_1m_to_tf(df_1m, 5))
+        # Merge-base parity (scope=None — every direct-call suite's arm): the
+        # frozen stock attests the verdict and FAILs forever.
+        unscoped = check_derived_freshness(tmp_path)
+        assert unscoped.status == "FAIL"
+        assert "RELIANCE" in unscoped.detail
+        # Head behavior under the shipped index4 default: skipped + counted,
+        # attested by the index, remediation wording stays true.
+        scoped = check_derived_freshness(tmp_path, scope=resolve_read_scope())
+        assert scoped.status == "PASS"
+        assert "NIFTY" in scoped.detail
+        assert "1 out-of-scope symbol dir(s) skipped" in scoped.detail
+        assert "DEC-UNIVERSE-INDEX-ONLY-001" in scoped.detail
+
+    def test_only_out_of_scope_derived_reads_skip_with_census(self, tmp_path: Path) -> None:
+        """A stock-only derived lake under the scope: honest SKIP + census."""
+        import polars as pl
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        self._write(tmp_path, "CASH", "RELIANCE", "1minute", df_1m)
+        self._write(tmp_path, "CASH", "RELIANCE", "5minute", resample_1m_to_tf(df_1m, 5))
+        result = check_derived_freshness(tmp_path, scope=resolve_read_scope())
+        assert result.status == "SKIP"
+        assert "no symbol has stored derived timeframes" in result.detail
+        assert "1 out-of-scope symbol dir(s) skipped" in result.detail
+
+    def test_unbounded_scope_is_pass_through(self, tmp_path: Path) -> None:
+        """The widen arm: a full scope equals the unfiltered default verdict."""
+        import polars as pl
+        from brutex.config.feed_scope import SCOPE_FULL, FeedScope
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        self._write(tmp_path, "CASH", "RELIANCE", "1minute", df_1m)
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        self._write(tmp_path, "CASH", "RELIANCE", "5minute", stale)
+        full = FeedScope(
+            feed="test", token=SCOPE_FULL, admitted_underlyings=None, fno_underlyings=None
+        )
+        assert check_derived_freshness(tmp_path, scope=full) == check_derived_freshness(tmp_path)

@@ -1651,3 +1651,25 @@ class TestReconcileGateWiring:
         warnings = [e for e in logs if e.get("event") == RECONCILE_MISMATCH_EVENT]
         assert len(warnings) == 2
         assert [e for e in logs if e.get("event") == SYMBOLS_NOT_YET_PULLED_EVENT] == []
+
+
+class TestScoreboardScopeExcludedEcho:
+    """The R2 emit-on-nonzero census on the scoreboard (DEC-UNIVERSE-INDEX-ONLY-001, #1934)."""
+
+    def test_default_zero_is_byte_identical(self) -> None:
+        base = build_completeness_scoreboard([], {}, [], {})
+        assert build_completeness_scoreboard([], {}, [], {}, scope_excluded=0) == base
+        assert "scope_excluded" not in base
+
+    def test_emits_on_nonzero(self) -> None:
+        board = build_completeness_scoreboard([], {}, [], {}, scope_excluded=4)
+        assert board["scope_excluded"] == 4
+        # The named sections are untouched by the echo.
+        assert set(board) == {"spot", "options", "scope_excluded"}
+
+    def test_csv_render_tolerates_the_echo(self) -> None:
+        # scoreboard_to_csv reads the named sections only — the additive echo
+        # can never break the download (structural tolerance pin).
+        board = build_completeness_scoreboard([], {}, [], {}, scope_excluded=4)
+        text = scoreboard_to_csv(board)
+        assert "Data Completeness" in text or text  # renders, never raises

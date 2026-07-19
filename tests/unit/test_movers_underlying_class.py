@@ -653,3 +653,82 @@ class TestDefaultFullPayloadByteIdentity:
             underlying_class="All",
         )
         assert self._dump(omitted) == self._dump(none_arg) == self._dump(all_arg)
+
+
+# ── R7 empty-Stocks-tab honest note (DEC-UNIVERSE-INDEX-ONLY-001, #1934) ───
+
+
+class TestEmptyStocksOutOfScopeNote:
+    """The R7 clause: #1650 is NOT superseded — the Stocks tab serves an
+    honest EMPTY under a stock-excluding scope, with the DEC-naming note."""
+
+    def test_note_names_the_dec_on_the_empty_stocks_tab(self) -> None:
+        note = class_note_suffix(CLASS_STOCKS, 0, empty_stocks_out_of_scope=True)
+        assert note == (
+            " Class: Stocks — no stock underlyings in scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+        )
+
+    def test_flag_is_inert_for_indices_and_all(self) -> None:
+        assert class_note_suffix(CLASS_ALL, 0, empty_stocks_out_of_scope=True) == ""
+        assert (
+            class_note_suffix(CLASS_INDICES, 0, empty_stocks_out_of_scope=True)
+            == " Class: Indices."
+        )
+
+    def test_default_false_is_byte_identical(self) -> None:
+        assert class_note_suffix(CLASS_STOCKS, 3) == class_note_suffix(
+            CLASS_STOCKS, 3, empty_stocks_out_of_scope=False
+        )
+
+    def test_spot_builder_emits_the_clause_only_out_of_scope_and_empty(self) -> None:
+        from brutex.dashboard.movers_snapshot import build_snapshot_payload
+
+        def _payload(*, stocks_in_scope: bool, snaps: list | None = None) -> dict:
+            return build_snapshot_payload(
+                snaps if snaps is not None else [],
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                top_n=10,
+                skipped=0,
+                underlying_class="Stocks",
+                stocks_in_scope=stocks_in_scope,
+            )
+
+        scoped = _payload(stocks_in_scope=False)
+        assert "no stock underlyings in scope (DEC-UNIVERSE-INDEX-ONLY-001)" in scoped["note"]
+        # Under full scope an empty Stocks tab is a genuine no-data state —
+        # the DEC clause would be FALSE wording and must never emit.
+        wide = _payload(stocks_in_scope=True)
+        assert "DEC-UNIVERSE-INDEX-ONLY-001" not in wide["note"]
+        # A NON-empty Stocks tab never carries the clause even out of scope
+        # (a widened union serving stocks reads the plain class note).
+        served = _payload(stocks_in_scope=False, snaps=_spot_snaps())
+        assert "no stock underlyings in scope" not in served["note"]
+
+    def test_futures_and_options_builders_emit_the_clause(self) -> None:
+        from brutex.dashboard.movers_futures import build_futures_payload
+        from brutex.dashboard.movers_options import build_options_payload
+
+        fut = build_futures_payload(
+            [],
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class="Stocks",
+            stocks_in_scope=False,
+        )
+        assert "no stock underlyings in scope (DEC-UNIVERSE-INDEX-ONLY-001)" in fut["note"]
+        opt = build_options_payload(
+            [],
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class="Stocks",
+            stocks_in_scope=False,
+        )
+        assert "no stock underlyings in scope (DEC-UNIVERSE-INDEX-ONLY-001)" in opt["note"]

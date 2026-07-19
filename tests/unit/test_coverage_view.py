@@ -405,3 +405,32 @@ class TestBuildOptionCoveragePayload:
         payload = build_option_coverage_payload(iter([_option("NIFTY", series=1, bars=3)]))
         assert payload["headline"]["total_bars"] == 3
         assert payload["rows"][0]["underlying"] == "NIFTY"
+
+
+class TestScopeExcludedEcho:
+    """The R2/R9 emit-on-nonzero census echo (DEC-UNIVERSE-INDEX-ONLY-001, #1934)."""
+
+    def test_spot_payload_default_zero_is_byte_identical(self) -> None:
+        # The default (unfiltered scan / index-only lake) adds NO key.
+        assert build_spot_coverage_payload([], scope_excluded=0) == build_spot_coverage_payload([])
+        assert "scope_excluded" not in build_spot_coverage_payload([_spot()])
+
+    def test_spot_payload_emits_on_nonzero(self) -> None:
+        payload = build_spot_coverage_payload([_spot()], scope_excluded=3)
+        assert payload["scope_excluded"] == 3
+        # Headline + rows untouched by the echo.
+        assert payload["headline"] == {"datasets": 1, "total_bars": 2}
+
+    def test_option_payload_default_zero_is_byte_identical(self) -> None:
+        rows = [_option("NIFTY", series=1, bars=3)]
+        assert build_option_coverage_payload(
+            rows, scope_excluded=0
+        ) == build_option_coverage_payload(rows)
+        assert "scope_excluded" not in build_option_coverage_payload(rows)
+
+    def test_option_payload_emits_on_nonzero(self) -> None:
+        payload = build_option_coverage_payload(
+            [_option("NIFTY", series=1, bars=3)], scope_excluded=2
+        )
+        assert payload["scope_excluded"] == 2
+        assert payload["headline"]["underlyings"] == 1

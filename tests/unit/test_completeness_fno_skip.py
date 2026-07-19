@@ -188,3 +188,127 @@ def test_list_candle_datasets_interval_bound(mixed_lake: Path) -> None:
     """The interval bound keeps only the requested interval directories."""
     listed = list_candle_datasets(mixed_lake, intervals=SPOT_VERDICT_INTERVALS)
     assert {d["interval"] for d in listed} == {"1minute", "1day"}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R2 read-scope screen on the verdict scan (DEC-UNIVERSE-INDEX-ONLY-001, #1934)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.config.feed_scope import SCOPE_FULL, FeedScope, resolve_feed_scope  # noqa: E402
+from brutex.dashboard.db_view import (  # noqa: E402
+    ScopedSummaryRows,
+    summary_rows_scope_excluded,
+)
+
+_FULL_SCOPE = FeedScope(
+    feed="test", token=SCOPE_FULL, admitted_underlyings=None, fno_underlyings=None
+)
+
+
+@pytest.fixture
+def stock_lake(mixed_lake: Path) -> Path:
+    """The mixed lake + a stored-only STOCK spot dataset (the R2 target class)."""
+    _write(mixed_lake, segment="CASH", symbol="RELIANCE", interval="1minute")
+    _write(mixed_lake, segment="CASH", symbol="RELIANCE", interval="1day")
+    return mixed_lake
+
+
+class TestVerdictScanReadScope:
+    """R2: the verdict wrapper's bounded-scope screen (design §3 R2)."""
+
+    def test_bounded_scope_excludes_stock_datasets_and_counts(self, stock_lake: Path) -> None:
+        """[FB] a stored stock spot dataset is excluded + counted under index4.
+
+        At merge-base the wrapper had no ``scope`` seam and the stock rows
+        were served (the route-level fails-before twin drives the REAL
+        ``/coverage/spot``); at head the bounded scope excludes them at
+        DISCOVERY and the census rides the returned rows.
+        """
+        conn = duckdb.connect()
+        try:
+            rows = summarize_spot_verdict_datasets(
+                conn, stock_lake, scope=resolve_feed_scope("groww")
+            )
+        finally:
+            conn.close()
+        symbols = {r["symbol"] for r in rows}
+        assert "RELIANCE" not in symbols
+        # The DRIFTED index dir (own-exchange prefix) is recovered THEN
+        # admitted — the recovery-ordering pin (§6#6).
+        assert symbols == {"NSE-NIFTY"}
+        assert isinstance(rows, ScopedSummaryRows)
+        # DISTINCT symbols, not datasets: RELIANCE holds 1minute + 1day (two
+        # datasets) yet counts ONCE.
+        assert rows.scope_excluded == 1
+        assert summary_rows_scope_excluded(rows) == 1
+
+    def test_bounded_scope_skips_excluded_aggregates(
+        self, stock_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The R2 economy: an excluded dataset never reaches the footer read."""
+        sources: list[str] = []
+        real = db_view._aggregate_parquet_resilient  # pyright: ignore[reportPrivateUsage] — whitebox counter
+
+        def _counting(
+            conn: Any, directory: Path, sql: str, *, source: str
+        ) -> list[tuple[Any, ...]]:
+            sources.append(source)
+            return real(conn, directory, sql, source=source)
+
+        monkeypatch.setattr(db_view, "_aggregate_parquet_resilient", _counting)
+        conn = duckdb.connect()
+        try:
+            summarize_spot_verdict_datasets(conn, stock_lake, scope=resolve_feed_scope("groww"))
+        finally:
+            conn.close()
+        assert len(sources) == 2, sources  # the two NSE-NIFTY verdict datasets only
+        assert all("RELIANCE" not in s for s in sources)
+
+    def test_default_none_is_unfiltered_byte_identical(self, stock_lake: Path) -> None:
+        """Law 0: ``scope=None`` (every legacy caller) serves the stock rows."""
+        conn = duckdb.connect()
+        try:
+            default_rows = summarize_spot_verdict_datasets(conn, stock_lake)
+            explicit_none = summarize_spot_verdict_datasets(conn, stock_lake, scope=None)
+        finally:
+            conn.close()
+        assert default_rows == explicit_none
+        assert {r["symbol"] for r in default_rows} == {"NSE-NIFTY", "RELIANCE"}
+        assert not isinstance(default_rows, ScopedSummaryRows)
+        assert summary_rows_scope_excluded(default_rows) == 0
+
+    def test_unbounded_scope_is_pass_through(self, stock_lake: Path) -> None:
+        """The widen arm: a ``full`` scope equals the unfiltered default."""
+        conn = duckdb.connect()
+        try:
+            default_rows = summarize_spot_verdict_datasets(conn, stock_lake)
+            full_rows = summarize_spot_verdict_datasets(conn, stock_lake, scope=_FULL_SCOPE)
+        finally:
+            conn.close()
+        assert full_rows == default_rows
+        assert not isinstance(full_rows, ScopedSummaryRows)
+
+    def test_index_only_lake_bounded_scope_zero_census(self, mixed_lake: Path) -> None:
+        """An index-only lake under the bounded scope: same rows, zero census."""
+        conn = duckdb.connect()
+        try:
+            unfiltered = summarize_spot_verdict_datasets(conn, mixed_lake)
+            bounded = summarize_spot_verdict_datasets(
+                conn, mixed_lake, scope=resolve_feed_scope("groww")
+            )
+        finally:
+            conn.close()
+        assert list(bounded) == list(unfiltered)
+        assert isinstance(bounded, ScopedSummaryRows)
+        assert bounded.scope_excluded == 0
+
+    def test_walk_admit_seam_default_none_never_consults_scope(self, stock_lake: Path) -> None:
+        """`summarize_spot_datasets(admit=None)` is parameter-driven — the
+        conftest-forced index4 env can never filter a defaulted walk (the
+        load_lake_spans cold-start contract's structural half)."""
+        conn = duckdb.connect()
+        try:
+            rows = summarize_spot_datasets(conn, stock_lake)
+        finally:
+            conn.close()
+        assert "RELIANCE" in {r["symbol"] for r in rows}

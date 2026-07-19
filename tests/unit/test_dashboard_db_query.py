@@ -3690,3 +3690,120 @@ class TestFnoGreeksProjection:
         )
         assert out["rows"] == []
         assert out["columns"][:2] == ["timestamp", "iv"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# R9 read-scope screen on the option census (DEC-UNIVERSE-INDEX-ONLY-001, #1934)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.config.feed_scope import SCOPE_FULL, FeedScope, resolve_feed_scope  # noqa: E402
+from brutex.dashboard.db_view import (  # noqa: E402
+    ScopedSummaryRows,
+    summary_rows_scope_excluded,
+)
+
+_R9_FULL_SCOPE = FeedScope(
+    feed="test", token=SCOPE_FULL, admitted_underlyings=None, fno_underlyings=None
+)
+_STOCK_OPT_PK = "NSE_FNO|500325|MONTH|1|ATM|CALL"
+
+
+class TestSummarizeOptionDatasetsScope:
+    """R9 — the POST-AGGREGATE row filter on the /coverage/options census."""
+
+    def _seed(self, lake: Path) -> None:
+        _write_options(lake, underlying_symbol="NIFTY")
+        _write_options(lake, partition_key=_STOCK_OPT_PK, underlying_symbol="RELIANCE")
+
+    def test_bounded_scope_excludes_stock_rows_and_counts(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """[FB] a stored stock underlying's census row is excluded + counted."""
+        self._seed(tmp_path)
+        with capture_logs() as logs:
+            rows = summarize_option_datasets(
+                store.connection, tmp_path, scope=resolve_feed_scope("groww")
+            )
+        assert [r["underlying"] for r in rows] == ["NIFTY"]
+        assert isinstance(rows, ScopedSummaryRows)
+        assert rows.scope_excluded == 1
+        assert summary_rows_scope_excluded(rows) == 1
+        events = [e for e in logs if e["event"] == "coverage.options.scope_excluded"]
+        assert len(events) == 1
+        assert events[0]["excluded"] == 1
+        assert events[0]["dec"] == "DEC-UNIVERSE-INDEX-ONLY-001"
+
+    def test_default_none_is_unfiltered_byte_identical(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """Law 0: ``scope=None`` (every legacy caller) serves the stock rows."""
+        self._seed(tmp_path)
+        rows = summarize_option_datasets(store.connection, tmp_path)
+        assert [r["underlying"] for r in rows] == ["NIFTY", "RELIANCE"]
+        assert not isinstance(rows, ScopedSummaryRows)
+        assert summary_rows_scope_excluded(rows) == 0
+
+    def test_unbounded_scope_is_pass_through(self, store: InstrumentStore, tmp_path: Path) -> None:
+        self._seed(tmp_path)
+        rows = summarize_option_datasets(store.connection, tmp_path, scope=_R9_FULL_SCOPE)
+        assert rows == summarize_option_datasets(store.connection, tmp_path)
+        assert not isinstance(rows, ScopedSummaryRows)
+
+    def test_index_only_tree_bounded_scope_zero_census(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """An index-only options tree: same rows, zero census, NO exclusion log."""
+        _write_options(tmp_path, underlying_symbol="NIFTY")
+        with capture_logs() as logs:
+            rows = summarize_option_datasets(
+                store.connection, tmp_path, scope=resolve_feed_scope("groww")
+            )
+        assert list(rows) == list(summarize_option_datasets(store.connection, tmp_path))
+        assert isinstance(rows, ScopedSummaryRows)
+        assert rows.scope_excluded == 0
+        assert not [e for e in logs if e["event"] == "coverage.options.scope_excluded"]
+
+    def test_junk_exch_id_excluded_and_counted_under_bounded_scope(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The §3.5 totality law: an uncoercible ``exch_id`` row is excluded."""
+        _write_options(tmp_path, underlying_symbol="NIFTY")
+        OptionParquetWriter(lake_root=tmp_path).write(
+            partition_key="XEQ_FNO|77|MONTH|1|ATM|CALL",
+            coordinate=OptionSeriesCoordinate(
+                exch_id="XEQ",
+                exchange_segment="XEQ_FNO",
+                security_id=77,
+                underlying_symbol="NIFTY",
+                expiry_flag="MONTH",
+                expiry_code=1,
+                strike_offset="ATM",
+            ),
+            bars=[_obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "CE", "105.0")],
+        )
+        rows = summarize_option_datasets(
+            store.connection, tmp_path, scope=resolve_feed_scope("groww")
+        )
+        assert [(r["exchange"], r["underlying"]) for r in rows] == [("NSE", "NIFTY")]
+        assert isinstance(rows, ScopedSummaryRows)
+        assert rows.scope_excluded == 1
+        # Pass-through under an unbounded scope (never a raise).
+        full_rows = summarize_option_datasets(store.connection, tmp_path, scope=_R9_FULL_SCOPE)
+        assert {r["exchange"] for r in full_rows} == {"NSE", "XEQ"}
+
+    def test_discovery_surfaces_stay_unfiltered_negative_pin(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The R9 negative pin (the wrong-turn guard, design §3 R9/R5):
+        ``list_option_datasets`` + ``list_option_series`` keep listing the
+        STOCK series — the /db raw viewer is never scope-gated, and neither
+        discovery function even takes a scope parameter (structural)."""
+        import inspect
+
+        self._seed(tmp_path)
+        series = list_option_series(store.connection, tmp_path)
+        datasets = list_option_datasets(tmp_path)
+        assert any(row["underlying_symbol"] == "RELIANCE" for row in series)
+        assert any("500325" in d["series"] for d in datasets)
+        assert "scope" not in inspect.signature(list_option_series).parameters
+        assert "scope" not in inspect.signature(list_option_datasets).parameters
