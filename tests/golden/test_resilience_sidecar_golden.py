@@ -132,11 +132,16 @@ def test_run_identity_goldens_are_unmoved() -> None:
     # reviewed repo-wide golden re-lock) moved the CANONICAL frozen pair —
     # _GOLDEN_RUN_ID f588194f… (the negative-pinned precise-era id, see
     # _PRECISE_ERA_RUN_ID in the canonical suite) → 715212420d2c…, and
-    # _GOLDEN_CONTENT_HASH 18129707c1bf… → ee874356dcf6… . This pin's LAW is
+    # _GOLDEN_CONTENT_HASH 18129707c1bf… → ee874356dcf6… . Refreshed AGAIN at
+    # the W2 metrics-depth #1976 census fold (MIGRATION.md #1974–#1976): the
+    # canonical content hash was re-derived on the folded tree — ee874356… →
+    # 011a494c… (the audited schema-additive delta: EXACTLY the 8
+    # appended-last nullable growth/exit-quality/recency columns; the run_id
+    # 715212… is UNMOVED — run identity untouched). This pin's LAW is
     # unchanged — the resilience annotation pass must mirror whatever the
-    # canonical frozen value is (the canonical suite itself is byte-untouched
-    # by this branch; these literals are copies OF it, never a re-lock of it).
+    # canonical frozen value is (these literals are copies OF the canonical
+    # suite's, never an independent re-lock of it).
     assert _GOLDEN_RUN_ID == "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
     assert (
-        _GOLDEN_CONTENT_HASH == "ee874356dcf6d81cf290eb7d8d7e0d516b668cfcf665c45fca94127ecd4c0789"
+        _GOLDEN_CONTENT_HASH == "011a494ce615aa4551af7d6189f20c4a5eeb34e5416301a4d67d2a4cc61d896c"
     )

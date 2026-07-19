@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 import pytest
 from brutex.data.models import CandleBar
@@ -3551,7 +3551,27 @@ class TestRecencyConcretePersist:
     sweep-persisted row's ``decay_weighted_net_paisa`` is CONCRETE, and —
     because the fixture's bars all sit inside the 24-month window — so is
     its trailing trio, equal to the full-history figures (the projector's
-    no-coercion law depends on this row-level honesty pin)."""
+    no-coercion law depends on this row-level honesty pin).
+
+    RE-DERIVED at the W2 #1976 census fold: main's worst-case re-craft
+    widened ``_trending_bars`` to 45 days, so the fixture now straddles TWO
+    30-day decay age buckets (trades exiting > 30 days before the anchor
+    land in bucket 1 at weight ``0.5**(1/12)``) — decay is CONCRETE but no
+    longer equal to net. HAND-AUDITED bucket layout per persisted mask
+    (session-gap exits, ~one trade/day; bucket key = ``(anchor −
+    exit_ts).days // 30``): mask 2 → net 57_960 = 38_640 (bucket 0) +
+    19_320 (bucket 1); mask 8 → net 54_610 = 38_640 + 15_970; mask 16 →
+    net 79_000 = 56_220 + 22_780. The trailing trio still equals the
+    full-history figures exactly (45 days << the 730-day window)."""
+
+    #: mask_bits → (net_pnl_paisa, bucket-0 pnl, bucket-1 pnl) — the
+    #: hand-audited decay bucket layout above (oracle: per-mask
+    #: ``simulate_trades`` streams bucketed by the GLOBAL anchor law).
+    _EXPECTED_BUCKETS: ClassVar[dict[int, tuple[int, int, int]]] = {
+        2: (57_960, 38_640, 19_320),
+        8: (54_610, 38_640, 15_970),
+        16: (79_000, 56_220, 22_780),
+    }
 
     def test_persisted_rows_carry_concrete_recency_metrics(self, tmp_path: Path) -> None:
         bars = _trending_bars()
@@ -3561,14 +3581,22 @@ class TestRecencyConcretePersist:
                 bars, _make_config(), store=store, dedup=_dedup(), audit=audit
             )
         assert summary.persisted >= 1  # anti-vacuity
-        for row in store.rows():
-            assert row.decay_weighted_net_paisa is not None
-            # The fixture spans days (<< 730), so the whole history is inside
-            # the trailing window AND inside decay bucket 0: the trio equals
-            # the full-history figures and decay == net exactly (weight 1.0).
-            assert row.trailing_net_pnl_paisa == float(row.net_pnl_paisa)
-            assert row.decay_weighted_net_paisa == float(row.net_pnl_paisa)
+        rows = {row.mask_bits: row for row in store.rows()}
+        assert set(rows) == set(self._EXPECTED_BUCKETS)  # the gate-passing trio
+        for mask, (net, bucket0, bucket1) in self._EXPECTED_BUCKETS.items():
+            row = rows[mask]
+            assert row.net_pnl_paisa == net
+            # 45 days << 730: the whole history is inside the trailing
+            # window — the trio equals the full-history figures exactly.
+            assert row.trailing_net_pnl_paisa == float(net)
             assert row.trailing_sharpe_ratio is not None
+            # The decay composite in the combine's own arithmetic (ascending
+            # bucket accumulation of ``pnl · 0.5**(bucket/12)``): bucket 0 at
+            # weight 1.0 + bucket 1 at half-life weight — CONCRETE, positive,
+            # and strictly BELOW net (bucket 1's weight < 1.0).
+            expected_decay = float(bucket0) + bucket1 * 0.5 ** (1 / 12.0)
+            assert row.decay_weighted_net_paisa == expected_decay
+            assert 0.0 < expected_decay < float(net)
 
 
 class TestIterMaskMetricsEmptyBarsShape:
@@ -3615,6 +3643,57 @@ class TestIterMaskMetricsEmptyBarsShape:
         assert "bars must be non-empty" in str(cause)
 
 
+def _sl_spread_bars(n_days: int = 12, per_day: int = 120) -> list[CandleBar]:
+    """The worst-case-rankable gap-up shape that SPREADS ``sl_hit_rate``.
+
+    RE-DERIVED at the W2 #1976 census fold: main's 45-day ``_trending_bars``
+    rides EOD-only exits under the suite default (``sl/tp = None``), so every
+    persisted row read the SAME ``sl_hit_rate == 0.0`` — one distinct value
+    cannot exercise the Door-6 ceiling. This is the sweep-run GOLDEN's
+    rankable gap-up shape (``tests/golden/test_engine_sweep_run_golden.py``
+    ``_bars`` — 7-bar cycles of narrow gap-up TP winners + a shallow bearish
+    bar + a deep bearish SL loss carrier every 4th cycle) rebuilt locally:
+    under ``sl=80 / tp=50`` worst-case fills all 5 masks rank + persist with
+    FIVE distinct hand-audited rates — every loss is an SL stop-out, so
+    ``sl_hit_rate == losing/total``: mask 16 → 21/194 ≈ 0.108247, mask 4 →
+    22/203 ≈ 0.108374, mask 1 → 37/332 ≈ 0.111446, mask 8 → 20/163 ≈
+    0.122699, mask 2 → 11/88 = 0.125.
+    """
+    bars: list[CandleBar] = []
+    cycle = 0
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                close, hi, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish SL loss carrier
+                o = price
+                close, hi, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar (range 0.50 < the SL 0.80)
+                o = price + 3.0
+                close, hi, lo = o + 0.3, o + 0.4, o - 0.1
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
 class TestMaxSlHitRateEnforcement:
     """Door-6 enforcement end-to-end (DEC-METRICS-LOSSRATE-FIRSTCLASS-001
     Stage B): an active ``SweepRunConfig.max_sl_hit_rate`` ceiling gates the
@@ -3623,7 +3702,11 @@ class TestMaxSlHitRateEnforcement:
 
     @staticmethod
     def _run(tmp_path: Path, name: str, **overrides: object) -> ResultsStore:
-        bars = _trending_bars()
+        # The SL/TP pair the spread fixture is hand-audited under (knob
+        # tests override the DOOR, never the fill geometry).
+        overrides.setdefault("sl_paisa", 80)
+        overrides.setdefault("tp_paisa", 50)
+        bars = _sl_spread_bars()
         store = ResultsStore(path=tmp_path / f"{name}.parquet")
         with AuditWriter.open(tmp_path / f"{name}.jsonl") as audit:
             run_persisted_sweep(
