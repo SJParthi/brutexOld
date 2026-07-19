@@ -490,8 +490,18 @@ def scope_revision() -> str:
 
 
 def _revision_token(raw: str | None, active: frozenset[str]) -> str:
-    """Derive the identity token for one ``(raw, active)`` snapshot."""
-    basis = f"{raw!r}|{','.join(sorted(active))}"
+    """Derive the identity token for one ``(raw, active)`` snapshot.
+
+    The active members are repr()-joined (NOT bare-comma-joined): vendor
+    tokens are validated only as non-empty strings, so a comma-bearing token
+    (``"a,b"``) bare-joined would ALIAS two different active-set snapshots
+    onto one token — exactly the registration-widening staleness class this
+    token exists to move on (DEC-UNIVERSE-INDEX-ONLY-001 review item 2; a
+    repr of a str quotes + escapes its content, so the joined form is
+    unambiguous). No in-tree token carries a comma — hardening, matching the
+    already-repr'd env half.
+    """
+    basis = f"{raw!r}|{','.join(repr(feed) for feed in sorted(active))}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 

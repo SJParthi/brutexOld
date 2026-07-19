@@ -328,6 +328,24 @@ class TestActiveFeedsAndReadUnion:
     def test_scope_revision_stable_without_changes(self) -> None:
         assert scope_revision() == scope_revision()
 
+    def test_scope_revision_comma_token_never_aliases_active_sets(self) -> None:
+        """The #1934 review's item-2 hardening: the token basis repr()-joins
+        the active members — vendor tokens are validated only as non-empty
+        strings, so a comma-bearing token (``"a,b"``) BARE-comma-joined would
+        alias the ``{"a", "b"}`` active-set snapshot onto ONE revision token
+        (a §2.5 registration widening could then fail to move a primed
+        read-cache key — the exact staleness class the token exists to
+        prevent). Code-authored-only reachability today (no in-tree token
+        carries a comma) — pinned regardless."""
+        note_feed_registered("a")
+        note_feed_registered("b")
+        split_rev = scope_revision()  # active = {groww, a, b}
+        feed_scope._reset_for_tests()
+        note_feed_registered("a,b")
+        fused_rev = scope_revision()  # active = {groww, "a,b"}
+        # [FB] bare-joined both sorted sets render "a,b,groww" — same token.
+        assert split_rev != fused_rev
+
     def test_unbounded_scope_admits_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The ``None``-set arms: a ``full`` scope admits any pair (pass-through)."""
         monkeypatch.setenv(FEED_SCOPE_ENV, "full")
@@ -376,9 +394,10 @@ class TestReadScopeSnapshot:
         # The scope is the FIRST snapshot's union (groww-only → bounded)...
         assert scope.bounded()
         # ... and the token is the SAME snapshot's token — never the widened
-        # set's (independent oracle: the documented (raw, active) basis).
-        narrow = hashlib.sha256(f"{'gdfl=full'!r}|groww".encode()).hexdigest()[:16]
-        wide = hashlib.sha256(f"{'gdfl=full'!r}|gdfl,groww".encode()).hexdigest()[:16]
+        # set's (independent oracle: the documented (raw, active) basis —
+        # active members repr()-joined, the item-2 delimiter hardening).
+        narrow = hashlib.sha256(f"{'gdfl=full'!r}|{'groww'!r}".encode()).hexdigest()[:16]
+        wide = hashlib.sha256(f"{'gdfl=full'!r}|{'gdfl'!r},{'groww'!r}".encode()).hexdigest()[:16]
         assert token == narrow
         assert token != wide
 
