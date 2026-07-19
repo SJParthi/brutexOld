@@ -136,6 +136,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.period_stats import validate_period_stats
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
@@ -223,8 +224,10 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: ``vix_at_exit`` stamp of its finalist trades, produced by the ONE COMMON
 #: :func:`brutex.engine.reference_wire.aggregate_trade_vix` fold. Full precision,
 #: NEVER rounded; ``None`` = honestly unknown (unstamped run / no VIX bar at any
-#: trade instant / a pre-VIX store), NEVER a fabricated ``0.0``. Appended LAST in
-#: the on-disk column order (the optional-column back-compat template). VIX stays
+#: trade instant / a pre-VIX store), NEVER a fabricated ``0.0``. Appended after
+#: ``deflated_sharpe`` in the on-disk column order (the optional-column
+#: back-compat template; the emit-on-present temporal-stats columns of
+#: DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 append after this trio). VIX stays
 #: REFERENCE ONLY (CLAUDE.md §2 Rule 3): these are deliberately excluded from
 #: :data:`_RANKABLE_FIELDS` and are never an input to the BLAKE3 run identity.
 #: PUBLIC because it is the ONE cross-module source of truth for the trio's
@@ -232,6 +235,21 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: VIX-attribution imports it — never a mirrored literal — so adding a fourth
 #: field here can never silently desync the attribution's nulling/schema gates.
 VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
+#: Utf8 **optional** canonical-JSON temporal-stats columns
+#: (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — appended after ``deflated_sharpe`` (and,
+#: since the club fold, after the VIX trio) per the optional-column LAW (module
+#: docstring): ``str | None = None`` fields
+#: read via ``record.get`` so a pre-extension store loads them as an honest
+#: ``None``. Written EMIT-ON-PRESENT (iff any row carries a value — a pure,
+#: deterministic function of the row set), so the all-None flush stays
+#: BYTE-IDENTICAL to the pre-extension writer (frozen-golden-pinned).
+#: Cell/cross-sum laws live in ONE place: :mod:`brutex.engine.period_stats`.
+_TEMPORAL_JSON_FIELDS: Final[tuple[str, ...]] = (
+    "stats_by_year_json",
+    "stats_by_quarter_json",
+    "stats_by_month_json",
+    "temporal_judged_years_json",
+)
 #: Float64 **nullable** loss/growth metric columns
 #: (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001):
 #: ``loss_rate`` (the losing-side mirror of ``win_rate``) plus the Kelly
@@ -244,8 +262,10 @@ VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 #: CURRENT code always carries concrete floats and ``None`` appears ONLY
 #: when reading a store written BEFORE the columns existed (the Ruling-5
 #: presence-tolerant boundary — the honest unknown). Full precision, NEVER
-#: rounded. Appended LAST in the on-disk column order, AFTER the VIX trio (the
-#: optional-column back-compat template, gap-register ruling 5). Unlike
+#: rounded. Appended LAST in the on-disk column order, AFTER the VIX trio +
+#: the emit-on-present temporal quartet (:data:`_TEMPORAL_JSON_FIELDS`) —
+#: the landed-first-wins re-integration order (the optional-column
+#: back-compat template, gap-register ruling 5). Unlike
 #: VIX these ARE rankable — under the explicit NULLS-LAST total order of
 #: :data:`_NULLABLE_RANKABLE_FIELDS` — and, unlike VIX, each is a PURE
 #: FUNCTION of other stored columns + the run's code (which is inside the
@@ -510,6 +530,28 @@ class ResultRow:
         order law ``vix_min <= vix_mean <= vix_max``. Round-trips as a Parquet
         null when ``None``. NEVER rankable, NEVER in the run identity
         (CLAUDE.md §2 Rule 3).
+    stats_by_year_json, stats_by_quarter_json, stats_by_month_json
+        OPTIONAL canonical-JSON per-period finalist stats
+        (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): ``{"2021": [n_trades,
+        net_pnl_paisa, wins, max_dd_paisa], …}`` with ``"YYYY"`` / ``"YYYYQn"``
+        / ``"YYYY-MM"`` keys — int cells ONLY (exact paisa; ``win_rate`` is
+        derivable, never stored), zero-trade buckets ABSENT. Cross-sum-VALIDATED
+        at construction/load against the row's own ``total_trades`` /
+        ``net_pnl_paisa`` / ``winning_trades`` and the quarter/year == Σ-months
+        identities (:func:`brutex.engine.period_stats.validate_period_stats`),
+        then canonically re-encoded — fabricated cells are structurally
+        impossible. Per-period ``max_dd_paisa`` is realized-at-exit,
+        trade-close-granular, INTRA-PERIOD-RESET — it splits (and so
+        systematically UNDERSTATES) boundary-spanning drawdowns, does NOT roll
+        up across horizons, and never supersedes the row's global
+        ``max_drawdown_paisa``, the ONLY authoritative risk figure. All four
+        temporal columns are all-present or all-``None`` per row (a partial set
+        is a torn capture — rejected).
+    temporal_judged_years_json
+        OPTIONAL canonical-JSON judged-year list (``["2020", …]``) — the
+        serve-time denominator that makes a zero-trade judged year (absent
+        bucket, hollow cell) distinguishable from an out-of-window year (not in
+        this list). Present iff the three stats columns are.
     loss_rate, kelly_fraction, log_growth_at_half_kelly
         The nullable loss/growth metric trio (:data:`GROWTH_FIELDS` —
         DEC-METRICS-LOSSRATE-FIRSTCLASS-001 / DEC-METRICS-KELLY-GROWTH-001),
@@ -549,8 +591,9 @@ class ResultRow:
     ResultsStoreError
         On a malformed ``run_id``, an empty context label, an out-of-range or
         negative-where-absolute money field, a negative or inconsistent trade
-        count, a non-finite metric, a non-finite / negative price, or a VIX
-        trio violating the ``min <= mean <= max`` order law.
+        count, a non-finite metric, a non-finite / negative price, a VIX
+        trio violating the ``min <= mean <= max`` order law, or an
+        invalid / torn / cross-sum-violating temporal column set.
     """
 
     run_id: str
@@ -579,6 +622,12 @@ class ResultRow:
     vix_mean: float | None = None
     vix_min: float | None = None
     vix_max: float | None = None
+    # ── Optional temporal-stats columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001),
+    #    appended after deflated_sharpe + the VIX trio per the optional-column LAW ──
+    stats_by_year_json: str | None = None
+    stats_by_quarter_json: str | None = None
+    stats_by_month_json: str | None = None
+    temporal_judged_years_json: str | None = None
     loss_rate: float | None = None
     kelly_fraction: float | None = None
     log_growth_at_half_kelly: float | None = None
@@ -684,6 +733,45 @@ class ResultRow:
             # Snap to the 2dp tick grid so the row is canonical (DEC-SPOT-PRICE-2DP-001).
             object.__setattr__(self, name, round_money(price))
 
+        self._validate_temporal_columns()
+
+    def _validate_temporal_columns(self) -> None:
+        """Validate + canonicalise the four optional temporal-stats columns.
+
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the columns are all-present or
+        all-``None`` per row (a partial set is a TORN capture — rejected loudly,
+        never half-loaded); when present they are decoded, cross-sum-validated
+        against this row's own totals, and re-encoded CANONICALLY in place
+        (:func:`brutex.engine.period_stats.validate_period_stats` — one law,
+        one home) so the in-memory row is byte-canonical regardless of the
+        stored spelling (the price-snap philosophy — Golden Rule #4).
+        """
+        values = [getattr(self, name) for name in _TEMPORAL_JSON_FIELDS]
+        present = [value for value in values if value is not None]
+        if not present:
+            return
+        if len(present) != len(_TEMPORAL_JSON_FIELDS):
+            missing = [name for name in _TEMPORAL_JSON_FIELDS if getattr(self, name) is None]
+            raise ResultsStoreError(
+                f"ResultRow temporal columns must be all-present or all-None "
+                f"(a partial set is a torn capture); missing: {', '.join(missing)}"
+            )
+        year_json, quarter_json, month_json, judged_json = values
+        try:
+            canonical = validate_period_stats(
+                stats_by_year_json=str(year_json),
+                stats_by_quarter_json=str(quarter_json),
+                stats_by_month_json=str(month_json),
+                temporal_judged_years_json=str(judged_json),
+                total_trades=self.total_trades,
+                net_pnl_paisa=self.net_pnl_paisa,
+                winning_trades=self.winning_trades,
+            )
+        except ValueError as exc:
+            raise ResultsStoreError(f"ResultRow temporal stats invalid: {exc}") from exc
+        for name, value in zip(_TEMPORAL_JSON_FIELDS, canonical, strict=True):
+            object.__setattr__(self, name, value)
+
 
 @dataclass(frozen=True, slots=True)
 class FlushResult:
@@ -786,21 +874,38 @@ class ResultsStore:
         Returns
         -------
         bool
-            ``True`` if the store content changed — the row was newly added OR
-            an existing row was backfill-upgraded (VIX and/or growth fields);
-            ``False`` if the stored row already carried everything *row* knows
-            (the idempotent no-op).
+            ``True`` if the store content changed with a backfill consequence —
+            the row was newly added OR an existing row was backfill-upgraded
+            on a :data:`_BACKFILLABLE_FIELDS` column (VIX and/or
+            growth / exit-quality / recency fields); ``False`` if the stored
+            row already carried everything *row* knows (the idempotent no-op)
+            OR the ONLY change was a temporal ENRICHMENT (below) — per the
+            D16 contract a temporal enrichment never grows the row count and
+            reports ``False`` even though the stored bytes changed.
 
         Raises
         ------
         ResultsStoreError
             If a *different* row is already stored under the same ``run_id`` —
             a run-identity collision means upstream non-determinism and is never
-            silently overwritten (Golden Rule #4). The VIX backfill branch is
-            the ONE sanctioned, directional exception described above.
+            silently overwritten (Golden Rule #4). The nullable-backfill
+            branch (:data:`_BACKFILLABLE_FIELDS`) and the temporal enrichment
+            carve-out are the TWO sanctioned, directional exceptions
+            described below.
         VixTrioConflictError
-            If the ONLY difference is two different known values on a VIX
+            If the difference includes two different known values on a VIX
             field — the VIX lake moved between runs (see the class docstring).
+
+        **Temporal enrichment carve-out (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001,
+        the D16 rule — ships with the columns, never separable):** the
+        same-run_id conflict compare covers every REQUIRED field ALWAYS; for
+        the four optional :data:`_TEMPORAL_JSON_FIELDS`, ``None`` on either
+        side is NOT a conflict and the POPULATED value WINS (a deterministic
+        enrichment-in-place, logged ``results_store.temporal_enriched``), so a
+        capture-toggled redo over an existing store enriches instead of
+        crashing mid-grid. Both-present-and-DIFFERENT stays a conflict: the
+        stats are a pure function of the trades, which are a pure function of
+        the run identity — a true mismatch is a reproducibility breach.
         """
         existing = self._rows.get(row.run_id)
         if existing is not None:
@@ -811,7 +916,10 @@ class ResultsStore:
                 for f in fields(ResultRow)
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
-            if any(name not in _BACKFILLABLE_FIELDS for name in differing):
+            if any(
+                name not in _BACKFILLABLE_FIELDS and name not in _TEMPORAL_JSON_FIELDS
+                for name in differing
+            ):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
                     # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
@@ -834,12 +942,51 @@ class ResultsStore:
                     f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
                     f"map to one result (Golden Rule #4) — refusing to overwrite."
                 )
-            merged = _merge_nullable_backfill(existing, row)
+            # Only the sanctioned overlay families (the backfillable nullable
+            # columns and/or the temporal columns) differ — apply each
+            # family's directional merge.
+            merged = existing
+            if any(name in _TEMPORAL_JSON_FIELDS for name in differing):
+                # Align every backfillable nullable field so the enrichment
+                # helper's non-temporal equality precondition holds; the
+                # nullable backfill merge runs separately below.
+                aligned_values: dict[str, object] = {
+                    name: getattr(merged, name) for name in sorted(_BACKFILLABLE_FIELDS)
+                }
+                aligned = replace(row, **aligned_values)  # type: ignore[arg-type]
+                enriched = _merge_temporal_enrichment(merged, aligned)
+                if enriched is None:
+                    _LOG.error(
+                        "results_store.conflict", run_id=row.run_id, differing_fields=differing
+                    )
+                    raise ResultsStoreError(
+                        f"run-identity conflict for {row.run_id}: a different result is already "
+                        f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
+                        f"map to one result (Golden Rule #4) — refusing to overwrite."
+                    )
+                if enriched != merged:
+                    _LOG.info(
+                        "results_store.temporal_enriched",
+                        run_id=row.run_id,
+                        enriched_fields=tuple(
+                            name
+                            for name in _TEMPORAL_JSON_FIELDS
+                            if getattr(merged, name) is None and getattr(enriched, name) is not None
+                        ),
+                    )
+                merged = enriched
+            if any(name in _BACKFILLABLE_FIELDS for name in differing):
+                # The per-family directional union (typed value-vs-value
+                # conflicts raise inside) — temporal enrichment above only
+                # touched temporal fields, so merged's backfillable fields
+                # still equal existing's here.
+                merged = _merge_nullable_backfill(merged, row)
             if merged == existing:
                 # Directional no-op: the incoming row is strictly LESS informed
-                # (it only turns known backfillable values into None) — the
-                # stored row already carries the union, nothing changes.
+                # (it only turns known values into None) — the stored row
+                # already carries the union, nothing changes.
                 return False
+            self._rows[row.run_id] = merged
             vix_backfilled = tuple(
                 name
                 for name in VIX_FIELDS
@@ -855,37 +1002,25 @@ class ResultsStore:
                 for name in EXIT_QUALITY_FIELDS
                 if getattr(existing, name) is None and getattr(merged, name) is not None
             )
-            if vix_backfilled:
-                _LOG.info(
-                    "results_store.vix_backfill",
-                    run_id=row.run_id,
-                    backfilled_fields=vix_backfilled,
-                )
-            if growth_backfilled:
-                _LOG.info(
-                    "results_store.growth_backfill",
-                    run_id=row.run_id,
-                    backfilled_fields=growth_backfilled,
-                )
-            if exit_quality_backfilled:
-                _LOG.info(
-                    "results_store.exit_quality_backfill",
-                    run_id=row.run_id,
-                    backfilled_fields=exit_quality_backfilled,
-                )
             recency_backfilled = tuple(
                 name
                 for name in RECENCY_FIELDS
                 if getattr(existing, name) is None and getattr(merged, name) is not None
             )
-            if recency_backfilled:
-                _LOG.info(
-                    "results_store.recency_backfill",
-                    run_id=row.run_id,
-                    backfilled_fields=recency_backfilled,
-                )
-            self._rows[row.run_id] = merged
-            return True
+            for event, names in (
+                ("results_store.vix_backfill", vix_backfilled),
+                ("results_store.growth_backfill", growth_backfilled),
+                ("results_store.exit_quality_backfill", exit_quality_backfilled),
+                ("results_store.recency_backfill", recency_backfilled),
+            ):
+                if names:
+                    _LOG.info(event, run_id=row.run_id, backfilled_fields=names)
+            # True iff some backfillable field was upgraded; a temporal-only
+            # enrichment changed the bytes but not the row count — the D16
+            # contract reports False for it.
+            return bool(
+                vix_backfilled or growth_backfilled or exit_quality_backfilled or recency_backfilled
+            )
         self._rows[row.run_id] = row
         return True
 
@@ -1037,13 +1172,23 @@ class ResultsStore:
             # cell-skip contract) instead of misreading a reference-only
             # annotation clash as verdict-grade file damage.
             raise
-        except (ResultsStoreError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        except (
+            ResultsStoreError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ArithmeticError,
+            RecursionError,
+        ) as exc:
             # ANY schema/decode failure — a missing required column (KeyError),
             # a null in a required cell (TypeError), a wrong-dtype value
-            # (ValueError / decimal.InvalidOperation ⊂ ArithmeticError), or row
+            # (ValueError / decimal.InvalidOperation ⊂ ArithmeticError), row
             # content failing ResultRow validation / the in-file duplicate
-            # conflict (ResultsStoreError) — surfaces as the typed damage
-            # class naming the store path, never a raw error (G14).
+            # conflict (ResultsStoreError), or a pathologically nested JSON
+            # temporal cell (RecursionError — primary mapping lives in
+            # period_stats._loads; this arm is the defence-in-depth belt) —
+            # surfaces as the typed damage class naming the store path, never
+            # a raw error (G14).
             raise ResultsStoreSchemaError(
                 f"results store at {path} is not decodable as the current "
                 f"ResultRow schema (old-schema / foreign / damaged file): {exc!r}"
@@ -1078,20 +1223,49 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
-        for name in (*VIX_FIELDS, *GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
-            # The nullable REFERENCE-ONLY VIX trio + the nullable growth trio
-            # + the nullable exit-quality column + the nullable recency
-            # family — appended LAST, in that order (the optional-column
-            # back-compat template, each generation strictly after the
-            # previous one); None → Parquet null.
+        for name in VIX_FIELDS:
+            # The nullable REFERENCE-ONLY VIX trio (the optional-column
+            # back-compat template); None → Parquet null.
+            columns[name] = [getattr(row, name) for row in ordered]
+
+        # EMIT-ON-PRESENT temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001):
+        # written iff ANY row carries a non-None value — a PURE, deterministic
+        # function of the row set (same rows ⇒ same presence verdict ⇒ same
+        # schema ⇒ same bytes), so re-flushing an unchanged store stays
+        # byte-identical (Golden Rule #4) AND the all-None flush keeps its
+        # pre-extension column ABSENCE (pinned by the frozen goldens + the
+        # fixture bytes-equality test). The quartet keeps its LANDED position
+        # (strictly after the VIX trio — the landed-first-wins
+        # re-integration ruling); the growth / exit-quality / recency
+        # families append strictly AFTER it below.
+        temporal_present = any(
+            getattr(row, name) is not None for row in ordered for name in _TEMPORAL_JSON_FIELDS
+        )
+        if temporal_present:
+            for name in _TEMPORAL_JSON_FIELDS:
+                # None keeps None (→ Parquet null) for rows without capture.
+                columns[name] = [getattr(row, name) for row in ordered]
+
+        for name in (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS):
+            # The nullable growth trio + the nullable exit-quality column +
+            # the nullable recency family — appended LAST, in that order,
+            # strictly AFTER the temporal quartet's landed position (the
+            # optional-column back-compat template, each generation strictly
+            # after the previous one); None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices → the VIX trio → the growth trio →
-        # the exit-quality column LAST
+        # metrics → deflated → prices → the VIX trio → [temporal,
+        # emit-on-present, at its LANDED position] → the growth trio → the
+        # exit-quality column → the recency family LAST — each optional
+        # family appended at its own introduction point, landed-first-wins,
         # for legacy-file back-compat) for a reproducible byte stream.
+        # The SCHEMA dict governs the frame's column ORDER (probed): it must
+        # spell the ruled on-disk order exactly — … prices → VIX → [temporal,
+        # emit-on-present, at its LANDED position] → growth → exit-quality →
+        # recency LAST (the landed-first-wins re-integration ruling).
         df = pl.DataFrame(
             columns,
             schema={
@@ -1105,10 +1279,12 @@ class ResultsStore:
                         *_NULLABLE_METRIC_FIELDS,
                         *_PRICE_FIELDS,
                         *VIX_FIELDS,
-                        *GROWTH_FIELDS,
-                        *EXIT_QUALITY_FIELDS,
-                        *RECENCY_FIELDS,
                     ),
+                    pl.Float64,
+                ),
+                **(dict.fromkeys(_TEMPORAL_JSON_FIELDS, pl.Utf8) if temporal_present else {}),
+                **dict.fromkeys(
+                    (*GROWTH_FIELDS, *EXIT_QUALITY_FIELDS, *RECENCY_FIELDS),
                     pl.Float64,
                 ),
             },
@@ -1418,6 +1594,13 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     old-schema file, wrapped by :meth:`ResultsStore.load` into
     :class:`ResultsStoreSchemaError`.
     """
+    # Optional temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — the SAME
+    # presence-tolerant record.get law: absent column OR stored null → None
+    # (Utf8 cells, so the float helper does not apply).
+    year_json = record.get("stats_by_year_json")
+    quarter_json = record.get("stats_by_quarter_json")
+    month_json = record.get("stats_by_month_json")
+    judged_json = record.get("temporal_judged_years_json")
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
@@ -1456,6 +1639,45 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
         max_drawdown_pct=float(record["max_drawdown_pct"]),  # type: ignore[arg-type]
         avg_entry_price=Decimal(str(record["avg_entry_price"])),
         avg_exit_price=Decimal(str(record["avg_exit_price"])),
+        stats_by_year_json=None if year_json is None else str(year_json),
+        stats_by_quarter_json=None if quarter_json is None else str(quarter_json),
+        stats_by_month_json=None if month_json is None else str(month_json),
+        temporal_judged_years_json=None if judged_json is None else str(judged_json),
+    )
+
+
+def _merge_temporal_enrichment(existing: ResultRow, row: ResultRow) -> ResultRow | None:
+    """The D16 append-enrichment merge — or ``None`` when the pair is a true conflict.
+
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: two rows for one run-identity may
+    LEGALLY differ ONLY in the four optional temporal columns, and only in the
+    ``None``-vs-populated direction (a capture-toggled redo re-computed the
+    SAME finalist with capture on/off). Field-wise: any non-temporal
+    difference ⇒ ``None`` (conflict); a temporal field populated on BOTH sides
+    with different bytes ⇒ ``None`` (the stats are a pure function of the run
+    identity — a mismatch is a reproducibility breach); else the populated
+    value wins per field and the merged row is returned. Per-row all-or-none
+    validation (``_validate_temporal_columns``) guarantees the merge never
+    manufactures a mixed-capture row.
+    """
+    for f in fields(ResultRow):
+        if f.name in _TEMPORAL_JSON_FIELDS:
+            continue
+        if getattr(existing, f.name) != getattr(row, f.name):
+            return None
+    merged: dict[str, str | None] = {}
+    for name in _TEMPORAL_JSON_FIELDS:
+        ours: str | None = getattr(existing, name)
+        theirs: str | None = getattr(row, name)
+        if ours is not None and theirs is not None and ours != theirs:
+            return None
+        merged[name] = ours if ours is not None else theirs
+    return replace(
+        existing,
+        stats_by_year_json=merged["stats_by_year_json"],
+        stats_by_quarter_json=merged["stats_by_quarter_json"],
+        stats_by_month_json=merged["stats_by_month_json"],
+        temporal_judged_years_json=merged["temporal_judged_years_json"],
     )
 
 

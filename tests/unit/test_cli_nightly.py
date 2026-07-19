@@ -887,3 +887,54 @@ def test_status_deadman_alert_raise_never_breaks_status(
     )
     assert rc == 0  # best-effort: the read-only status command never breaks
     assert "dead-man: MISSED" in capsys.readouterr().out
+
+
+# ── eager apriori env validation (DEC-SWEEP-APRIORI-DEFAULT-001 #1752, round 2) ──
+
+
+@pytest.mark.parametrize("conditions", [None, "0,1,2"])
+def test_run_junk_apriori_env_refuses_eagerly_pre_chain(
+    conditions: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review fix round 2: the nightly's default ``--k`` is the extinction
+    token, so a SET-but-junk ``BRUTEX_SWEEP_APRIORI`` must be a cron-red
+    ``EXIT_USER_ERROR`` BEFORE any chain link (collision probe / locks /
+    backup / pull) — never a mid-chain sweep-leg failure hours in. Both the
+    default-conditions and explicit ``--conditions`` arms resolve the SAME
+    eager plan (then discard it — validation only)."""
+    lake, _results = _mini_lake(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "ture")
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "brutex.nightly.run.run_nightly", lambda *a, **k: called.__setitem__("n", 1)
+    )
+    argv = ["nightly", "run", "--lake-root", str(lake)]
+    if conditions is not None:
+        argv += ["--conditions", conditions]
+    rc = cli.main(argv)
+    assert rc == cli.EXIT_USER_ERROR
+    err = capsys.readouterr().err
+    assert "BRUTEX_SWEEP_APRIORI" in err
+    assert "is not a recognised value" in err
+    assert called["n"] == 0  # the chain NEVER started
+
+
+def test_run_legacy_numeric_k_never_reads_the_junk_apriori_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The legacy numeric ``--k`` arm never reads the env (the resolver's
+    byte-identity mandate) — the same junk value stays SILENT and the chain
+    runs (the shipped tri-state opt-in semantics: junk is silent-OFF there)."""
+    lake, results = _mini_lake(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "ture")
+    monkeypatch.setattr("brutex.nightly.run.run_nightly", lambda *a, **k: _green_report(results))
+    rc = cli.main(["nightly", "run", "--lake-root", str(lake), "--k", "1,2"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "BRUTEX_SWEEP_APRIORI" not in captured.err
+    assert "🌙 Nightly" in captured.out  # the chain genuinely ran

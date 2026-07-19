@@ -230,6 +230,14 @@ function bxHarvestFilterOptions(rows) {
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
     if (minPf !== null) { filters.min_pf = minPf; }
+    /* DEC-RESULTS-TRUST-HONESTY-001 (B2a): the min_trades / min_dsr floors —
+       relocated from the pre-refold inline screener script into this panel
+       (the #1552 extraction convention). BXScreener.applyFilters owns the
+       math; a missing stored value is EXCLUDED under an active floor. */
+    var minTrades = num('scMinTrades');
+    if (minTrades !== null) { filters.min_trades = minTrades; }
+    var minDsr = num('scMinDsr');
+    if (minDsr !== null) { filters.min_dsr = minDsr; }
     var maxDd = num('scMaxDd');
     if (maxDd !== null) { filters.max_abs_dd_paisa = maxDd; }
     var lo = num('scVixLo');
@@ -440,7 +448,8 @@ function bxHarvestFilterOptions(rows) {
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMinTrades',
+     'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {

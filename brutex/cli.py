@@ -264,6 +264,213 @@ def parse_condition_ids(raw: str) -> list[int]:
     return bits
 
 
+#: The self-documenting ``--k`` token that selects the Apriori-to-EXTINCTION
+#: exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md #1752) — the
+#: DEFAULT on every grid surface sharing ``_add_sweep_grid_args`` (sweep-all /
+#: sweep-daemon / sweep-verify / nightly). A numeric CSV is the legacy
+#: byte-identical arm; exactly ONE token, no aliases.
+EXTINCTION_K_TOKEN: Final[str] = "extinction"  # noqa: S105 — a --k mode token, not a credential
+
+#: The Apriori frontier's single-``uint64``-limb width — the maximum (exclusive)
+#: condition-bit index the frozen generator accepts (mirrors
+#: ``sweep_apriori._U64_BITS``; a ``>= 64`` bit on the DEFAULT path falls back
+#: to legacy, ruling 10 — the explicit-``--k`` paths keep the generator's own
+#: graceful per-tuple refusal).
+_APRIORI_U64_BITS: Final[int] = 64
+
+#: The pair level — the k=2 rung whose worst-case work is EXACTLY computable at
+#: launch (``C(n, 2) × n_bars``); deeper levels are data-dependent.
+_APRIORI_PAIR_LEVEL: Final[int] = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SweepExplorationPlan:
+    """The resolved sweep exploration mode (DEC-SWEEP-APRIORI-DEFAULT-001).
+
+    Produced by :func:`resolve_sweep_exploration` — a PURE resolution (the
+    resolver never mutates the environment; the CALLERS own the
+    ``BRUTEX_SWEEP_APRIORI`` write so spawn workers inherit it).
+
+    Attributes
+    ----------
+    apriori
+        ``True`` iff the Apriori extinction mode resolved ON (the caller must
+        then ensure ``BRUTEX_SWEEP_APRIORI`` is set for the engine + workers).
+    k_values
+        The resolved k-ladder (extinction: ``[1..n_unique]``, possibly trimmed
+        by an explicit ``--max-combos``) or the legacy explicit list.
+    notes
+        Loud one-line WARN notes the caller prints to stderr (the kill-switch
+        fallback, the u128 fallback, the ladder trim) — empty on the silent
+        arms.
+    """
+
+    apriori: bool
+    k_values: list[int]
+    notes: tuple[str, ...]
+
+
+def resolve_sweep_exploration(
+    k: str,
+    *,
+    condition_bits: Sequence[int],
+    max_combos: int | None,
+    env: Mapping[str, str] = os.environ,
+) -> SweepExplorationPlan:
+    """Resolve the ``--k`` grammar + env law into a :class:`SweepExplorationPlan`.
+
+    DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) — the ONE pure resolver
+    behind every grid surface's ``--k``:
+
+    * A NUMERIC CSV (anything but the token) is the LEGACY arm — parsed exactly
+      as before (``_parse_int_csv``), ``apriori=False``, the environment
+      never read: byte-identical to the pre-flip behavior.
+    * The ``extinction`` token (the new default) resolves the tri-state
+      ``BRUTEX_SWEEP_APRIORI``: unset/blank or truthy ⇒ EXTINCTION mode
+      (``k_values = [1..n_unique]``); an explicit falsy literal is the KILL
+      SWITCH ⇒ the legacy default ``[1, 2]`` + one loud WARN note (never a
+      refusal of an explicitly-passed token); a SET-but-unrecognised value
+      (junk — e.g. a typo'd ``ture``) raises :class:`CliUserError` EAGERLY —
+      after the flip a junk value would otherwise be a SILENT mode flip of the
+      default (Golden Rule #1). Explicit numeric ``--k`` + any env value keeps
+      today's tri-state opt-in semantics byte-identical (junk stays
+      silent-OFF there — the byte-identity mandate covers that path).
+    * u128 forward guard (ruling 10): a resolved condition bit ``>= 64`` on
+      the token arm falls back to the legacy ``[1, 2]`` with one loud WARN —
+      the frozen generator refuses ``>= 64``-bit vocabularies per tuple, so an
+      extinction default there would TUPLE_FAIL every tuple (a stillborn
+      default). Explicit ``--k`` paths keep today's per-tuple graceful refusal.
+    * Explicit ``--max-combos`` × extinction (ruling 9): the ladder is TRIMMED
+      to the contiguous prefix ``1..k_max`` the cap admits (walking k upward,
+      cut at the FIRST k whose raw ``C(n_unique, k)`` exceeds the cap — the
+      extinction walk's own upward march; the symmetric ``C(n, k)`` tail
+      re-entry at very deep k is deliberately NOT admitted), with one loud
+      note naming the cut; a cap that empties the ladder (even ``k=1``
+      refused) raises :class:`CliUserError`. ``effective_max_combos`` then
+      honors the explicit cap verbatim (operator WINS), and the trimmed ladder
+      satisfies the raw-count guard by construction.
+
+    Parameters
+    ----------
+    k
+        The raw ``--k`` value (token or CSV).
+    condition_bits
+        The resolved swept condition bits (``n_unique = len(set(...))``).
+    max_combos
+        The raw ``--max-combos`` (``None`` = not passed — the built-in
+        default, which ``effective_max_combos`` auto-raises in apriori mode).
+    env
+        The environment mapping to read (injectable for tests; NEVER mutated).
+
+    Returns
+    -------
+    SweepExplorationPlan
+        The resolved mode + ladder + loud notes.
+
+    Raises
+    ------
+    CliUserError
+        A junk ``BRUTEX_SWEEP_APRIORI`` value on the token arm, a non-integer
+        legacy CSV token, an EMPTY extinction ladder (zero resolved condition
+        bits — a silent zero-tuple run is never admitted), or an explicit
+        ``--max-combos`` that refuses even ``k=1`` in extinction mode.
+    """
+    if k.strip().lower() != EXTINCTION_K_TOKEN:
+        # LEGACY arm — byte-identical: same parser, env untouched/unread.
+        return SweepExplorationPlan(apriori=False, k_values=_parse_int_csv(k, flag="--k"), notes=())
+    # Lazy imports keep the CLI module top light (the polars-free `version`
+    # fast path) — the resolver runs only on the sweep surfaces.
+    from brutex.engine.combo_mask import count_combos
+    from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+    from brutex.engine.sweep_lookahead import env_flag_tristate
+
+    raw = env.get(SWEEP_APRIORI_ENV)
+    if raw is not None and raw.strip():
+        flag = env_flag_tristate(raw)
+        if flag is False:
+            # The kill switch: legacy default k=1,2 + ONE loud WARN — an
+            # explicitly-passed token is never refused; the WARN says exactly
+            # what happened (ruling 7).
+            return SweepExplorationPlan(
+                apriori=False,
+                k_values=[1, 2],
+                notes=(
+                    f"{SWEEP_APRIORI_ENV}={raw!r} (the kill switch) disables the "
+                    "Apriori extinction default — falling back to the legacy "
+                    "default k=1,2 (byte-identical to the previous default); "
+                    "unset the env var to restore extinction mode, or pass an "
+                    "explicit --k.",
+                ),
+            )
+        if flag is None:
+            # Junk on the DEFAULT path is fail-loud (ruling 7): a typo'd value
+            # must never silently flip the default exploration mode.
+            raise CliUserError(
+                f"{SWEEP_APRIORI_ENV}={raw!r} is not a recognised value "
+                "(1/true/yes/on | 0/false/no/off); refusing to guess the default "
+                "exploration mode — fix the env var or pass an explicit --k"
+            )
+    n_unique = len(set(condition_bits))
+    if n_unique == 0:
+        # An EMPTY ladder is a refusal, never a silent zero-tuple run — and
+        # never the earlier arithmetic lie "C(0,1)=0 > cap" on the trimmed arm
+        # (review fix round 1 n1). Both the capped and uncapped token arms
+        # refuse identically here, before any ladder math.
+        raise CliUserError(
+            "extinction mode resolved an EMPTY k-ladder: zero condition bits "
+            "(n_unique=0) — pass --conditions with at least one bit, or an "
+            "explicit --k"
+        )
+    over_width = sorted(bit for bit in set(condition_bits) if bit >= _APRIORI_U64_BITS)
+    if over_width:
+        # u128 forward guard (ruling 10) — dormant at today's 60-bit vocabulary.
+        note = (
+            f"condition bit {over_width[0]} >= 64: the Apriori frontier is "
+            "u64-only (the frozen generator refuses >=64-bit vocabularies "
+            "per tuple), so the extinction default falls back to the legacy "
+            "k=1,2 for this run — pass an explicit --k to choose the ladder."
+        )
+        if raw is not None and raw.strip():
+            # Reaching here with a set-and-nonblank env means it classified
+            # TRUTHY above (falsy returned, junk raised) — and a truthy env
+            # makes the ENGINE's own apriori_enabled() read ON regardless of
+            # this legacy fallback, so every >=64-bit tuple would STILL
+            # TUPLE_FAIL at the generator's per-tuple guard. Say so honestly
+            # (review fix round 1 n2) instead of implying the fallback alone
+            # yields a clean legacy run.
+            note += (
+                f" NOTE: {SWEEP_APRIORI_ENV}={raw!r} is set truthy, so the engine's "
+                "generator still refuses >=64-bit tuples (TUPLE_FAILED) — unset it "
+                "for a clean legacy run."
+            )
+        return SweepExplorationPlan(apriori=False, k_values=[1, 2], notes=(note,))
+    k_values = list(range(1, n_unique + 1))
+    notes: tuple[str, ...] = ()
+    if max_combos is not None:
+        trimmed: list[int] = []
+        for candidate_k in k_values:
+            if count_combos(candidate_k, n_unique) > max_combos:
+                break
+            trimmed.append(candidate_k)
+        if not trimmed:
+            raise CliUserError(
+                f"--max-combos {max_combos} refuses even k=1 "
+                f"(C({n_unique},1)={n_unique} > {max_combos}) in extinction mode; "
+                "raise --max-combos, omit it, or pass an explicit --k"
+            )
+        if len(trimmed) < len(k_values):
+            cut_k = trimmed[-1] + 1
+            notes = (
+                f"extinction ladder TRIMMED by the explicit --max-combos "
+                f"{max_combos}: k limited to 1..{trimmed[-1]} (the first refused "
+                f"level is k={cut_k}, C({n_unique},{cut_k})="
+                f"{count_combos(cut_k, n_unique)} > {max_combos}); omit "
+                "--max-combos to walk the full ladder under the mask·bar breaker.",
+            )
+        k_values = trimmed
+    return SweepExplorationPlan(apriori=True, k_values=k_values, notes=notes)
+
+
 def sweep_all_exit_code(tuples_failed: int) -> int:
     """Map a completed ``sweep-all`` run's ``tuples_failed`` to its exit code.
 
@@ -369,7 +576,15 @@ def _add_sweep_grid_args(
         help="Comma-separated directions BUY/SELL (default BUY,SELL)",
     )
     parser.add_argument(
-        "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
+        "--k",
+        default=EXTINCTION_K_TOKEN,
+        help=(
+            "Comma-separated conditions-per-combo values, or 'extinction' (the "
+            "default): walk k=1,2,3,… per cell until no combo fires >= min-hits "
+            "bars — provably nothing deeper survives (Apriori anti-monotone). An "
+            "explicit list (e.g. '1,2') runs exactly those k, legacy-style, "
+            "byte-identical to the previous default."
+        ),
     )
     parser.add_argument(
         "--fib-anchors",
@@ -439,7 +654,14 @@ def _add_sweep_grid_args(
         "--max-combos",
         type=int,
         default=None,
-        help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
+        help=(
+            "Refuse any k whose RAW brute-force count C(n,k) exceeds this. Legacy "
+            "mode: the hard cap (default 100000). Extinction/Apriori mode: an "
+            "opt-in belt — when omitted the raw-count cap is auto-raised (logged) "
+            "and the per-level mask·bar budget (BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) "
+            "is the operative guard; when passed it TRIMS the k-ladder to the k it "
+            "admits (noted loudly)."
+        ),
     )
     parser.add_argument(
         "--allow-missing-slices",
@@ -489,13 +711,71 @@ def _add_sweep_grid_args(
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    # ── Overfit/DSR gate — ON BY DEFAULT (DEC-RESULTS-TRUST-HONESTY-001 ·
+    # B2b, a SANCTIONED default-behavior change): every default sweep now
+    # runs the DEC-RANKING-OVERFIT-001 Deflated-Sharpe gate; the paired
+    # --no-overfit-gate flag is the explicit escape. CLI-DEFAULT-ONLY — the
+    # library default SweepRunConfig.overfit stays None (byte-identical
+    # engine contract; the frozen sweep goldens construct configs directly
+    # and pass UNMODIFIED). set_defaults below is the ONE default authority
+    # for the shared flag pair.
     parser.add_argument(
         "--overfit-gate",
         action="store_true",
         dest="overfit_gate",
         help=(
             "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
-            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
+            "per leaderboard (DEC-RANKING-OVERFIT-001); ON by default since "
+            "DEC-RESULTS-TRUST-HONESTY-001 — this flag is the explicit no-op twin "
+            "of --no-overfit-gate"
+        ),
+    )
+    parser.add_argument(
+        "--no-overfit-gate",
+        action="store_false",
+        dest="overfit_gate",
+        help=(
+            "Disable the default-on overfit/DSR gate (DEC-RESULTS-TRUST-HONESTY-001 "
+            "escape hatch) — restores the pre-flip ungated ranking"
+        ),
+    )
+    parser.set_defaults(overfit_gate=True)
+    # ── Temporal-robustness year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) ──
+    # The shipped default is OBSERVE (capture + count would-be kills, filter
+    # nothing) so per-period stats accumulate from day one; the observe→gate
+    # flip is one env var / flag after the operator inspects the first real
+    # grid's strips. Precedence: flag > $BRUTEX_TEMPORAL > observe; junk env
+    # fails loud pre-sweep (the BRUTEX_LOG_LEVEL pattern).
+    parser.add_argument(
+        "--temporal-mode",
+        choices=("off", "observe", "gate"),
+        default=None,
+        dest="temporal_mode",
+        help=(
+            "Temporal-robustness year gate mode (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): "
+            "'observe' (default; capture per-period stats + count would-be kills, filter "
+            "nothing), 'gate' (filter one-lucky-year combos pre-rank), 'off' (no capture, "
+            "byte-identical legacy). Overrides $BRUTEX_TEMPORAL."
+        ),
+    )
+    parser.add_argument(
+        "--temporal-min-profitable-frac",
+        type=float,
+        default=None,
+        dest="temporal_min_profitable_frac",
+        help=(
+            "P1: min fraction of judged years with positive pnl (default 0.5 — "
+            ">= 4 of 7; requires --temporal-mode observe|gate)"
+        ),
+    )
+    parser.add_argument(
+        "--temporal-max-year-share",
+        type=float,
+        default=None,
+        dest="temporal_max_year_share",
+        help=(
+            "P2: max share of the positive pnl mass one judged year may carry "
+            "(default 0.6; requires --temporal-mode observe|gate)"
         ),
     )
     # ── Stage-3 BIPOP-CMA-ES refinement pass (DEC-STAGE3-WIRE-001) ──
@@ -6303,7 +6583,25 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
         to_dt = date.fromisoformat(args.to_date) if args.to_date else None
         if from_dt is not None and to_dt is not None and from_dt > to_dt:
             raise ValueError(f"--from-date {args.from_date} is after --to-date {args.to_date}")
-    except (NightlyEnvError, ValueError) as exc:
+        # DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) review fix
+        # round 2: the nightly's default --k is the extinction token, so a
+        # junk BRUTEX_SWEEP_APRIORI must refuse HERE — cron-red
+        # EXIT_USER_ERROR BEFORE any chain link runs (collision probe /
+        # locks / backup / pull) — never a mid-chain sweep-leg failure hours
+        # in. The resolved plan is DISCARDED (validation only; the sweep leg
+        # re-resolves at launch). An explicit legacy numeric --k never reads
+        # the env (the resolver's byte-identity mandate) — untouched.
+        if (args.k or "").strip().lower() == EXTINCTION_K_TOKEN:
+            resolve_sweep_exploration(
+                args.k,
+                condition_bits=(
+                    parse_condition_ids(args.conditions)
+                    if args.conditions
+                    else default_condition_bits()
+                ),
+                max_combos=args.max_combos,
+            )
+    except (NightlyEnvError, ValueError, CliUserError) as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
@@ -7007,7 +7305,10 @@ def cmd_pull_all_spot(
                 # failed pull); the tail's run_crossverify clears it at the
                 # day's completed material verdict. The day law mirrors the
                 # --auto gate's clock contract (IST wall clock; the injected
-                # `now` seam wins).
+                # `now` seam wins). HONEST (round-1 review MINOR-2): a run
+                # that crosses midnight leaves THIS launch_day's marker
+                # while the tail runs the NEW day — benign + convergent:
+                # the next run's D3 completes launch_day idempotently.
                 from brutex.calendars.nse import now_ist as _now_ist
                 from brutex.crossverify.owed import mark_owed_for_pull
 
@@ -7789,6 +8090,66 @@ def _parse_paisa_list(raw: str) -> list[int | None]:
     return out
 
 
+#: The temporal-gate mode env var (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — the
+#: process-wide lever behind ``--temporal-mode``; junk fails LOUD pre-sweep.
+TEMPORAL_MODE_ENV = "BRUTEX_TEMPORAL"
+#: The legal mode tokens; ``"off"`` disables capture AND gate entirely.
+_TEMPORAL_MODE_TOKENS: tuple[str, ...] = ("off", "observe", "gate")
+#: The SHIPPED rollout default (design graft 2): capture ON + would-be kills
+#: counted/audited, NOTHING filtered — the operator sees kills before
+#: candidates die; the observe→gate flip is one env var + a ledger note.
+_TEMPORAL_DEFAULT_MODE = "observe"
+
+
+def resolve_temporal_config(
+    temporal_mode: str | None,
+    temporal_min_profitable_frac: float | None,
+    temporal_max_year_share: float | None,
+) -> Any:
+    """EAGERLY resolve the sweep's temporal-gate config (fail-loud, pre-sweep).
+
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: precedence is ``--temporal-mode`` >
+    ``$BRUTEX_TEMPORAL`` (case-insensitive; the ``BRUTEX_LOG_LEVEL`` pattern) >
+    the shipped ``observe`` default. ``"off"`` returns ``None`` (byte-identical
+    legacy sweep — and REFUSES stray threshold flags: a silently-ignored knob
+    is a config lie); ``observe``/``gate`` return a validated
+    :class:`~brutex.ranking.temporal.TemporalRobustnessConfig` with any
+    explicit threshold overrides applied. Junk — an unknown env token or an
+    out-of-range threshold — raises :class:`CliUserError` (one clean
+    ``[brutex] …`` line + ``EXIT_USER_ERROR``, never a traceback, never a
+    silent fallback), BEFORE any lake I/O.
+    """
+    from brutex.ranking.temporal import TemporalRobustnessConfig
+
+    if temporal_mode is not None:
+        mode = temporal_mode
+    else:
+        raw = os.environ.get(TEMPORAL_MODE_ENV, "").strip().lower()
+        mode = raw if raw else _TEMPORAL_DEFAULT_MODE
+    if mode not in _TEMPORAL_MODE_TOKENS:
+        raise CliUserError(
+            f"invalid {TEMPORAL_MODE_ENV}/--temporal-mode value {mode!r}; "
+            f"choose one of {', '.join(_TEMPORAL_MODE_TOKENS)}"
+        )
+    if mode == "off":
+        if temporal_min_profitable_frac is not None or temporal_max_year_share is not None:
+            raise CliUserError(
+                "--temporal-min-profitable-frac/--temporal-max-year-share require "
+                "--temporal-mode observe|gate (the temporal gate is off — a "
+                "silently-ignored threshold is refused, never dropped)"
+            )
+        return None
+    kwargs: dict[str, Any] = {"mode": mode}
+    if temporal_min_profitable_frac is not None:
+        kwargs["min_profitable_years_fraction"] = temporal_min_profitable_frac
+    if temporal_max_year_share is not None:
+        kwargs["max_single_year_pnl_share"] = temporal_max_year_share
+    try:
+        return TemporalRobustnessConfig(**kwargs)
+    except ValueError as exc:
+        raise CliUserError(f"invalid temporal gate config: {exc}") from exc
+
+
 def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-tested engine
     *,
     lake_root: Path | None,
@@ -7812,8 +8173,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
     price_source_cells: str = "hlc3:close",
-    overfit_gate: bool = False,
+    # ON by default (DEC-RESULTS-TRUST-HONESTY-001 · B2b — the sanctioned
+    # default flip; --no-overfit-gate / overfit_gate=False is the escape).
+    # The LIBRARY default SweepRunConfig.overfit stays None — this is the
+    # CLI-surface default only.
+    overfit_gate: bool = True,
     dsr_min: float = 0.95,
+    temporal_mode: str | None = None,
+    temporal_min_profitable_frac: float | None = None,
+    temporal_max_year_share: float | None = None,
     options_sim: bool = True,
     options_expiry: str = "weekly",
     options_broker: str = "groww",
@@ -7845,7 +8213,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.data.catalog import Catalog
     from brutex.data.errors import CatalogError
     from brutex.data.timeframes import trading_minutes_for_lake_interval
-    from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
+    from brutex.engine.sweep_apriori import (
+        SWEEP_APRIORI_ENV,
+        apriori_enabled,
+        effective_max_combos,
+        resolve_max_mask_bars,
+    )
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -7876,6 +8249,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.orchestrator.audit import AuditWriter
     from brutex.ranking import OverfitGateConfig
     from brutex.strategies.types import Side
+
+    # Temporal-gate config (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — resolved
+    # EAGERLY, before any lake I/O: a junk $BRUTEX_TEMPORAL / threshold is a
+    # clean one-line CliUserError exit, never a mid-launch traceback and never
+    # a silent fallback. The shipped default is OBSERVE (capture + count,
+    # filter nothing).
+    temporal_config = resolve_temporal_config(
+        temporal_mode, temporal_min_profitable_frac, temporal_max_year_share
+    )
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -8034,8 +8416,39 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = _parse_int_csv(k, flag="--k")
+    # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
+    # #1752): the condition bits parse FIRST (the resolver needs n_unique +
+    # the u128 width guard), then the ONE pure resolver maps the --k grammar +
+    # the BRUTEX_SWEEP_APRIORI tri-state onto the ladder — EAGERLY, before any
+    # lake I/O (the resolve_results_depth_enabled precedent), so a junk env
+    # value on the default path is a clean pre-sweep user-config error.
+    # (The reconcile drops main's interim `k_list = _parse_int_csv(k, ...)`
+    # here — the resolver below OWNS the --k grammar; k_list = exploration.k_values.)
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    try:
+        exploration = resolve_sweep_exploration(
+            k, condition_bits=condition_bits, max_combos=max_combos
+        )
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    for note in exploration.notes:
+        print(f"[brutex] {note}", file=sys.stderr)
+    k_list = exploration.k_values
+    # Workers + the engine guards read this env var (spawn workers inherit
+    # the parent env at pool creation; sweep_run's apriori branch +
+    # effective_max_combos below read only os.environ). setdefault
+    # semantics — a truthy operator value is left verbatim; a SET-but-BLANK
+    # or WHITESPACE-ONLY value (which the resolver classifies exactly like
+    # unset, and which apriori_enabled() reads as OFF) is overwritten too —
+    # the .strip() matches the resolver's own blank classification (review
+    # fix round 1 m1: a bare truthiness check treated "   " as set, leaving
+    # the engine OFF under an extinction banner — a split-brain) — so the
+    # resolved plan and the engine can never disagree. No restore here: a CLI
+    # process exits after the sweep; the ONE in-process embedder
+    # (dashboard run_sweep_from_request) snapshot-restores at its boundary.
+    if exploration.apriori and not (os.environ.get(SWEEP_APRIORI_ENV) or "").strip():
+        os.environ[SWEEP_APRIORI_ENV] = "1"
     # Off-heap dedup-store knobs (R2-SL-F4-F5): validate flag + env EAGERLY —
     # before the lake preload and any store open — so a mistyped knob is a
     # clean user-config error, never a mid-launch traceback (and never a false
@@ -8382,6 +8795,51 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
             )
 
+        # Extinction-mode launch preflight (DEC-SWEEP-APRIORI-DEFAULT-001): name the
+        # mode, the ONE operative hard guard, and the EXACTLY-computable worst-case
+        # level-2 work per loaded slice. Deliberately NO C(60,k) projections and NO
+        # wall-clock estimate — deeper levels are data-dependent, so any such figure
+        # would be fake precision (modeled != measured, Golden Rule #10); the run's
+        # audit artifacts carry the measured per-level curve instead.
+        if exploration.apriori:
+            from brutex.engine.combo_mask import count_combos
+            from brutex.ranking import MIN_TRADES
+
+            budget = resolve_max_mask_bars()
+            n_unique = len(set(condition_bits))
+            print(
+                "[brutex] sweep exploration: APRIORI-TO-EXTINCTION (default). Per cell "
+                f"the k-ladder runs k=1,2,3,… until no combo fires >= {MIN_TRADES} bars "
+                "(natural extinction — provably nothing deeper survives).",
+                file=sys.stderr,
+            )
+            print(
+                f"[brutex] hard guard: per-level mask·bar breaker at {budget} mask·bar "
+                "(BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS; MODELED default, not an "
+                "M4-measured figure). A level exceeding it refuses LOUDLY; that tuple "
+                "and the cell's deeper k are marked TUPLE_FAILED (they would trip "
+                "identically); raise the budget and re-run to explore deeper.",
+                file=sys.stderr,
+            )
+            if _APRIORI_PAIR_LEVEL in exploration.k_values:
+                c2 = count_combos(_APRIORI_PAIR_LEVEL, n_unique)
+                for (slice_symbol, slice_interval), slice_bars in loaded.items():
+                    product = c2 * slice_bars
+                    pct = 100.0 * product / budget
+                    print(
+                        f"[brutex] worst-case level-2 work, exact: "
+                        f"{slice_symbol}/{slice_interval} C({n_unique},2)={c2} x "
+                        f"{slice_bars} bars = {product} mask·bar ({pct:.2f}% of budget)",
+                        file=sys.stderr,
+                    )
+            print(
+                "[brutex] deeper levels are DATA-DEPENDENT — no candidate count or "
+                "wall-clock is projectable before the frontier is built; this run's "
+                "audit artifacts carry the measured per-level curve (modeled != "
+                "measured, Golden Rule #10).",
+                file=sys.stderr,
+            )
+
         # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
         # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
         # the last prebuild, a kill-9 mid-incremental-re-derive) would feed the engine
@@ -8512,6 +8970,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         if overfit_gate:
             grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+        if temporal_config is not None:
+            # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: identity-safe (never enters
+            # _tuple_digest / run identity — the overfit precedent), so this
+            # threading changes WHICH rows persist, never any row's bytes.
+            grid_kwargs["temporal"] = temporal_config
         if scope.overridden:
             # Layer-1 opt-out rides the SAME operator decision as the Layer-2
             # override (DEC-ENGINE-SCOPE-GUARD-001) — set ONLY when symbols were
@@ -8682,9 +9145,19 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"(evaluated={summary.evaluated})"
             )
 
+        # The k-axis banner token (DEC-SWEEP-APRIORI-DEFAULT-001): extinction mode
+        # names the ladder + the operative breaker budget instead of dumping the
+        # raw 60-element list; the legacy branch is byte-identical.
+        if exploration.apriori:
+            k_banner = (
+                f"k=1..{exploration.k_values[-1]} (Apriori extinction mode; "
+                f"breaker budget {resolve_max_mask_bars()} mask·bar)"
+            )
+        else:
+            k_banner = f"k={list(grid.k_values)}"
         print(
             f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
-            f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
+            f"{[d.value for d in grid.directions]} × {k_banner} → "
             f"results: {out_root}"
         )
         # AUTOMATIC operator alerts (DEC-TELEGRAM-WIRE-001): a hung sweep worker fires
@@ -8696,9 +9169,30 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         alerter = SweepAlerter()
         # G2 (DEC-SWEEP-UNKILLABLE-CORE-001): the stall policy resolved at launch
         # (default == the exact 300 s identity; env/scaling only ever RAISES it)
-        # governs BOTH the inter-tuple watchdog and the parallel driver below.
+        # governs BOTH the inter-tuple watchdog and the parallel driver below —
+        # combined with the ladder-aware extinction bound
+        # (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 1 m7): a healthy
+        # mid-ladder extinction level legitimately runs HOURS between tuple
+        # completions, so the flat policy default fired false CRITICAL "hung
+        # sweep" Telegram alerts on every default run. Scale the timeout by the
+        # SAME capped ladder-cumulative bound the parallel driver's stall guard
+        # uses (the heaviest tuple: deepest k × the largest loaded slice),
+        # floored at the launch-resolved policy bound. The legacy arm keeps the
+        # policy bound unchanged (explicit --k — deliberately untouched).
+        from brutex.engine.sweep_parallel import apriori_ladder_stall_bound_seconds
+
+        watchdog_timeout = stall_policy.timeout_seconds
+        if exploration.apriori:
+            watchdog_timeout = max(
+                watchdog_timeout,
+                apriori_ladder_stall_bound_seconds(
+                    k=exploration.k_values[-1],
+                    n_unique=len(set(condition_bits)),
+                    n_bars=max(loaded.values()),
+                ),
+            )
         watchdog = SweepWatchdog(
-            timeout_seconds=stall_policy.timeout_seconds,
+            timeout_seconds=watchdog_timeout,
             on_hung=alerter.watchdog_hung_callback(),
         )
         checkpoint = SweepCheckpointStore(
@@ -9075,6 +9569,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     "redo on the next run (exit code non-zero).",
                     file=sys.stderr,
                 )
+                if result.tuples_failed_apriori_budget > 0:
+                    # The mode-aware remediation sentence (DEC-SWEEP-APRIORI-DEFAULT-001):
+                    # a budget trip is target-invariant, so the cell's deeper-k
+                    # tuples fail identically — name the ONE lever.
+                    print(
+                        f"[brutex] {result.tuples_failed_apriori_budget} of these were mask·bar "
+                        "budget trips — that cell's deeper k levels fail identically by "
+                        "construction; raise BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS (or pass an "
+                        "explicit --k) and re-run to explore them (the frozen checkpoint "
+                        "re-runs exactly the refused tuples).",
+                        file=sys.stderr,
+                    )
             if stage3_report.enabled:
                 print(
                     f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
@@ -10063,6 +10569,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         compare_recount,
         plan_expected_stores,
         recorded_audit_facts,
+        recorded_overfit_from_audit,
         verify_identity,
         verify_structural,
     )
@@ -10218,8 +10725,78 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    k_list = _parse_int_csv(k, flag="--k")
+    # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001): the SAME
+    # resolver + env law as cmd_sweep_all — the shared parser flipped verify's
+    # --k default to the extinction token too, so a bare `sweep-verify` on an
+    # extinction tree rebuilds the SAME k-ladder. Condition bits parse FIRST
+    # (the resolver needs n_unique + the u128 width guard).
+    # (The reconcile drops main's interim `k_list = _parse_int_csv(k, ...)`
+    # here — the resolver below OWNS the --k grammar; k_list = exploration.k_values.)
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
+    try:
+        exploration = resolve_sweep_exploration(
+            k, condition_bits=condition_bits, max_combos=max_combos
+        )
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    for note in exploration.notes:
+        print(f"[brutex] {note}", file=sys.stderr)
+    k_list = exploration.k_values
+    if exploration.apriori:
+        # The recount's shadow re-sweep + effective_max_combos read only
+        # os.environ (setdefault semantics; a SET-but-BLANK or
+        # WHITESPACE-ONLY value is overwritten too — the cmd_sweep_all law,
+        # .strip()-matched to the resolver's blank classification; review
+        # fix round 1 m1).
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        if not (os.environ.get(SWEEP_APRIORI_ENV) or "").strip():
+            os.environ[SWEEP_APRIORI_ENV] = "1"
+    # Recorded-mode gate (DEC-SWEEP-APRIORI-DEFAULT-001): n_enumerated is
+    # mode-dependent AND sits in the byte-diffed trial-stats sidecar, so a
+    # wrong-mode recount under an otherwise MATCHED context would read
+    # verdict-grade recount_divergence on a healthy tree (the false-corrupt
+    # hazard). The COMPARAND is the recount's ENGINE-EFFECTIVE mode (review
+    # fix round 1 M3) — the Tier-3 shadow re-sweep obeys os.environ via
+    # apriori_enabled(), NOT the resolver verdict alone: an explicit --k with
+    # BRUTEX_SWEEP_APRIORI exported truthy recounts in apriori mode even
+    # though the resolver said legacy (and, symmetrically, an
+    # explicit-ladder-under-truthy-env tree recorded apriori and re-verified
+    # the same way IS a matched-mode recount — verdict-grade allowed).
+    # Computed AFTER the env setdefault above, so it reads exactly what the
+    # shadow re-sweep will read. A definite recorded-mode ≠ effective-mode is
+    # a CONTEXT mismatch: printed here, folded into the recount `mismatches`
+    # ladder below (refuse → inconclusive; --allow-context-mismatch → compare
+    # with findings degraded to INCONCLUSIVE — never verdict-grade). A
+    # pre-flip / START-less tree reads None → abstain (the code-commit
+    # context gate already protects it). The mode read runs ONLY when it can
+    # matter — a recount was requested OR the default/extinction resolution
+    # is in play (review fix round 1 m2: an explicit-k no-recount verify must
+    # not hard-fail on an unreadable supervisor chain the gate would never
+    # consume; main returned rc 0 on the same tree).
+    recorded_mode: bool | None = None
+    mode_mismatch: str | None = None
+    if recount or exploration.apriori:
+        from brutex.engine.sweep_apriori import apriori_enabled
+        from brutex.engine.sweep_verify import recorded_apriori_from_audit
+
+        effective_apriori = exploration.apriori or apriori_enabled()
+        try:
+            recorded_mode = recorded_apriori_from_audit(out_root)
+        except SweepVerifyError as exc:
+            print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if recorded_mode is not None and recorded_mode != effective_apriori:
+            mode_mismatch = (
+                f"exploration_mode: recorded "
+                f"{'apriori-extinction' if recorded_mode else 'legacy'} vs effective "
+                f"{'apriori-extinction' if effective_apriori else 'legacy'} (the mode "
+                "the recount's shadow re-sweep runs under) — n_enumerated in the "
+                "trial-stats sidecar is mode-dependent, so a wrong-mode recount "
+                "byte-diverges without corruption"
+            )
+            print(f"[brutex] sweep-verify: {mode_mismatch}")
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
     # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
     # the launcher uses the 375-minute session — tf_minutes is in every tuple
@@ -10256,13 +10833,106 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
-    if max_combos is not None:
+    if exploration.apriori:
+        # The verify twin of cmd_sweep_all's Apriori-aware pre-flight
+        # (DEC-SWEEP-APRIORI-DEFAULT-001): without it an extinction tree's
+        # k-ladder would be REFUSED at the raw-C(n,k) guard before Tier 1
+        # ever ran. An explicit --max-combos still WINS verbatim (the
+        # resolver already trimmed the ladder to what it admits), and the
+        # LEGACY verify arm below keeps today's raw pass-through
+        # byte-identical.
+        from brutex.engine.sweep_apriori import effective_max_combos
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+
+        grid_kwargs["max_combos"] = effective_max_combos(
+            apriori_enabled=True,
+            k_values=k_list,
+            n_unique=len(set(condition_bits)),
+            requested_max_combos=max_combos if max_combos is not None else DEFAULT_MAX_COMBOS,
+            requested_is_explicit=max_combos is not None,
+        )
+    elif max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
+    # Temporal-robustness parity for the Tier-3 shadow re-sweep
+    # (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 × DEC-SWEEP-OVERFIT-RECOUNT-
+    # RECOVERY-001, the reconcile-round-2 fix — MIGRATION.md #1851): the
+    # launcher resolves `--temporal-mode` > $BRUTEX_TEMPORAL > the shipped
+    # OBSERVE default and threads it as `grid.temporal`, which stamps the
+    # four optional per-period stats columns onto every persisted finalist
+    # row carrying trades. The temporal config is IDENTITY-EXEMPT (never in
+    # `_tuple_digest`), so a temporal-blind verify grid planned the SAME
+    # store addresses yet its shadow re-sweep rendered rows WITHOUT the
+    # columns — every default-launched tree whose finalists held trades read
+    # a recount_divergence FALSE-CORRUPT under a fully matched context (the
+    # residual the #1851 grid_mismatch recovery unmasked; executing pins:
+    # the 3 recount tests in tests/integration/test_cli_sweep_all_vix_stamp.py
+    # + test_sweep_all_futures_launch.py::
+    # test_sweep_verify_recount_round_trips_a_futures_tree — all 4 FAIL
+    # without this block). Resolve here EXACTLY as the launcher's default arm
+    # does — ENV-ONLY: sweep-verify takes NO --temporal-mode flag, so the
+    # only way to match a non-default launch is exporting the SAME
+    # $BRUTEX_TEMPORAL at verify time; junk $BRUTEX_TEMPORAL fails loud
+    # pre-plan. HONEST residual (SYMMETRIC, both directions): temporal mode
+    # is not yet recorded on the START payload, so ANY tree launched under a
+    # NON-default mode recounted under a mismatched env byte-diverges —
+    # including the off-launched case: a legitimately `--temporal-mode off`
+    # tree that previously verified clean now reads a LOUD rc-3 false-corrupt
+    # recount_divergence when recounted under the default OBSERVE env
+    # (narrow, loud, never a false-clean; remediation today =
+    # BRUTEX_TEMPORAL=off at verify). Recording+recovery à la the
+    # gate_config channel is the IMMEDIATE next item —
+    # DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 (MIGRATION.md #1851
+    # reconcile-round-2 note; the defer is coordinator-accepted on the
+    # identity-exemption risk argument: temporal never enters
+    # `_tuple_digest`, so a wrong resolution mis-COLUMNS a shadow row —
+    # never mis-ADDRESSES the tree).
+    try:
+        temporal_config = resolve_temporal_config(None, None, None)
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if temporal_config is not None:
+        grid_kwargs["temporal"] = temporal_config
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
         print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+
+    import dataclasses as _dc
+
+    # Recorded OVERFIT-gate recovery (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
+    # `_tuple_digest` (#1336) folds the ACTIVE gate config into every tuple
+    # store ADDRESS, and the default-ON overfit DSR gate means every
+    # production tree's stores live at GATED addresses — while THIS verify
+    # grid's `overfit` default is None, so without the recovery
+    # `plan_expected_stores` + the recount mis-planned UNGATED addresses and
+    # every healthy overfit-gated tree read a grid_mismatch FALSE-POSITIVE
+    # (an alarm-fatigue regression — recount unusable on overfit trees; NOT a
+    # false-clean). The tree describes itself: the launch sites persist the
+    # overfit leg on their START records (SUPERVISOR_START/GRID_SWEEP_START);
+    # recover it here — unconditionally, BEFORE the Tier-1/2 address planning
+    # (the stage3 fold's placement law) — so every tier addresses the SAME
+    # files the launcher wrote. A recorded None (a legacy / pre-channel /
+    # ungated tree) leaves the grid byte-identical; a PRE-channel tree that
+    # WAS overfit-gated keeps the #1336 grid_mismatch remediation (re-verify
+    # with a matching config) — the narrowed honest residual. An UNREADABLE
+    # chain never raises here (the recovery is per-chain TOLERANT — one loud
+    # WARN per skipped chain, the surviving readable chain supplies the config
+    # when it carries a START record; the m2 survival law: an explicit-k
+    # no-recount verify never HARD-fails on a corrupt supervisor chain — a
+    # gated cmd_sweep_all tree whose supervisor chain is unreadable is
+    # config-UNRECOVERABLE and honestly reads grid_mismatch instead, never a
+    # fabricated default); the raise below is reserved for the MALFORMED-leg
+    # class (a junk gate_config.overfit on the winning START record — not a
+    # verifiable tree).
+    try:
+        _recorded_overfit = recorded_overfit_from_audit(out_root)
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if _recorded_overfit is not None:
+        grid = _dc.replace(grid, overfit=_recorded_overfit)
 
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —
     # absent/unreadable manifest leaves cells honestly unattributed.
@@ -10284,13 +10954,13 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # and fold them into the verify grid so `plan_expected_stores` + the
     # shadow re-sweep address the SAME files the launcher wrote. A gate-less
     # tree emits NO fragment (default-elision), so its verify grid — and every
-    # pre-fold verdict — is byte-identical to before. HONEST residual: an
-    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
-    # here yet, so its identity pairing still reads grid_mismatch — re-verify
-    # with a matching config (the #1336 remediation wording).
+    # pre-fold verdict — is byte-identical to before. The overfit leg's
+    # recorded-knob channel is the recorded_overfit_from_audit recovery ABOVE
+    # (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001); the residual is narrowed to
+    # PRE-channel overfit-gated trees (no gate_config on their START records),
+    # which keep the #1336 grid_mismatch remediation — re-verify with a
+    # matching config.
     if stage3 is not None and stage3.enabled:
-        import dataclasses as _dc
-
         from brutex.engine.sweep_verify import recorded_stage3_from_audit
 
         _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
@@ -10427,6 +11097,12 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             if rec != cur
         ]
+        # Exploration-mode parity (DEC-SWEEP-APRIORI-DEFAULT-001): a
+        # wrong-mode recount is a CONTEXT mismatch — it rides the SAME
+        # refuse/inconclusive ladder below, so its byte-divergence can never
+        # read verdict-grade recount_divergence (the false-corrupt hazard).
+        if mode_mismatch is not None:
+            mismatches.append(mode_mismatch)
         # F16 schedule evidence (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): a lake
         # that gained/lost a contract since the recorded run is surfaced with
         # BOTH schedules named — not just a bare snapshot-hash diff.
@@ -10714,7 +11390,11 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             reports.append(rec_report)
             if any(
                 f.code
-                in ("recount_divergence_inconclusive", "cell_recount_divergence_inconclusive")
+                in (
+                    "recount_divergence_inconclusive",
+                    "cell_recount_divergence_inconclusive",
+                    "recount_mixed_mode_unverifiable",
+                )
                 for f in rec_report.findings
             ) or (stage3 is not None and stage3.enabled and stage3_grid is None):
                 inconclusive_only = True
@@ -12172,6 +12852,9 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            temporal_mode=args.temporal_mode,
+            temporal_min_profitable_frac=args.temporal_min_profitable_frac,
+            temporal_max_year_share=args.temporal_max_year_share,
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
@@ -12228,6 +12911,9 @@ def _dispatch(argv: list[str] | None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            temporal_mode=args.temporal_mode,
+            temporal_min_profitable_frac=args.temporal_min_profitable_frac,
+            temporal_max_year_share=args.temporal_max_year_share,
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,

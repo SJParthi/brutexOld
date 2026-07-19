@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from brutex.dashboard.oneclick_artifacts import (
+    BaselineResult,
     EventsPage,
     ManifestResult,
     RunInfo,
@@ -39,6 +40,7 @@ from brutex.dashboard.oneclick_artifacts import (
 
 __all__ = [
     "CHAIN_STAGES",
+    "build_baseline_payload",
     "build_equity_payload",
     "build_events_payload",
     "build_manifest_payload",
@@ -294,6 +296,61 @@ def build_top100_payload(
         "fixture_root_active": fixture_root_active,
         "cascade_join": top100.cascade_join,
     }
+
+
+def build_baseline_payload(
+    run_id: str, result: BaselineResult, *, fixture_root_active: bool
+) -> dict[str, Any]:
+    """Project one baseline read into the ``GET /api/v1/oneclick/baseline`` payload.
+
+    STORED values only (DEC-RESULTS-TRUST-HONESTY-001 · B1 — the R27 series is
+    served verbatim, never recomputed): prices stay the artifact's exact 2-dp
+    strings, ``total_return_pct`` stays the raw full-precision float (a
+    statistical figure — never rounded, CLAUDE.md §4). A non-``ok`` read keeps
+    the series keys ``null`` with the honest detail + the run's stored
+    ``instruments`` so the client can re-ask precisely.
+
+    Parameters
+    ----------
+    run_id
+        The requested run id (echoed).
+    result
+        The adapter's :class:`~brutex.dashboard.oneclick_artifacts.BaselineResult`.
+    fixture_root_active
+        Stamped into the payload (C-MINOR-1).
+
+    Returns
+    -------
+    dict
+        ``{status, run_id, instrument, filename, instruments[], anchor_open,
+        start, end, sessions[], total_return_pct, source_note, detail,
+        revision, fixture_root_active}``.
+    """
+    series = result.series
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "run_id": run_id,
+        "instrument": result.instrument,
+        "filename": result.filename,
+        "instruments": list(result.instruments),
+        "anchor_open": None,
+        "start": None,
+        "end": None,
+        "sessions": None,
+        "total_return_pct": None,
+        "source_note": None,
+        "detail": result.detail,
+        "revision": result.revision,
+        "fixture_root_active": fixture_root_active,
+    }
+    if series is not None:
+        payload["anchor_open"] = str(series.anchor_open)
+        payload["start"] = series.start.isoformat()
+        payload["end"] = series.end.isoformat()
+        payload["sessions"] = [[day.isoformat(), str(close)] for day, close in series.sessions]
+        payload["total_return_pct"] = series.total_return_pct
+        payload["source_note"] = series.source_note
+    return payload
 
 
 def build_events_payload(
