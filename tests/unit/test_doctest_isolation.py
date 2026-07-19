@@ -87,6 +87,15 @@ def test_quiet_structlog_restores_prior_config() -> None:
         assert isinstance(inside, structlog.ReturnLoggerFactory)
     assert structlog.get_config()["logger_factory"] is before
 
-    with pytest.raises(RuntimeError, match="boom"), quiet_structlog():
+    # CodeQL restructure (code-scanning alert 1335): a literal ``raise`` as
+    # the whole ``with pytest.raises(...)`` body made CodeQL's
+    # intraprocedural unreachable-code query flag the assert below (it does
+    # not model pytest.raises swallowing the exception). Raising through a
+    # helper keeps the post-block assert visibly reachable — behavior
+    # identical, no suppression comment.
+    def _boom() -> None:
         raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"), quiet_structlog():
+        _boom()
     assert structlog.get_config()["logger_factory"] is before
