@@ -3934,7 +3934,14 @@ hostile-review pass._
   results UNCHANGED at defaults — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; the ONE sanctioned ranking-gate
   delta is Door 5's derived threshold, LOOSENING-ONLY (no
-  previously-passing strategy is newly rejected). The full record lives
+  previously-passing strategy is newly rejected). VEHICLE-LAP FIX ROUNDS
+  (2026-07-19, PR #1699): 490e3a9c9 (CodeQL test hygiene, 11 alerts,
+  tests-only) + 112b0932d — the sweep-verify recount-attribution widening
+  to the appended nullable columns (`_APPENDED_NULLABLE_FIELDS` from the
+  results_store per-family constants; pre-VIX/pre-extension attribution
+  stays honest, identity-envelope divergences still abstain) — the ONE
+  production-module delta beyond the lane's original set; the record
+  lives in MIGRATION.md #1976. The full record lives
   in MIGRATION.md #1974–#1976 — this blurb carries the shape, never the
   per-stage story.)
   Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
