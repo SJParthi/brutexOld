@@ -33,8 +33,9 @@ env-var path, not the production pull.
   :meth:`acquire` blocks until a token is available. The caller
   always gets through eventually.
 * **Optional daily quota gate.** When constructed with a
-  ``DailyQuotaTracker``, :meth:`acquire` consults the tracker AFTER
-  bucket success — if the tracker's daily limit is exhausted, raises
+  :class:`~brutex.orchestrator.quota_tracker.QuotaGate`, :meth:`acquire`
+  consults the gate AFTER
+  bucket success — if the gate's daily limit is exhausted, raises
   :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` which
   the adapter maps to ``Outcome.FATAL`` (halt the phase, no auto-retry).
   DORMANT in production: Groww backtesting has NO daily quota
@@ -73,7 +74,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from brutex.orchestrator.quota_tracker import DailyQuotaTracker
+    from brutex.orchestrator.quota_tracker import QuotaGate
 
 from brutex.models import BruteXError
 
@@ -209,15 +210,17 @@ class AdaptiveTokenBucket:
     #: Optional daily-quota gate. When set, :meth:`acquire` calls
     #: ``quota_tracker.acquire_or_raise()`` AFTER the bucket token is
     #: consumed (Agent 1 §A — outside the bucket lock to avoid leaking
-    #: 150µs LMDB latency into observability reads). When ``None``, the
-    #: bucket runs in legacy "bucket-only" mode (production callers
-    #: MUST always pass a tracker; ``None`` is for test fixtures only).
+    #: gate latency into observability reads). When ``None``, the
+    #: bucket runs in "bucket-only" mode — the PRODUCTION posture (Groww
+    #: has no daily quota, DEC-QUOTA-VERDICT-MOOT-001); a future capped
+    #: vendor wires a :class:`~brutex.orchestrator.quota_tracker.QuotaGate`
+    #: implementation here (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001).
     #: ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001): the ``| None`` →
     #: ``& None`` annotation flip is provably equivalent (PEP 563 — never
-    #: evaluated; ``DailyQuotaTracker`` is a TYPE_CHECKING-only name). The
+    #: evaluated; ``QuotaGate`` is a TYPE_CHECKING-only name). The
     #: ``None`` default the line-scoped pragma also skips stays pinned by
     #: ``test_quota_tracker_none_is_legacy_path``.
-    quota_tracker: DailyQuotaTracker | None = None  # pragma: no mutate
+    quota_tracker: QuotaGate | None = None  # pragma: no mutate
     #: Ease-in: start the bucket EMPTY (0 tokens) instead of full (``burst``).
     #: With the default ``False`` the bucket grants its ``burst`` allowance
     #: immediately (legacy behaviour). The :class:`RateController` passes ``True`` so
@@ -331,8 +334,8 @@ class AdaptiveTokenBucket:
                 self._tokens -= 1.0
 
         # Daily quota gate (DEC-P0-030, PR #50c). Called OUTSIDE the
-        # bucket lock per Agent 1 §A to avoid leaking 150µs LMDB latency
-        # into dashboard reads. The quota tracker has its own lock; the
+        # bucket lock per Agent 1 §A to avoid leaking gate latency
+        # into dashboard reads. The quota gate carries its own locking; the
         # two locks compose sequentially (bucket released → quota acquired)
         # so no deadlock possible. If the daily quota is exhausted, the
         # bucket token is "wasted" — acceptable per FATAL semantics

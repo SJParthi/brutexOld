@@ -48,9 +48,8 @@ adapter to *do*, not what the adapter's upstream SDK *calls the methods*.
 Things that are NOT adapter concerns (the orchestrator handles them):
 
 * Rate limiting (``AdaptiveTokenBucket``)
-* Work-item state machine (``brutex.orchestrator.state``)
-* Retry policy (``brutex.orchestrator.retry``)
-* Dedup + persistence (``WorkItemStore``)
+* Retry policy (``adapters/groww/errors.is_retryable`` + client ``max_attempts``)
+* Dedup + persistence (the engine's ``sweep_cache`` LMDB tiers)
 * Audit log (``AuditWriter``)
 * Data lake writer (``BarSink``)
 * Dashboard + Telegram + metrics
@@ -290,10 +289,8 @@ class MarketAdapter(Protocol):
     **recommended** pattern is to reuse BruteX's control plane:
 
     * :class:`~brutex.orchestrator.rate_limiter.AdaptiveTokenBucket`
-    * :class:`~brutex.orchestrator.store.WorkItemStore`
     * :class:`~brutex.orchestrator.audit.AuditWriter`
-    * :mod:`brutex.orchestrator.retry`
-    * :mod:`brutex.orchestrator.state`
+    * :mod:`brutex.orchestrator.events` (the pipeline event shapes)
 
     That's what :class:`VendorAdapter` does, and it's what every future
     adapter should do too.

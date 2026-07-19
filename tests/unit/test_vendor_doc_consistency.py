@@ -16,11 +16,11 @@ historically). So these assertions check:
   (DEC-AWS-ONLY-CREDS-001) and carry NO instruction to set the retired
   ``BRUTEX_GROWW_*`` auth env vars (nor any ``BRUTEX_DHAN_*``).
 
-Scope is deliberately narrow (the *breaking* surfaces only): the legacy
-``brutex.orchestrator.adaptive_rate_limiter`` reads vendor-neutral
-``BRUTEX_RATE_*RPS`` rate vars, which ``ENV_VARS.md`` documents honestly as
-tracked residue -- so this guard checks the *auth* vars, not every historical
-mention.
+Scope is deliberately narrow (the *breaking* surfaces only): this guard
+checks the *auth* vars, not every historical mention. (The legacy
+``brutex.orchestrator.adaptive_rate_limiter`` module that once read the
+vendor-neutral ``BRUTEX_RATE_*RPS`` vars was DELETED —
+DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1969.)
 """
 
 from __future__ import annotations

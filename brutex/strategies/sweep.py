@@ -236,8 +236,7 @@ class ComboResult:
 class ComboCache:
     """Persistent ``combo_hash → ComboResult`` cache on LMDB.
 
-    Analogous to :class:`~brutex.orchestrator.store.WorkItemStore`
-    but for combo results. Keys are 32-byte raw sha256 digests so
+    A persistent LMDB result cache. Keys are 32-byte raw sha256 digests so
     the B+tree fanout stays tight; values are JSON bytes.
 
     A single instance is a context manager — ``.close()`` must be

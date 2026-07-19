@@ -144,7 +144,10 @@ jobs:
     # ~= +53 s, absorbed by the margin below); remaining 8 loop modules =
     # 932 (state 58 + retry 77 +
     # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
-    # parser 33 + spec 91).
+    # parser 33 + spec 91) — since REDUCED by 281 (state 58 + retry 77 +
+    # store 146): those three modules were DELETED as dead scaffolding
+    # (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1969), so the loop
+    # below carries three fewer pairs and the timing margin only WIDENS.
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
     # Nominal: (284 + 377 + 932) x ~2.3 s ~= 61 min; + rate_common 369
@@ -309,8 +312,9 @@ jobs:
           # DISJOINT path sets, so no mutant result is lost — each pass has
           # its own survivors check.
           mv .mutmut-cache .mutmut-cache-math
-          # 2. Orchestration / data plumbing (the FSM, retry classifier, audit
-          #    chain, rate limiter, store, partition/parser) — one pass per
+          # 2. Orchestration / data plumbing (the audit chain, rate limiter,
+          #    partition; the FSM/retry/store pairs were deleted with their
+          #    modules — MIGRATION.md #1969) — one pass per
           #    module against its dedicated unit test file, all driven to
           #    ZERO survivors by DEC-MUTATION-RUNTIME-001 (the measured 223
           #    survivors of the per-module enumeration were killed by
@@ -501,11 +505,8 @@ jobs:
           # on every push via ci.yml's normal test tiers.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
-            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
-            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py:" \
             "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py:" \
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
-            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \

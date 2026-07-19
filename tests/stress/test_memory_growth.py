@@ -98,8 +98,10 @@ Honest envelope — what this module does NOT prove
   fno_math, trading_core) — only the generous RSS backstop partially covers
   these. The ``run_id``s here are sha256-derived 64-hex stand-ins satisfying
   the store's contract, NOT real BLAKE3 combo hashes (Golden Rule #1).
-* The LMDB-backed ``DailyQuotaTracker`` — excluded via the documented
-  ``quota_tracker=None`` bucket-only test mode; production wires one.
+* Any wired quota gate — excluded via the documented
+  ``quota_tracker=None`` bucket-only mode (the PRODUCTION posture:
+  Groww has no daily quota, and the dormant tracker class was deleted
+  behind the ``QuotaGate`` Protocol — MIGRATION.md #1969).
 * O(rows) paths: ``ResultsStore.flush()``/``load()``, the orchestrator
   ``verify_chain`` and both modules' ``read_entries`` (the list contract),
   ``AuditWriter.open(resume=True)`` whole-file replay. (The sweep-side twin

@@ -13,10 +13,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from datetime import datetime
 from itertools import pairwise
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 from brutex.adapters import rate_common
@@ -47,22 +44,38 @@ from brutex.adapters.rate_common import (
     TRAILING_LOG_WINDOW_S,
     RateController,
 )
-from brutex.orchestrator.quota_tracker import DailyQuotaTracker
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaGate
 from structlog.testing import capture_logs
 
-_IST = ZoneInfo("Asia/Kolkata")
+
+class _FakeQuotaGate:
+    """A minimal in-memory :class:`QuotaGate` double.
+
+    The deleted ``DailyQuotaTracker``'s consumed surface, verbatim
+    (DEC-ORCH-DEAD-SCAFFOLD-DELETE-001): the controller only ever calls
+    ``current_count`` / ``remaining`` / ``daily_limit`` here.
+    """
+
+    def __init__(self, *, daily_limit: int, used: int) -> None:
+        self.daily_limit = daily_limit
+        self._used = used
+
+    def acquire_or_raise(self) -> int:
+        if self._used >= self.daily_limit:
+            raise DailyQuotaExceeded(f"daily_limit={self.daily_limit} already reached")
+        self._used += 1
+        return self._used
+
+    def current_count(self) -> int:
+        return self._used
+
+    def remaining(self) -> int:
+        return max(0, self.daily_limit - self._used)
 
 
-def _quota(tmp_path: Path, *, limit: int, used: int) -> DailyQuotaTracker:
-    """Build a real quota tracker (fixed IST clock) pre-advanced to *used* calls."""
-    q = DailyQuotaTracker(
-        daily_limit=limit,
-        store_path=tmp_path / "q.lmdb",
-        clock=lambda: datetime(2026, 6, 8, 12, 0, tzinfo=_IST),
-    )
-    for _ in range(used):
-        q.acquire_or_raise()
-    return q
+def _quota(*, limit: int, used: int) -> QuotaGate:
+    """Build a fake quota gate pre-advanced to *used* calls."""
+    return _FakeQuotaGate(daily_limit=limit, used=used)
 
 
 class _Clock:
@@ -557,9 +570,9 @@ def test_steps_preserve_single_bucket_identity() -> None:
 class TestQuotaWiring:
     """The daily-quota gauge + brake (DEC-AUTO-RESUME-QUOTA-001)."""
 
-    def test_snapshot_includes_quota_when_tracker_wired(self, tmp_path: Path) -> None:
+    def test_snapshot_includes_quota_when_tracker_wired(self) -> None:
         ctl = RateController(
-            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=10, used=4)
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(limit=10, used=4)
         )
         snap = ctl.snapshot()
         assert snap["current_rps"] == 5.0  # base rate fields still present
@@ -583,15 +596,15 @@ class TestQuotaWiring:
             "recent_3600s",
         }
 
-    def test_quota_exhausted_true_at_limit(self, tmp_path: Path) -> None:
+    def test_quota_exhausted_true_at_limit(self) -> None:
         ctl = RateController(
-            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=2, used=2)
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(limit=2, used=2)
         )
         assert ctl.quota_exhausted() is True
 
-    def test_quota_exhausted_false_with_remaining(self, tmp_path: Path) -> None:
+    def test_quota_exhausted_false_with_remaining(self) -> None:
         ctl = RateController(
-            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=5, used=1)
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(limit=5, used=1)
         )
         assert ctl.quota_exhausted() is False
 
@@ -2132,14 +2145,14 @@ class TestMutationBoundaryPins:
         clock.t = 1000.0 + PER_MIN_WINDOW  # exactly 60 s after the reserved instant
         assert ctl.snapshot()["recent_minute"] == 0  # boundary-age issue evicted
 
-    def test_quota_exhausted_false_at_remaining_exactly_one(self, tmp_path: Path) -> None:
+    def test_quota_exhausted_false_at_remaining_exactly_one(self) -> None:
         """Kills mutant 301 (``quota_exhausted`` ``remaining() <= 0`` → ``<= 1``).
 
         One remaining call is NOT exhaustion — the loop may still spend it; the
         mutant would stop the pull a call early (a silent under-use, still a
         defect: the gate must fire at EXACTLY zero).
         """
-        q = _quota(tmp_path, limit=2, used=1)
+        q = _quota(limit=2, used=1)
         ctl = RateController(quota_tracker=q, clock=_Clock(), sleep=lambda _s: None)
         assert q.remaining() == 1
         assert ctl.quota_exhausted() is False

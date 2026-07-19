@@ -134,11 +134,13 @@ class TestPerSwapEquality:
         assert time(15, 30) == session.SESSION_CLOSE
 
     def test_zoneinfo_family_consumers_bind_the_root(self) -> None:
+        # (The historical quota_tracker._IST probe died with the dormant
+        # tracker — DEC-ORCH-DEAD-SCAFFOLD-DELETE-001, MIGRATION.md #1969:
+        # the trimmed module is clock-free, importing neither ZoneInfo nor
+        # calendars.nse.)
         from brutex.crossverify import config as cv_config
         from brutex.dashboard import db_view
-        from brutex.orchestrator import quota_tracker
 
-        assert quota_tracker._IST is IST
         assert cv_config._IST is IST
         assert db_view._IST is IST
 

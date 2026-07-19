@@ -5,7 +5,8 @@ Enforces the operator's O(1)-dedup decree (MIGRATION.md #342) for the
 keys are stored. LMDB is a B+tree (O(log n)) but a dense working set keeps
 the tree a few pages deep, so the cost is dominated by the O(1) key compare.
 
-Mirrors `tests/bench/test_store_o1.py`: empirical ratio with CI-jitter
+Mirrors the historical `tests/bench/test_store_o1.py` (deleted with
+`orchestrator/store.py` — MIGRATION.md #1969): empirical ratio with CI-jitter
 headroom (`< 5×`) — a scan regression would blow the ratio and fail the gate.
 The 10k-vs-1k ratio routes its M4-Pro strict ceiling through
 :func:`tests.bench._o1_tiers.cache_tier_ceiling` (the DEC-O1-CACHE-TIER-001

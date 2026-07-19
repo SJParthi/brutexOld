@@ -9,7 +9,8 @@ The Bloom probe is O(1) and the exact `set` membership is O(1) amortised, so
 the combined dedup is O(1). If a regression turned either into a scan, the
 ratio blows up and this gate fails.
 
-Mirrors `tests/bench/test_store_o1.py`: empirical ratio with CI-jitter
+Mirrors the historical `tests/bench/test_store_o1.py` (deleted with
+`orchestrator/store.py` — MIGRATION.md #1969): empirical ratio with CI-jitter
 headroom (`< 5×`), the explicit enforcement of the decree's per-operation
 O(1) guarantee.
 """

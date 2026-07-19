@@ -39,8 +39,9 @@ repos:
   # rev MUST track the pyproject `ruff>=0.15,<1.0` toolchain: the stale
   # v0.8.4 pin reformatted 0.15-formatted files on commit, fighting the
   # CI `ruff format --check` gate (DEC-ORCH-STRICT-GATES-001 session,
-  # 2026-06-10 — the hook rewrote test_orchestrator_state.py and
-  # aborted the commit).
+  # 2026-06-10 — the hook rewrote test_orchestrator_state.py, a file
+  # since deleted with orchestrator/state.py (MIGRATION.md #1969),
+  # and aborted the commit).
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.16
     hooks:

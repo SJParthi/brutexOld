@@ -1041,16 +1041,45 @@ class TestThreadSafety:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Bucket ↔ DailyQuotaTracker integration (DEC-P0-030, PR #50c)
+# Bucket ↔ QuotaGate integration (DEC-P0-030, PR #50c; retyped onto the
+# structural QuotaGate Protocol by DEC-ORCH-DEAD-SCAFFOLD-DELETE-001 —
+# the deleted DailyQuotaTracker is replaced by an in-memory fake gate)
 # ────────────────────────────────────────────────────────────────────────
+
+
+class _FakeQuotaGate:
+    """A minimal in-memory :class:`QuotaGate` double.
+
+    Exactly the deleted ``DailyQuotaTracker``'s consumed surface: the
+    bucket calls ONLY ``acquire_or_raise()`` (rate_limiter.py's quota-gate
+    branch); the count/remaining reads let the tests assert increments.
+    """
+
+    def __init__(self, *, daily_limit: int) -> None:
+        self.daily_limit = daily_limit
+        self._used = 0
+
+    def acquire_or_raise(self) -> int:
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
+
+        if self._used >= self.daily_limit:
+            raise DailyQuotaExceeded(f"daily_limit={self.daily_limit} already reached")
+        self._used += 1
+        return self._used
+
+    def current_count(self) -> int:
+        return self._used
+
+    def remaining(self) -> int:
+        return max(0, self.daily_limit - self._used)
 
 
 class TestQuotaTrackerIntegration:
     """Verify the optional ``quota_tracker`` field composes correctly.
 
     Closes Agent 1 §G None-safety, Agent 3 A1/A2/B1/B2 ordering, Agent 2
-    §B no-silent-bypass (via explicit test that None is the test-only
-    legacy path).
+    §B no-silent-bypass (via explicit test that None is the production
+    bucket-only path).
     """
 
     def test_quota_tracker_none_is_legacy_path(self) -> None:
@@ -1071,141 +1100,74 @@ class TestQuotaTrackerIntegration:
         wait = bucket.acquire()
         assert wait == 0.0  # first token from burst, no wait
 
-    def test_quota_tracker_set_increments_on_acquire(self, tmp_path: object) -> None:
+    def test_quota_tracker_set_increments_on_acquire(self) -> None:
         """When quota_tracker is set, every successful bucket acquire
         triggers exactly one quota increment.
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import DailyQuotaTracker
-
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=10,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        gate = _FakeQuotaGate(daily_limit=10)
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=gate,
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
-            assert tracker.current_count() == 0
-            bucket.acquire()
-            assert tracker.current_count() == 1
-            bucket.acquire()
-            bucket.acquire()
-            assert tracker.current_count() == 3
-        finally:
-            tracker.close()
+        assert gate.current_count() == 0
+        bucket.acquire()
+        assert gate.current_count() == 1
+        bucket.acquire()
+        bucket.acquire()
+        assert gate.current_count() == 3
 
-    def test_quota_exceeded_bubbles_up_from_acquire(self, tmp_path: object) -> None:
-        """When the quota tracker raises DailyQuotaExceeded, it bubbles
-        up from bucket.acquire() — the adapter maps this to Outcome.FATAL
-        (no auto-retry).
+    def test_quota_exceeded_bubbles_up_from_acquire(self) -> None:
+        """When the quota gate raises DailyQuotaExceeded, it bubbles
+        up from bucket.acquire() — the halt chain maps this to a
+        pull-wide stop (no auto-retry).
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import (
-            DailyQuotaExceeded,
-            DailyQuotaTracker,
-        )
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=3,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=_FakeQuotaGate(daily_limit=3),
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
+        bucket.acquire()
+        bucket.acquire()
+        bucket.acquire()
+        with pytest.raises(DailyQuotaExceeded):
             bucket.acquire()
-            bucket.acquire()
-            bucket.acquire()
-            with pytest.raises(DailyQuotaExceeded):
-                bucket.acquire()
-        finally:
-            tracker.close()
 
-    def test_record_success_unchanged_on_quota_raise(self, tmp_path: object) -> None:
+    def test_record_success_unchanged_on_quota_raise(self) -> None:
         """Agent 3 A2/I1: bucket's _last_success_at MUST remain
         unchanged when quota raises. The adapter caller controls
         record_success(); the bucket itself does not call it inside
         acquire().
         """
-        from datetime import datetime as _datetime
-        from pathlib import Path
-        from zoneinfo import ZoneInfo
-
-        from brutex.orchestrator.quota_tracker import (
-            DailyQuotaExceeded,
-            DailyQuotaTracker,
-        )
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 
         clock = FakeClock()
-        sleep = clock.sleep
-
-        ist = ZoneInfo("Asia/Kolkata")
-        ist_now = _datetime(2026, 5, 18, 9, 15, tzinfo=ist)
-
-        def ist_clock() -> _datetime:
-            return ist_now
-
-        tracker = DailyQuotaTracker(
-            daily_limit=1,
-            store_path=Path(str(tmp_path)) / "quota.lmdb",
-            clock=ist_clock,
+        bucket = AdaptiveTokenBucket(
+            initial_rps=10.0,
+            downshift_rps=5.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+            quota_tracker=_FakeQuotaGate(daily_limit=1),
         )
-        try:
-            bucket = AdaptiveTokenBucket(
-                initial_rps=10.0,
-                downshift_rps=5.0,
-                burst=5,
-                clock=clock.now,
-                sleep=sleep,
-                quota_tracker=tracker,
-            )
+        bucket.acquire()
+        success_at_before = bucket._last_success_at
+        with pytest.raises(DailyQuotaExceeded):
             bucket.acquire()
-            success_at_before = bucket._last_success_at
-            with pytest.raises(DailyQuotaExceeded):
-                bucket.acquire()
-            # _last_success_at MUST be unchanged — bucket.acquire() does not
-            # update it on quota failure (adapter caller controls success
-            # recording via the separate record_success() method).
-            assert bucket._last_success_at == success_at_before
-        finally:
-            tracker.close()
+        # _last_success_at MUST be unchanged — bucket.acquire() does not
+        # update it on quota failure (adapter caller controls success
+        # recording via the separate record_success() method).
+        assert bucket._last_success_at == success_at_before
 
 
 class TestStartEmpty:

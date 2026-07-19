@@ -109,7 +109,7 @@ class RuntimeInfo:
     metrics_url
         Prometheus scrape URL.
     phase
-        Current :class:`~brutex.orchestrator.state.IngestPhase` value,
+        Current :class:`~brutex.orchestrator.events.IngestPhase` value,
         or ``"idle"`` / ``"starting"`` / ``"shutting_down"``.
     env_snapshot
         Sanitised copy of ``BRUTEX_*`` env vars (secrets redacted).
