@@ -64,7 +64,7 @@ import os
 import threading
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
@@ -202,6 +202,10 @@ _ACTIVE_SEED: Final[frozenset[str]] = frozenset({DEFAULT_FEED})
 _active: set[str] = set(_ACTIVE_SEED)
 #: Memo: raw env string (``None`` = unset) → parsed form. Parse-once per string.
 _parse_memo: dict[str | None, _ParsedEnv | None] = {}
+#: The :func:`_parse_env` miss sentinel — ``None`` is a legitimate memo VALUE
+#: (blank/unset parses to ``None``), so the single-op ``dict.get`` read below
+#: needs a distinct miss marker.
+_PARSE_MISS: Final[object] = object()
 #: Memo: ``(feed, raw env string)`` → resolved :class:`FeedScope` (§2.3 memo law).
 _feed_memo: dict[tuple[str, str | None], FeedScope] = {}
 #: Memo: ``(raw env string, active snapshot)`` → the read union (§2.3 memo law —
@@ -227,9 +231,20 @@ def _parse_env(raw: str | None) -> _ParsedEnv | None:
     ``None`` / blank / whitespace-only → ``None`` (≡ UNSET → the defaults
     map — the house blank-is-unset convention; the "empty entry" refusal
     applies only WITHIN a non-blank value).
+
+    The memoized read is ONE GIL-atomic ``dict.get`` (never check-then-index):
+    production memos are add-only, but the test seam :func:`_reset_for_tests`
+    CLEARS them under ``_LOCK`` around every test — a daemon thread leaked
+    from a prior test (an SWR revalidator resolving scope) could interleave a
+    clear between a two-step ``in`` probe and the index and KeyError inside
+    that daemon. One atomic op leaves no interleave point (flake-hardening
+    only; no production impact — regression-pinned).
     """
-    if raw in _parse_memo:
-        return _parse_memo[raw]
+    memoized = _parse_memo.get(raw, _PARSE_MISS)
+    if memoized is not _PARSE_MISS:
+        # The sentinel identity check narrows the value back to the memo's
+        # own ``_ParsedEnv | None`` domain (dict.get widened it to object).
+        return cast("_ParsedEnv | None", memoized)
     parsed = _parse_env_uncached(raw)
     with _LOCK:
         _parse_memo[raw] = parsed

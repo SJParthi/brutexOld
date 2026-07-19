@@ -162,6 +162,33 @@ class TestEnvGrammar:
         assert dict(DEFAULT_FEED_SCOPES) == {"groww": SCOPE_INDEX4, "dhan": SCOPE_INDEX4}
         assert DEFAULT_FEED == "groww"
 
+    def test_parse_memo_read_survives_a_reset_race_interleave(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The memoized ``_parse_env`` read is ONE GIL-atomic ``dict.get`` —
+        never check-then-index (DEC-UNIVERSE-INDEX-ONLY-001, review r3).
+
+        Production memos are add-only, but ``_reset_for_tests`` CLEARS
+        ``_parse_memo`` under ``_LOCK`` around EVERY test — a daemon thread
+        leaked from a prior test (an SWR revalidator resolving scope) could
+        interleave that clear between a two-step ``in`` probe and the index
+        and KeyError inside the daemon. The adversarial memo below simulates
+        that interleave DETERMINISTICALLY: its ``in`` probe clears the dict
+        after answering — the old two-step read raises KeyError here, while
+        the single-op ``dict.get`` read never opens an interleave window and
+        serves the memoized parse."""
+        expected = feed_scope._parse_env("index4")  # prime via the real path
+        assert expected is not None
+
+        class _ClearOnProbe(dict[object, object]):
+            def __contains__(self, key: object) -> bool:
+                present = super().__contains__(key)
+                super().clear()  # the simulated _reset_for_tests interleave
+                return present
+
+        monkeypatch.setattr(feed_scope, "_parse_memo", _ClearOnProbe({"index4": expected}))
+        assert feed_scope._parse_env("index4") == expected
+
 
 class TestFailClosedDefaultWarn:
     """§2.3 Rev 5 — the ACTIVE-feed fail-closed-default warn tier."""
