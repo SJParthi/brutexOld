@@ -404,7 +404,9 @@ class TestReadScopeSnapshot:
         for src in (app_src, warm_src):
             assert "scope_token = scope_revision()" not in src
             assert "scope_token=scope_revision()" not in src
-        assert app_src.count("read_scope_snapshot()") == 5  # 3 warm + movers + preopen
+        # 3 warm + movers + preopen + the missing-sessions drill (the r4
+        # BLOCKER fold — its memo folds the token, so it MUST bind the pair).
+        assert app_src.count("read_scope_snapshot()") == 6
         assert warm_src.count("read_scope_snapshot()") == 1
 
 
