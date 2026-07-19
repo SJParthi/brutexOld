@@ -30,12 +30,14 @@ DEC-SWEEP-STREAMING-RANK-001 (part 2) through the REAL
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
@@ -43,6 +45,7 @@ from brutex.engine.sweep_driver import metrics_from_trades
 from brutex.engine.sweep_mem_budget import (
     BATCH_RANK_BYTES_PER_KEPT,
     BOUNDED_RANK_MODE_ENV,
+    BUDGET_WORKERS_ENV,
     MEM_BUDGET_ENV,
 )
 from brutex.engine.sweep_run import (
@@ -457,3 +460,99 @@ class TestGridTupleSkip:
         failed = [line for line in audit_lines if line["action"] == "TUPLE_FAILED"]
         assert len(failed) == 1
         assert MEM_BUDGET_ENV in failed[0]["payload"]["error"]
+
+
+# ── worker-aware memory budget — the DEC-SWEEP-SCALE-GUARDS-001 e2e flip pins,
+# re-pinned onto main's LANDED divisor (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001) ──
+
+
+def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
+    """Force RAM detection to *total_bytes* so the DERIVED default is divided.
+
+    Main's landed contract makes the explicit ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``
+    override PER-WORKER (never divided), so these e2e pins drive the divisor
+    through the RAM-derived default + the ``BRUTEX_SWEEP_BUDGET_WORKERS`` env
+    seam — exactly the production pool-initializer shape.
+    """
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes
+    )
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
+    )
+    reset_hardware_envelope_cache()
+
+
+@pytest.fixture(name="_fresh_ram_cache")
+def _fresh_ram_cache_fixture() -> Iterator[None]:
+    """Isolate from the process-global RAM detection cache (DEC-RAM-BUDGETS-001)."""
+    reset_hardware_envelope_cache()
+    yield
+    reset_hardware_envelope_cache()
+
+
+@pytest.mark.usefixtures("_fresh_ram_cache")
+class TestWorkerAwareBudget:
+    """End-to-end: the worker divisor reaches the plan seam inside the run.
+
+    The whole point of the OOM fix — the SAME grid + SAME simulated machine
+    flips from "fits" (one eval worker) to "refused/bounded" (2 workers via
+    the ``BRUTEX_SWEEP_BUDGET_WORKERS`` pool-initializer seam), proving the
+    divided budget reaches ``plan_rank_memory`` through
+    ``run_persisted_sweep``'s bare ``resolve_mem_budget_bytes()`` call.
+    (T2's ``sweep_concurrency=`` kwarg delivery was DEDUPED to this landed
+    env-seam mechanism at the 2026-07-11 fold.)
+    """
+
+    def _run_workers(
+        self,
+        tmp_path: Path,
+        tag: str,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        workers: int,
+    ) -> SweepRunSummary:
+        if workers == 1:
+            monkeypatch.delenv(BUDGET_WORKERS_ENV, raising=False)
+        else:
+            monkeypatch.setenv(BUDGET_WORKERS_ENV, str(workers))
+        store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+        dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+        with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+            return run_persisted_sweep(
+                _BARS,
+                _make_config(),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest="cafe0123cafe0123",
+            )
+
+    def test_single_worker_fits_but_concurrent_refuses_same_machine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulated RAM 48 000 B → derived total 48 000 × 1/6 = 8 000 B, between
+        # the per-tuple projection (5 masks × 1024 = 5 120 B) and 2× it: at
+        # workers=1 the tuple fits (5 120 < 8 000); at workers=2 the divided
+        # budget (8 000 // 2 = 4 000) is below the projection → the graceful
+        # typed refusal fires — the OOM fix in miniature.
+        _set_env(monkeypatch, "off", None)
+        _simulate_ram(monkeypatch, 48_000)
+        # workers=1 completes (byte-for-byte the pre-change behavior).
+        summary = self._run_workers(tmp_path, "single", monkeypatch, workers=1)
+        assert isinstance(summary, SweepRunSummary)
+        # workers=2 is refused BEFORE any evaluation (nothing persisted).
+        with pytest.raises(SweepMemoryBudgetError, match=MEM_BUDGET_ENV):
+            self._run_workers(tmp_path, "concurrent", monkeypatch, workers=2)
+
+    def test_concurrent_engages_bounded_rank_under_auto(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under mode `auto`, the divided budget ENGAGES the bounded columnar rank
+        # (loudly) instead of refusing — and still completes byte-correctly.
+        _set_env(monkeypatch, "auto", None)
+        _simulate_ram(monkeypatch, 48_000)
+        with capture_logs() as logs:
+            summary = self._run_workers(tmp_path, "auto_conc", monkeypatch, workers=2)
+        assert isinstance(summary, SweepRunSummary)
+        assert any(e["event"] == "sweep_run.bounded_rank_engaged" for e in logs)
