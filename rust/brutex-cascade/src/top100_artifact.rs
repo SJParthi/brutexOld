@@ -61,7 +61,7 @@ use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
-use crate::capture_repr;
+use crate::{capture_repr, domain_err};
 
 // ── Law constants (frozen by the corpus constants block) ────────────────────
 
@@ -77,16 +77,6 @@ const SHA256_HEX_LEN: usize = 64;
 const MASK_HEX_WIDTH: usize = 32;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
-
-/// Raise the passed domain-error class (`Top100Error`) with a fully-composed
-/// message — the real Python exception instance, so `type(exc).__name__` and
-/// `str(exc)` are byte-identical to the deleted law's direct raises.
-fn domain_err(error_cls: &Bound<'_, PyAny>, msg: String) -> PyErr {
-    match error_cls.call1((msg,)) {
-        Ok(inst) => PyErr::from_value(inst),
-        Err(err) => err,
-    }
-}
 
 /// Python `a != b` (`rich_compare` — bool==int puns included).
 fn py_ne(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {

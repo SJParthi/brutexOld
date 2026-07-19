@@ -20,6 +20,22 @@ whose source stamp ``dsr_n_source`` renders in the cascade sidecar section. The
 cascade's larger-N deflation is strictly stricter — it supersedes, never
 double-spends, the per-tuple gate.
 
+**RUST-HOSTED RENDER LAWS (DEC-RUST-CASCADE-RESULTS-001, slice 2c):** the
+RENDER-LAW family — the aliases-only sort vocabulary resolution, the two
+``_format_*`` display helpers, the :func:`render_leaderboard` winners-table
+byte law (incl. the exact-integer ``format_inr`` money twin of
+:func:`brutex.money.format_inr` — never f64), ``_provisional_note``,
+``_render_sidecar_group``, :func:`render_cascade_sidecar`'s render law and
+:func:`results_show_report`'s text-assembly law — lives in
+``rust/brutex-cascade/src/results_report.rs``, verified against the FROZEN
+pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/results_report.json``). This
+module keeps the type face (constants, the delegating helpers the test
+surfaces import) plus the store-coupled I/O half — discovery / merge /
+snapshot quarantine / manifest attribution / the sidecar file read — which
+stays Python: it orchestrates the ``results_store`` public API and the
+filesystem, and the crate computes text + decisions only.
+
 Honest envelope (Golden Rule #10)
 ---------------------------------
 Discovery + merge is inherently **O(total finalists)** work and memory — there is no
@@ -45,25 +61,25 @@ pool PBO is appended as an optional trailing section.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import structlog
 
+from brutex.engine.cascade_rust import require_cascade_rust
 from brutex.engine.results_store import (
     ResultRow,
     ResultsStore,
     ResultsStoreError,
     VixTrioConflictError,
 )
-from brutex.money import format_inr
 
 _LOG = structlog.get_logger(__name__)
 
 #: Friendly ``--sort-by`` aliases → the underlying rankable :class:`ResultRow` column.
-#: Kept here as the ONE place the CLI sort vocabulary lives (CLAUDE.md §11 COMMON).
+#: Kept here as the ONE place the CLI sort vocabulary lives (CLAUDE.md §11 COMMON);
+#: threaded into the Rust resolver as data, never re-minted crate-side.
 SORT_ALIASES: Final[dict[str, str]] = {
     "sharpe": "sharpe_ratio",
     "sortino": "sortino_ratio",
@@ -324,31 +340,30 @@ def _stage3_rel_paths(root: Path) -> frozenset[str] | None:
 def _resolve_sort_field(sort_by: str) -> str:
     """Map a friendly ``--sort-by`` alias to its :class:`ResultRow` column.
 
+    RUST-HOSTED (DEC-RUST-CASCADE-RESULTS-001): the aliases-ONLY law + the
+    verbatim refusal message live crate-side; :data:`SORT_ALIASES` and the
+    :class:`ResultsStoreError` class are threaded in as data, so the raised
+    exception is the REAL domain type with the byte-identical message.
+
     Raises
     ------
     ResultsStoreError
         If *sort_by* is not a known alias.
     """
-    field = SORT_ALIASES.get(sort_by)
-    if field is None:
-        raise ResultsStoreError(
-            f"unknown sort key {sort_by!r}; choose one of {sorted(SORT_ALIASES)}"
-        )
-    return field
+    return cast(
+        "str",
+        require_cascade_rust().results_resolve_sort_field(sort_by, SORT_ALIASES, ResultsStoreError),
+    )
 
 
 def _format_deflated(value: float | None) -> str:
     """Render the Deflated-Sharpe column — full precision, NEVER rounded; ``None`` → ``—``."""
-    if value is None:
-        return "—"
-    return f"{value:+.4f}"
+    return cast("str", require_cascade_rust().results_format_deflated(value))
 
 
 def _format_conditions(condition_names: str) -> str:
     """Render the winning conditions — the stored NAMES, or a clear no-condition note."""
-    if not condition_names:
-        return "(no conditions — enters every bar)"
-    return condition_names
+    return cast("str", require_cascade_rust().results_format_conditions(condition_names))
 
 
 def render_leaderboard(rows: Sequence[ResultRow], *, origins: dict[str, str] | None = None) -> str:
@@ -364,9 +379,11 @@ def render_leaderboard(rows: Sequence[ResultRow], *, origins: dict[str, str] | N
     ``src=stage3`` (an UNGATED refined trial) — the per-row honesty the old
     blanket disclaimer could not give; with ``origins=None`` no marker renders
     and a row cannot reveal which it is (the DEC-STAGE3-WIRE-001 fallback).
-    Money goes through :func:`brutex.money.format_inr` (2dp,
-    DEC-MONEY-2DP-001); statistical metrics are only *displayed* to a fixed
-    width — the stored values are never rounded.
+    Money renders through the crate's exact-integer twin of
+    :func:`brutex.money.format_inr` (2dp, DEC-MONEY-2DP-001); statistical
+    metrics are only *displayed* to a fixed width — the stored values are
+    never rounded. RUST-HOSTED (DEC-RUST-CASCADE-RESULTS-001): the whole
+    table byte law lives crate-side.
 
     Parameters
     ----------
@@ -381,25 +398,7 @@ def render_leaderboard(rows: Sequence[ResultRow], *, origins: dict[str, str] | N
     str
         The rendered table (a single placeholder line when *rows* is empty).
     """
-    if not rows:
-        return "(no persisted results)"
-    lines: list[str] = []
-    for rank, row in enumerate(rows, start=1):
-        # Per-row provenance marker (DEC-ROW-PROVENANCE-001): rendered ONLY
-        # when the cascade manifest attributes the tree's files — `grid` rows
-        # are gate survivors, `stage3` rows are UNGATED refined trials. With
-        # no attribution the output is byte-identical to the unmarked render.
-        marker = "" if origins is None else f"  src={origins.get(row.run_id, '?')}"
-        lines.append(
-            f"#{rank}  {row.instrument} {row.tf} {row.direction}  "
-            f"pnl={format_inr(row.net_pnl_paisa)}  "
-            f"trades={row.total_trades}  "
-            f"win={row.win_rate * 100:.1f}%  "
-            f"sharpe={row.sharpe_ratio:+.3f}  "
-            f"dsr@tupleN={_format_deflated(row.deflated_sharpe)}{marker}\n"
-            f"    {_format_conditions(row.condition_names)}"
-        )
-    return "\n".join(lines)
+    return cast("str", require_cascade_rust().results_render_leaderboard(rows, origins))
 
 
 def _provisional_note(report: dict[str, object]) -> str:
@@ -410,20 +409,12 @@ def _provisional_note(report: dict[str, object]) -> str:
     a list, no verdict carries the key (a pre-change report — the flag was
     never recorded), or no PASS is flagged (a leaderboard-sourced group).
     Lenient by design: an additive key on a best-effort render surface never
-    hard-fails a pre-change sidecar.
+    hard-fails a pre-change sidecar. RUST-HOSTED
+    (DEC-RUST-CASCADE-RESULTS-001) — the strict ``is True`` identity law on
+    ``provisional`` AND ``passed`` (int ``1`` satisfies neither) lives
+    crate-side.
     """
-    verdicts = report.get("verdicts")
-    if not isinstance(verdicts, list):
-        return ""
-    stamped = [v for v in verdicts if isinstance(v, dict) and "provisional" in v]
-    if not stamped:
-        return ""
-    n_provisional = sum(
-        1 for v in stamped if v.get("provisional") is True and v.get("passed") is True
-    )
-    if n_provisional == 0:
-        return ""
-    return f"  provisional={n_provisional} (pool-N DSR pass — not proven at leaderboard N)"
+    return cast("str", require_cascade_rust().results_provisional_note(report))
 
 
 def _render_sidecar_group(entry: object) -> str:
@@ -454,28 +445,12 @@ def _render_sidecar_group(entry: object) -> str:
     read as proven. A pre-change report LACKING the key renders unchanged
     (the same absent-key convention as ``pool_pbo``), as does a
     leaderboard-sourced group (zero flagged passes).
+
+    RUST-HOSTED (DEC-RUST-CASCADE-RESULTS-001): the whole line law lives
+    crate-side — ``float(pbo)`` runs CPython's own ``float()`` there, so the
+    coercion grammar and the raised ``ValueError`` message stay byte-identical.
     """
-    if not isinstance(entry, dict):
-        raise ValueError("group entry is not an object")
-    report = entry.get("report")
-    if not isinstance(report, dict):
-        raise ValueError("group report is not an object")
-    label = f"{entry.get('instrument', '?')} {entry.get('tf', '?')}"
-    counts = f"in={report.get('n_input', '?')} survived={report.get('n_survived', '?')}"
-    if "dsr_n_source" not in report:
-        dsr = "dsr N not stamped (pre-ADR-0008 report)"
-    else:
-        dsr = f"dsr N={report.get('dsr_n_trials', '?')} source={report['dsr_n_source']}"
-    dsr += _provisional_note(report)
-    if "pool_pbo" not in report:
-        return f"  {label}  pool PBO not recorded (pre-sidecar report)  {counts}  {dsr}"
-    pbo = report["pool_pbo"]
-    if pbo is None:
-        return (
-            f"  {label}  pool PBO skipped (pool < 2 candidates / short series / "
-            f"pool empty at #5)  {counts}  {dsr}"
-        )
-    return f"  {label}  pool PBO={float(pbo):.4f}  {counts}  {dsr}"
+    return cast("str", require_cascade_rust().results_render_sidecar_group(entry))
 
 
 def render_cascade_sidecar(root: Path) -> str:
@@ -488,6 +463,13 @@ def render_cascade_sidecar(root: Path) -> str:
     version) renders a LOUD ``UNREADABLE`` section naming the path and reason —
     never a silent skip (Golden Rule #10); the leaderboard above it still
     renders (the sidecar is supplementary, not load-bearing).
+
+    RUST-HOSTED (DEC-RUST-CASCADE-RESULTS-001): the path probe + the file
+    read (and its path-dependent ``OSError``/decode ``UNREADABLE`` arm) stay
+    here; the crate renders over the already-read content — CPython
+    ``json.loads`` error text, the ``version != REPORT_VERSION``
+    rich-compare gate (the bool==int pun loads) and the group ``ValueError``
+    funnels are byte-identical by construction.
     """
     from brutex.engine.cascade_wire import REPORT_VERSION, report_path
 
@@ -496,25 +478,23 @@ def render_cascade_sidecar(root: Path) -> str:
         return ""
     header = f"Stage-4 cascade sidecar — {path}"
     try:
-        payload: object = json.loads(path.read_text(encoding="utf-8"))
+        content = path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         return f"{header}\n  UNREADABLE: {exc}"
-    if not isinstance(payload, dict) or not isinstance(payload.get("groups"), list):
-        return f"{header}\n  UNREADABLE: not a cascade report object"
-    version = payload.get("version")
-    if version != REPORT_VERSION:
-        return f"{header}\n  UNREADABLE: unsupported report version {version!r}"
-    try:
-        groups = [_render_sidecar_group(entry) for entry in payload["groups"]]
-    except ValueError as exc:
-        return f"{header}\n  UNREADABLE: {exc}"
-    if not groups:
-        return f"{header}\n  (no pooled slices)"
-    return "\n".join([header, *groups])
+    return cast(
+        "str",
+        require_cascade_rust().results_render_sidecar_content(header, content, REPORT_VERSION),
+    )
 
 
 def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY) -> str:
     """Load the results tree under *root* and render the top-*top* winners leaderboard.
+
+    The store-coupled orchestration (discovery → merge → ``top_k`` → the
+    manifest-attributed origins map) stays here; the text-assembly law —
+    header · the provenance note selected by origins ``None``-ness ·
+    leaderboard · the conditional sidecar append — is RUST-HOSTED
+    (DEC-RUST-CASCADE-RESULTS-001).
 
     Parameters
     ----------
@@ -556,26 +536,13 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
         origins = {
             run_id: ("stage3" if rel in stage3_files else "grid") for run_id, rel in sources.items()
         }
-    if origins is None:
-        provenance_note = (
-            "  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also "
-            "persists UNGATED Stage-3 refined-eval trials — no per-row gate verdict)"
-        )
-    else:
-        provenance_note = (
-            "  (per-row src= markers from the cascade manifest: src=grid rows are "
-            "gate survivors; src=stage3 rows are UNGATED refined trials — "
-            "DEC-ROW-PROVENANCE-001)"
-        )
-    header = (
-        f"BruteX results — {root}\n"
-        f"  files={len(files)}  finalists={len(store)}  "
-        f"sort={sort_by}  showing top {len(leaders)}\n"
-        f"{provenance_note}"
-    )
     sidecar = render_cascade_sidecar(root)
-    body = f"{header}\n\n{render_leaderboard(leaders, origins=origins)}"
-    return f"{body}\n\n{sidecar}" if sidecar else body
+    return cast(
+        "str",
+        require_cascade_rust().results_show_render(
+            root, len(files), len(store), sort_by, len(leaders), leaders, origins, sidecar
+        ),
+    )
 
 
 __all__ = [

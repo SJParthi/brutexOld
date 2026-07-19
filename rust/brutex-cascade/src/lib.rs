@@ -37,6 +37,7 @@ pub mod decimal;
 pub mod ist;
 pub mod minute_path;
 pub mod pyjson;
+pub mod results_report;
 pub mod top100_artifact;
 
 use cascade_join::{GroupNode, Leaf, LeafR, ReportNode, RootView, VerdictNode};
@@ -630,6 +631,102 @@ fn top100_load_artifact<'py>(
     )
 }
 
+// ───────────────────────────── results_report (slice 2c) ────────────────
+// The RENDER-LAW family of `brutex/engine/results_report.py` — module docs
+// in `results_report.rs`. The store-coupled I/O half (discovery / merge /
+// snapshot quarantine / manifest attribution / file reads) stays shim-side.
+
+/// `_resolve_sort_field` — aliases-ONLY resolution; the alias map + the
+/// `ResultsStoreError` class are threaded from the shim.
+#[pyfunction]
+fn results_resolve_sort_field<'py>(
+    py: Python<'py>,
+    token: &Bound<'py, PyAny>,
+    aliases: &Bound<'py, PyAny>,
+    error_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::resolve_sort_field(py, token, aliases, error_cls)
+}
+
+/// `_format_deflated` — `None` → `"—"`; else the always-signed `+.4f`.
+#[pyfunction]
+fn results_format_deflated(value: Option<f64>) -> String {
+    results_report::format_deflated(value)
+}
+
+/// `_format_conditions` — falsy → the note; truthy passes through VERBATIM.
+#[pyfunction]
+fn results_format_conditions<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::format_conditions(py, value)
+}
+
+/// `render_leaderboard` — the winners-table byte law.
+#[pyfunction]
+fn results_render_leaderboard<'py>(
+    py: Python<'py>,
+    rows: &Bound<'py, PyAny>,
+    origins: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::render_leaderboard(py, rows, origins)
+}
+
+/// `_provisional_note` — the counted pool-N pass label, or `""`.
+#[pyfunction]
+fn results_provisional_note(report: &Bound<'_, PyAny>) -> PyResult<String> {
+    results_report::provisional_note(report)
+}
+
+/// `_render_sidecar_group` — one group line, or the `ValueError` refusal.
+#[pyfunction]
+fn results_render_sidecar_group<'py>(
+    py: Python<'py>,
+    entry: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::render_sidecar_group(py, entry)
+}
+
+/// `render_cascade_sidecar`'s render law over ALREADY-READ file content
+/// (the path probe + read + the path-dependent OSError arm are the shim's).
+#[pyfunction]
+fn results_render_sidecar_content<'py>(
+    py: Python<'py>,
+    header: &Bound<'py, PyAny>,
+    content: &Bound<'py, PyAny>,
+    report_version: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::render_sidecar_content(py, header, content, report_version)
+}
+
+/// `results_show_report`'s text-assembly law (orchestration is the shim's).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn results_show_render<'py>(
+    py: Python<'py>,
+    root: &Bound<'py, PyAny>,
+    files_n: usize,
+    finalists_n: usize,
+    sort_by: &Bound<'py, PyAny>,
+    showing_n: usize,
+    leaders: &Bound<'py, PyAny>,
+    origins: Option<&Bound<'py, PyAny>>,
+    sidecar: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    results_report::show_render(
+        py,
+        root,
+        files_n,
+        finalists_n,
+        sort_by,
+        showing_n,
+        leaders,
+        origins,
+        sidecar,
+    )
+}
+
 // ───────────────────────────── cascade_join ─────────────────────────────
 
 /// Classify one Python value into the law's [`Leaf`] model.
@@ -679,6 +776,17 @@ pub(crate) fn capture_repr(v: &Bound<'_, PyAny>) -> String {
 /// exactly as the Python law's `payload.get(...)` calls).
 pub(crate) fn mapping_get<'py>(obj: &Bound<'py, PyAny>, key: &str) -> PyResult<Bound<'py, PyAny>> {
     obj.call_method1("get", (key,))
+}
+
+/// Raise a passed-in domain-error CLASS with a fully-composed message — the
+/// real Python exception instance, so `type(exc).__name__` and `str(exc)`
+/// are byte-identical to the deleted law's direct raises (the slice-2b
+/// `Top100Error` pattern, shared with slice 2c's `ResultsStoreError`).
+pub(crate) fn domain_err(error_cls: &Bound<'_, PyAny>, msg: String) -> PyErr {
+    match error_cls.call1((msg,)) {
+        Ok(inst) => PyErr::from_value(inst),
+        Err(err) => err,
+    }
 }
 
 /// Project one verdict entry.
@@ -873,6 +981,14 @@ fn _brutex_cascade(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(top100_build, m)?)?;
     m.add_function(wrap_pyfunction!(top100_load_stamp, m)?)?;
     m.add_function(wrap_pyfunction!(top100_load_artifact, m)?)?;
+    m.add_function(wrap_pyfunction!(results_resolve_sort_field, m)?)?;
+    m.add_function(wrap_pyfunction!(results_format_deflated, m)?)?;
+    m.add_function(wrap_pyfunction!(results_format_conditions, m)?)?;
+    m.add_function(wrap_pyfunction!(results_render_leaderboard, m)?)?;
+    m.add_function(wrap_pyfunction!(results_provisional_note, m)?)?;
+    m.add_function(wrap_pyfunction!(results_render_sidecar_group, m)?)?;
+    m.add_function(wrap_pyfunction!(results_render_sidecar_content, m)?)?;
+    m.add_function(wrap_pyfunction!(results_show_render, m)?)?;
     // The crate's hardcoded walker exit-reason vocabulary, exposed so the
     // Python drift pin can assert set AND order equality against
     // `trade_sim.EXIT_REASONS` (DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR:
