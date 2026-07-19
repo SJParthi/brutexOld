@@ -131,7 +131,12 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.engine.results_store import ResultRow
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.trial_stats import LeaderboardTrialStats
-    from brutex.metrics.cascade import CandidateInput, CascadeConfig, CascadeReport
+    from brutex.metrics.cascade import (
+        CandidateInput,
+        CandidateVerdict,
+        CascadeConfig,
+        CascadeReport,
+    )
 
 _LOG = structlog.get_logger("brutex.engine.cascade_wire")
 
@@ -563,10 +568,21 @@ def cascade_config_for_sweep(
 
 
 def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
-    """Return *config*'s fields as a JSON-serialisable dict (manifest storage)."""
+    """Return *config*'s fields as a JSON-serialisable dict (manifest storage).
+
+    DEFAULT-ELISION law (DEC-REGIME-MUST-SURVIVE-STRATUM-001, the
+    ``_gate_config_fragment`` precedent): the default-OFF
+    ``extreme_vol_stratum`` flag is emitted ONLY when True, so a
+    default-config manifest serialises BYTE-IDENTICALLY to the pre-filter
+    shape; :func:`cascade_config_from_dict` defaults the absent key back to
+    ``False`` (back-compat both directions — an old manifest round-trips).
+    """
     from dataclasses import asdict
 
-    return asdict(config)
+    data = asdict(config)
+    if data.get("extreme_vol_stratum") is False:
+        del data["extreme_vol_stratum"]
+    return data
 
 
 def cascade_config_from_dict(data: dict[str, object]) -> CascadeConfig:
@@ -733,6 +749,8 @@ def build_candidate_input(
     CandidateInput
         The reconstructed cascade input.
     """
+    from datetime import date
+
     from brutex.calendars.nse import IST
     from brutex.engine.combo_mask import mask_to_entry_signals
     from brutex.engine.sweep_driver import build_equity_curve
@@ -740,6 +758,7 @@ def build_candidate_input(
     from brutex.metrics.cascade import CandidateInput
     from brutex.metrics.compute import compute_metrics
     from brutex.metrics.cpcv import sharpe_of_returns
+    from brutex.metrics.extreme_vol_stratum import classify_extreme_sessions
     from brutex.strategies.types import Side
 
     side = Side.BUY if direction_label == "bull" else Side.SELL
@@ -783,6 +802,20 @@ def build_candidate_input(
     # TRUE per-trade lockbox evidence (R2-SR-F2): each trade's exit-day IST
     # ordinal, sorted — the count source for filter #8's 500-trade floor.
     trade_days = tuple(sorted(t.exit_ts.astimezone(IST).date().toordinal() for t in trades))
+
+    # Filter #10 evidence (DEC-REGIME-MUST-SURVIVE-STRATUM-001): the daily
+    # close series is derived from the SAME bars already in hand — the LAST
+    # close per IST session date (one O(bars) pass, lake truth, no extra
+    # I/O) — then each trade is flagged by whether its ENTRY session
+    # classified extreme. Flags + pnls are aligned in TRADE order (the same
+    # ``trades`` sequence), never the sorted exit-day order above.
+    daily_closes: dict[date, float] = {}
+    for bar in bars:
+        daily_closes[bar.timestamp.astimezone(IST).date()] = float(bar.close)
+    extreme_sessions = classify_extreme_sessions(daily_closes)
+    extreme_flags = tuple(t.entry_ts.astimezone(IST).date() in extreme_sessions for t in trades)
+    trade_pnls = tuple(t.pnl_paisa for t in trades)
+
     # Train/holdout split via the ONE shared resolver (R2-SR-F1): the training
     # references are measured over the bars strictly BEFORE the lockbox window
     # start — the same window filter #8 will gate with (same params, same
@@ -849,6 +882,8 @@ def build_candidate_input(
         lockbox_returns=per_bar,
         lockbox_days=day_ordinals,
         lockbox_trade_days=trade_days,
+        extreme_vol_entry_flags=extreme_flags,
+        trade_pnls_paisa=trade_pnls,
         mc_n_bars=len(bars),
         mc_n_entries=n_entries,
         mc_evaluate=_make_mc_evaluate(
@@ -1104,6 +1139,11 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) rides the SAME additive-at-1
     precedent: the RAW full-precision stage-3 fraction or ``null`` (a
     pre-change report simply lacks the key — readers None-fill).
+    The per-verdict ``extreme_vol_status`` / ``extreme_vol_stats`` keys
+    (DEC-REGIME-MUST-SURVIVE-STRATUM-001) are EMIT-ON-PRESENT: written ONLY
+    when the default-OFF filter #10 actually evaluated the candidate
+    (``extreme_vol_status is not None``), so a flag-OFF report serialises
+    BYTE-IDENTICALLY to the pre-filter shape.
     """
     return {
         "n_input": report.n_input,
@@ -1114,19 +1154,27 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
         "pool_pbo": report.pool_pbo,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
-        "verdicts": [
-            {
-                "candidate_id": verdict.candidate_id,
-                "passed": verdict.passed,
-                "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
-                "detail": verdict.detail,
-                "composite_score": verdict.composite_score,
-                "provisional": verdict.provisional,
-                "cpcv_pass_rate": verdict.cpcv_pass_rate,
-            }
-            for verdict in report.verdicts
-        ],
+        "verdicts": [_verdict_to_dict(verdict) for verdict in report.verdicts],
     }
+
+
+def _verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
+    """Serialise one :class:`CandidateVerdict` (EMIT-ON-PRESENT filter-#10 keys)."""
+    out: dict[str, object] = {
+        "candidate_id": verdict.candidate_id,
+        "passed": verdict.passed,
+        "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
+        "detail": verdict.detail,
+        "composite_score": verdict.composite_score,
+        "provisional": verdict.provisional,
+        "cpcv_pass_rate": verdict.cpcv_pass_rate,
+    }
+    if verdict.extreme_vol_status is not None:
+        out["extreme_vol_status"] = verdict.extreme_vol_status
+        out["extreme_vol_stats"] = (
+            None if verdict.extreme_vol_stats is None else dict(verdict.extreme_vol_stats)
+        )
+    return out
 
 
 def wire_report_to_dict(report: CascadeWireReport) -> dict[str, object]:
