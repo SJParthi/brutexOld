@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1957,
+_Last updated: 2026-07-19 (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1960,
 branch `claude/feed-rust-materialize` — the feed MATERIALIZATION layer
 converts to Rust and the Python oracle bodies are DELETED (the zero-Python
 endgame for `brutex/feed`): the `brutex_feed` wheel becomes REQUIRED for
@@ -50,7 +50,7 @@ DEC-FEED-EPOCH-RESAMPLER-RETIRE-001 (resampler.py retirement). ENGINE
 results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; run identity untouched. This header
 carries the pointer, never the story — the full record lives in the §1
-Active-branch blurb + MIGRATION.md #1957.)
+Active-branch blurb + MIGRATION.md #1960.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3665,9 +3665,10 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/feed-rust-materialize`
-  (**DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1957** — entry #1957 above
-  the live tail #1956; the renumber-at-landing law stands, the DEC-ID is the
-  stable handle per DEC-LEDGER-RENUMBER-001 — the feed MATERIALIZATION layer
+  (**DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1960** — renumbered
+  #1957 → #1960 at the 2026-07-19 merge-reconcile (main took #1957 for
+  DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001 at the club-O fold, live ceiling
+  #1959; the DEC-ID is the stable handle per DEC-LEDGER-RENUMBER-001) — the feed MATERIALIZATION layer
   converts to Rust and the Python oracle bodies are DELETED (the zero-Python
   endgame for `brutex/feed`): the `brutex_feed` wheel becomes REQUIRED for
   feed materialization. HONESTY BANNER (ADR-0020, verbatim): expected payoff
@@ -3789,7 +3790,7 @@ hostile-review pass._
   decimal jump — accidental-crash → plausibly-correct serve;
   planted-dtype-only, no production writer emits decimal128 price
   columns. REFUTER ROUND folded (docs-only ledger amendment over gate
-  widening — the per-item record lives in MIGRATION.md #1957): Claim A
+  widening — the per-item record lives in MIGRATION.md #1960): Claim A
   (P-06 barrier parity) UNREFUTED over 19,933 differential ops — the
   ≥2^63 / bool-index / float-index observations each stricter-or-equal,
   degenerate-input-only (`advance_to(2**63)` old-silent-succeed → new
@@ -11204,7 +11205,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/feed-rust-materialize`
-  (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1957 — the feed
+  (DEC-FEED-RUST-MATERIALIZE-002, MIGRATION.md #1960 — the feed
   MATERIALIZATION layer converts to Rust and the Python oracle bodies are
   DELETED (the zero-Python endgame for `brutex/feed`): the `brutex_feed`
   wheel becomes REQUIRED for feed materialization — crate 0.1.0 → 0.2.0
@@ -11224,7 +11225,7 @@ hostile-review pass._
   DEC-FEED-RUST-FLIP-001); expected payoff ≈ 0 — uniformity, not speed;
   named follow-up DEC-FEED-EPOCH-RESAMPLER-RETIRE-001; ENGINE results
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1957 for the full blurb)
+  see §1 + MIGRATION.md #1960 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·

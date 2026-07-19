@@ -10,7 +10,7 @@ ready-for-review: this lane lands ONLY via the coordinator's club fold. The
 independent refuter round has COMPLETED and its outcome is FOLDED (a
 docs-only LEDGER AMENDMENT — behavior delta 6 + two wording corrections +
 the Claim-A honest-limits lines; see the 4-agent hostile review section
-below + MIGRATION.md #1957; no code change — ledger amendment was chosen
+below + MIGRATION.md #1960; no code change — ledger amendment was chosen
 over gate widening).
 
 ## Before / After (plain language)
@@ -91,7 +91,7 @@ construction.
 ### Failure modes
 
 The SIX ledgered behavior deltas (each hostile/planted-input-only,
-sanctioned + disclosed in MIGRATION.md #1957; delta 6 + the wording
+sanctioned + disclosed in MIGRATION.md #1960; delta 6 + the wording
 corrections in deltas 2/3 are the folded refuter-round outcome):
 
 1. **Wheel-absent** feed materialization now fails LOUD (was: silent
@@ -185,7 +185,7 @@ suffix-independence + lookahead **48/48**.
   the honest residue.
 - No speedup claimed (ADR-0020 honesty banner); no default-flip DEC needed —
   the flip IS this PR, refusal-law instead of burn-in per the operator's
-  compressed no-soak cycle (recorded in MIGRATION.md #1957).
+  compressed no-soak cycle (recorded in MIGRATION.md #1960).
 - ENGINE results UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change.
 
@@ -204,11 +204,11 @@ suffix-independence + lookahead **48/48**.
 - This fold commit (`1f9ac5b`) lands the hostile review's non-blocking MINOR
   (three stale "development-stage Python arm" doc phrases reworded to the
   wheel-required Rust truth — no Python fallback arm exists) + the NIT
-  (the ≥2^63 OverflowError honest-limits line in MIGRATION.md #1957).
+  (the ≥2^63 OverflowError honest-limits line in MIGRATION.md #1960).
 - The refuter-fold commit (this branch's docs-only head) records the
   COMPLETED refuter round: delta 6 (the decimal128 screen-ON crash→serve,
   planted-dtype-only) + the delta-2/3 wording corrections + the Claim-A
-  degenerate-input honest-limits lines in MIGRATION.md #1957 — ledger
+  degenerate-input honest-limits lines in MIGRATION.md #1960 — ledger
   amendment chosen over gate widening (NO code change).
 
 ## Spec / decision links
@@ -217,7 +217,7 @@ suffix-independence + lookahead **48/48**.
   DEC-FEED-RUST-CORE-001's default-OFF/degrade contract #1797 — the crate +
   FFI discipline STAND; closes/moots the named follow-up
   `DEC-FEED-RUST-FLIP-001`)
-- MIGRATION.md row(s): #1957 (live tail #1956 at branch time; the
+- MIGRATION.md row(s): #1960 (renumbered #1957 → #1960 at the 2026-07-19 merge-reconcile — main took #1957 for DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, live ceiling #1959; the
   renumber-at-landing law stands — the DEC-ID is the stable handle per
   DEC-LEDGER-RENUMBER-001)
 - Spec section(s) touched: ADR-0020 conversion program (the brutex/feed
@@ -276,7 +276,7 @@ suffix-independence + lookahead **48/48**.
 
 - NumPy-style docstrings on public symbols; the folded MINOR removed the
   three stale "development-stage Python arm" phrases (no Python arm exists)
-- MIGRATION.md #1957 + CLAUDE.md header/§1/§3 rotation updated
+- MIGRATION.md #1960 + CLAUDE.md header/§1/§3 rotation updated
 - No silent scope expansion — resampler retirement is the named follow-up
 
 ### No hallucination (Golden Rule #1)
@@ -312,7 +312,7 @@ suffix-independence + lookahead **48/48**.
 | Demand | This PR's proof | Real-time check |
 |---|---|---|
 | 100% code coverage | 4× 100.00% line+branch: `feed_rust.py` (85/40) · `replay.py` (163/42) · `lookahead.py` (69/10) · `series_load.py` (89/30) on their ci.yml gates | ci.yml coverage gates |
-| 100% audit coverage | N/A — no material-action writer touched, no audit-JSONL schema change; the durable record is MIGRATION.md #1957 | audit-chain CI gate unchanged |
+| 100% audit coverage | N/A — no material-action writer touched, no audit-JSONL schema change; the durable record is MIGRATION.md #1960 | audit-chain CI gate unchanged |
 | 100% testing coverage | unit + integration (seam suites 150 at the folded head; feed family 237) + property (frozen-oracle hypothesis differential + cargo proptest) + golden (858/126, byte-untouched fixtures) + bench (linearity + ratio) + cargo (61–71 `--locked`); mutation via the mutation.yml pair wiring | pytest + cargo + mutation.yml |
 | 100% code checks | ruff + ruff-format clean; `mypy --strict` 0 new (env-only `cma` baseline); pyright 0 on touched files; bandit rides the standing pre-push/CI gates | pre-push hooks + ci.yml |
 | 100% code performance | no speedup claimed (ADR-0020 banner); barrier O(1)-per-op preserved; strict scan O(n_bars) like the deleted oracle; bench gates green | pytest-benchmark |
@@ -322,7 +322,7 @@ suffix-independence + lookahead **48/48**.
 | 100% security | no secret/network surface touched; env-flag parse fail-loud; crate deps append-only, Cargo.lock updated for the version bump only | pre-push gate |
 | 100% security hardening | refuse-poison `validate_strict_scan` — a poisoned wheel can only refuse, never serve; no new dishonest pragma | grep noqa |
 | 100% bug fixing | feat not fix; the review's ONE non-blocking MINOR + NIT folded at commit `1f9ac5b` (doc honesty — no Python arm exists) | review record below |
-| 100% scenarios covering | the 6 ledgered behavior-delta failure modes (wheel-absent, null columns, envelope, retired flags, >2^53 residue — each pinned; delta 6 is refuter-EXECUTED + ledgered, planted-dtype-only, no gate widening by disposition) + MemoryError/KI/SystemExit raw re-raise | pytest -q battery + #1957 |
+| 100% scenarios covering | the 6 ledgered behavior-delta failure modes (wheel-absent, null columns, envelope, retired flags, >2^53 residue — each pinned; delta 6 is refuter-EXECUTED + ledgered, planted-dtype-only, no gate widening by disposition) + MemoryError/KI/SystemExit raw re-raise | pytest -q battery + #1960 |
 | 100% functionalities covering | every new public symbol (8-symbol crate surface + `require_feed_kernel`/`require_materialize_flags`/`validate_strict_scan`) driven by the rewritten seam suites | pre-push gate |
 | 100% code review | 4-agent hostile review evidence below | this section |
 | 100% extreme check | the frozen in-test oracle differential + byte-untouched goldens + the append-only crate law (frozen `scan_bars` registrations untouched) are the mechanical anti-regression rails | every commit |
@@ -336,7 +336,7 @@ suffix-independence + lookahead **48/48**.
 | Never slow/locked/hanged | the kernel functions are pure CPU (no I/O in the crate); one constant FFI hop per barrier access; no new lock | bench linearity + ratio gates green |
 | QuestDB never fails | N/A — BruteX uses DuckDB + LMDB; neither touched | confirmed |
 | O(1) latency | barrier O(1)-per-op + O(1)-memory-in-record=False preserved (integer comparisons in Rust); the scan is O(n_bars) per launch — stated, never hidden (the #1797 envelope) | bench gates |
-| Uniqueness + dedup | N/A — no dedup key change; run identity untouched (bxsnap2 goldens byte-identical) | MIGRATION.md #1957 |
+| Uniqueness + dedup | N/A — no dedup key change; run identity untouched (bxsnap2 goldens byte-identical) | MIGRATION.md #1960 |
 | Real-time proof | the Real-run proof command above against the REAL built wheel | this PR body |
 
 ## Z+ 7-layer audit
@@ -347,9 +347,9 @@ suffix-independence + lookahead **48/48**.
 | VERIFY | 237 feed family + 150 seam/parity + 858/126 golden + 4633 engine subset + 61–71 cargo verify the flip end-to-end; ci-exact coverage gates 100.00% on all four touched modules |
 | RECONCILE | the deleted two-arm lattice is replaced by refusal laws — a SET legacy flag refuses loudly naming the DEC (never a silent behavior change); pre-existing raw-TypeError escapes reconciled into the typed corrupt-column ValueError (delta 2, disclosed — refuter-corrected: the one null-volume-on-a-screen-skipped-row sub-case was a silent SERVE, not a raw escape; refuse-harder either way) |
 | PREVENT | the append-only crate law (frozen `scan_bars` + registrations byte-untouched, pinned) + `validate_strict_scan`'s refuse-poison gate + the retired-flag refusal prevent silent re-introduction of a degrade arm |
-| AUDIT | MIGRATION.md #1957 is the durable decision record (incl. the folded honest-limits addendum + the refuter-round record: A unrefuted/19,933 ops · B letter-refuted → delta 6 + two wording corrections · C stands · disposition ledger-amendment); CLAUDE.md header/§1/§3 rotated; no runtime audit-JSONL change |
+| AUDIT | MIGRATION.md #1960 is the durable decision record (incl. the folded honest-limits addendum + the refuter-round record: A unrefuted/19,933 ops · B letter-refuted → delta 6 + two wording corrections · C stands · disposition ledger-amendment); CLAUDE.md header/§1/§3 rotated; no runtime audit-JSONL change |
 | RECOVER | revert the branch commits → the exact #1797 state restored (crate 0.1.0, default-OFF flag, live Python oracle); no schema/lake/run-identity change to unwind |
-| COOLDOWN | the flip is refusal-law instead of burn-in per the operator's compressed no-soak cycle (recorded in #1957); the frozen goldens + oracle differential are the standing post-merge net |
+| COOLDOWN | the flip is refusal-law instead of burn-in per the operator's compressed no-soak cycle (recorded in #1960); the frozen goldens + oracle differential are the standing post-merge net |
 
 ## 4-agent hostile review
 
@@ -361,9 +361,9 @@ club-fold four-eye protocol —
 | Implementation worker (lane T17) | build + gate execution + ledger | the branch's 4 commits + the executed gate battery (Real-run proof) | — |
 | Independent hostile reviewer | correctness + security + O-complexity honesty + coverage honesty | **verdict SHIP** — ONE non-blocking MINOR (three stale "development-stage Python arm" doc phrases claiming a nonexistent fallback) + one NIT (≥2^63 barrier index → OverflowError at the FFI edge, unreachable in practice) — **both folded at commit `1f9ac5b`**, gates re-run green | 0 blocking |
 | Independent refuter | adversarial re-execution / completeness | **COMPLETED + FOLDED (docs-only ledger amendment)** — Claim A (P-06 barrier parity) UNREFUTED over **19,933 differential ops** (37 crafted sequences × both record modes + 4,000 seeded random sequences; full observable-state compare per op; the ≥2^63 delta confirmed SAFE-direction — raise-vs-raise-differently, the dangerous oracle-raise/new-silent-pass direction never occurred). Claim B (materialization bit-parity) **REFUTED IN THE LETTER** on ONE hostile-dtype-only shape (the decimal128 screen-ON crash→serve — ledgered as delta 6) + two wording corrections (deltas 2/3), canonical/production plane parity-clean over **~3,000 executed cases** (494 crafted + 2,500 hypothesis, screen ON/OFF, warn-sequence + message-byte compare). Claim C (the >2^53 residue is unreachable from a healthy lake) **STANDS** — hostile 2dp-snapped ≫2^53 prices through the REAL ParquetBarSink→ParquetWriter→Catalog.get_bars chain read back canonical float64; parity confirmed on all three lakes, both screen arms. Disposition: ledger amendment over gate widening (planted-only shape, strictly better-behaved new direction); the Decimal-price junk-typed-gate refusal stays the backticked unminted follow-up `DEC-FEED-DECIMAL-PRICE-GATE-001` | 0 blocking |
-| Coordinator club fold | fourth eye — slotting, union-file weave, renumber-at-landing | this PR lands ONLY via the club fold; #1957 re-verified at landing | — |
+| Coordinator club fold | fourth eye — slotting, union-file weave, renumber-at-landing | this PR lands ONLY via the club fold; #1960 re-verified at landing | — |
 
-Review evidence: MIGRATION.md #1957 (per-item record, incl. the refuter-round
+Review evidence: MIGRATION.md #1960 (per-item record, incl. the refuter-round
 record + disposition) + the fold commit `1f9ac5b` message + the refuter-fold
 docs-only commit (this branch's head).
 
@@ -383,25 +383,25 @@ docs-only commit (this branch's head).
   out-of-envelope loud refusal — refuter-corrected wording · SET falsy/junk
   flag refusal · >2^53 decision-plane f64 residue · the refuter-found
   decimal128 screen-ON crash→serve) — each hostile/planted-input-only,
-  sanctioned + disclosed in #1957; the seam
+  sanctioned + disclosed in #1960; the seam
   suites' old pins pinned the deleted degrade lattice and were REWRITTEN to
   the wheel-required contract (the ONE sanctioned pin-rewrite class of this
   lane, disclosed); the `_expected_bar_time_in_window` walk-COST delta
   (verdict-equivalent, every day resolved before the kernel call where the
-  deleted walk stopped early) is disclosed in #1957; barrier indices ≥ 2^63
+  deleted walk stopped early) is disclosed in #1960; barrier indices ≥ 2^63
   raise OverflowError at the FFI edge (loud, never a silent look-ahead;
   unreachable in practice — with the refuter's Claim-A degenerate-index
-  observations, each stricter-or-equal, ledgered in #1957).
+  observations, each stricter-or-equal, ledgered in #1960).
 - 📋 ROADMAP: `resampler.py` retirement =
   `DEC-FEED-EPOCH-RESAMPLER-RETIRE-001` (named follow-up, RECOMMENDED for
   deletion); series_load orchestration/calendar I/O stays Python (honest
   residue); the refuter round's outcome is FOLDED (delta 6 + the wording
-  corrections, #1957 — ledger amendment over gate widening); a Decimal-price
+  corrections, #1960 — ledger amendment over gate widening); a Decimal-price
   refusal in the junk-typed gate stays available if the club wants it — the
   backticked unminted follow-up `DEC-FEED-DECIMAL-PRICE-GATE-001`.
 
 Anti-pattern check: every claim above cites the executed gate evidence (Test
-plan) or the ledger entry (MIGRATION.md #1957); no claim is based on a
+plan) or the ledger entry (MIGRATION.md #1960); no claim is based on a
 hypothetical artifact.
 
 ## Operator action required (post-merge)
