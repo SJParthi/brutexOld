@@ -1492,9 +1492,11 @@ class RecordedStage3Audit:
         its cell stores hold preloaded foreign-knob rows and are honestly
         non-reproducible; condition B4: cells inconclusive, never compared).
     optimizer_versions
-        The sorted unique ``(pycma, numpy)`` pairs from ``STAGE_3_REFINE_START``
-        lines — the refined-row identity folds them, so a drift changes
-        trajectories without changing the context triple (condition B3).
+        The sorted unique ``(optimizer_version, optimizer_build)`` pairs
+        from ``STAGE_3_REFINE_START`` lines (DEC-RUST-STAGE3-REFINE-001: the
+        brutex-refine crate version tag + its baked source digest) — the
+        refined-row identity folds them, so a drift changes trajectories
+        without changing the context triple (condition B3).
     """
 
     knobs: RecordedStage3Knobs | None
@@ -1531,7 +1533,9 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
         for entry in iter_entries(audit_path):
             if entry.action == "STAGE_3_REFINE_START":
                 payload = entry.payload
-                versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+                versions.add(
+                    (str(payload.get("optimizer_version")), str(payload.get("optimizer_build")))
+                )
                 continue
             if entry.action != "STAGE_3_PASS_START":
                 continue

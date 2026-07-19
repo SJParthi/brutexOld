@@ -128,6 +128,26 @@ else
   fi
 fi
 
+# ────────── 6a2. brutex_refine wheel (REQUIRED for Stage-3) ──────────
+# DEC-RUST-STAGE3-REFINE-001: the DEFAULT-ON Stage-3 optimizer core
+# (restarted CMA-ES + Mode-A grid + top-K selection). The pycma Python
+# math is DELETED, so Stage-3 grid/selection/refinement REFUSES loudly
+# without this wheel — build it like fno_math/trading_core (a failure
+# aborts bootstrap: unlike brutex_feed there is no Python fallback).
+_step "Step 6a2/7 — build + install brutex_refine Rust extension"
+if python -c "import brutex_refine" 2>/dev/null; then
+  _ok "brutex_refine already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-refine && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_refine" 2>/dev/null; then
+    _ok "brutex_refine built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

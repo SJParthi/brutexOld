@@ -474,6 +474,7 @@ class SweepGridConfig:
                 f"got {self.stage3_max_fevals}/{self.stage3_max_restarts}"
             )
         if self.stage3_enable:
+            from brutex.engine.refine_rust import RefineRustUnavailableError
             from brutex.engine.stage3_grid import (
                 MODE_A_SL_AXIS,
                 MODE_A_TP_AXIS,
@@ -495,6 +496,15 @@ class SweepGridConfig:
                         raise ValueError(
                             f"SweepGridConfig.stage3_enable requires every {label} value "
                             f"on the Mode-A grid: {exc}"
+                        ) from exc
+                    except RefineRustUnavailableError as exc:
+                        # DEC-RUST-STAGE3-REFINE-001: normalize rides the
+                        # brutex_refine wheel — an enabled grid on a
+                        # wheel-less/flag-off box fails fast HERE as the same
+                        # clean config ValueError the CLI already surfaces.
+                        raise ValueError(
+                            f"SweepGridConfig.stage3_enable requires the Stage-3 "
+                            f"Rust runtime to validate {label}: {exc}"
                         ) from exc
 
             _require_on_grid("stop_losses", MODE_A_SL_AXIS, self.stop_losses)

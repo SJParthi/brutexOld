@@ -272,16 +272,21 @@ class WheelSpec:
 
 
 #: The CANONICAL box wheel set — MIRRORED from the Makefile ``run-raw``
-#: target's build list (Makefile:90-105: fno-math, trading-core, brutex-feed;
+#: target's build list (fno-math, trading-core, brutex-feed, brutex-refine;
 #: brutex-lake ABSENT — coordinator policy, excluded pending
 #: DEC-BRUTEX-LAKE-BOX-WHEEL-001), drift-pinned by a test that PARSES the
 #: Makefile's ``cd rust/<crate> && … maturin develop`` lines and asserts set
 #: equality (§10 test 16).  Runtime behavior stays a deterministic constant
 #: (the lane must run mid-update on a possibly-broken tree); CI catches drift.
+#: brutex-refine is REQUIRED (DEC-RUST-STAGE3-REFINE-001 — the DEFAULT-ON
+#: Stage-3 optimizer core has NO Python fallback, so a box whose wheel went
+#: stale would refuse every stage-3 sweep; the run-raw step aborts on failure
+#: for the same reason).
 WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("fno_math", "rust/fno-math", required=True),
     WheelSpec("trading_core", "rust/trading-core", required=True),
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
+    WheelSpec("brutex_refine", "rust/brutex-refine", required=True),
 )
 
 

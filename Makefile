@@ -103,6 +103,11 @@ run-raw: preflight
 		{ cd rust/brutex-feed && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
 			|| echo "==> brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST is default-OFF; the feed degrades to the Python oracle)"; \
 	}
+	@$(VPY) -c "import brutex_refine" 2>/dev/null || { \
+		echo "==> brutex_refine kernel not importable — building it (one-time; needs cargo; DEC-RUST-STAGE3-REFINE-001)"; \
+		$(VPIP) install maturin; \
+		cd rust/brutex-refine && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
 	$(VPY) -m brutex run
 
 fmt:

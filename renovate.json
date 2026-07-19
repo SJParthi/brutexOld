@@ -224,26 +224,6 @@
       ]
     },
     {
-      "description": "DEC-STAGE3-OPTIMIZE-EXTRA-001 (ADR-0007 condition 9) — Stage-3 optimizer carve-out: `cma` (pycma) is EXACT-pinned and excluded from every auto-bump path (grouped bumps AND vulnerabilityAlerts auto-merge). Optimizer version bumps silently change CMA-ES search trajectories, and the refinement-run identity hashes the pycma/numpy versions — a bump invalidates every cached refinement run, so it must be a deliberate, decision-ID'd PR. Mirrors the python-data-lake lock-step precedent (DEC-P0-015).",
-      "matchPackageNames": [
-        "cma"
-      ],
-      "matchDepTypes": [
-        "dependencies",
-        "optional-dependencies"
-      ],
-      "enabled": false,
-      "automerge": false,
-      "labels": [
-        "dependencies",
-        "renovate",
-        "stage3-optimizer-pin"
-      ],
-      "prBodyNotes": [
-        ":lock: `cma` (pycma) is the Stage-3 BIPOP-CMA-ES optimizer, EXACT-pinned per ADR-0007 condition 9. Renovate updates are DISABLED — bumping changes search trajectories and invalidates the refinement-run identity cache. Bump only via a dedicated decision-ID PR. See DEC-STAGE3-OPTIMIZE-EXTRA-001 in `docs/MIGRATION.md`."
-      ]
-    },
-    {
       "description": "DEC-P0-015 (PR #37) — Z+ security auto-merge carve-out: data-lake trio (polars+duckdb+pyarrow) is EXCLUDED from vulnerabilityAlerts auto-merge to preserve the python-data-lake lock-step group (single CVE patch must not split the ABI-locked trio). All OTHER deps with a vulnerability patch auto-merge after green CI. Placed LAST in packageRules per Agent 1 hot-path review precedence rule. Concurrent-limit:1 prevents racing security PRs from squash-conflicting (Agent 1 MEDIUM finding).",
       "matchPackageNames": [
         "polars",

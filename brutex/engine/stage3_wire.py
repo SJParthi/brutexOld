@@ -133,7 +133,7 @@ STAGE3_ACTION_PASS_COMPLETE: Final[str] = "STAGE_3_PASS_COMPLETE"  # noqa: S105 
 class Stage3WireError(BruteXError):
     """Raised for any Stage-3 wiring failure.
 
-    Covers a missing ``optimize`` extra at pass time, non-chronological bars in
+    Covers an unavailable Stage-3 Rust runtime at pass time, non-chronological bars in
     the train-slice helper, a survivor whose grid cell cannot be recovered by
     run-identity match, an unknown direction label / timeframe label on a
     persisted row, and a refined cell carrying a disabled (``None``) SL/TP leg.
@@ -141,32 +141,35 @@ class Stage3WireError(BruteXError):
 
 
 def ensure_stage3_runtime() -> tuple[str, str]:
-    """Fail fast (and loudly) when the pinned ``optimize`` extra is absent.
+    """Fail fast (and loudly) when the Stage-3 Rust runtime is unavailable.
 
     Called by the launcher BEFORE any Stage-3 work (and again at pass start) so
-    an enabled run can never crash on a missing ``cma`` import AFTER the whole
-    grid persisted — the same fail-fast rationale as the on-grid axis
-    validation in :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`.
+    an enabled run can never crash on a missing ``brutex_refine`` wheel AFTER
+    the whole grid persisted — the same fail-fast rationale as the on-grid
+    axis validation in :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`.
 
     Returns
     -------
     tuple[str, str]
-        ``(pycma_version, numpy_version)`` — the identity fields of ADR-0007
-        condition 4, proving both libraries import.
+        ``(optimizer_version, optimizer_build)`` — the identity fields of
+        ADR-0007 condition 4 (DEC-RUST-STAGE3-REFINE-001: the crate version
+        tag + the wheel's baked crate-source digest), proving the wheel
+        engages.
 
     Raises
     ------
     Stage3WireError
-        If the ``optimize`` extra (exact-pinned pycma,
-        DEC-STAGE3-OPTIMIZE-EXTRA-001) is not installed.
+        If the ``brutex_refine`` wheel cannot be engaged (absent/stale wheel,
+        or a falsy/junk ``BRUTEX_REFINE_RUST`` — the Python optimizer math is
+        deleted, there is no fallback).
     """
+    from brutex.engine.refine_rust import RefineRustUnavailableError
+
     try:
         return optimizer_versions()
-    except ImportError as exc:
+    except RefineRustUnavailableError as exc:
         raise Stage3WireError(
-            "--stage3-enable requires the 'optimize' extra (pinned pycma) — "
-            "install with: pip install -e '.[optimize]' "
-            f"(import failed: {exc})"
+            f"--stage3-enable requires the Stage-3 Rust runtime (DEC-RUST-STAGE3-REFINE-001): {exc}"
         ) from exc
 
 
@@ -545,7 +548,7 @@ def run_stage3_pass(
     the supervised grid returns (review F10). Sequence:
 
     1. No-op fast path when ``grid.stage3_enable`` is ``False``.
-    2. :func:`ensure_stage3_runtime` (fail fast on a missing ``optimize`` extra).
+    2. :func:`ensure_stage3_runtime` (fail fast on an unavailable Rust runtime).
     3. Select survivors from ONLY this grid's Stage-2 cell files
        (:func:`~brutex.engine.sweep_orchestrator.iter_sweep_tuples` +
        :func:`~brutex.engine.sweep_orchestrator.tuple_store_path`), grouped to
@@ -614,7 +617,7 @@ def run_stage3_pass(
     Raises
     ------
     Stage3WireError
-        Missing ``optimize`` extra, an unrecoverable survivor cell, an unknown
+        Unavailable Stage-3 Rust runtime, an unrecoverable survivor cell, an unknown
         direction/timeframe label, or non-chronological bars.
     """
     if not grid.stage3_enable:

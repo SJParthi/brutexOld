@@ -349,7 +349,7 @@ See `LICENSE`.
 
 - Python 3.12, Rust + PyO3, Arrow zero-copy
 - Polars, DuckDB, LMDB, Parquet (Zstd-9)
-- pycma (BIPOP-CMA-ES) for Stage 3 refinement
+- brutex-refine (in-repo Rust BIPOP-style CMA-ES) for Stage 3 refinement
 - Hypothesis, pytest-benchmark, mutmut, cargo-mutants, cargo-fuzz
 - FastAPI + structlog + Prometheus
 - Claude Code (Anthropic) as the build copilot, with a 4-agent
