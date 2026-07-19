@@ -246,6 +246,28 @@ class TestBurnIn:
             assert score_probabilities(FEATURES, 2, WEIGHTS, 0.1) == oracle_probs()
         assert calls["n"] == BURN_IN_CALLS + 4  # the kernel keeps serving
 
+    def test_abstain_matching_kernel_serves_through_burn_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The abstain twin of the score burn-in test: the post-burn-in
+        # steady-state arm (burn_in >= BURN_IN_CALLS -> straight return)
+        # must be reachable WITHOUT the compiled wheel — the touched-module
+        # discovery gate runs wheel-free, so the RealWheel parity test
+        # cannot carry this branch there.
+        expected = abstain_masks_python(*ABSTAIN_ARGS)
+        calls = {"n": 0}
+
+        def _kernel(*args: object) -> list[int]:
+            calls["n"] += 1
+            return abstain_masks_python(*args)  # type: ignore[arg-type]
+
+        monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel(abstain=_kernel))
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(BURN_IN_CALLS + 4):
+                assert abstain_reason_masks(*ABSTAIN_ARGS) == expected
+        assert calls["n"] == BURN_IN_CALLS + 4  # the kernel keeps serving
+        assert not any(e["event"] == META_RUST_AUTOREVERT_EVENT for e in logs)
+
     def test_mismatch_ships_the_oracle_and_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         drifted = [min(1.0, p + 1e-9) for p in oracle_probs()]
         monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel(score=lambda *a: list(drifted)))
