@@ -23,7 +23,9 @@ Structure (the ``test_lake_rust_render.py`` / ``test_feed_rust.py`` idioms):
 
 from __future__ import annotations
 
+import ast
 import os
+import subprocess
 import sys
 import types
 from collections.abc import Callable, Iterator, Sequence
@@ -829,6 +831,9 @@ class TestMoneynessSeams:
                 strike=Decimal("24000"),
                 spot=Decimal("24100"),
                 band=Decimal(0),
+                itm=Moneyness.ITM,
+                atm=Moneyness.ATM,
+                otm=Moneyness.OTM,
                 python=lambda: Moneyness.UNKNOWN,
             )
             assert got is bucket
@@ -841,6 +846,9 @@ class TestMoneynessSeams:
             strike=Decimal("24000"),
             spot=Decimal("24100"),
             band=Decimal(0),
+            itm=Moneyness.ITM,
+            atm=Moneyness.ATM,
+            otm=Moneyness.OTM,
             python=lambda: Moneyness.ITM,
         )
         assert got is Moneyness.ITM
@@ -855,6 +863,9 @@ class TestMoneynessSeams:
             strike=Decimal("24000"),
             spot=Decimal("24100"),
             band=Decimal("0.005"),  # half a paisa — inexact
+            itm=Moneyness.ITM,
+            atm=Moneyness.ATM,
+            otm=Moneyness.OTM,
             python=lambda: Moneyness.OTM,
         )
         assert got is Moneyness.OTM
@@ -1408,6 +1419,74 @@ class TestStrikeGridDifferential:
                 step = 50 if instrument is OptionsUnderlying.NIFTY else 100
                 assert on_result == [24_000 + i * step for i in range(-half_width, half_width + 1)]
         assert not ocr.optcost_rust_disabled()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Import-graph acyclicity (the CODEQL FIX ROUND)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestImportGraphAcyclic:
+    """The CODEQL FIX ROUND import-order pins — the cycle class can't return.
+
+    Code-scanning alerts 1308 (``moneyness.py:37`` — "begins an import
+    cycle", error) + 1309 (``optcost_rust.py:148`` — the interim
+    ``TYPE_CHECKING``-only ``Moneyness`` import, runtime-free yet still a
+    module-level cyclic-import finding, note): the facade now takes the
+    graded bucket values by INJECTION (``classify_graded(itm=, atm=, otm=)``)
+    and imports ``brutex.data.moneyness`` NOWHERE, so the import graph is
+    acyclic in BOTH directions, statically and at runtime — the exact
+    ``fno_symbol_rust`` precedent (``TestImportGraphAcyclic`` there). Two
+    layers: (a) fresh-interpreter subprocess imports in EVERY order (each
+    module alone + both sequential orders — a reintroduced runtime cycle
+    fails here), and (b) an AST source pin that refuses ANY import of
+    ``brutex.data.moneyness`` from the facade — including a
+    ``TYPE_CHECKING``-guarded one (the exact shape that regressed).
+    """
+
+    @pytest.mark.parametrize(
+        "statements",
+        [
+            ("import brutex.optcost_rust",),
+            ("import brutex.data.moneyness",),
+            ("import brutex.optcost_rust", "import brutex.data.moneyness"),
+            ("import brutex.data.moneyness", "import brutex.optcost_rust"),
+        ],
+        ids=["facade_alone", "consumer_alone", "facade_then_consumer", "consumer_then_facade"],
+    )
+    def test_fresh_interpreter_import_order(self, statements: tuple[str, ...]) -> None:
+        code = "\n".join(statements)
+        proc = subprocess.run(  # fixed argv, our own interpreter — never shell
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+            cwd=_REPO_ROOT,
+        )
+        assert proc.returncode == 0, (
+            f"fresh-interpreter import failed for {statements!r}:\n{proc.stderr}"
+        )
+
+    def test_facade_source_never_imports_moneyness(self) -> None:
+        src = (_REPO_ROOT / "brutex" / "optcost_rust.py").read_text(encoding="utf-8")
+        offenders: list[str] = []
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "brutex.data.moneyness" or module.endswith(".moneyness"):
+                    offenders.append(f"line {node.lineno}: from {module} import …")
+            elif isinstance(node, ast.Import):
+                offenders.extend(
+                    f"line {node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "brutex.data.moneyness"
+                )
+        assert offenders == [], (
+            "the facade must NEVER import brutex.data.moneyness (not even under "
+            "TYPE_CHECKING — the no-cycle law, DEC-OPTCOST-TAILS-RUST-001 CODEQL "
+            f"FIX ROUND, alerts 1308/1309): {offenders}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -34,6 +34,10 @@ from decimal import ROUND_HALF_DOWN, Decimal
 from enum import StrEnum
 from typing import Final, TypeGuard
 
+# One-directional edge: the facade imports this module NOWHERE (the graded
+# bucket values are INJECTED via `classify_graded(itm=, atm=, otm=)`), so the
+# import graph is acyclic — the CODEQL FIX ROUND (code-scanning alerts
+# 1308/1309), pinned by TestImportGraphAcyclic in tests/unit/test_optcost_rust.py.
 from brutex import optcost_rust
 
 
@@ -109,6 +113,9 @@ def classify(
             strike=strike,
             spot=spot,
             band=band,
+            itm=Moneyness.ITM,
+            atm=Moneyness.ATM,
+            otm=Moneyness.OTM,
             python=lambda: _classify_graded_python(option_type, strike, spot, band),
         )
     return _classify_graded_python(option_type, strike, spot, band)

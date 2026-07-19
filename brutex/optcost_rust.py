@@ -26,11 +26,16 @@ A TOP-LEVEL leaf (the ``brutex/feed_rust.py`` precedent), NOT
 
 The top-level leaf imports ONLY stdlib + ``structlog`` at module scope
 (``brutex/__init__.py`` is version-only); call-site types
-(``UnverifiedCostRegimeError``, ``Moneyness``) and the COMMON degrade/panic
+(``UnverifiedCostRegimeError``) and the COMMON degrade/panic
 belts (re-exported by ``brutex.data.lake_rust_render`` for sibling seams —
 CLAUDE.md §11 COMMON, no copies) are imported LAZILY at call time, when the
-caller's own module is fully initialised. Call sites import this facade,
-never the reverse.
+caller's own module is fully initialised; the ``classify_graded`` bucket
+values are INJECTED by the caller instead, so this facade imports
+``brutex.data.moneyness`` NOWHERE — not even under ``TYPE_CHECKING`` (the
+CODEQL FIX ROUND, code-scanning alerts 1308 + 1309: the interim
+``TYPE_CHECKING``-only ``Moneyness`` import was runtime-free yet still a
+module-level cyclic-import finding — the ``fno_symbol_rust`` precedent).
+Call sites import this facade, never the reverse.
 
 ## The flag — ``BRUTEX_OPTCOST_TAILS_RUST`` (DEFAULT OFF)
 
@@ -145,8 +150,6 @@ if TYPE_CHECKING:  # pragma: no cover - imports only for static typing
     from collections.abc import Callable, Sequence
     from types import ModuleType
 
-    from brutex.data.moneyness import Moneyness
-
 
 class RegimeRowLike(Protocol):
     """The structural shape of :class:`brutex.costs.constants.RegimeRow`.
@@ -158,14 +161,17 @@ class RegimeRowLike(Protocol):
     @property
     def start(self) -> date:  # pragma: no cover — Protocol stub, never executed
         """The regime's inclusive start date (or an unverified-window marker)."""
+        ...
 
     @property
     def rate_bps_x100(self) -> int | None:  # pragma: no cover — Protocol stub, never executed
         """The verified rate in bps x100, or ``None`` for a rate-less refusal row."""
+        ...
 
     @property
     def source(self) -> str:  # pragma: no cover — Protocol stub, never executed
         """The row's citation (circular id) or its honest verification-gap note."""
+        ...
 
 
 _LOG = structlog.get_logger("brutex.optcost_rust")
@@ -819,16 +825,29 @@ def next_monthly(
     return cast("date", _materialize(_route("next_monthly", kernel_call=_kernel, oracle=_oracle)))
 
 
-def classify_graded(
+def classify_graded[BucketT](
     *,
     is_put: bool,
     strike: Decimal,
     spot: Decimal,
     band: Decimal,
-    python: Callable[[], Moneyness],
-) -> Moneyness:
+    itm: BucketT,
+    atm: BucketT,
+    otm: BucketT,
+    python: Callable[[], BucketT],
+) -> BucketT:
     """Routed graded arm of :func:`brutex.data.moneyness.classify`
     (seam ``classify``) — NA/UNKNOWN are decided at the call site pre-FFI.
+
+    The graded bucket VALUES (``itm``/``atm``/``otm`` —
+    :class:`brutex.data.moneyness.Moneyness` members at the one production
+    call site) are INJECTED by the caller, so this facade never imports
+    ``brutex.data.moneyness`` at any scope — not even under
+    ``TYPE_CHECKING`` (the CODEQL FIX ROUND: code-scanning alerts 1308 +
+    1309 flagged the ``moneyness`` ⇄ ``optcost_rust`` module-level import
+    cycle; the injection mirrors the ``fno_symbol_rust`` precedent — the
+    import graph is acyclic in BOTH directions, statically and at runtime,
+    pinned by ``TestImportGraphAcyclic``).
 
     The paisa-exactness gate (hard rule 4): any input not exactly
     representable as i64 paisa routes SILENTLY to the oracle — never a
@@ -838,7 +857,6 @@ def classify_graded(
     the DEFAULT decimal context ONLY (module docstring — the oracle's own
     ``spot − strike`` subtraction is ambient-context arithmetic).
     """
-    from brutex.data.moneyness import Moneyness
 
     def _oracle() -> Outcome:
         return Outcome(value=python())
@@ -849,10 +867,10 @@ def classify_graded(
     if strike_paisa is None or spot_paisa is None or band_paisa is None:
         return python()
 
-    graded: dict[int, Moneyness] = {
-        2: Moneyness.ITM,
-        3: Moneyness.ATM,
-        4: Moneyness.OTM,
+    graded: dict[int, BucketT] = {
+        2: itm,
+        3: atm,
+        4: otm,
     }
 
     def _kernel(kernel: ModuleType) -> Outcome:
@@ -866,7 +884,7 @@ def classify_graded(
             raise KernelResultRefused(msg)
         return Outcome(value=bucket)
 
-    return cast("Moneyness", _materialize(_route("classify", kernel_call=_kernel, oracle=_oracle)))
+    return cast("BucketT", _materialize(_route("classify", kernel_call=_kernel, oracle=_oracle)))
 
 
 def atm_offset_paisa(
