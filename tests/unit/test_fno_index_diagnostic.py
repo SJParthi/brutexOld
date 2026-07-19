@@ -54,6 +54,21 @@ from brutex.universe import (
     normalize_underlying_symbol,
 )
 from structlog.testing import capture_logs
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the pre-#1934 verbose-index bridging + FNO-index-gap
+    DIAGNOSTIC mechanics over MIDCPNIFTY/FINNIFTY/NIFTYNXT50 fixtures —
+    indices outside the shipped ``index4`` scope; under
+    ``BRUTEX_FEED_SCOPE=full`` those legacy rules are byte-identical (the
+    parity half of the §6 widen-path pin). The shipped index4-default guard
+    arms live in ``test_universe_index_only_scope.py`` + the scope-gate
+    batteries (migration Law 1)."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 # ────────────────────────────────────────────────────────────────────────
 # Instrument fixtures for the pure-function layer

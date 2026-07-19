@@ -667,6 +667,10 @@ jobs:
           # and the helper predicates (`is_index_underlying`,
           # `is_in_scope`, `classify_underlying_kind`) — comprehensive
           # coverage of every public function + every branch.
+          # DEC-UNIVERSE-INDEX-ONLY-001 (#1934): the scope suites join the
+          # stanza — the bounded index4 admission arms live in
+          # test_universe_index_only_scope.py + test_universe_pull.py (the
+          # legacy suites run full-arm per the §6 migration law).
           if compgen -G "tests/unit/test_universe.py" > /dev/null; then
             pytest \
               --cov=brutex.universe \
@@ -674,6 +678,8 @@ jobs:
               --cov-report=term-missing \
               --cov-fail-under=100 \
               tests/unit/test_universe.py \
+              tests/unit/test_universe_pull.py \
+              tests/unit/test_universe_index_only_scope.py \
               tests/unit/test_fno_index_diagnostic.py
           else
             echo "(brutex.universe test file not present yet — gate inactive)"

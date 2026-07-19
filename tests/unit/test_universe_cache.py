@@ -38,11 +38,25 @@ import pytest
 pytest.importorskip("duckdb", reason="the universe cache reads a real DuckDB store")
 
 import duckdb
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard import universe_cache as uc
 from brutex.dashboard.universe_cache import UniverseSnapshotCache, _Snapshot
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from structlog.testing import capture_logs
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the CACHE MECHANICS (revision token, memo identity,
+    per-kind independence, single-flight) over index+stock fixtures; the
+    stock rows exist to exercise the ``reference_stock_count`` /
+    ``stock_count_total`` split and per-kind memos, so the suite runs
+    full-arm — the scope law itself is pinned by
+    ``test_universe_index_only_scope.py`` + the scope-gate batteries."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 from structlog.typing import EventDict
 
 

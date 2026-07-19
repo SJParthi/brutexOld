@@ -36,9 +36,9 @@ from unittest import mock
 
 import pytest
 from brutex import cli
+from brutex.config.credentials import CredentialsError
 from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.config.feed_scope import resolve_read_scope
-from brutex.config.credentials import CredentialsError
 from brutex.data import greeks_enrich_pass as gep
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome

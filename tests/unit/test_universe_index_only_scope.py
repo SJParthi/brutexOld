@@ -172,6 +172,20 @@ class TestFetchScopeIndex4:
         assert is_in_fetch_scope(_idx("NIFTY"), _FNO_ELIGIBLE) is True
         assert is_in_fetch_scope(_idx("NIFTYIT"), _FNO_ELIGIBLE) is False
 
+    def test_explicit_scope_kwarg_bypasses_env_resolution(self) -> None:
+        """The §2.4 seam: an EXPLICIT ``scope=`` is honored verbatim (the
+        ``scope is None`` env-resolution arm is never entered) — the caller's
+        injected scope decides, independent of ``BRUTEX_FEED_SCOPE``."""
+        from brutex.config.feed_scope import SCOPE_FULL, SCOPE_INDEX4, _scope_for_token
+
+        index4 = _scope_for_token("groww", SCOPE_INDEX4)
+        full = _scope_for_token("groww", SCOPE_FULL)
+        stock_leg = _leg("RELIANCE", InstrumentType.FUT, Exchange.NSE)
+        assert is_in_fetch_scope(stock_leg, _FNO_ELIGIBLE, scope=index4) is False
+        assert is_in_fetch_scope(stock_leg, _FNO_ELIGIBLE, scope=full) is True
+        assert is_universe_underlying(_idx("NIFTYIT"), _FNO_ELIGIBLE, scope=index4) is False
+        assert is_universe_underlying(_idx("NIFTYIT"), _FNO_ELIGIBLE, scope=full) is True
+
 
 class TestClassifyMirror:
     """A4 — classify_instrument threads the SAME scope law."""
