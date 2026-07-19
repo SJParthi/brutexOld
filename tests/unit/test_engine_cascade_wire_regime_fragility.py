@@ -18,9 +18,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
-import pytest
-
 import brutex.engine.cascade_wire as cw
+import pytest
 from brutex.data.models import CandleBar
 from brutex.engine.session_lens import build_session_lens
 from brutex.metrics.cascade import CandidateVerdict

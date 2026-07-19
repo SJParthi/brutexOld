@@ -90,7 +90,6 @@ import numpy as np
 from brutex.metrics.cpcv import DEFAULT_N_GROUPS, DEFAULT_N_TEST_GROUPS, cpcv_pass_rate
 from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
 from brutex.metrics.extreme_vol_stratum import evaluate_stratum
-from brutex.metrics.regime_fragility import evaluate_fragility
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -99,6 +98,7 @@ from brutex.metrics.lockbox import (
 )
 from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 from brutex.metrics.pbo import pbo_probability
+from brutex.metrics.regime_fragility import evaluate_fragility
 from brutex.metrics.spa import BootstrapConfig, reality_check, romano_wolf
 from brutex.metrics.wfo import WFOScheme, wfo_pass_rate
 

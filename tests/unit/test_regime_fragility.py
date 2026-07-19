@@ -26,9 +26,7 @@ def _stratum(total: int, n: int = MIN_STRATUM_TRADES) -> tuple[int, ...]:
     return (head,) + (1,) * (n - 1)
 
 
-def _two_stratum_trend(
-    up_total: int, down_total: int
-) -> tuple[tuple[int, ...], tuple[str, ...]]:
+def _two_stratum_trend(up_total: int, down_total: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
     """Two supported trend strata with exact positive-P&L totals."""
     up = _stratum(up_total)
     down = _stratum(down_total)

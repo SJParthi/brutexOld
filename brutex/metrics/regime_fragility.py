@@ -73,6 +73,10 @@ _CONCENTRATION_DEN: Final[int] = 5
 #: the two gates calibrate independently.
 MIN_STRATUM_TRADES: Final[int] = 30
 
+#: An axis is JUDGEABLE only with at least this many supported strata —
+#: one supported stratum has nothing to be concentrated AGAINST.
+_MIN_JUDGEABLE_STRATA: Final[int] = 2
+
 #: The trend-axis stratum EXCLUDED from the laws (counted in stats only).
 _UNKNOWN_LABEL: Final[str] = TrendStratum.UNKNOWN.value
 
@@ -102,9 +106,7 @@ class FragilityVerdict:
     detail: str
 
 
-def _axis_groups(
-    pnls_paisa: Sequence[int], labels: Sequence[str]
-) -> dict[str, list[int]]:
+def _axis_groups(pnls_paisa: Sequence[int], labels: Sequence[str]) -> dict[str, list[int]]:
     """Group *pnls_paisa* by aligned stratum *labels* (callers pre-check length)."""
     groups: dict[str, list[int]] = {}
     for pnl, label in zip(pnls_paisa, labels, strict=True):
@@ -129,10 +131,8 @@ def _evaluate_axis(
     eligible = {label: g for label, g in groups.items() if label not in excluded}
     pos_by_label = {label: sum(p for p in g if p > 0) for label, g in eligible.items()}
     total_pos = sum(pos_by_label.values())
-    supported = [
-        label for label, g in eligible.items() if len(g) >= MIN_STRATUM_TRADES
-    ]
-    judgeable = len(supported) >= 2
+    supported = [label for label, g in eligible.items() if len(g) >= MIN_STRATUM_TRADES]
+    judgeable = len(supported) >= _MIN_JUDGEABLE_STRATA
 
     strata_stats: dict[str, object] = {}
     for label in sorted(groups):
@@ -222,9 +222,7 @@ def evaluate_fragility(
     reasons: list[str] = []
     any_judgeable = False
 
-    def run_axis(
-        axis: str, labels: Sequence[str] | None, *, excluded: frozenset[str]
-    ) -> None:
+    def run_axis(axis: str, labels: Sequence[str] | None, *, excluded: frozenset[str]) -> None:
         nonlocal any_judgeable
         if labels is None:
             axes[axis] = _skipped_axis("no_input")

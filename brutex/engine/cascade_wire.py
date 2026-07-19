@@ -765,7 +765,7 @@ def build_candidate_input(
     CandidateInput
         The reconstructed cascade input.
     """
-    from datetime import date, datetime
+    from datetime import date
     from decimal import Decimal
 
     from brutex.calendars.nse import IST
@@ -1277,9 +1277,7 @@ def _verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
     if verdict.regime_fragility_status is not None:
         out["regime_fragility_status"] = verdict.regime_fragility_status
         out["regime_fragility_stats"] = (
-            None
-            if verdict.regime_fragility_stats is None
-            else dict(verdict.regime_fragility_stats)
+            None if verdict.regime_fragility_stats is None else dict(verdict.regime_fragility_stats)
         )
     return out
 

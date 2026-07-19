@@ -226,9 +226,7 @@ def test_evidence_none_abstains_with_null_stats() -> None:
 def test_pnls_without_any_axis_abstains() -> None:
     cfg = _pass_config(regime_fragility=True)
     # P&L present but BOTH axes absent → the evidence-None abstain arm.
-    rep = run_stage4_cascade(
-        [_candidate("a", seed=1, trade_pnls_paisa=(1, 2, 3))], cfg
-    )
+    rep = run_stage4_cascade([_candidate("a", seed=1, trade_pnls_paisa=(1, 2, 3))], cfg)
     (v,) = rep.verdicts
     assert v.regime_fragility_status == "insufficient_strata"
     assert v.regime_fragility_stats is None
