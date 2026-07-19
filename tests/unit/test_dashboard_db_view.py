@@ -2244,9 +2244,12 @@ class TestWindowPayloadReadScope:
         one-arg ``TRIM`` strips spaces ONLY, so pre-fix the SQL path
         excluded+counted the tab-padded key the Python ``str.strip()`` twin
         admitted — violating the bind's one-directional (admit-side-wider)
-        envelope. The two-arg ASCII-whitespace ``TRIM`` restores parity."""
+        envelope. The two-arg ASCII-whitespace ``TRIM`` restores parity —
+        including the FS/GS/RS/US controls (``\\x1c``-``\\x1f``) Python's
+        ``str.strip()`` also strips (the full ASCII ``isspace`` set, so the
+        stated ASCII parity holds character-for-character)."""
         ledger = WindowLedger()
-        for key in ("NIFTY\t", " NIFTY \r\n", "RELIANCE"):
+        for key in ("NIFTY\t", " NIFTY \r\n", "BANKNIFTY\x1c", "RELIANCE"):
             ledger.record(
                 _window_key(key), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
             )
@@ -2257,7 +2260,7 @@ class TestWindowPayloadReadScope:
             tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope, conn=duckdb.connect()
         )
         for payload in (python_payload, duck_payload):
-            assert payload["count"] == 2  # both padded NIFTY forms admitted
+            assert payload["count"] == 3  # all three padded admitted forms
             assert payload["out_of_scope"] == {
                 "windows": 1,  # RELIANCE only — never a padded admitted key
                 "legacy_unresolved": 0,

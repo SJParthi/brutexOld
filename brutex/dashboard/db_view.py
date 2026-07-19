@@ -6974,8 +6974,11 @@ _LEGACY_SID_EXPR: Final[str] = "split_part(security_id, '|', 1)"
 #: DuckDB's one-arg ``TRIM`` strips SPACES only, while the Python fold twin
 #: (``scope_filter.classify_window_row``) judges ``str.strip()`` — without
 #: this set a tab/CR/LF-padded admitted key would be admitted by the Python
-#: fold yet excluded+counted by the SQL fast path (parity-pinned).
-_SQL_TRIM_WS: Final[str] = " \t\n\r\x0b\x0c"
+#: fold yet excluded+counted by the SQL fast path (parity-pinned). The set is
+#: the COMPLETE ASCII ``str.isspace()`` set — space/tab/LF/VT/FF/CR plus the
+#: FS/GS/RS/US controls ``\\x1c``-``\\x1f`` Python's ``str.strip()`` also
+#: strips — so the ASCII-parity claim holds character-for-character.
+_SQL_TRIM_WS: Final[str] = " \t\n\r\x0b\x0c\x1c\x1d\x1e\x1f"
 
 
 @dataclass(frozen=True)
@@ -6993,7 +6996,8 @@ class _WindowScopeBind:
     ``NSE-NIFTY-<junk>`` name over-admits into the census — the harmless
     direction). Exclusion-side envelope (stated + pinned): the spot arm
     trims the ASCII whitespace set (``TRIM(security_id, <ws>)`` —
-    tab/CR/LF/VT/FF/space, matching Python ``str.strip()`` over ASCII), so
+    tab/CR/LF/VT/FF/space + the FS/GS/RS/US controls, matching Python
+    ``str.strip()`` over ASCII character-for-character), so
     an ASCII-whitespace-padded admitted key is admitted on BOTH paths; an
     exotic UNICODE-whitespace-padded key (mintable by no producer — the
     #907/#911 drift corpus is space-padded only) may read excluded+COUNTED
