@@ -3393,9 +3393,12 @@ hostile-review pass._
   capture/aggregate digests SCHEMA-ADDITIVE (five INT64 counter columns, counters measured 0
   on those fixtures); rust/trade-sim/paisa/sensex absolute pins PROVEN UNCHANGED at the tf=1
   fixed point; `tests/golden/fixtures/` BYTE-UNTOUCHED (empty diff — Stage-1A/60-vocab/
-  indicator_version out of scope). PARITY: the hypothesis dual-stream Python≡Rust property
-  (~850 examples/run, u64 AND u128, zero divergences) + 140 randomized differential trials
-  (100 dual-arm + 40 drawdown bit-key — zero mismatches, re-run at every integration head).
+  indicator_version out of scope). PARITY: the COMMITTED dual-stream Python≡Rust hypothesis
+  property (the two `test_{u64,u128}_kernel_dual_stream_parity` tests, `max_examples=25`
+  each = 50 examples/run reproducible from the merged tree — the `ci` profile adds no
+  override — u64 AND u128, zero divergences) + IN-SESSION SCRATCHPAD exploration, NOT
+  committed (heavy_parity 400 examples/arm = 800; parity_smoke 120 differential trials =
+  80 dual-arm + 40 drawdown bit-key — zero mismatches).
   PREFLIGHT: the NON-WAIVABLE exec-slice refusal (`--allow-missing-slices` does not waive
   it). THE R13 FILL-SENSITIVITY HALF: NEW pure leaf `brutex/engine/fill_sensitivity.py` —
   ONE open-anchored reference re-sim per persisted finalist at results-depth time (entry at
@@ -3441,7 +3444,7 @@ hostile-review pass._
   252/98 · fill_sensitivity 55/22 · results_depth_pass 329/76 · exec_verdict 30/10 · futures
   executor+leaderboard · ranking package 286/74 · oneclick_artifacts (332) ·
   sweep_results_view 304/102 ALL 100.00%; cargo fno-math 623+4+1 `--locked` + fmt + clippy
-  `-D warnings` clean; golden tree 547 passed · property belt 555 passed · heavy CLI-chain
+  `-D warnings` clean; golden tree 548 passed · property belt 555 passed · heavy CLI-chain
   batches green; ruff/ruff-format clean; `mypy --strict` = the 9 env-only baselines; pyright
   0 errors on touched files; `node --check` clean; ledger validators green. ENGINE SEMANTICS
   CHANGED BY OPERATOR DIRECTIVE (PR-B of the fills-track sanctioned exception) —
@@ -10339,8 +10342,9 @@ hostile-review pass._
   (`_GOLDEN_RUN_ID` `caf0cb63…9390ca`; the 304-trade/+10,910-paisa census;
   the PR-A id negative-pinned `_PRE_GRID_RUN_ID`; fixtures byte-untouched,
   empty diff); AGG_COLUMNS 50→55; the R45 diffcheck reference rewritten
-  independent dual-stream; ~850-example hypothesis Python≡Rust parity + 140
-  randomized differential trials, zero divergences; the R13
+  independent dual-stream; the COMMITTED 50-examples/run dual-stream hypothesis
+  Python≡Rust parity (max_examples=25 × the two u64/u128 tests) + in-session scratchpad
+  heavy/differential runs (not committed), zero divergences; the R13
   fill-sensitivity annotation (open-anchored reference re-sim, per-entry
   additive object, never re-ranks, provider-None byte-identical); + #1980 —
   the winners hook widened to BOTH translation executors (per-entry
