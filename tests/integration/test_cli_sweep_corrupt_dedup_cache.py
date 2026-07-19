@@ -195,3 +195,41 @@ def test_raw_lmdb_error_from_cache_open_is_clean_refusal(
     err = capsys.readouterr().err
     assert "[brutex] REFUSED:" in err
     assert "simulated raw lmdb fault" in err
+
+
+def test_run_core_enter_failure_still_closes_dedup_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 belt (#1553): a NON-``SweepAlreadyRunningError`` failure of
+    ``sweep_run_core.__enter__`` (e.g. an ``OSError`` from the G6 flock /
+    exit-status write) must ALSO close the hoisted dedup ``SweepCache`` — on an
+    ``__enter__`` raise the run-core ExitStack is empty and ``core`` unbound,
+    so ONLY the cache is open — and the exception propagates RAW (a genuine
+    infra fault must traceback, Golden Rule #10; the sibling
+    ``SweepAlreadyRunningError`` handler stays the clean-refusal lane).
+    Fails-before: without the ``except BaseException`` belt the OSError left
+    the LMDB env open — the close spy stayed empty.
+    """
+    from brutex.engine import sweep_run_core as run_core_module
+    from brutex.engine.sweep_cache import SweepCache
+
+    lake_root, catalog_path = _build_lake(tmp_path)
+    closed: list[bool] = []
+    orig_close = SweepCache.close
+
+    def _spy_close(self: SweepCache) -> None:
+        closed.append(True)
+        orig_close(self)
+
+    class _BoomEnterCM:
+        def __enter__(self) -> object:
+            raise OSError("simulated run-core enter failure (flock write)")
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(SweepCache, "close", _spy_close)
+    monkeypatch.setattr(run_core_module, "sweep_run_core", lambda **_kwargs: _BoomEnterCM())
+    with pytest.raises(OSError, match="simulated run-core enter failure"):
+        cmd_sweep_all(**_sweep_kwargs(lake_root, catalog_path, tmp_path / "sweeps"))  # type: ignore[arg-type]
+    assert closed, "the hoisted SweepCache LMDB env must be closed on a run-core enter failure"

@@ -182,9 +182,7 @@ def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
     guards) reported the SAME "done" finish detail as full success. Must
     now surface a named failure in the finish detail instead."""
 
-    def _fails(
-        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
-    ) -> int:
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
         return 1
 
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
@@ -207,9 +205,7 @@ def test_nonzero_exit_code_does_not_mark_cache_dirty(
     cache = SummaryCache()
     monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
 
-    def _fails(
-        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
-    ) -> int:
+    def _fails(request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None) -> int:
         return 1
 
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)

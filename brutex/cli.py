@@ -8766,6 +8766,16 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 file=sys.stderr,
             )
             return EXIT_USER_ERROR
+        except BaseException:
+            # F1 belt (#1553): a NON-SweepAlreadyRunningError failure of
+            # ``sweep_run_core.__enter__`` (e.g. an OSError from the flock /
+            # exit-status write) must ALSO close the hoisted dedup cache — on an
+            # ``__enter__`` raise the stack is empty and ``core`` unbound, so
+            # ONLY the cache is open here. The exception propagates RAW (a
+            # genuine infra fault must traceback, Golden Rule #10);
+            # KeyboardInterrupt/SystemExit ride the same close-then-raise.
+            cache.close()
+            raise
         with _run_core_stack:
             _run_core_stack.enter_context(sweep_abort_alert(_emit_pull_halt_alert))
             _run_core_stack.enter_context(cache)
