@@ -171,7 +171,9 @@ class TestClassifySession:
 # ── Table validation laws (synthetic tables — mechanism only) ────────────────
 
 
-def _row(start: date, label: str, *, verified: bool = True, source: str = "test src") -> EraBoundary:
+def _row(
+    start: date, label: str, *, verified: bool = True, source: str = "test src"
+) -> EraBoundary:
     return EraBoundary(start, label, source, verified)
 
 
@@ -246,9 +248,7 @@ class TestPins:
         assert [row.label for row in ERA_BOUNDARIES if not row.verified] == [
             "post_peak_margin_full"
         ]
-        unverified = next(
-            row for row in ERA_BOUNDARIES if row.label == "post_peak_margin_full"
-        )
+        unverified = next(row for row in ERA_BOUNDARIES if row.label == "post_peak_margin_full")
         assert unverified.verified is False
         assert unverified.source.startswith("UNVERIFIED — ")
         # The honest source retains the circular id + phase dates.

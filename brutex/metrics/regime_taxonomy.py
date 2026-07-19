@@ -63,11 +63,12 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from itertools import pairwise
-from typing import Final, Iterable
+from typing import Final
 
 __all__ = [
     "COVID_2020_END",
@@ -192,11 +193,11 @@ def trend_stratum_from_lens_token(token: str | None) -> TrendStratum:
         honest bucket, never a guess and never a raise — a future lens
         vocabulary extension degrades to UNKNOWN instead of crashing).
     """
-    if token == "up":
+    if token == "up":  # noqa: S105 — lens trend token, not a secret
         return TrendStratum.UP
-    if token == "down":
+    if token == "down":  # noqa: S105 — lens trend token, not a secret
         return TrendStratum.DOWN
-    if token == "sideways":
+    if token == "sideways":  # noqa: S105 — lens trend token, not a secret
         return TrendStratum.CHOP
     return TrendStratum.UNKNOWN
 
@@ -418,10 +419,7 @@ def validate_era_boundaries(rows: Iterable[EraBoundary]) -> None:
         msg = "era table is empty"
         raise ValueError(msg)
     if table[0].start != date(2020, 1, 1):
-        msg = (
-            f"era table must open at the window floor date(2020, 1, 1) — "
-            f"got {table[0].start}"
-        )
+        msg = f"era table must open at the window floor date(2020, 1, 1) — got {table[0].start}"
         raise ValueError(msg)
     for prev, cur in pairwise(table):
         if cur.start <= prev.start:
