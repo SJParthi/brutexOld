@@ -38,12 +38,15 @@ the dynamic `_in_breach` set NEVER crosses the FFI (Python's untouched
 validation) PERMANENTLY; the I-3 blanket except keeps every fold — a
 facade-raised MemoryError folds to observe_failed on BOTH arms (the
 documented OOM-landing INVERSION vs the loop-watchdog lane). Flag OFF
-(default) BYTE-IDENTICAL, bomb-spy pinned; the run_tripwires ci.yml
-stanza stays 100% over the UNMODIFIED 81 tests; the run_gate runner
-grows to ALSO drive the seam suite (the money.py multi-file precedent,
-budget 2100→2600, floor 0.75 unchanged); cargo-mutants over
-src/tripwires.rs de-survivored by restructure/tests, never exclusions;
-the facade mutmut pair stands at 596/596 killed. ADR-0020 banner
+(default) BYTE-IDENTICAL (production-shape — the DEV-5 mixed-batch
+whole-tick-abort divergence disclosed), bomb-spy pinned; the
+run_tripwires ci.yml stanza stays 100% over the UNMODIFIED 81 tests;
+the run_gate runner grows to ALSO drive the seam suite (the money.py
+multi-file precedent, budget 2100→3200 — the round-1 headroom fold,
+floor 0.75 unchanged); cargo-mutants over src/tripwires.rs
+de-survivored by restructure/tests, never exclusions; the facade
+mutmut pair stands at 596/596 killed; review round 1 SHIP+SHIP — the
+four non-blocking findings folded in-branch. ADR-0020 banner
 verbatim: expected payoff ≈ 0 — conversion is for uniformity, not
 speed; ships INERT — a default flip needs its own DEC + soak, oracle
 deletion only via the H.2 rail (DEC-OBSERVABILITY-ORACLE-DELETE-001).
@@ -3639,8 +3642,13 @@ hostile-review pass._
   the blanket except keeps every fold — a facade-raised MemoryError folds
   to observe_failed on BOTH arms (the documented OOM-landing INVERSION vs
   the loop-watchdog lane, integration-pinned). FLAG OFF (default) is
-  BYTE-IDENTICAL (bomb-crate spies; the run_tripwires ci.yml stanza stays
-  100.00% — 346/112, 0 missed — over the UNMODIFIED 81 protected tests).
+  BYTE-IDENTICAL for all COERCIBLE-value inputs — the production shape
+  (the sole `on_tuple_summary` caller, `sweep_run_core.py:837-842`,
+  passes floats-only); the DEV-5 mixed junk+screenable whole-tick-abort
+  divergence is the ONE disclosed, production-unreachable exception (the
+  round-1 MINOR scoping) — bomb-crate spies on every routed law; the
+  run_tripwires ci.yml stanza stays 100.00% — 346/112, 0 missed — over
+  the UNMODIFIED 81 protected tests.
   S5 EVIDENCE: the integration parity file grows the full flag-ON
   TestTripwiresEntry matrix (all 7 laws through the REAL entry points,
   oracles BOMBED), the fail-soft + MemoryError-inversion both-arms pins,
@@ -3654,16 +3662,25 @@ hostile-review pass._
   the ci.yml run_gate runner is EXTENDED to also drive the seam suite
   (the money.py multi-file precedent) + the 18-test
   TestRunGateSupplementalPins killer class — the combined runner measures
-  368/406 = 90.6% at wall 975 s (budget
-  2100→2600, floor 0.75 unchanged; DEV-6's out-of-gate caveat resolved
-  structurally). cargo-mutants over src/tripwires.rs: 249 tested — 242
+  368/406 = 90.6% at wall 975 s (budget 2100→2600 at S6 → 3200 at the
+  round-1 fold — 975 s replica × the -001 ~2× real-CI factor projects
+  ~1.95 ks, and the full-2× value 3900 would be shadowed by the
+  mutation-py job's 90-min hang belt once the sibling gates' measured
+  walls + setup ≈ 2.2 ks are consumed, so 3200 ≈ 5400 − ~2200 is the
+  largest reachable budget, ~1.64× headroom; floor 0.75 unchanged;
+  DEV-6's out-of-gate caveat resolved structurally). cargo-mutants
+  over src/tripwires.rs: 249 tested — 242
   caught / 5 missed / 2 unviable on the first full run; the 5 missed
   killed by RESTRUCTURE/TESTS, never exclusions (two T2 `>`→`>=` boundary
   killers; the T3 peak-fold `>`→`>=` killed by a −0.0/+0.0 BITWISE
   to_bits pin; the SummaryLenMismatch Display fmt-drop killed by a
   to_string()==const assert; the ONE genuinely-equivalent `1 << 0` ≡
   `1 >> 0` mutant removed BY FORM — `mask |= 1`), re-run of the whole
-  matched region verified 106/106 caught, 0 missed. GATES (executed): cargo fmt/clippy `-D warnings`
+  matched region verified 106/106 caught, 0 missed — upgraded by the
+  round-1 NIT-2 FULL re-run at head: 248 tested — 246 caught / 2
+  unviable / 0 missed / 0 timeouts, zero survivors (249→248, the
+  removed-by-form site no longer generates a mutant). GATES
+  (executed): cargo fmt/clippy `-D warnings`
   --locked/test --release --locked green ×2 feature sets (106 tests);
   facade stanza BOTH arms 100.00% (609/190, 0 missed) — wheel-present 373
   passed, wheel-absent 345 passed + 28 skipped; the flag-ON twin battery
@@ -3679,6 +3696,11 @@ hostile-review pass._
   checked_add Err arms pinned at the wheel surface · the
   snapshot-counter single-read re-order · the coerce-before-screen
   whole-tick abort · the run_gate-resolved seam-apply mutant classes).
+  REVIEW ROUND 1 folded (SHIP+SHIP, zero blockers — per-finding record
+  in MIGRATION.md #1962): the byte-identity scoping (MINOR), the
+  facade-docstring totality reword (docstring-only; the facade stanza
+  re-measured 100.00% both arms), the run_gate 2600→3200 headroom bump,
+  and the full cargo-mutants re-run at head (248 tested, 0 missed).
   HONEST (ADR-0020 banner verbatim): expected payoff ≈ 0 — conversion is
   for uniformity, not speed; every routed law is sub-microsecond Python
   on a gated path and the engaged arm ADDS an FFI hop; ships INERT — a
@@ -11081,10 +11103,12 @@ hostile-review pass._
   T10 permanently; the I-3 blanket except keeps every fold (a
   facade-raised MemoryError folds to observe_failed on BOTH arms — the
   documented OOM-landing inversion vs the loop-watchdog lane); flag OFF
-  (default) byte-identical (bomb-spy-pinned); the run_tripwires ci.yml
+  (default) byte-identical (production-shape — DEV-5 disclosed;
+  bomb-spy-pinned); the run_tripwires ci.yml
   stanza stays 100% over the UNMODIFIED 81 tests; the run_gate runner
   grows to also drive the seam suite (money.py precedent, budget
-  2100→2600, floor 0.75 unchanged); cargo-mutants over src/tripwires.rs
+  2100→3200 — the round-1 headroom fold, floor 0.75 unchanged);
+  cargo-mutants over src/tripwires.rs
   de-survivored by restructure/tests, never exclusions; ships INERT —
   expected payoff ≈ 0, uniformity not speed (ADR-0020 banner verbatim);
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; NO new env var; matches §1's

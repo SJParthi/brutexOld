@@ -31,10 +31,15 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
   UNTOUCHED Python ``_edge_fire``/``_clear`` own membership + re-arm; the
   detail f-strings, ``sorted``, ``repr``, the SUSPECT latch, the RSS
   probe and every enable/interval/state-existence gate stay Python.
-  These routed fns are TOTAL over ``Exception`` — every degrade path
-  logs its own event and RETURNS the oracle value, so the tripwire
-  observation bodies' I-3 blanket ``except Exception`` can never observe
-  a facade-internal failure (the layering law).
+  Degrade discipline (the executed truth — review round 1): a
+  degrade-set or panic-belt exception RETURNS the oracle value (each
+  such path logs its own event); ``MemoryError`` / ``KeyboardInterrupt``
+  / ``SystemExit`` re-raise RAW (the escape trio, documented below);
+  any OTHER exception (e.g. a ``KeyError`` from a poisoned crate,
+  outside the degrade set) PROPAGATES to the caller, where the tripwire
+  observation bodies' I-3 blanket ``except Exception`` folds it to
+  ``observe_failed`` — the safety story is that COMPOSITION, not facade
+  totality over ``Exception``.
 
 ## The fail-closed layers (in order)
 

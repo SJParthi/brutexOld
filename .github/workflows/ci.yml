@@ -4559,12 +4559,23 @@ jobs:
           # the seam head 406 mutants / 291 killed = 71.7% under the 81
           # alone (below floor) vs 368 killed / 38 survived = 90.6% with
           # the seam suite's TestRunGateSupplementalPins killers. Budget
-          # raised 2100 -> 2600 for the grown runner (measured 975 s
-          # CI-replica, wheel-blocked). Floor 0.75 UNCHANGED — the
+          # raised 2100 -> 2600 at S6, then 2600 -> 3200 at the review
+          # round-1 fold (NIT-1, honest arithmetic): measured 975 s
+          # CI-replica (wheel-blocked) x the ~2x real-CI slowdown the
+          # -001 precedent observed => ~1.95 ks expected real-CI wall, so
+          # 2600 carried only ~1.33x headroom vs the sibling ~2x
+          # convention. The full-2x value (3900) does NOT fit: this job's
+          # `timeout-minutes: 90` hang belt (5400 s) minus the sibling
+          # gates' MEASURED walls + state/money + setup (~2.2 ks) leaves
+          # ~3.2 ks, so a 3900 budget would be shadowed by the job belt
+          # in exactly the slow-runner scenario it exists for — 3200 is
+          # the largest reachable budget (~1.64x headroom over the
+          # projected real-CI wall; the job belt stays the outer bound).
+          # Floor 0.75 UNCHANGED — the
           # sibling ratchet convention; the measured 90.6% clears the
           # Golden-Rule-#12 85% target, and RAISING the floor to pin that
           # is deliberate follow-up territory, not this lane's call.
-          run_gate brutex/observability/run_tripwires.py "tests/unit/test_observability_run_tripwires.py tests/unit/test_observability_rust.py" 2600 0.75 run_tripwires
+          run_gate brutex/observability/run_tripwires.py "tests/unit/test_observability_run_tripwires.py tests/unit/test_observability_rust.py" 3200 0.75 run_tripwires
 
       - name: Upload mutmut results XML for analysis
         if: always()
