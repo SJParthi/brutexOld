@@ -274,8 +274,12 @@ class TestLoadMisses:
         def _boom(*_a: object, **_k: object) -> str:
             raise OSError("read denied")
 
-        # 0600-mode passes, then the read raises — exercises the unreadable branch.
-        monkeypatch.setattr(Path, "read_text", _boom)
+        # 0600-mode passes, then the read raises — exercises the unreadable
+        # branch. DEC-LAKE-READ-INODE-GUARD-001: the read rides the guarded
+        # reader now — fault THAT seam (Path.read_text is no longer used).
+        from brutex.data import guarded_read
+
+        monkeypatch.setattr(guarded_read, "read_regular_text", _boom)
         assert load_cached_token(_CREDS, now_utc=_NOW_UTC) is None
 
     def test_non_utf8_bytes_returns_none(self, cache_path: Path) -> None:

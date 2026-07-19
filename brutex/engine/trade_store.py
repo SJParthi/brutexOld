@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final, TypedDict, TypeGuard
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.engine.minute_path import PathStatus
 from brutex.engine.results_store import ROW_GROUP_SIZE, ZSTD_LEVEL
 from brutex.models import BruteXError
@@ -248,12 +249,21 @@ class TradeStoreError(BruteXError):
 
 @dataclass(frozen=True, slots=True)
 class SidecarPaths:
-    """The per-tuple sidecar trio + stamp destinations (design D0b layout)."""
+    """The per-tuple sidecar trio + stamp destinations (design D0b layout).
+
+    ``resilience`` / ``resilience_stamp`` are the ADDITIVE sibling-sidecar
+    destinations for the per-mask losing-streak resilience analytics
+    (:mod:`brutex.engine.resilience_streaks`) — its own ``.resilience.parquet``
+    + ``.resilience.stamp.json`` beside the trio, written by a separate,
+    self-versioned pass (never through :func:`write_tuple_sidecars`).
+    """
 
     trades: Path
     aggs: Path
     equity: Path
     stamp: Path
+    resilience: Path
+    resilience_stamp: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +406,8 @@ def sidecar_paths_for(store_path: Path, sweeps_root: Path, *, run_id: str) -> Si
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=base / f"{stem}.stamp.json",
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 
@@ -595,7 +607,11 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
         _LOG.warning("trade_store.stamp_invalid", stamp=str(paths.stamp), reason=reason)
 
     try:
-        raw = paths.stamp.read_bytes()
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the oneclick
+        # trades/equity routes resolve sidecars through this stamp read): a
+        # planted FIFO / wedged volume folds into the stamp_unreadable arm
+        # (both guard errors are OSError subclasses), never a hung poll.
+        raw = read_regular_bytes_deadline(paths.stamp, what="trade-store stamp read")
     except OSError:
         _invalid("stamp_unreadable")
         return None
@@ -675,7 +691,10 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
             return None
         if verify_hashes:
             try:
-                content = path.read_bytes()
+                # DEC-LAKE-READ-INODE-GUARD-001 defense (a) + (b): the
+                # verify-hashes tier reads whole sidecars — same guard, same
+                # existing degrade arm.
+                content = read_regular_bytes_deadline(path, what="trade-store sidecar read")
             except OSError:
                 _invalid(f"{key}_unreadable")
                 return None

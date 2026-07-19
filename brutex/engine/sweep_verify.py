@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
 from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -1044,7 +1045,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
                 "filename carries no 16-hex tuple digest — pairing unverifiable",
             )
             continue
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
 
         sidecar_path = trial_stats_sidecar_path(store_path)
         sidecar_ok = False
@@ -1657,8 +1658,14 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
     try:
-        original_schema = list(pl.read_parquet_schema(original).items())
-        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+        # GUARDED footer probes (DEC-LAKE-READ-INODE-GUARD-001 fix round — the
+        # diagnostic-arm class sweep): both stores' BYTE reads above ride the
+        # guarded read_regular_bytes, so this attribution probe re-opening the
+        # SAME paths must not be the one raw-path open that wedges on a
+        # post-read inode swap. NotRegularFileError is an OSError → the
+        # existing abstain arm below absorbs it (never VIX-attributable).
+        original_schema = list(read_parquet_schema_regular(original).items())
+        scratch_schema = list(read_parquet_schema_regular(scratch).items())
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
@@ -1890,8 +1897,8 @@ def compare_recount(
             nonlocal store_digest_memo
             if store_digest_memo is None:
                 store_digest_memo = (
-                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
-                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(store_path)).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(scratch_store)).hexdigest(),
                 )
             return store_digest_memo
 
@@ -1954,7 +1961,7 @@ def compare_recount(
                     )
                 )
                 continue
-            if original.read_bytes() == scratch.read_bytes():
+            if read_regular_bytes(original) == read_regular_bytes(scratch):
                 continue  # byte-identical — verified (silence is the verdict)
             # VIX-only divergence (see the docstring's VIX RESIDUAL). All
             # THREE artifacts necessarily ride a VIX-only lake movement: the

@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_bytes, read_regular_text
 from brutex.engine.sweep_verify import (
     QUARANTINE_DIRNAME,
     RecordedContext,
@@ -112,7 +113,7 @@ def _sha256_or_none(path: Path) -> str | None:
     """SHA-256 hex of *path*'s bytes, or ``None`` when the file is absent."""
     if not path.exists():
         return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(read_regular_bytes(path)).hexdigest()
 
 
 def _validate_hex_field(name: str, value: str, length: int) -> None:
@@ -332,7 +333,7 @@ def read_heal_plan(path: Path) -> HealPlan:
     if not path.exists():
         raise SweepHealError(f"heal plan not found at {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(path))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise SweepHealError(f"heal plan at {path} is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):

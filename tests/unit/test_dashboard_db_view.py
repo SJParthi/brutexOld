@@ -417,6 +417,7 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
         "attempts",
         "empty_streak",
         "in_pull_fetches",
+        "streak_provenance",
         "last_error",
         "first_seen_at",
         "last_attempt_at",
@@ -2462,3 +2463,212 @@ class TestWindowScopeBindEdges:
         assert by_phase["spot"]["total"] == 1
         assert by_phase["futures"]["total"] == 1
         assert by_phase["options"]["total"] == 1
+
+
+class TestWindowStatusLabelProvenance:
+    """DEC-STREAK-PROVENANCE-001 — the 4th (streak_provenance) param: mixed-evidence
+    settles render per channel; legacy None + pure-channel lineages BYTE-IDENTICAL."""
+
+    # -- legacy None: byte-identical on EVERY branch (the back-compat pin) -----
+
+    @pytest.mark.parametrize(
+        ("status", "streak", "last_error"),
+        [
+            ("EMPTY", 2, None),
+            ("SKIPPED", 3, None),
+            ("SKIPPED", 3, "ALL_FILTERED"),
+            ("FAILED", 1, "ALL_FILTERED"),
+            ("SUCCESS", 0, None),
+            ("PLANNED", 0, None),
+        ],
+    )
+    def test_legacy_none_provenance_is_byte_identical(
+        self, status: str, streak: int, last_error: str | None
+    ) -> None:
+        assert window_status_label(status, streak, last_error, None) == window_status_label(
+            status, streak, last_error
+        )
+
+    def test_legacy_none_expired_stamp_verbatim(self) -> None:
+        from brutex.data.window_ledger import expired_window_settle_reason
+
+        stamp = expired_window_settle_reason(2)
+        assert window_status_label("SKIPPED", 3, stamp, None) == f"{stamp} — settled"
+
+    # -- pure-channel lineages: byte-identical strings (edge 23) ---------------
+
+    def test_pure_clean_lineage_renders_byte_identical(self) -> None:
+        prov = "EMPTY@a|EMPTY@b|EMPTY@c"
+        assert window_status_label("SKIPPED", 3, None, prov) == (
+            "vendor confirmed no trades (3 clean attempt(s) — settled)"
+        )
+        assert window_status_label("EMPTY", 2, None, "EMPTY@a|EMPTY@b") == (
+            "vendor confirmed no trades (2 clean attempt(s))"
+        )
+
+    def test_pure_flagged_lineage_renders_byte_identical(self) -> None:
+        prov = "ALL_FILTERED@a|ALL_FILTERED@b|ALL_FILTERED@c"
+        assert window_status_label("SKIPPED", 3, "ALL_FILTERED", prov) == (
+            "completeness gap accepted (ALL_FILTERED, 3 flagged attempt(s)) — settled"
+        )
+
+    # -- mixed-evidence settles: the honest per-channel split (edge 22) --------
+
+    def test_mixed_clean_final_names_the_flagged_attempts(self) -> None:
+        # ALL_FILTERED,ALL_FILTERED,EMPTY → SKIPPED with last_error=None: was the
+        # lie "3 clean attempt(s)"; now names the 2 boundary-filter demotions.
+        prov = "ALL_FILTERED@a|ALL_FILTERED@b|EMPTY@c"
+        assert window_status_label("SKIPPED", 3, None, prov) == (
+            "vendor confirmed no trades (1 clean attempt(s); 2 completeness-flagged) — settled"
+        )
+
+    def test_mixed_flagged_final_names_the_clean_attempts(self) -> None:
+        # EMPTY,EMPTY,ALL_FILTERED → SKIPPED with last_error=ALL_FILTERED: was
+        # "3 flagged attempt(s)"; now names the 2 clean empties.
+        prov = "EMPTY@a|EMPTY@b|ALL_FILTERED@c"
+        assert window_status_label("SKIPPED", 3, "ALL_FILTERED", prov) == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged + 2 clean attempt(s)) — settled"
+        )
+
+    def test_mixed_empty_status_names_the_flagged_attempts(self) -> None:
+        prov = "ALL_FILTERED@a|EMPTY@b"
+        assert window_status_label("EMPTY", 2, None, prov) == (
+            "vendor confirmed no trades (1 clean attempt(s); 1 completeness-flagged)"
+        )
+
+    def test_expired_stamp_wins_over_provenance(self) -> None:
+        # The stamp is provenance-honest at WRITE time — the label renders it
+        # verbatim even when a mixed lineage rides the row.
+        from brutex.data.window_ledger import expired_window_settle_reason
+
+        stamp = expired_window_settle_reason(1)
+        prov = "ALL_FILTERED@a|EMPTY@b"
+        assert window_status_label("SKIPPED", 3, stamp, prov) == f"{stamp} — settled"
+
+    def test_known_zero_lineage_floors_like_today(self) -> None:
+        # "" = KNOWN zero bumps (a fresh reset) — the defensive floor keeps the
+        # wording at 1, exactly as the streak floor does today.
+        assert window_status_label("EMPTY", 0, None, "") == (
+            "vendor confirmed no trades (1 clean attempt(s))"
+        )
+        assert window_status_label("SKIPPED", 0, None, "") == (
+            "vendor confirmed no trades (1 clean attempt(s) — settled)"
+        )
+        assert window_status_label("SKIPPED", 0, "ALL_FILTERED", "") == (
+            "completeness gap accepted (ALL_FILTERED, 1 flagged attempt(s)) — settled"
+        )
+
+
+class TestWindowRowStreakProvenance:
+    """``_window_row`` threads the provenance into the label + the JSON row —
+    the ONE chokepoint both /coverage/windows payload paths share."""
+
+    def test_window_row_carries_and_threads_the_field(self, tmp_path: Path) -> None:
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        key = WindowKey(
+            market="dhan",
+            security_id="MIXED",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+        )
+        now = datetime(2026, 6, 9, tzinfo=UTC)
+        for pull, (degraded, reason) in enumerate(
+            [(True, "ALL_FILTERED"), (True, "ALL_FILTERED"), (False, None)]
+        ):
+            ledger.record(
+                key,
+                raw_bars=3 if degraded else 0,
+                error_type=None,
+                bars_appended=0,
+                now=now,
+                degraded=degraded,
+                degraded_reason=reason,
+                pull_id=f"pl{pull}",
+            )
+        rec = ledger.records()[0]
+        assert rec.status == "SKIPPED"  # the mixed-evidence threshold settle
+        save_window_ledger(ledger, tmp_path)
+        # BOTH payload paths render the SAME honest mixed label + carry the field.
+        fast = build_window_payload(tmp_path, conn=duckdb.connect())
+        legacy = build_window_payload(tmp_path)
+        for payload in (fast, legacy):
+            (row,) = payload["windows"]
+            assert row["streak_provenance"] == "ALL_FILTERED@pl0|ALL_FILTERED@pl1|EMPTY@pl2"
+            assert row["status_label"] == (
+                "vendor confirmed no trades (1 clean attempt(s); 2 completeness-flagged) — settled"
+            )
+
+    def test_duckdb_fast_path_reads_a_legacy_file_without_error(self, tmp_path: Path) -> None:
+        # Edge 29: a post-R1 file that PREDATES streak_provenance (has
+        # empty_streak + in_pull_fetches, so the fast path does NOT defer) —
+        # the missing column reads None (legacy label), never a SELECT error.
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from brutex.data.window_ledger_store import ledger_path
+
+        path = ledger_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "market": ["dhan"],
+                    "security_id": ["LEGACY"],
+                    "interval": ["1minute"],
+                    "window_start": ["2021-01-01"],
+                    "window_end": ["2021-02-01"],
+                    "status": ["SKIPPED"],
+                    "bars": [0],
+                    "attempts": [3],
+                    "last_error": ["ALL_FILTERED"],
+                    "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                    "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                    "empty_streak": [3],
+                    "in_pull_fetches": [1],
+                    "bars_net_new": [None],
+                }
+            ),
+            path,
+        )
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        assert payload["source"] == "ledger"
+        (row,) = payload["windows"]
+        assert row["streak_provenance"] is None  # honest unknown, never ""
+        # The legacy wording, byte-identical (counts is None → streak fallback).
+        assert row["status_label"] == (
+            "completeness gap accepted (ALL_FILTERED, 3 flagged attempt(s)) — settled"
+        )
+
+    def test_duckdb_fast_path_reads_a_new_file_with_the_column(self, tmp_path: Path) -> None:
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        key = WindowKey(
+            market="dhan",
+            security_id="NEWROW",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 2, 1),
+        )
+        ledger.record(
+            key,
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=datetime(2026, 6, 9, tzinfo=UTC),
+            pull_id="px",
+        )
+        save_window_ledger(ledger, tmp_path)
+        payload = build_window_payload(tmp_path, conn=duckdb.connect())
+        (row,) = payload["windows"]
+        assert row["streak_provenance"] == "EMPTY@px"

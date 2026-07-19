@@ -37,6 +37,7 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Final
 
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP
@@ -53,6 +54,7 @@ from brutex.data.window_status import (
 )
 
 __all__ = [
+    "ALL_FILTERED_MASS_RESCINDED",
     "CONFIRMED_EMPTY_MIN_FETCHES",
     "DEMOTED_SETTLE_REASONS",
     "EMPTY",
@@ -64,7 +66,11 @@ __all__ = [
     "SETTLED_STATUSES",
     "SKIPPED",
     "SKIPPED_AUDIT_PER_PULL",
+    "STREAK_CLEAN_CHANNEL",
     "STREAK_EXEMPT_DEGRADED_REASONS",
+    "STREAK_PROVENANCE_MAX_ENTRIES",
+    "STREAK_PROVENANCE_SEP",
+    "STREAK_PROVENANCE_TRUNC",
     "SUCCESS",
     "LedgerProgress",
     "LedgerRowTuple",
@@ -73,6 +79,9 @@ __all__ = [
     "expired_window_settle_reason",
     "is_expired_window_settle_reason",
     "ledger_record_row",
+    "streak_provenance_append",
+    "streak_provenance_counts",
+    "streak_provenance_entries",
 ]
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
@@ -200,6 +209,95 @@ def is_expired_window_settle_reason(reason: str | None) -> bool:
 #: never re-trip the breaker endlessly on the very windows the operator chose to
 #: re-verify.
 REOPENED_MARKER: str = "REOPENED"
+
+#: The ``last_error`` marker :meth:`WindowLedger.rescind_all_filtered_settles`
+#: stamps on a same-pull ``ALL_FILTERED`` ``SKIPPED`` settle it AUTO-REVERSED after
+#: the mass all-filtered breaker tripped (DEC-ALLFILTERED-MASS-BREAKER-001). The
+#: row is demoted through the SAME reopen primitive the operator re-open uses
+#: (:meth:`WindowLedger._demote_skipped_locked` — ``FAILED``, streak + provenance
+#: reset, tombstoned against the merge-on-save), so it reads retryable — never
+#: settled — on ``/coverage/windows`` (``window_status_label`` renders any
+#: ``FAILED`` as "FAILED (will re-pull)", the exact ``REOPENED_MARKER`` treatment).
+ALL_FILTERED_MASS_RESCINDED: Final[str] = "ALL_FILTERED_MASS_RESCINDED"
+
+#: The provenance channel of a genuine clean-EMPTY streak bump — the literal
+#: ``EMPTY`` status token (DEC-STREAK-PROVENANCE-001); every OTHER channel is a
+#: degraded-demotion reason (:data:`DEMOTED_SETTLE_REASONS`) verbatim.
+STREAK_CLEAN_CHANNEL: Final[str] = EMPTY
+#: Separator between ``<channel>@<pull_id>`` provenance entries.
+STREAK_PROVENANCE_SEP: Final[str] = "|"
+#: The leading truncation marker prepended once the entry cap is crossed —
+#: counts thereafter honestly UNDER-report (documented truncation, never a
+#: fabricated history).
+STREAK_PROVENANCE_TRUNC: Final[str] = "…"
+#: Hard cap on stored provenance entries (drop-OLDEST on overflow, marker
+#: prepended). Unreachable at the default :data:`EMPTY_TERMINAL_THRESHOLD` = 3
+#: (a bump AT the threshold settles the row); reachable only under an injected
+#: custom ``_threshold`` — the append stays O(1) because the entry count is
+#: bounded by this cap.
+STREAK_PROVENANCE_MAX_ENTRIES: Final[int] = 16
+
+
+def streak_provenance_append(prior: str, channel: str, pull_id: str) -> str:
+    """Append one ``<channel>@<pull_id>`` streak-bump entry to *prior* — pure, O(1).
+
+    DEC-STREAK-PROVENANCE-001. *prior* is ``""`` (a KNOWN-zero fresh lineage) or
+    an existing ``a|b``-form history; *channel* is :data:`STREAK_CLEAN_CHANNEL`
+    or a degraded reason (uppercase tags — no ``|``/``@`` by construction);
+    *pull_id* is defensively sanitized (any ``|``/``@`` becomes ``_``; blank →
+    the literal ``-``) so entries always re-parse via ``rpartition("@")``. On
+    overflow past :data:`STREAK_PROVENANCE_MAX_ENTRIES` the OLDEST entries are
+    dropped and the :data:`STREAK_PROVENANCE_TRUNC` marker is prepended (the
+    string then starts ``…|``). O(1) — the entry count is bounded by the cap.
+    """
+    safe_pull = (pull_id or "-").replace(STREAK_PROVENANCE_SEP, "_").replace("@", "_")
+    entry = f"{channel}@{safe_pull}"
+    if not prior:
+        return entry
+    combined = f"{prior}{STREAK_PROVENANCE_SEP}{entry}"
+    tokens = [t for t in combined.split(STREAK_PROVENANCE_SEP) if t != STREAK_PROVENANCE_TRUNC]
+    if len(tokens) <= STREAK_PROVENANCE_MAX_ENTRIES:
+        return combined
+    kept = tokens[-STREAK_PROVENANCE_MAX_ENTRIES:]
+    return STREAK_PROVENANCE_SEP.join([STREAK_PROVENANCE_TRUNC, *kept])
+
+
+def streak_provenance_entries(prov: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse *prov* into ``(channel, pull_id)`` entries — pure, defensive, never raises.
+
+    ``None`` / ``""`` → ``()``. Each ``|``-token splits on its LAST ``@``
+    (``rpartition``); a malformed token (no ``@`` / empty channel) or the
+    :data:`STREAK_PROVENANCE_TRUNC` marker is SKIPPED — a corrupt cell degrades
+    to fewer entries, never an exception (DEC-STREAK-PROVENANCE-001).
+    """
+    if not prov:
+        return ()
+    entries: list[tuple[str, str]] = []
+    for token in prov.split(STREAK_PROVENANCE_SEP):
+        channel, sep, entry_pull = token.rpartition("@")
+        if not sep or not channel:
+            continue  # the truncation marker / a malformed token — defensive skip
+        entries.append((channel, entry_pull))
+    return tuple(entries)
+
+
+def streak_provenance_counts(prov: str | None) -> tuple[int, int] | None:
+    """``(clean, flagged)`` bump counts of *prov* — or ``None`` for unknown lineage.
+
+    DEC-STREAK-PROVENANCE-001, the tri-state read: ``None`` provenance is a
+    LEGACY row whose lineage is genuinely unrecorded — the caller must fall back
+    to the legacy (streak-derived) arithmetic, never a fabricated split. A known
+    lineage counts ``clean`` = entries whose channel is
+    :data:`STREAK_CLEAN_CHANNEL` and ``flagged`` = every other (degraded-reason)
+    entry. Truncated provenance counts the SURVIVING entries only (honest
+    under-report). Pure, O(entries) ≤ the cap.
+    """
+    if prov is None:
+        return None
+    entries = streak_provenance_entries(prov)
+    clean = sum(1 for channel, _pull in entries if channel == STREAK_CLEAN_CHANNEL)
+    return clean, len(entries) - clean
+
 
 #: Cap on terminally-``SKIPPED`` windows the MECHANIZED per-pull audit re-opens
 #: (DEC-SKIPPED-AUDIT-ROUNDROBIN-001). HONEST BUDGET ARITHMETIC (Golden Rule
@@ -363,15 +461,31 @@ class WindowLedgerRecord:
     #: stands). Same ``None`` = honest-unknown / overwrite-per-pull contract as
     #: :attr:`empty_retries`.
     transient_retries: int | None = None
+    #: The ``empty_streak``'s per-bump lineage (DEC-STREAK-PROVENANCE-001):
+    #: ``|``-separated ``<channel>@<pull_id>`` entries, one per GENUINE streak
+    #: bump, oldest first — ``channel`` is :data:`STREAK_CLEAN_CHANNEL`
+    #: (``EMPTY``) for a clean no-data bump or the degraded reason verbatim
+    #: (:data:`DEMOTED_SETTLE_REASONS`) for a demotion bump. TRI-STATE (the
+    #: :attr:`bars_net_new` ``None``-vs-``0`` honesty discipline as a string):
+    #: ``None`` = lineage honestly UNKNOWN (a legacy row written before the
+    #: column, or a legacy unknown prior propagated forward — a partial history
+    #: is NEVER fabricated); ``""`` = a KNOWN zero contributing bumps (a fresh
+    #: plan / seed / a ``SUCCESS`` or reopen reset); non-empty = the exact bump
+    #: history. On natural (unsuppressed, unforced) paths
+    #: ``clean + flagged == empty_streak``; a FORCED old-window settle keeps the
+    #: TRUE entry count (provenance is never padded to match a forced streak).
+    streak_provenance: str | None = None
 
 
-#: One serialised ledger row — the canonical 16-field tuple
+#: One serialised ledger row — the canonical 17-field tuple
 #: :func:`ledger_record_row` emits and :meth:`WindowLedger.from_rows` restores.
 #: THE single row-shape spelling (CLAUDE.md §11 COMMON): the durable store's
 #: ``LedgerRow`` aliases it, so the two can never drift. ``empty_retries`` +
-#: ``transient_retries`` (DEC-RETRY-COUNTER-SPLIT-001) were appended LAST —
-#: after ``bars_net_new`` exactly as that column was — for legacy-file
-#: back-compat (an absent column loads ``None`` = honest unknown).
+#: ``transient_retries`` (DEC-RETRY-COUNTER-SPLIT-001) then
+#: ``streak_provenance`` (DEC-STREAK-PROVENANCE-001) were appended LAST —
+#: after ``bars_net_new`` exactly as that column was, in that merge order —
+#: for legacy-file back-compat (an absent column loads ``None`` = honest
+#: unknown).
 LedgerRowTuple = tuple[
     str,
     str,
@@ -389,11 +503,12 @@ LedgerRowTuple = tuple[
     int | None,
     int | None,
     int | None,
+    str | None,
 ]
 
 
 def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
-    """Serialise ONE record to the canonical 16-field ledger row tuple.
+    """Serialise ONE record to the canonical 17-field ledger row tuple.
 
     The single source of the row shape (CLAUDE.md §11 COMMON —
     DEC-SUSPICION-SWEEP-FIXES-001): :meth:`WindowLedger.to_rows` delegates here,
@@ -402,8 +517,9 @@ def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
     mtime-cached records, so the two can never drift. Field order matches the
     durable store's :data:`~brutex.data.window_ledger_store.LedgerRow` —
     ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
-    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) each appended LAST
-    for legacy-file back-compat (see :meth:`WindowLedger.to_rows`).
+    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) then
+    ``streak_provenance`` (DEC-STREAK-PROVENANCE-001) each appended LAST for
+    legacy-file back-compat (see :meth:`WindowLedger.to_rows`).
     """
     return (
         r.market,
@@ -422,6 +538,7 @@ def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
         r.bars_net_new,
         r.empty_retries,
         r.transient_retries,
+        r.streak_provenance,
     )
 
 
@@ -524,6 +641,14 @@ class WindowLedger:
     _degraded: set[tuple[str, str, str, str, str]] = field(
         default_factory=set, repr=False, compare=False
     )
+    #: Window keys whose ``ALL_FILTERED`` degraded accept-gap settle fired on THIS
+    #: instance (DEC-ALLFILTERED-MASS-BREAKER-001) — the same-pull rescind list
+    #: :meth:`rescind_all_filtered_settles` reverses when the mass all-filtered
+    #: breaker trips. Per-instance = per-pull (a ledger is loaded fresh per pull);
+    #: appended under the existing lock, O(1) per settle. Never serialised.
+    _af_settled_keys: list[tuple[str, str, str, str, str]] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
@@ -568,6 +693,7 @@ class WindowLedger:
                 # halves (DEC-RETRY-COUNTER-SPLIT-001 — mirrors in_pull_fetches=0).
                 empty_retries=0,
                 transient_retries=0,
+                streak_provenance="",  # KNOWN zero bumps — a fresh plan
             )
             self._dirty.add(wk)
 
@@ -608,6 +734,10 @@ class WindowLedger:
                 # honest unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=None,
                 transient_retries=None,
+                # KNOWN zero bumps (DEC-STREAK-PROVENANCE-001): the streak is 0 by
+                # construction here, so — unlike the seeded row's unknown
+                # ``bars_net_new`` — "zero contributing bumps" is a FACT, not a guess.
+                streak_provenance="",
             )
             self._dirty.add(wk)
             return True
@@ -684,6 +814,9 @@ class WindowLedger:
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
         bars_net_new: int | None = None,
+        suppress_degraded_settle: bool = False,
+        allow_degraded_settle: Callable[[], bool] | None = None,
+        pull_id: str = "",
         empty_retries: int | None = None,
         transient_retries: int | None = None,
     ) -> str:
@@ -735,31 +868,25 @@ class WindowLedger:
         window (*old_window* ``False``) keeps the conservative across-pull streak, and
         :meth:`reopen_skipped` resets the streak so an operator re-open regains the
         full confirmation budget. The default ``False`` is byte-identical to the prior
-        behaviour. HONEST envelope (DEC-DATA-HONESTY-ALLFILTERED-SEED-001 doc
-        reconcile): BOTH spines' ``empty_streak`` may now include degraded-demotion
-        bumps — the F&O spine passes *degraded* (an ``ALL_FILTERED`` boundary verdict)
-        AND *old_window* on the SAME record call. Because the old-empty settle is
-        single-confirm (it fires off THIS pull's own genuine clean EMPTY), a prior
-        degraded bump can never SUBSTITUTE for clean-EMPTY evidence — but the
-        :func:`expired_window_settle_reason` stamp's clean-attempt COUNT is
-        streak-derived (``prior_streak + 1``), so a prior degraded bump INFLATES that
-        display count by one (e.g. one all-filtered demotion then one clean EMPTY
-        reads "2 clean attempts"). Accepted + regression-pinned: the settle decision
-        is sound (a real clean EMPTY landed), only the count conflates flagged
-        attempts with clean ones; ``brutex reopen-skipped`` stays the recovery.
-        The same no-provenance conflation applies to the THRESHOLD settle over
-        MIXED evidence (correctness-review fold, PR #1158): degraded bumps and
-        clean-EMPTY bumps share this ONE ``empty_streak``, so a mixed-evidence
-        settle labels ALL its attempts by whichever channel landed the FINAL
-        record — two ``ALL_FILTERED`` demotions then one genuine clean EMPTY
-        settle ``SKIPPED`` with ``last_error=None`` ("vendor confirmed no
-        trades (3 clean attempt(s))" though two were boundary-filter
-        demotions), and the symmetric two-clean-empties-then-one-demotion
-        settle reads "3 flagged attempt(s)". Display-only (#1031/#1294
-        pre-existing streak-sharing semantics — the settle itself is sound and
-        ``reopen-skipped`` recovers); an honest per-channel count needs a
-        streak-provenance column — the SAME named follow-up as the expired-stamp
-        inflation above, deliberately NOT claimed here.
+        behaviour. PROVENANCE (DEC-STREAK-PROVENANCE-001 — SHIPPED, closing the
+        #1294 named follow-up): BOTH spines' ``empty_streak`` may include
+        degraded-demotion bumps alongside clean-EMPTY bumps (the F&O spine passes
+        *degraded* — an ``ALL_FILTERED`` boundary verdict — AND *old_window* on the
+        SAME record call), and each genuine bump now records its
+        ``<channel>@<pull_id>`` entry on :attr:`WindowLedgerRecord.
+        streak_provenance`. The :func:`expired_window_settle_reason` stamp counts
+        the provenance-KNOWN clean entries (:func:`streak_provenance_counts`), so
+        one all-filtered demotion then one clean EMPTY now reads the honest
+        "1 clean attempt" (the prior streak-derived ``prior_streak + 1`` inflated
+        it to "2 clean attempts"); a LEGACY row (provenance ``None``) keeps the
+        ``prior_streak + 1`` fallback byte-identically. The THRESHOLD settle over
+        MIXED evidence is likewise rendered per channel by
+        ``brutex.dashboard.db_view.window_status_label`` ("N clean; M
+        completeness-flagged" / "M flagged + N clean") instead of attributing
+        every attempt to whichever channel landed the FINAL record. A legacy
+        UNKNOWN prior (``streak_provenance is None`` with a positive streak)
+        PROPAGATES ``None`` on every bump — a partial history is never fabricated
+        — until an honest reset (``SUCCESS`` / reopen → the KNOWN-zero ``""``).
 
         *degraded* (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001) is the
         DATA-COMPLETENESS demotion hint: a clean bars-returning fetch whose stored bars
@@ -810,6 +937,51 @@ class WindowLedger:
         keep reading it). ``None`` (the default) records an honest UNKNOWN for a
         caller with no sink result — never fabricated to ``0``.
 
+        *suppress_degraded_settle* (DEC-ALLFILTERED-MASS-BREAKER-001) is the
+        *suppress_settle* twin the DEGRADED channel never had: it marks a
+        degraded-SUCCESS outcome as **UNTRUSTED** — recorded while the pull's
+        mass ALL-FILTERED breaker is TRIPPED (a suspected vendor-wide
+        timestamp/session bug, when a boundary-emptied window is NOT evidence of
+        a genuine completeness gap). The window is still recorded ``FAILED``
+        with the demotion reason (honest + retryable) but its ``empty_streak``
+        is PRESERVED (not bumped) and the accept-gap ``SKIPPED`` settle is gated
+        OFF, so a mass event can never quietly settle windows terminal. IGNORED
+        for ``EMPTY`` / ``SUCCESS`` / plain-``FAILED`` classifications (it
+        appears only inside the ``degraded_success`` arms — the mirror of
+        *suppress_settle*'s "IGNORED for … degraded outcomes" contract; a record
+        can carry BOTH flags, their arms are disjoint). The default ``False`` is
+        byte-identical to the prior behaviour.
+
+        *allow_degraded_settle* (DEC-ALLFILTERED-MASS-BREAKER-001, review round
+        1) is the RECORD-TIME suppression re-check that closes the trip/settle
+        TOCTOU a tail-computed *suppress_degraded_settle* bool could not: both
+        spine tails thread the mass all-filtered breaker's
+        :meth:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker.allow_settle`
+        bound method here (for an ``ALL_FILTERED`` record ONLY — the orthogonal
+        INTERIOR_GAP/SUSPECTED_PARTIAL channels never pass it), and it is
+        consulted UNDER this ledger's own lock — the SAME lock
+        :meth:`rescind_all_filtered_settles` takes. Because the breaker's trip
+        latches BEFORE the tripping tail calls the rescind, and record/rescind
+        serialize on the lock, a settle in flight at the trip instant either
+        (a) records AFTER the rescind, sees the tripped breaker here and is
+        suppressed, or (b) records BEFORE the rescind, lands its key in
+        ``_af_settled_keys`` and is reversed by the rescind — no interleaving
+        can leak an un-rescinded settle (the round-1 F4/F8 race). Consulted
+        ONLY for a ``degraded_success`` record not already suppressed (a
+        ``True`` *suppress_degraded_settle* wins without a call; EMPTY /
+        SUCCESS / plain-``FAILED`` never consult it); a ``False`` return folds
+        into *suppress_degraded_settle*. The callable MUST be cheap and
+        non-raising (it runs under the lock; the breaker's ``allow_settle`` is
+        an O(1) lock-guarded flag read). ``None`` (the default) and a ``True``
+        return are byte-identical to the prior behaviour.
+
+        *pull_id* (DEC-STREAK-PROVENANCE-001) names the contributing pull in the
+        provenance entry a genuine streak bump appends. The spines pass their
+        in-scope id explicitly (inject-dependencies rule); ``""`` (the default)
+        falls back to :func:`~brutex.observability.correlation.current_pull_id`
+        (re-bound on worker threads by both spines), then to the literal ``"-"``
+        — an entry is never silently dropped for a missing id.
+
         *empty_retries* / *transient_retries* (DEC-RETRY-COUNTER-SPLIT-001) are
         the SPLIT of *in_pull_fetches* the #924/#1355 relabels could not show:
         clean 0-bar responses vs retryable transients (429/timeout/5xx) the
@@ -818,6 +990,13 @@ class WindowLedger:
         records an honest UNKNOWN for a caller that did not observe the fetch
         ladder — never fabricated to ``0`` (the ``bars_net_new`` template).
         """
+        # The provenance pull identity (DEC-STREAK-PROVENANCE-001): explicit wins,
+        # then the contextvar scope (re-bound on worker threads by both spines),
+        # then the honest "-" placeholder. Local import — correlation is a
+        # stdlib+structlog module, no cycle.
+        from brutex.observability.correlation import current_pull_id
+
+        pid = pull_id or current_pull_id() or "-"
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
         # error) so /coverage/windows shows WHY it re-pulls. Only meaningful when the demotion
@@ -828,6 +1007,18 @@ class WindowLedger:
             error_type = degraded_reason or "DEGRADED"
         wk = self._key(key)
         with self._lock:
+            # Record-time TOCTOU closure (DEC-ALLFILTERED-MASS-BREAKER-001,
+            # review round 1): re-evaluate the mass all-filtered suppression
+            # UNDER this lock — serialized with
+            # :meth:`rescind_all_filtered_settles` — so a sibling tail's trip
+            # landing between OUR tail and this record can never leak an
+            # un-rescinded settle (see the *allow_degraded_settle* docstring).
+            if (
+                degraded_success
+                and not suppress_degraded_settle
+                and allow_degraded_settle is not None
+            ):
+                suppress_degraded_settle = not allow_degraded_settle()
             prior = self._by_window.get(wk)
             attempts = (prior.attempts if prior is not None else 0) + 1
             # R1 (DEC-WINDOW-LEDGER-001) + R2 (DEC-EMPTY-STREAK-RATELIMIT-001):
@@ -846,31 +1037,65 @@ class WindowLedger:
             #     EMPTY-below-threshold are never skippable) until it returns bars; we
             #     only ever settle a window seen genuinely EMPTY ``_threshold`` times.
             prior_streak = prior.empty_streak if prior is not None else 0
+            # Per-bump provenance (DEC-STREAK-PROVENANCE-001), computed BESIDE each
+            # streak arm so the two can never drift. A fresh row's prior lineage is
+            # the KNOWN-zero ``""``; a LEGACY unknown prior (``None`` provenance
+            # with a positive streak) PROPAGATES ``None`` on a bump — appending a
+            # partial history would make every derived count quietly wrong
+            # (Golden Rule #1) — until an honest SUCCESS/reopen reset.
+            prior_prov = prior.streak_provenance if prior is not None else ""
+            legacy_prior = (
+                prior is not None and prior.streak_provenance is None and prior_streak > 0
+            )
             if classified == EMPTY:
                 # An UNTRUSTED empty (the pull's mass-empty breaker is tripped —
                 # DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) preserves the streak: a
                 # throttle-shaped empty is NOT evidence of no-data, so it must not
-                # step the window toward the across-pull SKIPPED promotion.
-                empty_streak = prior_streak if suppress_settle else prior_streak + 1
-            elif degraded_success:
-                if degraded_reason in STREAK_EXEMPT_DEGRADED_REASONS:
-                    # A TIME-TRANSIENT demotion (TODAY_INCOMPLETE — the vendor
-                    # has not settled TODAY yet) PRESERVES the streak, like
-                    # FAILED: the evidence expires at the session boundary by
-                    # construction, so it must never step the window toward the
-                    # SKIPPED promotion (DEC-PULL-TODAY-COMPLETENESS-GATE-001).
+                # step the window toward the across-pull SKIPPED promotion. The
+                # provenance follows the streak — a suppressed record appends nothing.
+                if suppress_settle:
                     empty_streak = prior_streak
+                    streak_provenance = prior_prov
                 else:
-                    # A STRUCTURAL demoted-SUCCESS (interior gap / truncation /
-                    # all-filtered) re-pull is BOUNDED: bump the streak so it
-                    # settles SKIPPED at the threshold, exactly like a genuine
-                    # EMPTY, rather than re-pulling forever on a window the
-                    # vendor will never complete.
                     empty_streak = prior_streak + 1
+                    streak_provenance = (
+                        None
+                        if legacy_prior
+                        else streak_provenance_append(prior_prov or "", STREAK_CLEAN_CHANNEL, pid)
+                    )
+            elif degraded_success:
+                # A STRUCTURAL demoted-SUCCESS (interior gap / truncation /
+                # all-filtered) re-pull is BOUNDED: bump the streak so it settles
+                # SKIPPED at the threshold, exactly like a genuine EMPTY, rather
+                # than re-pulling forever on a window the vendor will never
+                # complete — UNLESS (a) the demotion is TIME-TRANSIENT
+                # (TODAY_INCOMPLETE — the vendor has not settled TODAY yet;
+                # DEC-PULL-TODAY-COMPLETENESS-GATE-001: the evidence expires at
+                # the session boundary by construction, so it PRESERVES the
+                # streak like FAILED), or (b) the mass all-filtered breaker
+                # suppressed this record (DEC-ALLFILTERED-MASS-BREAKER-001: a
+                # mass-event verdict is NOT completeness evidence, so neither
+                # the streak nor the provenance advances; the row still records
+                # FAILED + the reason below). Both preserve arms carry the prior
+                # provenance verbatim — no new completeness evidence appended.
+                if degraded_reason in STREAK_EXEMPT_DEGRADED_REASONS or suppress_degraded_settle:
+                    empty_streak = prior_streak
+                    streak_provenance = prior_prov
+                else:
+                    empty_streak = prior_streak + 1
+                    streak_provenance = (
+                        None
+                        if legacy_prior
+                        else streak_provenance_append(
+                            prior_prov or "", degraded_reason or "DEGRADED", pid
+                        )
+                    )
             elif classified == FAILED:
                 empty_streak = prior_streak  # rate-limit/timeout — preserve, never reset
+                streak_provenance = prior_prov  # no bump — lineage preserved verbatim
             else:  # SUCCESS — the window has real data
                 empty_streak = 0
+                streak_provenance = ""  # KNOWN zero (an honest reset, never ``None``)
             status = classified
             # The streak-exempt guard here is a BELT (DEC-PULL-TODAY-COMPLETENESS-
             # GATE-001): with the exemption above the streak never moves on a
@@ -882,12 +1107,23 @@ class WindowLedger:
             if (
                 degraded_success
                 and degraded_reason not in STREAK_EXEMPT_DEGRADED_REASONS
+                and not suppress_degraded_settle
                 and empty_streak >= self._threshold
             ):
                 # The window has been flagged incomplete ``_threshold`` consecutive pulls —
                 # accept the gap and settle SKIPPED so the pull converges (the operator has
-                # been warned each time; the stored bars are kept).
+                # been warned each time; the stored bars are kept). Gated OFF while the mass
+                # all-filtered breaker suppresses this record (DEC-ALLFILTERED-MASS-BREAKER-001
+                # — the suppress arm above already preserved the streak, so this arm could
+                # only fire off PRIOR pulls' bumps; the explicit conjunct keeps the settle
+                # law readable + mutation-killable).
                 status = SKIPPED
+                if error_type == ALL_FILTERED:
+                    # Same-pull rescind tracking (DEC-ALLFILTERED-MASS-BREAKER-001):
+                    # remember every ALL_FILTERED accept-gap settle THIS instance
+                    # lands so a later trip can auto-reverse the pre-trip ones
+                    # (:meth:`rescind_all_filtered_settles`). Under the lock, O(1).
+                    self._af_settled_keys.append(wk)
             elif classified == EMPTY and not suppress_settle and (settle_empty or old_window):
                 # OLD-EMPTY SINGLE-CONFIRM (DEC-OLD-EMPTY-SINGLE-CONFIRM-001,
                 # operator-decreed 2026-07-04 — SUPERSEDES the budget-aware
@@ -914,7 +1150,16 @@ class WindowLedger:
                 # ``brutex reopen-skipped`` is the manual recovery).
                 empty_streak = self._threshold
                 status = SKIPPED
-                error_type = expired_window_settle_reason(prior_streak + 1)
+                # Expired-stamp honesty (DEC-STREAK-PROVENANCE-001): count the
+                # provenance-KNOWN clean entries — ``streak_provenance`` already
+                # carries THIS record's own EMPTY bump, so ``clean >= 1`` on every
+                # non-legacy path and a prior DEGRADED bump no longer inflates the
+                # "clean attempts" display (the #1294 F&O degraded+old_window
+                # "2 clean attempts" defect). A LEGACY ``None`` lineage keeps the
+                # streak-derived ``prior_streak + 1`` fallback — byte-identical.
+                counts = streak_provenance_counts(streak_provenance)
+                clean_attempts = counts[0] if counts is not None else prior_streak + 1
+                error_type = expired_window_settle_reason(clean_attempts)
             elif classified == EMPTY and not suppress_settle and empty_streak >= self._threshold:
                 status = SKIPPED  # genuinely empty _threshold CLEAN times → settle
             if degraded_success and status == FAILED:
@@ -962,6 +1207,7 @@ class WindowLedger:
                 bars_net_new=bars_net_new,
                 empty_retries=empty_retries,
                 transient_retries=transient_retries,
+                streak_provenance=streak_provenance,
             )
             self._dirty.add(wk)
             return status
@@ -986,6 +1232,9 @@ class WindowLedger:
             empty_streak = prior.empty_streak if prior is not None else 0
             # No fetch/append happened here — preserve the prior net-new (like ``bars``).
             bars_net_new = prior.bars_net_new if prior is not None else None
+            # No streak bump happened either — the prior lineage is preserved verbatim
+            # (the ``bars_net_new`` pattern; DEC-STREAK-PROVENANCE-001).
+            streak_provenance = prior.streak_provenance if prior is not None else None
             if prior is None or prior.status != SKIPPED:
                 # Honest-verdict tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): a known-gap
                 # settle is a newly-SKIPPED window too — the verdict must SAY it.
@@ -1009,6 +1258,7 @@ class WindowLedger:
                 # unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
                 empty_retries=None,
                 transient_retries=None,
+                streak_provenance=streak_provenance,
             )
             self._dirty.add(wk)
             return SKIPPED
@@ -1081,16 +1331,21 @@ class WindowLedger:
         return len(doomed)
 
     def _demote_skipped_locked(
-        self, doomed: list[tuple[str, str, str, str, str]], *, reason: str
+        self, doomed: list[tuple[str, str, str, str, str]], *, reason: str = REOPENED_MARKER
     ) -> None:
         """Demote each *doomed* ``SKIPPED`` row to a retryable ``FAILED`` — caller holds the lock.
 
         The ONE demotion body (CLAUDE.md §11 COMMON) shared by the operator
-        :meth:`reopen_skipped` and the mechanized :meth:`audit_reopen_skipped`:
-        status → ``FAILED``, ``empty_streak`` RESET to 0 (the full fresh
-        confirmation budget), *reason* stamped as ``last_error``, tombstoned in
-        ``_reopened`` (the merge-on-save must not resurrect the on-disk
-        ``SKIPPED`` copy) and stamped dirty (DEC-LEDGER-DELTA-FLUSH-001).
+        :meth:`reopen_skipped`, the mechanized :meth:`audit_reopen_skipped`, and
+        the mass all-filtered rescind (:meth:`rescind_all_filtered_settles`,
+        DEC-ALLFILTERED-MASS-BREAKER-001 — passes
+        :data:`ALL_FILTERED_MASS_RESCINDED`): status → ``FAILED``,
+        ``empty_streak`` RESET to 0 (the full fresh confirmation budget) with the
+        matching KNOWN-zero ``streak_provenance=""`` (DEC-STREAK-PROVENANCE-001 —
+        a re-opened window regains a fresh, fully-attributed confirmation
+        budget), *reason* stamped as ``last_error``, tombstoned in ``_reopened``
+        (the merge-on-save must not resurrect the on-disk ``SKIPPED`` copy) and
+        stamped dirty (DEC-LEDGER-DELTA-FLUSH-001).
         """
         for wk in doomed:
             row = self._by_window[wk]
@@ -1111,9 +1366,57 @@ class WindowLedger:
                 bars_net_new=row.bars_net_new,  # no fetch here — preserved
                 empty_retries=row.empty_retries,  # no fetch here — preserved
                 transient_retries=row.transient_retries,
+                streak_provenance="",  # streak reset ⇒ KNOWN-zero lineage
             )
         self._reopened.update(doomed)
         self._dirty.update(doomed)
+
+    def rescind_all_filtered_settles(self) -> int:
+        """Reverse every SAME-PULL ``ALL_FILTERED`` ``SKIPPED`` settle — returns the count.
+
+        DEC-ALLFILTERED-MASS-BREAKER-001: when the mass all-filtered breaker trips
+        MID-pull, up to ~(threshold − 1) early-recorded windows may already have
+        taken the accept-gap settle BEFORE the counters crossed — "a vendor-day
+        problem is never quietly absorbed" (+ §11 AUTOMATED) demands their
+        automatic reversal, not an operator TODO. Each key
+        :meth:`record` tracked in ``_af_settled_keys`` that is STILL ``SKIPPED``
+        with ``last_error == ALL_FILTERED`` is demoted through the EXISTING reopen
+        primitive (:meth:`_demote_skipped_locked` with
+        :data:`ALL_FILTERED_MASS_RESCINDED` — ``FAILED``, streak 0, provenance
+        ``""``, ``_reopened``-tombstoned, dirty). Additionally per rescinded key:
+        the key joins the ``_degraded`` tombstone set (a mid-pull
+        ``make_locked_flush`` checkpoint may have flushed the SKIPPED to disk —
+        BOTH tombstone sets force the in-memory ``FAILED`` to win the
+        merge-on-save outright, so the rescind survives the round-trip) and
+        ``_settled_skipped_count`` is DECREMENTED so
+        :attr:`newly_settled_skipped` (and the
+        ``SETTLED_SKIPPED_OPERATOR_THRESHOLD`` verdict it feeds) never reports a
+        rescinded settle. The tracked list is cleared; duplicates dedupe. Called
+        at most once per pull (the trip latches); O(settles-this-pull), bounded
+        ≈ the trip threshold — deliberately NOT an O(1) claim.
+
+        RACE CLOSURE (review round 1 — the F4/F8 trip/settle TOCTOU): this
+        method and :meth:`record` serialize on the SAME ``_lock``, and
+        :meth:`record` re-consults the breaker's ``allow_settle`` UNDER that
+        lock (the *allow_degraded_settle* callable) — so a settle in flight at
+        the trip instant either records BEFORE this rescind (its key is then in
+        ``_af_settled_keys`` and reversed here) or records AFTER it (the
+        breaker is already tripped, the record suppresses itself). No
+        interleaving can land an un-rescinded post-trip ``ALL_FILTERED``
+        settle.
+        """
+        with self._lock:
+            doomed: list[tuple[str, str, str, str, str]] = []
+            for wk in dict.fromkeys(self._af_settled_keys):
+                row = self._by_window.get(wk)
+                if row is not None and row.status == SKIPPED and row.last_error == ALL_FILTERED:
+                    doomed.append(wk)
+            self._demote_skipped_locked(doomed, reason=ALL_FILTERED_MASS_RESCINDED)
+            for wk in doomed:
+                self._degraded.add(wk)
+                self._settled_skipped_count -= 1
+            self._af_settled_keys.clear()
+        return len(doomed)
 
     def audit_reopen_skipped(
         self,
@@ -1394,7 +1697,7 @@ class WindowLedger:
 
     @staticmethod
     def _record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
-        """One record → the canonical serialised 16-tuple (ONE shape — CLAUDE.md §11).
+        """One record → the canonical serialised 17-tuple (ONE shape — CLAUDE.md §11).
 
         Delegates to the module-level :func:`ledger_record_row` — the SINGLE row-shape
         source shared with the ``/db`` grid's cached projection
@@ -1407,7 +1710,7 @@ class WindowLedger:
         """Serialise ONLY the rows dirtied since the last :meth:`clear_dirty` — sorted.
 
         DEC-LEDGER-DELTA-FLUSH-001: the delta append's row source. Emits the SAME
-        16-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
+        17-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
         restricted to keys stamped by a row-writing mutator since the last cleared
         batch. A dirty key whose row was meanwhile DELETED (a prune) is silently
         skipped — a delta cannot express a deletion (the pull-end full save owns
@@ -1493,12 +1796,13 @@ class WindowLedger:
 
         ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
         (DEC-INGEST-BOUNDARY-INTEGRITY-001) then the ``empty_retries`` /
-        ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) were each
-        appended LAST — after ``empty_streak`` exactly as that column was — so a
-        legacy 12/13/14-tuple Parquet (written before any of them existed) still
+        ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) then
+        ``streak_provenance`` (DEC-STREAK-PROVENANCE-001) were each appended
+        LAST — after ``empty_streak`` exactly as that column was — so a legacy
+        12/13/14/16-tuple Parquet (written before any of them existed) still
         loads (the store fills the missing column per-row; an absent
-        ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` reads
-        ``None``).
+        ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
+        ``streak_provenance`` reads ``None``).
 
         Delegates per-record to the module-level :func:`ledger_record_row` (ONE
         source of the row shape — the ``/db`` grid's cached projection reuses it,
@@ -1532,6 +1836,7 @@ class WindowLedger:
             bars_net_new,
             empty_retries,
             transient_retries,
+            streak_provenance,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -1551,6 +1856,7 @@ class WindowLedger:
                     bars_net_new=bars_net_new,
                     empty_retries=empty_retries,
                     transient_retries=transient_retries,
+                    streak_provenance=streak_provenance,
                 )
             )
         return ledger

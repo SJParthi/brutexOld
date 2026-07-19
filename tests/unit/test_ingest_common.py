@@ -27,17 +27,20 @@ import pytest
 from brutex.adapters.ingest_common import (
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
     DateWindow,
+    PullCancelled,
     clamp_window_end,
     drop_bars_after,
     fetch_until_nonempty,
     now_ist,
     plan_windows,
+    raise_if_cancelled,
     summarize_conflicts,
     tile_windows,
     window_days_for_interval,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict
+from brutex.models import BruteXError
 
 
 def _dt(year: int, month: int, day: int) -> datetime:
@@ -162,25 +165,30 @@ class TestDropBarsAfter:
     def test_keeps_bars_on_or_before_the_window_end(self) -> None:
         end = date(2024, 1, 10)
         bars = [self._bar(date(2024, 1, 8)), self._bar(date(2024, 1, 9)), self._bar(end)]
-        kept = drop_bars_after(bars, end)
+        kept, dropped = drop_bars_after(bars, end)
         assert kept == bars  # boundary bar (on the end date) is KEPT — byte-unchanged
+        assert dropped == 0  # nothing past the boundary — no count surfaced
 
     def test_drops_a_future_phantom_bar(self) -> None:
         end = date(2024, 1, 10)
         future = self._bar(date(2024, 1, 15))  # a clock-skew / out-of-window phantom
-        kept = drop_bars_after([self._bar(date(2024, 1, 9)), future], end)
+        good = self._bar(date(2024, 1, 9))
+        kept, dropped = drop_bars_after([good, future], end)
         assert future not in kept
+        assert kept == [good]  # the good bar is byte-identical (KEPT)
         assert len(kept) == 1
+        assert dropped == 1  # the mixed-in future phantom is COUNTED, not silent
 
     def test_empty_input_is_empty(self) -> None:
-        assert drop_bars_after([], date(2024, 1, 10)) == []
+        assert drop_bars_after([], date(2024, 1, 10)) == ([], 0)
 
     def test_uses_ist_trading_date_not_utc_date(self) -> None:
         # 20:00 UTC on the end date = 01:30 IST the NEXT day → IST date is end+1 → DROPPED.
         end = date(2024, 1, 10)
         late_utc = self._bar(end, hour_utc=20)  # 20:00 UTC Jan-10 = 01:30 IST Jan-11
-        kept = drop_bars_after([late_utc], end)
+        kept, dropped = drop_bars_after([late_utc], end)
         assert kept == []  # the IST date (Jan-11) is strictly after the end
+        assert dropped == 1
 
 
 class TestNowIst:
@@ -355,3 +363,23 @@ class TestMaybeAudit:
         assert entry.action == "INGEST_PAIR_DONE"
         assert entry.subject == "NIFTY:1minute"
         assert entry.payload == {"bars_appended": 3}
+
+
+class TestRaiseIfCancelled:
+    """The cooperative-cancel boundary helper (DEC-JOB-COOPERATIVE-CANCEL-001)."""
+
+    def test_none_probe_is_a_noop(self) -> None:
+        # Every legacy caller passes None — byte-identical, never raises.
+        assert raise_if_cancelled(None) is None
+
+    def test_false_probe_is_a_noop(self) -> None:
+        # A wired-but-not-firing probe does not raise (the window proceeds).
+        assert raise_if_cancelled(lambda: False) is None
+
+    def test_true_probe_raises_pull_cancelled(self) -> None:
+        with pytest.raises(PullCancelled):
+            raise_if_cancelled(lambda: True)
+
+    def test_pull_cancelled_is_a_brutex_error(self) -> None:
+        # Rides the ingest spines' _GLOBAL_STOP_ERRORS graceful-halt propagation.
+        assert issubclass(PullCancelled, BruteXError)

@@ -42,6 +42,7 @@ import structlog
 
 from brutex.config.hardware_envelope import hardware_key
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.engine.run_layout import run_dir
 from brutex.observability.log_tail import clamp_max_lines, tail_lines
 
@@ -196,7 +197,7 @@ def build_diagnostic_bundle(
                     continue
                 arcname = path.relative_to(rundir).as_posix()
                 try:
-                    members.append((arcname, path.read_bytes()))
+                    members.append((arcname, read_regular_bytes(path)))
                 except OSError as exc:
                     skipped.append(arcname)
                     _LOG.warning(
@@ -206,7 +207,7 @@ def build_diagnostic_bundle(
             extra_path = Path(extra)
             arcname = f"extra/{extra_path.name}"
             try:
-                members.append((arcname, extra_path.read_bytes()))
+                members.append((arcname, read_regular_bytes(extra_path)))
             except OSError as exc:
                 skipped.append(arcname)
                 _LOG.warning(

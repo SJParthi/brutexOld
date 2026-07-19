@@ -206,7 +206,8 @@ class TestSaveLoadRoundTrip:
 
     def test_directory_at_journal_path_loads_none_with_warn(self, tmp_path: Path) -> None:
         # The OSError arm beyond plain absence: a DIRECTORY planted at the
-        # journal path (IsADirectoryError) degrades, never a crash.
+        # journal path (NotRegularFileError — the DEC-LAKE-READ-INODE-GUARD-001
+        # fd-level S_ISREG gate) degrades, never a crash.
         import structlog.testing
 
         journal_path(tmp_path, _DAY).mkdir(parents=True)
@@ -214,7 +215,7 @@ class TestSaveLoadRoundTrip:
             assert load_journal(tmp_path, _DAY) is None
         corrupt = [e for e in logs if e["event"] == "crossverify.journal_corrupt"]
         assert len(corrupt) == 1
-        assert corrupt[0]["error_type"] == "IsADirectoryError"
+        assert corrupt[0]["error_type"] == "NotRegularFileError"
 
     def test_file_at_crossverify_dir_loads_none_with_warn(self, tmp_path: Path) -> None:
         # The STAT-side OSError arm: a FILE planted where the `.crossverify`

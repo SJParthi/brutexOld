@@ -1487,8 +1487,7 @@ def _read_daily_partition(
     COMMON). ``None`` when the directory is missing or holds no parquet (a
     never-pulled symbol), so every caller degrades honestly (Golden Rule #1).
     """
-    import polars as pl
-
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     base = lake_root / "bars" / exchange / segment / symbol / "1day"
@@ -1497,7 +1496,7 @@ def _read_daily_partition(
     # Keep-FIRST read dedup (DEC-LAKE-READ-UNIQUE-001): a poisoned-era duplicated
     # 1-day partition would otherwise double-serve a day — warned, never silent.
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+        read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
         source=f"movers_daily:{exchange}/{segment}/{symbol}",
     )
     return frame
