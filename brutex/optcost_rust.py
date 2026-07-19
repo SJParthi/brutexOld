@@ -157,15 +157,15 @@ class RegimeRowLike(Protocol):
 
     @property
     def start(self) -> date:  # pragma: no cover — Protocol stub, never executed
-        ...
+        """The regime's inclusive start date (or an unverified-window marker)."""
 
     @property
     def rate_bps_x100(self) -> int | None:  # pragma: no cover — Protocol stub, never executed
-        ...
+        """The verified rate in bps x100, or ``None`` for a rate-less refusal row."""
 
     @property
     def source(self) -> str:  # pragma: no cover — Protocol stub, never executed
-        ...
+        """The row's citation (circular id) or its honest verification-gap note."""
 
 
 _LOG = structlog.get_logger("brutex.optcost_rust")
