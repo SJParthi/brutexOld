@@ -33,7 +33,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
@@ -43,6 +42,7 @@ from brutex.data.errors import (
     datetime_out_of_range_errors,
     parquet_read_skip_errors,
 )
+from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
@@ -280,20 +280,20 @@ def reconcile_catalog_from_lake(
         # this ONE guard covers the L1 piggyback as well): a genuine code bug still
         # propagates (Golden Rule #1).
         try:
-            # glob=False: ONE concrete walked file (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
-            # symbol dir must never glob-read a sibling's rows into this row's
-            # reconcile stats.
-            timestamps = pl.read_parquet(path, columns=["timestamp"], glob=False).get_column(
-                "timestamp"
-            )
+            # Guarded literal read of ONE concrete walked file
+            # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15
+            # metachar law — held by construction inside read_parquet_regular
+            # — a `[`-carrying symbol dir must never glob-read a sibling's
+            # rows into this row's reconcile stats; +
+            # DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+            timestamps = read_parquet_regular(path, columns=("timestamp",)).get_column("timestamp")
             row_count = timestamps.len()
             if row_count == 0:
                 skipped += 1
                 continue
             first_ts = timestamps.min()
             last_ts = timestamps.max()
-            raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            raw_hash = hashlib.sha256(read_regular_bytes(path)).hexdigest()
         except (*parquet_read_skip_errors(), *datetime_out_of_range_errors()) as exc:
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1

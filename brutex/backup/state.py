@@ -33,6 +33,7 @@ import structlog
 
 from brutex.backup.errors import BackupStateError
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 
 if TYPE_CHECKING:
     from brutex.config.backup_env import BackupEnvConfig
@@ -336,7 +337,7 @@ def load_state(path: Path) -> BackupState | None:
         overwritten by the checker.
     """
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text(path)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
@@ -368,7 +369,7 @@ def load_deadman(path: Path) -> DeadmanState:
     ``backup.deadman.sidecar_corrupt``.
     """
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text(path)
     except FileNotFoundError:
         return DeadmanState()
     except (OSError, UnicodeDecodeError) as exc:

@@ -616,8 +616,8 @@ class TestCorruptExistingPartition:
         """A finite price whose repr overflows the snap's Decimal → exact per-row fallback.
 
         DEC-LAKE-WRITE-VECTORIZE-001: a value so large its ``x * 100`` overflows the
-        intermediate ``Decimal(precision=38)`` (overflow is empirically between 1e18 and
-        1e19; this test uses 1e22, well past it — unreachable for a real bar price but a
+        intermediate ``Decimal(precision=38)`` (overflow is empirically between 1e15 and
+        1e16 at the scale-20 parse; this test uses 1e22, well past it — unreachable for a real bar price but a
         valid finite ``CandleBar``) makes the columnar snap raise a ``PolarsError``; the
         reader must FALL BACK to the exact per-row reconstruction (NOT quarantine it) and
         still merge a new bar into the partition, with the stored large value preserved on
@@ -693,14 +693,19 @@ class TestCorruptExistingPartition:
         }
         writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
 
-        original_read_bytes = _Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the partition byte read rides the
+        # guarded reader now — fault THAT seam (Path.read_bytes is unused) via
+        # the string-target monkeypatch (the #1810 CodeQL convention). The
+        # delegate is guarded_read's identity-pinned object — the SAME function
+        # parquet_writer binds (`from brutex.data.guarded_read import ...`).
+        from brutex.data.guarded_read import read_regular_bytes as original_read_bytes
 
-        def _io_fault(self: _Path) -> bytes:
-            if self.suffix == ".parquet":
+        def _io_fault(target: _Path) -> bytes:
+            if target.suffix == ".parquet":
                 raise OSError("simulated read I/O fault")
-            return original_read_bytes(self)
+            return original_read_bytes(target)
 
-        monkeypatch.setattr(_Path, "read_bytes", _io_fault)
+        monkeypatch.setattr("brutex.data.parquet_writer.read_regular_bytes", _io_fault)
         with pytest.raises(WriterError, match="unreadable existing partition"):
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
 
@@ -769,10 +774,12 @@ class TestNoOpReusesExistingBytes:
         bar = _bar(0, open_="100", high="110", low="90", close="105")
         writer.write(bars=[bar], **coords)
 
-        def _oom_read_bytes(self: _Path) -> bytes:
+        # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded reader seam via the
+        # string-target monkeypatch (the #1810 CodeQL convention).
+        def _oom_read_bytes(target: _Path) -> bytes:
             raise MemoryError("partition byte read OOM")
 
-        monkeypatch.setattr(_Path, "read_bytes", _oom_read_bytes)
+        monkeypatch.setattr("brutex.data.parquet_writer.read_regular_bytes", _oom_read_bytes)
         with pytest.raises(LakeWriteHalt) as exc_info:
             writer.write(bars=[bar], **coords)
         assert exc_info.value.reason == "out_of_memory"

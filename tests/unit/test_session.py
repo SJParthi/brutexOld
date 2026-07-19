@@ -143,6 +143,46 @@ class TestFilterToTradingSession:
         assert verdict.kept == [saturday_budget]
         assert verdict.dropped == 0
 
+    def test_extended_session_bar_2021_02_24_is_kept(self) -> None:
+        # SANCTIONED BEHAVIOR CHANGE (DEC-EXTENDED-SESSION-OUTAGE-001): a real
+        # 16:30 IST bar on the 2021-02-24 NSE-outage EXTENDED day (close 17:00
+        # at NSE + BSE + MSEI per the SEBI press releases, verified 2026-07-11)
+        # is now KEPT — the pre-fix resolver fabricated a 15:30 close and
+        # silently dropped it. FAILS on the pre-fix source (the reversion gate).
+        extended_bar = _ist_bar(2021, 2, 24, 16, 30)
+        assert filter_intraday_session([extended_bar]) == []  # the old defect, pinned
+        verdict = filter_to_trading_session([extended_bar])
+        assert verdict.kept == [extended_bar]
+        assert verdict.dropped == 0
+
+    def test_extended_session_close_is_half_open_at_1700(self) -> None:
+        # [open, close): 16:59 is the last kept minute; 17:00:00 drops.
+        last_minute = _ist_bar(2021, 2, 24, 16, 59)
+        at_close = _ist_bar(2021, 2, 24, 17, 0)
+        verdict = filter_to_trading_session([last_minute, at_close])
+        assert verdict.kept == [last_minute]
+        assert verdict.dropped_off_session == 1
+
+    def test_extended_hours_bar_on_a_neighbor_date_still_drops(self) -> None:
+        # The extension is ONE date only — a 15:45 bar on the EVE (2021-02-23,
+        # a regular Tuesday) stays post-close junk and drops.
+        verdict = filter_to_trading_session([_ist_bar(2021, 2, 23, 15, 45)])
+        assert verdict.kept == []
+        assert verdict.dropped_off_session == 1
+
+    def test_circuit_halt_day_bars_kept_unchanged(self) -> None:
+        # DEC-HALT-DAY-TREATMENT-001 — ANNOTATE, never drop: the 2020-03-23
+        # market-wide-halt day stays a full REGULAR session; its real bars
+        # (including one printed inside the 09:58→~10:58 halt window's wall
+        # clock — the filter judges [open, close) only, never intra-day halts)
+        # pass the boundary exactly as before.
+        in_session = _ist_bar(2020, 3, 23, 10, 30)
+        post_close = _ist_bar(2020, 3, 23, 15, 45)
+        verdict = filter_to_trading_session([in_session, post_close])
+        assert verdict.kept == [in_session]
+        assert verdict.dropped_off_session == 1
+        assert verdict.dropped_non_trading_date == 0
+
     def test_pre_open_bar_is_dropped_and_counted(self) -> None:
         verdict = filter_to_trading_session([_ist_bar(2024, 1, 2, 9, 0)])
         assert verdict.kept == []
