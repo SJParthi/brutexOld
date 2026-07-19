@@ -56,7 +56,7 @@ def test_classify_pre_stratum_start_never_extreme() -> None:
         date(2024, 1, 2): 121.5,  # +0.41% → calm
     }
     assert classify_extreme_sessions(closes) == frozenset({date(2024, 1, 1)})
-    assert STRATUM_START == date(2024, 1, 1)
+    assert date(2024, 1, 1) == STRATUM_START
 
 
 def test_classify_first_session_has_no_predecessor() -> None:

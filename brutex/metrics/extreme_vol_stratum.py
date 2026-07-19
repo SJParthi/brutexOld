@@ -35,7 +35,8 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from itertools import pairwise
+from typing import Literal, cast
 
 #: First session of the "current regime" extreme-vol stratum (inclusive).
 STRATUM_START = date(2024, 1, 1)
@@ -93,7 +94,7 @@ def classify_extreme_sessions(daily_closes: Mapping[date, float]) -> frozenset[d
     """
     ordered = sorted(daily_closes)
     extreme: set[date] = set()
-    for prev_day, day in zip(ordered, ordered[1:], strict=False):
+    for prev_day, day in pairwise(ordered):
         if day < STRATUM_START:
             continue
         prev_close = daily_closes[prev_day]
@@ -195,8 +196,9 @@ def evaluate_stratum(
             "insufficient_stratum_trades",
             f"only {n_stratum} stratum trade(s) < {MIN_STRATUM_TRADES} — abstain, not rejected",
         )
-    # stratum_exp is non-None here (n_stratum >= MIN_STRATUM_TRADES >= 1).
-    assert stratum_exp is not None
+    # stratum_exp is non-None here (n_stratum >= MIN_STRATUM_TRADES >= 1) —
+    # cast, never a runtime assert (ruff S101; the cascade_wire cast precedent).
+    stratum_exp = cast(float, stratum_exp)
     if stratum_exp < 0.0:
         return verdict(
             "fail",

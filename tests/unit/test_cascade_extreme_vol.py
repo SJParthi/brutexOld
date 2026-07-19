@@ -179,9 +179,7 @@ def test_verdict_dict_carries_no_new_keys_when_off() -> None:
 
 def test_fail_rejects_at_the_stage_token() -> None:
     cfg = _pass_config(extreme_vol_stratum=True)
-    rep = run_stage4_cascade(
-        [_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=-100))], cfg
-    )
+    rep = run_stage4_cascade([_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=-100))], cfg)
     (v,) = rep.verdicts
     assert v.passed is False
     assert v.rejected_at is FilterStage.EXTREME_VOL_STRATUM
@@ -193,9 +191,7 @@ def test_fail_rejects_at_the_stage_token() -> None:
 
 def test_ok_survives_with_visible_status_and_stats() -> None:
     cfg = _pass_config(extreme_vol_stratum=True)
-    rep = run_stage4_cascade(
-        [_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=100))], cfg
-    )
+    rep = run_stage4_cascade([_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=100))], cfg)
     (v,) = rep.verdicts
     assert v.passed is True
     assert v.extreme_vol_status == "ok"
@@ -271,9 +267,7 @@ def test_flags_pnls_length_mismatch_rejected_at_construction() -> None:
 
 def test_verdict_dict_emits_status_and_stats_when_on() -> None:
     cfg = _pass_config(extreme_vol_stratum=True)
-    rep = run_stage4_cascade(
-        [_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=100))], cfg
-    )
+    rep = run_stage4_cascade([_candidate("x", seed=1, **_stratum_evidence(stratum_pnl=100))], cfg)
     (v,) = rep.verdicts
     payload = cw._verdict_to_dict(v)
     assert payload["extreme_vol_status"] == "ok"
