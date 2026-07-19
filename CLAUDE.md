@@ -3805,7 +3805,8 @@ hostile-review pass._
   `DEFAULT_FEED_SCOPES` = {groww: index4, dhan: index4}, the fail-loud
   `BRUTEX_FEED_SCOPE` env grammar (bare `index4`|`full` XOR a per-feed
   `key=token` CSV; junk refuses at boot/entry via the eager-validation
-  sites — 9 CLI entrypoints + the dashboard routes — never mid-pull; the ONE
+  sites — 9 CLI entrypoints + the dashboard greeks-backfill route — never
+  mid-pull; the ONE
   new env var, zero new routes), the two consumer laws (producers bind the
   ACTING feed's `resolve_feed_scope`; display/census surfaces bind
   `resolve_read_scope` = the UNION over ACTIVE feeds), the

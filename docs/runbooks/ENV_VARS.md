@@ -190,6 +190,14 @@ whitespace-only ≡ unset (the house tristate convention). Resolution is
 memoized per raw env string — a mid-process ENV flip is unsupported; the
 widen path is env change → master reload (auto-healed one-shot) → verify.
 
+**The env change MUST be PERSISTENT and IDENTICAL for EVERY BruteX process
+sharing the lake** (shell profile / launchd plist / service environment —
+the design's §5.6 mandate), set BEFORE any reload: a one-shot env prefix on
+a single command widens only that process, and the next default-scope boot's
+SYMMETRIC auto-heal silently REVERTS the store back to the narrow scope
+(a prune-revert loop costing one extra vendor master fetch per divergent
+boot — bounded churn, no data loss, but the widen never sticks).
+
 | Env var | Default | Allowed | Module |
 |---|---|---|---|
 | `BRUTEX_FEED_SCOPE` | unset (= the shipped per-feed defaults: `groww=index4,dhan=index4`) | a bare token (`index4` \| `full`) applying to all scope-known feeds, XOR a per-feed CSV of `key=token` pairs (e.g. `groww=index4,gdfl=full`); mixing the forms, unknown tokens, empty/duplicate keys all refuse loudly | `brutex.config.feed_scope` |
