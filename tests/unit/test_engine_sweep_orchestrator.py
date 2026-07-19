@@ -755,7 +755,7 @@ class TestMaxSlHitRateKnob:
     def test_default_none_keeps_the_frozen_digest(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
-        digest = TestTupleDigestGateSelectionIdentity._PRE_FIX_DEFAULT_DIGEST
+        digest = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
         assert _tuple_digest(_tuple(), _grid()) == digest
         # An EXPLICIT None is the default — byte-identical, never a re-key.
         assert _tuple_digest(_tuple(), _grid(max_sl_hit_rate=None)) == digest
@@ -766,7 +766,7 @@ class TestMaxSlHitRateKnob:
         an ungated tree can never share a store address."""
         from brutex.engine.sweep_orchestrator import _tuple_digest
 
-        default = TestTupleDigestGateSelectionIdentity._PRE_FIX_DEFAULT_DIGEST
+        default = TestTupleDigestGateSelectionIdentity._DEFAULT_DIGEST
         gated = _tuple_digest(_tuple(), _grid(max_sl_hit_rate=0.5))
         assert gated != default
         # Distinct ceilings are distinct addresses too.
