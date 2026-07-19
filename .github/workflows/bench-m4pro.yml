@@ -221,6 +221,29 @@ jobs:
             sleep 10
           done
 
+      - name: Build brutex_identity (run-identity + stores kernel)
+        run: |
+          . .venv/bin/activate
+          # DEC-RUST-RUNID-STORES-001: brutex.engine / brutex.strategies.combo /
+          # brutex.data.window_ledger_store HARD-import the brutex_identity
+          # wheel, and every bench pytest below imports brutex — so this
+          # self-hosted job must build it too (caught by the lane's independent
+          # refuter round: without it the next scheduled run dies at collection
+          # with ModuleNotFoundError; the round-1 "whole-workflow job census"
+          # had missed this workflow).
+          # Belt-and-suspenders crates.io flake guard (see fno_math step).
+          cd rust/brutex-identity
+          n=0
+          until maturin develop --release; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "maturin develop (brutex-identity) failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "maturin develop (brutex-identity) failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Run absolute-throughput gate
         run: |
           . .venv/bin/activate

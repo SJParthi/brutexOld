@@ -78,6 +78,12 @@ repos:
           # movers_snapshot.py (the same wheel-less-env class the
           # --follow-imports=silent note above documents).
           - polars>=1.0,<2.0
+          # blake3 ships inline types (py.typed); without it the hook env
+          # degrades `blake3.blake3(...).hexdigest()` to Any → phantom
+          # no-any-return on files like sweep_supervisor.py (the same
+          # wheel-less-env class as the polars entry above; surfaced when a
+          # merge-forward pulls a blake3-using module into the changed set).
+          - blake3>=0.4,<2.0
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust

@@ -120,12 +120,13 @@ from __future__ import annotations
 import hashlib
 import io
 import math
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, fields, replace
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
+import brutex_identity
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
@@ -157,10 +158,6 @@ _INT64_MAX: Final[int] = 2**63 - 1
 #: every set bit. (Was ``(1<<52)-1`` pre-u128.)
 MASK_BITS_MAX: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 
-#: Per-limb mask for the two-column u128 split.
-_U64_MASK: Final[int] = (1 << 64) - 1
-#: Offset to map a u64 (0..2**64-1) into signed-int64 range for Parquet ``Int64``.
-_U64_TO_I64_OFFSET: Final[int] = 1 << 63
 
 #: Separator joining the matched-condition NAMES in the readable ``condition_names``
 #: column — reads as the combo's rule ("close_above_ema20 AND near_fib_618").
@@ -627,56 +624,93 @@ class ResultsStore:
             If the ONLY difference is two different known values on a VIX
             field — the VIX lake moved between runs (see the class docstring).
         """
+        # The whole append DECISION — identical/backfill/conflict classification
+        # incl. the differing-field list and the VIX union trio — runs in the
+        # brutex_identity kernel (DEC-RUST-RUNID-STORES-001); this wrapper owns
+        # the store mutation, the logging and the typed error contracts
+        # (message bytes unchanged).
         existing = self._rows.get(row.run_id)
-        if existing is not None:
-            if existing == row:
-                return False
-            differing = tuple(
-                f.name
-                for f in fields(ResultRow)
-                if getattr(existing, f.name) != getattr(row, f.name)
-            )
-            if any(name not in VIX_FIELDS for name in differing):
-                _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
-                if set(differing) <= set(_NULLABLE_METRIC_FIELDS):
-                    # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
-                    # a nullable gate-derived metric — the fingerprint of a
-                    # gate-config (overfit / Stage-3) re-run into the same store
-                    # address, not upstream non-determinism. Raise the typed subclass
-                    # so the driver skips + counts this ONE tuple, never a global
-                    # grid abort. Covers None-vs-float (gate on/off) AND float-vs-float
-                    # (two overfit configs).
-                    raise ResultsStoreGateConflictError(
-                        f"run-identity conflict for {row.run_id}: the ONLY differing field(s) "
-                        f"({', '.join(differing)}) are gate-derived DSR metric(s) — a gate-config "
-                        f"change (overfit / Stage-3) re-ran into the same store address. The store "
-                        f"address now encodes the gate+selection identity "
-                        f"(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001); re-run with a fresh results "
-                        f"root or the matching config. Refusing to overwrite (Golden Rule #4)."
-                    )
-                raise ResultsStoreError(
-                    f"run-identity conflict for {row.run_id}: a different result is already "
-                    f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
-                    f"map to one result (Golden Rule #4) — refusing to overwrite."
-                )
-            merged = _merge_vix_backfill(existing, row)
-            if merged == existing:
-                # Directional no-op: the incoming row is strictly LESS informed
-                # (it only turns known VIX values into None) — the stored row
-                # already carries the union, nothing changes.
-                return False
-            _LOG.info(
-                "results_store.vix_backfill",
-                run_id=row.run_id,
-                backfilled_fields=tuple(
-                    name
-                    for name in VIX_FIELDS
-                    if getattr(existing, name) is None and getattr(merged, name) is not None
-                ),
-            )
-            self._rows[row.run_id] = merged
+        kind, differing, merged_vix, extra = brutex_identity.classify_result_append(
+            None if existing is None else _row_to_ffi(existing), _row_to_ffi(row)
+        )
+        if kind == "insert":
+            self._rows[row.run_id] = row
             return True
-        self._rows[row.run_id] = row
+        if kind == "noop":
+            # Identical re-append, or the directional no-op: the incoming row is
+            # strictly LESS informed (it only turns known VIX values into None)
+            # — the stored row already carries the union, nothing changes.
+            return False
+        if kind in ("plain_conflict", "gate_conflict"):
+            _LOG.error(
+                "results_store.conflict", run_id=row.run_id, differing_fields=tuple(differing)
+            )
+            if kind == "gate_conflict":
+                # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): the ONLY diff is
+                # a nullable gate-derived metric — the fingerprint of a
+                # gate-config (overfit / Stage-3) re-run into the same store
+                # address, not upstream non-determinism. Raise the typed subclass
+                # so the driver skips + counts this ONE tuple, never a global
+                # grid abort. Covers None-vs-float (gate on/off) AND float-vs-float
+                # (two overfit configs).
+                raise ResultsStoreGateConflictError(
+                    f"run-identity conflict for {row.run_id}: the ONLY differing field(s) "
+                    f"({', '.join(differing)}) are gate-derived DSR metric(s) — a gate-config "
+                    f"change (overfit / Stage-3) re-ran into the same store address. The store "
+                    f"address now encodes the gate+selection identity "
+                    f"(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001); re-run with a fresh results "
+                    f"root or the matching config. Refusing to overwrite (Golden Rule #4)."
+                )
+            raise ResultsStoreError(
+                f"run-identity conflict for {row.run_id}: a different result is already "
+                f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
+                f"map to one result (Golden Rule #4) — refusing to overwrite."
+            )
+        if existing is None:  # defensive totality — the kernel never yields
+            # the VIX arms on an insert; a drifted kernel must fail LOUD,
+            # never mutate the store on an undefined verdict.
+            raise ResultsStoreError(
+                f"results store append: unexpected kernel verdict {kind!r} with no stored row"
+            )
+        if kind == "vix_conflict":
+            _LOG.error(
+                "results_store.vix_conflict",
+                run_id=existing.run_id,
+                conflicting_fields=tuple(extra),
+                stored={name: getattr(existing, name) for name in VIX_FIELDS},
+                incoming={name: getattr(row, name) for name in VIX_FIELDS},
+            )
+            raise VixTrioConflictError(
+                f"REFERENCE-ONLY VIX trio conflict for {existing.run_id}: the stored row and "
+                f"the redo carry different known values for {', '.join(extra)} while "
+                f"every non-VIX column is identical. VIX is deliberately OUTSIDE the BLAKE3 "
+                f"run identity (CLAUDE.md §2 Rule 3), so this is NOT upstream non-determinism "
+                f"— the India-VIX lake moved between the two runs (a re-pull backfilled "
+                f"missing VIX bars, or the derived 1day partition was re-derived "
+                f"latest-wins). Grid drivers skip this ONE tuple and the Stage-3 pass skips "
+                f"this ONE refined cell (the #904 skip-and-continue contract) — the rest of "
+                f"the launch completes; remedy: quarantine/delete this tuple's results "
+                f"store so a redo re-persists it against the current VIX series, or re-run "
+                f"after the VIX lake settles."
+            )
+        if kind != "backfill" or merged_vix is None:  # defensive totality —
+            # an unknown future kernel verdict must fail LOUD, never a silent
+            # store mutation (the same fail-closed posture as the arm above).
+            raise ResultsStoreError(
+                f"results store append: unexpected kernel verdict {kind!r} for {row.run_id}"
+            )
+        merged = replace(
+            existing,
+            vix_mean=merged_vix[0],
+            vix_min=merged_vix[1],
+            vix_max=merged_vix[2],
+        )
+        _LOG.info(
+            "results_store.vix_backfill",
+            run_id=row.run_id,
+            backfilled_fields=tuple(extra),
+        )
+        self._rows[row.run_id] = merged
         return True
 
     def extend(self, rows: Iterable[ResultRow]) -> int:
@@ -725,12 +759,15 @@ class ResultsStore:
             raise ResultsStoreError(
                 f"top_k: unknown ranking field {by!r}; choose one of {sorted(_RANKABLE_FIELDS)}"
             )
-        getter = _field_getter(by)
-        # Stable two-pass sort: run_id asc first (the tie-break), then by the
-        # ranking column — Python's stable sort preserves run_id order in ties.
-        ordered = sorted(self._rows.values(), key=lambda r: r.run_id)
-        ordered.sort(key=getter, reverse=descending)
-        return tuple(ordered[:k])
+        # The ordering LAW — run_id-ascending tie-break, then the ranking column
+        # (exact-int for money/count columns so paisa above 2**53 rank
+        # correctly) — runs in the brutex_identity kernel
+        # (DEC-RUST-RUNID-STORES-001); this wrapper extracts the keys and maps
+        # the returned indices back onto the stored rows.
+        run_ids = list(self._rows)
+        keys = [getattr(self._rows[run_id], by) for run_id in run_ids]
+        ranked = brutex_identity.rank_top_k(run_ids, keys, k, descending)
+        return tuple(self._rows[run_ids[i]] for i in ranked)
 
     def flush(self) -> FlushResult:
         """Write a deterministic Parquet snapshot of the store to :attr:`path`.
@@ -902,123 +939,128 @@ def _validate_run_id(run_id: str) -> None:
 
     Canonical = exactly :data:`COMBO_HASH_HEX_LEN` lowercase hex chars, matching
     ``brutex.strategies.combo.combo_hash(...)``'s ``.hex()`` output so the dedup
-    key is unambiguous (no upper/lower aliasing).
+    key is unambiguous (no upper/lower aliasing). The LAW runs in the
+    ``brutex_identity`` kernel (DEC-RUST-RUNID-STORES-001); the repr-bearing
+    arms are re-rendered here with CPython ``repr`` so the message bytes match
+    the retired body exactly (the kernel renders Rust ``{:?}`` quoting).
+    Disclosed narrowing: a same-length string that only ``bytes.fromhex``'s
+    whitespace tolerance accepted (e.g. embedded spaces) is now rejected —
+    reject-only on garbage, no real BLAKE3 hex is affected.
     """
-    if len(run_id) != COMBO_HASH_HEX_LEN:
-        raise ResultsStoreError(
-            f"run_id must be {COMBO_HASH_HEX_LEN}-char BLAKE3 hex, got {len(run_id)} chars"
-        )
-    if run_id != run_id.lower():
+    message = brutex_identity.validate_run_id_error(run_id, COMBO_HASH_HEX_LEN)
+    if message is None:
+        return
+    if message.startswith("run_id must be lowercase hex"):
         raise ResultsStoreError(f"run_id must be lowercase hex, got {run_id!r}")
-    try:
-        bytes.fromhex(run_id)
-    except ValueError as exc:
-        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
+    if message.endswith("is not valid hex"):
+        raise ResultsStoreError(f"run_id {run_id!r} is not valid hex")
+    raise ResultsStoreError(message)
 
 
-def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
-    """Union-merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+#: The marshalled :class:`ResultRow` FFI shape — dataclass field order with the
+#: derived ``condition_names`` LAST; prices as their exact ``str(Decimal)``
+#: texts (post-snap the 2dp text is canonical, so string equality ≡ numeric
+#: equality). ONE tuple builder feeds every kernel decision.
+_ResultRowFfi = tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    str,
+    str,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    str,
+]
 
-    The resolution is a per-field UNION under the directional law of
-    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
-    :data:`VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
-    *honestly unknown*, never a conflicting fact — so a stamped redo backfills
-    an unstamped row and an unstamped redo never erases a stamp. The caller
-    (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
-    field is equal — a non-VIX difference is the plain run-identity conflict
-    and never reaches this merge.
 
-    Raises
-    ------
-    VixTrioConflictError
-        When one VIX field carries two DIFFERENT known values — the India-VIX
-        lake moved between the two runs (see the class docstring); the raise
-        names the cause + the remedy so the operator is never misdirected at
-        "upstream non-determinism". (A mutually-inconsistent backfill — e.g.
-        a merged trio violating ``min <= mean <= max`` — still raises the
-        plain order-law :class:`ResultsStoreError` from the merged row's own
-        construction.)
+def _price_ffi_text(value: Decimal) -> str:
+    """Render a price for the kernel's TEXT comparison, signed-zero normalised.
+
+    The kernel compares prices as strings, and the retired dataclass ``__eq__``
+    compared them NUMERICALLY — under which ``Decimal("-0.00")`` equals
+    ``Decimal("0.00")``. ``abs()`` on the zero class drops the sign while
+    preserving the scale text, so a signed-zero price stays the numeric-law
+    no-op instead of flipping into a false run-identity conflict (the
+    hostile-review MINOR of DEC-RUST-RUNID-STORES-001). Non-zero values pass
+    through verbatim — ``round_money`` fixes their scale at construction, so
+    text equality matches numeric equality for every producible price.
     """
-    conflicting = tuple(
-        name
-        for name in VIX_FIELDS
-        if getattr(existing, name) is not None
-        and getattr(incoming, name) is not None
-        and getattr(existing, name) != getattr(incoming, name)
+    return str(abs(value) if value == 0 else value)
+
+
+def _row_to_ffi(row: ResultRow) -> _ResultRowFfi:
+    """Marshal one row for the kernel append decision."""
+    return (
+        row.run_id,
+        row.instrument,
+        row.tf,
+        row.direction,
+        row.mode,
+        row.mask_bits,
+        row.net_pnl_paisa,
+        row.gross_profit_paisa,
+        row.gross_loss_paisa,
+        row.max_drawdown_paisa,
+        row.expectancy_paisa,
+        row.total_trades,
+        row.winning_trades,
+        row.losing_trades,
+        row.sharpe_ratio,
+        row.sortino_ratio,
+        row.calmar_ratio,
+        row.profit_factor,
+        row.win_rate,
+        row.max_drawdown_pct,
+        _price_ffi_text(row.avg_entry_price),
+        _price_ffi_text(row.avg_exit_price),
+        row.deflated_sharpe,
+        row.vix_mean,
+        row.vix_min,
+        row.vix_max,
+        row.condition_names,
     )
-    if conflicting:
-        _LOG.error(
-            "results_store.vix_conflict",
-            run_id=existing.run_id,
-            conflicting_fields=conflicting,
-            stored={name: getattr(existing, name) for name in VIX_FIELDS},
-            incoming={name: getattr(incoming, name) for name in VIX_FIELDS},
-        )
-        raise VixTrioConflictError(
-            f"REFERENCE-ONLY VIX trio conflict for {existing.run_id}: the stored row and "
-            f"the redo carry different known values for {', '.join(conflicting)} while "
-            f"every non-VIX column is identical. VIX is deliberately OUTSIDE the BLAKE3 "
-            f"run identity (CLAUDE.md §2 Rule 3), so this is NOT upstream non-determinism "
-            f"— the India-VIX lake moved between the two runs (a re-pull backfilled "
-            f"missing VIX bars, or the derived 1day partition was re-derived "
-            f"latest-wins). Grid drivers skip this ONE tuple and the Stage-3 pass skips "
-            f"this ONE refined cell (the #904 skip-and-continue contract) — the rest of "
-            f"the launch completes; remedy: quarantine/delete this tuple's results "
-            f"store so a redo re-persists it against the current VIX series, or re-run "
-            f"after the VIX lake settles."
-        )
-    resolved: dict[str, float | None] = {
-        name: (
-            getattr(existing, name)
-            if getattr(existing, name) is not None
-            else getattr(incoming, name)
-        )
-        for name in VIX_FIELDS
-    }
-    # Explicit keywords (not a **splat) so mypy checks each against its field type.
-    return replace(
-        existing,
-        vix_mean=resolved["vix_mean"],
-        vix_min=resolved["vix_min"],
-        vix_max=resolved["vix_max"],
-    )
-
-
-def _field_getter(name: str) -> Callable[[ResultRow], float]:
-    """Return a typed accessor for a rankable numeric column.
-
-    Money / count columns return ``int`` at runtime (exact — no float coercion,
-    so int64 paisa above 2**53 still rank correctly); the ``float`` annotation
-    is the numeric-tower upper bound for the sort key.
-    """
-
-    def _get(row: ResultRow) -> float:
-        return getattr(row, name)  # type: ignore[no-any-return]
-
-    return _get
 
 
 def _encode_limb(mask: int, *, hi: bool) -> int:
     """Encode one u64 limb of a u128 ``mask`` as a SIGNED int64 for Parquet ``Int64``.
 
-    A u64 (0..2**64-1) does not fit a signed int64, so we subtract 2**63 to centre
-    it: an unsigned ``u`` maps to the signed value ``u - 2**63`` ∈ [-2**63, 2**63-1].
-    :func:`_decode_mask` inverts it. ``hi=False`` returns the low limb
-    (``mask & U64``), ``hi=True`` the high limb (``mask >> 64``).
+    Thin wrapper over the Rust kernel :func:`brutex_identity.mask_to_limbs`
+    (DEC-RUST-RUNID-STORES-001): a u64 (0..2**64-1) does not fit a signed int64,
+    so the kernel subtracts 2**63 to centre it — an unsigned ``u`` maps to the
+    signed value ``u - 2**63`` ∈ [-2**63, 2**63-1]. :func:`_decode_mask` inverts
+    it. ``hi=False`` returns the low limb, ``hi=True`` the high limb.
     """
-    limb = (mask >> 64) if hi else (mask & _U64_MASK)
-    return limb - _U64_TO_I64_OFFSET
+    lo_signed, hi_signed = brutex_identity.mask_to_limbs(mask)
+    return int(hi_signed if hi else lo_signed)
 
 
 def _decode_mask(lo_signed: int, hi_signed: int) -> int:
     """Reassemble a u128 mask from its two SIGNED-int64 limb columns.
 
-    Inverse of :func:`_encode_limb`: add back the 2**63 offset to recover each
-    unsigned u64 limb, then ``hi << 64 | lo``.
+    Thin wrapper over the Rust kernel :func:`brutex_identity.mask_from_limbs`
+    (DEC-RUST-RUNID-STORES-001) — the inverse of :func:`_encode_limb`: add back
+    the 2**63 offset per limb, then ``hi << 64 | lo``.
     """
-    lo = lo_signed + _U64_TO_I64_OFFSET
-    hi = hi_signed + _U64_TO_I64_OFFSET
-    return (hi << 64) | lo
+    return int(brutex_identity.mask_from_limbs(lo_signed, hi_signed))
 
 
 def _optional_float(record: dict[str, object], name: str) -> float | None:

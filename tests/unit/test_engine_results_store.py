@@ -407,9 +407,10 @@ class TestTopK:
             store.top_k(1, by="avg_entry_price")  # price columns are not rankable
 
     def test_ranks_money_above_2_53_exactly(self) -> None:
-        # int64 paisa above 2**53 must rank EXACTLY — `_field_getter` returns the
-        # raw int (no float() coercion that would tie 2**53 and 2**53 + 1). This
-        # guards a reproducibility-critical property (and kills the float mutant).
+        # int64 paisa above 2**53 must rank EXACTLY — the kernel's rank_top_k
+        # receives the raw int (the retired `_field_getter` helper's law: no
+        # float() coercion that would tie 2**53 and 2**53 + 1). This guards a
+        # reproducibility-critical property (and kills the float mutant).
         big = 2**53
         store = ResultsStore(path=Path("unused.parquet"))
         store.extend(
@@ -831,3 +832,81 @@ class TestTopThousandStorage:
         after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
         assert after == before
         assert len(after) == 1000
+
+
+class TestKernelVerdictTotality:
+    """The defensive fail-closed arms over a DRIFTED kernel verdict.
+
+    DEC-RUST-RUNID-STORES-001: the append decision runs in the
+    ``brutex_identity`` kernel; a future kernel emitting an unknown verdict —
+    or a VIX-arm verdict with no stored row — must fail LOUDLY and mutate
+    NOTHING (Golden Rule #1), never a silent store write. Direct unit
+    coverage of the structurally-unreachable arms (the house
+    retained-structural convention — never a pragma).
+    """
+
+    def test_vix_arm_verdict_with_no_stored_row_fails_loud(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex_identity
+
+        monkeypatch.setattr(
+            brutex_identity,
+            "classify_result_append",
+            lambda existing, incoming: ("vix_conflict", [], None, ["vix_mean"]),
+        )
+        store = ResultsStore(path=Path("/dev/null"))
+        with pytest.raises(ResultsStoreError, match="unexpected kernel verdict 'vix_conflict'"):
+            store.append(_row())
+        assert len(store) == 0  # nothing mutated on the undefined verdict
+
+    def test_unknown_future_verdict_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex_identity
+
+        store = ResultsStore(path=Path("/dev/null"))
+        store.append(_row())
+        monkeypatch.setattr(
+            brutex_identity,
+            "classify_result_append",
+            lambda existing, incoming: ("teleport", [], None, []),
+        )
+        with pytest.raises(ResultsStoreError, match="unexpected kernel verdict 'teleport'"):
+            store.append(_row())
+        assert len(store) == 1  # the stored row is untouched
+
+
+class TestSignedZeroPriceNoop:
+    """The kernel's TEXT price compare must keep the retired NUMERIC law on zeros.
+
+    ``Decimal("-0.00")`` passes the ``price >= 0`` validation and equals
+    ``Decimal("0.00")`` NUMERICALLY, so the retired dataclass ``__eq__`` read an
+    identical re-append as a silent no-op. ``_price_ffi_text`` normalises the
+    sign wrapper-side (the hostile-review MINOR of DEC-RUST-RUNID-STORES-001) —
+    without it the text compare would flip this into a false run-identity
+    conflict.
+    """
+
+    def test_signed_zero_price_reappend_is_noop_not_conflict(self) -> None:
+        from dataclasses import replace
+        from decimal import Decimal
+
+        store = ResultsStore(path=Path("unused.parquet"))
+        stored = _row(avg_entry_price=Decimal("0.00"))
+        incoming = replace(stored, avg_entry_price=Decimal("-0.00"))
+        assert stored == incoming  # the retired NUMERIC law: equal rows
+        appended = store.append(stored)
+        assert appended is True
+        reappended = store.append(incoming)
+        assert reappended is False  # noop — never a conflict
+        assert len(store) == 1
+
+    def test_price_ffi_text_normalises_only_zero(self) -> None:
+        from decimal import Decimal
+
+        from brutex.engine.results_store import _price_ffi_text
+
+        assert _price_ffi_text(Decimal("-0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("0.00")) == "0.00"
+        assert _price_ffi_text(Decimal("123.45")) == "123.45"
+        # Scale text preserved on the zero class (only the SIGN is dropped).
+        assert _price_ffi_text(Decimal("-0")) == "0"

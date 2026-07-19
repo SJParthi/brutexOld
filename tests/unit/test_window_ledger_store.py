@@ -7,15 +7,19 @@ retired in Stage e), the PLANNED upsert (`plan_windows`), the throttled live
 flush, and the begin/end dry-run rule.
 """
 
-# Whitebox tests reach module-private decode helpers (`_read_ledger_file_rows` /
-# `_intern_cells` / `_INTERNED_COLUMNS`) — sanctioned per pyproject.toml.
+# Whitebox tests reach module-private decode surfaces (`_read_ledger_file_rows` /
+# `_INTERNED_COLUMNS` — the retired `_intern_cells` helper's law now lives in
+# the brutex_identity kernel's LedgerStringPool) — sanctioned per pyproject.toml.
 # pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import os
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,7 +43,9 @@ from brutex.data.window_ledger import (
 )
 from brutex.data.window_ledger_store import (
     DEFAULT_LEDGER_SAVE_SLOW_WARN_S,
+    LEDGER_RENDER_ENV,
     LEDGER_SAVE_SLOW_WARN_ENV,
+    LedgerRenderFlagRemovedError,
     LedgerRow,
     append_ledger_delta,
     begin_pull_ledger,
@@ -57,6 +63,7 @@ from brutex.data.window_ledger_store import (
     plan_windows,
     reconcile_ledger_windows,
     reconcile_ledger_with_lake,
+    require_ledger_render_env_unset,
     resolve_ledger_save_slow_warn_seconds,
     save_window_ledger,
     seed_enclosed_windows,
@@ -150,9 +157,10 @@ class TestSaveDiskFullHalts:
     pull-wide :class:`LakeWriteHalt`, not a raw error (the ledger is a LAKE write, so a
     full disk fails every remaining window identically and must halt the pull, never be
     mis-quarantined per-symbol). A non-ENOSPC OSError still propagates UNCHANGED (the
-    guard never over-escalates). ``pyarrow.parquet.write_table`` is the boundary that
-    raises in the real failure (the temp's first byte write on a full volume), so we
-    patch it to drive the deterministic regression.
+    guard never over-escalates). The temp's byte write (``Path.write_bytes`` inside
+    the ``atomic_write_via`` callback — DEC-RUST-RUNID-STORES-001: the kernel renders
+    the bytes, the callback writes them) is the boundary that raises in the real
+    failure (a full volume), so we patch it to drive the deterministic regression.
     """
 
     @staticmethod
@@ -164,12 +172,10 @@ class TestSaveDiskFullHalts:
     def test_disk_full_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import pyarrow.parquet as pq
-
         def _boom(*_a: object, **_k: object) -> None:
             raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(LakeWriteHalt) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert exc_info.value.reason == "disk_full"
@@ -179,12 +185,10 @@ class TestSaveDiskFullHalts:
     def test_out_of_memory_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import pyarrow.parquet as pq
-
         def _boom(*_a: object, **_k: object) -> None:
             raise MemoryError("heap exhausted")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(LakeWriteHalt) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert exc_info.value.reason == "out_of_memory"
@@ -193,12 +197,11 @@ class TestSaveDiskFullHalts:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A non-ENOSPC OSError (e.g. EACCES) is NOT escalated to a halt — propagates raw."""
-        import pyarrow.parquet as pq
 
         def _boom(*_a: object, **_k: object) -> None:
             raise OSError(errno.EACCES, "Permission denied")
 
-        monkeypatch.setattr(pq, "write_table", _boom)
+        monkeypatch.setattr(Path, "write_bytes", _boom)
         with pytest.raises(OSError) as exc_info:
             save_window_ledger(self._ledger(), tmp_path)
         assert not isinstance(exc_info.value, LakeWriteHalt)
@@ -3254,25 +3257,38 @@ class TestInternedDecode:
     def test_timestamp_columns_are_deliberately_not_interned(self) -> None:
         # µs-ISO timestamps are essentially unique — a memo would double-hold
         # them; the exclusion is per-COLUMN policy, pinned here.
-        from brutex.data.window_ledger_store import _CORE_COLUMNS, _INTERNED_COLUMNS
+        import brutex_identity
+        from brutex.data.window_ledger_store import _INTERNED_COLUMNS
 
         assert "first_seen_at" not in _INTERNED_COLUMNS
         assert "last_attempt_at" not in _INTERNED_COLUMNS
         # Every interned column IS a core column (the optional int columns
-        # never carry strings — nothing to intern there).
-        assert frozenset(_CORE_COLUMNS) >= _INTERNED_COLUMNS
+        # never carry strings — nothing to intern there). The core set is the
+        # kernel's — the ONE schema authority (DEC-RUST-RUNID-STORES-001).
+        assert frozenset(brutex_identity.LEDGER_CORE_COLUMNS) >= _INTERNED_COLUMNS
 
-    def test_intern_cells_passthrough_for_non_strings(self) -> None:
-        from brutex.data.window_ledger_store import _intern_cells
+    def test_pool_collapses_equal_cells_and_passes_none_through(self, tmp_path: Path) -> None:
+        # The kernel pool law (DEC-RUST-RUNID-STORES-001, replacing the retired
+        # per-call dict memo): equal low-cardinality cells collapse onto ONE
+        # object across reads sharing a pool; a nullable None cell passes
+        # through untouched; the pool's distinct-string count is observable.
+        import brutex_identity
+        from brutex.data.window_ledger_store import _read_ledger_file_rows
 
-        memo: dict[str, str] = {}
-        first = "1minute"
-        second = "".join(["1minu", "te"])  # equal value, runtime-built distinct object
-        assert second == first and second is not first
-        out = _intern_cells([first, None, second], memo)
-        assert out[0] is first
-        assert out[1] is None  # None (a nullable cell) passes through untouched
-        assert out[2] is first  # the memo collapsed the equal value
+        self._saved_ledger(tmp_path)
+        pool = brutex_identity.LedgerStringPool()
+        assert len(pool) == 0
+        first = _read_ledger_file_rows(ledger_path(tmp_path), pool=pool)
+        size_after_first = len(pool)
+        assert size_after_first > 0
+        again = _read_ledger_file_rows(ledger_path(tmp_path), pool=pool)
+        # A re-read of the same file adds NO new distinct strings and shares
+        # the FIRST read's objects (cross-call identity via the pool).
+        assert len(pool) == size_after_first
+        assert first[0][2] is again[0][2]  # interval
+        assert first[0][0] is again[0][0]  # market
+        # None (a nullable cell — the SUCCESS row's last_error) passes through.
+        assert first[0][8] is None
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -3386,128 +3402,262 @@ class TestSharedPullLedgerScope:
         assert after is not holder[0]  # the finally reset ran
 
 
-class TestLedgerRustRenderSeam:
-    """DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 — the ONE shared render body.
+# ────────────────────────────────────────────────────────────────────────
+# Corrupt-parquet abort regression (DEC-RUST-RUNID-STORES-001, independent
+# refuter round 2 — the BLOCKER)
+# ────────────────────────────────────────────────────────────────────────
 
-    Both write sites (``append_ledger_delta`` + ``save_window_ledger``) render
-    through ``_ledger_parquet_bytes``: flag OFF (the default) runs the verbatim
-    pyarrow oracle with the crate structurally unreachable (bomb-spy-pinned);
-    flag ON routes through the ``lake_rust_ledger_render`` facade. The
-    ENOSPC/OOM → ``LakeWriteHalt`` law covers the render on BOTH arms
-    (DEC-WINDOW-LEDGER-WRITE-HALT-001 — semantics byte-identical).
+#: The deterministic bounded corruption battery, run in a SUBPROCESS: parquet-rs
+#: PANICS on structurally-plausible-but-corrupt parquet ("column start and
+#: length should not be negative", `Option::unwrap()` on None in the footer
+#: thrift — each reachable by a SINGLE flipped byte of a canonical ledger
+#: file), and under the crate's since-retired `panic = "abort"` release
+#: profile that panic was an uncatchable SIGABRT (exit 134) killing the WHOLE
+#: pull — reproduced pre-fix, which is exactly why the battery must run
+#: out-of-process: an abort kills the runner, so only a subprocess can report
+#: it. The child renders a canonical ledger file via the production render
+#: seam, then for EVERY byte of the footer region (last 700 bytes; the thrift
+#: metadata lives there) applies BOTH an XOR 0x01 bit-flip (the zigzag-varint
+#: sign flip that mints the negative-offset panic class) and an XOR 0xFF
+#: inversion (the unwrap-None class), plus a stride over the body — and
+#: drives each corrupted file through the REAL `load_window_ledger`
+#: (the parent-path degrade contract) AND classifies the kernel-level error.
+_CORRUPTION_BATTERY_CHILD = """
+import json
+import sys
+from pathlib import Path
+
+import brutex_identity
+from brutex.data.window_ledger import SUCCESS, WindowLedger
+from brutex.data.fetch_coverage import WindowKey
+from datetime import UTC, date, datetime
+from brutex.data.window_ledger_store import ledger_path, load_window_ledger, save_window_ledger
+
+tmp = Path(sys.argv[1])
+ledger = WindowLedger()
+ledger.record(
+    WindowKey(market="groww", security_id="NSE-NIFTY", interval="1minute",
+              start=date(2024, 1, 1), end=date(2024, 1, 31)),
+    raw_bars=375, error_type=None, bars_appended=375,
+    now=datetime(2024, 1, 31, 16, 0, tzinfo=UTC),
+)
+save_window_ledger(ledger, tmp)
+path = ledger_path(tmp)
+base = bytearray(path.read_bytes())
+n = len(base)
+offsets = list(range(max(0, n - 700), n)) + list(range(0, max(0, n - 700), 97))
+counters = {"total": 0, "degraded": 0, "loaded_ok": 0,
+            "panicked_cases": 0, "negative_metadata_cases": 0}
+for off in offsets:
+    for mask in (0x01, 0xFF):
+        corrupted = bytearray(base)
+        corrupted[off] ^= mask
+        # Kernel-level classification: the caught-panic class must surface as
+        # a typed ValueError, never an abort / PanicException.
+        try:
+            brutex_identity.read_ledger_rows(bytes(corrupted), 3)
+        except ValueError as exc:
+            msg = str(exc)
+            if "parquet decode panicked" in msg:
+                counters["panicked_cases"] += 1
+                if "negative" in msg:
+                    counters["negative_metadata_cases"] += 1
+        # Parent-path law: the REAL production load DEGRADES (empty +
+        # load_failed) or reads clean (an immaterial byte) — never raises,
+        # never aborts.
+        path.write_bytes(bytes(corrupted))
+        loaded = load_window_ledger(tmp)
+        counters["total"] += 1
+        if loaded.load_failed:
+            counters["degraded"] += 1
+            assert loaded.count == 0, (off, mask, loaded.count)
+        else:
+            counters["loaded_ok"] += 1
+print(json.dumps(counters))
+"""
+
+
+class TestCorruptParquetNeverAborts:
+    """The refuter-round-2 BLOCKER regression: corrupt window-ledger parquet
+    must take the documented degrade path (empty + ``load_failed`` + ONE
+    structured WARNING) — never a process abort. Pre-fix (the crate's
+    ``panic = "abort"`` profile, no catch_unwind boundary) the battery's
+    subprocess died with returncode -6 (SIGABRT); the SAME corrupt bytes
+    under the retired pyarrow reader raised a catchable OSError.
     """
 
-    @pytest.fixture(autouse=True)
-    def _fresh_facade(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        from brutex.data import lake_rust_ledger_render
+    def test_corruption_battery_subprocess_never_aborts(self, tmp_path: Path) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", _CORRUPTION_BATTERY_CHILD, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"corruption battery died rc={proc.returncode} (-6/134 = SIGABRT — a "
+            f"parquet-rs panic escaped the catch_unwind boundary): "
+            f"stdout={proc.stdout[-800:]!r} stderr={proc.stderr[-800:]!r}"
+        )
+        counters = json.loads(proc.stdout.splitlines()[-1])
+        # Anti-vacuous teeth: the sweep must actually EXERCISE the panic
+        # class — including the named negative-column-start/length metadata
+        # panic (the refuter's reproduced parquet-57.3.1 site).
+        assert counters["panicked_cases"] >= 1, counters
+        assert counters["negative_metadata_cases"] >= 1, counters
+        assert counters["degraded"] >= 1, counters
+        assert counters["degraded"] + counters["loaded_ok"] == counters["total"], counters
 
-        monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
-        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
-        yield
-        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+    def test_panic_class_corruption_degrades_with_structured_warning(self, tmp_path: Path) -> None:
+        # The in-process parent-path proof over ONE panic-class corruption
+        # (located dynamically off the kernel error text, so the pin never
+        # depends on a byte offset): the REAL load degrades to empty with
+        # load_failed=True and the ONE structured WARNING — post-fix this is
+        # safe to run in-process because the panic is caught in the kernel.
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=375,
+            error_type=None,
+            bars_appended=375,
+            now=_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+        path = ledger_path(tmp_path)
+        base = bytearray(path.read_bytes())
+        panic_bytes: bytes | None = None
+        import brutex_identity
 
-    def _ledger(self) -> WindowLedger:
+        for off in range(max(0, len(base) - 700), len(base)):
+            for mask in (0x01, 0xFF):
+                corrupted = bytearray(base)
+                corrupted[off] ^= mask
+                try:
+                    brutex_identity.read_ledger_rows(bytes(corrupted), 3)
+                except ValueError as exc:
+                    if "parquet decode panicked" in str(exc):
+                        panic_bytes = bytes(corrupted)
+                        break
+            if panic_bytes is not None:
+                break
+        assert panic_bytes is not None, "no panic-class corruption found in the footer sweep"
+        path.write_bytes(panic_bytes)
+        with capture_logs() as logs:
+            loaded = load_window_ledger(tmp_path)
+        assert loaded.count == 0
+        assert loaded.load_failed is True
+        warnings = [
+            e
+            for e in logs
+            if e.get("event") == "window_ledger.load_failed" and e.get("log_level") == "warning"
+        ]
+        assert len(warnings) == 1
+        assert "parquet decode panicked" in str(warnings[0].get("error"))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# RETIRED: TestLedgerRustRenderSeam (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+# MIGRATION.md #1918). The flag-gated ``_ledger_parquet_bytes`` render seam
+# it pinned (pyarrow oracle default / BRUTEX_LAKE_RUST_LEDGER_RENDER →
+# brutex-lake crate arm) was SUPERSEDED-IN-PART on the render plane by
+# DEC-RUST-RUNID-STORES-001 (#1962) per the coordinator ruling of 2026-07-18:
+# the ``brutex_identity`` kernel render is unconditionally the ONE writer, so
+# the seam class's intent is void — its substance survives as (a) the kernel
+# canonical-bytes goldens (``tests/golden/test_window_ledger_bytes_probe.py``
+# + ``test_runid_stores_oracle_golden.py``), (b) the adapted row-fixed-point +
+# state-convergence integration gates
+# (``tests/integration/test_window_ledger_rust_reader_parity.py`` /
+# ``..._state_convergence.py``), and (c) ``TestLedgerRenderEnvGuard`` below —
+# a SET flag now REFUSES loudly instead of selecting a retired render arm.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLedgerRenderEnvGuard:
+    """The removed ``$BRUTEX_LAKE_RUST_LEDGER_RENDER`` knob REFUSES loudly.
+
+    DEC-RUST-RUNID-STORES-001 (supersedes-in-part
+    DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 #1918 on the render plane) — the
+    FillMode ``require_fill_mode_env_unset`` precedent: the render is no
+    longer flag-selectable, so a stale config that still exports the retired
+    variable — its old truthy AND falsy spellings alike — must fail LOUD at
+    every store entry (load / save / append) instead of silently pretending
+    the knob is honoured. Unset (and the ``VAR= cmd`` empty-string unset
+    idiom) stays the normal, guard-silent path.
+    """
+
+    @staticmethod
+    def _ledger() -> WindowLedger:
         ledger = WindowLedger()
         ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
-        ledger.plan(_key("SENSEX"), now=_NOW)  # the last_attempt_at None arm
         return ledger
 
-    def test_flag_off_bytes_identical_to_direct_pyarrow_path_write(self, tmp_path: Path) -> None:
-        # The seam restructure pin: the OFF arm renders to a BUFFER then
-        # writes the bytes, where the pre-conversion writer ran
-        # ``pq.write_table(table, tmp)`` straight at the temp PATH — the
-        # file bytes must be identical (pyarrow's writer is destination-
-        # agnostic; the byte-determinism golden probe backs it).
-        import pyarrow.parquet as pq
-        from brutex.data import window_ledger_store as store_mod
-
-        save_window_ledger(self._ledger(), tmp_path)
-        rows = load_window_ledger(tmp_path).to_rows()
-        direct = tmp_path / "direct.parquet"
-        pq.write_table(store_mod._rows_to_table(rows), direct)  # type: ignore[no-untyped-call, unused-ignore]
-        assert ledger_path(tmp_path).read_bytes() == direct.read_bytes()
-        assert store_mod._render_ledger_parquet_python(rows) == direct.read_bytes()
-
-    def test_flag_off_never_routes_to_facade_and_never_imports_crate(
+    def test_unset_env_passes_and_all_three_entries_work(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Bomb spy (the OFF-arm pin): the facade route AND the crate import
-        # are both structurally unreachable with the flag unset.
-        import sys as sys_mod
-
-        from brutex.data import lake_rust_ledger_render
-        from brutex.data import window_ledger_store as store_mod
-
-        def _bomb(**_kwargs: Any) -> bytes:
-            raise AssertionError("flag-OFF must never route through the facade")
-
-        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _bomb)
-        monkeypatch.setitem(sys_mod.modules, "brutex_lake", None)  # import would raise
+        monkeypatch.delenv(LEDGER_RENDER_ENV, raising=False)
         ledger = self._ledger()
-        assert append_ledger_delta(ledger, tmp_path) == 2
-        ledger.record(_key("BANKNIFTY"), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        assert append_ledger_delta(ledger, tmp_path) == 1
         save_window_ledger(ledger, tmp_path)
-        assert load_window_ledger(tmp_path).to_rows() == ledger.to_rows()
-        assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
+        assert load_window_ledger(tmp_path).count == 1
 
-    def test_flag_on_routes_both_write_sites_through_the_facade(
+    def test_empty_string_is_the_unset_idiom_and_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from brutex.data import lake_rust_ledger_render
-        from brutex.data import window_ledger_store as store_mod
-
-        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "1")
-        calls: list[int] = []
-
-        def _spy(*, rows: Any, python_render: Any) -> bytes:
-            calls.append(len(rows))
-            result = python_render()
-            assert isinstance(result, bytes)
-            return result
-
-        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _spy)
-        ledger = self._ledger()
-        assert append_ledger_delta(ledger, tmp_path) == 2  # site 1: the delta append
-        ledger.record(_key("BANKNIFTY"), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
-        save_window_ledger(ledger, tmp_path)  # site 2: the full save
-        assert calls == [2, 3]
-        assert load_window_ledger(tmp_path).to_rows() == ledger.to_rows()
-
-    def test_flag_junk_env_stays_on_the_oracle_arm(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from brutex.data import lake_rust_ledger_render
-        from brutex.data import window_ledger_store as store_mod
-
-        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "onn")
-
-        def _bomb(**_kwargs: Any) -> bytes:
-            raise AssertionError("junk env must resolve loud-OFF, never route")
-
-        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _bomb)
+        # ``VAR= cmd`` — nothing was configured; the guard stays silent
+        # (the FillMode precedent's documented envelope).
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "")
+        require_ledger_render_env_unset()
         save_window_ledger(self._ledger(), tmp_path)
-        assert len(load_window_ledger(tmp_path).to_rows()) == 2
+        assert load_window_ledger(tmp_path).count == 1
 
-    def test_flag_on_render_memory_error_maps_to_lake_write_halt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "1",  # the old truthy arm — would have selected the retired crate render
+            "true",
+            "0",  # the old falsy arm — even the spelling matching today's one render refuses
+            "false",
+            "off",
+            "definitely-not-a-flag",  # junk (the old resolver's loud-OFF class)
+            "  1  ",  # whitespace-padded still refuses (strip() finds content)
+        ],
+    )
+    def test_any_set_value_refuses_at_every_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
-        # The render runs INSIDE atomic_write_via's guarded callable, so a
-        # raw MemoryError out of the facade (its documented re-raise
-        # doctrine) still maps to LakeWriteHalt("out_of_memory") — the
-        # DEC-WINDOW-LEDGER-WRITE-HALT-001 law, byte-identical to the
-        # pre-conversion pq.write_table-in-place semantics.
-        from brutex.data import lake_rust_ledger_render
-        from brutex.data import window_ledger_store as store_mod
-
-        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "1")
-
-        def _oom(**_kwargs: Any) -> bytes:
-            raise MemoryError
-
-        monkeypatch.setattr(store_mod, "render_ledger_parquet_bytes", _oom)
+        monkeypatch.setenv(LEDGER_RENDER_ENV, value)
         ledger = self._ledger()
-        with pytest.raises(LakeWriteHalt) as excinfo:
+        with pytest.raises(LedgerRenderFlagRemovedError):
             append_ledger_delta(ledger, tmp_path)
-        assert excinfo.value.reason == "out_of_memory"
-        with pytest.raises(LakeWriteHalt):
+        with pytest.raises(LedgerRenderFlagRemovedError):
             save_window_ledger(ledger, tmp_path)
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            load_window_ledger(tmp_path)
+        # The refusal fired BEFORE any lake I/O — nothing was created.
+        assert not (tmp_path / "window_ledger").exists()
+
+    def test_refusal_names_the_dec_and_the_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "1")
+        with pytest.raises(LedgerRenderFlagRemovedError) as exc_info:
+            require_ledger_render_env_unset()
+        message = str(exc_info.value)
+        assert "DEC-RUST-RUNID-STORES-001" in message
+        assert "DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001" in message
+        assert LEDGER_RENDER_ENV in message
+        assert "'1'" in message  # the offending value is repr()'d into the refusal
+
+    def test_injection_seam_reads_the_given_mapping_not_os_environ(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pure-guard seam: an explicit mapping wins over os.environ (and an
+        # os.environ-set value is invisible when a clean mapping is passed).
+        monkeypatch.setenv(LEDGER_RENDER_ENV, "1")
+        require_ledger_render_env_unset(env={})
+        monkeypatch.delenv(LEDGER_RENDER_ENV)
+        with pytest.raises(LedgerRenderFlagRemovedError):
+            require_ledger_render_env_unset(env={LEDGER_RENDER_ENV: "1"})
+
+    def test_error_type_is_a_value_error(self) -> None:
+        # The typed refusal follows the FillModeRemovedError precedent
+        # (ValueError subclass — a config error, catchable narrowly).
+        assert issubclass(LedgerRenderFlagRemovedError, ValueError)
