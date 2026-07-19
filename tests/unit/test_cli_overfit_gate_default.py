@@ -18,7 +18,7 @@ RUN-IDENTITY LAW (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001, MIGRATION.md
 Flipping the CLI default therefore MOVES the store address of every
 default-invocation sweep (full recompute on the first post-flip run) while
 the ENGINE-level identity is untouched: ``SweepGridConfig.overfit`` still
-defaults ``None``, so the frozen ungated digest ``5b020e892247deac``
+defaults ``None``, so the frozen ungated digest ``7a0120c1123b44c6``
 (``test_engine_sweep_orchestrator.TestTupleDigestGateSelectionIdentity``)
 stays byte-stable and every frozen engine golden passes UNMODIFIED. The
 gated-at-defaults successor digest is pinned here.
@@ -88,8 +88,11 @@ class TestGateIdentityConsequence:
 
     # The frozen UNGATED digest (engine-level default — SweepGridConfig.overfit
     # stays None): byte-stable across this proposal, mirrored from
-    # test_engine_sweep_orchestrator.TestTupleDigestGateSelectionIdentity.
-    _UNGATED_DIGEST = "5b020e892247deac"
+    # test_engine_sweep_orchestrator.TestTupleDigestGateSelectionIdentity
+    # (_DEFAULT_DIGEST — the post-DEC-FILL-WORST-CASE-ONLY-001 #1825 value;
+    # the dead salvage build pinned the PRECISE-era 5b020e892247deac,
+    # re-executed here on the worst-case-era main).
+    _UNGATED_DIGEST = "7a0120c1123b44c6"
 
     # PROPOSAL re-lock — the store-address digest a DEFAULT CLI invocation now
     # targets (gate active at its defaults: dsr_min=0.95, weight=0.05,
@@ -97,10 +100,10 @@ class TestGateIdentityConsequence:
     # {"overfit": [0.95, 0.05, 0.0, 0.0]}). Hand-derivation: the #1715
     # descriptor gains descriptor["gate_config"] = {"overfit":
     # [0.95, 0.05, 0.0, 0.0]} before the canonical-JSON → BLAKE3 fold, so the
-    # digest MOVES from the ungated 5b020e892247deac. Captured empirically on
+    # digest MOVES from the ungated 7a0120c1123b44c6. Captured empirically on
     # this branch; REVERTS (delete this pin) if the operator rules the gate
     # back OFF.
-    _GATED_DEFAULT_DIGEST = "22a4b3ef39de5210"
+    _GATED_DEFAULT_DIGEST = "78ea140f9fa4906a"
 
     @staticmethod
     def _tuple_and_grids() -> tuple[SweepTuple, SweepGridConfig, SweepGridConfig]:

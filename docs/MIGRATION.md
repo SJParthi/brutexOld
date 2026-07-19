@@ -7366,8 +7366,12 @@ folds into the per-tuple store address
 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 #1715,
 `engine/sweep_identity._gate_config_fragment` →
 `sweep_orchestrator._tuple_digest`), so the DEFAULT CLI invocation's store
-digest MOVES from the frozen ungated `5b020e892247deac` to the measured
-gated-at-defaults successor `22a4b3ef39de5210` (the identity fragment
+digest MOVES from the frozen ungated `7a0120c1123b44c6` (the
+post-#1825 worst-case-era value; the dead salvage build had measured the
+PRECISE-era pair `5b020e892247deac` -> `22a4b3ef39de5210` — RE-EXECUTED
+2026-07-19 on the live main per Golden Rule #1, delta attributed to the
+DEC-FILL-WORST-CASE-ONLY-001 run-identity re-lock) to the measured
+gated-at-defaults successor `78ea140f9fa4906a` (the identity fragment
 `{"overfit": [0.95, 0.05, 0.0, 0.0]}`; captured on this branch, pinned in
 `tests/unit/test_cli_overfit_gate_default.py`): the FIRST post-flip default
 sweep fully RE-COMPUTES (no resume of pre-flip stores — Parquet + completion
