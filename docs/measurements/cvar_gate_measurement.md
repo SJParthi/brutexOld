@@ -25,7 +25,7 @@
 * The engine-integration behaviour (a REAL `run_persisted_sweep` whose
   fat-tail masks are rejected gate-ON and served gate-OFF, with the OFF arm
   content-hash-identical) is separately pinned by
-  `tests/unit/test_engine_sweep_cvar_gate.py` — that is the wiring proof;
+  `tests/unit/test_engine_sweep_run_cvar_gate.py` — that is the wiring proof;
   THIS file is the threshold-behaviour evidence.
 
 ## Method (fully reproducible)
