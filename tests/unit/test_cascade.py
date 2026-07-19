@@ -1161,6 +1161,22 @@ class TestPerCandidatePbo:
         assert v.passed is True
         assert v.candidate_pbo == self._oracle_pbo(family, cfg.pbo_n_splits)
 
+    def test_two_column_family_is_the_minimum_that_proceeds(self) -> None:
+        # Boundary law (hostile-review round 1, MINOR-2): _MIN_POOL_FOR_PBO
+        # == 2 is an INCLUSIVE floor — a K=2 family runs the per-candidate
+        # CSCV and records the measured value (kills the `<` -> `<=` skip
+        # mutant, under which a 2-column family would abstain with None; the
+        # K=1 skip side is pinned by test_single_column_family_skips below).
+        cfg = _pass_config()
+        cand = _candidate("a", seed=1)
+        family = self._family_for(cand, seed=99, k=2)
+        assert len(family) == 2
+        rep = run_stage4_cascade([_candidate("a", seed=1, family_returns=family)], cfg)
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.candidate_pbo is not None
+        assert v.candidate_pbo == self._oracle_pbo(family, cfg.pbo_n_splits)
+
     def test_no_family_skips_with_none(self) -> None:
         rep = run_stage4_cascade([_candidate("a", seed=1)], _pass_config())
         (v,) = rep.verdicts

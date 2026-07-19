@@ -685,6 +685,11 @@ def cascade_config_from_dict(data: dict[str, object]) -> CascadeConfig:
     fields — no special-casing needed). Every OTHER drift keeps the
     existing refusal law — an unknown key / missing required field is a
     ``TypeError`` inside ``CascadeConfig(**data)`` → :class:`CascadeWireError`.
+    The forward-compat asymmetry is DELIBERATE (hostile-review round 1): the
+    CONFIG parse is STRICT — a NEW manifest's unknown config key read by OLD
+    code refuses loudly (the established strict-config precedent) — while
+    the spec's ``family_sl_tp`` is presence-tolerant ADDITIVE
+    (EMIT-ON-PRESENT at MANIFEST_VERSION 1; see ``manifest_from_json``).
     """
     from brutex.metrics.cascade import CascadeConfig
 
@@ -1060,8 +1065,14 @@ def candidates_for_spec(
     excludes the candidate says nothing about it; the per-candidate PBO is
     then honestly skipped). ``None`` (the default) applies no cap — direct
     callers; the production wire always threads
-    ``CascadeConfig.candidate_pbo_family_cap``.
+    ``CascadeConfig.candidate_pbo_family_cap``. A ``family_cap < 1`` is
+    REFUSED (:class:`CascadeWireError`) — aligned with
+    :func:`run_cascade_over_specs`'s config-level refusal, so a direct
+    caller's cap-0 can never quietly degrade every family to ``None``
+    (hostile-review round 1).
     """
+    if family_cap is not None and family_cap < 1:
+        raise CascadeWireError(f"family_cap must be >= 1 or None, got {family_cap}")
     from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
 

@@ -321,9 +321,14 @@ class CascadeConfig:
     #: DEC-STAT-001 floor, MIGRATION.md #123: the cascade series are per-BAR
     #: equity returns, so the label horizon is 1 bar and the formula floors at
     #: ``ceil(375 / tf_minutes)``). An explicit ``int >= 0`` overrides
-    #: uniformly across every group; negative values are refused at the use
-    #: sites (:func:`run_stage4_cascade` / the wire resolver — this frozen
-    #: config class carries no ``__post_init__``, matching every other field).
+    #: uniformly across every group; a NEGATIVE value is refused by
+    #: :func:`brutex.engine.cascade_wire.resolve_cascade_embargo_bars` (the
+    #: production route — the ONLY reader of this field) and by
+    #: :func:`run_stage4_cascade`'s own ``embargo_bars`` validation —
+    #: ``run_stage4_cascade`` never reads this config field; direct callers
+    #: pass ``embargo_bars`` explicitly (hostile-review round 1 wording; this
+    #: frozen config class carries no ``__post_init__``, matching every other
+    #: field).
     #: Appended + defaulted (the additive-config precedent), so an OLD
     #: manifest config dict without the key rebuilds with the default.
     wfo_embargo: int | None = None
@@ -815,7 +820,13 @@ def run_stage4_cascade(
     # above guarantees every column has >= 2 observations AND positive
     # variance — exactly hansen_spa's `_require_positive_variance` demand —
     # so the SPA arm can never raise on the pool matrix. Both tests consume
-    # the SAME deterministic BootstrapConfig (one seed).
+    # the SAME deterministic BootstrapConfig (one seed). The OTHER hansen_spa
+    # raise — the bootstrap-variance-collapse ValueError inside
+    # spa._studentization — is likewise unreachable here:
+    # ``CascadeConfig.bootstrap()`` always leaves ``block_length=None``, so
+    # the resampler derives ``expected_block_length(n_obs)`` — never a
+    # pathological FIXED block long enough to reproduce the full sample
+    # (hostile-review round 1).
     pool_rc_pvalue: float | None = None
     pool_spa_pvalue: float | None = None
     if survivors:

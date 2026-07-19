@@ -2709,6 +2709,29 @@ class TestFamilyCap:
         assert cand.family_returns is not None
         assert len(cand.family_returns) == len(self._WIDE)
 
+    def test_cap_equal_to_family_width_is_inert_and_silent(self) -> None:
+        # Boundary law (hostile-review round 1, MINOR-1): the truncation
+        # fires on STRICTLY-wider families only — a cap EXACTLY equal to the
+        # family width neither truncates nor warns (kills the `>` -> `>=`
+        # cap mutant, which would truncate-and-warn at equality).
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=len(self._WIDE))
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+        assert [e for e in logs if e["event"] == "cascade_wire.family_capped"] == []
+        assert [e for e in logs if e["event"] == "cascade_wire.family_cap_dropped_own_pair"] == []
+
+    def test_cap_below_one_refused_at_the_seam(self) -> None:
+        # Hostile-review round 1 (wire NIT-2): aligned with
+        # run_cascade_over_specs' config-level refusal — a direct caller's
+        # cap 0 refuses loudly instead of degrading every family to the
+        # family=None dropped-own-pair skip.
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        for bad_cap in (0, -1):
+            with pytest.raises(cw.CascadeWireError, match="family_cap must be >= 1 or None"):
+                cw.candidates_for_spec(spec, _session_bars(), family_cap=bad_cap)
+
 
 class TestRunCascadeOverSpecsEmbargo:
     def _spy_run(self, seen: list[dict[str, object]]) -> Callable[..., CascadeReport]:

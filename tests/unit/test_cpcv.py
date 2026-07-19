@@ -332,8 +332,27 @@ class TestEmbargoInvariance:
     def test_kernel_arm_parity_unaffected_by_embargo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Both dispatch arms are test-fold-only, so the embargo cannot desync
         the Rust kernel from the Python oracle: the flag-ON rate with a
-        non-zero embargo equals the flag-OFF zero-embargo rate."""
+        non-zero embargo equals the flag-OFF zero-embargo rate.
+
+        Engagement-honest (hostile-review round 1, MINOR-3): a wheel-absent
+        environment degrades the ON arm to the Python oracle, so the parity
+        would pass VACUOUSLY (Python == Python). The test therefore SKIPS
+        loudly when the kernel symbol is unavailable and, when available,
+        SPIES on the dispatch (wrapped, never replaced — the real kernel
+        still runs) asserting the call was genuinely SERVED by the kernel
+        (a non-``None`` pass-count), never the oracle fallback.
+        """
         from brutex.metrics import rust_stats
+
+        try:
+            import fno_math
+        except ImportError:
+            pytest.skip("fno_math wheel absent — the CPCV kernel cannot engage")
+        if not callable(getattr(fno_math, "stats_cpcv_pass_count", None)):
+            pytest.skip(
+                "fno_math wheel is stale (no stats_cpcv_pass_count symbol) — "
+                "the CPCV kernel cannot engage"
+            )
 
         returns = [1.0, 2.0, -3.0, -4.0]
         monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
@@ -341,8 +360,22 @@ class TestEmbargoInvariance:
         monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
         rust_stats.reset_self_check_for_tests("cpcv")
         rust_stats.reset_observability_memo_for_tests()
+
+        served: list[object] = []
+        real_dispatch = rust_stats.cpcv_pass_count_via_kernel
+
+        def spy(*args: object, **kwargs: object) -> int | None:
+            result = real_dispatch(*args, **kwargs)  # type: ignore[arg-type]
+            served.append(result)
+            return result
+
+        monkeypatch.setattr(rust_stats, "cpcv_pass_count_via_kernel", spy)
         on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, embargo=375)
         assert on == off == 1.0 / 6.0
+        # The kernel ENGAGED: exactly ONE dispatch, SERVED by the kernel —
+        # the returned pass-count is 1 of C(4,2)=6 folds, never the
+        # ``None`` oracle-fallback sentinel.
+        assert served == [1]
 
 
 class TestParameterValidation:
