@@ -96,7 +96,7 @@ impl Params {
 
 /// The default population size λ = 4 + ⌊3 ln n⌋.
 pub fn default_lambda(n: usize) -> usize {
-    4 + (3.0 / /* ~ changed by cargo-mutants ~ */ (n as f64).ln()).floor() as usize
+    4 + (3.0 * (n as f64).ln()).floor() as usize
 }
 
 /// One CMA-ES run (ask/tell driven, minimization, unit-box repair).
