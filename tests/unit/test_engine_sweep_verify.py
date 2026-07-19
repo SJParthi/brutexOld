@@ -24,7 +24,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.reference_series import TradeReferenceStamper
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import VIX_FIELDS, ResultsStore
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -35,6 +35,7 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.engine.sweep_verify import (
+    _APPENDED_NULLABLE_FIELDS,
     RecordedContext,
     SweepVerifyError,
     TreeVerifyReport,
@@ -2216,7 +2217,7 @@ class TestRecountVixDivergence:
         for finding in report.findings:
             assert finding.severity == "warn"
             assert "India-VIX lake moved" not in finding.detail
-            assert "original rows carry NO trio values" in finding.detail
+            assert "carry NO values on the diverging nullable columns" in finding.detail
             assert "None→value backfill" in finding.detail
             assert "no quarantine needed" in finding.detail
 
@@ -2240,7 +2241,10 @@ class TestRecountVixDivergence:
         """
         original, scratch, grid = self._two_trees(tmp_path, None, None)
         store_path = _store_path(original, grid)
-        _drop_store_columns(store_path, ["vix_mean", "vix_min", "vix_max"])
+        # A faithful pre-VIX-generation stand-in lacks the trio AND every
+        # strictly-later appended nullable family (growth / exit-quality /
+        # recency) — a real pre-VIX writer predates them all.
+        _drop_store_columns(store_path, sorted(_APPENDED_NULLABLE_FIELDS))
         assert store_path.read_bytes() != _store_path(scratch, grid).read_bytes()
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
@@ -2250,7 +2254,7 @@ class TestRecountVixDivergence:
         finding = report.findings[0]
         assert finding.severity == "warn"
         assert "India-VIX lake moved" not in finding.detail
-        assert "original rows carry NO trio values" in finding.detail
+        assert "carry NO values on the diverging nullable columns" in finding.detail
         assert "None→value backfill" in finding.detail
         assert "no quarantine needed" in finding.detail
 
@@ -2307,6 +2311,44 @@ class TestRecountVixDivergence:
             _stores_differ_only_in_vix(_store_path(original, grid), _store_path(scratch, grid))
             is None
         )
+
+    def test_recorded_later_family_value_divergence_abstains(self, tmp_path: Path) -> None:
+        # A recorded NON-None growth/exit-quality/recency value the recount
+        # cannot reproduce is a genuine identity-envelope divergence — the
+        # attribution must abstain (None → the corrupt ladder), never read
+        # it as a VIX backfill/moved shape.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        assert rows[0].loss_rate is not None  # the current writer computes it
+        self._rewrite_store(
+            store_path,
+            (dataclasses.replace(rows[0], loss_rate=0.987654321), *rows[1:]),
+        )
+        assert _stores_differ_only_in_vix(store_path, _store_path(scratch, grid)) is None
+
+    def test_pre_extension_none_later_family_rows_are_the_backfill_shape(
+        self, tmp_path: Path
+    ) -> None:
+        # The ROW shape of a pre-extension store recounted under current
+        # code: the original rows hold None on every later-family nullable
+        # metric while the recount computes real values — the sanctioned
+        # directional None→value backfill, attributed never condemned.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        later_nulled: dict[str, None] = dict.fromkeys(
+            sorted(_APPENDED_NULLABLE_FIELDS - set(VIX_FIELDS))
+        )
+        self._rewrite_store(
+            store_path,
+            tuple(dataclasses.replace(row, **later_nulled) for row in rows),  # type: ignore[arg-type]
+        )
+        assert _stores_differ_only_in_vix(store_path, _store_path(scratch, grid)) == "backfill"
 
     def test_helper_attributes_a_mixed_equal_and_vix_diff_row_set(self, tmp_path: Path) -> None:
         # One row equal + one row differing ONLY in the trio → attributed.
@@ -2650,13 +2692,27 @@ class TestPreVixSchemaMigration:
         assert _is_pre_vix_schema_migration(original, scratch) is False
 
     def test_extra_schema_drift_abstains(self, tmp_path: Path) -> None:
-        # Missing trio PLUS any other column drift — stripping the trio from
-        # the scratch schema no longer reproduces the original: abstain.
+        # Missing appended nullable columns PLUS any other column drift —
+        # stripping the appended nullable columns from the scratch schema no
+        # longer reproduces the original: abstain (the final strip-compare
+        # arm, reached with both presence gates passing).
         original = tmp_path / "original.parquet"
         scratch = tmp_path / "scratch.parquet"
         self._reflush(_PRE_VIX_FIXTURE, original)
         self._reflush(_PRE_VIX_FIXTURE, scratch)
-        _drop_store_columns(original, ["vix_mean", "vix_min", "vix_max", "deflated_sharpe"])
+        _drop_store_columns(original, [*sorted(_APPENDED_NULLABLE_FIELDS), "deflated_sharpe"])
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+        assert _stores_differ_only_in_vix(original, scratch) is None
+
+    def test_later_family_presence_abstains(self, tmp_path: Path) -> None:
+        # A store carrying a LATER appended nullable column (sl_hit_rate)
+        # while missing the trio matches NO real writer generation — the
+        # widened presence gate abstains, never a guessed attribution.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, sorted(_APPENDED_NULLABLE_FIELDS - {"sl_hit_rate"}))
         assert _is_pre_vix_schema_migration(original, scratch) is False
 
     def test_unreadable_footer_abstains(self, tmp_path: Path) -> None:
