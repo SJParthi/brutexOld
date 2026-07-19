@@ -3848,7 +3848,14 @@ hostile-review pass._
   discovery (R4), the movers class note (R7), the option census
   post-aggregate filter (R9), the /coverage grid (R10), the
   /coverage/windows census + pull-progress phases on ONE scope WHERE (R11,
-  O(page) preserved), and `doctor.check_derived_freshness` (R12); NOT
+  O(page) preserved), `doctor.check_derived_freshness` (R12), and — since
+  the POST-MERGE r4 BLOCKER fold — the /coverage/missing-sessions drill
+  (#1674, a merge-window census surface that had landed calling the RAW
+  scan unscoped, enumerating stored stocks + advising re-pulls the P7
+  gates refuse: now the ONE R2 wrapper via a `session_date_segments`
+  passthrough + the `read_scope_snapshot()` memo-key fold + the
+  emit-on-nonzero `scope_excluded` echo — FB/parity/widen-pinned, the
+  full record in #1934's r4 fold clause); NOT
   touched by LAW (pinned): R5 — the `/db` raw viewer + pagers + both
   options discovery surfaces keep listing stored stock datasets (the
   coordinator-relayed stored-bytes-readable directive (C) — paraphrase,
