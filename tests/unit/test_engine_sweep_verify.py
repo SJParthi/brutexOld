@@ -2827,3 +2827,96 @@ class TestCellRecountCodes:
         assert record.knobs is None
         assert record.consistent is True
         assert record.optimizer_versions == ()
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the recount post-diff verdict tail
+    (DEC-RUST-SWEEP-OPS-001 slice 5).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by patching
+    the facade's ``importlib`` binding. Flag ON must be behavior-identical to
+    the flag-OFF Python law (which every OTHER recount test in this file
+    drives) — the byte-diff, the run-identity seams
+    (``canonical_trade_params``/``mask_run_id``), the finding codes,
+    severities and detail BYTES all stay Python on both arms; only the pure
+    post-diff classification tail routes.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _findings(report: TreeVerifyReport) -> list[tuple[str, str, str]]:
+        return [(f.code, f.severity, f.detail) for f in report.findings]
+
+    def test_flag_on_matches_flag_off_over_the_whole_ladder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One tampered grid store + one tampered cell store, driven under
+        every (context_match, cell_evidence) combination — finding triples
+        (code, severity, detail bytes) identical ON vs OFF over the SAME
+        trees (``compare_recount`` is read-only)."""
+        grid = _grid()
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root in (original, scratch):
+            root.mkdir()
+            _sweep(root, grid)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        grid_store = _store_path(original, grid)
+        for root in (original, scratch):
+            dest = root / cell_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / grid_store.relative_to(original), dest)
+        # Tamper BOTH the grid store and the cell store in the original tree.
+        grid_store.write_bytes(grid_store.read_bytes() + b"tampered")
+        cell = original / cell_rel
+        cell.write_bytes(cell.read_bytes() + b"tampered")
+
+        combos = [(True, True), (True, False), (False, True), (False, False)]
+
+        def _drive() -> list[list[tuple[str, str, str]]]:
+            return [
+                self._findings(
+                    compare_recount(original, scratch, plan, context_match=cm, cell_evidence=ce)
+                )
+                for cm, ce in combos
+            ]
+
+        off = _drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = _drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        # Anti-vacuous: the ladder genuinely branched — grid corrupt +
+        # cell dependent under (True, *); inconclusive under (False, *).
+        assert {c for c, _, _ in off[0]} == {
+            "recount_divergence",
+            "cell_recount_divergence_dependent",
+        }
+        assert "recount_divergence_inconclusive" in {c for c, _, _ in off[2]}

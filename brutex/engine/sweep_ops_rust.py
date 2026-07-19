@@ -166,6 +166,41 @@ the only "decision" is a trivial best-effort holder-pid parse), and
 (never re-rendered in Rust) and the crash-loop ``>= threshold``
 comparison is a one-line trivial fold.
 
+Slice-5 routed laws (the VERIFY/APRIORI family — the hard rail: the
+RUN-IDENTITY boundary seams ``sweep_run.canonical_trade_params`` /
+``mask_run_id`` are NEVER converted or re-rendered; every finding /
+refusal MESSAGE byte, the audit reads, the Parquet loads and the sha256
+hashing stay Python — verify verdicts feed heal quarantine plans):
+
+21. **Recount verdict tail** (:func:`routed_recount_verdict`) —
+    ``brutex/engine/sweep_verify.py``'s ``compare_recount``
+    post-byte-diff classification ladder (B1/B2/B5 + the VIX-residual
+    family split). The VIX attribution (``ResultsStore`` row loads +
+    ``replace()``/``getattr``/``dataclasses.fields`` introspection) stays
+    Python and crosses as ONE boolean; the token keys the Python-owned
+    finding codes/details and the ``grid_corrupt_leaderboards`` side
+    effect.
+22. **Apriori join + subset-prune** (:func:`routed_apriori_join_prune`) —
+    ``brutex/engine/sweep_apriori.py``'s ``F_{j-1} ⋈ F_{j-1}`` level fold
+    (the module's own "deterministic, pure integer, bit-identical
+    Python↔Rust" law), with the strided mask·bar budget trip returned as
+    a VALUE (a trip is a semantic outcome, never degraded away; the
+    ``SweepAprioriBudgetError`` message bytes stay Python). Conflict
+    pairs cross pre-packed; the k==0/1 arms, the hit COUNTER (the
+    resident kernel / ``count_supermasks``), the census logging and the
+    env knobs stay Python.
+
+Slice-5 N/A disposition (honest, not padding): ``sweep_diffcheck`` stays
+Python WHOLE — its reference simulator IS the R45 independence artifact
+(re-hosting it in the shared conversion crate would drain the never-adopt
+law's value; its AST-pinned import ban passes UNMODIFIED, untouched),
+``sample_masks`` is CPython-MT19937 ``random.Random.sample``
+semantics-land (un-mirrorable without re-implementing CPython's RNG — the
+marshaling-trap class) and ``drawdown_bit_key`` is byte RENDERING
+(``struct.pack``). ``sweep_verify``'s remaining surfaces (audit-fact
+reads, roll-schedule refusals, the structural/identity tiers) are
+I/O + run-identity seams and stay Python.
+
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
 * **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
@@ -285,6 +320,10 @@ _LAW_HEAL_MISMATCH: Final[str] = "heal_mismatch"
 _LAW_SCHEDULE_NEXT_FIRE: Final[str] = "schedule_next_fire"
 #: The resume-decision-law burn-in budget key (slice 4).
 _LAW_RESUME_DECISION: Final[str] = "resume_decision"
+#: The recount-verdict-law burn-in budget key (slice 5).
+_LAW_RECOUNT_VERDICT: Final[str] = "recount_verdict"
+#: The apriori-join-prune-law burn-in budget key (slice 5).
+_LAW_APRIORI_JOIN: Final[str] = "apriori_join"
 
 #: Every routed law's burn-in budget key (the reset seam iterates this).
 _ALL_LAWS: Final[tuple[str, ...]] = (
@@ -310,6 +349,8 @@ _ALL_LAWS: Final[tuple[str, ...]] = (
     _LAW_HEAL_MISMATCH,
     _LAW_SCHEDULE_NEXT_FIRE,
     _LAW_RESUME_DECISION,
+    _LAW_RECOUNT_VERDICT,
+    _LAW_APRIORI_JOIN,
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live.
@@ -322,6 +363,7 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = dict.fromkeys(_ALL_LAWS, BURN_IN_SAM
 #: surface. A wheel missing any is a pre-slice-1b install (``crate_stale`` —
 #: extending this list stales older wheels BY DESIGN; rebuild via maturin).
 _CRATE_API: Final[tuple[str, ...]] = (
+    "apriori_join_prune",
     "audit_entry_hash",
     "chain_link_state",
     "chain_verify_step",
@@ -339,6 +381,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "progress_derived",
     "quarantine_next_ordinal",
     "rank_plan_decision",
+    "recount_verdict",
     "resume_decision",
     "schedule_next_fire",
     "sla_decision",
@@ -452,6 +495,24 @@ _RESUME_TOKENS: Final[frozenset[str]] = frozenset(
 #: value-identical to the Python oracle's exact INT arithmetic (every
 #: intermediate stays an integer < 2^53) — beyond it, refuse to the oracle.
 _SCHEDULER_EXACT_BOUND: Final[float] = float(2**52)
+#: The recount post-byte-diff verdict tokens (the crate ↔ wiring contract;
+#: `grid_corrupt` keys sweep_verify's heal-grade arm + the
+#: grid_corrupt_leaderboards side effect — both stay Python).
+_RECOUNT_VERDICT_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "vix_divergence",
+        "grid_corrupt",
+        "grid_inconclusive",
+        "cell_dependent",
+        "cell_corrupt",
+        "cell_inconclusive",
+    }
+)
+#: The Apriori frontier bit ceiling (`sweep_apriori._U64_BITS` — drift-pinned
+#: by the facade suite; the generator refuses ``>= 64`` bits before any join).
+_APRIORI_MAX_BIT: Final[int] = 64
+#: The u64 exclusive ceiling for conflict pair-masks crossing the FFI.
+_U64_CEILING: Final[int] = 2**64
 
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
@@ -1758,10 +1819,152 @@ def routed_resume_decision(
     )
 
 
+# ─────────────────── slice 5 — the verify/apriori family ───────────────────
+
+
+def _validate_recount_verdict(raw: object) -> str | None:
+    """Structural OUTPUT gate for the recount classification token."""
+    if type(raw) is not str or raw not in _RECOUNT_VERDICT_TOKENS:
+        return None
+    return raw
+
+
+def routed_recount_verdict(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+    *,
+    python_law: Callable[[], str],
+) -> str:
+    """The routed recount post-byte-diff classification tail (slice 5).
+
+    Exact-type input gates: all five flags exact ``bool``. The VIX
+    attribution itself (`ResultsStore` row loads + ``replace()``/``getattr``
+    introspection) is computed Python-side and crosses as ONE boolean; the
+    ``grid_corrupt_leaderboards`` side effect and every finding
+    code/severity/detail BYTE stay with ``compare_recount``, keyed off the
+    token — and the run-identity boundary seams
+    (``canonical_trade_params`` / ``mask_run_id``) never cross the FFI.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if any(
+        type(flag) is not bool
+        for flag in (
+            vix_attributable,
+            is_grid_tuple,
+            context_match,
+            cell_evidence,
+            grid_corrupt_leaderboard,
+        )
+    ):
+        _warn_once("recount_verdict_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_RECOUNT_VERDICT,
+        "recount_verdict",
+        (vix_attributable, is_grid_tuple, context_match, cell_evidence, grid_corrupt_leaderboard),
+        python_law=python_law,
+        validate=_validate_recount_verdict,
+    )
+
+
+def _apriori_frontier_refused(frontier: Sequence[tuple[int, ...]]) -> bool:
+    """``True`` when an Apriori frontier may NOT cross the FFI (gate helper).
+
+    The crate's contiguous-prefix bucketing and bit-drop subset walk are
+    equivalent to the oracle's insertion-ordered dict bucketing and
+    index-drop walk ONLY over the constructed frontier shape — uniform-length
+    tuples of strictly-ascending bits in ``[0, 64)``, strictly lex-sorted
+    (so equal prefixes are contiguous and no duplicates exist). Anything
+    else refuses to the oracle.
+    """
+    if type(frontier) is not list or not frontier:
+        return type(frontier) is not list  # an empty frontier is fine (crate no-op)
+    length = len(frontier[0]) if type(frontier[0]) is tuple else -1
+    if length < 1:
+        return True
+    for tuple_ in frontier:
+        if type(tuple_) is not tuple or len(tuple_) != length:
+            return True
+        previous = -1
+        for bit in tuple_:
+            if type(bit) is not int or not previous < bit < _APRIORI_MAX_BIT:
+                return True
+            previous = bit
+    return any(not frontier[i] < frontier[i + 1] for i in range(len(frontier) - 1))
+
+
+def _validate_apriori_join(raw: object) -> tuple[list[tuple[int, ...]], int | None] | None:
+    """Structural OUTPUT gate for the join ``(candidates, tripped)`` pair."""
+    if not (isinstance(raw, tuple) and len(raw) == _STRING_PAIR_ARITY):
+        return None
+    candidates_raw, tripped = raw
+    if type(candidates_raw) is not list:
+        return None
+    if tripped is not None and (type(tripped) is not int or tripped < 1 or candidates_raw != []):
+        return None
+    candidates: list[tuple[int, ...]] = []
+    for candidate in candidates_raw:
+        if type(candidate) is not list or any(type(bit) is not int for bit in candidate):
+            return None
+        candidates.append(tuple(candidate))
+    return (candidates, tripped)
+
+
+def routed_apriori_join_prune(
+    frontier: Sequence[tuple[int, ...]],
+    drop_conflicts: bool,
+    conflict_masks: Sequence[int],
+    n_bars: int,
+    limit: int,
+    stride: int,
+    *,
+    python_law: Callable[[], tuple[list[tuple[int, ...]], int | None]],
+) -> tuple[list[tuple[int, ...]], int | None]:
+    """The routed Apriori join + subset-prune level fold (slice 5).
+
+    Exact-type input gates: *frontier* per :func:`_apriori_frontier_refused`
+    (the constructed shape the crate's contiguous bucketing mirrors);
+    *drop_conflicts* exact ``bool``; *conflict_masks* an exact ``tuple`` of
+    exact ``int`` pair-masks in ``[1, 2^64)``; *n_bars*/*limit*/*stride*
+    exact ``int`` in u64 range (``limit``/``stride`` ``>= 1``). The strided
+    mask·bar budget trip comes back as a VALUE (never an exception the
+    facade would degrade away) — the caller raises its own
+    ``SweepAprioriBudgetError`` bytes from the count. HONEST cost: the gate
+    + marshaling are O(frontier·k) per level — the same order as the join
+    itself, and never the ~33B-trial mask/bar hot loop.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if (
+        _apriori_frontier_refused(frontier)
+        or type(drop_conflicts) is not bool
+        or type(conflict_masks) is not tuple
+        or any(type(mask) is not int or not 1 <= mask < _U64_CEILING for mask in conflict_masks)
+        or any(type(value) is not int for value in (n_bars, limit, stride))
+        or not 0 <= n_bars < _U64_CEILING
+        or not 1 <= limit < _U64_CEILING
+        or not 1 <= stride < _U64_CEILING
+    ):
+        _warn_once("apriori_join_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_APRIORI_JOIN,
+        "apriori_join_prune",
+        (frontier, drop_conflicts, conflict_masks, n_bars, limit, stride),
+        python_law=python_law,
+        validate=_validate_apriori_join,
+    )
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "SWEEP_OPS_RUST_ENV",
     "reset_sweep_ops_rust_for_tests",
+    "routed_apriori_join_prune",
     "routed_audit_entry_hash",
     "routed_chain_link_state",
     "routed_chain_verify_step",
@@ -1778,6 +1981,7 @@ __all__ = [
     "routed_progress_derived",
     "routed_quarantine_next_ordinal",
     "routed_rank_plan",
+    "routed_recount_verdict",
     "routed_resume_decision",
     "routed_run_path",
     "routed_schedule_next_fire",

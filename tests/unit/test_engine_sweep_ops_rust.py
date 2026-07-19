@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from brutex.engine import sweep_ops_rust
@@ -20,6 +20,7 @@ from brutex.engine.sweep_ops_rust import (
     BURN_IN_SAMPLES,
     SWEEP_OPS_RUST_ENV,
     reset_sweep_ops_rust_for_tests,
+    routed_apriori_join_prune,
     routed_audit_entry_hash,
     routed_chain_link_state,
     routed_chain_verify_step,
@@ -36,6 +37,7 @@ from brutex.engine.sweep_ops_rust import (
     routed_progress_derived,
     routed_quarantine_next_ordinal,
     routed_rank_plan,
+    routed_recount_verdict,
     routed_resume_decision,
     routed_run_path,
     routed_schedule_next_fire,
@@ -206,6 +208,16 @@ class TestFlagLaw:
             "resume",
             7,
         )
+        # Slice-5 laws: equally crate-free when the flag is OFF.
+        assert (
+            routed_recount_verdict(
+                False, False, False, False, False, python_law=lambda: "cell_inconclusive"
+            )
+            == "cell_inconclusive"
+        )
+        assert routed_apriori_join_prune(
+            [(0,), (1,)], False, (), 100, 10**9, 65_536, python_law=lambda: ([(0, 1)], None)
+        ) == ([(0, 1)], None)
         assert calls == []
 
     def test_disabled_latch_predicate(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2717,3 +2729,329 @@ class TestSliceFourDriftPins:
         # docstring law: the probe wrapper accepts every FULL RunVerdict token
         # (including "unknown", which the 3-member tail vocabulary lacks).
         assert sweep_ops_rust._LIVENESS_TAIL_TOKENS < sweep_ops_rust._RUN_VERDICT_TOKENS
+
+
+class TestRoutedRecountVerdict:
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ((True, True, True, True, True), "vix_divergence"),
+            ((True, False, False, False, False), "vix_divergence"),
+            ((False, True, True, False, False), "grid_corrupt"),
+            ((False, True, False, True, True), "grid_inconclusive"),
+            ((False, False, True, True, True), "cell_dependent"),  # B5 outranks
+            ((False, False, True, True, False), "cell_corrupt"),
+            ((False, False, False, True, False), "cell_inconclusive"),
+            ((False, False, True, False, False), "cell_inconclusive"),
+        ],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[bool, ...], expected: str
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_recount_verdict(*args, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (1, True, True, True, True),  # int flag
+            (True, True, "yes", True, True),  # str flag
+            (True, True, True, True, None),  # None flag
+        ],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[Any, ...]
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert (
+                routed_recount_verdict(*args, python_law=lambda: "vix_divergence")
+                == "vix_divergence"
+            )
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "recount_verdict_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [7, "recount_divergence", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        # NOTE "recount_divergence" is the FINDING CODE, not a verdict token —
+        # a crate emitting the code vocabulary is refused (the code bytes are
+        # Python-owned; the token vocabulary is the only crate contract).
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.recount_verdict = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_recount_verdict(
+                    False, True, True, False, False, python_law=lambda: "grid_corrupt"
+                )
+                == "grid_corrupt"
+            )
+        warns = [e for e in logs if e.get("reason") == "recount_verdict_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A condemnation-blessing poison: verdict-grade corrupt under a
+        # MISMATCHED context — the catastrophic wrong-inputs condemnation.
+        crate.recount_verdict = lambda *args: "grid_corrupt"
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert (
+                routed_recount_verdict(
+                    False, True, False, False, False, python_law=lambda: "grid_inconclusive"
+                )
+                == "grid_inconclusive"
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_recount_verdict"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> str:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert (
+            routed_recount_verdict(False, False, True, True, True, python_law=forbidden_oracle)
+            == "cell_dependent"
+        )
+
+
+class TestRoutedAprioriJoinPrune:
+    _SINGLETONS: ClassVar[list[tuple[int, ...]]] = [(0,), (1,), (2,)]
+
+    def test_parity_with_oracle_full_join(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        expected = ([(0, 1), (0, 2), (1, 2)], None)
+        assert (
+            routed_apriori_join_prune(
+                self._SINGLETONS, False, (), 10, 1_000_000, 65_536, python_law=lambda: expected
+            )
+            == expected
+        )
+
+    def test_parity_with_oracle_budget_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        expected: tuple[list[tuple[int, ...]], int | None] = ([], 4)
+        assert (
+            routed_apriori_join_prune(
+                [(0,), (1,), (2,), (3,)], False, (), 10, 25, 2, python_law=lambda: expected
+            )
+            == expected
+        )
+
+    def test_parity_with_oracle_conflict_drop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        expected = ([(0, 1), (1, 2)], None)
+        assert (
+            routed_apriori_join_prune(
+                self._SINGLETONS,
+                True,
+                ((1 << 0) | (1 << 2),),
+                10,
+                1_000_000,
+                65_536,
+                python_law=lambda: expected,
+            )
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        "frontier",
+        [
+            ((0,), (1,)),  # tuple, not list
+            [(0,), [1]],  # list element
+            [(0, 1), (1,)],  # ragged lengths
+            [()],  # empty tuple
+            [(1, 0)],  # not ascending within the tuple
+            [(0, 0)],  # duplicate bit (not strictly ascending)
+            [(1,), (0,)],  # not lex-sorted
+            [(0,), (0,)],  # duplicate tuple (not STRICTLY sorted)
+            [(64,)],  # bit out of range
+            [(True,)],  # bool bit
+        ],
+    )
+    def test_frontier_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, frontier: Any
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        expected: tuple[list[tuple[int, ...]], int | None] = ([], None)
+        with capture_logs() as logs:
+            assert (
+                routed_apriori_join_prune(
+                    frontier, False, (), 10, 100, 65_536, python_law=lambda: expected
+                )
+                == expected
+            )
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "apriori_join_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize(
+        ("drop_conflicts", "conflict_masks", "n_bars", "limit", "stride"),
+        [
+            (1, (), 10, 100, 65_536),  # int drop_conflicts
+            (False, [5], 10, 100, 65_536),  # list conflict_masks
+            (False, (0,), 10, 100, 65_536),  # zero pair-mask
+            (False, (2**64,), 10, 100, 65_536),  # beyond u64
+            (False, (), -1, 100, 65_536),  # negative n_bars
+            (False, (), 10, 0, 65_536),  # zero limit
+            (False, (), 10, 100, 0),  # zero stride
+            (False, (), 10.0, 100, 65_536),  # float n_bars
+        ],
+    )
+    def test_scalar_inputs_refused_to_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        drop_conflicts: Any,
+        conflict_masks: Any,
+        n_bars: Any,
+        limit: Any,
+        stride: Any,
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        expected: tuple[list[tuple[int, ...]], int | None] = ([], None)
+        with capture_logs() as logs:
+            assert (
+                routed_apriori_join_prune(
+                    list(self._SINGLETONS),
+                    drop_conflicts,
+                    conflict_masks,
+                    n_bars,
+                    limit,
+                    stride,
+                    python_law=lambda: expected,
+                )
+                == expected
+            )
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "apriori_join_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            None,
+            ([],),  # wrong arity
+            ("x", None),  # non-list candidates
+            ([(0, 1)], None),  # tuple candidate (crate emits lists)
+            ([[0, "1"]], None),  # non-int bit
+            ([], 0),  # tripped count < 1
+            ([[0, 1]], 4),  # tripped with non-empty candidates
+        ],
+    )
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.apriori_join_prune = lambda *args: result
+        _install_crate(monkeypatch, crate)
+        expected = ([(0, 1), (0, 2), (1, 2)], None)
+        with capture_logs() as logs:
+            assert (
+                routed_apriori_join_prune(
+                    list(self._SINGLETONS),
+                    False,
+                    (),
+                    10,
+                    1_000_000,
+                    65_536,
+                    python_law=lambda: expected,
+                )
+                == expected
+            )
+        warns = [e for e in logs if e.get("reason") == "apriori_join_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A candidate-dropping poison: silently prunes a frequent pair.
+        crate.apriori_join_prune = lambda *args: ([[0, 1]], None)
+        _install_crate(monkeypatch, crate)
+        expected = ([(0, 1), (0, 2), (1, 2)], None)
+        with capture_logs() as logs:
+            assert (
+                routed_apriori_join_prune(
+                    list(self._SINGLETONS),
+                    False,
+                    (),
+                    10,
+                    1_000_000,
+                    65_536,
+                    python_law=lambda: expected,
+                )
+                == expected
+            )
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_apriori_join"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> tuple[list[tuple[int, ...]], int | None]:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_apriori_join_prune(
+            list(self._SINGLETONS),
+            False,
+            (),
+            10,
+            1_000_000,
+            65_536,
+            python_law=forbidden_oracle,
+        ) == ([(0, 1), (0, 2), (1, 2)], None)
+
+    def test_empty_frontier_routes_to_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        expected: tuple[list[tuple[int, ...]], int | None] = ([], None)
+        assert (
+            routed_apriori_join_prune([], False, (), 10, 100, 65_536, python_law=lambda: expected)
+            == expected
+        )
+
+
+class TestSliceFiveDriftPins:
+    def test_recount_tokens_cover_the_wiring_arms(self) -> None:
+        from brutex.engine.sweep_verify import _recount_verdict_python
+
+        produced = {
+            _recount_verdict_python(True, False, False, False, False),
+            _recount_verdict_python(False, True, True, False, False),
+            _recount_verdict_python(False, True, False, False, False),
+            _recount_verdict_python(False, False, True, True, True),
+            _recount_verdict_python(False, False, True, True, False),
+            _recount_verdict_python(False, False, False, False, False),
+        }
+        assert produced == sweep_ops_rust._RECOUNT_VERDICT_TOKENS
+
+    def test_apriori_max_bit_mirrors_the_module_guard(self) -> None:
+        from brutex.engine.sweep_apriori import _U64_BITS
+
+        assert _U64_BITS == sweep_ops_rust._APRIORI_MAX_BIT
+
+    def test_conflict_pair_masks_mirror_the_canonical_pairs(self) -> None:
+        from brutex.engine.sweep_apriori import _CONFLICT_PAIR_MASKS
+        from brutex.vocabulary.conflicts import CONFLICT_PAIRS
+
+        assert set(_CONFLICT_PAIR_MASKS) == {(1 << a) | (1 << b) for a, b in CONFLICT_PAIRS}
+        assert list(_CONFLICT_PAIR_MASKS) == sorted(_CONFLICT_PAIR_MASKS)
+
+    def test_stride_input_is_the_module_constant(self) -> None:
+        from brutex.engine.sweep_apriori import _BUDGET_CHECK_STRIDE
+
+        assert _BUDGET_CHECK_STRIDE == 65_536

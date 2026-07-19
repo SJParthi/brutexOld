@@ -18,6 +18,7 @@ loudly instead.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from types import SimpleNamespace
 
 import blake3
@@ -438,6 +439,82 @@ def _resume_decision(
     return ("resume", next_index)
 
 
+_FAKE_RECOUNT_VERDICT_TOKENS = [
+    "vix_divergence",
+    "grid_corrupt",
+    "grid_inconclusive",
+    "cell_dependent",
+    "cell_corrupt",
+    "cell_inconclusive",
+]
+
+
+def _recount_verdict(
+    vix_attributable: bool,
+    is_grid_tuple: bool,
+    context_match: bool,
+    cell_evidence: bool,
+    grid_corrupt_leaderboard: bool,
+) -> str:
+    """The sweep_verify recount post-byte-diff classification tail (fake twin)."""
+    if vix_attributable:
+        return "vix_divergence"
+    if is_grid_tuple:
+        return "grid_corrupt" if context_match else "grid_inconclusive"
+    if grid_corrupt_leaderboard:
+        return "cell_dependent"
+    if context_match and cell_evidence:
+        return "cell_corrupt"
+    return "cell_inconclusive"
+
+
+def _apriori_join_prune(
+    frontier: list[tuple[int, ...]],
+    drop_conflicts: bool,
+    conflict_masks: list[int] | tuple[int, ...],
+    n_bars: int,
+    limit: int,
+    stride: int,
+) -> tuple[list[list[int]], int | None]:
+    """The sweep_apriori join + subset-prune level fold (fake twin)."""
+    if stride < 1:
+        raise ValueError("stride must be >= 1")
+    for tuple_ in frontier:
+        if not tuple_:
+            raise ValueError("frontier tuples must be non-empty")
+        for bit in tuple_:
+            if not 0 <= bit < 64:
+                raise ValueError(f"frontier bit {bit} out of range [0, 64)")
+    frontier_masks = {_fake_mask_of(tuple_) for tuple_ in frontier}
+    buckets: dict[tuple[int, ...], list[int]] = {}
+    for tuple_ in frontier:
+        buckets.setdefault(tuple(tuple_[:-1]), []).append(tuple_[-1])
+    candidates: list[list[int]] = []
+    count = 0
+    for prefix, lasts in buckets.items():
+        for i in range(len(lasts)):
+            for jj in range(i + 1, len(lasts)):
+                candidate = [*prefix, lasts[i], lasts[jj]]
+                full = _fake_mask_of(candidate)
+                if any(full & ~(1 << drop) not in frontier_masks for drop in candidate):
+                    continue
+                if drop_conflicts and any(full & pm == pm for pm in conflict_masks):
+                    continue
+                candidates.append(candidate)
+                count += 1
+                if count % stride == 0 and count * n_bars > limit:
+                    return ([], count)
+    candidates.sort()
+    return (candidates, None)
+
+
+def _fake_mask_of(positions: Sequence[int]) -> int:
+    mask = 0
+    for position in positions:
+        mask |= 1 << position
+    return mask
+
+
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:
     """Return a fresh behavior-correct fake crate namespace.
 
@@ -473,4 +550,7 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
         heal_mismatch_decision=_heal_mismatch_decision,
         schedule_next_fire=_schedule_next_fire,
         resume_decision=_resume_decision,
+        RECOUNT_VERDICT_TOKENS=list(_FAKE_RECOUNT_VERDICT_TOKENS),
+        recount_verdict=_recount_verdict,
+        apriori_join_prune=_apriori_join_prune,
     )

@@ -12,11 +12,13 @@ compiled crate and asserts value-identity with the retained Python oracles
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Final
 
+import numpy as np
 import pytest
 
 brutex_sweep_ops = pytest.importorskip(
@@ -28,6 +30,13 @@ from brutex.engine.run_layout import (  # noqa: E402
     RUN_DIR_SUBDIR,
     mirror_run_dir,
     run_dir,
+)
+from brutex.engine.sweep_apriori import (  # noqa: E402
+    _BUDGET_CHECK_STRIDE,
+    _CONFLICT_PAIR_MASKS,
+    _join_result_python,
+    _mask_of,
+    generate_apriori_candidates,
 )
 from brutex.engine.sweep_audit import (  # noqa: E402
     SweepAuditChainCorruption,
@@ -64,6 +73,7 @@ from brutex.engine.sweep_ops_rust import (  # noqa: E402
     reset_sweep_ops_rust_for_tests,
     routed_count_violations,
     routed_heal_mismatch,
+    routed_recount_verdict,
     sweep_ops_rust_disabled,
 )
 from brutex.engine.sweep_preflight import (  # noqa: E402
@@ -76,6 +86,7 @@ from brutex.engine.sweep_progress import (  # noqa: E402
     _derived_python,
 )
 from brutex.engine.sweep_quarantine import quarantine_tuple_trio  # noqa: E402
+from brutex.engine.sweep_run import SweepAprioriBudgetError  # noqa: E402
 from brutex.engine.sweep_scheduler import (  # noqa: E402
     IST_OFFSET_SECONDS,
     CheckpointView,
@@ -90,6 +101,7 @@ from brutex.engine.sweep_stall_policy import (  # noqa: E402
     StallPolicy,
     resolve_stall_policy,
 )
+from brutex.engine.sweep_verify import _recount_verdict_python  # noqa: E402
 from brutex.observability.chain_map import LINKS, build_chain_map  # noqa: E402
 from brutex.observability.run_tripwires import (  # noqa: E402
     TripwireConfig,
@@ -1302,4 +1314,138 @@ class TestSliceFourBurnInSteadyState:
                 )
                 == "complete_partial"
             )
+        assert sweep_ops_rust_disabled() is False
+
+
+# ─────────────────────────── slice 5: verify/apriori ───────────────────────────
+
+
+class TestRecountVerdictParity:
+    def test_exhaustive_thirty_two_combination_differential(self) -> None:
+        """The crate ladder ≡ the Python oracle over the WHOLE 2^5 domain."""
+        for flags in itertools.product((False, True), repeat=5):
+            assert brutex_sweep_ops.recount_verdict(*flags) == _recount_verdict_python(*flags)
+
+    def test_token_vocabulary_pin(self) -> None:
+        assert set(brutex_sweep_ops.RECOUNT_VERDICT_TOKENS) == {
+            "vix_divergence",
+            "grid_corrupt",
+            "grid_inconclusive",
+            "cell_dependent",
+            "cell_corrupt",
+            "cell_inconclusive",
+        }
+
+    def test_routed_wrapper_serves_the_crate_value(self) -> None:
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> str:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert (
+            routed_recount_verdict(False, True, True, False, False, python_law=forbidden_oracle)
+            == "grid_corrupt"
+        )
+
+
+class TestAprioriJoinParity:
+    @given(
+        k=st.integers(min_value=1, max_value=3),
+        data=st.data(),
+        drop_conflicts=st.booleans(),
+    )
+    def test_hypothesis_differential_vs_python_law(
+        self, k: int, data: st.DataObject, drop_conflicts: bool
+    ) -> None:
+        """Crate join+prune ≡ ``_join_result_python`` over gated frontiers."""
+        universe = data.draw(st.integers(min_value=k, max_value=9))
+        pool = list(itertools.combinations(range(universe), k))
+        subset = data.draw(st.sets(st.sampled_from(pool), min_size=1, max_size=min(len(pool), 12)))
+        frontier = sorted(subset)
+        masks = np.array(sorted(_mask_of(t) for t in frontier), dtype=np.uint64)
+        raw = brutex_sweep_ops.apriori_join_prune(
+            [list(t) for t in frontier],
+            drop_conflicts,
+            list(_CONFLICT_PAIR_MASKS),
+            375,
+            10**15,
+            _BUDGET_CHECK_STRIDE,
+        )
+        expected = _join_result_python(
+            frontier, masks, drop_conflicts=drop_conflicts, n_bars=375, limit=10**15
+        )
+        assert ([tuple(c) for c in raw[0]], raw[1]) == expected
+
+    def test_strided_trip_hand_derived_pins(self) -> None:
+        """The trip fires only at stride multiples, STRICT ``>``, count returned."""
+        frontier = [[0], [1], [2]]  # join → (0,1), (0,2), (1,2)
+        assert brutex_sweep_ops.apriori_join_prune(frontier, False, [], 10, 5, 1) == ([], 1)
+        assert brutex_sweep_ops.apriori_join_prune(frontier, False, [], 10, 5, 2) == ([], 2)
+        # At-limit is NOT over-limit (strict >): 3 candidates x 10 bars == 30 <= 30.
+        assert brutex_sweep_ops.apriori_join_prune(frontier, False, [], 10, 30, 1) == (
+            [[0, 1], [0, 2], [1, 2]],
+            None,
+        )
+
+    def test_whole_generate_flag_on_vs_off_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``generate_apriori_candidates`` end-to-end ON ≡ OFF (masks + order)."""
+        bar_bits = [0b111, 0b101, 0b011, 0b110, 0b001] * 3
+
+        def _drive() -> list[list[int]]:
+            return [
+                generate_apriori_candidates(bar_bits, condition_bits=(0, 1, 2), k=k, min_hits=2)
+                for k in (1, 2, 3)
+            ]
+
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = _drive()
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
+        reset_sweep_ops_rust_for_tests()
+        on = _drive()
+        assert on == off
+        assert sweep_ops_rust_disabled() is False
+
+    def test_budget_trip_message_bytes_flag_on_vs_off_parity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``SweepAprioriBudgetError`` bytes are identical either arm."""
+        bar_bits = [0b11111, 0b10101, 0b01111] * 5
+
+        def _message() -> str:
+            with pytest.raises(SweepAprioriBudgetError) as exc:
+                generate_apriori_candidates(
+                    bar_bits,
+                    condition_bits=(0, 1, 2, 3, 4),
+                    k=2,
+                    min_hits=1,
+                    max_mask_bars=1,
+                    cell_label="parity-cell",
+                )
+            return str(exc.value)
+
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = _message()
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
+        reset_sweep_ops_rust_for_tests()
+        on = _message()
+        assert on == off
+        assert "parity-cell" in on
+
+
+class TestSliceFiveBurnInSteadyState:
+    def test_eighteen_engaged_calls_never_autorevert(self) -> None:
+        reset_sweep_ops_rust_for_tests()
+        for _ in range(18):  # 18 engaged recount folds
+            assert (
+                routed_recount_verdict(
+                    False, False, False, True, False, python_law=lambda: "cell_inconclusive"
+                )
+                == "cell_inconclusive"
+            )
+        bar_bits = [0b111, 0b110, 0b011] * 4
+        for _ in range(18):  # 18 engaged join folds (k=2 routes one join level)
+            masks = generate_apriori_candidates(bar_bits, condition_bits=(0, 1, 2), k=2, min_hits=1)
+            assert masks  # non-empty: the level genuinely joined
         assert sweep_ops_rust_disabled() is False

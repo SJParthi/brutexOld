@@ -162,10 +162,14 @@ jobs:
             tests/integration/test_sweep_ops_rust_parity.py
 
       - name: Flag-ON verbatim legs (the UNMODIFIED routed-module stem suites)
-        # The last two entries are slice 4's lock-composition EXTRA GATE —
-        # the sweep_singleflight G6/G10 battery + the #1785 sweep-vs-pull
-        # concurrency regression must pass UNMODIFIED with the flag ON
-        # (flock/OFD semantics stay Python; the routing must be invisible).
+        # sweep_singleflight + the pull-concurrency entry are slice 4's
+        # lock-composition EXTRA GATE — the G6/G10 battery + the #1785
+        # sweep-vs-pull concurrency regression must pass UNMODIFIED with the
+        # flag ON (flock/OFD semantics stay Python; the routing must be
+        # invisible). The verify/apriori/diffcheck entries are slice 5's
+        # EXTRA GATE — the recount battery, the apriori parity golden and
+        # the R45 diffcheck AST-pin suite must pass UNMODIFIED with the
+        # flag ON (diffcheck itself is an honest N/A — untouched).
         run: |
           BRUTEX_SWEEP_OPS_RUST=1 pytest -rs -q \
             tests/unit/test_engine_run_layout.py \
@@ -187,4 +191,8 @@ jobs:
             tests/unit/test_engine_sweep_heal.py \
             tests/unit/test_engine_sweep_scheduler.py \
             tests/unit/test_engine_sweep_singleflight.py \
-            tests/integration/test_sweep_pull_concurrency.py
+            tests/integration/test_sweep_pull_concurrency.py \
+            tests/unit/test_engine_sweep_verify.py \
+            tests/unit/test_engine_sweep_apriori.py \
+            tests/unit/test_engine_sweep_diffcheck.py \
+            tests/golden/test_engine_sweep_apriori_parity.py
