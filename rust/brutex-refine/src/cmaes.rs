@@ -498,4 +498,16 @@ mod tests {
         assert_eq!(default_lambda(5), 8);
         assert_eq!(default_lambda(10), 10);
     }
+
+    #[test]
+    fn lambda_accessor_reports_the_constructed_population() {
+        // Direct pin on the accessor the restart driver's truncation law
+        // reads (refine.rs: `expected < self.cma.lambda()`): a mutant
+        // returning a constant (0/1) would silently disable the
+        // truncated-final-generation-no-update law.
+        for lambda in [2usize, 6, 13] {
+            let es = Cmaes::new(&[0.5, 0.5], 0.3, 7, lambda);
+            assert_eq!(es.lambda(), lambda);
+        }
+    }
 }
