@@ -212,6 +212,9 @@ from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
 from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
+from brutex.engine.sweep_identity import (
+    _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
+)
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.engine.sweep_mem_budget import BUDGET_WORKERS_ENV, MEM_BUDGET_ENV
@@ -2093,6 +2096,20 @@ class ParallelGridDriver:
                 "enabled": True,
                 "max_mask_bars": self._max_mask_bars,
             }
+        overfit_fragment = _gate_config_fragment(self._grid)
+        if overfit_fragment is not None and "overfit" in overfit_fragment:
+            # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001)
+            # — the PARALLEL twin of the sequential supervisor's emit-on-active
+            # leg (``run_supervised_grid``), consumed by sweep-verify's
+            # recorded-overfit reconcile (``recorded_overfit_from_audit``) so
+            # ``sweep-verify --recount`` re-derives the #1336 gate-folded store
+            # addresses for a PARALLEL gated run too. Pre-fix the leg was
+            # SEQUENTIAL-only, so a gated-by-default parallel run's recount
+            # re-planned UNGATED addresses, saw zero stores, and emitted no
+            # heal plan (the #1553 heal-chain e2e exposure; driver parity
+            # pinned by TestStartPayloadGateConfigParity). EMIT-ON-active:
+            # absence == legacy — every ungated/legacy payload byte-identical.
+            start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_START,
             subject=self._subject,

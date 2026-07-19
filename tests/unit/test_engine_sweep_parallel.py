@@ -3434,3 +3434,51 @@ class TestParallelAprioriWiring:
 
     def test_accumulator_default_is_zero(self) -> None:
         assert mod._Accumulator().tuples_failed_apriori_budget == 0
+
+
+# ────── SUPERVISOR_START gate_config driver parity (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001) ──────
+# The recorded-overfit channel's PRODUCER must exist at BOTH launch sites: the
+# sequential supervisor already persisted the emit-on-active ``gate_config``
+# leg its consumer (`sweep_verify.recorded_overfit_from_audit`) re-derives the
+# #1336 gate-folded store addresses from — the parallel driver did NOT, so a
+# gated-by-default PARALLEL run's ``sweep-verify --recount`` re-planned
+# UNGATED addresses, saw zero stores, and emitted no heal plan (exposed by the
+# #1553 heal-chain e2e on the S1×S2 merge-forward). These pins hold the two
+# drivers' START payloads to the SAME leg so they can never drift again.
+
+
+class TestStartPayloadGateConfigParity:
+    """Both drivers' SUPERVISOR_START carry the SAME emit-on-active gate leg."""
+
+    @staticmethod
+    def _start_gate_leg(sup_path: Path) -> object:
+        entries = list(read_sup_entries(sup_path))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        return start.payload.get("gate_config")
+
+    def test_gated_start_leg_identical_across_both_drivers(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE (the F-B fix): pre-fix the parallel leg was ``None``
+        while the sequential leg carried the fragment — this asserted equality
+        was RED on the pre-fix tree (9be3aacd) and is the drift tripwire."""
+        from brutex.ranking import OverfitGateConfig
+
+        gate = OverfitGateConfig(dsr_min=0.75)
+        _run_sequential(tmp_path / "seq", _grid(overfit=gate))
+        seq_leg = self._start_gate_leg(tmp_path / "seq" / "sup.jsonl")
+        _run_parallel_summary(tmp_path / "par", _grid(overfit=gate), workers=2)
+        par_leg = self._start_gate_leg(tmp_path / "par" / "sup.jsonl")
+        assert seq_leg is not None, "the sequential START must record the active gate"
+        assert isinstance(seq_leg, dict) and "overfit" in seq_leg
+        assert par_leg == seq_leg, (
+            "driver drift: the PARALLEL SUPERVISOR_START gate_config leg differs from "
+            "the sequential supervisor's — the recorded-overfit recount channel "
+            "(DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001) needs BOTH producers"
+        )
+
+    def test_ungated_start_carries_no_gate_leg_on_either_driver(self, tmp_path: Path) -> None:
+        """EMIT-ON-active: ungated/legacy START payloads stay byte-identical
+        (no ``gate_config`` key on either driver — absence == legacy)."""
+        _run_sequential(tmp_path / "seq", _grid())
+        _run_parallel_summary(tmp_path / "par", _grid(), workers=2)
+        assert self._start_gate_leg(tmp_path / "seq" / "sup.jsonl") is None
+        assert self._start_gate_leg(tmp_path / "par" / "sup.jsonl") is None
