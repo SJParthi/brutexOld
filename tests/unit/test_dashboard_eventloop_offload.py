@@ -58,6 +58,7 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.lake_offload import LakeOffload
 from brutex.data.instrument_store import InstrumentStore
@@ -208,10 +209,15 @@ def test_preopen_xlsx_render_runs_off_the_event_loop(
 def test_preopen_symbols_payload_unchanged_through_offload(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Byte-shape sanity: the offloaded route returns the same payload contract."""
+    """Byte-shape sanity: the offloaded route returns the same payload contract.
+
+    The stub mirrors the real ``resolve_report_datasets`` signature incl. the
+    #1934 ``scope=`` kwarg (DEC-UNIVERSE-INDEX-ONLY-001 design §3 R3) the
+    route now threads.
+    """
     monkeypatch.setattr(
         "brutex.dashboard.app.resolve_report_datasets",
-        lambda lake, wanted=None, basis="day": [("NSE", "CASH", "COALINDIA")],
+        lambda lake, wanted=None, basis="day", scope=None: [("NSE", "CASH", "COALINDIA")],
     )
     resp = client.get("/api/v1/reports/preopen/symbols?basis=minute")
     assert resp.status_code == 200
@@ -353,7 +359,15 @@ def test_universe_index_constituents_reads_run_off_the_event_loop(
     threadpool closure. Blocking the first store read proves they run on a worker:
     a concurrent ``/api/v1/state`` still answers. The best-effort NSE resolve is
     stubbed so the test exercises the store-read offload, not the network path.
+
+    EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration Law 2):
+    constituent picking is STOCK machinery, dormant under the shipped index4
+    default (the A5b short-circuit answers BEFORE any store read — the
+    dormancy guard arm lives in ``test_dashboard_app_backfill.py``), so the
+    store-read offload under pin is reachable only under a stock-admitting
+    scope.
     """
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
     monkeypatch.setattr(
         "brutex.dashboard.constituents_cache.resolve_constituents",
         lambda *_a, **_k: SimpleNamespace(rows=[], source="unavailable", as_of=None),

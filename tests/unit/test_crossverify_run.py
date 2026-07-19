@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog.testing
 from brutex.calendars.nse import HolidayDataUnavailableError, SessionType, TradingSession
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.config import CrossverifyConfig
 from brutex.crossverify.day_export import SymbolExport
@@ -2457,10 +2458,18 @@ class TestDefaultSeams:
         with RealExitStack() as stack:
             assert seams.acquire_locks(stack) is True
 
-    def test_enumerate_targets_whole_spot_universe(self, tmp_path: Path) -> None:
+    def test_enumerate_targets_whole_spot_universe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The #1788 whole-universe pin: an extra index, an F&O stock AND a
         reference-only NTM stock ALL enumerate; a key-unsafe symbol is
         excluded + counted; the engine-trio floor always leads.
+
+        EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        law): the enumeration rides the scope-aware classifier, so the #1788
+        whole-universe law now holds under a STOCK-ADMITTING scope (the §6
+        widen-path pin); the shipped index4-default narrowing is pinned in
+        ``test_enumerate_narrows_under_index4_default`` below.
 
         F6 (#1788 fix round): the store is wrapped so its ELIGIBLE set does
         NOT contain HONASA — on the production LEAN store
@@ -2470,6 +2479,7 @@ class TestDefaultSeams:
         narrowed wrapper forces HONASA to enumerate ONLY via the reference
         ids — the seams-level twin of the pull_leg
         ``TestWholeUniverseSpotTargets`` pin."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         from brutex.data.instrument_store import InstrumentStore
         from brutex.models import InstrumentType
 
@@ -2521,10 +2531,14 @@ class TestDefaultSeams:
         ]
         assert excluded == 1  # the key-unsafe stock
 
-    def test_enumerate_ignores_registry_fut_rows(self, tmp_path: Path) -> None:
+    def test_enumerate_ignores_registry_fut_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """#1788 NEGATIVE PIN (seams level): a lake WITH a registry holding
         LIVE FUT rows yields ZERO FNO identities — futures are out of the
-        contract, the registry is never read."""
+        contract, the registry is never read. Full arm (§6 migration law —
+        the RELIANCE row needs a stock-admitting scope to enumerate)."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         _seed_store(tmp_path, [_make_instrument("RELIANCE")])
         _seed_registry_with_fut_rows(tmp_path)
         seams = default_seams(
@@ -2538,6 +2552,36 @@ class TestDefaultSeams:
             "BANKNIFTY",
             "SENSEX",
             "RELIANCE",
+        ]
+        assert excluded == 0
+
+    def test_enumerate_narrows_under_index4_default(self, tmp_path: Path) -> None:
+        """The shipped index4-default guard arm (DEC-UNIVERSE-INDEX-ONLY-001
+        Law 1, seams level): under the conftest-forced default the SAME
+        stock-bearing store enumerates ONLY the admitted pairs — the
+        engine-trio floor + INDIAVIX — and the stock row simply never
+        enumerates (no exclusion count: the scope law narrows the selection
+        upstream of the key-safety screen)."""
+        from brutex.models import InstrumentType
+
+        _seed_store(
+            tmp_path,
+            [
+                _make_instrument("NIFTY", itype=InstrumentType.IDX),
+                _make_instrument("INDIAVIX", itype=InstrumentType.IDX),
+                _make_instrument("FINNIFTY", itype=InstrumentType.IDX),
+                _make_instrument("RELIANCE"),
+            ],
+        )
+        seams = default_seams(
+            _seams_config(tmp_path), env=_GUARD_OFF, account_key_resolver=lambda: None
+        )
+        identities, excluded = seams.enumerate_targets(_DAY)
+        assert [identity.canonical_symbol for identity in identities] == [
+            "NIFTY",
+            "BANKNIFTY",
+            "SENSEX",
+            "INDIAVIX",
         ]
         assert excluded == 0
 

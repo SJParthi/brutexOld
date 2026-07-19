@@ -3,7 +3,11 @@
 SPOT-ONLY since DEC-CROSSVERIFY-SPOT-ONLY-001 (MIGRATION.md #1788): the
 metadata + futures-candle legs are GONE (their absence is import-pinned) and
 the whole-spot-universe enumeration — indices + F&O stocks + reference-only
-NTM names — is pinned so it can never silently narrow.
+NTM names — is pinned so it can never silently narrow WITHIN a scope.
+Since DEC-UNIVERSE-INDEX-ONLY-001 (#1934, supersedes-in-part #1788's
+enumeration clause) that whole-universe law holds under a STOCK-ADMITTING
+scope — the suite runs full-arm (the autouse fixture below) with the shipped
+index4-default narrowing pinned in ``TestIndex4DefaultEnumeration``.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.crossverify.canonical import canonical_identity
 from brutex.crossverify.pull_leg import (
     PullLegReport,
@@ -33,6 +38,21 @@ _LOOKBACK = 7
 
 #: The reference-only NTM constituent's fixture SECURITY_ID (not F&O-eligible).
 _NTM_SID = 424242
+
+
+@pytest.fixture(autouse=True)
+def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+    This suite pins the #1788 whole-spot-universe enumeration MECHANICS over
+    stock/sectoral fixtures; the crossverify enumeration rides the SAME
+    scope-aware ``classify_instrument`` law, so under the conftest-forced
+    ``index4`` default those fixtures legitimately narrow. Running the suite
+    under ``BRUTEX_FEED_SCOPE=full`` IS the §6 widen-path pin — the legacy
+    enumeration is byte-identical there. The shipped index4-default guard arm
+    lives in ``TestIndex4DefaultEnumeration`` below (which re-narrows in-body,
+    winning over this fixture)."""
+    monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
 
 def _inst(
@@ -166,6 +186,31 @@ class TestWholeUniverseSpotTargets:
         )
         targets = whole_universe_spot_targets(store)  # type: ignore[arg-type]
         assert [t.symbol_name for t in targets] == ["NIFTY"]
+
+
+class TestIndex4DefaultEnumeration:
+    """The shipped index4-default guard arm (DEC-UNIVERSE-INDEX-ONLY-001 Law 1):
+
+    the crossverify pull enumeration narrows WITH the scope law — a sectoral
+    index, an F&O stock and a reference-only NTM name all drop; only the
+    admitted pairs enumerate. Re-narrows in-body (winning over the module's
+    full-arm autouse fixture)."""
+
+    def test_enumeration_narrows_to_admitted_indices(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "index4")
+        store = _FakeStore(
+            instruments=[
+                _inst("NIFTY", itype=InstrumentType.IDX),
+                _inst("INDIAVIX", itype=InstrumentType.IDX),
+                _inst("FINNIFTY", itype=InstrumentType.IDX),  # sectoral — excluded
+                _inst("RELIANCE"),  # F&O stock — excluded
+                _inst("HONASA", security_id=_NTM_SID),  # NTM reference — excluded
+            ],
+            eligible=frozenset({(Exchange.NSE, "RELIANCE")}),
+            reference_ids=frozenset({_NTM_SID}),
+        )
+        targets = whole_universe_spot_targets(store)  # type: ignore[arg-type]
+        assert [t.symbol_name for t in targets] == ["INDIAVIX", "NIFTY"]
 
 
 class TestRunPullLeg:

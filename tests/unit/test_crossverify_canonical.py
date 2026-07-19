@@ -20,6 +20,39 @@ from brutex.crossverify.canonical import (
     symbol_key_safe,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.universe import is_universe_underlying
+
+#: The mirror-pin coordinate corpus (admitted 4 + a sectoral + a BSE junk pair).
+_MIRROR_COORDS: tuple[tuple[Exchange, str], ...] = (
+    (Exchange.NSE, "NIFTY"),
+    (Exchange.NSE, "INDIAVIX"),
+    (Exchange.NSE, "FINNIFTY"),
+    (Exchange.BSE, "SENSEX"),
+    (Exchange.BSE, "BSE100"),
+)
+
+
+def _idx_instrument(exchange: Exchange, symbol: str) -> Instrument:
+    from decimal import Decimal
+
+    return Instrument(
+        exch_id=exchange,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal(0),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+    )
 
 
 class TestIndexMapping:
@@ -58,44 +91,51 @@ class TestIndexMapping:
     def test_unknown_exchange_index_excluded(self) -> None:
         assert canonical_identity(exchange="MCX", segment="INDEX", lake_symbol="GOLD") is None
 
-    def test_index_rule_mirrors_universe_idx_fetch_rule(self) -> None:
+    def test_index_rule_mirrors_universe_idx_fetch_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Mirror-pin: the mapper's INDEX arm accepts exactly the coordinates
         ``is_universe_underlying`` admits for an IDX row (every NSE index;
-        from BSE only SENSEX) — the export can never widen past the pull."""
-        from decimal import Decimal
+        from BSE only SENSEX) — the export can never widen past the pull.
 
-        from brutex.models import Exchange, Instrument, InstrumentType, Segment
-        from brutex.universe import is_universe_underlying
+        EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration
+        law): the #1788 exact-mirror invariant holds under an UNBOUNDED
+        scope; under the shipped ``index4`` default the ADMISSION narrows
+        while the static mapper table stays wide, so the relationship there
+        is one-directional — ``test_index4_admission_is_subset_of_mapper``
+        below pins that envelope."""
+        from brutex.config.feed_scope import FEED_SCOPE_ENV
 
-        for exchange, symbol in (
-            (Exchange.NSE, "NIFTY"),
-            (Exchange.NSE, "INDIAVIX"),
-            (Exchange.NSE, "FINNIFTY"),
-            (Exchange.BSE, "SENSEX"),
-            (Exchange.BSE, "BSE100"),
-        ):
-            inst = Instrument(
-                exch_id=exchange,
-                security_id=1,
-                symbol_name=symbol,
-                display_name=symbol,
-                instrument=InstrumentType.IDX,
-                segment=Segment.INDEX,
-                series=None,
-                isin=None,
-                underlying_symbol=symbol,
-                underlying_security_id=None,
-                lot_size=0,
-                tick_size=Decimal(0),
-                sm_freeze_qty=None,
-                sm_expiry_date=None,
-                strike_price=None,
-            )
+        monkeypatch.setenv(FEED_SCOPE_ENV, "full")
+        for exchange, symbol in _MIRROR_COORDS:
+            inst = _idx_instrument(exchange, symbol)
             admitted = is_universe_underlying(inst, frozenset())
             mapped = canonical_identity(
                 exchange=exchange.value, segment="INDEX", lake_symbol=symbol
             )
             assert (mapped is not None) == admitted, (exchange, symbol)
+
+    def test_index4_admission_is_subset_of_mapper(self) -> None:
+        """The shipped-default reconciliation of the #1788 mirror
+        (DEC-UNIVERSE-INDEX-ONLY-001): under ``index4`` the ENUMERATION is
+        the narrowing authority — every scope-ADMITTED index still maps
+        (admitted ⊆ mappable, so the export never refuses an admitted
+        symbol), while a mapper-mappable sectoral (FINNIFTY) is
+        admission-refused and therefore never enumerated into the export."""
+        for exchange, symbol in _MIRROR_COORDS:
+            inst = _idx_instrument(exchange, symbol)
+            admitted = is_universe_underlying(inst, frozenset())
+            mapped = canonical_identity(
+                exchange=exchange.value, segment="INDEX", lake_symbol=symbol
+            )
+            if admitted:  # admitted ⊆ mappable — never a refused admitted symbol
+                assert mapped is not None, (exchange, symbol)
+        # The narrowing direction, concretely: FINNIFTY maps yet is refused.
+        finnifty = _idx_instrument(Exchange.NSE, "FINNIFTY")
+        assert is_universe_underlying(finnifty, frozenset()) is False
+        assert (
+            canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="FINNIFTY") is not None
+        )
 
     def test_key_unsafe_index_excluded(self) -> None:
         assert canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="A/B") is None
