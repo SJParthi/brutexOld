@@ -3920,7 +3920,19 @@ hostile-review pass._
   trusted-input boundary disclosed; a preflight-refused run writes NOTHING
   into `--out` (the documented retry works); the workflow-header
   1..1200→1195 comment fix + the bounded `--min-free-gib` override
-  (default 30, never passed by the workflow); the per-finding record
+  (default 30, never passed by the workflow). FIX ROUND 3 folded
+  (pre-open — the round-2 refuter pair, 0 MAJOR): the sizing envs are now
+  PINNED too — `BRUTEX_SWEEP_WORKERS` + `BRUTEX_SWEEP_MEM_BUDGET_BYTES`
+  explicitly SET to the parent-resolved DEFAULT laws (dotenv-immune, the
+  capacity precedent) so the absolute RSS/pool bars are measured at KNOWN
+  sizing, with the remaining 23 symmetric sweep envs audited + echoed into
+  provenance; the OFF→ON warm-cache wall-bias disclosed (summary + runbook)
+  with a trivial `--arm-order` reversal lever; per-arm forensics mirrors
+  (the shared `~/.brutex/runs/<run_id>` cross-arm clobber ended); the
+  verdict-time override belt attributes the LIVE env, never the stored
+  probed key; the post-arm compare/summary crash window closed (the
+  report-with-error still ships); `ps_bin`→`df_bin` + the ledger's bar-6
+  scope tightened; the per-finding record
   lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives

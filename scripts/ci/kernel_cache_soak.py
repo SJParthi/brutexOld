@@ -52,6 +52,18 @@ HONEST LIMITS (Golden Rule #10)
   grid measures capacity=1; widen ``--fib-anchors`` / ``--price-source-cells``
   to soak a higher capacity — the flip DEC must weigh whether the measured
   capacity covers the operator's grids (R2 MAJOR-2 honesty scoping).
+* The wall bar carries an ORDERING bias: the second arm (default: ON) starts
+  with a warm OS page-cache/import state — systematic, inside the ≤ 1.02
+  band, bounded by the preload share of a 2-4 h arm (fix-round-3 NIT-1;
+  disclosed on the summary; ``--arm-order on-first`` reverses it for a
+  bias check).
+* The ABSOLUTE RSS/pool bars are measured at PINNED sizing: ``arm_env``
+  explicitly sets ``BRUTEX_SWEEP_WORKERS`` + ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``
+  (the parent-resolved DEFAULT laws) beside the capacity pin, so a stray
+  ambient/``.env`` sizing value can never silently re-scope them
+  (fix-round-3 MINOR-1); the remaining symmetric sweep envs are echoed into
+  ``provenance.symmetric_env_echo`` (parent-environ view — dotenv values
+  are invisible there, which is exactly why the sizing envs are pinned).
 * A non-smoke report whose ``hardware_key`` is not the registered §8 M4-Pro
   envelope — or whose key came from the ``BRUTEX_BENCH_BASELINE_KEY`` env
   OVERRIDE rather than real hardware probes — can never read FLIP-READY: the
@@ -101,6 +113,60 @@ RESULTS_DEPTH_ENV: Final[str] = "BRUTEX_RESULTS_DEPTH"
 KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 #: Mirror of sweep_parallel.WORKER_KERNEL_CAPACITY_MAX (drift-pinned).
 WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
+#: Mirror of sweep_mem_budget.MEM_BUDGET_ENV (drift-pinned): the rank-region
+#: byte budget. Fix-round-3 MINOR-1 (refuter-A): a ``.env``-planted value
+#: reached BOTH children symmetrically (never attributable to the flag) but
+#: silently RE-SCOPED the ABSOLUTE RSS/pool bars away from the DEFAULT sizing
+#: law the flip ships — so ``arm_env`` now PINS the parent-resolved default
+#: (:func:`resolve_pinned_mem_budget`) into both arms, mirroring the capacity
+#: precedent. The engine treats a SET value as the per-worker override
+#: (never divided), so pinning the default-law per-worker figure at the
+#: pinned worker count is byte-identical to the engine's own default.
+MEM_BUDGET_ENV: Final[str] = "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
+#: Mirror of run_layout.MIRROR_ROOT_ENV (drift-pinned): the Row-15 forensics
+#: mirror root. Fix-round-3 NIT (refuter-A): both arms share ``run_id``
+#: (grid identity — the cache flag is env, not grid), so the default shared
+#: ``~/.brutex/runs/<run_id>/`` mirror was CLOBBERED cross-arm (write-only
+#: residue, no result coupling); each arm now mirrors into its OWN
+#: ``<arm>/mirror/`` dir instead — per-arm forensics kept, the operator's
+#: shared mirror root untouched by a soak.
+RUN_MIRROR_ROOT_ENV: Final[str] = "BRUTEX_RUN_MIRROR_ROOT"
+#: The remaining SYMMETRIC sweep-reachable env knobs (fix-round-3 MINOR-1
+#: audit, refuter-A's enumeration): each reaches BOTH arms identically (same
+#: base env + same dotenv application in both children), so none can skew
+#: ARM IDENTITY or attribute an effect to the flag — they are deliberately
+#: NOT pinned (behavior toggles are the operator's box posture) but are
+#: ECHOED into ``provenance.symmetric_env_echo`` so the report states the
+#: sizing/behavior posture its absolute numbers were measured under.
+#: HONEST LIMIT: the echo is the PARENT-environ view — a ``.env``-file value
+#: the child's own ``bootstrap_env()`` injects is invisible here (disclosed
+#: in-report via ``symmetric_env_echo_scope``); the arm-identity-relevant
+#: sizing envs are PINNED instead, exactly because the echo cannot see dotenv.
+SYMMETRIC_ENV_ECHO: Final[tuple[str, ...]] = (
+    "BRUTEX_SWEEP_BOUNDED_RANK",
+    "BRUTEX_SWEEP_BUDGET_WORKERS",
+    "BRUTEX_SWEEP_RUST_METRICS",
+    "BRUTEX_SWEEP_RUST_STAGE1A",
+    "BRUTEX_SWEEP_APRIORI",
+    "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS",
+    "BRUTEX_SWEEP_CACHE_BLOOM_CAPACITY",
+    "BRUTEX_SWEEP_CACHE_MAP_MB",
+    "BRUTEX_SWEEP_DIFFCHECK",
+    "BRUTEX_SWEEP_DIFFCHECK_K",
+    "BRUTEX_SWEEP_STALL_SECONDS",
+    "BRUTEX_SWEEP_STALL_FACTOR",
+    "BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC",
+    "BRUTEX_SWEEP_PER_TUPLE_SECONDS",
+    "BRUTEX_SWEEP_LOOKAHEAD_GUARD",
+    "BRUTEX_SWEEP_RESUME_STORE_GUARD",
+    "BRUTEX_SWEEP_SMALL_GRID_FACTOR",
+    "BRUTEX_SWEEP_DETACHED",
+    "BRUTEX_BAD_TICK_SCREEN",
+    "BRUTEX_LAKE_HEAL",
+    "BRUTEX_MAX_BLOOM_BYTES",
+    "BRUTEX_POLARS_THREADS",
+    "BRUTEX_DUCKDB_THREADS",
+)
 #: The hardware-key env override (hardware_envelope.BENCH_BASELINE_KEY_ENV,
 #: drift-pinned): when set, ``hardware_key()`` returns it VERBATIM — a forged
 #: M4-Pro key would flip the provenance bar on any box, so a non-smoke report
@@ -486,6 +552,52 @@ def effective_worker_kernel_capacity(fib_anchors: str, price_source_cells: str) 
     )
 
 
+def resolve_pinned_workers(cli_workers: int | None) -> tuple[int, str]:
+    """The worker count ``arm_env`` PINS into ``BRUTEX_SWEEP_WORKERS`` + its source.
+
+    Fix-round-3 MINOR-1 (refuter-A): a dotenv ``BRUTEX_SWEEP_WORKERS`` reached
+    both children symmetrically yet re-scoped the ABSOLUTE pool-RSS bar with
+    zero report echo — the count is now always PINNED explicitly (dotenv-immune
+    like the capacity pin) and echoed into provenance. *cli_workers* (the
+    ``--workers`` flag / the smoke default) wins verbatim (``"explicit"``);
+    otherwise the engine's own AUTO law ``auto_sweep_workers(os.cpu_count())``
+    is resolved PARENT-side (``"auto-resolved"``) — deliberately WITHOUT the
+    small-grid sequential demotion (a sequential arm can never produce soak
+    evidence; the caller refuses ``< 2`` structurally instead of soaking into
+    a guaranteed loud telemetry FAIL).
+    """
+    if cli_workers is not None:
+        return cli_workers, "explicit"
+    from brutex.engine.sweep_parallel import auto_sweep_workers  # lazy: wheel env
+
+    return auto_sweep_workers(os.cpu_count()), "auto-resolved"
+
+
+def resolve_pinned_mem_budget(workers: int) -> int:
+    """The per-worker rank-region budget ``arm_env`` PINS into :data:`MEM_BUDGET_ENV`.
+
+    The engine's DEFAULT sizing law resolved PARENT-side: ``memory_budget_bytes``
+    with the sweep fraction/floor at the PINNED worker count and an EMPTY env
+    (an ambient/.env override is deliberately excluded — the flip ships the
+    DEFAULT law, so that is what the soak measures; ambient presence is echoed
+    separately). The engine resolves a SET :data:`MEM_BUDGET_ENV` value as the
+    per-worker override, never divided (``resolve_mem_budget_bytes``'s #1352
+    contract), so pinning this exact figure is byte-identical to each worker's
+    own default resolution at ``BRUTEX_SWEEP_BUDGET_WORKERS=<workers>`` —
+    drift-pinned in TestEngineDriftPins.
+    """
+    from brutex.config.hardware_envelope import memory_budget_bytes  # lazy: wheel env
+    from brutex.engine.sweep_mem_budget import DEFAULT_MEM_BUDGET_BYTES, MEM_BUDGET_FRACTION
+
+    return memory_budget_bytes(
+        fraction=MEM_BUDGET_FRACTION,
+        floor_bytes=DEFAULT_MEM_BUDGET_BYTES,
+        workers=workers,
+        env={},
+        env_var=MEM_BUDGET_ENV,
+    )
+
+
 def redact_home(path_str: str) -> str:
     """Home-prefix-redact a path for the UPLOADED report (R1 MINOR-1).
 
@@ -539,9 +651,11 @@ def arm_env(
     base: dict[str, str],
     *,
     cache_on: bool,
-    workers: int | None,
+    workers: int,
     results_depth_off: bool,
     capacity: int,
+    mem_budget_bytes: int,
+    mirror_root: Path,
 ) -> dict[str, str]:
     """One arm's spawn environment — every arm-identity env EXPLICITLY SET.
 
@@ -562,20 +676,37 @@ def arm_env(
     * :data:`RESULTS_DEPTH_ENV` — ``0`` (smoke) / ``1`` (non-smoke; a dotenv
       ``=0`` would silently skip the results-depth artifacts the identity
       compare now covers),
-    * :data:`LOG_LEVEL_ENV` ``INFO`` + ``PYTHONHASHSEED=0`` (already set).
+    * :data:`LOG_LEVEL_ENV` ``INFO`` + ``PYTHONHASHSEED=0`` (already set),
+    * :data:`SWEEP_WORKERS_ENV` — ALWAYS pinned to *workers* (fix-round-3
+      MINOR-1: previously set only when ``--workers`` was passed — a dotenv
+      value reached both children symmetrically yet re-scoped the ABSOLUTE
+      pool-RSS bar with zero report echo; also closes the dotenv
+      ``BRUTEX_SWEEP_WORKERS=1`` sequential bypass, which now cannot even
+      reach the child),
+    * :data:`MEM_BUDGET_ENV` — PINNED to *mem_budget_bytes*, the
+      parent-resolved DEFAULT sizing law per worker
+      (:func:`resolve_pinned_mem_budget`; fix-round-3 MINOR-1 — the absolute
+      RSS/pool bars are measured at KNOWN sizing, never a stray ``.env``
+      budget's),
+    * :data:`RUN_MIRROR_ROOT_ENV` — the arm's OWN ``<arm>/mirror`` dir
+      (fix-round-3 NIT: both arms share ``run_id``, so the default shared
+      ``~/.brutex/runs/<run_id>/`` forensics mirror was clobbered cross-arm;
+      per-arm dirs keep the forensics AND leave the operator's mirror root
+      untouched — write-only, outside the compared ``results/``/
+      ``sweep_runs/`` roots).
 
-    ``BRUTEX_SWEEP_WORKERS`` is set only when the operator passed
-    ``--workers`` — a dotenv value applies to BOTH arms symmetrically and the
-    ACTUAL worker count is measured from the ON summary, so it cannot skew
-    arm identity silently.
+    The remaining sweep-reachable envs are SYMMETRIC by construction and
+    deliberately unpinned — audited in :data:`SYMMETRIC_ENV_ECHO`, echoed
+    into provenance.
     """
     env = dict(base)
     env[KERNEL_CACHE_ENV] = "1" if cache_on else "0"
     env[KERNEL_CAPACITY_ENV] = str(capacity)
     env[LOG_LEVEL_ENV] = "INFO"  # the telemetry MUST reach stderr (#1630 guard)
     env["PYTHONHASHSEED"] = "0"
-    if workers is not None:
-        env[SWEEP_WORKERS_ENV] = str(workers)
+    env[SWEEP_WORKERS_ENV] = str(workers)
+    env[MEM_BUDGET_ENV] = str(mem_budget_bytes)
+    env[RUN_MIRROR_ROOT_ENV] = str(mirror_root)
     env[RESULTS_DEPTH_ENV] = "0" if results_depth_off else "1"
     return env
 
@@ -743,6 +874,19 @@ def evaluate_acceptance(
 
     if smoke:
         provenance_bar = "SMOKE-UNJUDGED"
+    elif isinstance(hardware_key_source, str) and hardware_key_source.startswith(
+        "env-override-at-verdict"
+    ):
+        # Fix-round-3 NIT (refuter-A wording): attribute correctly — the
+        # STORED key was genuinely probed at run time; what taints the run is
+        # the LIVE override set at VERDICT time (the belt-check).
+        provenance_bar = (
+            f"NOT-DECISION-GRADE({BENCH_BASELINE_KEY_ENV} is set in the LIVE verdict "
+            f"environment (set at verdict time) — the report's stored key "
+            f"{hardware_key!r} was probed at run time, but an override-tainted "
+            "verdict environment cannot feed the flip DEC; unset the override and "
+            "re-run the verdict)"
+        )
     elif isinstance(hardware_key_source, str) and hardware_key_source.startswith("env-override"):
         provenance_bar = (
             f"NOT-DECISION-GRADE(hardware_key {hardware_key!r} comes from the "
@@ -847,6 +991,11 @@ def render_summary(report: dict[str, Any]) -> str:
         f"- wall: ON−OFF = {deltas.get('wall_delta_s'):+.1f} s "
         f"(ratio {deltas.get('wall_ratio_on_over_off'):.3f}; ≤ {WALL_RATIO_CEILING} is the "
         "no-regression band — a within-noise no-win flip is a YELLOW FLAG for the DEC)",
+        f"- wall-bar ordering bias (fix-round-3 NIT-1): arms ran "
+        f"{'→'.join(str(a).upper() for a in prov.get('arm_order', ['off', 'on']))} — the "
+        "SECOND arm inherits a warm OS page-cache/import state, a systematic bias INSIDE "
+        f"the ≤ {WALL_RATIO_CEILING} band (bounded by the preload share of a 2-4 h arm; "
+        "re-run with --arm-order reversed for a bias check)",
         f"- per-worker peak RSS delta: {fmt_kib(deltas.get('rss_per_worker_kib'))} "
         f"(ceiling {fmt_kib(RSS_PER_WORKER_DELTA_CEILING_KIB)})",
         f"- pool peak RSS delta: {fmt_kib(deltas.get('rss_pool_kib'))}; "
@@ -867,6 +1016,13 @@ def render_summary(report: dict[str, Any]) -> str:
         )
         + ") — the flip DEC must weigh whether this capacity covers the operator's grids "
         "(widen via --fib-anchors / --price-source-cells)",
+        f"- sizing PINNED in both arm envs (fix-round-3 MINOR-1): "
+        f"workers={prov.get('sweep_workers_effective')} "
+        f"({prov.get('sweep_workers_source')}) as {SWEEP_WORKERS_ENV}, "
+        f"mem_budget={prov.get('mem_budget_bytes_effective')} bytes/worker (the "
+        f"RAM-derived DEFAULT law resolved parent-side) as {MEM_BUDGET_ENV} — an "
+        "ambient/.env sizing value can never re-scope the absolute RSS/pool bars; "
+        "the remaining symmetric envs are echoed in provenance.symmetric_env_echo",
         "",
         "## Identity (MEASURED)",
         "",
@@ -961,11 +1117,11 @@ def preflight_lake(
 
 def preflight_disk(out_dir: Path, need_kib: int) -> str | None:
     """Digits-fenced free-disk probe under *out_dir* (the SOAK-R10-1 pattern)."""
-    ps_bin = shutil.which("df")
-    if ps_bin is None:
+    df_bin = shutil.which("df")
+    if df_bin is None:
         return "df not found — cannot verify free disk; refusing to soak blind"
     proc = subprocess.run(  # noqa: S603 — fixed argv, never a shell
-        [ps_bin, "-Pk", str(out_dir)], capture_output=True, text=True, check=False
+        [df_bin, "-Pk", str(out_dir)], capture_output=True, text=True, check=False
     )
     lines = proc.stdout.splitlines()
     if proc.returncode != 0 or len(lines) < 2:
@@ -987,6 +1143,10 @@ def collect_provenance(
     sample_interval_s: float,
     smoke: bool,
     min_free_gib: int | None = None,
+    sweep_workers_effective: int | None = None,
+    sweep_workers_source: str | None = None,
+    mem_budget_bytes_effective: int | None = None,
+    arm_order: tuple[str, ...] = ("off", "on"),
 ) -> dict[str, Any]:
     """Environment echo for the report — every probe guarded, never fatal."""
 
@@ -1055,6 +1215,31 @@ def collect_provenance(
         # `capacity_env_ambient_popped`, whose parent-only view the refuter
         # proved blind to the child's dotenv re-read).
         "capacity_env_ambient_present": KERNEL_CAPACITY_ENV in os.environ,
+        # Fix-round-3 MINOR-1: the sizing the ABSOLUTE RSS/pool bars were
+        # measured at — both values are PINNED into the arm envs by arm_env
+        # (dotenv-immune, the capacity precedent), so a stray ambient/.env
+        # budget or worker count can never silently re-scope the bars.
+        "sweep_workers_effective": sweep_workers_effective,
+        "sweep_workers_source": sweep_workers_source,
+        "sweep_workers_env_ambient_present": SWEEP_WORKERS_ENV in os.environ,
+        "mem_budget_bytes_effective": mem_budget_bytes_effective,
+        "mem_budget_env_ambient_present": MEM_BUDGET_ENV in os.environ,
+        # Fix-round-3 NIT-1 (refuter-A): the arm execution order — the SECOND
+        # arm inherits a warm OS page-cache/import state, a systematic bias
+        # inside the ≤ 1.02 wall band (see the summary's disclosure line).
+        "arm_order": list(arm_order),
+        # The audited SYMMETRIC (unpinned) sweep-reachable envs: parent-environ
+        # view only — a .env-file value the child injects is invisible here
+        # (the arm-identity-relevant ones are PINNED instead, see arm_env).
+        "symmetric_env_echo": {
+            name: os.environ[name] for name in SYMMETRIC_ENV_ECHO if name in os.environ
+        },
+        "symmetric_env_echo_scope": (
+            "parent-environ view only — dotenv (.env) values the child's own "
+            "bootstrap_env() injects are invisible here; arm-identity-relevant "
+            "sizing envs are PINNED (see arm_env), the rest are symmetric across arms"
+        ),
+        "symmetric_env_audited": list(SYMMETRIC_ENV_ECHO),
         "min_free_gib": min_free_gib,
         "budget_minutes": budget_minutes,
         "sample_interval_s": sample_interval_s,
@@ -1234,6 +1419,57 @@ def compare_arms(
     }
 
 
+def compare_arms_guarded(
+    off_arm_dir: Path, on_arm_dir: Path, off_arm: dict[str, Any], on_arm: dict[str, Any]
+) -> dict[str, Any]:
+    """:func:`compare_arms` with the no-report window CLOSED (fix-round-3, refuter-B).
+
+    The tree walks read every result file (``read_bytes`` after ``rglob``) —
+    a file vanishing/erroring between the two (conceivable on the
+    SIGKILL-timeout path if a sweep descendant survives and mutates the tree)
+    previously tracebacked out of ``cmd_run`` BEFORE the report write: exit 1
+    with NO report and no artifact. Any failure here now degrades to a
+    fully-shaped compare block whose identity/audit/exit-status verdicts all
+    FAIL naming the crash (``compare_error``), so the report-with-error is
+    STILL written and the artifact ships (rc 1 via the judged identity FAIL —
+    never a fabricated PASS).
+    """
+    try:
+        return compare_arms(off_arm_dir, on_arm_dir, off_arm, on_arm)
+    except Exception as exc:  # the report must ship — never a silent no-report exit
+        detail = f"compare crashed: {exc!r} — identity NOT proven"
+        return {
+            "identity_ok": False,
+            "result_files_compared": 0,
+            "sweep_runs_files_compared": 0,
+            "diff_paths": [],
+            "audit_ts_masked_ok": False,
+            "audit_detail": detail,
+            "exit_status_structural_ok": False,
+            "exit_status_detail": detail,
+            "excluded_sidecars": list(STRUCTURAL_SIDECARS),
+            "compare_error": repr(exc),
+        }
+
+
+def render_summary_guarded(report: dict[str, Any]) -> str:
+    """:func:`render_summary`, degrading to an error stub instead of raising.
+
+    The second half of the fix-round-3 no-report window: a summary-render
+    crash must never lose the already-assembled ``soak-report.json`` — the
+    caller writes the JSON first, then this text.
+    """
+    try:
+        return render_summary(report)
+    except Exception as exc:  # the JSON report is the primary artifact
+        return (
+            "# Kernel-cache OFF↔ON soak report\n\n"
+            f"summary render FAILED: {exc!r}\n\n"
+            "The machine-readable soak-report.json beside this file is the "
+            "authoritative artifact — read the acceptance block there.\n"
+        )
+
+
 def build_smoke_lake(root: Path) -> Path:
     """A tiny REAL-writer NIFTY 1m fixture lake (the results-depth-wiring idiom)."""
     from datetime import timezone
@@ -1400,6 +1636,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         no_options_sim = False
         results_depth_off = False
 
+    # Fix-round-3 MINOR-1: resolve the PINNED sizing BEFORE any artifact —
+    # the absolute RSS/pool bars must be measured at KNOWN sizing (the
+    # default law), never a stray ambient/.env budget or worker count.
+    workers_effective, workers_source = resolve_pinned_workers(workers)
+    if workers_effective < 2:
+        return _fail_structural(
+            f"auto-resolved sweep workers={workers_effective} (< 2 on this box): the "
+            "kernel-cache telemetry lives in the parallel driver, so a sequential "
+            "soak can never produce evidence — pass --workers >= 2 explicitly"
+        )
+    mem_budget_bytes = resolve_pinned_mem_budget(workers_effective)
+
     missing = preflight_lake(
         lake_root,
         grid["symbols"] or "",
@@ -1425,6 +1673,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     report_dir = out_dir / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    arm_order: tuple[str, ...] = ("off", "on") if args.arm_order == "off-first" else ("on", "off")
     provenance = collect_provenance(
         lake_root=lake_root,
         grid=grid,
@@ -1432,6 +1681,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         sample_interval_s=sample_interval,
         smoke=smoke,
         min_free_gib=None if smoke else args.min_free_gib,
+        sweep_workers_effective=workers_effective,
+        sweep_workers_source=workers_source,
+        mem_budget_bytes_effective=mem_budget_bytes,
+        arm_order=arm_order,
     )
     keys = int(provenance["grid"]["keys_fan_out"])
     # Full path in the LOCAL run log ONLY — the uploaded report carries the
@@ -1452,8 +1705,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     deadline = time.monotonic() + args.budget_minutes * 60.0
 
+    print(
+        f"kernel-cache-soak: sizing PINNED — workers={workers_effective} "
+        f"({workers_source}), mem_budget={mem_budget_bytes} bytes/worker (the default "
+        f"law), arm order {'→'.join(a.upper() for a in arm_order)}"
+    )
     arms: dict[str, dict[str, Any]] = {}
-    for arm_name, cache_on in (("off", False), ("on", True)):
+    for arm_name in arm_order:
+        cache_on = arm_name == "on"
         arm_dir = out_dir / f"arm-{arm_name}"
         results_root = arm_dir / "results"  # FRESH per arm — the resume/cache-skip law
         argv = build_sweep_argv(
@@ -1466,9 +1725,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         env = arm_env(
             dict(os.environ),
             cache_on=cache_on,
-            workers=workers,
+            workers=workers_effective,
             results_depth_off=results_depth_off,
             capacity=int(provenance["worker_kernel_capacity_effective"]),
+            mem_budget_bytes=mem_budget_bytes,
+            # Fix-round-3 NIT: per-arm forensics mirror — the shared
+            # ~/.brutex/runs/<run_id> default would be clobbered cross-arm.
+            mirror_root=arm_dir / "mirror",
         )
         print(f"kernel-cache-soak: arm {arm_name.upper()} starting ({' '.join(argv[3:])})")
         arms[arm_name] = run_arm(
@@ -1485,7 +1748,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"wall={arms[arm_name]['wall_s']:.1f}s"
         )
 
-    compare = compare_arms(
+    # Fix-round-3 (refuter-B NIT-1): the guarded compare + summary close the
+    # narrow no-report window — a post-arm hashing/render crash still writes
+    # the report-with-error (JSON first, it is the primary artifact).
+    compare = compare_arms_guarded(
         out_dir / "arm-off",
         out_dir / "arm-on",
         arms["off"],
@@ -1502,13 +1768,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     (report_dir / "soak-report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (report_dir / "summary.md").write_text(render_summary(report), encoding="utf-8")
+    summary_text = render_summary_guarded(report)
+    (report_dir / "summary.md").write_text(summary_text, encoding="utf-8")
     for arm_name in ("off", "on"):
         log = out_dir / f"arm-{arm_name}" / "sweep.log"
         if log.is_file():  # bounded artifact: the last 64 KiB tail only
             data = log.read_bytes()[-65536:]
             (report_dir / f"arm-{arm_name}-sweep.tail.log").write_bytes(data)
-    print(render_summary(report))
+    print(summary_text)
 
     failures = judged_failures(report["acceptance"])
     if failures:
@@ -1533,9 +1800,16 @@ def cmd_verdict(args: argparse.Namespace) -> int:
         # Fix-round-2 (refuter-1 spoof): trust the report's recorded key
         # source AND belt-check the LIVE environment — a verdict run under
         # the BENCH_BASELINE_KEY_ENV override is itself override-tainted.
+        # Fix-round-3 NIT (refuter-A wording): the belt uses a DISTINCT
+        # source token so the refusal attributes the LIVE verdict-time
+        # override, never mis-claims the stored (probed) key's origin; a
+        # report whose RECORDED source is already the run-time override keeps
+        # that stronger attribution.
         key_source = report["provenance"].get("hardware_key_source")
-        if os.environ.get(BENCH_BASELINE_KEY_ENV, "").strip():
-            key_source = f"env-override:{BENCH_BASELINE_KEY_ENV} (set at verdict time)"
+        if os.environ.get(BENCH_BASELINE_KEY_ENV, "").strip() and not (
+            isinstance(key_source, str) and key_source.startswith("env-override")
+        ):
+            key_source = f"env-override-at-verdict:{BENCH_BASELINE_KEY_ENV}"
         acceptance = evaluate_acceptance(
             off=report["arms"]["off"],
             on=report["arms"]["on"],
@@ -1623,6 +1897,15 @@ def build_parser() -> argparse.ArgumentParser:
         "(the workflow plan-job SEC9-1 law, enforced script-side too)",
     )
     run.add_argument("--sample-interval-s", type=float, default=5.0)
+    run.add_argument(
+        "--arm-order",
+        choices=("off-first", "on-first"),
+        default="off-first",
+        help="arm execution order (default off-first). The SECOND arm inherits a "
+        "warm OS page-cache/import state — a systematic bias inside the ≤ 1.02 "
+        "wall band; re-run with the order reversed for a bias check (fix-round-3 "
+        "NIT-1). Echoed as provenance.arm_order",
+    )
     run.add_argument(
         "--min-free-gib",
         type=int,

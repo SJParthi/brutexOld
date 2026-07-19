@@ -69,6 +69,27 @@
   arms is uncontrolled; soak an idle machine (the bench-m4pro quiet-runner
   assumption) and outside the nightly pull window (the sweep takes the G10
   lake read-guard on the pull lock — a concurrent nightly would contend).
+- **The wall bar carries an ORDERING bias** (fix-round-3): arms run OFF→ON
+  by default, so the second (ON) arm inherits a warm OS page-cache/import
+  state — a systematic ON-favoring bias INSIDE the ≤ 1.02 no-regression
+  band, bounded by the preload share of a 2-4 h arm. It is disclosed on the
+  summary; re-run with `--arm-order on-first` for a bias check.
+- **The ABSOLUTE RSS/pool bars are measured at PINNED sizing** (fix-round-3):
+  `BRUTEX_SWEEP_WORKERS` + `BRUTEX_SWEEP_MEM_BUDGET_BYTES` are explicitly
+  SET in both arm envs to the parent-resolved DEFAULT laws (dotenv-immune,
+  the capacity-pin mechanism), and the report echoes
+  `provenance.sweep_workers_effective` / `mem_budget_bytes_effective` — a
+  stray ambient/`.env` sizing value can never silently re-scope the 36 GiB
+  pool ceiling or the per-worker delta. The remaining symmetric sweep envs
+  are echoed in `provenance.symmetric_env_echo` (parent-environ view only —
+  dotenv values are invisible there, which is exactly why the sizing envs
+  are pinned rather than echoed).
+- **Forensics mirrors are per-arm** (fix-round-3): both arms share `run_id`
+  (grid identity — the cache flag is env, not grid), so the default shared
+  `~/.brutex/runs/<run_id>/` Row-15 mirror would be clobbered cross-arm;
+  each arm's flight-recorder mirror lands under its own `<out>/arm-*/mirror/`
+  instead (write-only forensics — the operator's shared mirror root is
+  untouched by a soak).
 
 ## 2. What one soak run does
 
@@ -166,8 +187,12 @@ defaults keep FULL bar depth (2020-01-01 → previous day, NIFTY+BANKNIFTY,
 1minute/5minute/15minute) — size `--k`/`--conditions`/`--sl`/`--tp` so each
 arm lands ≈ 2-4 h inside the budget, and widen `--fib-anchors` /
 `--price-source-cells` to soak a kernel-cache capacity > 1 (§1). `--workers`
-(≥ 2) pins `BRUTEX_SWEEP_WORKERS` for both arms; the default (unset) uses
-the auto worker law (8 on the M4-Pro). A sandbox mechanics check is
+(≥ 2) pins `BRUTEX_SWEEP_WORKERS` for both arms; the default (unset)
+resolves the auto worker law parent-side (8 on the M4-Pro) and PINS that —
+the worker count and the per-worker `BRUTEX_SWEEP_MEM_BUDGET_BYTES` default
+are always explicitly set in both arm envs (fix-round-3 sizing pins, §1)
+and echoed into provenance. `--arm-order on-first` reverses the default
+OFF→ON order for a wall-bias check (§1). A sandbox mechanics check is
 `python scripts/ci/kernel_cache_soak.py run --smoke --out /tmp/kc-soak`
 (never decision-grade — §1).
 
@@ -194,12 +219,16 @@ figures — and must quote the ACTUAL peaks/headroom, not just PASS/FAIL):
    must weigh whether that capacity covers the operator's grids (widen
    `--fib-anchors`/`--price-source-cells` for a higher-capacity soak; the
    0.8 GiB ceiling targets the HIGH-capacity worst case, which a
-   capacity-1 run does not exercise).
+   capacity-1 run does not exercise). The absolute bars are measured at the
+   PINNED default sizing — `provenance.sweep_workers_effective` +
+   `mem_budget_bytes_effective` state it (fix-round-3, §1).
 4. **Wall neutral-or-better (hard):** `wall_ratio_on_over_off ≤ 1.02` — a
    NO-REGRESSION band, deliberately not a win gate. The VALUE section
    surfaces the actual win/loss: the flip should show net
    neutral-to-better, and a within-noise no-win flip is a YELLOW FLAG the
-   DEC must address explicitly.
+   DEC must address explicitly. Mind the disclosed OFF→ON warm-cache
+   ordering bias inside this band (§1; `provenance.arm_order` records the
+   order — an `--arm-order on-first` re-run is the bias check).
 5. **Telemetry invariants (hard):** ON arm exactly one
    `kernel_reuse_summary`; `builds_total + hits_total == tuples_done`;
    `builds_total ≤ keys × workers` (keys = the grid's
