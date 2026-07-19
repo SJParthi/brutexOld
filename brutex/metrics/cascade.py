@@ -90,6 +90,7 @@ import numpy as np
 from brutex.metrics.cpcv import DEFAULT_N_GROUPS, DEFAULT_N_TEST_GROUPS, cpcv_pass_rate
 from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
 from brutex.metrics.extreme_vol_stratum import evaluate_stratum
+from brutex.metrics.regime_fragility import evaluate_fragility
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -170,6 +171,10 @@ class FilterStage(Enum):
     # extreme-vol must-survive stratum — runs ONLY when
     # ``CascadeConfig.extreme_vol_stratum`` is True.
     EXTREME_VOL_STRATUM = "extreme_vol_stratum"
+    # Default-OFF filter #11 (DEC-REGIME-FRAGILITY-GATE-001): the
+    # regime-fragility gate — runs ONLY when
+    # ``CascadeConfig.regime_fragility`` is True.
+    REGIME_FRAGILITY = "regime_fragility"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +237,17 @@ class CandidateInput:
     #: flags. ``None`` (the default) keeps every existing construction
     #: byte-identical; the filter needs BOTH fields to evaluate.
     trade_pnls_paisa: tuple[int, ...] | None = None
+    #: Per-trade session-lens trend token of the ENTRY session for filter
+    #: #11 (DEC-REGIME-FRAGILITY-GATE-001) — the taxonomy leaf maps it
+    #: (junk degrades to the UNKNOWN bucket, excluded from the laws).
+    #: Aligned index-for-index with ``trade_pnls_paisa`` (same length when
+    #: BOTH are present). ``None`` (the default) = the axis is skipped —
+    #: an honest abstain, never a fabricated verdict and never a reject.
+    trade_trend_tokens: tuple[str, ...] | None = None
+    #: Per-trade structural-era label of the ENTRY date for filter #11
+    #: (``regime_taxonomy.era_for_date(...).label``). Same alignment /
+    #: default laws as ``trade_trend_tokens``.
+    trade_era_labels: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Reject a non-finite metric / series value or an empty id up front."""
@@ -267,6 +283,20 @@ class CandidateInput:
                 f"{len(self.extreme_vol_entry_flags)} != trade_pnls_paisa length "
                 f"{len(self.trade_pnls_paisa)} (candidate {self.candidate_id!r})"
             )
+        for axis_name, axis_labels in (
+            ("trade_trend_tokens", self.trade_trend_tokens),
+            ("trade_era_labels", self.trade_era_labels),
+        ):
+            if (
+                axis_labels is not None
+                and self.trade_pnls_paisa is not None
+                and len(axis_labels) != len(self.trade_pnls_paisa)
+            ):
+                raise ValueError(
+                    f"CandidateInput.{axis_name} length {len(axis_labels)} != "
+                    f"trade_pnls_paisa length {len(self.trade_pnls_paisa)} "
+                    f"(candidate {self.candidate_id!r})"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +347,11 @@ class CascadeConfig:
     # report is byte-identical to the pre-filter shape (no stage_survivors
     # key, no verdict fields). Flipping the default ON is its own DEC.
     extreme_vol_stratum: bool = False
+    # #11 regime-fragility gate (DEC-REGIME-FRAGILITY-GATE-001) —
+    # DEFAULT-OFF: when False (the default) the filter never runs and the
+    # report is byte-identical to the pre-filter shape (no stage_survivors
+    # key, no verdict fields). Flipping the default ON is its own DEC.
+    regime_fragility: bool = False
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""
@@ -374,6 +409,21 @@ class CandidateVerdict:
     #: counts / expectancies / variances / ratio — full precision, never
     #: rounded), or ``None`` whenever the status is ``None``.
     extreme_vol_stats: dict[str, float | int | None] | None = None
+    #: The regime-fragility status token (filter #11,
+    #: DEC-REGIME-FRAGILITY-GATE-001): ``"ok"`` / ``"fail"`` /
+    #: ``"insufficient_strata"``, or ``None`` when the filter never
+    #: evaluated this candidate (flag OFF, or the candidate died at an
+    #: earlier stage — scope is deliberately survivors-only). Appended +
+    #: defaulted (the ``extreme_vol_status`` precedent) so every existing
+    #: construction is byte-identical. An ABSTAIN status is RECORDED but
+    #: never a rejection.
+    regime_fragility_status: str | None = None
+    #: The measured per-axis per-stratum numbers behind
+    #: ``regime_fragility_status`` (trade counts / expectancies /
+    #: positive-P&L shares + ``taxonomy_version`` — full precision, never
+    #: rounded), or ``None`` whenever the status is ``None`` OR the
+    #: evidence was absent (the visible evidence-None abstain).
+    regime_fragility_stats: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,6 +970,43 @@ def run_stage4_cascade(
         survivors = kept
         stage_survivors[FilterStage.EXTREME_VOL_STRATUM.value] = len(survivors)
 
+    # ── #11 REGIME-FRAGILITY GATE (per-candidate, DEFAULT-OFF —
+    # DEC-REGIME-FRAGILITY-GATE-001). Gated on the config flag: when OFF
+    # (the default) this block does not execute AT ALL — no stage_survivors
+    # key, no verdict fields, report byte-identical. Scope is deliberately
+    # MINIMAL: only candidates surviving to #11 are evaluated (an
+    # earlier-stage reject never gains a fragility status — it was already
+    # decided). The ABSTAIN status ("insufficient_strata") is RECORDED but
+    # NEVER rejects — data unavailability is visible honesty, not a
+    # failure. ──
+    regime_fragility_status_by_id: dict[str, str] = {}
+    regime_fragility_stats_by_id: dict[str, dict[str, object]] = {}
+    if config.regime_fragility:
+        kept = []
+        for c in survivors:
+            if c.trade_pnls_paisa is None or (
+                c.trade_trend_tokens is None and c.trade_era_labels is None
+            ):
+                # Evidence unavailable (an old manifest / a hand-built
+                # caller): honest ABSTAIN — visible, never a reject
+                # (Golden Rule #1).
+                regime_fragility_status_by_id[c.candidate_id] = "insufficient_strata"
+                kept.append(c)
+                continue
+            fv = evaluate_fragility(
+                c.trade_pnls_paisa,
+                trend_tokens=c.trade_trend_tokens,
+                era_labels=c.trade_era_labels,
+            )
+            regime_fragility_status_by_id[c.candidate_id] = fv.status
+            regime_fragility_stats_by_id[c.candidate_id] = fv.stats
+            if fv.status == "fail":
+                reject(c, FilterStage.REGIME_FRAGILITY, fv.detail)
+            else:
+                kept.append(c)
+        survivors = kept
+        stage_survivors[FilterStage.REGIME_FRAGILITY.value] = len(survivors)
+
     # ── Composite ranking of survivors (spec 686-697) ──
     scores = _composite_scores(survivors, lockbox_sharpe_by_id)
     # Deterministic TOTAL order (DEC-STATS-GATE-INTEGRITY-001 R2-SR-F6,
@@ -953,12 +1040,18 @@ def run_stage4_cascade(
     # (DEC-REGIME-MUST-SURVIVE-STRATUM-001): both default to ``None``, so a
     # flag-OFF run (empty maps) stamps every verdict with its own defaults —
     # provably byte-identical to the pre-filter report.
+    # The regime-fragility filter #11 fields ride the SAME recording-only
+    # stamp (DEC-REGIME-FRAGILITY-GATE-001): both default to ``None``, so a
+    # flag-OFF run (empty maps) stamps every verdict with its own defaults —
+    # provably byte-identical to the pre-filter report.
     ordered_verdicts = tuple(
         replace(
             verdicts[cid],
             cpcv_pass_rate=cpcv_rate_by_id.get(cid),
             extreme_vol_status=extreme_vol_status_by_id.get(cid),
             extreme_vol_stats=extreme_vol_stats_by_id.get(cid),
+            regime_fragility_status=regime_fragility_status_by_id.get(cid),
+            regime_fragility_stats=regime_fragility_stats_by_id.get(cid),
         )
         for cid in ids
     )

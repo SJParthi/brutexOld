@@ -582,6 +582,10 @@ def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
     data = asdict(config)
     if data.get("extreme_vol_stratum") is False:
         del data["extreme_vol_stratum"]
+    # The filter-#11 flag rides the SAME elision law
+    # (DEC-REGIME-FRAGILITY-GATE-001): emitted ONLY when True.
+    if data.get("regime_fragility") is False:
+        del data["regime_fragility"]
     return data
 
 
@@ -749,16 +753,21 @@ def build_candidate_input(
     CandidateInput
         The reconstructed cascade input.
     """
-    from datetime import date
+    from datetime import date, datetime
+    from decimal import Decimal
 
     from brutex.calendars.nse import IST
+    from brutex.data.models import CandleBar
+    from brutex.engine.combo_aggregates import TREND_UNKNOWN
     from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.session_lens import build_session_lens
     from brutex.engine.sweep_driver import build_equity_curve
     from brutex.engine.trade_sim import simulate_trades
     from brutex.metrics.cascade import CandidateInput
     from brutex.metrics.compute import compute_metrics
     from brutex.metrics.cpcv import sharpe_of_returns
     from brutex.metrics.extreme_vol_stratum import classify_extreme_sessions
+    from brutex.metrics.regime_taxonomy import era_for_date
     from brutex.strategies.types import Side
 
     side = Side.BUY if direction_label == "bull" else Side.SELL
@@ -815,6 +824,62 @@ def build_candidate_input(
     extreme_sessions = classify_extreme_sessions(daily_closes)
     extreme_flags = tuple(t.entry_ts.astimezone(IST).date() in extreme_sessions for t in trades)
     trade_pnls = tuple(t.pnl_paisa for t in trades)
+
+    # Filter #11 evidence (DEC-REGIME-FRAGILITY-GATE-001), trade order:
+    # * ERA labels — the pure taxonomy bisect over each trade's ENTRY date.
+    # * TREND tokens — the session-lens vocabulary at each trade's ENTRY
+    #   session, via the ONE production classifier (`build_session_lens`,
+    #   §11 COMMON — never a second trend fold) over per-session DAILY
+    #   bars folded from the SAME `bars` already in hand (per IST session:
+    #   first open / max high / min low / last close / summed volume; the
+    #   session's FIRST timestamp keys the bar, so the folded series is
+    #   strictly increasing with one bar per IST date by construction —
+    #   the lens input contract). One extra O(bars) fold + one
+    #   O(sessions) lens build per candidate (disclosed cost; no lake
+    #   I/O). The lens `instrument` drives ONLY the expiry EVENT flag,
+    #   which this evidence never consumes — a sentinel token is passed
+    #   and the lens's expiry arm abstains lens-wide (one INFO per
+    #   candidate build; honest, nothing fabricated).
+    session_first_ts: dict[date, datetime] = {}
+    session_open: dict[date, Decimal] = {}
+    session_high: dict[date, Decimal] = {}
+    session_low: dict[date, Decimal] = {}
+    session_close: dict[date, Decimal] = {}
+    session_volume: dict[date, int] = {}
+    for bar in bars:
+        day = bar.timestamp.astimezone(IST).date()
+        if day not in session_first_ts:
+            session_first_ts[day] = bar.timestamp
+            session_open[day] = bar.open
+            session_high[day] = bar.high
+            session_low[day] = bar.low
+            session_volume[day] = 0
+        else:
+            session_high[day] = max(session_high[day], bar.high)
+            session_low[day] = min(session_low[day], bar.low)
+        session_close[day] = bar.close
+        session_volume[day] += bar.volume
+    # Insertion order == chronological (bars are strictly increasing).
+    session_daily = tuple(
+        CandleBar(
+            timestamp=session_first_ts[day],
+            open=session_open[day],
+            high=session_high[day],
+            low=session_low[day],
+            close=session_close[day],
+            volume=session_volume[day],
+            open_interest=None,
+        )
+        for day in session_first_ts
+    )
+    lens = build_session_lens(session_daily, instrument="CASCADE-REGIME-FRAGILITY")
+    trend_tokens = tuple(
+        TREND_UNKNOWN
+        if (regime := lens.trend_by_date.get(t.entry_ts.astimezone(IST).date())) is None
+        else regime.value
+        for t in trades
+    )
+    era_labels = tuple(era_for_date(t.entry_ts.astimezone(IST).date()).label for t in trades)
 
     # Train/holdout split via the ONE shared resolver (R2-SR-F1): the training
     # references are measured over the bars strictly BEFORE the lockbox window
@@ -884,6 +949,8 @@ def build_candidate_input(
         lockbox_trade_days=trade_days,
         extreme_vol_entry_flags=extreme_flags,
         trade_pnls_paisa=trade_pnls,
+        trade_trend_tokens=trend_tokens,
+        trade_era_labels=era_labels,
         mc_n_bars=len(bars),
         mc_n_entries=n_entries,
         mc_evaluate=_make_mc_evaluate(
@@ -1173,6 +1240,15 @@ def _verdict_to_dict(verdict: CandidateVerdict) -> dict[str, object]:
         out["extreme_vol_status"] = verdict.extreme_vol_status
         out["extreme_vol_stats"] = (
             None if verdict.extreme_vol_stats is None else dict(verdict.extreme_vol_stats)
+        )
+    # The filter-#11 keys ride the SAME EMIT-ON-PRESENT law
+    # (DEC-REGIME-FRAGILITY-GATE-001).
+    if verdict.regime_fragility_status is not None:
+        out["regime_fragility_status"] = verdict.regime_fragility_status
+        out["regime_fragility_stats"] = (
+            None
+            if verdict.regime_fragility_stats is None
+            else dict(verdict.regime_fragility_stats)
         )
     return out
 
