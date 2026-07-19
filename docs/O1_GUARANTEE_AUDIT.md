@@ -282,7 +282,7 @@ Fixes (each one line; test files named):
 
 ## Assurance verification evidence (2026-07-18)
 
-**Decision ID:** DEC-O1-GUARANTEE-VERIFY-001 · **Ledger:** MIGRATION.md #1954
+**Decision ID:** DEC-O1-GUARANTEE-VERIFY-001 · **Ledger:** MIGRATION.md #2012
 
 This section RECORDS an independent, evidence-based re-verification of the
 O(1) guarantee classified above — it does not change any row. Executed

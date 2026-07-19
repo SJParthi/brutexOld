@@ -10,7 +10,7 @@
 > DEC-SCOREBOARD-REFRESH-002 / #918 and the in-between #935 sweep). The number in the last column is the
 > **ledger entry** (`docs/MIGRATION.md #NNN`), the authoritative record of each change._
 >
-> _Assurance-verified 2026-07-18 (DEC-O1-GUARANTEE-VERIFY-001 / #1954) — an independent, evidence-based
+> _Assurance-verified 2026-07-18 (DEC-O1-GUARANTEE-VERIFY-001 / #2012) — an independent, evidence-based
 > re-verification pass re-ran the quality gates read-only and recorded the executed pass-counts + the
 > honest not-yet-green rows in the new **[Independent assurance verification](#-independent-assurance-verification-2026-07-18)**
 > section below. It does NOT regenerate the customer themes through the newest ledger — those remain at

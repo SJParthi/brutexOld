@@ -9,7 +9,7 @@
   — the MIGRATION.md entry lands only AFTER operator sign-off, with a
   coordinator-reserved entry number. This ADR file is the design record; the
   ledger row and the CLAUDE.md blurb land with the implementation PRs.
-  — LEDGERED 2026-07-16 as MIGRATION.md #1830 (the Status-ACCEPTED
+  — LEDGERED 2026-07-16 as MIGRATION.md #2011 (the Status-ACCEPTED
   paperwork PR beside this Status flip).
 - **Deciders:** operator (sign-off pending) · orchestration-track owner ·
   coordinator · the Dhan feed track (adapter-contract declarations only)
@@ -1971,7 +1971,7 @@ fixes, no new mechanism — folded @ this commit:
 - **RESOLVED (2026-07-16):** the questions above are resolved by the
   operator's landing decision (PR #1555 merged to main) + the 2026-07-15/16
   rulings recorded in-ADR (§§2-9, §15.1) and in the ledger
-  (`DEC-DUAL-VENDOR-PIPELINE-001`, MIGRATION.md #1830; Q1's chosen
+  (`DEC-DUAL-VENDOR-PIPELINE-001`, MIGRATION.md #2011; Q1's chosen
   disposition (a) shipped as DEC-OPTIONS-PREBUILD-RETIRE-001,
   MIGRATION.md #1831).
 
