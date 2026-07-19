@@ -3772,9 +3772,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         detail=f"unknown security_id {symbol!r} — not in the instrument store",
                     )
                 # P7 arm (v) — the /pull-all inline ?symbol= selection
-                # (DEC-UNIVERSE-INDEX-ONLY-001; the route's ValueError → 400
-                # mapping below carries the refusal).
-                screen_pull_scope([instrument])
+                # (DEC-UNIVERSE-INDEX-ONLY-001). Tight per-call mapping (the
+                # arm-(iv) idiom, r4 item-6 consistency fold): only the
+                # screen's refusal reads as a client 400 — an internal
+                # ValueError from the surrounding store reads keeps its
+                # loud-500 taxonomy instead of masquerading as a client
+                # error; the HTTPException propagates through the offload.
+                try:
+                    screen_pull_scope([instrument])
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
                 return [instrument], f"{symbol} spot"
             if kind is not None:
                 return _select_bulk_targets(kind), f"{kind} spot"
@@ -3993,9 +4000,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         detail=f"unknown security_id {symbol!r} — not in the instrument store",
                     )
                 # P7 arm (iii) — the metadata route's inline ?symbol= selection
-                # (DEC-UNIVERSE-INDEX-ONLY-001; the route's ValueError → 400
-                # mapping below carries the refusal).
-                screen_pull_scope([instrument])
+                # (DEC-UNIVERSE-INDEX-ONLY-001). Tight per-call mapping (the
+                # arm-(iv) idiom, r4 item-6 consistency fold): only the
+                # screen's refusal reads as a client 400 — an internal
+                # ValueError from the surrounding store reads keeps its
+                # loud-500 taxonomy; the HTTPException propagates through
+                # the offload.
+                try:
+                    screen_pull_scope([instrument])
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
                 selected = [instrument]
                 label = f"{symbol} metadata"
             elif kind is not None:
