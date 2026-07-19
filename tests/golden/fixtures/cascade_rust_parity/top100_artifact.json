@@ -1,0 +1,849 @@
+{
+  "builds": [
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":0,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":0,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 0,
+        "sha256": "68fc7e9456ed95aafd144349bb9e116b6a12616fa9f9015b365a32cb4bc788c8",
+        "warns": []
+      },
+      "name": "empty_pool"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000024\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000024\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"1c9431976b28d3e91f734dcfb5de15145826ef2492dfdbeea92ad130998d0e4b\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000024\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000025\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000025\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"79c5233c7de4610db06a5b0911816b07e6307af41d1d197e39a1f4bb6d5d281c\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":12.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":0.9,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000025\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-a\",\"snap-b\"],\"excluded_no_aggs\":1,\"families_collapsed\":0,\"gate_passers\":2,\"margin_roi_wired\":false,\"parity_excluded\":3,\"pool\":2,\"reasons_wired\":false,\"stores\":2,\"zero_trade_excluded\":2}}\n",
+        "n_entries": 2,
+        "sha256": "e5c609a83b12f7ba80c53fd6352bc4c390bf36ee42ac72dcbae80a9e68b7dcfb",
+        "warns": []
+      },
+      "name": "basic_two"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"ema20_above_ema200\",\"ema20_below_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k2_cccccccccccccccc\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000021\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000021\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000030\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":null,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"140c3b01af3c3ea22f5dbc4205f969b5a1b14c3e864076e9e9ac281ddc3334d2\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":3.5,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000021\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_cccccccccccccccc\"},\"family_id\":\"000000000000000000000000000000000000000000000000000000000000001f\",\"family_members\":[\"000000000000000000000000000000000000000000000000000000000000001f\",\"0000000000000000000000000000000000000000000000000000000000000020\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000001\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"92f1cf911a56e1e1fa7f1eb3dcea5f29288527d63572334615ea1bb1032abd55\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":9.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"000000000000000000000000000000000000000000000000000000000000001f\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/5minute/bull_k2_dddddddddddddddd\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000022\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000022\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000005\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"46ce6a5bf683d457426a6729a5325edf578e239f6d61e785c436aa1b80666c73\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":21.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":3,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000022\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":1,\"gate_passers\":4,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":5,\"reasons_wired\":false,\"stores\":2,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 3,
+        "sha256": "14072b72994de87dbdb916604ca167c78dae9c6033170b337801aa6eba15f9e0",
+        "warns": []
+      },
+      "name": "twin_collapse"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000029\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000029\",\"000000000000000000000000000000000000000000000000000000000000002a\",\"000000000000000000000000000000000000000000000000000000000000002b\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000003\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"eb643b73a8edc116ee3759f37dc63668779b4627fa59ccbbaf96dedf88c82284\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"000000000000000000000000000000000000000000000000000000000000002b\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":1,\"gate_passers\":2,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":3,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "a7cd3f20b313eba11be9dc6fefc4f0db896611399b08d1a2adb1b9e93adc49ff",
+        "warns": []
+      },
+      "name": "gated_representative_fallback"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"zz-custom\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000033\",\"0000000000000000000000000000000000000000000000000000000000000034\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000001\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"cffa39b30930d183dedb33e03ec760881e87b2b3f2ba7da8b824dc43dc0b103a\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000034\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":1,\"gate_passers\":2,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":2,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "66c5eb2ca3a30adbea20678952363d3472e58bfc569abfb0887f6590b70aae68",
+        "warns": []
+      },
+      "name": "custom_family_id_fallback"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000002\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000002\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":3.0,\"composite_score\":1.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"322a6321d2d01b617b6f4ba91d88270d68d9c300c5cb2cf1b5b7301f0f37afd2\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":2,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":5.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.7,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000002\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000003\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":2.0,\"composite_score\":null,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"c56c9333de38edaf7d812ff3adccf69afeeba62c399544683cca4b9ecfeabe3e\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":1,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":5.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":2.0,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.3,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000001\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":1.0,\"composite_score\":2.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"55b0ee70812b98412240cedea7b0876e2648272d8afc452636eacc0dafeb5955\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":2.0,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.5,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":3,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000004\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000004\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.5,\"composite_score\":3.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"03939046bf79694ece8b593f6affd9f66db6dd27f7f04d43ccfbff54335e0216\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":9,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":20.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.21,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.9,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":4,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000004\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":4,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":4,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 4,
+        "sha256": "e896579506fdd58d030027e6552e06232360c04b505588ca078408fc24e23e9d",
+        "warns": [
+          {
+            "event": "top100.unknown_preset",
+            "requested": "bogus-token",
+            "resolved": "min_dd_first"
+          }
+        ]
+      },
+      "name": "unknown_preset_degrades"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000004\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000004\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.5,\"composite_score\":3.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"03939046bf79694ece8b593f6affd9f66db6dd27f7f04d43ccfbff54335e0216\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":9,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":20.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.21,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.9,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000004\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000001\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":1.0,\"composite_score\":2.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"55b0ee70812b98412240cedea7b0876e2648272d8afc452636eacc0dafeb5955\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":2.0,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.5,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000001\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000002\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000002\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":3.0,\"composite_score\":1.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"322a6321d2d01b617b6f4ba91d88270d68d9c300c5cb2cf1b5b7301f0f37afd2\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":2,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":5.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.7,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":3,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000002\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000003\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":2.0,\"composite_score\":null,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"c56c9333de38edaf7d812ff3adccf69afeeba62c399544683cca4b9ecfeabe3e\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":1,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":5.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":2.0,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.3,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":4,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"composite\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":4,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":4,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 4,
+        "sha256": "d8ec30ee100e575eb3df3cc02152c199d23808282628a87c0c2454d98f397128",
+        "warns": []
+      },
+      "name": "preset_composite_build"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000026\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000026\"],\"instrument\":\"NIFTY\",\"margin_roi\":{\"detail\":\"margin history unverified for NIFTY\",\"roi_pct\":null,\"status\":\"unverified\"},\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"4d7d1d9e2c234d1c4ab02e6c9f4ff326c71f9a732507c75b6b4161ef69d2df17\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":{\"plain\":\"mask 0x7 plain\",\"technical\":\"mask 0x7 technical\"},\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000026\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"ema20_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000027\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000027\"],\"instrument\":\"NIFTY\",\"margin_roi\":{\"detail\":\"margin history unverified for NIFTY\",\"roi_pct\":null,\"status\":\"unverified\"},\"mask_hex\":\"00000000000000000000000000000010\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"a6e7cdae82a860c0774cf9066af2316eef971bb9fc9aa9c2aa51cf934a2bf7d9\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":11.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000027\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":2,\"margin_roi_wired\":true,\"parity_excluded\":0,\"pool\":2,\"reasons_wired\":true,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 2,
+        "sha256": "e2e339602db24265ec365ce95ba3c4df26bf8b275a95b63ec50be45a7841ab8d",
+        "warns": []
+      },
+      "name": "providers_wired"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":4,\"n_survived\":3,\"state\":\"joined\",\"sweep_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\"},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"cascade_composite\":2.5,\"cpcv_pass_rate\":0.3333333333333333,\"detail\":\"survived all Stage-4 filters\",\"provisional\":false,\"rejected_at\":null,\"status\":\"pass\",\"survivor_rank\":1},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"000000000000000000000000000000000000000000000000000000000000003d\",\"family_members\":[\"000000000000000000000000000000000000000000000000000000000000003d\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"cpcv_pass_pct\":33.33333333333333,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"8e80b74635ecc078377c8670ffd6aa9b395ca9b47806174e3111cecfd74e7b1c\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":4.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"000000000000000000000000000000000000000000000000000000000000003d\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"cascade_composite\":1.5,\"cpcv_pass_rate\":1.0,\"detail\":\"survived all Stage-4 filters\",\"provisional\":true,\"rejected_at\":null,\"status\":\"provisional_pass\",\"survivor_rank\":2},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"000000000000000000000000000000000000000000000000000000000000003e\",\"family_members\":[\"000000000000000000000000000000000000000000000000000000000000003e\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"cpcv_pass_pct\":100.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"3c360b400e3716c12dee28071a121ac2d0540412fc46e46b71227a2a5eaa2733\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":5.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"000000000000000000000000000000000000000000000000000000000000003e\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"cascade_composite\":null,\"cpcv_pass_rate\":0.25,\"detail\":\"cpcv 0.2500 < 0.5\",\"provisional\":false,\"rejected_at\":\"cpcv\",\"status\":\"fail\",\"survivor_rank\":null},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"000000000000000000000000000000000000000000000000000000000000003f\",\"family_members\":[\"000000000000000000000000000000000000000000000000000000000000003f\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"cpcv_pass_pct\":25.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"ea99411b7ded57a73be961f6c86f4fba1e262326366861c75c9dda5c5d8c3daa\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":6.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":3,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"000000000000000000000000000000000000000000000000000000000000003f\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"cascade_composite\":1.5,\"cpcv_pass_rate\":null,\"detail\":\"survived all Stage-4 filters\",\"provisional\":false,\"rejected_at\":null,\"status\":\"pass\",\"survivor_rank\":3},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000040\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000040\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"205973c6561dc9754a2c6392531703e85fb145bbe222adbc501f7d2a9c321ac1\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":7.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":4,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000040\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"not_in_cascade_pool\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000041\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000041\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"17d03f5c85b5dc328500443ebb98c15e6af2c4c263cf5440d30daeb68bc4b7b2\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":8.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":5,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000041\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":5,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":5,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 5,
+        "sha256": "a9628297cd472fad7b37af70dc919825d878d9fd332a163e5612a80daa7be8ce",
+        "warns": []
+      },
+      "name": "cascade_joined_states"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":2,\"n_survived\":1,\"state\":\"joined\",\"sweep_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\"},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"duplicate_candidate_id\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000047\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000047\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"78cae9b34684f2dab55bca25074343d731a2c9e88b85aa6ea6afff52f1b14a76\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000047\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}},{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"cascade_composite\":1.5,\"cpcv_pass_rate\":0.75,\"detail\":\"survived all Stage-4 filters\",\"provisional\":false,\"rejected_at\":null,\"status\":\"pass\",\"survivor_rank\":1},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000048\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000048\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"cpcv_pass_pct\":75.0,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"1dac044790cc41659b1c408dd7fad550681725f9875a6eaf890488f9ece7952a\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":12.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":2,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000048\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":2,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":2,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 2,
+        "sha256": "41c802308ec2613084d9363b31970aacf446ae247d2fa5537f40db203bb196b4",
+        "warns": []
+      },
+      "name": "cascade_ambiguous_id"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"sweep_id_mismatch\",\"sweep_id\":\"0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d\"},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"sweep_id_mismatch\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000049\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000049\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"a9b83f0864e07ac77b578a72b709d4279b88ab76daac59009df3344229a3212a\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000049\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "feb2cb1f467a3ef261e7ea04848775c30a0a6956ee1254dd8cc3d09fa31156ad",
+        "warns": [
+          {
+            "event": "top100.cascade_sweep_id_mismatch",
+            "report_sweep_id": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+            "run_id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          }
+        ]
+      },
+      "name": "cascade_sweep_id_mismatch"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NSE-NIFTY-\\u2122\\u03c0\":\"baseline-\\u2122.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull-\\u03b2\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NSE-NIFTY-\\u2122\\u03c0/1minute/bull_k1_\\u03c0\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000051\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000051\"],\"instrument\":\"NSE-NIFTY-\\u2122\\u03c0\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"840d7d6252b679d588802ef97d002479f8aab918601e2e8920e176a40e72888c\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000051\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "99a49d023e3cd34d0c9f51b03bd4e405e1dd9cf8d90acb5e2f841137a2a775da",
+        "warns": []
+      },
+      "name": "unicode_fields"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000052\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000052\"],\"instrument\":\"BAD-\\ud800-SURROGATE\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"5a456f3257ff05c0d11a2aa92f52e853051de30a1236c6e306249ae198a17f49\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000052\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "524f6ea15c710fe4259688f7c6cea96d1fe1768b844fcb55617af3c535bbffb1",
+        "warns": []
+      },
+      "name": "lone_surrogate_instrument"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\",\"close_below_ema200\",\"ema20_above_ema200\",\"ema20_below_ema200\",\"near_pivot_p\",\"near_pivot_r1\",\"near_pivot_r2\",\"near_pivot_r3\",\"near_pivot_s1\",\"near_pivot_s2\",\"near_pivot_s3\",\"close_above_pdh\",\"close_below_pdh\",\"close_above_pdl\",\"close_below_pdl\",\"near_pdh\",\"near_pdl\",\"near_fib_0\",\"near_fib_236\",\"near_fib_382\",\"near_fib_50\",\"near_fib_618\",\"near_fib_786\",\"near_fib_100\",\"near_fib_1272\",\"near_fib_1618\",\"near_fib_200\",\"near_fib_2618\",\"bar_bullish\",\"bar_bearish\",\"bar_doji\",\"bar_large_body\",\"bar_small_body\",\"long_upper_wick\",\"long_lower_wick\",\"prior_n_bullish\",\"prior_n_bearish\",\"prior_alternating\",\"close_at_day_high\",\"close_at_day_low\",\"close_in_upper_third\",\"close_in_lower_third\",\"early_morning\",\"mid_morning\",\"midday\",\"afternoon\",\"gap_up_day\",\"gap_down_day\",\"inside_day\",\"outside_day\",\"close_above_vwap\",\"close_below_vwap\",\"near_pivot_r5\",\"near_pivot_s5\",\"bos_bullish\",\"bos_bearish\",\"choch_bullish\",\"choch_bearish\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000053\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000053\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000fffffffffffffff\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":-2305843009213693952,\"fingerprint\":\"42badeef3ba360f7ff3a90cc468eb0b7cddf84ae82f46294c983aa7e5c4e2b00\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":4611686018427387905,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":9007199254740993,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":4611686018427387904,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000053\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "fac46367fdf4d6ddd6b1168d8970bfc79d962bcb1cbb8a7b92694d6314b0cb6f",
+        "warns": []
+      },
+      "name": "huge_ints_max_mask"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000054\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000054\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"33b3490439945eb00395c8606b777a5c3a268676d8a13c900139cb5be46e8ddc\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":[[\"2024-01-02\",-500]]},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000054\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":null}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "4d493c4114f87025aa8c5b0b239708e1e9044919d1d349bc0ae1329ebfb4b89f",
+        "warns": []
+      },
+      "name": "vix_partial_trio_none"
+    },
+    {
+      "expect": {
+        "json": "{\"baselines\":{\"NIFTY\":\"baseline-NIFTY.json\"},\"cascade_join\":{\"n_input\":null,\"n_survived\":null,\"state\":\"no_report\",\"sweep_id\":null},\"entries\":[{\"arm\":{\"sl_paisa\":80,\"tp_paisa\":50},\"cascade\":{\"reason\":\"no_report\",\"status\":\"not_validated\"},\"conditions\":[\"close_above_ema20\",\"close_below_ema20\",\"close_above_ema200\"],\"direction\":\"bull\",\"equity_ref\":{\"sidecar\":\"equity\",\"tuple\":\"NIFTY/1minute/bull_k1_deadbeefdeadbeef\"},\"family_id\":\"0000000000000000000000000000000000000000000000000000000000000055\",\"family_members\":[\"0000000000000000000000000000000000000000000000000000000000000055\"],\"instrument\":\"NIFTY\",\"margin_roi\":null,\"mask_hex\":\"00000000000000000000000000000007\",\"metrics\":{\"avg_entry_price\":\"100.00\",\"avg_exit_price\":\"100.25\",\"calmar_ratio\":0.8,\"composite_score\":1.25,\"deflated_sharpe\":null,\"equity_status\":\"no_1m_data\",\"exits\":{\"end_of_data\":0,\"forced_1520\":5,\"session_gap\":0,\"signal\":20,\"stop_loss\":5,\"take_profit\":10},\"expectancy_paisa\":250,\"fingerprint\":\"455cd1e4c32b117585cf41291140f2e3b06cf297bc0e4e55fd45ac4a28a1a319\",\"gross_loss_paisa\":6000,\"gross_profit_paisa\":16000,\"losing_trades\":15,\"mae_1m_avg_paisa\":null,\"mae_1m_p95_paisa\":null,\"mae_1m_worst_paisa\":null,\"mae_avg_paisa\":120,\"mae_p95_paisa\":350,\"mae_worst_paisa\":400,\"max_consecutive_losses\":3,\"max_consecutive_wins\":6,\"max_dd_minute_path_paisa\":1500,\"max_dd_minute_path_pct\":1.5,\"max_drawdown_paisa\":2000,\"max_drawdown_pct\":10.0,\"mfe_1m_avg_paisa\":null,\"mfe_1m_best_paisa\":null,\"mfe_1m_p95_paisa\":null,\"mfe_avg_paisa\":300,\"mfe_best_paisa\":900,\"mfe_p95_paisa\":800,\"net_pnl_paisa\":10000,\"profit_factor\":1.5,\"recovery_factor\":5.0,\"sharpe_ratio\":1.0,\"sortino_ratio\":1.2,\"total_trades\":40,\"trades_with_1m\":0,\"win_loss_ratio\":2.5,\"win_rate\":0.625,\"winning_trades\":25,\"worst5_days\":\"free-form\"},\"rank\":1,\"reasons\":null,\"regime\":{\"by_trend\":{\"unknown\":10000},\"by_year\":{\"2024\":10000},\"entry_hour_hist\":{\"9\":40},\"event_days\":{\"counts\":{},\"pnl\":{}},\"one_regime_wonder\":false,\"regime_wonder_axis\":null},\"run_id\":\"0000000000000000000000000000000000000000000000000000000000000055\",\"tf\":\"1minute\",\"vix_band\":{\"hi\":17.0,\"lo\":12.5,\"loss\":{\"avg\":13.0,\"max\":16.0,\"min\":11.0},\"missing\":0,\"stamped\":40,\"win\":{\"avg\":14.5,\"max\":18.0,\"min\":12.0}}}],\"preset\":\"min_dd_first\",\"run_id\":\"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0\",\"schema_version\":1,\"source\":{\"data_snapshot_hashes\":[\"snap-1\"],\"excluded_no_aggs\":0,\"families_collapsed\":0,\"gate_passers\":1,\"margin_roi_wired\":false,\"parity_excluded\":0,\"pool\":1,\"reasons_wired\":false,\"stores\":1,\"zero_trade_excluded\":0}}\n",
+        "n_entries": 1,
+        "sha256": "cd332398b187af581203eef649b469cb49e86bb7754d2bac1ca611b3cdaa8027",
+        "warns": []
+      },
+      "name": "worst5_nonlist_json_passthrough"
+    },
+    {
+      "expect": {
+        "entry_run_ids": [
+          "000000000000000000000000000000000000000000000000000000000000044c",
+          "0000000000000000000000000000000000000000000000000000000000000431",
+          "0000000000000000000000000000000000000000000000000000000000000416",
+          "00000000000000000000000000000000000000000000000000000000000003fb",
+          "0000000000000000000000000000000000000000000000000000000000000444",
+          "0000000000000000000000000000000000000000000000000000000000000429",
+          "000000000000000000000000000000000000000000000000000000000000040e",
+          "00000000000000000000000000000000000000000000000000000000000003f3",
+          "000000000000000000000000000000000000000000000000000000000000043c",
+          "0000000000000000000000000000000000000000000000000000000000000421",
+          "0000000000000000000000000000000000000000000000000000000000000406",
+          "000000000000000000000000000000000000000000000000000000000000044f",
+          "00000000000000000000000000000000000000000000000000000000000003eb",
+          "0000000000000000000000000000000000000000000000000000000000000434",
+          "0000000000000000000000000000000000000000000000000000000000000419",
+          "00000000000000000000000000000000000000000000000000000000000003fe",
+          "0000000000000000000000000000000000000000000000000000000000000447",
+          "000000000000000000000000000000000000000000000000000000000000042c",
+          "0000000000000000000000000000000000000000000000000000000000000411",
+          "00000000000000000000000000000000000000000000000000000000000003f6",
+          "000000000000000000000000000000000000000000000000000000000000043f",
+          "0000000000000000000000000000000000000000000000000000000000000424",
+          "0000000000000000000000000000000000000000000000000000000000000409",
+          "00000000000000000000000000000000000000000000000000000000000003ee",
+          "0000000000000000000000000000000000000000000000000000000000000437",
+          "000000000000000000000000000000000000000000000000000000000000041c",
+          "0000000000000000000000000000000000000000000000000000000000000401",
+          "000000000000000000000000000000000000000000000000000000000000044a",
+          "000000000000000000000000000000000000000000000000000000000000042f",
+          "0000000000000000000000000000000000000000000000000000000000000414",
+          "00000000000000000000000000000000000000000000000000000000000003f9",
+          "0000000000000000000000000000000000000000000000000000000000000442",
+          "0000000000000000000000000000000000000000000000000000000000000427",
+          "000000000000000000000000000000000000000000000000000000000000040c",
+          "00000000000000000000000000000000000000000000000000000000000003f1",
+          "000000000000000000000000000000000000000000000000000000000000043a",
+          "000000000000000000000000000000000000000000000000000000000000041f",
+          "0000000000000000000000000000000000000000000000000000000000000404",
+          "000000000000000000000000000000000000000000000000000000000000044d",
+          "00000000000000000000000000000000000000000000000000000000000003e9",
+          "0000000000000000000000000000000000000000000000000000000000000432",
+          "0000000000000000000000000000000000000000000000000000000000000417",
+          "00000000000000000000000000000000000000000000000000000000000003fc",
+          "0000000000000000000000000000000000000000000000000000000000000445",
+          "000000000000000000000000000000000000000000000000000000000000042a",
+          "000000000000000000000000000000000000000000000000000000000000040f",
+          "00000000000000000000000000000000000000000000000000000000000003f4",
+          "000000000000000000000000000000000000000000000000000000000000043d",
+          "0000000000000000000000000000000000000000000000000000000000000422",
+          "0000000000000000000000000000000000000000000000000000000000000407",
+          "0000000000000000000000000000000000000000000000000000000000000450",
+          "00000000000000000000000000000000000000000000000000000000000003ec",
+          "0000000000000000000000000000000000000000000000000000000000000435",
+          "000000000000000000000000000000000000000000000000000000000000041a",
+          "00000000000000000000000000000000000000000000000000000000000003ff",
+          "0000000000000000000000000000000000000000000000000000000000000448",
+          "000000000000000000000000000000000000000000000000000000000000042d",
+          "0000000000000000000000000000000000000000000000000000000000000412",
+          "00000000000000000000000000000000000000000000000000000000000003f7",
+          "0000000000000000000000000000000000000000000000000000000000000440",
+          "0000000000000000000000000000000000000000000000000000000000000425",
+          "000000000000000000000000000000000000000000000000000000000000040a",
+          "00000000000000000000000000000000000000000000000000000000000003ef",
+          "0000000000000000000000000000000000000000000000000000000000000438",
+          "000000000000000000000000000000000000000000000000000000000000041d",
+          "0000000000000000000000000000000000000000000000000000000000000402",
+          "000000000000000000000000000000000000000000000000000000000000044b",
+          "0000000000000000000000000000000000000000000000000000000000000430",
+          "0000000000000000000000000000000000000000000000000000000000000415",
+          "00000000000000000000000000000000000000000000000000000000000003fa",
+          "0000000000000000000000000000000000000000000000000000000000000443",
+          "0000000000000000000000000000000000000000000000000000000000000428",
+          "000000000000000000000000000000000000000000000000000000000000040d",
+          "00000000000000000000000000000000000000000000000000000000000003f2",
+          "000000000000000000000000000000000000000000000000000000000000043b",
+          "0000000000000000000000000000000000000000000000000000000000000420",
+          "0000000000000000000000000000000000000000000000000000000000000405",
+          "000000000000000000000000000000000000000000000000000000000000044e",
+          "00000000000000000000000000000000000000000000000000000000000003ea",
+          "0000000000000000000000000000000000000000000000000000000000000433",
+          "0000000000000000000000000000000000000000000000000000000000000418",
+          "00000000000000000000000000000000000000000000000000000000000003fd",
+          "0000000000000000000000000000000000000000000000000000000000000446",
+          "000000000000000000000000000000000000000000000000000000000000042b",
+          "0000000000000000000000000000000000000000000000000000000000000410",
+          "00000000000000000000000000000000000000000000000000000000000003f5",
+          "000000000000000000000000000000000000000000000000000000000000043e",
+          "0000000000000000000000000000000000000000000000000000000000000423",
+          "0000000000000000000000000000000000000000000000000000000000000408",
+          "0000000000000000000000000000000000000000000000000000000000000451",
+          "00000000000000000000000000000000000000000000000000000000000003ed",
+          "0000000000000000000000000000000000000000000000000000000000000436",
+          "000000000000000000000000000000000000000000000000000000000000041b",
+          "0000000000000000000000000000000000000000000000000000000000000400",
+          "0000000000000000000000000000000000000000000000000000000000000449",
+          "000000000000000000000000000000000000000000000000000000000000042e",
+          "0000000000000000000000000000000000000000000000000000000000000413",
+          "00000000000000000000000000000000000000000000000000000000000003f8",
+          "0000000000000000000000000000000000000000000000000000000000000441",
+          "0000000000000000000000000000000000000000000000000000000000000426"
+        ],
+        "n_entries": 100,
+        "sha256": "af6110765ae1ab35a27af7af4c0e1a47dd5b2543b80f14c70d804e0efd1cfa2d",
+        "warns": []
+      },
+      "name": "limit_cap_105_to_100"
+    },
+    {
+      "expect": {
+        "error_str": "build_top100: duplicate candidate run_id '000000000000000000000000000000000000000000000000000000000000005b'",
+        "error_type": "Top100Error"
+      },
+      "name": "duplicate_run_id_refused"
+    },
+    {
+      "expect": {
+        "built": true,
+        "n_entries": 1,
+        "render_error_str": "Out of range float values are not JSON compliant: nan",
+        "render_error_type": "ValueError"
+      },
+      "name": "nan_composite_render_refused"
+    },
+    {
+      "expect": {
+        "built": true,
+        "n_entries": 1,
+        "render_error_str": "Out of range float values are not JSON compliant: inf",
+        "render_error_type": "ValueError"
+      },
+      "name": "inf_recovery_render_refused"
+    },
+    {
+      "expect": {
+        "error_str": "agg JSON column did not decode to an object: '[1,2]'",
+        "error_type": "Top100Error"
+      },
+      "name": "agg_regime_json_array_refused"
+    },
+    {
+      "expect": {
+        "error_str": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "error_type": "JSONDecodeError"
+      },
+      "name": "agg_regime_json_invalid_refused"
+    }
+  ],
+  "constants": {
+    "default_preset": "min_dd_first",
+    "entry_required_keys": [
+      "arm",
+      "conditions",
+      "direction",
+      "equity_ref",
+      "family_id",
+      "family_members",
+      "instrument",
+      "margin_roi",
+      "mask_hex",
+      "metrics",
+      "rank",
+      "reasons",
+      "regime",
+      "run_id",
+      "tf",
+      "vix_band"
+    ],
+    "filename": "top100.json",
+    "gate_max_consecutive_losses": 10,
+    "gate_max_drawdown_pct": 30.0,
+    "gate_min_profit_factor": 1.2,
+    "gate_min_trades": 30,
+    "gate_min_win_loss_ratio": 2.0,
+    "gate_min_win_rate": 0.25,
+    "limit": 100,
+    "presets": [
+      "min_dd_first",
+      "composite",
+      "profit_factor",
+      "win_rate",
+      "calmar"
+    ],
+    "schema_version": 1,
+    "stage": "top100",
+    "stamp_filename": "top100.stamp.json"
+  },
+  "constructors": [
+    {
+      "expect": {
+        "error_str": "Top100Candidate: row run_id '0000000000000000000000000000000000000000000000000000000000000001' != agg run_id '0000000000000000000000000000000000000000000000000000000000000002' \u2014 a mislabelled join would rank one combo under another's numbers",
+        "error_type": "Top100Error"
+      },
+      "name": "candidate_run_id_mismatch"
+    },
+    {
+      "expect": {
+        "error_str": "Top100Candidate.tuple_ref must be non-empty",
+        "error_type": "Top100Error"
+      },
+      "name": "candidate_empty_tuple_ref"
+    },
+    {
+      "expect": {
+        "error_str": "PoolCounts.stores must be >= 0, got -1",
+        "error_type": "Top100Error"
+      },
+      "name": "counts_negative_stores"
+    },
+    {
+      "expect": {
+        "error_str": "PoolCounts.excluded_no_aggs must be >= 0, got -1",
+        "error_type": "Top100Error"
+      },
+      "name": "counts_negative_no_aggs"
+    },
+    {
+      "expect": {
+        "error_str": "PoolCounts.zero_trade_excluded must be >= 0, got -2",
+        "error_type": "Top100Error"
+      },
+      "name": "counts_negative_zero_trade"
+    },
+    {
+      "expect": {
+        "error_str": "PoolCounts.parity_excluded must be >= 0, got -3",
+        "error_type": "Top100Error"
+      },
+      "name": "counts_negative_parity"
+    }
+  ],
+  "gates": [
+    {
+      "expect": true,
+      "name": "defaults_pass"
+    },
+    {
+      "expect": true,
+      "name": "trades_at_min"
+    },
+    {
+      "expect": false,
+      "name": "trades_below_min"
+    },
+    {
+      "expect": true,
+      "name": "pf_at_gate"
+    },
+    {
+      "expect": false,
+      "name": "pf_below_gate"
+    },
+    {
+      "expect": true,
+      "name": "dd_at_gate"
+    },
+    {
+      "expect": false,
+      "name": "dd_next_double_above_gate"
+    },
+    {
+      "expect": false,
+      "name": "low_wr_low_wlr_fails"
+    },
+    {
+      "expect": true,
+      "name": "low_wr_wlr_at_gate_passes"
+    },
+    {
+      "expect": false,
+      "name": "low_wr_none_wlr_substitutes_zero"
+    },
+    {
+      "expect": true,
+      "name": "wr_at_gate_passes"
+    },
+    {
+      "expect": true,
+      "name": "streak_at_gate"
+    },
+    {
+      "expect": false,
+      "name": "streak_above_gate"
+    }
+  ],
+  "load": [
+    {
+      "expect": {
+        "cascade_join": {
+          "n_input": null,
+          "n_survived": null,
+          "state": "no_report",
+          "sweep_id": null
+        },
+        "loaded": true,
+        "reloaded_sha256": "62f4ce7e22508882f28d81146760575dc7a4ac743adb48266fcf52be29932b59"
+      },
+      "name": "ok_roundtrip"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_unreadable"
+      },
+      "name": "stamp_missing"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_not_json"
+      },
+      "name": "stamp_not_json"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_bad_shape"
+      },
+      "name": "stamp_extra_key"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_bad_shape"
+      },
+      "name": "stamp_missing_key"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_wrong_stage"
+      },
+      "name": "stamp_wrong_stage"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_wrong_run_id"
+      },
+      "name": "stamp_wrong_run_id"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_bad_content_hash"
+      },
+      "name": "stamp_short_hash"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_bad_content_hash"
+      },
+      "name": "stamp_nonstr_hash"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "stamp_bad_produced_at"
+      },
+      "name": "stamp_produced_at_int"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "artifact_unreadable"
+      },
+      "name": "artifact_missing"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "artifact_hash_mismatch"
+      },
+      "name": "artifact_tampered"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "artifact_not_json"
+      },
+      "name": "artifact_not_json"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "artifact_not_object"
+      },
+      "name": "artifact_json_array"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "schema_version_mismatch"
+      },
+      "name": "schema_version_2"
+    },
+    {
+      "expect": {
+        "cascade_join": {
+          "n_input": null,
+          "n_survived": null,
+          "state": "no_report",
+          "sweep_id": null
+        },
+        "loaded": true,
+        "reloaded_sha256": "62f4ce7e22508882f28d81146760575dc7a4ac743adb48266fcf52be29932b59"
+      },
+      "name": "schema_version_true_bool_pun"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "artifact_wrong_run_id"
+      },
+      "name": "artifact_wrong_run_id"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_preset"
+      },
+      "name": "preset_empty"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_preset"
+      },
+      "name": "preset_int"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_source"
+      },
+      "name": "source_list"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_baselines"
+      },
+      "name": "baselines_int_value"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_entries"
+      },
+      "name": "entries_dict"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_entry_shape"
+      },
+      "name": "entry_missing_key"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_entry_shape"
+      },
+      "name": "entry_not_dict"
+    },
+    {
+      "expect": {
+        "loaded": false,
+        "reason": "bad_entry_rank_order"
+      },
+      "name": "entry_rank_zero_based"
+    },
+    {
+      "expect": {
+        "cascade_join": {
+          "n_input": null,
+          "n_survived": null,
+          "state": "no_report",
+          "sweep_id": null
+        },
+        "loaded": true,
+        "reloaded_sha256": "e5692c9b4892d841cacf4df62b02b0fe866427f7f4d7f96c056296585ea9e899"
+      },
+      "name": "entry_rank_true_bool_pun"
+    },
+    {
+      "expect": {
+        "cascade_join": null,
+        "loaded": true,
+        "reloaded_sha256": "50bdb62a7b9a8790fee16c821999a5be977f6548c61341ce7f9561f53e35a86c"
+      },
+      "name": "cascade_join_string_dropped"
+    },
+    {
+      "expect": {
+        "cascade_join": null,
+        "loaded": true,
+        "reloaded_sha256": "50bdb62a7b9a8790fee16c821999a5be977f6548c61341ce7f9561f53e35a86c"
+      },
+      "name": "cascade_join_absent_pre_change"
+    }
+  ],
+  "preset_resolution": [
+    {
+      "expect": {
+        "requested": null,
+        "resolved": "min_dd_first",
+        "warned": false
+      },
+      "name": "known_min_dd_first"
+    },
+    {
+      "expect": {
+        "requested": null,
+        "resolved": "composite",
+        "warned": false
+      },
+      "name": "known_composite"
+    },
+    {
+      "expect": {
+        "requested": null,
+        "resolved": "profit_factor",
+        "warned": false
+      },
+      "name": "known_profit_factor"
+    },
+    {
+      "expect": {
+        "requested": null,
+        "resolved": "win_rate",
+        "warned": false
+      },
+      "name": "known_win_rate"
+    },
+    {
+      "expect": {
+        "requested": null,
+        "resolved": "calmar",
+        "warned": false
+      },
+      "name": "known_calmar"
+    },
+    {
+      "expect": {
+        "requested": "junk",
+        "resolved": "min_dd_first",
+        "warned": true
+      },
+      "name": "unknown_junk"
+    },
+    {
+      "expect": {
+        "requested": "",
+        "resolved": "min_dd_first",
+        "warned": true
+      },
+      "name": "unknown_blank"
+    },
+    {
+      "expect": {
+        "requested": "MIN_DD_FIRST",
+        "resolved": "min_dd_first",
+        "warned": true
+      },
+      "name": "unknown_case_sensitive"
+    }
+  ],
+  "ranks": [
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000003",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000004"
+      ],
+      "name": "min_dd_first"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000004",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000003"
+      ],
+      "name": "composite"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000003",
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000004"
+      ],
+      "name": "profit_factor_tie_run_id"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000004",
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000003"
+      ],
+      "name": "win_rate"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000003",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000004"
+      ],
+      "name": "calmar"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "0000000000000000000000000000000000000000000000000000000000000003",
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "0000000000000000000000000000000000000000000000000000000000000004"
+      ],
+      "name": "unknown_degrades_to_default"
+    },
+    {
+      "expect": [
+        "0000000000000000000000000000000000000000000000000000000000000019",
+        "000000000000000000000000000000000000000000000000000000000000001a",
+        "0000000000000000000000000000000000000000000000000000000000000018",
+        "0000000000000000000000000000000000000000000000000000000000000017",
+        "0000000000000000000000000000000000000000000000000000000000000016",
+        "0000000000000000000000000000000000000000000000000000000000000015",
+        "000000000000000000000000000000000000000000000000000000000000001b",
+        "000000000000000000000000000000000000000000000000000000000000001c"
+      ],
+      "name": "min_dd_tie_ladder"
+    }
+  ],
+  "write_roundtrip": [
+    {
+      "expect": {
+        "artifact_filename": "top100.json",
+        "content_hash_matches": true,
+        "dir_files": [
+          "top100.json",
+          "top100.stamp.json"
+        ],
+        "file_equals_rendered": true,
+        "produced_at_is_str": true,
+        "reload_cascade_join_preserved": true,
+        "reload_equals_original": true,
+        "rendered_sha256": "62f4ce7e22508882f28d81146760575dc7a4ac743adb48266fcf52be29932b59",
+        "stamp_keys": [
+          "content_hash",
+          "produced_at_utc",
+          "run_id",
+          "stage"
+        ],
+        "stamp_run_id_matches": true,
+        "stamp_stage": "top100"
+      },
+      "name": "small_no_cascade"
+    },
+    {
+      "expect": {
+        "artifact_filename": "top100.json",
+        "content_hash_matches": true,
+        "dir_files": [
+          "top100.json",
+          "top100.stamp.json"
+        ],
+        "file_equals_rendered": true,
+        "produced_at_is_str": true,
+        "reload_cascade_join_preserved": true,
+        "reload_equals_original": true,
+        "rendered_sha256": "4d29e3c9eaf9c4807dbebf0f4cb4a39da7b9979faf4a4b470ebb07a205f92c15",
+        "stamp_keys": [
+          "content_hash",
+          "produced_at_utc",
+          "run_id",
+          "stage"
+        ],
+        "stamp_run_id_matches": true,
+        "stamp_stage": "top100"
+      },
+      "name": "small_with_cascade_join"
+    }
+  ]
+}

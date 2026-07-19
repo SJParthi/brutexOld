@@ -320,6 +320,121 @@ def capture_cascade_wire() -> dict[str, Any]:
     }
 
 
+def capture_top100_artifact() -> dict[str, Any]:
+    """Freeze the top100_artifact builder/writer/reader laws (slice 2b)."""
+    from brutex.engine.top100_artifact import (
+        DEFAULT_TOP100_PRESET,
+        ENTRY_REQUIRED_KEYS,
+        GATE_MAX_CONSECUTIVE_LOSSES,
+        GATE_MAX_DRAWDOWN_PCT,
+        GATE_MIN_PROFIT_FACTOR,
+        GATE_MIN_TRADES,
+        GATE_MIN_WIN_LOSS_RATIO,
+        GATE_MIN_WIN_RATE,
+        TOP100_FILENAME,
+        TOP100_LIMIT,
+        TOP100_PRESETS,
+        TOP100_SCHEMA_VERSION,
+        TOP100_STAGE,
+        TOP100_STAMP_FILENAME,
+        passes_hard_gates,
+        rank_candidates,
+        resolve_preset,
+    )
+    from structlog.testing import capture_logs
+
+    from tests.golden._top100_artifact_parity_corpus import (
+        build_cases,
+        constructor_cases,
+        gate_cases,
+        load_scenarios,
+        preset_resolution_cases,
+        rank_cases,
+        run_build_case,
+        run_load_scenario,
+        run_write_roundtrip,
+        write_roundtrip_cases,
+    )
+
+    constants = {
+        "schema_version": TOP100_SCHEMA_VERSION,
+        "stage": TOP100_STAGE,
+        "filename": TOP100_FILENAME,
+        "stamp_filename": TOP100_STAMP_FILENAME,
+        "limit": TOP100_LIMIT,
+        "default_preset": DEFAULT_TOP100_PRESET,
+        "presets": list(TOP100_PRESETS),
+        "entry_required_keys": sorted(ENTRY_REQUIRED_KEYS),
+        "gate_min_trades": GATE_MIN_TRADES,
+        "gate_min_profit_factor": GATE_MIN_PROFIT_FACTOR,
+        "gate_max_drawdown_pct": GATE_MAX_DRAWDOWN_PCT,
+        "gate_min_win_rate": GATE_MIN_WIN_RATE,
+        "gate_min_win_loss_ratio": GATE_MIN_WIN_LOSS_RATIO,
+        "gate_max_consecutive_losses": GATE_MAX_CONSECUTIVE_LOSSES,
+    }
+
+    gates = [
+        {"name": name, "expect": passes_hard_gates(candidate.row, candidate.agg)}
+        for name, candidate in gate_cases()
+    ]
+
+    presets: list[dict[str, Any]] = []
+    for name, token in preset_resolution_cases():
+        with capture_logs() as logs:
+            resolved = resolve_preset(token)
+        warns = [e for e in logs if e.get("event") == "top100.unknown_preset"]
+        presets.append(
+            {
+                "name": name,
+                "expect": {
+                    "resolved": resolved,
+                    "warned": bool(warns),
+                    "requested": warns[0]["requested"] if warns else None,
+                },
+            }
+        )
+
+    ranks = [
+        {
+            "name": name,
+            "expect": [c.row.run_id for c in rank_candidates(pool, preset=preset)],
+        }
+        for name, preset, pool in rank_cases()
+    ]
+
+    builds = [{"name": name, "expect": run_build_case(case)} for name, case in build_cases()]
+
+    constructors: list[dict[str, Any]] = []
+    for name, thunk in constructor_cases():
+        try:
+            thunk()
+        except BaseException as exc:
+            constructors.append(
+                {
+                    "name": name,
+                    "expect": {"error_type": type(exc).__name__, "error_str": str(exc)},
+                }
+            )
+        else:  # pragma: no cover - a passing thunk is a broken corpus
+            raise AssertionError(f"constructor case {name} did not raise")
+
+    writes = [
+        {"name": name, "expect": run_write_roundtrip(build)}
+        for name, build in write_roundtrip_cases()
+    ]
+    loads = [{"name": name, "expect": run_load_scenario(setup)} for name, setup in load_scenarios()]
+    return {
+        "constants": constants,
+        "gates": gates,
+        "preset_resolution": presets,
+        "ranks": ranks,
+        "builds": builds,
+        "constructors": constructors,
+        "write_roundtrip": writes,
+        "load": loads,
+    }
+
+
 def main() -> int:
     # PER-FILE refusal (slice 2a): each family whose fixture already exists is
     # skipped LOUDLY unless the regen env is set — so a later slice can add its
@@ -330,6 +445,7 @@ def main() -> int:
         "minute_path.json": capture_minute_path,
         "combo_aggregates.json": capture_combo_aggregates,
         "cascade_wire.json": capture_cascade_wire,
+        "top100_artifact.json": capture_top100_artifact,
     }
     regen = os.environ.get(_REGEN_ENV) == "1"
     wrote = 0
