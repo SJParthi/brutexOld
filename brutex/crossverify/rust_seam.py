@@ -50,6 +50,20 @@ oracle's outcome):
 ``MemoryError`` re-raises raw (an OOM stays a global stop — the errors.py
 doctrine); ``KeyboardInterrupt``/``SystemExit`` propagate.
 
+Concurrency envelope (round-1 hostile-review NIT-3 — the sibling-facade
+law, matching :mod:`brutex.data.lake_rust_stats` /
+:mod:`brutex.data.lake_rust_render`): the latch
+(:data:`_DISABLED_REASON`), the per-law burn-in budgets
+(:data:`_BURN_IN_REMAINING`) and the warn-once memo
+(:data:`_OBSERVABILITY_MEMO`) are the same documented exception to the
+no-global-mutable-state rule as the lake facades' — plain UNLOCKED
+writes. A racing thread (a BackgroundPullJob worker beside a CLI run in
+one process, flag ON) can at worst emit a duplicate WARN or run ±1 extra
+burn-in compare (memory-only), NEVER a wrong byte — a burn-in mismatch
+ships the oracle value regardless of which thread observes it, and the
+latch check-then-set race only delays the latch by one call. Default-OFF
+keeps the whole surface latent in production today.
+
 Cost honesty (Golden Rule #10): a uniformity conversion — the Python side
 still runs the full Decimal/datetime validation + cell pre-formatting in
 BOTH arms, so the engaged path adds one FFI hop per file/mapping and the
@@ -429,8 +443,10 @@ def routed_canonical_identity(
             _disable(
                 "burn_in_mismatch_canonical",
                 error=True,
-                rust_fields=None if fields is None else list(fields),
-                python_fields=None if oracle_fields is None else list(oracle_fields),
+                # Vendor-derived symbol material rides repr() (the #907
+                # house log-injection law; round-1 hostile-review NIT-4).
+                rust_fields=None if fields is None else repr(list(fields)),
+                python_fields=None if oracle_fields is None else repr(list(oracle_fields)),
             )
             return oracle_fields
         _BURN_IN_REMAINING[_LAW_CANONICAL] -= 1
@@ -483,8 +499,10 @@ def routed_s3_key(
             _disable(
                 "burn_in_mismatch_s3_key",
                 error=True,
-                rust_key=rust_key,
-                python_key=oracle_key,
+                # Vendor-derived symbol material rides repr() (the #907
+                # house log-injection law; round-1 hostile-review NIT-4).
+                rust_key=repr(rust_key),
+                python_key=repr(oracle_key),
             )
             return oracle_key
         _BURN_IN_REMAINING[_LAW_S3_KEY] -= 1

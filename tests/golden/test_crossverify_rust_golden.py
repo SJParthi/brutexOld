@@ -96,6 +96,16 @@ class TestFlagOnGolden:
             assert export.csv_bytes == fixture, f"{symbol}: flag-ON bytes drifted"
         # The engagement spy: a silently-degrading seam cannot fake green.
         assert rust_on["render_csv"] >= len(GOLDEN_SYMBOLS + STRUCTURAL_FUT_SYMBOLS)
+        # Round-1 hostile-review MINOR-2: invocation alone is not
+        # crate-byte-SHIP — a crate returning ``(None, refusal)`` for valid
+        # golden rows would serve ORACLE fixture bytes and still pass the
+        # byte + call-count asserts. Every refusal/degrade path records its
+        # reason in the warn-once memo (``_warn_once``), so the memo holding
+        # EXACTLY the engaged marker proves zero refusals/errors — the crate
+        # bytes are what shipped (the house private-import test pattern).
+        assert {rust_seam._ENGAGED_KEY} == rust_seam._OBSERVABILITY_MEMO, (
+            f"seam degraded during the golden run: {sorted(rust_seam._OBSERVABILITY_MEMO)}"
+        )
         # The mapping law flag-ON reproduces every golden identity (the
         # harness built GOLDEN_IDENTITIES at import time, flag-OFF — this is
         # the flag-ON re-map parity + the canonical engagement).
@@ -125,3 +135,8 @@ class TestFlagOnGolden:
         assert "\n".join(keys) + "\n" == S3_KEYS_FIXTURE.read_text(encoding="utf-8")
         assert rust_on["s3_key"] >= len(GOLDEN_SYMBOLS)
         assert rust_seam.rust_seam_disabled() is False
+        # MINOR-2 twin: a clean memo (engaged marker ONLY) proves the crate
+        # keys shipped — no refusal/degrade fallback served oracle strings.
+        assert {rust_seam._ENGAGED_KEY} == rust_seam._OBSERVABILITY_MEMO, (
+            f"seam degraded during the golden run: {sorted(rust_seam._OBSERVABILITY_MEMO)}"
+        )

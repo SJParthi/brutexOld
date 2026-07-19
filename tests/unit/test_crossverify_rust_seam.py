@@ -682,18 +682,24 @@ class TestBurnIn:
             crossverify_canonical_identity=lambda *a: ("WRONG",) * 6,
         )
         oracle_fields = ("a", "b", "c", "d", "e", "f")
-        out = rust_seam.routed_canonical_identity(
-            exchange="NSE",
-            segment="CASH",
-            lake_symbol="M&M",
-            fno_underlying=None,
-            fno_expiry_iso=None,
-            fno_is_future=False,
-            fno_exchange=None,
-            python_oracle=lambda: oracle_fields,
-        )
+        with structlog.testing.capture_logs() as logs:
+            out = rust_seam.routed_canonical_identity(
+                exchange="NSE",
+                segment="CASH",
+                lake_symbol="M&M",
+                fno_underlying=None,
+                fno_expiry_iso=None,
+                fno_is_future=False,
+                fno_exchange=None,
+                python_oracle=lambda: oracle_fields,
+            )
         assert out == oracle_fields
         assert rust_seam.rust_seam_disabled() is True
+        # NIT-4 pin: the vendor-derived field payloads ride repr() (#907).
+        errors = [e for e in logs if e["event"] == "crossverify_rust.autoreverted"]
+        assert errors[0]["reason"] == "burn_in_mismatch_canonical"
+        assert errors[0]["rust_fields"] == repr(list(("WRONG",) * 6))
+        assert errors[0]["python_fields"] == repr(list(oracle_fields))
 
     def test_canonical_burn_in_none_vs_none_counts_down(
         self, monkeypatch: pytest.MonkeyPatch, flag_on: None
@@ -736,15 +742,21 @@ class TestBurnIn:
         self, monkeypatch: pytest.MonkeyPatch, flag_on: None
     ) -> None:
         _plant_crate(monkeypatch, crossverify_s3_key=lambda *a: "WRONG")
-        out = rust_seam.routed_s3_key(
-            prefix="p",
-            day_iso="2026-07-10",
-            segment_token="NSE_EQ",
-            canonical_symbol="M&M",
-            python_oracle=lambda: "right",
-        )
+        with structlog.testing.capture_logs() as logs:
+            out = rust_seam.routed_s3_key(
+                prefix="p",
+                day_iso="2026-07-10",
+                segment_token="NSE_EQ",
+                canonical_symbol="M&M",
+                python_oracle=lambda: "right",
+            )
         assert out == "right"
         assert rust_seam.rust_seam_disabled() is True
+        # NIT-4 pin: the vendor-derived key payloads ride repr() (#907).
+        errors = [e for e in logs if e["event"] == "crossverify_rust.autoreverted"]
+        assert errors[0]["reason"] == "burn_in_mismatch_s3_key"
+        assert errors[0]["rust_key"] == repr("WRONG")
+        assert errors[0]["python_key"] == repr("right")
         rust_seam.reset_crossverify_rust_for_tests(remaining=1)
         _plant_crate(monkeypatch, crossverify_s3_key=lambda *a: "right")
         with structlog.testing.capture_logs() as logs:

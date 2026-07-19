@@ -149,9 +149,31 @@ jobs:
             sleep 10
           done
 
+      - name: Hard wheel-health gate (no vacuous skips)
+        # Round-1 hostile-review MINOR-1: the golden + differential legs
+        # below guard on `pytest.importorskip("brutex_ops")`, and pytest
+        # treats a skip as green — a broken-but-installed wheel would turn
+        # the lane's only real-crate drift teeth VACUOUS. This step FAILS
+        # the lane outright when the wheel cannot import or lacks any of
+        # the three seam callables; the in-test skip guard stays for local
+        # crate-free runs (main CI never installs the wheel by design).
+        run: |
+          python -c "
+          import brutex_ops
+          for name in (
+              'crossverify_render_csv',
+              'crossverify_canonical_identity',
+              'crossverify_s3_key',
+          ):
+              assert callable(getattr(brutex_ops, name, None)), (
+                  'brutex_ops.' + name + ' missing/not callable — broken wheel'
+              )
+          print('brutex_ops wheel healthy: all 3 seam callables present')
+          "
+
       - name: Seam unit suite (crate-free fakes) + REAL-wheel golden + differential
-        # -rs surfaces any skip reason — with the wheel installed above the
-        # importorskip guards cannot fire here (belt-and-suspenders).
+        # -rs surfaces any skip reason — the hard wheel-health gate above
+        # already FAILED the lane if the importorskip guard could fire.
         run: |
           pytest -rs -q \
             tests/unit/test_crossverify_rust_seam.py \
