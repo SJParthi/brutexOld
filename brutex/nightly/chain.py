@@ -494,6 +494,13 @@ class NightlyReport:
     #: ADDITIVE env-preflight block (DEC-BOX-AUTODEPLOY-LANE-001 §12) — the
     #: ``EnvPreflightOutcome.to_dict()`` mapping, ``None`` when it never ran.
     env_preflight: Mapping[str, object] | None = None
+    #: ADDITIVE R48 decay-leg block (DEC-NIGHTLY-DECAY-R48-001) — the
+    #: ``brutex.nightly.decay`` report block, ``None`` when the leg never ran
+    #: (dry-run). The block key is emitted ALWAYS (stable key set).
+    decay: Mapping[str, object] | None = None
+    #: ADDITIVE champion/challenger block (DEC-CHAMPION-CHALLENGER-001 +
+    #: DEC-NIGHTLY-RUN-DELTA-001) — ``None`` when the leg never ran.
+    champions: Mapping[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -536,6 +543,8 @@ class NightlyReport:
             "dry_run": self.dry_run,
             "box_update": None if self.box_update is None else dict(self.box_update),
             "env_preflight": None if self.env_preflight is None else dict(self.env_preflight),
+            "decay": None if self.decay is None else dict(self.decay),
+            "champions": None if self.champions is None else dict(self.champions),
             "ok": self.ok,
             "suspect": self.suspect,
             "blocker": None if self.blocker is None else self.blocker.value,

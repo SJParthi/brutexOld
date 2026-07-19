@@ -105,12 +105,19 @@ logger = structlog.get_logger(__name__)
 
 __all__ = ["NightlyPlan", "NightlySeams", "run_nightly"]
 
-#: The verbatim R48 divergence sentence (spec §12 item 1 — carried on EVERY report).
+#: The R48 status sentence (carried on EVERY report). The v1.1 deferral was
+#: LIFTED by the winning-P0 operator ruling (2026-07-18) and the leg is BUILT
+#: (DEC-NIGHTLY-DECAY-R48-001): the post-chain decay leg re-measures the
+#: newest top100 finalists over the trailing window; the per-run outcome
+#: lives in the report's ``decay`` block (kill switch
+#: ``BRUTEX_NIGHTLY_DECAY=0`` reads an honest ``disabled`` block, never a
+#: silent absence).
 R48_DIVERGENCE_NOTE = (
-    "R48 decay diff NOT built — deferred to v1.1 by the explicit operator phase "
-    "directive; a recorded DIVERGENCE from the living requirements (which home "
-    "R48 (A) in P6; the file's v1.1 item is R49). The P3 top100.json probe is "
-    "the v1.1 seam."
+    "R48 decay diff BUILT (DEC-NIGHTLY-DECAY-R48-001; the v1.1 deferral was "
+    "lifted by the winning-P0 operator ruling 2026-07-18): the post-chain "
+    "decay leg re-measures the newest top100.json finalists over the "
+    "trailing window — the per-run outcome is this report's `decay` block "
+    "(BRUTEX_NIGHTLY_DECAY=0 disables; report-level, never a chain link)."
 )
 
 #: The verified SUPERVISOR_ACTION_COMPLETE identity (T5): total == the five parts.
@@ -674,6 +681,29 @@ def _run_locked(
                 audit.append(
                     action="TRIPWIRE", subject=f"nightly:{nightly_id}", payload=wire.to_dict()
                 )
+        # ── LANE W5 adaptation legs (DEC-NIGHTLY-DECAY-R48-001 +
+        # DEC-CHAMPION-CHALLENGER-001 + DEC-NIGHTLY-RUN-DELTA-001) ──
+        # REPORT-LEVEL blocks per the #1939 box-update precedent: post-chain,
+        # never chain links, fail-open (the guarded wrappers NEVER raise — a
+        # leg failure reads an honest error block, the nightly is unbroken).
+        # Dry-runs never run the legs (None blocks — the box_update law):
+        # run_nightly dispatches dry_run plans to _run_dry BEFORE any lock,
+        # so _run_locked is wet-only by construction and the legs run
+        # unconditionally here (a dead dry_run re-check would be untestable).
+        from brutex.nightly.champions import run_champions_leg_guarded
+        from brutex.nightly.decay import run_decay_leg_guarded
+
+        decay_block: Mapping[str, object] | None = run_decay_leg_guarded(
+            lake_root=plan.lake_root, results_root=plan.results_root, alerter=alerter
+        )
+        champions_block: Mapping[str, object] | None = run_champions_leg_guarded(
+            lake_root=plan.lake_root,
+            results_root=plan.results_root,
+            decay_block=decay_block,
+            alerter=alerter,
+            from_date=plan.from_date,
+            to_date=plan.to_date,
+        )
         report = _assemble_report(
             plan,
             nightly_id=nightly_id,
@@ -684,6 +714,8 @@ def _run_locked(
             snapshot_id=snapshot_id,
             absent_artifacts=absent_artifacts,
             extra_notes=tuple(extra_notes),
+            decay=decay_block,
+            champions=champions_block,
         )
         with contextlib.suppress(OSError):
             write_report(plan.results_root, report)
@@ -752,6 +784,8 @@ def _assemble_report(
     snapshot_id: str | None,
     absent_artifacts: tuple[str, ...],
     extra_notes: tuple[str, ...],
+    decay: Mapping[str, object] | None = None,
+    champions: Mapping[str, object] | None = None,
 ) -> NightlyReport:
     """Assemble the NightlyReport from the collected link outcomes.
 
@@ -759,12 +793,21 @@ def _assemble_report(
     threading, DEC-BOX-AUTODEPLOY-LANE-001 §6 step 5) into the report; a
     box-update status outside ``{up_to_date, disabled}`` appends the ONE
     §5 summary line via the honesty-notes mechanism (the cheapest carrier —
-    zero new alert methods).
+    zero new alert methods). The decay / champions blocks are the LANE-W5
+    post-chain leg outcomes (run-time threading — they need post-sweep
+    data, so they cannot ride the frozen plan), each with its own one-line
+    honesty note on a noteworthy status.
     """
     notes = [R48_DIVERGENCE_NOTE, *extra_notes]
     box_note = _box_update_note(plan.box_update)
     if box_note is not None:
         notes.append(box_note)
+    decay_note = _decay_note(decay)
+    if decay_note is not None:
+        notes.append(decay_note)
+    champions_note = _champions_note(champions)
+    if champions_note is not None:
+        notes.append(champions_note)
     return NightlyReport(
         schema_version=REPORT_SCHEMA_VERSION,
         nightly_id=nightly_id,
@@ -782,6 +825,8 @@ def _assemble_report(
         dry_run=plan.dry_run,
         box_update=plan.box_update,
         env_preflight=plan.env_preflight,
+        decay=decay,
+        champions=champions,
     )
 
 
@@ -805,6 +850,54 @@ def _box_update_note(block: Mapping[str, object] | None) -> str | None:
         f"📦 box-update: {status} {_sha7('from_sha')}→{_sha7('to_sha')} · "
         f"wheels ok {ok_count}/{len(wheel_list)} · gate {gate}"
     )
+
+
+def _decay_note(block: Mapping[str, object] | None) -> str | None:
+    """The one-line decay-leg summary (silent on absent/disabled/quiet-ok).
+
+    Noteworthy = any DECAYED entry, or a non-ok status other than
+    ``disabled`` (the #1939 one-honesty-line law).
+    """
+    if block is None:
+        return None
+    status = str(block.get("status", "unknown"))
+    if status in {"disabled", "skipped"}:
+        # No-artifact / kill-switched nights are QUIET states, not findings.
+        return None
+    if status == "ok":
+        decayed = block.get("decayed")
+        if isinstance(decayed, int) and decayed > 0:
+            return (
+                f"📉 decay: {decayed}/{block.get('checked')} finalist(s) DECAYED "
+                f"(run {str(block.get('run_id'))[:12]}…, trailing "
+                f"{block.get('window_sessions')} sessions) — retire-flagged, see decay-diff.json"
+            )
+        return None
+    return f"📉 decay leg: {status} — {str(block.get('error', ''))[:120]}"
+
+
+def _champions_note(block: Mapping[str, object] | None) -> str | None:
+    """The one-line champions-leg summary (silent on absent/disabled/quiet-ok)."""
+    if block is None:
+        return None
+    status = str(block.get("status", "unknown"))
+    if status in {"disabled", "skipped"}:
+        return None
+    if status == "ok":
+        transitions = block.get("transitions")
+        rows = transitions if isinstance(transitions, list) else []
+        promoted = sum(1 for t in rows if isinstance(t, dict) and t.get("action") == "PROMOTED")
+        seeded = sum(1 for t in rows if isinstance(t, dict) and t.get("action") == "SEEDED")
+        flagged = sum(
+            1 for t in rows if isinstance(t, dict) and t.get("action") == "RETIRE_FLAGGED"
+        )
+        if promoted or seeded or flagged:
+            return (
+                f"🏆 champions: {promoted} promoted · {seeded} seeded · "
+                f"{flagged} retire-flagged (ledger champions/champions.jsonl)"
+            )
+        return None
+    return f"🏆 champions leg: {status} — {str(block.get('error', ''))[:120]}"
 
 
 def _emit_summary(alerter: SweepAlerter, report: NightlyReport, seams: NightlySeams) -> None:
