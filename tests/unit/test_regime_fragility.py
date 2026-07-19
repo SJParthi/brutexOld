@@ -287,3 +287,27 @@ def test_determinism() -> None:
     a = evaluate_fragility(pnls, trend_tokens=tokens, era_labels=labels)
     b = evaluate_fragility(pnls, trend_tokens=tokens, era_labels=labels)
     assert a == b
+
+
+def test_concentration_attributes_to_unsupported_stratum_pinned() -> None:
+    """Pin the CURRENT law: the concentrated stratum need not be supported.
+
+    The hostile-review round-1 repro (MINOR-1): eras A and B each carry 30
+    winning trades, era C carries ONE +99999 trade — C sits far below
+    MIN_STRATUM_TRADES (unsupported), yet its wins enter the positive-P&L
+    denominator and it takes the > 80% attribution. This test pins the
+    current-law behavior pending the activation-DEC calibration (scoping
+    the numerator/denominator to SUPPORTED strata is the named candidate
+    change — see the module docstring's honest-deferrals paragraph).
+    """
+    era_a = _stratum(3000)
+    era_b = _stratum(3000)
+    pnls = era_a + era_b + (99_999,)
+    labels = ("era_a",) * len(era_a) + ("era_b",) * len(era_b) + ("era_c",)
+    verdict = evaluate_fragility(pnls, trend_tokens=None, era_labels=labels)
+    assert verdict.status == "fail"
+    assert verdict.reasons == ("regime_concentration:era:era_c",)
+    strata = _axis_strata(verdict, "era")
+    era_c = strata["era_c"]
+    assert isinstance(era_c, dict)
+    assert era_c["trades"] == 1  # far below MIN_STRATUM_TRADES — unsupported

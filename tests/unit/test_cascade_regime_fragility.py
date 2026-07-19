@@ -298,3 +298,60 @@ def test_off_config_replace_on_changes_report() -> None:
     assert off.survivor_ids == ("a",)
     assert on.survivor_ids == ()
     assert off != on
+
+
+# ────── composition with filter #10 (extreme-vol) ──────
+
+
+def _combined_evidence(*, extreme_pnl: int) -> dict[str, object]:
+    """60 aligned trades carrying evidence for filter #10 AND filter #11.
+
+    The first 30 trades are the extreme-vol entry stratum (constant
+    *extreme_pnl* each) and the trend "up" stratum; the last 30 are the calm
+    stratum and the trend "down" stratum (+100 each) — both trend strata
+    supported, neither past the 80% concentration bar when *extreme_pnl* is
+    positive.
+    """
+    return {
+        "trade_pnls_paisa": (extreme_pnl,) * MIN_STRATUM_TRADES + (100,) * MIN_STRATUM_TRADES,
+        "extreme_vol_entry_flags": (True,) * MIN_STRATUM_TRADES + (False,) * MIN_STRATUM_TRADES,
+        "trade_trend_tokens": ("up",) * MIN_STRATUM_TRADES + ("down",) * MIN_STRATUM_TRADES,
+    }
+
+
+def test_both_filters_on_candidate_passes_both() -> None:
+    cfg = _pass_config(extreme_vol_stratum=True, regime_fragility=True)
+    rep = run_stage4_cascade([_candidate("a", seed=1, **_combined_evidence(extreme_pnl=100))], cfg)
+    assert rep.survivor_ids == ("a",)
+    (v,) = rep.verdicts
+    assert v.passed is True
+    assert v.extreme_vol_status == "ok"
+    assert v.regime_fragility_status == "ok"
+    assert rep.stage_survivors[FilterStage.EXTREME_VOL_STRATUM.value] == 1
+    assert rep.stage_survivors[FilterStage.REGIME_FRAGILITY.value] == 1
+
+
+def test_extreme_vol_reject_never_reaches_fragility() -> None:
+    # Survivors-only composition: a filter-#10 reject carries NO filter-#11
+    # verdict fields even though it holds evaluable fragility evidence.
+    cfg = _pass_config(extreme_vol_stratum=True, regime_fragility=True)
+    rep = run_stage4_cascade([_candidate("a", seed=1, **_combined_evidence(extreme_pnl=-100))], cfg)
+    assert rep.survivor_ids == ()
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.EXTREME_VOL_STRATUM
+    assert v.extreme_vol_status == "fail"
+    assert v.regime_fragility_status is None
+    assert v.regime_fragility_stats is None
+
+
+def test_config_round_trip_with_both_flags() -> None:
+    cfg = cw.cascade_config_for_sweep(
+        "abcd", overrides={"extreme_vol_stratum": True, "regime_fragility": True}
+    )
+    data = cw.cascade_config_to_dict(cfg)
+    assert data["extreme_vol_stratum"] is True
+    assert data["regime_fragility"] is True
+    assert cw.cascade_config_from_dict(data) == cfg
+    both_off = cw.cascade_config_to_dict(cw.cascade_config_for_sweep("abcd"))
+    assert "extreme_vol_stratum" not in both_off
+    assert "regime_fragility" not in both_off
