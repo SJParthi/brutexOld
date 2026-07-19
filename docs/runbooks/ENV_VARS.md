@@ -196,7 +196,10 @@ widen path is env change → master reload (auto-healed one-shot) → verify.
 
 `index4` = exactly the 4 `V1_INDICES` pairs (`NSE-NIFTY`, `NSE-BANKNIFTY`,
 `BSE-SENSEX`, `NSE-INDIAVIX`) + the 3 F&O-bearing index chains; `full` = the
-pre-#1934 legacy admission rules (the widen path — pinned byte-identical).
+pre-#1934 legacy admission rules (the widen path — pinned byte-identical
+modulo the ONE recorded A2 correction: under `full`, BSE derivative legs are
+now ADMITTED where the stale legacy clause rejected them — `full ⊇ index4`,
+pinned; MIGRATION.md #1934's honest envelope).
 
 ---
 

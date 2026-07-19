@@ -36,11 +36,13 @@ one-shot), the P7–P10 producer gates refuse out-of-scope vendor pulls
 loudly, the R-family read filters exclude-and-COUNT (emit-on-nonzero; the
 /db raw viewer stays unfiltered), and the STORED-DATA law holds — code
 never deletes stored partitions/ledgers/registry. Supersedes DEC-P0-063
-(#200) + DEC-NTM-GROWW-REPOINT-001 (#694); narrows-in-part #160/#1788/
-#1794; absorbs the never-landed ADR-0024 package's universe half (#1835/
-#1836/#1837 — the crossverify S3 retirement re-raises as the stacked
-row #1937). Fails-before proven executed at merge-base c2208706;
-`full`-scope pinned byte-identical to merge-base on every gated surface.
+(#200) + DEC-NTM-GROWW-REPOINT-001 (#694); narrows-in-part #160;
+supersedes-in-part #1788/#1794; absorbs the never-landed ADR-0024
+package's universe half (#1835/#1836/#1837 — the crossverify S3
+retirement re-raises as the stacked row #1937). Fails-before proven
+executed at merge-base c2208706; `full`-scope pinned byte-identical to
+merge-base on every gated surface (modulo the ONE recorded A2
+BSE-derivatives correction — full ⊇ index4, pinned).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX (already spot-only per #1790);
 no vocab/rate/lake-schema change. This header carries the pointer, never
 the story — the full record lives in the §1 Active-branch blurb +
@@ -3796,8 +3798,9 @@ hostile-review pass._
   2026-07-15 — the scope cut, spelling preserved verbatim); "entire four
   instruments spots expired fno" (operator, 2026-07-16 — expired F&O chains
   KEPT); "auto-land the scope cut when green" (operator, 2026-07-17 — the
-  landing authorization for THIS PR; the S3-push removal directive "even aws
-  s3 push also" grounds ONLY the stacked PR-2, row #1937). THE LAW: NEW leaf
+  landing authorization for THIS PR; the 2026-07-15 S3-push removal
+  directive grounds ONLY the stacked PR-2, row #1937 — quoted THERE per the
+  citation register's consumer map, never here). THE LAW: NEW leaf
   `brutex/config/feed_scope.py` — `FeedScope` + `SCOPE_INDEX4`/`SCOPE_FULL`,
   `DEFAULT_FEED_SCOPES` = {groww: index4, dhan: index4}, the fail-loud
   `BRUTEX_FEED_SCOPE` env grammar (bare `index4`|`full` XOR a per-feed
@@ -3825,8 +3828,9 @@ hostile-review pass._
   covering the interim). PRODUCER GATES P7–P10 (fire only under a bounded
   scope; `full` = structural pass-through, the widen path pinned
   BYTE-IDENTICAL to merge-base on every gated surface): P7
-  `pull_controller.screen_pull_scope` at both raw store-resolution arms +
-  the five single-symbol/selection route arms (out-of-scope selection = a
+  `pull_controller.screen_pull_scope` at its five arms — the two
+  pull_controller store-resolution chokepoints + the three app.py
+  single-instrument route arms (out-of-scope selection = a
   loud ValueError/400 naming the ids + the DEC — the merge-base
   bookmarked-stock-id real-vendor-pull repro closed); P8 the
   `/pull-historical` DIRECT registry grammar screens resolved ContractRows;
@@ -3846,7 +3850,8 @@ hostile-review pass._
   O(page) preserved), and `doctor.check_derived_freshness` (R12); NOT
   touched by LAW (pinned): R5 — the `/db` raw viewer + pagers + both
   options discovery surfaces keep listing stored stock datasets (the
-  operator's stored-bytes-readable words). THE STORED-DATA LAW (the #1831
+  coordinator-relayed stored-bytes-readable directive (C) — paraphrase,
+  never operator wording). THE STORED-DATA LAW (the #1831
   precedent): code NEVER deletes stored partitions, ledgers, or the durable
   F&O registry — stored stock data stays readable in /db and is excluded
   from ENUMERATION with honest counts; disk reclaim = an optional operator
@@ -3867,12 +3872,14 @@ hostile-review pass._
   /coverage · /completeness routes; all green at head); the suite forces
   `BRUTEX_FEED_SCOPE=index4` (the shipped default is the tested default)
   with FULL-arm suites opting in via `_full_scope_arm` fixtures. GATES
-  (executed): `feed_scope.py` (177/60) + `scope_filter.py` (87/40) BOTH
+  (executed — re-measured at the MERGED head + the review-fix round):
+  `feed_scope.py` (183/60) + `scope_filter.py` (87/40) BOTH
   100.00% line+branch standalone on NEW ci.yml stanzas; window_ledger
-  (290/84) + window_ledger_store (436/118) + the db_view 23-file gate +
+  (357/108) + window_ledger_store (451/120) + the db_view 24-file gate +
   the doctor gate + the three movers modules + `pull_controller.py`
-  (618/146) ALL 100.00% on their gates; ruff/ruff-format clean; `mypy
-  --strict` 0 new. HONEST: ONE new env var, zero new routes; the R9 census
+  (634/148) + auto_pull (24/6, the discovery-mapped stem suite) ALL
+  100.00% on their gates; ruff/ruff-format clean; `mypy
+  --strict` clean (521 files). HONEST: ONE new env var, zero new routes; the R9 census
   still reads every stored stock series' footers (output-only exclusion,
   stated); the CLI-fetch VIX gap is pre-existing + disclosed, not fixed;
   the /db stock-moneyness DRIFT rung degrades once a store holds zero
@@ -11538,9 +11545,10 @@ hostile-review pass._
   pinned); GATED DORMANT never deleted (the recorded divergence from
   prior-art #1836) + the stored-data law (code never deletes stored
   partitions/ledgers/registry); the `full` widen path pinned byte-identical
-  to merge-base; supersedes DEC-P0-063 (#200) + #694, narrows-in-part
-  #160/#1788/#1794, absorbs the never-landed ADR-0024 package's universe
-  half (#1937 = the stacked crossverify-S3 PR-2); fails-before proven
+  to merge-base (modulo the one recorded A2 BSE-derivatives correction —
+  full ⊇ index4); supersedes DEC-P0-063 (#200) + #694, narrows-in-part
+  #160, supersedes-in-part #1788/#1794, absorbs the never-landed ADR-0024
+  package's universe half (#1937 = the stacked crossverify-S3 PR-2); fails-before proven
   executed at merge-base c2208706; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no vocab/rate/lake-schema change; matches §1's
   Active branch line — see §1 + MIGRATION.md #1934 for the full blurb)

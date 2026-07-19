@@ -474,13 +474,13 @@ def _revision_token(raw: str | None, active: frozenset[str]) -> str:
 def validate_feed_scope_env() -> FeedScope:
     """Eagerly validate ``BRUTEX_FEED_SCOPE`` — the §2.3 boot/entry seam.
 
-    Called once, pre-lock, by every scope-consuming entry point
-    (``cmd_dashboard`` / ``cmd_fetch`` / ``cmd_pull_all_spot`` /
-    ``cmd_nightly_run`` / ``cmd_greeks_backfill`` / ``cmd_enrich_greeks`` /
-    the crossverify ``run`` CLI entry / ``cmd_doctor`` / the dashboard
-    greeks-backfill route) so junk fails at exit-1 boot / clean 400 — never
-    mid-pull (the #1558 r5/r6 eager-validation law). Returns the acting
-    default feed's scope for convenience.
+    Called once, pre-lock, by every scope-consuming entry point — the NINE
+    CLI entrypoints (``cmd_dashboard`` / ``cmd_fetch`` / ``cmd_pull_all_spot``
+    / ``cmd_nightly_run`` / ``cmd_greeks_backfill`` / ``cmd_enrich_greeks`` /
+    the crossverify ``run`` CLI entry / ``cmd_doctor`` / ``cmd_doctor_live``)
+    plus the dashboard greeks-backfill route — so junk fails at exit-1 boot /
+    clean 400 — never mid-pull (the #1558 r5/r6 eager-validation law).
+    Returns the acting default feed's scope for convenience.
     """
     return resolve_feed_scope(DEFAULT_FEED)
 
