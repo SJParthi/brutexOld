@@ -95,6 +95,17 @@ def hwenv_hardware_key(
     on a caught panic.
     """
 
+def models_normalise_tick_size_str(kind: str, payload: str) -> str:
+    """The ``normalise_tick_size`` decision twin (T35 PR-2 — models seam).
+
+    ``kind`` ∈ ``{"decimal", "str", "int", "float"}`` with the payload in
+    the facade's canonical string render; returns the 2dp member string.
+    Raises ``ValueError`` — a ``tick_refuse:*`` message is the LAW
+    refusal outcome (the facade serves the oracle's
+    ``TickSizeFormatError``), anything else a degrade-member fault;
+    ``RuntimeError`` if the core panicked (caught at the FFI boundary).
+    """
+
 def paths_lake_root_str(override_value: str | None, home: str) -> str:
     """The ``resolve_lake_root`` decision twin (milestone 3 — paths seam).
 

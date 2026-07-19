@@ -199,6 +199,7 @@ class TestFacadesNeverImportAwsSurfaces:
         names = {p.name for p in _facade_files()}
         expected = {
             "money_rust.py",
+            "models_rust.py",
             "feed_rust.py",
             "hardware_envelope_rust.py",
             "paths_rust.py",

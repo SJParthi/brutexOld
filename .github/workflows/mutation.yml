@@ -517,6 +517,7 @@ jobs:
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
             "brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:" \
             "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
+            "brutex/models_rust.py:tests/unit/test_models_rust.py:" \
             "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
             "brutex/config/seam_core.py:tests/unit/test_config_seam_core.py:" \
             "brutex/config/paths_rust.py:tests/unit/test_config_paths_rust.py:" \
