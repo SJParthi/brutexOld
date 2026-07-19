@@ -584,6 +584,8 @@ class TestSidecarReaderBelts:
             aggs=tmp_path / "x.aggs.parquet",
             equity=tmp_path / "x.equity.parquet",
             stamp=tmp_path / "x.stamp.json",
+            resilience=tmp_path / "x.resilience.parquet",
+            resilience_stamp=tmp_path / "x.resilience.stamp.json",
         )
         with pytest.raises(ResultsDepthError, match="unreadable aggs sidecar"):
             _load_agg_records(paths)
@@ -596,6 +598,8 @@ class TestSidecarReaderBelts:
             aggs=tmp_path / "x.aggs.parquet",
             equity=tmp_path / "x.equity.parquet",
             stamp=tmp_path / "x.stamp.json",
+            resilience=tmp_path / "x.resilience.parquet",
+            resilience_stamp=tmp_path / "x.resilience.stamp.json",
         )
         with pytest.raises(ResultsDepthError, match="unreadable trades sidecar"):
             _entry_ts_sets(paths, [run_id_of(1)])
@@ -608,6 +612,8 @@ class TestSidecarReaderBelts:
             aggs=tmp_path / "absent.parquet",
             equity=tmp_path / "absent.parquet",
             stamp=tmp_path / "absent.json",
+            resilience=tmp_path / "absent.resilience.parquet",
+            resilience_stamp=tmp_path / "absent.resilience.json",
         )
         assert _entry_ts_sets(paths, []) == {}
 
@@ -621,6 +627,8 @@ class TestSidecarReaderBelts:
             aggs=tmp_path / "x.parquet",
             equity=tmp_path / "x.parquet",
             stamp=tmp_path / "x.json",
+            resilience=tmp_path / "x.resilience.parquet",
+            resilience_stamp=tmp_path / "x.resilience.json",
         )
         monkeypatch.setitem(sys.modules, "polars", None)  # block `import polars`
         with pytest.raises(ResultsDepthError, match="requires 'polars'"):
