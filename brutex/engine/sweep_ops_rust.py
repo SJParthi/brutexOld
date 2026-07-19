@@ -201,6 +201,63 @@ marshaling-trap class) and ``drawdown_bit_key`` is byte RENDERING
 reads, roll-schedule refusals, the structural/identity tiers) are
 I/O + run-identity seams and stay Python.
 
+Slice-6 routed laws (the ORCHESTRATION-CORE family — the hard rail: the
+#1712 unkillable-run-core semantics are preserved EXACTLY; the
+``sweep_run_core`` context manager, its flock/keep-awake/flight-recorder
+/G12 crash-loop-breaker composition, every durable write, and the
+run-identity-class ``grid_identity`` / ``_tuple_digest`` /
+``_selection_identity_fragment`` seams NEVER cross the FFI):
+
+23. **TUPLE_DONE decimation stride** (:func:`routed_record_stride`) —
+    ``brutex/engine/sweep_run_core.py``'s D-9 ``tuple_record_stride``
+    fold. The Python oracle's ``math.ceil(t / 10_000)`` is TRUE (f64)
+    division, so the crate mirrors it in f64 and the input gate holds
+    the operand to the exactly-representable |v| <= 2^52 band (the
+    slice-4 scheduler band law) where IEEE division + ceil are
+    bit-identical cross-language.
+24. **Per-tuple diffcheck budget** (:func:`routed_diffcheck_budget`) —
+    ``sweep_run_core``'s R45 K-distribution fold (design D-11):
+    positive ``//`` positive floor division ≡ Rust integer division
+    inside the gated band.
+25. **Grid tuple count** (:func:`routed_grid_tuple_count`) —
+    ``brutex/engine/sweep_orchestrator.py``'s ``count_sweep_tuples``
+    outer-product fold over PRE-EXTRACTED axis cardinalities (Python
+    owns the ``SweepGridConfig`` object marshaling); the crate
+    accumulates in checked u128 and a product past u64 degrades to the
+    Python bigint oracle.
+
+Slice-6 N/A dispositions (honest, not padding — the mostly-N/A outcome
+is the expected shape of this family): ``sweep_run_core``'s remainder is
+CM/thread/OS/durable-I/O land (``_finalize`` / ``mirror_run_forensics``
+/ ``_append_run_manifest_line`` / ``_is_halt``) and the manifest-content
+``_selection_fragment``/``_conditions_hex`` builders stay Python (their
+bytes feed the RUN_MANIFEST audit action — the byte-law rail);
+``sweep_orchestrator``'s ``_tuple_digest`` + ``_selection_identity_
+fragment`` are the #1715 gate-identity digest (byte pin
+``5b020e892247deac``) — run-identity-class, NEVER converted — and
+``iter_sweep_tuples``/``run_one_tuple``/``run_sweep_grid``/
+``bloom_capacity_hint`` are object/I/O land (the hint composes
+``combo_mask.count_combos`` — routing it would mint a SECOND binomial
+source, the ``sweep_artifact_guard`` anti-copy precedent);
+``sweep_driver`` stays Python WHOLE (metrics/simulation land whose Rust
+story ALREADY exists — the fno_math kernels + ``rust_metrics`` + the
+#1531/#1532 burn-in oracle pair; it sits on the diffcheck AST BAN list
+and ``_walk_forward_run_hash`` is RUN IDENTITY). Remainder census, all
+honest N/A: ``sweep_run`` (the carved-out run-identity home) ·
+``sweep_cache`` (Bloom+LMDB I/O; the #1714 auto-grow fold composes the
+bloom sizing helper + the RAM wall + refusal message bytes — inseparable
+without splitting a hostile-reviewed law) · ``sweep_cancel`` (sidecar
+I/O) · ``sweep_kernel`` (resident fno_math kernel dispatch — existing
+Rust story) · ``sweep_launch`` (subprocess/env) · ``sweep_lookahead``
+(the guard's OFF-path identity contract is load-bearing) ·
+``sweep_parallel`` (spawn pools/threads; its stall budget ALREADY rides
+the routed slice-1 law via ``resolve_stall_policy`` — never
+double-routed) · ``sweep_report`` (rendering) · ``sweep_stream``
+(columnar object marshaling; rank order is byte-order-pinned vs
+``ResultsStore.top_k``) · ``sweep_supervisor`` (process orchestration;
+its BLAKE3 chain is DISTINCT from ``sweep_audit``'s — no third chain
+implementation, the ``flight_recorder`` precedent).
+
 ## The fail-closed layers (the window_ledger_rust template, adapted)
 
 * **Flag** — ``BRUTEX_SWEEP_OPS_RUST`` default OFF; truthy → ON, falsy →
@@ -324,6 +381,12 @@ _LAW_RESUME_DECISION: Final[str] = "resume_decision"
 _LAW_RECOUNT_VERDICT: Final[str] = "recount_verdict"
 #: The apriori-join-prune-law burn-in budget key (slice 5).
 _LAW_APRIORI_JOIN: Final[str] = "apriori_join"
+#: The record-stride-law burn-in budget key (slice 6).
+_LAW_RECORD_STRIDE: Final[str] = "record_stride"
+#: The diffcheck-budget-law burn-in budget key (slice 6).
+_LAW_DIFFCHECK_BUDGET: Final[str] = "diffcheck_budget"
+#: The grid-tuple-count-law burn-in budget key (slice 6).
+_LAW_GRID_TUPLE_COUNT: Final[str] = "grid_tuple_count"
 
 #: Every routed law's burn-in budget key (the reset seam iterates this).
 _ALL_LAWS: Final[tuple[str, ...]] = (
@@ -351,6 +414,9 @@ _ALL_LAWS: Final[tuple[str, ...]] = (
     _LAW_RESUME_DECISION,
     _LAW_RECOUNT_VERDICT,
     _LAW_APRIORI_JOIN,
+    _LAW_RECORD_STRIDE,
+    _LAW_DIFFCHECK_BUDGET,
+    _LAW_GRID_TUPLE_COUNT,
 )
 
 #: Process-local OFF latch — the disable reason, or ``None`` when live.
@@ -374,9 +440,11 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
+    "grid_tuple_count",
     "heal_mismatch_decision",
     "join_path_segments",
     "liveness_tail",
+    "per_tuple_diffcheck_budget",
     "preflight_missing",
     "progress_derived",
     "quarantine_next_ordinal",
@@ -387,6 +455,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "sla_decision",
     "stall_scaled_timeout",
     "stamp_verdict",
+    "tuple_record_stride",
 )
 
 #: Structural arities of the crate's fragment legs + stall pair (the frozen
@@ -1960,6 +2029,94 @@ def routed_apriori_join_prune(
     )
 
 
+def _validate_stride(raw: object) -> int | None:
+    """Structural OUTPUT gate for the record-stride fold (exact int >= 1)."""
+    return raw if type(raw) is int and raw >= 1 else None
+
+
+def _validate_nonneg_int(raw: object) -> int | None:
+    """Structural OUTPUT gate for a non-negative exact-int fold result."""
+    return raw if type(raw) is int and raw >= 0 else None
+
+
+def routed_record_stride(total_tuples: int, *, python_law: Callable[[], int]) -> int:
+    """The routed D-9 TUPLE_DONE decimation-stride fold (slice 6).
+
+    Exact-type input gate: *total_tuples* an exact ``int`` within the
+    exactly-representable f64 band (|v| <= 2^52 — the shared
+    :func:`_scheduler_int_refused` band law): the Python oracle's
+    ``math.ceil(t / 10_000)`` is TRUE (f64) division, so the crate mirrors
+    it in f64 and parity is IEEE-exact only inside the band; a count
+    beyond it refuses to the bigint oracle. Everything else in the #1712
+    run core — the context manager, flocks, keep-awake, flight recorder,
+    G12 breaker, durable writes — stays Python.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if _scheduler_int_refused(total_tuples):
+        _warn_once("record_stride_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_RECORD_STRIDE,
+        "tuple_record_stride",
+        (total_tuples,),
+        python_law=python_law,
+        validate=_validate_stride,
+    )
+
+
+def routed_diffcheck_budget(
+    k_per_run: int, total_tuples: int, *, python_law: Callable[[], int]
+) -> int:
+    """The routed R45 per-tuple diffcheck-budget fold (slice 6, design D-11).
+
+    Exact-type input gates: both operands exact ``int`` within the shared
+    |v| <= 2^52 band. Post-clamp both operands are positive, where the
+    Python ``//`` floor division ≡ Rust integer division exactly. The R45
+    never-adopt law is untouched — this distributes the K budget, the
+    diffcheck itself stays the independent Python reference simulator.
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if _scheduler_int_refused(k_per_run) or _scheduler_int_refused(total_tuples):
+        _warn_once("diffcheck_budget_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_DIFFCHECK_BUDGET,
+        "per_tuple_diffcheck_budget",
+        (k_per_run, total_tuples),
+        python_law=python_law,
+        validate=_validate_nonneg_int,
+    )
+
+
+def routed_grid_tuple_count(axes: Sequence[int], *, python_law: Callable[[], int]) -> int:
+    """The routed grid outer-product tuple-count fold (slice 6).
+
+    Exact-type input gate: *axes* an exact ``tuple`` of exact ``int``
+    cardinalities in u64 range (Python owns the ``SweepGridConfig``
+    object marshaling — only the pre-extracted lengths cross). The crate
+    accumulates in checked u128; a product past u64 raises the crate's
+    declared ``ValueError``, which the degrade set folds back to the
+    Python bigint oracle (a legitimately astronomical grid is oracle
+    territory, never a truncation).
+    """
+    if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
+        return python_law()
+    if type(axes) is not tuple or any(
+        type(value) is not int or not 0 <= value < _U64_CEILING for value in axes
+    ):
+        _warn_once("grid_tuple_count_input_refused")
+        return python_law()
+    return _routed_law_call(
+        _LAW_GRID_TUPLE_COUNT,
+        "grid_tuple_count",
+        (axes,),
+        python_law=python_law,
+        validate=_validate_nonneg_int,
+    )
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "SWEEP_OPS_RUST_ENV",
@@ -1972,15 +2129,18 @@ __all__ = [
     "routed_checkpoint_record_decision",
     "routed_count_violations",
     "routed_detach_probe_verdict",
+    "routed_diffcheck_budget",
     "routed_exit_status_resolution",
     "routed_freshness_stale",
     "routed_gate_fragment",
+    "routed_grid_tuple_count",
     "routed_heal_mismatch",
     "routed_liveness_tail",
     "routed_preflight_missing",
     "routed_progress_derived",
     "routed_quarantine_next_ordinal",
     "routed_rank_plan",
+    "routed_record_stride",
     "routed_recount_verdict",
     "routed_resume_decision",
     "routed_run_path",

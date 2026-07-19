@@ -90,6 +90,10 @@ from brutex.engine.sweep_identity import (
     _gate_config_fragment,  # pyright: ignore[reportPrivateUsage]
 )
 from brutex.engine.sweep_kernel import ResidentKernelCache
+from brutex.engine.sweep_ops_rust import (
+    routed_grid_tuple_count,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_run import (
     SweepComboError,
     SweepRunConfig,
@@ -666,19 +670,24 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
         ``|instruments| · |timeframes| · |directions| · |k_values| ·
         |stop_losses| · |take_profits| · |proximities| · |fib_anchors|``.
     """
-    return prod(
-        (
-            len(grid.instruments),
-            len(grid.timeframes),
-            len(grid.directions),
-            len(grid.k_values),
-            len(grid.stop_losses),
-            len(grid.take_profits),
-            len(grid.proximities),
-            len(grid.fib_anchors),
-            len(grid.price_source_cells),
-        )
+    axes = (
+        len(grid.instruments),
+        len(grid.timeframes),
+        len(grid.directions),
+        len(grid.k_values),
+        len(grid.stop_losses),
+        len(grid.take_profits),
+        len(grid.proximities),
+        len(grid.fib_anchors),
+        len(grid.price_source_cells),
     )
+    if sweep_ops_rust_enabled():
+
+        def _oracle(values: tuple[int, ...] = axes) -> int:
+            return prod(values)
+
+        return routed_grid_tuple_count(axes, python_law=_oracle)
+    return prod(axes)
 
 
 def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:

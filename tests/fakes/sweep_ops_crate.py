@@ -515,6 +515,28 @@ def _fake_mask_of(positions: Sequence[int]) -> int:
     return mask
 
 
+def _tuple_record_stride(total_tuples: int) -> int:
+    """The D-9 decimation-stride twin (f64-mirrored true division)."""
+    return max(1, math.ceil(max(0, total_tuples) / 10_000))
+
+
+def _per_tuple_diffcheck_budget(k_per_run: int, total_tuples: int) -> int:
+    """The R45 K-distribution twin."""
+    if k_per_run <= 0:
+        return 0
+    return max(1, k_per_run // max(1, total_tuples))
+
+
+def _grid_tuple_count(axes: Sequence[int]) -> int:
+    """The outer-product twin — raises past u64 like the crate's checked mul."""
+    product = 1
+    for value in axes:
+        product *= value
+    if product >= 2**64:
+        raise ValueError("axis product exceeds u64")
+    return product
+
+
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:
     """Return a fresh behavior-correct fake crate namespace.
 
@@ -553,4 +575,7 @@ def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespac
         RECOUNT_VERDICT_TOKENS=list(_FAKE_RECOUNT_VERDICT_TOKENS),
         recount_verdict=_recount_verdict,
         apriori_join_prune=_apriori_join_prune,
+        tuple_record_stride=_tuple_record_stride,
+        per_tuple_diffcheck_budget=_per_tuple_diffcheck_budget,
+        grid_tuple_count=_grid_tuple_count,
     )

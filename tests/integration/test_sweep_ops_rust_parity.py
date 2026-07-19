@@ -72,6 +72,7 @@ from brutex.engine.sweep_ops_rust import (  # noqa: E402
     SWEEP_OPS_RUST_ENV,
     reset_sweep_ops_rust_for_tests,
     routed_count_violations,
+    routed_grid_tuple_count,
     routed_heal_mismatch,
     routed_recount_verdict,
     sweep_ops_rust_disabled,
@@ -87,6 +88,12 @@ from brutex.engine.sweep_progress import (  # noqa: E402
 )
 from brutex.engine.sweep_quarantine import quarantine_tuple_trio  # noqa: E402
 from brutex.engine.sweep_run import SweepAprioriBudgetError  # noqa: E402
+from brutex.engine.sweep_run_core import (  # noqa: E402
+    _diffcheck_budget_python,
+    _record_stride_python,
+    per_tuple_diffcheck_budget,
+    tuple_record_stride,
+)
 from brutex.engine.sweep_scheduler import (  # noqa: E402
     IST_OFFSET_SECONDS,
     CheckpointView,
@@ -1448,4 +1455,57 @@ class TestSliceFiveBurnInSteadyState:
         for _ in range(18):  # 18 engaged join folds (k=2 routes one join level)
             masks = generate_apriori_candidates(bar_bits, condition_bits=(0, 1, 2), k=2, min_hits=1)
             assert masks  # non-empty: the level genuinely joined
+        assert sweep_ops_rust_disabled() is False
+
+
+# ─────────────────────── slice 6: run-core/orchestrator ───────────────────────
+
+
+class TestRunCoreParity:
+    @given(total=st.integers(min_value=-(2**52), max_value=2**52))
+    def test_stride_hypothesis_differential_vs_python_law(self, total: int) -> None:
+        """The crate's f64-mirrored stride ≡ the Python oracle over the band."""
+        assert brutex_sweep_ops.tuple_record_stride(total) == _record_stride_python(total)
+
+    @given(
+        k=st.integers(min_value=-(2**52), max_value=2**52),
+        total=st.integers(min_value=-(2**52), max_value=2**52),
+    )
+    def test_budget_hypothesis_differential_vs_python_law(self, k: int, total: int) -> None:
+        assert brutex_sweep_ops.per_tuple_diffcheck_budget(k, total) == _diffcheck_budget_python(
+            k, total
+        )
+
+    def test_wired_folds_flag_on_vs_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _drive() -> list[int]:
+            strides = [tuple_record_stride(t) for t in (0, 10_001, 25_000, 100_000)]
+            budgets = [per_tuple_diffcheck_budget(k, t) for k, t in ((0, 5), (7, 3), (200, 1))]
+            return strides + budgets
+
+        monkeypatch.delenv(SWEEP_OPS_RUST_ENV, raising=False)
+        reset_sweep_ops_rust_for_tests()
+        off = _drive()
+        monkeypatch.setenv(SWEEP_OPS_RUST_ENV, "1")
+        reset_sweep_ops_rust_for_tests()
+        on = _drive()
+        assert on == off == [1, 2, 3, 10, 0, 2, 200]
+        assert sweep_ops_rust_disabled() is False
+
+    def test_grid_count_parity_and_overflow_degrade(self) -> None:
+        assert brutex_sweep_ops.grid_tuple_count([3, 21, 2, 6, 5, 5, 1, 3, 1]) == 56_700
+        with pytest.raises(ValueError, match="exceeds u64"):
+            brutex_sweep_ops.grid_tuple_count([2**63, 2])
+        # The wrapper folds the crate ValueError back to the bigint oracle.
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        assert routed_grid_tuple_count((2**63, 2), python_law=lambda: 2**64) == 2**64
+
+    def test_eighteen_engaged_calls_never_autorevert(self) -> None:
+        reset_sweep_ops_rust_for_tests()
+        for i in range(18):  # 18 engaged stride + budget + count folds
+            assert tuple_record_stride(10_000 * i + 1) == i + 1
+            assert per_tuple_diffcheck_budget(200, i + 1) == max(1, 200 // (i + 1))
+            expected = 6 * (i + 1)
+            assert (
+                routed_grid_tuple_count((2, 3, i + 1), python_law=lambda v=expected: v) == expected
+            )
         assert sweep_ops_rust_disabled() is False

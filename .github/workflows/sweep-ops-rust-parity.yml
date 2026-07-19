@@ -169,7 +169,10 @@ jobs:
         # invisible). The verify/apriori/diffcheck entries are slice 5's
         # EXTRA GATE — the recount battery, the apriori parity golden and
         # the R45 diffcheck AST-pin suite must pass UNMODIFIED with the
-        # flag ON (diffcheck itself is an honest N/A — untouched).
+        # flag ON (diffcheck itself is an honest N/A — untouched). The
+        # run_core/orchestrator entries are slice 6's legs — the #1712
+        # unkillable-core battery must pass UNMODIFIED with the flag ON
+        # (only the D-9 stride / R45 budget / grid-count folds route).
         run: |
           BRUTEX_SWEEP_OPS_RUST=1 pytest -rs -q \
             tests/unit/test_engine_run_layout.py \
@@ -195,4 +198,6 @@ jobs:
             tests/unit/test_engine_sweep_verify.py \
             tests/unit/test_engine_sweep_apriori.py \
             tests/unit/test_engine_sweep_diffcheck.py \
-            tests/golden/test_engine_sweep_apriori_parity.py
+            tests/golden/test_engine_sweep_apriori_parity.py \
+            tests/unit/test_engine_sweep_run_core.py \
+            tests/unit/test_engine_sweep_orchestrator.py

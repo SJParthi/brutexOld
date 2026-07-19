@@ -28,15 +28,18 @@ from brutex.engine.sweep_ops_rust import (
     routed_checkpoint_record_decision,
     routed_count_violations,
     routed_detach_probe_verdict,
+    routed_diffcheck_budget,
     routed_exit_status_resolution,
     routed_freshness_stale,
     routed_gate_fragment,
+    routed_grid_tuple_count,
     routed_heal_mismatch,
     routed_liveness_tail,
     routed_preflight_missing,
     routed_progress_derived,
     routed_quarantine_next_ordinal,
     routed_rank_plan,
+    routed_record_stride,
     routed_recount_verdict,
     routed_resume_decision,
     routed_run_path,
@@ -218,6 +221,10 @@ class TestFlagLaw:
         assert routed_apriori_join_prune(
             [(0,), (1,)], False, (), 100, 10**9, 65_536, python_law=lambda: ([(0, 1)], None)
         ) == ([(0, 1)], None)
+        # Slice-6 laws: equally crate-free when the flag is OFF.
+        assert routed_record_stride(25_000, python_law=lambda: 3) == 3
+        assert routed_diffcheck_budget(7, 3, python_law=lambda: 2) == 2
+        assert routed_grid_tuple_count((2, 3), python_law=lambda: 6) == 6
         assert calls == []
 
     def test_disabled_latch_predicate(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3055,3 +3062,219 @@ class TestSliceFiveDriftPins:
         from brutex.engine.sweep_apriori import _BUDGET_CHECK_STRIDE
 
         assert _BUDGET_CHECK_STRIDE == 65_536
+
+
+# ─────────────────────── slice 6: run-core/orchestrator ───────────────────────
+
+
+class TestRoutedRecordStride:
+    @pytest.mark.parametrize(
+        ("total", "expected"),
+        [(-5, 1), (0, 1), (1, 1), (10_000, 1), (10_001, 2), (25_000, 3), (100_000, 10)],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, total: int, expected: int
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_record_stride(total, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize("total", [True, 1.0, "10", None, 2**53])
+    def test_input_refused_to_oracle(self, monkeypatch: pytest.MonkeyPatch, total: Any) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_record_stride(total, python_law=lambda: 42) == 42
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "record_stride_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [0, -1, 2.0, "1", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.tuple_record_stride = lambda total: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_record_stride(10_001, python_law=lambda: 2) == 2
+        warns = [e for e in logs if e.get("reason") == "record_stride_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.tuple_record_stride = lambda total: 7  # a stride-inflating poison
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_record_stride(10_001, python_law=lambda: 2) == 2
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_record_stride"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> int:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_record_stride(100_000, python_law=forbidden_oracle) == 10
+
+
+class TestRoutedDiffcheckBudget:
+    @pytest.mark.parametrize(
+        ("k", "total", "expected"),
+        [(0, 10, 0), (-3, 10, 0), (7, 3, 2), (2, 5, 1), (200, 1, 200), (9, 0, 9), (9, -4, 9)],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, k: int, total: int, expected: int
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_diffcheck_budget(k, total, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        ("k", "total"),
+        [(True, 3), (7, False), (7.0, 3), (7, "3"), (2**53, 3), (7, -(2**53))],
+    )
+    def test_input_refused_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, k: Any, total: Any
+    ) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_diffcheck_budget(k, total, python_law=lambda: 5) == 5
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "diffcheck_budget_input_refused"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [-1, 2.0, "0", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.per_tuple_diffcheck_budget = lambda k, total: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_diffcheck_budget(7, 3, python_law=lambda: 2) == 2
+        warns = [e for e in logs if e.get("reason") == "diffcheck_budget_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        # A budget-inflating poison: more diffcheck samples than the R45
+        # run-level K allows.
+        crate.per_tuple_diffcheck_budget = lambda k, total: 999
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_diffcheck_budget(7, 3, python_law=lambda: 2) == 2
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_diffcheck_budget"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> int:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_diffcheck_budget(200, 7, python_law=forbidden_oracle) == 28
+
+
+class TestRoutedGridTupleCount:
+    @pytest.mark.parametrize(
+        ("axes", "expected"),
+        [((), 1), ((3,), 3), ((3, 21, 2), 126), ((2, 0, 9), 0), ((2**63, 2), 2**64)],
+    )
+    def test_parity_with_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, axes: tuple[int, ...], expected: int
+    ) -> None:
+        # The (2**63, 2) case exercises the crate's u64-overflow ValueError →
+        # the degrade set folds back to the Python bigint oracle.
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        assert routed_grid_tuple_count(axes, python_law=lambda: expected) == expected
+
+    @pytest.mark.parametrize(
+        "axes",
+        [[2, 3], (2, True, 3), (2, -1), (2, 2**64), (2, 3.0), (2, "3"), "23", None],
+    )
+    def test_input_refused_to_oracle(self, monkeypatch: pytest.MonkeyPatch, axes: Any) -> None:
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        with capture_logs() as logs:
+            assert routed_grid_tuple_count(axes, python_law=lambda: 6) == 6
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "grid_tuple_count_input_refused"]
+        assert len(warns) == 1
+
+    def test_overflow_degrades_to_the_bigint_oracle_loudly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        with capture_logs() as logs:
+            assert routed_grid_tuple_count((2**63, 4), python_law=lambda: 2**65) == 2**65
+        warns = [e for e in logs if e.get("reason") == "grid_tuple_count_error"]
+        assert len(warns) == 1
+
+    @pytest.mark.parametrize("result", [-1, 6.0, "6", None])
+    def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.grid_tuple_count = lambda axes: result
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_grid_tuple_count((2, 3), python_law=lambda: 6) == 6
+        warns = [e for e in logs if e.get("reason") == "grid_tuple_count_result_refused"]
+        assert len(warns) == 1
+
+    def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.grid_tuple_count = lambda axes: 1  # a tuple-count-collapsing poison
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            assert routed_grid_tuple_count((2, 3), python_law=lambda: 6) == 6
+        reverts = [e for e in logs if e["event"] == "sweep_ops_rust.autoreverted"]
+        assert reverts[0]["reason"] == "burn_in_mismatch_grid_tuple_count"
+
+    def test_steady_state_skips_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _good_crate())
+        reset_sweep_ops_rust_for_tests(remaining=0)
+
+        def forbidden_oracle() -> int:
+            raise AssertionError("steady state must not consult the oracle")
+
+        assert routed_grid_tuple_count((3, 21, 2), python_law=forbidden_oracle) == 126
+
+
+class TestSliceSixDriftPins:
+    def test_wired_stride_matches_the_run_core_constant(self) -> None:
+        from brutex.engine.sweep_run_core import (
+            DECIMATION_TARGET_RECORDS,
+            _record_stride_python,
+        )
+
+        assert DECIMATION_TARGET_RECORDS == 10_000
+        assert _record_stride_python(10_001) == 2
+
+    def test_wired_budget_oracle_is_the_verbatim_fold(self) -> None:
+        from brutex.engine.sweep_run_core import _diffcheck_budget_python
+
+        assert _diffcheck_budget_python(0, 10) == 0
+        assert _diffcheck_budget_python(7, 3) == 2
+        assert _diffcheck_budget_python(2, 5) == 1
+
+    def test_grid_axes_arity_matches_the_grid_config(self) -> None:
+        # The wired count extracts NINE axis cardinalities — one per grid
+        # product axis (instrument/tf/direction/k/sl/tp/proximity/fib/price).
+        import inspect
+
+        from brutex.engine import sweep_orchestrator
+
+        source = inspect.getsource(sweep_orchestrator.count_sweep_tuples)
+        assert source.count("len(grid.") == 9
