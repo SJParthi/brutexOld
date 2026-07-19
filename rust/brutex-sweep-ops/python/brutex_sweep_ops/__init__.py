@@ -15,6 +15,18 @@ Exposed surface (slice 1 — leaves):
 * ``RUN_DIR_SUBDIR`` — the Rust twin of ``run_layout.RUN_DIR_SUBDIR``
   (drift-pinned by the parity suite).
 
+Slice 1b — the deferred leaf batch:
+
+* ``progress_derived`` — the ``sweep_progress`` snapshot derived-metrics
+  cluster (percent · elapsed · rate · ETA · survivor rate).
+* ``sla_decision`` — the ``sweep_sla_guard`` projection decision.
+* ``rank_plan_decision`` — the ``sweep_mem_budget`` rank-memory decision
+  table.
+* ``preflight_missing`` / ``freshness_stale`` — the two ``sweep_preflight``
+  pure folds.
+* ``liveness_tail`` — the ``sweep_liveness`` ``progress_verdict`` decision
+  tail.
+
 Wheel-source freshness handshake (the sibling-wheel pattern)
 ------------------------------------------------------------
 Import-time guard: the compiled ``.so`` is asserted to expose EVERY symbol
@@ -39,8 +51,14 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "RUN_DIR_SUBDIR",
     "__version__",
+    "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
+    "liveness_tail",
+    "preflight_missing",
+    "progress_derived",
+    "rank_plan_decision",
+    "sla_decision",
     "stall_scaled_timeout",
 )
 
@@ -71,8 +89,14 @@ _assert_compiled_surface(_compiled)
 from ._brutex_sweep_ops import (  # noqa: E402
     RUN_DIR_SUBDIR,
     __version__,
+    freshness_stale,
     gate_config_fragment,
     join_path_segments,
+    liveness_tail,
+    preflight_missing,
+    progress_derived,
+    rank_plan_decision,
+    sla_decision,
     stall_scaled_timeout,
 )
 
@@ -83,7 +107,13 @@ __build_crate_version__: str = __version__
 __all__ = [
     "RUN_DIR_SUBDIR",
     "__version__",
+    "freshness_stale",
     "gate_config_fragment",
     "join_path_segments",
+    "liveness_tail",
+    "preflight_missing",
+    "progress_derived",
+    "rank_plan_decision",
+    "sla_decision",
     "stall_scaled_timeout",
 ]
