@@ -85,6 +85,14 @@ pub mod metrics;
 /// Python keeps every numpy pairwise reduction, libm call and raise.
 pub mod stats;
 
+/// DEC-OPTCOST-TAILS-RUST-001: options-cost TAIL kernels — the pure decision
+/// math of the regime-rate lookup (`brutex/costs/constants.py`), moneyness
+/// classification (`brutex/data/moneyness.py`) and strike/lot/expiry rules
+/// (`brutex/options/`). Ints-only FFI; every refusal stays a code Python
+/// materializes with today's exact exception bytes (VERIFIED-RATES-ONLY,
+/// DEC-ETC-REGIME-HISTORY-001).
+pub mod optcost;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -168,5 +176,39 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
     // ---- end stats module ----
+    // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
+    // kernels (regime rates / moneyness / strike-lot-expiry rules).
+    // Additive registration only; existing registrations above are
+    // untouched. Consumed by the default-OFF BRUTEX_OPTCOST_TAILS_RUST seam.
+    m.add_function(wrap_pyfunction!(optcost::regime::optcost_regime_rate, m)?)?;
+    m.add_function(wrap_pyfunction!(optcost::lots::optcost_history_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::expiry::optcost_next_weekly_expiry,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::expiry::optcost_next_monthly_expiry,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::moneyness::optcost_moneyness_classify,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::moneyness::optcost_atm_offset, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::moneyness::optcost_strike_step,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::strike::optcost_offset_strike, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::strike::optcost_strike_offset_from_atm,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optcost::strike::optcost_grid_around_atm,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(optcost::strike::optcost_round_to_atm, m)?)?;
+    // ---- end optcost module ----
     Ok(())
 }

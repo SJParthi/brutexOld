@@ -10,7 +10,7 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix,
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -527,6 +527,7 @@ jobs:
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
             "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
             "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
+            "brutex/optcost_rust.py:tests/unit/test_optcost_rust.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
@@ -731,7 +732,7 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (8-shard matrix)
   #
   # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
@@ -741,7 +742,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/8)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -755,7 +756,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -793,7 +794,7 @@ jobs:
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/8)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
@@ -805,22 +806,38 @@ jobs:
           #   155 trade_sim + 81 stats/cpcv + 79 python + 10 mask_word + 9 lib;
           #   the 2026-07-08 post-merge HEAD measured 599 — the race-6 merge
           #   folded main's width-generic u128 trade_sim kernel, trade_sim
-          #   124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   124->167; the pre-merge 2026-07-07 measurement was 556); +
+          #   optcost/*.rs (DEC-OPTCOST-TAILS-RUST-001 #1957) = 1191 total
+          #   re-measured 2026-07-19 on the merge-reconciled tree under the
+          #   pinned 27.1.0 (692 + optcost 499 — per-file split in
+          #   rust/fno-math/.cargo/mutants.toml).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
+          #   wall-clock parallelism = this shard matrix (5->6 = the #1597
           #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
-          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
-          #   ceil(692/6)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
-          #   ~= 62-83 min nominal, ~100 at +20% on the worst end -> >= 20 min
-          #   margin per shard.
+          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin; at the
+          #   692-mutant tree ceil(692/6)=116 mutants x 29-40 s/mutant serial
+          #   (CI per-lane measured 4-9 s build + 25-31 s test) ~= 56-77 min +
+          #   ~5.5 min baseline/setup ~= 62-83 min nominal, ~100 at +20% on the
+          #   worst end -> >= 20 min margin per shard).
+          # - 6->8 shards (DEC-OPTCOST-TAILS-RUST-001 #1957, merge-reconciled
+          #   2026-07-19): the optcost scope (src/optcost/*.rs) grew the census
+          #   to 1191 measured on the merge-reconciled tree under the pinned
+          #   27.1.0 (`cargo mutants --list | wc -l`; = 692 + optcost 499, the
+          #   per-file split in rust/fno-math/.cargo/mutants.toml; the lane's
+          #   pre-merge measurement was 1177 on the pre-hoist tree). At 6 shards
+          #   that is ~199 mutants/shard vs the 113 the 65-min worst shard was
+          #   measured at (~0.575 min/mutant worst-shard) -> ~114 min actual /
+          #   ~137 min at the +20% band, PAST the 120-min cap — so the #1597
+          #   pre-decided +1-shard dial is taken TWICE: 1191/8 ~= 149/shard ->
+          #   ~86 min actual / ~103 min at +20%, restoring the >= 17-min margin
+          #   posture.
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/6 \
+            --shard ${{ matrix.shard }}/8 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \

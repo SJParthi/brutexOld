@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-18 (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957 —
+renumbered #1954 → #1957 at the 2026-07-19 merge-reconcile over main tip
+4c11f7aaf (main's Club P train took #1954/#1955/#1956; DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001) —
+branch `claude/optcost-tails-rust` — the UNCLAIMED options/cost TAIL kernels
+(the regime-rate bisect · moneyness classify/ATM-offset/strike-step ·
+lot-size history · expiry calendar · strike grid/offset/round — the 6
+surviving files of the 23-file census after the claims/I-O exclusions)
+re-hosted on `rust/fno-math` (NEW `src/optcost/`, 11 pyfunctions,
+APPEND-ONLY hub registrations, crate stays 0.3.0) behind the NEW
+default-OFF `BRUTEX_OPTCOST_TAILS_RUST` seam (`brutex/optcost_rust.py` —
+the feed_rust leaf precedent; ints-only `(code, value)` FFI — Rust
+DECIDES, Python MATERIALIZES; every VERIFIED-RATES-ONLY refusal incl.
+DEC-ETC-REGIME-HISTORY-001's `UnverifiedCostRegimeError` composed
+Python-side, type + message-BYTE parity pinned; per-seam 16-call burn-in
+bit-compare + ship-the-oracle autorevert + refuse-poison validation;
+`resolve_delta_target_strike` + paisa-inexact Decimals + mixed-exponent
+ladders stay ORACLE-ONLY — disclosed, never approximated; `round_to_atm`
+ported WITH the CPython float-floor-div proof). Flag OFF (default) is
+BYTE-IDENTICAL to origin/main and the Rust extension is NEVER imported
+(bomb-spy + never-imports pinned); the frozen sweep-run + 400-case vocab
+goldens pass BOTH arms with fixtures BYTE-UNTOUCHED — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; expected payoff ≈ 0 (uniformity, not speed — the
+engaged seam ADDS an FFI hop; no speedup claimed). 2 hostile-review
+rounds folded (9 + 5 findings, 0 majors, 4× SHIP each — the
+2-consecutive-clean law satisfied). This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1957.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3523,7 +3551,89 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/optcost-tails-rust`
+  (**DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957** — renumbered
+  #1954 → #1957 at the 2026-07-19 merge-reconcile over main tip 4c11f7aaf
+  (main's Club P train took #1954/#1955/#1956) per
+  DEC-LEDGER-RENUMBER-001, the DEC-ID is the stable handle —
+  the UNCLAIMED options/cost TAIL kernels re-hosted on `rust/fno-math`
+  behind the NEW default-OFF `BRUTEX_OPTCOST_TAILS_RUST` seam, with the
+  verbatim Python law retained as the LIVE oracle. SCOPE (the survivors of
+  the 23-file / 8,378-LOC census after the claims/I-O/display exclusions —
+  6 files / 1,760 LOC): `costs/constants.py` (the regime-rate bisect —
+  the ONE `rate_for_date` chokepoint serving the stt/exchange-charge
+  delegators) · `data/moneyness.py` (classify / atm_offset /
+  derive_strike_step) · `options/expiry_calendar.py` (history lookup +
+  next weekly/monthly expiry ordinal walks) · `options/strike_rules.py`
+  (resolve_offset_strike) · `options/lot_size_history.py` (get_lot_size)
+  · `options/strike_grid.py` (round_to_atm / strike_offset_from_atm /
+  grid_around_atm). MECHANISM: NEW `rust/fno-math/src/optcost/{mod,
+  regime,moneyness,lots,expiry,strike}.rs` — 11 pyfunctions registered
+  APPEND-ONLY at the END of the pymodule list (the fno-math HUB files are
+  contended by ~9 in-flight lanes — strictly additive edits keep club
+  weaves file-mechanical); the handshake trio (shim `__init__.py`/`.pyi`
+  + EXPECTED_BUILD.json, 25 symbols) updated same-commit; crate STAYS
+  0.3.0, Cargo.toml/Cargo.lock byte-untouched; NEW top-level leaf
+  `brutex/optcost_rust.py` (the feed_rust home precedent — the
+  brutex/math and brutex/costs homes REJECTED for a hard-import /
+  proven-cycle reason each), LOCAL flag-vocabulary twin equality-pinned
+  vs `sweep_lookahead`, degrade + panic belts IMPORTED from
+  `lake_rust_render` (§11 COMMON), per-seam 16-call burn-in bit-compare
+  + ship-the-ORACLE autorevert + refuse-poison validation of every
+  kernel return + warn-once per (reason, seam). REFUSAL LAW (hard rule —
+  VERIFIED-RATES-ONLY): kernels return `(code, value)` int tuples only;
+  every refusal exception — `UnverifiedCostRegimeError`
+  (DEC-ETC-REGIME-HISTORY-001 #1524, NO runtime escape hatch), the
+  empty-table/pre-history ValueErrors, the lot/expiry pre-history
+  ValueErrors, the non-OFFSET strike-rule ValueError — is composed
+  Python-side from the caller's own row objects, TYPE + MESSAGE-BYTE
+  identical both arms (the full 3,287-date refusal-plane parity suite,
+  reviewer-executed both rounds). BIT-EXACTNESS: atm_offset's
+  ROUND_HALF_DOWN proven as an exact integer law over the whole i64
+  paisa domain; `round_to_atm` ported WITH the CPython
+  float-floor-div/divmod transcription proof (12 bit-exact literals +
+  the 2M-case full-float differential; out-of-envelope Errs → oracle);
+  ORACLE-ONLY where proof was not achievable at reasonable cost —
+  `resolve_delta_target_strike` (the `round(float, 6)` dtoa tie-break),
+  paisa-inexact Decimals, mixed-exponent strike ladders — disclosed,
+  never approximated; moneyness' never-raises total-function contract
+  preserved on every seam path. REVIEWS: 2 hostile-review rounds folded
+  (round 1: 9 findings, 0 majors, 4× SHIP — the F7 coverage-claim +
+  F8 ambient-decimal-context MINORs folded fails-before-proven; round 2:
+  5 findings, all NITs, 0 majors, 4× SHIP — the 2-consecutive-clean law
+  satisfied; both fold commits' facade changes proven docstring-only by
+  stripped-AST equality). GATES (executed): cargo fmt/clippy `-D
+  warnings`/test --release green (643+4+1; 47 optcost tests); the facade
+  100.00% line+branch (372/122, 101 tests) on the NEW ci.yml 19c3 gate;
+  all six call-site module gates re-measured 100.00%; the 630-test
+  battery + the 8-file golden set green flag-OFF AND flag-ON with
+  `git diff origin/main -- tests/golden` EMPTY (the frozen sweep-run
+  `_GOLDEN_RUN_ID` + 400-case vocab fixtures BYTE-UNTOUCHED — the
+  ENGINE-UNCHANGED belt); bomb-spy + the never-imports pin
+  (`test_off_default_never_imports_fno_math`) green; mutation wired
+  (mutants.toml optcost allowlist +
+  the honest 1,177-mutant census + the fno-math matrix reshard 6→8 +
+  the mutmut pair) — zero-survivor status WIRED, NOT claimed (the
+  weekly scheduled gate is the executor); ruff/ruff-format clean;
+  `mypy --strict` 0 new vs the origin/main baseline; pyright 0 errors
+  on all touched files; jscpd 0.44% < 1%. HONEST (Golden Rule #10; the
+  ADR-0020 banner verbatim): expected payoff ≈ 0 — uniformity, not
+  speed; the engaged seam ADDS an FFI hop + a per-call handshake +
+  refuse-poison validation (a small per-call slowdown on cold/warm
+  per-trade paths, never the mask hot path); NO speedup claimed or
+  measured; ships INERT — a default flip is the named follow-up
+  `DEC-OPTCOST-TAILS-FLIP-001` (own DEC + soak + the first green
+  scheduled mutation run); conscious pinned residuals: the F8
+  caller-modified-decimal-context class (zero production reachability),
+  the never-latching `result_refused` per-call re-pay, the
+  kernel-abstain warn-once cost, the nested-oracle burn-in envelope on
+  next_weekly/next_monthly (SAFE-biased, disclosed). ENGINE UNTOUCHED —
+  zero edits under `brutex/engine/` + `rust/trading-core/`; run
+  identity / `canonical_trade_params` / `indicator_version` untouched
+  by construction; NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; ONE new env var
+  `BRUTEX_OPTCOST_TAILS_RUST` (default OFF).)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10769,7 +10879,35 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/optcost-tails-rust`
+  (DEC-OPTCOST-TAILS-RUST-001, MIGRATION.md #1957 — renumbered
+  #1954 → #1957 at the 2026-07-19 merge-reconcile per
+  DEC-LEDGER-RENUMBER-001 — the UNCLAIMED
+  options/cost TAIL kernels (regime-rate bisect · moneyness
+  classify/ATM-offset/strike-step · lot-size history · expiry calendar ·
+  strike grid/offset/round — the 6 surviving files of the 23-file census
+  after the claims/I-O exclusions) re-hosted on `rust/fno-math` (NEW
+  `src/optcost/`, 11 pyfunctions, APPEND-ONLY hub registrations, crate
+  stays 0.3.0) behind the NEW default-OFF `BRUTEX_OPTCOST_TAILS_RUST`
+  seam — NEW top-level leaf `brutex/optcost_rust.py` (the feed_rust home
+  precedent; ints-only `(code, value)` FFI — Rust DECIDES, Python
+  MATERIALIZES; per-seam 16-call burn-in bit-compare +
+  ship-the-oracle autorevert + refuse-poison validation; every
+  VERIFIED-RATES-ONLY refusal incl. DEC-ETC-REGIME-HISTORY-001's
+  `UnverifiedCostRegimeError` composed Python-side, type + message-byte
+  parity pinned; `resolve_delta_target_strike` + paisa-inexact Decimals
+  + mixed-exponent ladders stay ORACLE-ONLY — disclosed, never
+  approximated; `round_to_atm` ported WITH the CPython float-floor-div
+  proof); flag OFF (default) BYTE-IDENTICAL + Rust never imported
+  (bomb-spy + never-imports pinned); the frozen sweep-run + vocab
+  goldens pass BOTH arms fixtures BYTE-UNTOUCHED; mutation wired NOT
+  claimed zero-survivor (fno-math matrix resharded 6→8); expected
+  payoff ≈ 0 — uniformity, not speed (the engaged seam adds an FFI
+  hop; no speedup claimed); 2 hostile-review rounds folded (9 + 5
+  findings, 0 majors, 4× SHIP each); ENGINE UNTOUCHED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1957 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
