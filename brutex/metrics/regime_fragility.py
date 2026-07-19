@@ -33,6 +33,19 @@ Honest deferrals (Golden Rule #10)
 * Variance-explosion-in-high-VIX is already covered for the extreme-vol
   overlay by filter #10 (its variance-ratio arm) — deliberately NEVER
   duplicated here.
+* The concentration law's numerator AND denominator span every
+  NON-EXCLUDED stratum, supported or not — only the axis-judgeability
+  gate demands >= 2 SUPPORTED strata; the concentrated stratum itself
+  need NOT be supported. Both directions of that choice are real: a
+  below-:data:`MIN_STRATUM_TRADES` stratum (even a single windfall
+  trade) can BE the > 80% holder and take the
+  ``regime_concentration:<axis>:<stratum>`` attribution, and an
+  unsupported stratum's wins inflate the positive-P&L denominator,
+  DILUTING the supported strata's shares below the bar. Scoping the
+  numerator/denominator to SUPPORTED strata only is a named candidate
+  change for the ACTIVATION DEC, when the operator calibrates the
+  thresholds — the current behavior is explicitly test-pinned
+  (``test_concentration_attributes_to_unsupported_stratum_pinned``).
 
 The thresholds are CONSERVATIVE defaults pending operator calibration —
 they gate nothing until ``CascadeConfig.regime_fragility`` is flipped ON
