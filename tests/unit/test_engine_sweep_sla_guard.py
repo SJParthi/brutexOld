@@ -199,3 +199,61 @@ class TestMessagesHonesty:
         projection = check_sweep_sla(1, acknowledge=False, env={})
         with pytest.raises(AttributeError):
             projection.tuple_count = 2  # type: ignore[misc]
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the SLA projection decision.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_all_decisions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        off = [
+            check_sweep_sla(100, acknowledge=False, env={}),
+            check_sweep_sla(1_000_000, acknowledge=False, env={}),
+            check_sweep_sla(1_000_000, acknowledge=True, env={}),
+        ]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = [
+                check_sweep_sla(100, acknowledge=False, env={}),
+                check_sweep_sla(1_000_000, acknowledge=False, env={}),
+                check_sweep_sla(1_000_000, acknowledge=True, env={}),
+            ]
+            assert on == off
+            assert [p.decision.value for p in on] == ["allowed", "refused", "acknowledged"]
+        finally:
+            self._reset_facade()

@@ -198,18 +198,11 @@ class TestSweepOpsRouting:
 
         from brutex.engine import sweep_ops_rust
 
-        def stall_scaled_timeout(factor: float, estimate: float, base: float) -> tuple[float, bool]:
-            scaled = factor * estimate
-            if scaled > base:
-                return (scaled, True)
-            return (base, False)
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
 
-        crate = SimpleNamespace(
-            __version__="fake",
-            join_path_segments=lambda base, segments: base,
-            gate_config_fragment=lambda *args: (None, None),
-            stall_scaled_timeout=stall_scaled_timeout,
-        )
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
         monkeypatch.setattr(
             sweep_ops_rust,
             "importlib",

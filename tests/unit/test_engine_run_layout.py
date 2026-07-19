@@ -83,20 +83,11 @@ class TestSweepOpsRouting:
 
         from brutex.engine import sweep_ops_rust
 
-        def join_path_segments(base: str, segments: list[str]) -> str:
-            acc = base
-            for segment in segments:
-                if acc and not acc.endswith("/"):
-                    acc += "/"
-                acc += segment
-            return acc
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
 
-        crate = SimpleNamespace(
-            __version__="fake",
-            join_path_segments=join_path_segments,
-            gate_config_fragment=lambda *args: (None, None),
-            stall_scaled_timeout=lambda *args: (300.0, False),
-        )
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
         monkeypatch.setattr(
             sweep_ops_rust,
             "importlib",

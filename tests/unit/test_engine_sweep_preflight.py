@@ -208,3 +208,77 @@ class TestOneDayTradeLawNote:
 
         assert one_day_trade_law_note(["1minute", "5minute", "15minute"]) is None
         assert one_day_trade_law_note([]) is None
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the two preflight pure folds.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python laws (which every OTHER test in
+    this file drives).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_missing_fold(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        sizes = {
+            ("NSE-NIFTY", "1minute"): 375,
+            ("NSE-NIFTY", "5minute"): 0,
+            ("BSE-SENSEX", "1minute"): 7,
+        }
+        symbols = ["NSE-NIFTY", "BSE-SENSEX"]
+        intervals = ["1minute", "5minute"]
+        off = preflight_slices(sizes, symbols=symbols, intervals=intervals)
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = preflight_slices(sizes, symbols=symbols, intervals=intervals)
+            assert on == off
+            assert on.missing == (("NSE-NIFTY", "5minute"), ("BSE-SENSEX", "5minute"))
+            assert on.requested == 4
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_matches_python_law_freshness_fold(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        verdicts = {
+            ("Z", "5minute"): "stale",
+            ("A", "1day"): "fresh",
+            ("A", "5minute"): "weird",  # fail-closed: not exactly "fresh"
+        }
+        off = preflight_derived_freshness(verdicts)
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = preflight_derived_freshness(verdicts)
+            assert on == off
+            assert on.stale == (("A", "5minute"), ("Z", "5minute"))
+            assert on.checked == 3
+        finally:
+            self._reset_facade()
