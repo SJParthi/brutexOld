@@ -72,6 +72,27 @@ ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. This header carries the pointer,
 never the story — the full record lives in the §1 Active-branch blurb +
 MIGRATION.md #1952.)
+Earlier: 2026-07-16 (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001,
+MIGRATION.md #1895, branch `claude/crossverify-owed-sentinel` — the owed-day
+sentinel HARDENING follow-up to the landed #1810 (the base change rode the
+club-T train, PR #1558; this delta is the round-1 hostile-review fold —
+SHIP ×2, zero BLOCKER/MAJOR): `mark_owed_for_pull` gains publish-gate PARITY
+with the D3 catchup (a staged-only `BRUTEX_CROSSVERIFY_PUBLISH=off` launch
+no longer writes a marker no automatic pass would ever clear — mark and
+auto-clearer AGREE; mark-side pin test), the owed scan gains the STRICT
+canonical-name law + the silent atomic-temp skip (refuter round 3 over
+LANDED main — a foreign-planted basic-ISO `20260714.json` was an IMMORTAL
+un-clearable owed day and double-listed beside its canonical twin, both
+pre-existing on #1810; a scan racing an in-flight mark's `.brutex-write-*`
+temp fired a spurious junk WARN — all fails-before-pinned), the
+midnight-crossing launch is documented benign/convergent at both mark
+sites, `mark_owed`'s broad except narrows to OSError (a genuine code bug
+now propagates loudly), and the scan-window floor boundary is exactly
+pinned. Sidecar-gate + scan-law + comments + tests only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1895; main's landed #1810 entry is
+byte-untouched.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940,
 branch `claude/rust-slice-t10-data-purelaw` — ADR-0020 slice T10 PR-1: the
 NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
@@ -3871,6 +3892,63 @@ hostile-review pass._
   new lane); expected payoff ≈ 0 — uniformity, not speed; ships INERT. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the per-item record lives in
   the §1 blurb + MIGRATION.md #1952 — this header carries the pointer, never the story.)
+  Earlier: `claude/crossverify-owed-sentinel`
+  (**DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1895** — the
+  owed-day sentinel HARDENING follow-up to the landed
+  DEC-CROSSVERIFY-OWED-SENTINEL-001 (#1810; the base change landed on main
+  via the club-T train, PR #1558, folding the closed draft PR #1537 — this
+  delta is the round-1 hostile-review fold authored after the train cut;
+  main's #1810 ledger entry is byte-UNTOUCHED, the round-1 record lives in
+  its OWN row #1832 per the coordinator's re-cut ruling). THE FOUR ITEMS
+  (2 reviewers, verdict SHIP ×2 — zero BLOCKER/MAJOR): (MINOR-1, the ONE
+  behavior change) `mark_owed_for_pull` gains publish-gate PARITY with the
+  step-D3 catchup that auto-completes markers — the mark previously gated
+  on `config.enabled` only while D3 sits behind run.py's
+  `config.publish and not config.dry_run` gate, so a staged-only
+  (`BRUTEX_CROSSVERIFY_PUBLISH=off`) launch wrote a marker that was
+  surfaced forever yet never auto-healed; the mark now gates on publish
+  too (mark and auto-clearer AGREE; ONE skip INFO names the reason),
+  pinned by the mark-side twin `test_publish_off_marks_nothing` beside
+  #1810's scan-side `test_owed_scan_gated_off_for_no_publish`. (MINOR-2,
+  documented NOT changed — benign/convergent) a launch that crosses
+  MIDNIGHT marks launch_day D while the tail runs config.day = D+1: D's
+  marker survives and the NEXT run's D3 completes it idempotently (zero
+  double-puts — the #1810 journal-idempotency law); the honest-limit
+  comment lives at BOTH launcher mark sites (app.py + cli.py). (NIT a)
+  `mark_owed`'s broad `except Exception` NARROWED to `except OSError` —
+  the sibling `clear_owed`'s discipline; a genuine code bug now propagates
+  loudly; both failure-arm tests exercise OSError subclasses, arm stays
+  covered. (NIT b) the exact floor-boundary pin
+  `test_window_floor_boundary_exact` — today − lookback IN the scan;
+  today − lookback − 1 OUT but KEPT + surfaced. REFUTER ROUND 3 folded
+  (the execution-refuter round over LANDED main — no BLOCKER/MAJOR; both
+  findings pre-existing on #1810, this PR hardens them): (R3-MINOR-1)
+  the STRICT canonical-name law — `list_owed_days` classified via bare
+  `date.fromisoformat(stem)`, which since Python 3.11 also accepts basic
+  ISO (`20260714`) + ISO week dates (`2026-W28-1`), so a foreign-planted
+  basic-ISO name was an IMMORTAL owed day (`clear_owed` unlinks only the
+  canonical name — perpetual D3 rerun / permanent beyond-window WARN)
+  and a canonical+basic pair double-listed the day; ONE gate fixes it —
+  a name is a marker IFF `date.fromisoformat(stem).isoformat() == stem`
+  (non-canonical ⇒ the junk WARN; docstrings now TRUE), four
+  fails-before pins incl. the demonstrated immortal-clear repro pinned
+  dead; (R3-NIT-1) a scan racing an in-flight mark's `.brutex-write-*`
+  atomic temp fired a spurious junk WARN — dotfile-prefixed names now
+  skip SILENTLY (fails-before-pinned). HONEST: a publish-off
+  launch now writes NO marker — a later publish-on flip cannot
+  auto-complete that day (manual `--day` remediation; the deliberate cost
+  of parity); D2+D3 same-day double-processing stays idempotent; the
+  per-run beyond-window re-WARN is deliberate loudness; D3 has no
+  aggregate deadline (bounded by `catchup_days`); the scan's diagnostic
+  read is forensics-only. GATES (executed, re-measured at the round-3
+  fold): `owed.py 114/30 100.00%` (38 tests, ci.yml-exact) · whole
+  `brutex.crossverify` 1549/420 100.00% (622 battery tests) · launcher suites 93 passed · ruff/ruff-format
+  clean · `mypy --strict` 0 new · pyright 0 errors on touched files ·
+  ledger/citation/branch-consistency validators green. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; zero new routes/env. Files:
+  `brutex/crossverify/owed.py` + two comment-only launcher touches +
+  `tests/unit/test_crossverify_owed.py`.)
   Earlier: `claude/rust-slice-t10-data-purelaw`
   (**DEC-DATA-RUST-PURELAW-001,
   MIGRATION.md #1940** — slice T10 PR-1: NEW stdlib-pure OPTIONAL crate `rust/brutex-data` +
@@ -11494,6 +11572,20 @@ hostile-review pass._
   lane extended (no new lane); expected payoff ≈ 0 — uniformity, not
   speed; ships INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line — see §1 + MIGRATION.md #1952 for the full blurb)
+  Earlier: `claude/crossverify-owed-sentinel`
+  (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1895 — the
+  owed-day sentinel HARDENING follow-up to the landed #1810: publish-gate
+  parity on `mark_owed_for_pull` (staged-only launches no longer write
+  markers the D3 catchup can never auto-clear; mark-side pin test), the
+  STRICT canonical marker-name law + the silent atomic-temp skip (refuter
+  round 3 — a planted basic-ISO name is junk, never an immortal
+  un-clearable owed day; no spurious junk WARN on a racing mark's temp),
+  the midnight-cross honest-limit comments at both launcher mark sites,
+  `mark_owed`'s except narrowed Exception→OSError, and the exact
+  scan-window floor-boundary pin; sidecar-gate + scan-law + comments +
+  tests only;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1895 for the full blurb)
   Earlier: `claude/rust-slice-t10-data-purelaw`
   (DEC-DATA-RUST-PURELAW-001, MIGRATION.md #1940 — ADR-0020 slice T10 PR-1:
   the NEW stdlib-pure OPTIONAL crate `rust/brutex-data` + the default-OFF
