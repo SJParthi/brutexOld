@@ -18,8 +18,8 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c,
-MIGRATION.md #1955 + #1956 + #1957, branch `claude/rust-cascade-results-s2` STACKED on the
+_Last updated: 2026-07-19 (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c+2d,
+MIGRATION.md #1955 + #1956 + #1957 + #1958, branch `claude/rust-cascade-results-s2` STACKED on the
 slice-1 head — the `cascade_wire` SERIALISATION + PARSE LAW family moves to
 `rust/brutex-cascade/src/cascade_wire.rs` under the same capture-first
 compressed cycle (the 76-case parity corpus (62-test replay) FROZEN against the UNTOUCHED
@@ -53,11 +53,22 @@ show-report text assembly) crate-hosted under the same capture-first cycle
 I/O half DELIBERATELY stays shim-side Python — the sanctioned
 partial-conversion scoping; 76 zero-divergence differentials + 5/5
 hand-killed mutants + the module's FIRST dedicated ci.yml stanza
-(243 tests / 100.00%). ENGINE
+(243 tests / 100.00%). SLICE 2d (same branch, MIGRATION.md #1958): the
+lane's first TWO-module BATCH — `twin_detect` + `baseline` crate-hosted
+under the same capture-first cycle (the 159-case corpus / 162-test replay
+frozen FIRST; the blake3 digest stays shim-side, `twin_group` indices map
+back to the ORIGINAL run_id objects, the 28-digit Decimal total law runs
+through CPython operators crate-side), scoped by an explicit
+five-candidate SCOUT with three drops recorded-with-reasons (candidate ·
+session_lens · reference_series — the remainder now 9 files); 70
+zero-divergence differentials + 9/9 hand-killed mutants + both
+pre-existing stanzas extended (baseline 186 / twin_detect 156 tests,
+100.00% each). ENGINE
 UNCHANGED — the sweep hot path + run identity take ZERO diffs —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; no new env
 vars. This header carries the pointer, never the story — the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1955 + #1956 + #1957.)
+lives in the §1 Active-branch blurb + MIGRATION.md #1955 + #1956 + #1957 +
+#1958.)
 Earlier: 2026-07-18 (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954,
 branch `claude/rust-cascade-results` — the cascade/results-depth Rust
 conversion PHASE A: the NEW standalone `rust/brutex-cascade` crate (pyo3
@@ -3309,8 +3320,8 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-cascade-results-s2`
-  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c, MIGRATION.md
-  #1955 + #1956 + #1957** —
+  (**DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c+2d, MIGRATION.md
+  #1955 + #1956 + #1957 + #1958** —
   STACKED on the slice-1 head ef021b8; the T14 lane's second slice: the
   `cascade_wire` SERIALISATION + PARSE LAW family moves to
   `rust/brutex-cascade/src/cascade_wire.rs` and the module becomes a
@@ -3492,16 +3503,67 @@ hostile-review pass._
   itself refused (InvalidOperation) — both zones stated precisely,
   neither over-generalized; the `__format__`-not-`__str__` divergence
   pinned BOTH ways; non-float metric fields scoped in the suite
-  docstring. The recorded remainder is now 11 files (+ combo_mask
+  docstring. The recorded remainder after 2c: 11 files (+ combo_mask
   support + the two retained halves). The slice-2c hostile-review round
   LANDED verdict SHIP (recorded on #1957 — zero BLOCKER/MAJOR/MINOR,
   every count reproduced under execution; the ONE doc-completeness NIT —
   the crate module doc's universal-identity under-claim — folded in the
   review-fold commit: the module doc now discloses the bounded
   `__format__`-vs-`__str__` identity + the dual paisa refusal zones,
-  comment-only, wheel byte-unchanged). ENGINE UNCHANGED — zero
+  comment-only, wheel byte-unchanged).
+  SLICE 2d (same branch, MIGRATION.md #1958 — the `twin_detect` +
+  `baseline` conversion, 358 + 334 LOC → byte-exact type-face shims over
+  `rust/brutex-cascade/src/twin_detect.rs` + `src/baseline.rs`; the
+  lane's first TWO-module BATCH slice): the SCOUT batch-scoping verdict
+  is binding — FIVE remainder candidates scouted, twin_detect + baseline
+  IN, THREE dropped-with-reasons staying on the remainder (`candidate.py`
+  — pure composition over the unconverted deflate/robustness/validation
+  stack + the metrics/compute carve-out; `session_lens.py` — cross-wheel:
+  the trading_core MarketStructureState fold + Python-side NSE/expiry
+  calendar data; `reference_series.py` — thin dict-lookup glue over
+  lake_read's keep-first + the picklable spawn-stamper contract (#1645)
+  + a per-trade hot-path FFI hop for near-zero law). CAPTURE-FIRST at
+  319ccdf87: the 159-case corpus (69 twin + 90 baseline) / 162-test
+  replay frozen against the untouched Python (8× generator refusal — six
+  prior fixtures byte-untouched; PYTHONHASHSEED determinism; a 25-item
+  frozen-quirk list; the 9-of-10 jaccard-boundary construction corrected
+  PRE-commit — the first shape was silently 9/11, not a subset; the
+  structurally-DEAD `allow_nan=False` write arm disclosed, deliberately
+  NOT frozen — no invented reachability). The port at cec2d52f7: both
+  law bodies deleted behind type-face shims; the split decisions — the
+  canonical fingerprint BYTES render crate-side with the blake3 digest
+  SHIM-side (Cargo.toml/Cargo.lock byte-untouched, pyo3 the only dep),
+  `twin_group` returns pool INDICES mapped back to the ORIGINAL run_id
+  objects (str-subclass identity pinned), baseline's 28-sig-digit
+  Decimal total law runs on the ORIGINAL Decimal objects through CPython
+  operators crate-side; the Phase-A NaN assumption CORRECTED by probing
+  (quiet NaN passes quantize SILENTLY — only sNaN/Infinity/the 28-digit
+  wall raise; exact InvalidOperation args seam-pinned); the 162 frozen
+  replays green UNMODIFIED on the FIRST post-wheel run (zero fix rounds
+  — the third slice in a row); pre-existing 97 + prior replays 279 +
+  tests/golden 997 + consumers 262 + 19 seam pins green; shims 100.00%
+  (twin 39/0 · baseline 58/2); cargo 60 `--locked -D warnings`; the two
+  pre-existing static stanzas EXTENDED (unit-alone would have left the
+  corpus-only delegates uncovered — the 2b/2c latent-red lesson applied
+  up front). Differentials at e96816cbf: 70 hypothesis tests (36 twin +
+  34 baseline) vs the verbatim 319ccdf87 oracles — ZERO divergences,
+  first-run green under both profiles; 9/9 hand-applied Rust mutants
+  KILLED (incl. W3 sessions-len, which forced a NEW deterministic
+  ladder-rung pin verified against the live mutant) + 3 not-attempted
+  sites justified (mutants-s2.log V/W block); both stanzas re-measured
+  100.00% (baseline 186 tests · twin_detect 156); clean-tree battery
+  329. DISCLOSED envelope (carries the Phase-B set + one NEW pinned
+  member): lone-surrogate run_ids in group_twins fail UTF-8 extraction;
+  beyond-±i64 entry-µs/pnl refuse OverflowError; a `Fraction(1,3)`
+  threshold diverges — the crate rounds-to-f64-then-compares vs the
+  oracle's exact-rational compare — pinned BOTH ways; the quiet-NaN
+  payload carry now TESTED (the Phase-B open note closed); raw-escape
+  parity held everywhere. The recorded remainder is now 9 files. The
+  slice-2d hostile-review round is PENDING at the docs commit
+  (dispatched next; recorded on #1958 when the verdict lands — the
+  #1955–#1957 convention). ENGINE UNCHANGED — zero
   hot-path/run-identity diffs; no new env
-  vars; full record in MIGRATION.md #1957.)
+  vars; full record in MIGRATION.md #1958.)
   Earlier: `claude/rust-cascade-results`
   (**DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954** — the T14
   cascade/results-depth Rust conversion, PHASE A, under the operator's
@@ -10169,8 +10231,8 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-cascade-results-s2`
-  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c, MIGRATION.md
-  #1955 + #1956 + #1957 —
+  (DEC-RUST-CASCADE-RESULTS-001 PHASE B SLICES 2a+2b+2c+2d, MIGRATION.md
+  #1955 + #1956 + #1957 + #1958 —
   STACKED on the slice-1 head: the `cascade_wire` SERIALISATION + PARSE LAW
   family moves to `rust/brutex-cascade/src/cascade_wire.rs` under the
   capture-first cycle (the 76-case parity corpus (62-test replay) frozen against the
@@ -10223,13 +10285,38 @@ hostile-review pass._
   the full i64 money domain; 6 multi-defect order pins); 5/5
   hand-killed Rust mutants (2/7 sites not-attempted with reasons); the
   module's FIRST dedicated ci.yml stanza — 243 tests / 100.00%
-  (104/22); the recorded remainder now 11 files; the slice-2c
+  (104/22); the recorded remainder after 2c 11 files; the slice-2c
   hostile-review round LANDED SHIP (recorded on #1957 — zero
   BLOCKER/MAJOR/MINOR; the one doc-completeness NIT — the crate
   module-doc envelope under-claim — folded comment-only in the
-  review-fold commit); ENGINE UNCHANGED — the sweep hot path + run identity take
+  review-fold commit). SLICE 2d (same branch, MIGRATION.md #1958):
+  `twin_detect` (358 LOC) + `baseline` (334 LOC) — the lane's first
+  TWO-module BATCH slice, scoped by a five-candidate SCOUT with three
+  drops recorded-with-reasons (candidate — composition over unconverted
+  callees + the metrics/compute carve-out; session_lens — the
+  trading_core cross-wheel fold + Python-side calendar data;
+  reference_series — thin lake-glue + the picklable spawn-stamper
+  contract + a per-trade FFI hop for near-zero law); both crate-hosted
+  under the same capture-first cycle (the 159-case corpus / 162-test
+  replay frozen at 319ccdf87 BEFORE conversion — 25 frozen quirks; the
+  9-of-10 jaccard subset construction corrected pre-commit; the dead
+  `allow_nan=False` arm disclosed, not frozen) behind byte-exact
+  type-face shims (the blake3 digest stays shim-side; `twin_group`
+  indices map back to the ORIGINAL run_id objects; the 28-digit Decimal
+  total law runs through CPython operators crate-side; the quiet-NaN
+  quantize law probe-corrected — only sNaN/Infinity/the 28-digit wall
+  raise); the 162 replays UNMODIFIED green on the first post-wheel run
+  (zero fix rounds — third slice in a row); 70 zero-divergence
+  differentials vs the verbatim frozen oracles; 9/9 hand-killed Rust
+  mutants (incl. the W3 kill that forced a new deterministic ladder-rung
+  pin) + 3 not-attempted sites justified; the two pre-existing stanzas
+  extended — baseline 186 / twin_detect 156 tests, 100.00% each; the
+  recorded remainder now 9 files; the slice-2d hostile-review round
+  PENDING at the docs commit (recorded on #1958 when the verdict
+  lands); ENGINE UNCHANGED — the sweep hot path + run identity take
   ZERO diffs — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1955 + #1956 + #1957 for the full blurbs)
+  see §1 + MIGRATION.md #1955 + #1956 + #1957 + #1958 for the full
+  blurbs)
   Earlier: `claude/rust-cascade-results`
   (DEC-RUST-CASCADE-RESULTS-001, MIGRATION.md #1954 — the T14
   cascade/results-depth Rust conversion PHASE A: the NEW
