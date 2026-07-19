@@ -138,16 +138,44 @@ class TestDiscovery:
         assert discover_top100_runs(tmp_path, limit=5) == ()
 
     def test_stat_oserror_skipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The sort-key stat on top100.json raises → the run is skipped.
+
+        The FIRST top100.json stat (``is_file``) succeeds so the loop
+        reaches the inner ``suppress(OSError)``; the SECOND (the sort-key
+        ``.stat()``) raises — the run is dropped, never a leg crash.
+        """
         write_artifact(tmp_path, "a" * 64, [_entry(1)])
         real_stat = Path.stat
+        calls = {"n": 0}
 
         def _flaky(self: Path, **kwargs: object) -> object:
-            if self.name == "a" * 64:
-                raise OSError("stat refused")
+            if self.name == "top100.json":
+                calls["n"] += 1
+                if calls["n"] > 1:
+                    raise OSError("stat refused")
             return real_stat(self, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(Path, "stat", _flaky)
         assert discover_top100_runs(tmp_path, limit=5) == ()
+        assert calls["n"] == 2
+
+    def test_sidecar_write_does_not_rekey_discovery(self, tmp_path: Path) -> None:
+        """Round-1 MINOR #2 regression: discovery keys on the IMMUTABLE
+        top100.json file mtime, NOT the run-dir mtime — a later sidecar
+        write into a PRIOR night's run dir (run-delta.json /
+        decay-diff.json bump the DIR mtime) must never re-select it."""
+        import os
+
+        dir_a = write_artifact(tmp_path, "a" * 64, [_entry(1)])
+        write_artifact(tmp_path, "b" * 64, [_entry(1)])
+        runs = discover_top100_runs(tmp_path, limit=1)
+        assert [r.run_id for r in runs] == ["b" * 64]
+        # A sidecar lands in run "a" and bumps the DIR mtime far past "b".
+        (dir_a / "run-delta.json").write_text("{}", encoding="utf-8")
+        future = dir_a.stat().st_mtime + 10_000.0
+        os.utime(dir_a, (future, future))
+        runs = discover_top100_runs(tmp_path, limit=1)
+        assert [r.run_id for r in runs] == ["b" * 64]
 
 
 class TestCoordsAndKeys:

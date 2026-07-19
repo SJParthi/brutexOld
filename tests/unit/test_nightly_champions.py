@@ -221,6 +221,31 @@ class TestRunDelta:
         delta = build_run_delta(prior, current)
         assert delta["rank_moves"] == []
         assert delta["common"] == 1
+        assert delta["join_collisions"] == 0
+
+    def test_join_key_collision_keeps_first_and_warns(self, tmp_path: Path) -> None:
+        """Round-1 MINOR #3: two DISTINCT entries sharing a join key (the
+        entry schema carries no Stage-1A axis params — named follow-up
+        DEC-TOP100-AXIS-JOIN-KEY-001) are guarded LOUDLY: keep-FIRST
+        (best rank) + counted + one WARN — never a silent last-wins."""
+        colliding_a = _entry(1)  # same mask/direction/instrument/tf/arm …
+        colliding_b = _entry(2)  # … distinct run_id/rank → the SAME join key
+        assert colliding_a != colliding_b
+        assert entry_join_key(colliding_a) == entry_join_key(colliding_b)
+        current = self._artifact(tmp_path, "a" * 64, [colliding_a, colliding_b])
+        with structlog.testing.capture_logs() as logs:
+            delta = build_run_delta(None, current)
+        assert delta["join_collisions"] == 1
+        assert any(e["event"] == "nightly.champions.join_key_collision" for e in logs)
+        # Both sides guarded on the ok arm too: one collision per side.
+        current2 = self._artifact(tmp_path, "b" * 64, [colliding_a, colliding_b])
+        with structlog.testing.capture_logs() as logs2:
+            delta2 = build_run_delta(current, current2)
+        assert delta2["join_collisions"] == 2
+        assert delta2["common"] == 1
+        # keep-FIRST: the surviving row is rank 1 on both sides — no move.
+        assert delta2["rank_moves"] == []
+        assert len(logs2) == 2
 
 
 class TestTransitions:
@@ -232,15 +257,14 @@ class TestTransitions:
         run_id: str,
         entries: list[dict[str, object]],
         *,
-        mtime: float,
         decay_block: Mapping[str, object] | None = None,
         alerter: object | None = None,
     ) -> dict[str, object]:
-        # The leg WRITES run-delta.json into tonight's run dir, which
-        # resets that dir's mtime to the wall clock — so the synthetic
-        # night ordering must sit ABOVE any wall-clock value or a prior
-        # night's delta-written dir would outrank a later synthetic one.
-        write_artifact(tmp_path, run_id, entries, mtime=4.0e9 + mtime)
+        # NATURAL mtimes: discovery keys on the IMMUTABLE top100.json
+        # FILE mtime (round-1 MINOR #2), so the legs' own sidecar writes
+        # into a prior night's run dir can never re-key discovery — the
+        # old synthetic-future-mtime crutch is gone.
+        write_artifact(tmp_path, run_id, entries)
         return run_champions_leg(
             lake_root=tmp_path / "lake",
             results_root=tmp_path,
@@ -288,17 +312,13 @@ class TestTransitions:
 
         alerter = _Alerter()
         # Night 1: no champion → SEED from the best eligible entry.
-        block1 = self._night(tmp_path, "a" * 64, [champion], mtime=1000.0, alerter=alerter)
+        block1 = self._night(tmp_path, "a" * 64, [champion], alerter=alerter)
         assert block1["status"] == "ok"
         actions1 = [t["action"] for t in block1["transitions"]]  # type: ignore[index, union-attr]
         assert actions1 == ["SEEDED"]
         # Nights 2-3: the challenger dominates → CHALLENGED (streak 1, 2).
-        block2 = self._night(
-            tmp_path, "b" * 64, [champion, challenger], mtime=2000.0, alerter=alerter
-        )
-        block3 = self._night(
-            tmp_path, "c" * 64, [champion, challenger], mtime=3000.0, alerter=alerter
-        )
+        block2 = self._night(tmp_path, "b" * 64, [champion, challenger], alerter=alerter)
+        block3 = self._night(tmp_path, "c" * 64, [champion, challenger], alerter=alerter)
         streaks = [
             t["streak"]
             for b in (block2, block3)
@@ -307,9 +327,7 @@ class TestTransitions:
         ]
         assert streaks == [1, 2]
         # Night 4: streak reaches CHAMPION_PROMOTE_NIGHTS → PROMOTED.
-        block4 = self._night(
-            tmp_path, "d" * 64, [champion, challenger], mtime=4000.0, alerter=alerter
-        )
+        block4 = self._night(tmp_path, "d" * 64, [champion, challenger], alerter=alerter)
         actions4 = [t["action"] for t in block4["transitions"]]  # type: ignore[index, union-attr]
         assert actions4 == ["PROMOTED"]
         assert len(alerter.promoted) == 1
@@ -345,9 +363,9 @@ class TestTransitions:
         champion = _entry(1, mask_hex="a".zfill(32))
         chall_b = _entry(2, mask_hex="b".zfill(32))
         chall_c = _entry(2, mask_hex="c".zfill(32))
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
-        self._night(tmp_path, "b" * 64, [champion, chall_b], mtime=2000.0)
-        block = self._night(tmp_path, "c" * 64, [champion, chall_c], mtime=3000.0)
+        self._night(tmp_path, "a" * 64, [champion])
+        self._night(tmp_path, "b" * 64, [champion, chall_b])
+        block = self._night(tmp_path, "c" * 64, [champion, chall_c])
         challenged = [t for t in block["transitions"] if t["action"] == "CHALLENGED"]  # type: ignore[union-attr]
         assert challenged[0]["streak"] == 1  # a NEW identity restarts the count
 
@@ -357,15 +375,15 @@ class TestTransitions:
         champion = _entry(1, mask_hex="a".zfill(32))
         challenger = _entry(2, mask_hex="b".zfill(32))
         _patch_challenge(monkeypatch, _dominating_verdict())
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
-        self._night(tmp_path, "b" * 64, [champion, challenger], mtime=2000.0)
+        self._night(tmp_path, "a" * 64, [champion])
+        self._night(tmp_path, "b" * 64, [champion, challenger])
         _patch_challenge(monkeypatch, _dominating_verdict(dominates=False))
-        block = self._night(tmp_path, "c" * 64, [champion, challenger], mtime=3000.0)
+        block = self._night(tmp_path, "c" * 64, [champion, challenger])
         retained = [t for t in block["transitions"] if t["action"] == "RETAINED"]  # type: ignore[union-attr]
         assert retained[0]["reason"] == "challenger_did_not_dominate"
         # The streak state was cleared — a later domination restarts at 1.
         _patch_challenge(monkeypatch, _dominating_verdict())
-        block = self._night(tmp_path, "d" * 64, [champion, challenger], mtime=4000.0)
+        block = self._night(tmp_path, "d" * 64, [champion, challenger])
         challenged = [t for t in block["transitions"] if t["action"] == "CHALLENGED"]  # type: ignore[union-attr]
         assert challenged[0]["streak"] == 1
 
@@ -375,17 +393,17 @@ class TestTransitions:
         champion = _entry(1, mask_hex="a".zfill(32))
         challenger = _entry(2, mask_hex="b".zfill(32))
         _patch_challenge(monkeypatch, _dominating_verdict())
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
+        self._night(tmp_path, "a" * 64, [champion])
         _patch_challenge(monkeypatch, None)
-        block = self._night(tmp_path, "b" * 64, [champion, challenger], mtime=2000.0)
+        block = self._night(tmp_path, "b" * 64, [champion, challenger])
         retained = [t for t in block["transitions"] if t["action"] == "RETAINED"]  # type: ignore[union-attr]
         assert retained[0]["reason"] == "pooled_check_failed"
 
     def test_no_challenger_retains(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_challenge(monkeypatch, _dominating_verdict())
         champion = _entry(1, mask_hex="a".zfill(32))
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
-        block = self._night(tmp_path, "b" * 64, [champion], mtime=2000.0)
+        self._night(tmp_path, "a" * 64, [champion])
+        block = self._night(tmp_path, "b" * 64, [champion])
         retained = [t for t in block["transitions"] if t["action"] == "RETAINED"]  # type: ignore[union-attr]
         assert retained[0]["reason"] == "no_challenger"
 
@@ -397,8 +415,8 @@ class TestTransitions:
         _patch_challenge(monkeypatch, _dominating_verdict())
         champion = _entry(1, mask_hex="a".zfill(32))
         challenger = _entry(2, mask_hex="b".zfill(32))
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
-        block = self._night(tmp_path, "b" * 64, [champion, challenger], mtime=2000.0)
+        self._night(tmp_path, "a" * 64, [champion])
+        block = self._night(tmp_path, "b" * 64, [champion, challenger])
         actions = [t["action"] for t in block["transitions"]]  # type: ignore[index, union-attr]
         assert actions == ["PROMOTED"]
 
@@ -418,7 +436,7 @@ class TestTransitions:
         ) == frozenset({"k1"})
 
     def test_seed_needs_an_eligible_entry(self, tmp_path: Path) -> None:
-        block = self._night(tmp_path, "a" * 64, [_entry(1, cascade_status="fail")], mtime=1000.0)
+        block = self._night(tmp_path, "a" * 64, [_entry(1, cascade_status="fail")])
         assert block["status"] == "ok"
         assert block["transitions"] == []
         assert load_champions_state(tmp_path)["champions"] == {}
@@ -429,18 +447,18 @@ class TestTransitions:
         """A DECAYED champion is retire-FLAGGED (annotation, never deleted)."""
         _patch_challenge(monkeypatch, _dominating_verdict())
         champion = _entry(1, mask_hex="a".zfill(32))
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
+        self._night(tmp_path, "a" * 64, [champion])
         decay_block = {
             "status": "ok",
             "entries": [{"join_key": entry_join_key(champion), "verdict": "decayed"}],
         }
-        block = self._night(tmp_path, "b" * 64, [champion], mtime=2000.0, decay_block=decay_block)
+        block = self._night(tmp_path, "b" * 64, [champion], decay_block=decay_block)
         actions = [t["action"] for t in block["transitions"]]  # type: ignore[index, union-attr]
         assert "RETIRE_FLAGGED" in actions
         record = load_champions_state(tmp_path)["champions"]["NIFTY/1minute/bull"]  # type: ignore[index, call-overload]
         assert record["retire_flag"] == {"reason": "decayed", "flagged_utc": NOW.isoformat()}
         # Idempotent: a second decayed night does not re-flag.
-        block2 = self._night(tmp_path, "c" * 64, [champion], mtime=3000.0, decay_block=decay_block)
+        block2 = self._night(tmp_path, "c" * 64, [champion], decay_block=decay_block)
         assert "RETIRE_FLAGGED" not in [t["action"] for t in block2["transitions"]]  # type: ignore[index, union-attr]
 
     def test_corrupt_champion_record_skipped(
@@ -451,7 +469,7 @@ class TestTransitions:
             tmp_path, {"schema_version": 1, "champions": {"NIFTY/1minute/bull": "junk"}}
         )
         with structlog.testing.capture_logs() as logs:
-            block = self._night(tmp_path, "a" * 64, [_entry(1)], mtime=1000.0)
+            block = self._night(tmp_path, "a" * 64, [_entry(1)])
         assert block["status"] == "ok"
         assert any(e["event"] == "nightly.champions.record_corrupt" for e in logs)
 
@@ -470,7 +488,7 @@ class TestTransitions:
             "load_champions_state",
             lambda root: {"schema_version": 1, "champions": "junk"},
         )
-        block = self._night(tmp_path, "a" * 64, [_entry(1)], mtime=1000.0)
+        block = self._night(tmp_path, "a" * 64, [_entry(1)])
         assert block["status"] == "ok"
         assert block["champions"] == 1  # reseeded over a fresh dict
 
@@ -487,9 +505,7 @@ class TestTransitions:
 
         monkeypatch.setattr(champions, "atomic_write_simple", _refuse_delta)
         with structlog.testing.capture_logs() as logs:
-            block = self._night(
-                tmp_path, "a" * 64, [_entry(1, cascade_status="fail")], mtime=1000.0
-            )
+            block = self._night(tmp_path, "a" * 64, [_entry(1, cascade_status="fail")])
         assert block["status"] == "ok"
         summary = block["run_delta"]
         assert isinstance(summary, dict)
@@ -510,12 +526,115 @@ class TestTransitions:
 
         champion = _entry(1, mask_hex="a".zfill(32))
         challenger = _entry(2, mask_hex="b".zfill(32))
-        self._night(tmp_path, "a" * 64, [champion], mtime=1000.0)
-        block = self._night(
-            tmp_path, "b" * 64, [champion, challenger], mtime=2000.0, alerter=_Raises()
-        )
+        self._night(tmp_path, "a" * 64, [champion])
+        block = self._night(tmp_path, "b" * 64, [champion, challenger], alerter=_Raises())
         actions = [t["action"] for t in block["transitions"]]  # type: ignore[index, union-attr]
         assert actions == ["PROMOTED"]  # best-effort — never a leg failure
+
+    def test_state_save_failure_no_ledger_entry_converges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-1 MAJOR #1 arm (a): a state-save OSError mid-run leaves
+        the ledger WITHOUT the failed transition (state-leads /
+        ledger-trails — the ledger can never over-assert), and the next
+        night converges with NO duplicate ledger entry."""
+        _patch_challenge(monkeypatch, _dominating_verdict())
+
+        def _refuse(root: Path, state: object) -> Path:
+            raise OSError("disk says no")
+
+        monkeypatch.setattr(champions, "save_champions_state", _refuse)
+        with structlog.testing.capture_logs() as logs:
+            block = self._night(tmp_path, "a" * 64, [_entry(1)])
+        assert block["status"] == "ok"
+        assert block["scope_errors"] == 1
+        assert block["transitions"] == []
+        assert block["state_path"] is None
+        assert any(e["event"] == "nightly.champions.scope_error" for e in logs)
+        assert any(e["event"] == "nightly.champions.state_save_failed" for e in logs)
+        ledger_path = tmp_path / "champions" / LEDGER_FILENAME
+        assert read_entries(ledger_path) == []  # never a phantom SEEDED
+        # Next night (writes healthy again): the SEED lands exactly ONCE.
+        monkeypatch.setattr(champions, "save_champions_state", save_champions_state)
+        block2 = self._night(tmp_path, "b" * 64, [_entry(1)])
+        assert [t["action"] for t in block2["transitions"]] == ["SEEDED"]  # type: ignore[index, union-attr]
+        assert [e.action for e in read_entries(ledger_path)] == ["SEEDED"]
+        assert verify_chain(ledger_path) == 1
+
+    def test_promoted_ledger_crash_state_leads_converges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-1 MAJOR #1 arms (b)+(c): a crash in the window between
+        the state save and the PROMOTED ledger append leaves state
+        AUTHORITATIVE (the promotion materialized) and the ledger
+        honestly UNDER-counting — the pinned law: the ledger records NO
+        retroactive catch-up line and the next night never duplicates
+        the promotion, even when the era's counterpart drops out of the
+        artifact (the formerly-unreconcilable phantom-PROMOTED shape)."""
+        from brutex.orchestrator import audit
+
+        _patch_challenge(monkeypatch, _dominating_verdict())
+        champion = _entry(1, mask_hex="a".zfill(32))
+        challenger = _entry(2, mask_hex="b".zfill(32))
+        self._night(tmp_path, "a" * 64, [champion])
+        self._night(tmp_path, "b" * 64, [champion, challenger])
+        self._night(tmp_path, "c" * 64, [champion, challenger])
+        real_append = audit.AuditWriter.append
+
+        def _crash(self: audit.AuditWriter, **kwargs: object) -> object:
+            if kwargs.get("action") == "PROMOTED":
+                raise RuntimeError("simulated crash between state save and ledger append")
+            return real_append(self, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(audit.AuditWriter, "append", _crash)
+        # Night 4: streak reaches 3 → the promotion SAVES state, then the
+        # ledger append "crashes".
+        block4 = self._night(tmp_path, "d" * 64, [champion, challenger])
+        assert block4["scope_errors"] == 1
+        assert block4["transitions"] == []
+        record = load_champions_state(tmp_path)["champions"]["NIFTY/1minute/bull"]  # type: ignore[index, call-overload]
+        assert record["era"] == 2  # state MATERIALIZED the promotion
+        assert record["join_key"] == entry_join_key(challenger)
+        monkeypatch.setattr(audit.AuditWriter, "append", real_append)
+        # Night 5: the promoted challenger DROPPED OUT of the artifact —
+        # the old champion entry challenges the state champion AFRESH; no
+        # phantom, no duplicate promotion, era stays 2, streak restarts.
+        block5 = self._night(tmp_path, "e" * 64, [champion])
+        actions5 = [t["action"] for t in block5["transitions"]]  # type: ignore[index, union-attr]
+        assert actions5 == ["CHALLENGED"]
+        assert block5["transitions"][0]["streak"] == 1  # type: ignore[index, call-overload]
+        state5 = load_champions_state(tmp_path)["champions"]["NIFTY/1minute/bull"]  # type: ignore[index, call-overload]
+        assert state5["era"] == 2
+        ledger_path = tmp_path / "champions" / LEDGER_FILENAME
+        actions = [e.action for e in read_entries(ledger_path)]
+        # Honest UNDER-count: no PROMOTED line ever — never a phantom.
+        assert actions == ["SEEDED", "CHALLENGED", "CHALLENGED", "CHALLENGED"]
+        assert verify_chain(ledger_path) == 4
+
+    def test_hostile_scope_isolated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Round-1 NIT #4: a hostile artifact whose instrument carries the
+        ledger-forbidden ``|`` byte poisons ONLY its own scope (counted +
+        one WARN via ``AuditFieldError`` isolation) — every other scope
+        proceeds and the nightly is unbroken."""
+        _patch_challenge(monkeypatch, _dominating_verdict())
+        good = _entry(1)
+        hostile = _entry(2, instrument="NIF|TY", mask_hex="b".zfill(32))
+        with structlog.testing.capture_logs() as logs:
+            block = self._night(tmp_path, "a" * 64, [good, hostile])
+        assert block["status"] == "ok"
+        assert block["scope_errors"] == 1
+        scope_events = [e for e in logs if e["event"] == "nightly.champions.scope_error"]
+        assert len(scope_events) == 1
+        assert scope_events[0]["error_type"] == "AuditFieldError"
+        ledger_path = tmp_path / "champions" / LEDGER_FILENAME
+        entries = read_entries(ledger_path)
+        assert [e.action for e in entries] == ["SEEDED"]  # the good scope only
+        assert entries[0].subject == "champion:NIFTY/1minute/bull"
+        assert verify_chain(ledger_path) == 1
+        # State-leads: the hostile scope's seed persisted in STATE (the
+        # trailing ledger under-counts it — the documented law).
+        state = load_champions_state(tmp_path)
+        assert set(state["champions"]) == {"NIFTY/1minute/bull", "NIF|TY/1minute/bull"}  # type: ignore[arg-type]
 
 
 class TestChallengeRealPath:
@@ -532,11 +651,11 @@ class TestChallengeRealPath:
         _plant_lake(lake)
         champion = _entry(1, mask_hex="a".zfill(32), direction="bear")
         challenger = _entry(2, mask_hex="0".zfill(32), direction="bear")
-        # Future-based mtimes: the night-1 delta write resets run "a"'s
-        # dir mtime to the wall clock (see TestTransitions._night).
-        write_artifact(tmp_path, "a" * 64, [champion], mtime=4.0e9 + 1000.0)
+        # Natural mtimes: discovery keys on the immutable top100.json
+        # file mtime (round-1 MINOR #2) — no synthetic-future crutch.
+        write_artifact(tmp_path, "a" * 64, [champion])
         run_champions_leg(lake_root=lake, results_root=tmp_path, now_utc=NOW)
-        write_artifact(tmp_path, "b" * 64, [champion, challenger], mtime=4.0e9 + 2000.0)
+        write_artifact(tmp_path, "b" * 64, [champion, challenger])
         # Bound the pooled window to the fixture month (cheap + hermetic).
         block = run_champions_leg(
             lake_root=lake,
@@ -550,6 +669,51 @@ class TestChallengeRealPath:
         assert isinstance(transitions, list)
         retained = [t for t in transitions if t["action"] == "RETAINED"]
         assert retained and retained[0]["reason"] == "challenger_did_not_dominate"
+
+    def test_shared_catalog_opened_once_across_challenges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-1 NIT #5: ONE lazily-opened catalog is shared across every
+        challenged scope of a leg (the decay leg's one-catalog shape) —
+        never a fresh ``Catalog.open`` per scope."""
+        from brutex.data.catalog import Catalog
+
+        lake = tmp_path / "lake"
+        _plant_lake(lake)
+        champ_1m = _entry(1, mask_hex="a".zfill(32), direction="bear")
+        champ_2m = _entry(2, mask_hex="a".zfill(32), direction="bear", tf="2minute")
+        write_artifact(tmp_path, "a" * 64, [champ_1m, champ_2m])
+        run_champions_leg(lake_root=lake, results_root=tmp_path, now_utc=NOW)
+        chall_1m = _entry(2, mask_hex="0".zfill(32), direction="bear")
+        chall_2m = _entry(4, mask_hex="0".zfill(32), direction="bear", tf="2minute")
+        night2 = [
+            champ_1m,
+            chall_1m,
+            _entry(3, mask_hex="a".zfill(32), direction="bear", tf="2minute"),
+            chall_2m,
+        ]
+        write_artifact(tmp_path, "b" * 64, night2)
+        opens = {"n": 0}
+        real_open = Catalog.open.__func__  # type: ignore[attr-defined]
+
+        def _counting_open(cls: type[Catalog], path: Path, **kwargs: object) -> Catalog:
+            opens["n"] += 1
+            return real_open(cls, path, **kwargs)  # type: ignore[no-any-return]
+
+        monkeypatch.setattr(Catalog, "open", classmethod(_counting_open))
+        block = run_champions_leg(
+            lake_root=lake,
+            results_root=tmp_path,
+            now_utc=NOW,
+            from_date="2024-06-01",
+            to_date="2024-06-19",
+        )
+        assert block["status"] == "ok"
+        transitions = block["transitions"]
+        assert isinstance(transitions, list)
+        retained = [t for t in transitions if t["action"] == "RETAINED"]
+        assert len(retained) == 2  # BOTH scopes were challenged tonight
+        assert opens["n"] == 1  # ONE shared catalog for the whole leg
 
     def test_challenge_out_of_scope_instrument(self, tmp_path: Path) -> None:
         verdict = champions._challenge(
