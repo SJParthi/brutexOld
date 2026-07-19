@@ -118,6 +118,7 @@ import structlog
 
 from brutex.calendars.nse import now_ist
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import open_regular_binary, read_regular_text_deadline
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 if TYPE_CHECKING:
@@ -730,7 +731,7 @@ def read_launch_state(lake_root: Path) -> dict[str, Any] | None:
     """
     path = launch_state_path(lake_root)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text_deadline(path, what="launch pidfile read")
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1088,7 +1089,7 @@ def launch_sweep(
 def read_log_tail(log_path: Path, *, tail_bytes: int = DEFAULT_LOG_TAIL_BYTES) -> str:
     """Bounded tail of *log_path* — seek to the last *tail_bytes*, never a full read."""
     try:
-        with log_path.open("rb") as fh:
+        with open_regular_binary(log_path) as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
             fh.seek(max(0, size - tail_bytes))

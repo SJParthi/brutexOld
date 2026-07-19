@@ -608,11 +608,16 @@ class Catalog:
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
             # _read_partition_frame keeps the torn-read-retry helper
-            # (DEC-WINDOW-TORN-READ-RETRY-001, #1376) AND reads with glob=False
-            # so the ENGINE's feed mouth never glob-interprets a `[`-carrying
-            # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law; the writer also
-            # refuses to mint such dirs — partition._FORBIDDEN_SYMBOL_CHARS).
+            # (DEC-WINDOW-TORN-READ-RETRY-001, #1376) + schema validation, and
+            # since the lake-guards merge its inner reads ride the COMMON
+            # read_parquet_regular gate (DEC-LAKE-READ-INODE-GUARD-001): a
+            # validated open HANDLE is read literally, so the ENGINE's feed
+            # mouth never glob-interprets a `[`-carrying symbol dir into its
+            # siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the
+            # #1594 round-15 metachar law — held BY CONSTRUCTION) and never
+            # hangs on a planted non-regular inode (NotRegularFileError is a
+            # parquet_read_skip_errors() member — the retry/UNREADABLE arm
+            # absorbs it loudly).
             frames.append(_read_partition_frame(path, retry_sleep=retry_sleep))
 
         combined = pl.concat(frames, how="vertical_relaxed")
@@ -780,26 +785,30 @@ def _read_partition_frame(
         ``sleep(seconds)`` used between the tear and its single retry;
         defaults to :func:`time.sleep`. Injectable so tests never sleep.
     """
-    import polars as pl
-
     from brutex.data.errors import parquet_read_skip_errors
+    from brutex.data.guarded_read import read_parquet_regular
 
     sleep = retry_sleep if retry_sleep is not None else time.sleep
     skip_errors = parquet_read_skip_errors()
-    # glob=False on every read below: the caller resolves ONE concrete partition
-    # file, so the ENGINE's feed mouth must never glob-interpret a `[`-carrying
-    # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001,
-    # the #1594 round-15 metachar law; partition._FORBIDDEN_SYMBOL_CHARS refuses
-    # to mint such dirs, but a legacy dir must still read its literal file).
+    # Every read below rides the COMMON read_parquet_regular gate
+    # (DEC-LAKE-READ-INODE-GUARD-001): the caller resolves ONE concrete
+    # partition file, the gate opens it O_NONBLOCK + S_ISREG-validates the fd
+    # and hands the validated OPEN handle to polars — read LITERALLY, so the
+    # ENGINE's feed mouth never glob-interprets a `[`-carrying symbol dir into
+    # its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594
+    # round-15 metachar law, held BY CONSTRUCTION — subsumes the prior
+    # glob=False spelling) and never hangs on a planted non-regular inode
+    # (NotRegularFileError is an OSError = a parquet_read_skip_errors()
+    # member, so it folds into the retry-then-UNREADABLE arm below).
     try:
-        frame = pl.read_parquet(str(path), glob=False)
+        frame = read_parquet_regular(path)
     except skip_errors as first:
         # Torn read (concurrent writer). Retry ONCE — the writer's os.replace is
         # atomic, so a second open sees one consistent inode on a healthy lake.
         _LOG.warning("catalog.read.parquet_retry", path=str(path), error=str(first))
         sleep(_PARTITION_READ_RETRY_DELAY_S)
         try:
-            frame = pl.read_parquet(str(path), glob=False)
+            frame = read_parquet_regular(path)
         except skip_errors as second:
             raise CatalogError(
                 f"UNREADABLE partition file {path}: {second} — a corrupt partition "

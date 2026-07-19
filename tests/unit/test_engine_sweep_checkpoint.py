@@ -196,7 +196,9 @@ def test_load_read_oserror_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def _boom(*_a: Any, **_k: Any) -> str:
         raise OSError("eio")
 
-    monkeypatch.setattr(Path, "read_text", _boom)
+    # DEC-LAKE-READ-INODE-GUARD-001: the load path reads through the guarded
+    # deadline reader now — fault THAT seam (Path.read_text is no longer used).
+    monkeypatch.setattr(ckpt, "read_regular_text_deadline", _boom)
     with pytest.raises(SweepCheckpointError, match="Failed to read checkpoint"):
         s.load()
 

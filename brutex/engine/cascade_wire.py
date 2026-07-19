@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -1325,7 +1326,7 @@ def build_leaderboard_trials(
                 f"trial-stats pairing mismatch at {sidecar}: sidecar digest "
                 f"{stats.tuple_digest} != expected tuple digest {expected_digest}"
             )
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
         if stats.store_content_hash != actual_hash:
             raise CascadeWireError(
                 f"trial-stats pairing mismatch at {sidecar}: sidecar store hash "
@@ -2064,7 +2065,7 @@ def load_manifest(results_root: Path) -> CascadeManifest:
             f"no cascade manifest at {path} — run `brutex sweep-all` first "
             f"(the sweep writes the manifest its winners are cascaded from)"
         )
-    return manifest_from_json(path.read_bytes())
+    return manifest_from_json(read_regular_bytes(path))
 
 
 # ── End-to-end (auto path + manual path) ──────────────────────────────────────

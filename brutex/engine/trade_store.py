@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final, TypedDict, TypeGuard
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.engine.minute_path import PathStatus
 from brutex.engine.results_store import ROW_GROUP_SIZE, ZSTD_LEVEL
 from brutex.models import BruteXError
@@ -649,7 +650,11 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
         _LOG.warning("trade_store.stamp_invalid", stamp=str(paths.stamp), reason=reason)
 
     try:
-        raw = paths.stamp.read_bytes()
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the oneclick
+        # trades/equity routes resolve sidecars through this stamp read): a
+        # planted FIFO / wedged volume folds into the stamp_unreadable arm
+        # (both guard errors are OSError subclasses), never a hung poll.
+        raw = read_regular_bytes_deadline(paths.stamp, what="trade-store stamp read")
     except OSError:
         _invalid("stamp_unreadable")
         return None
@@ -736,7 +741,10 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
             return None
         if verify_hashes:
             try:
-                content = path.read_bytes()
+                # DEC-LAKE-READ-INODE-GUARD-001 defense (a) + (b): the
+                # verify-hashes tier reads whole sidecars — same guard, same
+                # existing degrade arm.
+                content = read_regular_bytes_deadline(path, what="trade-store sidecar read")
             except OSError:
                 _invalid(f"{key}_unreadable")
                 return None

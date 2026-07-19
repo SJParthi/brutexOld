@@ -93,6 +93,7 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, runtime_checka
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.lake_read import bars_by_ts_first
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
@@ -1030,7 +1031,7 @@ def _sentinel_resume(store_path: Path, digest: str) -> TupleCompletionSentinel |
         _unpaired("tuple digest mismatch")
         return None
     try:
-        content = store_path.read_bytes()
+        content = read_regular_bytes(store_path)
     except OSError as exc:
         _unpaired(f"store unreadable: {exc}")
         return None

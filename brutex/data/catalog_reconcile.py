@@ -33,7 +33,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
@@ -42,6 +41,7 @@ from brutex.data.errors import (
     PartitionError,
     datetime_out_of_range_errors,
 )
+from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
@@ -355,13 +355,13 @@ def reconcile_catalog_from_lake(
         # present-but-unreadable (→ `unreadable` → launch REFUSES), while
         # FileNotFoundError alone is a benign vanished-file skip.
         try:
-            # glob=False: ONE concrete walked file (DEC-SPOT-DERIVE-TS-RANGE-
-            # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
-            # symbol dir must never glob-read a sibling's rows into this row's
-            # reconcile stats.
-            timestamps = pl.read_parquet(path, columns=["timestamp"], glob=False).get_column(
-                "timestamp"
-            )
+            # Guarded literal read of ONE concrete walked file
+            # (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the #1594 round-15
+            # metachar law — held by construction inside read_parquet_regular
+            # — a `[`-carrying symbol dir must never glob-read a sibling's
+            # rows into this row's reconcile stats; +
+            # DEC-LAKE-READ-INODE-GUARD-001 fd validation).
+            timestamps = read_parquet_regular(path, columns=("timestamp",)).get_column("timestamp")
             row_count = timestamps.len()
             if row_count == 0:
                 # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,
@@ -384,7 +384,12 @@ def reconcile_catalog_from_lake(
                 continue
             first_ts = timestamps.min()
             last_ts = timestamps.max()
-            raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            # Guarded raw-hash read (DEC-LAKE-READ-INODE-GUARD-001, the
+            # lake-guards fold): read_regular_bytes fd-validates the SAME inode
+            # before hashing — a planted non-regular inode raises
+            # NotRegularFileError (an OSError → the unreadable arm below),
+            # never a hang.
+            raw_hash = hashlib.sha256(read_regular_bytes(path)).hexdigest()
         except _PARQUET_UNREADABLE_ERRORS as exc:
             # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1924): a CORRUPT /
             # version-incompatible partition file — or one whose Datetime column
@@ -416,10 +421,12 @@ def reconcile_catalog_from_lake(
             # #1924 review round 2 (M3): a NON-ENOENT OSError is a PRESENT-but-
             # UNREADABLE partition, NOT absence — the exact silent-partial class this
             # refusal exists to close. Concrete shapes: a data-bearing DIRECTORY named
-            # ``<mm>.parquet/`` (``pl.read_parquet`` reads its real rows, then
-            # ``path.read_bytes()`` raises ``IsADirectoryError`` — the #1558 FIX-ROUND-8
-            # dataset-directory shape); a chmod-000 / wrong-owner file
-            # (``PermissionError``); an ``EIO`` device fault. Each holds REAL data the
+            # ``<mm>.parquet/`` (the fd-validated readers raise
+            # ``NotRegularFileError``/``IsADirectoryError`` — the #1558 FIX-ROUND-8
+            # dataset-directory shape); a planted non-regular inode
+            # (``NotRegularFileError``, DEC-LAKE-READ-INODE-GUARD-001); a chmod-000 /
+            # wrong-owner file (``PermissionError``); an ``EIO`` device fault. Each
+            # (bar the planted inode) holds REAL data the
             # sweep would silently skip (poisoning the PDH/PDL/pivot/Fib anchors while
             # ``data_snapshot_hash`` stamps the holed series canonical), so it joins
             # ``unreadable`` and REFUSES the launch loudly (present != absent). This
