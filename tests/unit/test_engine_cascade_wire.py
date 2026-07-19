@@ -2558,3 +2558,20 @@ class TestWriteReportAtomic:
         first = path.read_bytes()
         cw.write_report(tmp_path, _manual_report())
         assert path.read_bytes() == first  # deterministic bytes, atomically re-landed
+
+
+class TestLbtToDictDelegate:
+    """Direct pin on the ``_lbt_to_dict`` crate delegate.
+
+    ``manifest_to_json`` serialises lbt records crate-side, so the retained
+    standalone delegate is otherwise reached only by the golden/property
+    suites — the whole-engine ``--cov=brutex.engine`` unit gate needs this
+    direct exercise (the ``_float_stats`` retained-delegate precedent).
+    """
+
+    def test_round_trips_through_the_parse_delegate(self) -> None:
+        record = _lbt()
+        payload = cw._lbt_to_dict(record)
+        assert payload["instrument"] == "NIFTY"
+        assert payload["n_trials"] == 10
+        assert cw._lbt_from_dict(dict(payload)) == record

@@ -27,6 +27,7 @@ from brutex.engine.combo_aggregates import (
     REGIME_WONDER_SHARE,
     ComboAggregate,
     ComboAggregateError,
+    _consecutive_runs,
     _float_stats,
     aggregate_combo,
     nearest_rank,
@@ -747,3 +748,32 @@ class TestFloatStatsEmptyInputPin:
 
         with pytest.raises(ValueError, match="float_stats: values must be non-empty"):
             _float_stats([])
+
+
+class TestConsecutiveRunsTwin:
+    """The retained Python ``_consecutive_runs`` twin (the resilience suites'
+    cross-pin oracle) — direct branch battery + the crate-fold parity pin, so
+    the Python twin and the crate-hosted ``max_consecutive_losses/wins`` fold
+    can never silently drift (the merge-forward integration law)."""
+
+    def test_empty_pnls_is_zero_zero(self) -> None:
+        assert _consecutive_runs([]) == (0, 0)
+
+    def test_all_three_arms_and_resets(self) -> None:
+        # loss,loss (streak 2) → win (breaks losses) → scratch (breaks BOTH)
+        # → loss (streak 1). Longest: losses 2, wins 1.
+        assert _consecutive_runs([-1, -1, 1, 0, -1]) == (2, 1)
+
+    def test_scratch_breaks_both_streaks(self) -> None:
+        assert _consecutive_runs([-10, -10, -10, 0, 20, 20, -5, 20]) == (3, 2)
+
+    def test_parity_with_the_crate_fold(self) -> None:
+        # The SAME shape the aggregate-level scratch test pins: the Python
+        # twin must equal the crate-hosted fold's streak fields exactly.
+        pnls = [-10, -10, -10, 0, 20, 20, -5, 20]
+        trades = tuple(_trade(_DAY, i, p) for i, p in enumerate(pnls))
+        agg = _aggregate(_capture(trades), _row(pnls))
+        assert _consecutive_runs(pnls) == (
+            agg.max_consecutive_losses,
+            agg.max_consecutive_wins,
+        )

@@ -1040,3 +1040,31 @@ class TestCascadeJoinAtWriter:
         with_key.pop("cascade_join")
         assert payload == with_key  # the ONLY delta is the elided root key
         assert legacy.rendered_bytes().endswith(b"\n")
+
+
+class TestCascadePayloadDelegate:
+    """Direct pins on the ``_cascade_payload`` crate delegate.
+
+    The delegate is retained for the property suites' direct imports (the
+    slice-2b mid-flight catch) — but the whole-engine ``--cov=brutex.engine``
+    unit gate never reached its body through ``build_top100`` (the crate
+    computes entry cascade blocks internally), leaving the line uncovered
+    once the resilience suites joined the stanza. Direct unit pins per the
+    ``_float_stats`` retained-delegate precedent.
+    """
+
+    def test_no_report_state_reads_not_validated(self) -> None:
+        from brutex.engine.top100_artifact import _cascade_payload
+
+        cascade, rate = _cascade_payload("cid", join=None, state=CASCADE_STATE_NO_REPORT)
+        assert cascade == {"status": "not_validated", "reason": CASCADE_STATE_NO_REPORT}
+        assert rate is None
+
+    def test_joined_pass_projects_the_verdict(self) -> None:
+        from brutex.engine.top100_artifact import _cascade_payload
+
+        join = _join({"cid": _view("cid")})
+        cascade, rate = _cascade_payload("cid", join=join, state=CASCADE_STATE_JOINED)
+        assert cascade["status"] == "pass"
+        assert cascade["cpcv_pass_rate"] == 0.75
+        assert rate == 0.75

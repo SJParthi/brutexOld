@@ -165,6 +165,37 @@ def _float_stats(values: Sequence[float]) -> tuple[float, float, float]:
     return lo, mean, hi
 
 
+def _consecutive_runs(pnls: Sequence[int]) -> tuple[int, int]:
+    """Longest losing / winning streaks over chronological per-trade P&Ls.
+
+    The public twin of ``brutex.metrics.compute._consecutive_runs`` (same law,
+    re-implemented so no private is imported): a loss (``pnl < 0``) extends
+    the losing run and breaks the winning one; a win the mirror; a scratch
+    (``pnl == 0``) breaks BOTH.
+
+    The FOLD twin of this law (``max_consecutive_losses/wins`` on
+    :class:`ComboAggregate`) is crate-hosted in ``combo_aggregates.rs``; this
+    retained Python copy is the cross-pin ORACLE the resilience suites
+    (``resilience_streaks`` unit + property) import, parity-pinned against
+    the crate fold in ``test_engine_combo_aggregates.py`` so the two homes
+    can never silently drift.
+    """
+    max_losses = max_wins = cur_losses = cur_wins = 0
+    for pnl in pnls:
+        if pnl < 0:
+            cur_losses += 1
+            cur_wins = 0
+        elif pnl > 0:
+            cur_wins += 1
+            cur_losses = 0
+        else:
+            cur_losses = 0
+            cur_wins = 0
+        max_losses = max(max_losses, cur_losses)
+        max_wins = max(max_wins, cur_wins)
+    return max_losses, max_wins
+
+
 @dataclass(frozen=True, slots=True)
 class ComboAggregate:
     """One finalist's aggregate record — one row of ``<stem>.aggs.parquet``.

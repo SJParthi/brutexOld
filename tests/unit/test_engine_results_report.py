@@ -706,3 +706,35 @@ class TestVixCrossStoreDivergence:
         s2.flush()
         with pytest.raises(ResultsStoreError, match="run-identity conflict"):
             load_results_tree(tmp_path)
+
+
+class TestRetainedFragmentDelegates:
+    """Direct pins on the retained render-fragment crate delegates.
+
+    ``render_leaderboard`` / the sidecar renders assemble these fragments
+    crate-side, so the standalone Python delegates are otherwise reached only
+    by the dedicated results_report golden/differential suites — the
+    whole-engine ``--cov=brutex.engine`` unit gate needs the direct exercise
+    (the ``_float_stats`` retained-delegate precedent).
+    """
+
+    def test_format_deflated(self) -> None:
+        from brutex.engine.results_report import _format_deflated
+
+        assert _format_deflated(None) == "—"
+        assert _format_deflated(0.97) == "+0.9700"
+
+    def test_format_conditions(self) -> None:
+        from brutex.engine.results_report import _format_conditions
+
+        assert _format_conditions("") == "(no conditions — enters every bar)"
+        assert _format_conditions("a AND b") == "a AND b"
+
+    def test_provisional_note(self) -> None:
+        from brutex.engine.results_report import _provisional_note
+
+        assert _provisional_note({}) == ""
+        flagged: dict[str, object] = {"verdicts": [{"passed": True, "provisional": True}]}
+        assert _provisional_note(flagged) == (
+            "  provisional=1 (pool-N DSR pass — not proven at leaderboard N)"
+        )
