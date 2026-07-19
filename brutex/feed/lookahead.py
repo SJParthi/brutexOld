@@ -75,9 +75,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from brutex.feed.errors import LookAheadError
+from brutex.feed_rust import materialize_rust_enabled, require_feed_kernel
+
+#: Verdict vocabulary shared with the Rust ``BarrierCore``
+#: (DEC-FEED-RUST-MATERIALIZE-002) — mirror-pinned against the crate's
+#: constants by the wheel FFI tests.
+_ADVANCE_OK = 0
+_ADVANCE_NEGATIVE = 1
+_ADVANCE_BACKWARDS = 2
+_ACCESS_OK = 0
+_ACCESS_NO_CURSOR = 1
+_ACCESS_NEGATIVE = 2
+_ACCESS_LOOKAHEAD = 3
 
 #: Pass-through value type for :meth:`LookAheadBarrier.guard` — the barrier
 #: validates the *index* and returns the caller's *value* unchanged, so the
@@ -117,41 +129,44 @@ class LookAheadBarrier:
     replays without leaking the prior run's cursor or trail.
     """
 
-    __slots__ = ("_current_index", "_record", "_touched")
+    __slots__ = ("_core",)
 
     def __init__(self, *, record: bool = True) -> None:
-        self._record = record
-        self._current_index = -1
-        self._touched: list[int] = []
+        if materialize_rust_enabled():
+            self._core: _BarrierCoreLike = require_feed_kernel().BarrierCore(  # type: ignore[attr-defined]
+                record
+            )
+        else:
+            self._core = _PythonBarrierCore(record)
 
     # ── Introspection ─────────────────────────────────────────────
 
     @property
     def current_index(self) -> int:
         """Current bar index ``N``. ``-1`` before the first :meth:`advance_to`."""
-        return self._current_index
+        return self._core.current_index
 
     @property
     def records(self) -> bool:
         """Whether this barrier retains the touched-index trail."""
-        return self._record
+        return self._core.records
 
     @property
     def touched_indices(self) -> tuple[int, ...]:
         """Every *permitted* index passed to :meth:`access`, in call order.
 
         A rejected look-ahead index (one ``> N`` that raised) is NOT
-        recorded — the append happens only after the bounds check passes,
+        recorded — the core appends only after the bounds check passes,
         so a FAIL never poisons the trail. Empty when ``record=False``
         (the barrier still validated each access, it just did not retain
         the trail).
         """
-        return tuple(self._touched)
+        return tuple(self._core.touched())
 
     @property
     def max_touched(self) -> int | None:
         """Largest *permitted* index touched, or ``None`` if nothing was recorded."""
-        return max(self._touched) if self._touched else None
+        return self._core.max_touched()
 
     # ── Cursor + access ───────────────────────────────────────────
 
@@ -172,14 +187,14 @@ class LookAheadBarrier:
             If *index* is negative or strictly less than the current
             cursor.
         """
-        if index < 0:
+        verdict = self._core.advance_to(index)
+        if verdict == _ADVANCE_NEGATIVE:
             raise ValueError(f"advance_to: bar index must be >= 0, got {index}")
-        if index < self._current_index:
+        if verdict == _ADVANCE_BACKWARDS:
             raise ValueError(
                 f"advance_to: cursor cannot move backwards "
-                f"({index} < current {self._current_index})"
+                f"({index} < current {self._core.current_index})"
             )
-        self._current_index = index
 
     def access(self, index: int) -> int:
         """Validate (and record) a read of bar *index*; return it unchanged.
@@ -206,23 +221,19 @@ class LookAheadBarrier:
         ValueError
             If *index* is negative.
         """
-        if self._current_index < 0:
+        verdict = self._core.access(index)
+        if verdict == _ACCESS_NO_CURSOR:
             raise LookAheadError(
-                f"no bar reached yet (cursor={self._current_index}); "
+                f"no bar reached yet (cursor={self._core.current_index}); "
                 f"any read at index {index} is a look-ahead (P-06)"
             )
-        if index < 0:
+        if verdict == _ACCESS_NEGATIVE:
             raise ValueError(f"access: bar index must be >= 0, got {index}")
-        if index > self._current_index:
+        if verdict == _ACCESS_LOOKAHEAD:
             raise LookAheadError(
-                f"bar index {index} > current {self._current_index}: "
+                f"bar index {index} > current {self._core.current_index}: "
                 f"look-ahead read forbidden (P-06 / FR-INT-004)"
             )
-        # Record ONLY a *permitted* access — appended AFTER the bounds check so a
-        # rejected future index can never poison the ``touched_indices`` trail
-        # (and thus ``max_touched`` / a report's ``max_index_touched``) on a FAIL.
-        if self._record:
-            self._touched.append(index)
         return index
 
     def guard(self, index: int, value: _T) -> _T:
@@ -240,7 +251,73 @@ class LookAheadBarrier:
         Called by the runner/driver before every replay so the barrier
         carries no state across deterministic re-runs.
         """
-        self._current_index = -1
+        self._core.reset()
+
+
+class _BarrierCoreLike(Protocol):
+    """Structural protocol of the verdict-coded core (Rust ``BarrierCore``
+    or the development-stage :class:`_PythonBarrierCore`)."""
+
+    @property
+    def current_index(self) -> int: ...  # pragma: no cover — Protocol stub
+
+    @property
+    def records(self) -> bool: ...  # pragma: no cover — Protocol stub
+
+    def touched(self) -> list[int]: ...  # pragma: no cover — Protocol stub
+
+    def max_touched(self) -> int | None: ...  # pragma: no cover — Protocol stub
+
+    def advance_to(self, index: int) -> int: ...  # pragma: no cover — Protocol stub
+
+    def access(self, index: int) -> int: ...  # pragma: no cover — Protocol stub
+
+    def reset(self) -> None: ...  # pragma: no cover — Protocol stub
+
+
+class _PythonBarrierCore:
+    """The retained development-stage Python core (verdict protocol).
+
+    The verbatim comparison plane of the pre-T17 barrier, re-shaped onto
+    the Rust ``BarrierCore`` verdict vocabulary so BOTH arms drive the ONE
+    exception-materializing wrapper. Deleted at the flip
+    (DEC-FEED-RUST-MATERIALIZE-002).
+    """
+
+    __slots__ = ("_touched", "current_index", "records")
+
+    def __init__(self, record: bool) -> None:
+        self.records = record
+        self.current_index = -1
+        self._touched: list[int] = []
+
+    def touched(self) -> list[int]:
+        return list(self._touched)
+
+    def max_touched(self) -> int | None:
+        return max(self._touched) if self._touched else None
+
+    def advance_to(self, index: int) -> int:
+        if index < 0:
+            return _ADVANCE_NEGATIVE
+        if index < self.current_index:
+            return _ADVANCE_BACKWARDS
+        self.current_index = index
+        return _ADVANCE_OK
+
+    def access(self, index: int) -> int:
+        if self.current_index < 0:
+            return _ACCESS_NO_CURSOR
+        if index < 0:
+            return _ACCESS_NEGATIVE
+        if index > self.current_index:
+            return _ACCESS_LOOKAHEAD
+        if self.records:
+            self._touched.append(index)
+        return _ACCESS_OK
+
+    def reset(self) -> None:
+        self.current_index = -1
         self._touched.clear()
 
 

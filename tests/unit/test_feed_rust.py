@@ -295,20 +295,32 @@ class TestLeafDiscipline:
         # Round-1 review hardening: an import ALLOWLIST (strictly stronger
         # than the original heavy-package denylist) — a stray third-party or
         # brutex.* import into the leaf fails this pin by construction.
-        # The leaf's whole legal surface: stdlib (__future__/os/typing),
-        # structlog, and the lazy in-function wheel import.
-        allowed = {"__future__", "os", "typing", "structlog", "brutex_feed"}
+        # MODULE-scope surface: stdlib (__future__/os/typing) + structlog —
+        # the cycle-relevant plane (brutex.feed.replay imports this module,
+        # so a module-scope brutex.feed edge would be circular).
+        # FUNCTION-scope additionally admits the lazy wheel import
+        # (brutex_feed) and — since DEC-FEED-RUST-MATERIALIZE-002 — the
+        # lazy `brutex.feed.errors` import inside `_feed_error` (in-function
+        # is cycle-safe: every caller reaches it only after the package is
+        # fully imported; the typed FeedError family is the wheel-required
+        # refusal contract).
+        module_allowed = {"__future__", "os", "typing", "structlog"}
+        lazy_allowed = module_allowed | {"brutex_feed", "brutex.feed.errors"}
         source = Path(feed_rust.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
+        module_level_imports = {
+            id(node) for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)
+        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    top = alias.name.split(".")[0]
-                    assert top in allowed, alias.name
+                    allowed = module_allowed if id(node) in module_level_imports else lazy_allowed
+                    assert alias.name.split(".")[0] in allowed or alias.name in allowed, alias.name
             elif isinstance(node, ast.ImportFrom):
                 assert node.level == 0, "relative imports forbidden in the leaf"
-                top = (node.module or "").split(".")[0]
-                assert top in allowed, node.module
+                module = node.module or ""
+                allowed = module_allowed if id(node) in module_level_imports else lazy_allowed
+                assert module.split(".")[0] in allowed or module in allowed, node.module
 
     def test_truthy_falsy_mirror_sweep_lookahead(self) -> None:
         # The leaf may not IMPORT env_flag_tristate (verified cycle:

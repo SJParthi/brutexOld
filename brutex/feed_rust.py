@@ -45,6 +45,18 @@ _LOG = structlog.get_logger(__name__)
 #: The opt-in environment flag (default OFF — Pattern A).
 FEED_RUST_ENV: Final[str] = "BRUTEX_FEED_RUST"
 
+#: The T17 materialization flag (DEC-FEED-RUST-MATERIALIZE-002).
+MATERIALIZE_RUST_ENV: Final[str] = "BRUTEX_FEED_MATERIALIZE_RUST"
+
+#: The lane's decision id — woven into every wheel-required refusal.
+MATERIALIZE_DECISION: Final[str] = "DEC-FEED-RUST-MATERIALIZE-002"
+
+#: The ONE named remediation for a missing/stale wheel.
+WHEEL_REMEDIATION: Final[str] = (
+    "run `maturin develop --release` inside rust/brutex-feed with the "
+    "project venv active (or `make setup`)"
+)
+
 #: ONE structlog event per degrade reason per process (``reason=`` field).
 FEED_RUST_FALLBACK_EVENT: Final[str] = "feed_rust.fallback"
 
@@ -63,6 +75,7 @@ _WARNED: Final[set[str]] = set()
 #: Structural arities of the kernel result (the frozen FFI shape).
 _RESULT_ARITY: Final[int] = 3
 _STOP_ARITY: Final[int] = 2
+_STRICT_STOP_ARITY: Final[int] = 3
 _EVENT_ARITY: Final[int] = 5
 
 #: Highest positivity-stop field index (0/1/2/3 = open/high/low/close).
@@ -74,6 +87,22 @@ ScanEvent = tuple[int, int, int, int, int]
 
 #: The kernel's outcome: ``(kept_rows, warn_events, positivity_stop)``.
 ScanResult = tuple[list[int], list[ScanEvent], tuple[int, int] | None]
+
+#: The STRICT kernel's stop coordinate: ``(row, field, kind)`` — kind is
+#: :data:`STOP_NONPOSITIVE` or :data:`STOP_NONFINITE`.
+StrictStop = tuple[int, int, int]
+
+#: The strict kernel's outcome (DEC-FEED-RUST-MATERIALIZE-002):
+#: ``(kept_rows, warn_events, stop)``.
+StrictScanResult = tuple[list[int], list[ScanEvent], StrictStop | None]
+
+#: Strict-stop kind: a non-positive price (Python raises the verbatim
+#: ``_positivity_error``).
+STOP_NONPOSITIVE: Final[int] = 0
+
+#: Strict-stop kind: a non-finite price (Python raises the verbatim
+#: ``_nonfinite_error``).
+STOP_NONFINITE: Final[int] = 1
 
 
 class _ScanKernel(Protocol):
@@ -151,6 +180,127 @@ def feed_rust_enabled(raw: str | None = None) -> bool:
         _WARNED.add(FEED_RUST_FLAG_EVENT)
         _LOG.warning(FEED_RUST_FLAG_EVENT, env=FEED_RUST_ENV, value=value)
     return False
+
+
+def materialize_rust_enabled(raw: str | None = None) -> bool:
+    """DEC-FEED-RUST-MATERIALIZE-002 flag — the T17 development-stage gate.
+
+    Pattern A while the lane develops (ONLY an explicit truthy enables;
+    unset/falsy/junk are OFF). The lane's compressed cycle flips the
+    default ON and then retires the Python arm — at which point a SET
+    falsy value REFUSES loudly (the retired-axis law) instead of silently
+    selecting a deleted path.
+    """
+    value = os.environ.get(MATERIALIZE_RUST_ENV) if raw is None else raw
+    if value is None:
+        return False
+    stripped = value.strip().lower()
+    if stripped in _TRUTHY:
+        return True
+    if stripped == "" or stripped in _FALSY:
+        return False
+    if MATERIALIZE_RUST_ENV not in _WARNED:
+        _WARNED.add(MATERIALIZE_RUST_ENV)
+        _LOG.warning(FEED_RUST_FLAG_EVENT, env=MATERIALIZE_RUST_ENV, value=value)
+    return False
+
+
+def _feed_error(message: str) -> Exception:
+    """Build a :class:`brutex.feed.errors.FeedError` via a LAZY import.
+
+    The leaf discipline forbids a MODULE-scope ``brutex.feed`` import
+    (``brutex.feed.__init__`` imports ``replay`` which imports THIS module
+    — a module-scope edge here would be a cycle); an in-FUNCTION import is
+    cycle-safe because every caller reaches this only after the package is
+    fully imported. The exception TYPE matters: consumers catch the typed
+    ``FeedError`` family, never a bare RuntimeError.
+    """
+    from brutex.feed.errors import FeedError
+
+    return FeedError(message)
+
+
+def require_feed_kernel() -> object:
+    """Return the ``brutex_feed`` wheel module, or raise LOUDLY.
+
+    DEC-FEED-RUST-MATERIALIZE-002: the Python feed-materialization oracle
+    bodies are deleted, so the wheel is REQUIRED — a missing/stale wheel
+    is a typed :class:`~brutex.feed.errors.FeedError` naming the
+    remediation, never a silent degrade and never a fabricated bar.
+    """
+    try:
+        import brutex_feed
+    except (ImportError, AttributeError) as exc:
+        raise _feed_error(
+            f"the brutex_feed Rust wheel is REQUIRED for feed "
+            f"materialization ({MATERIALIZE_DECISION} deleted the Python "
+            f"oracle bodies) but it failed to import: {exc} — "
+            f"{WHEEL_REMEDIATION}"
+        ) from exc
+    return brutex_feed
+
+
+def validate_strict_scan(result: object, n_rows: int) -> bool:
+    """Refuse-poison gate over a STRICT kernel result (the
+    :func:`validate_scan` laws with the 3-element stop coordinate).
+
+    Structural laws (proven for every well-formed input by the crate's own
+    test suite — a violation here can only mean a stale/corrupt wheel):
+    the 3-tuple shape; ``kept_rows`` ints strictly ascending in
+    ``[0, n_rows)``; ``warn_events`` 5-int tuples strictly ascending by
+    ``emit_at_row`` with the row-coordinate range laws; ``stop`` ``None``
+    or ``(row, field, kind)`` with ``row in [0, n_rows)``,
+    ``field in [0, 3]`` and ``kind in {STOP_NONPOSITIVE, STOP_NONFINITE}``
+    — and, when present, the truncation law (nothing recorded at/after the
+    stop row). The wheel-required caller RAISES on ``False`` (a poisoned
+    wheel can only refuse, never serve).
+    """
+    if not (isinstance(result, tuple) and len(result) == _RESULT_ARITY):
+        return _invalid(n_rows, "result_shape")
+    kept, warns, stop = result
+    if not (isinstance(kept, list) and isinstance(warns, list)):
+        return _invalid(n_rows, "column_shape")
+    if stop is None:
+        kept_bound = n_rows
+        emit_bound = n_rows + 1  # a finish event anchors AT n_rows
+        row_bound = n_rows
+    else:
+        if not (isinstance(stop, tuple) and len(stop) == _STRICT_STOP_ARITY):
+            return _invalid(n_rows, "stop_shape")
+        stop_row, stop_field, stop_kind = stop
+        if not all(isinstance(v, int) for v in (stop_row, stop_field, stop_kind)):
+            return _invalid(n_rows, "stop_types")
+        if not (0 <= stop_row < n_rows and 0 <= stop_field <= _MAX_FIELD_INDEX):
+            return _invalid(n_rows, "stop_range")
+        if stop_kind not in (STOP_NONPOSITIVE, STOP_NONFINITE):
+            return _invalid(n_rows, "stop_kind")
+        kept_bound = stop_row
+        emit_bound = stop_row
+        row_bound = stop_row
+    prev_kept = -1
+    for idx in kept:
+        if not isinstance(idx, int):
+            return _invalid(n_rows, "kept_type")
+        if idx <= prev_kept or idx >= kept_bound:
+            return _invalid(n_rows, "kept_order")
+        prev_kept = idx
+    prev_emit = -1
+    for event in warns:
+        if not (isinstance(event, tuple) and len(event) == _EVENT_ARITY):
+            return _invalid(n_rows, "event_shape")
+        emit, session_first, skipped, first_prev, first_skip = event
+        if not all(isinstance(v, int) for v in event):
+            return _invalid(n_rows, "event_types")
+        if emit <= prev_emit or emit >= emit_bound:
+            return _invalid(n_rows, "event_order")
+        if not 0 <= session_first < row_bound:
+            return _invalid(n_rows, "session_first_range")
+        if skipped < 1:
+            return _invalid(n_rows, "skipped_floor")
+        if not 0 <= first_prev < first_skip < row_bound:
+            return _invalid(n_rows, "offender_range")
+        prev_emit = emit
+    return True
 
 
 def resolve_feed_kernel() -> _ScanKernel | None:
@@ -258,11 +408,21 @@ __all__ = [
     "FEED_RUST_ENV",
     "FEED_RUST_FALLBACK_EVENT",
     "FEED_RUST_FLAG_EVENT",
+    "MATERIALIZE_DECISION",
+    "MATERIALIZE_RUST_ENV",
+    "STOP_NONFINITE",
+    "STOP_NONPOSITIVE",
+    "WHEEL_REMEDIATION",
     "ScanEvent",
     "ScanResult",
+    "StrictScanResult",
+    "StrictStop",
     "feed_rust_enabled",
+    "materialize_rust_enabled",
+    "require_feed_kernel",
     "reset_for_tests",
     "resolve_feed_kernel",
     "validate_scan",
+    "validate_strict_scan",
     "warn_degrade_once",
 ]

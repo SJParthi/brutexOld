@@ -50,7 +50,7 @@ import heapq
 import math
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -66,10 +66,16 @@ from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.feed.errors import FeedError, LookAheadError
 from brutex.feed_rust import (
+    MATERIALIZE_DECISION,
+    STOP_NONFINITE,
     ScanResult,
+    StrictScanResult,
     feed_rust_enabled,
+    materialize_rust_enabled,
+    require_feed_kernel,
     resolve_feed_kernel,
     validate_scan,
+    validate_strict_scan,
     warn_degrade_once,
 )
 
@@ -347,6 +353,29 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
 
     screen_on = bad_tick_screen_enabled()
 
+    # ── The wheel-REQUIRED strict path (DEC-FEED-RUST-MATERIALIZE-002) ──
+    # The T17 unified arm: decisions ALWAYS come from the strict Rust scan
+    # (finiteness + positivity + the bad-tick screen in one kernel);
+    # Python keeps ONLY materialization (Decimal/CandleBar/error/WARN over
+    # the same `to_pylist()` objects — run identity byte-preserved by
+    # construction). No degrade exists on this arm: a missing wheel, an
+    # out-of-envelope timestamp, a null consulted column or a poisoned
+    # kernel result each raise LOUDLY (correct-or-absent, never a
+    # silently wrong bar).
+    if materialize_rust_enabled():
+        return _bars_via_strict_kernel(
+            table,
+            source,
+            screen_on,
+            timestamps,
+            opens,
+            highs,
+            lows,
+            closes,
+            volumes,
+            open_interests,
+        )
+
     # ── OPTIONAL Rust decision kernel (DEC-FEED-RUST-CORE-001) ──────────
     # Default-OFF (`BRUTEX_FEED_RUST`, Pattern A opt-in). When enabled AND
     # the kernel serves (canonical schema, zero nulls on ts/prices/volume,
@@ -569,6 +598,182 @@ def _scan_via_kernel_or_none(
     return result
 
 
+# ── The wheel-REQUIRED strict path (DEC-FEED-RUST-MATERIALIZE-002) ──────
+
+
+#: The columns whose values the read consumes as non-null (open_interest
+#: nulls are legal — non-FNO bars carry them by contract).
+_CONSULTED_COLUMNS: tuple[str, ...] = ("timestamp", "open", "high", "low", "close", "volume")
+
+#: Exact epoch anchors for the microsecond conversion of NON-canonical
+#: timestamp objects (integer arithmetic — no float ever enters).
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+_EPOCH_NAIVE = datetime(1970, 1, 1)
+_ONE_US = timedelta(microseconds=1)
+
+
+def _corrupt_column_error(source: str | None, column: str, detail: str) -> ValueError:
+    """The typed corrupt-COLUMN refusal of the wheel-required arm.
+
+    DEC-FEED-RUST-MATERIALIZE-002: with the Python oracle loop deleted,
+    a null / junk-typed consulted column becomes ONE typed corrupt-data
+    ``ValueError`` naming the column + partition (the same graceful
+    per-symbol error surface the ingest/prebuild quarantines already
+    handle) — SUPERSEDING the deleted oracle's accidental raw
+    ``TypeError``/``AttributeError`` escapes on such columns (documented
+    pre-existing escapes, never a contract; the lake writers never render
+    them — only planted/out-of-band data reaches this).
+    """
+    origin = f" in {source}" if source is not None else ""
+    return ValueError(
+        f"corrupt stored bar column{origin}: {column!r} {detail} — "
+        f"refusing to serve corrupt data to the engine ({MATERIALIZE_DECISION})"
+    )
+
+
+def _decision_floats(source: str | None, column: str, values: list[Any]) -> list[float]:
+    """f64 DECISION copies of a NON-canonical price column.
+
+    Materialization always reads the ORIGINAL ``to_pylist()`` objects (so
+    e.g. an int-typed price column still materializes ``Decimal(str(5))``
+    — the deleted oracle's exact bytes); only the KERNEL's decision input
+    is float-cast here. HONEST residue (ledgered): an integer/Decimal
+    price beyond f64's exact range (>= 2**53) rounds in the DECISION
+    plane where the oracle compared exactly — a hostile-input-only class
+    (the lake writers render float64), disclosed, never silent for the
+    served values themselves.
+    """
+    try:
+        return [float(v) for v in values]
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise _corrupt_column_error(
+            source, column, f"holds a non-numeric price value ({exc})"
+        ) from exc
+
+
+def _decision_ts_us(source: str | None, timestamps: list[Any]) -> list[int]:
+    """Exact epoch-µs DECISION copies of a NON-canonical timestamp column.
+
+    tz-aware objects convert exactly (integer arithmetic against the UTC
+    epoch); a NAIVE timestamp is treated as-if-UTC for the DECISION plane
+    only — observationally inert, because the first kept row's
+    ``CandleBar`` constructor rejects the naive object with the same
+    wrapped corrupt-bar ``ValueError`` before any decision output becomes
+    visible (no warn can anchor before the first kept row).
+    """
+    out: list[int] = []
+    for ts in timestamps:
+        if not isinstance(ts, datetime):
+            raise _corrupt_column_error(
+                source, "timestamp", f"holds a non-timestamp value ({ts!r})"
+            )
+        epoch = _EPOCH_NAIVE if ts.tzinfo is None else _EPOCH_UTC
+        out.append((ts - epoch) // _ONE_US)
+    return out
+
+
+def _bars_via_strict_kernel(
+    table: pa.Table,
+    source: str | None,
+    screen_on: bool,
+    timestamps: list[Any],
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    volumes: list[int],
+    open_interests: list[int | None],
+) -> list[CandleBar]:
+    """The unified wheel-REQUIRED read: strict Rust decisions, Python
+    materialization (DEC-FEED-RUST-MATERIALIZE-002).
+
+    Refusal lattice (each arm LOUD, never a degrade):
+
+    * wheel missing/stale → :class:`FeedError` naming the rebuild remedy
+      (:func:`~brutex.feed_rust.require_feed_kernel`);
+    * a null consulted column → the typed corrupt-column ``ValueError``;
+    * a junk-typed decision column → the typed corrupt-column
+      ``ValueError``;
+    * a consulted timestamp outside the fixed-IST envelope
+      (``[epoch 0, 9999-12-31T00:00:00Z)`` — where the kernel's +05:30
+      day-ordinal law provably equals ``astimezone(IST).date()``) →
+      :class:`FeedError` naming the envelope (real lake bars are
+      post-2020 by the ``GROWW_HISTORY_FLOOR`` law; only
+      planted/out-of-band data can reach this);
+    * a kernel raise → :class:`FeedError` (``MemoryError`` /
+      ``KeyboardInterrupt`` / ``SystemExit`` re-raise RAW);
+    * a structurally poisoned kernel result → :class:`FeedError`
+      (a stale wheel can only refuse, never serve).
+
+    Decisions on the CANONICAL 7-column schema consume the SAME float
+    lists Python materializes from; a NON-canonical (hostile/legacy)
+    table gets f64/µs decision COPIES while materialization keeps the
+    original objects — the deleted oracle's output bytes by construction.
+    """
+    kernel = require_feed_kernel()
+    n_rows: int = table.num_rows
+    import pyarrow as pa  # local: module-scope pyarrow stays TYPE_CHECKING-only
+
+    for name in _CONSULTED_COLUMNS:
+        if table.column(name).null_count > 0:
+            raise _corrupt_column_error(source, name, "holds null value(s)")
+
+    expected_types = (
+        ("timestamp", pa.timestamp("us", tz="UTC")),
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+    )
+    canonical = all(
+        table.schema.field(name).type.equals(expected) for name, expected in expected_types
+    )
+    if canonical:
+        d_opens, d_highs, d_lows, d_closes = opens, highs, lows, closes
+        ts_us: list[int] = (
+            table.column("timestamp").cast(pa.int64()).to_pylist() if screen_on else []
+        )
+    else:
+        d_opens = _decision_floats(source, "open", opens)
+        d_highs = _decision_floats(source, "high", highs)
+        d_lows = _decision_floats(source, "low", lows)
+        d_closes = _decision_floats(source, "close", closes)
+        ts_us = _decision_ts_us(source, timestamps) if screen_on else []
+
+    try:
+        result: StrictScanResult | None = kernel.scan_bars_strict(  # type: ignore[attr-defined]
+            ts_us, d_opens, d_highs, d_lows, d_closes, screen_on, BAD_TICK_MAX_RATIO
+        )
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        raise FeedError(
+            f"the brutex_feed strict scan kernel raised {exc!r} over "
+            f"{n_rows} row(s){' of ' + source if source is not None else ''} — "
+            f"a kernel fault is a defect, never a silent degrade "
+            f"({MATERIALIZE_DECISION})"
+        ) from exc
+    if result is None:
+        raise FeedError(
+            f"a stored timestamp{' in ' + source if source is not None else ''} "
+            f"lies outside the fixed-IST envelope [epoch 0, 9999-12-31T00:00:00Z) "
+            f"where the kernel's +05:30 civil-date law is provable — refusing "
+            f"to serve a possibly-wrong session grouping (real lake bars are "
+            f"post-2020; this is planted/out-of-band data — "
+            f"{MATERIALIZE_DECISION})"
+        )
+    if not validate_strict_scan(result, n_rows):
+        raise FeedError(
+            f"the brutex_feed wheel returned a structurally invalid scan over "
+            f"{n_rows} row(s) — a poisoned/stale wheel can only refuse, never "
+            f"serve; rebuild it: run `maturin develop --release` inside "
+            f"rust/brutex-feed ({MATERIALIZE_DECISION})"
+        )
+    return _bars_from_scan(
+        result, source, timestamps, opens, highs, lows, closes, volumes, open_interests
+    )
+
+
 def _emit_warn(
     event: tuple[int, int, int, int, int],
     source: str | None,
@@ -594,7 +799,7 @@ def _emit_warn(
 
 
 def _bars_from_scan(
-    result: ScanResult,
+    result: ScanResult | StrictScanResult,
     source: str | None,
     timestamps: list[Any],
     opens: list[float],
@@ -638,9 +843,20 @@ def _bars_from_scan(
             )
         )
     if stop is not None:
-        row, field = stop
+        # A legacy scan stop is ``(row, field)``; the strict scan appends
+        # ``kind`` (DEC-FEED-RUST-MATERIALIZE-002) — non-finite raises the
+        # finiteness refusal, everything else the positivity refusal, both
+        # from Python's OWN float objects (the ONE message source each).
+        # The literal ``3`` (not a named constant) is load-bearing: mypy's
+        # tuple-union len() narrowing engages only on a literal comparison.
+        if len(stop) == 3:  # noqa: PLR2004 — the strict stop arity
+            row, field, kind = stop
+        else:
+            (row, field), kind = stop, None
         price_name = ("open", "high", "low", "close")[field]
         price = (opens, highs, lows, closes)[field][row]
+        if kind == STOP_NONFINITE:
+            raise _nonfinite_error(origin, timestamps[row], price_name, price)
         raise _positivity_error(origin, timestamps[row], price_name, price)
     while wi < len(warns):
         _emit_warn(warns[wi], source, timestamps, closes)

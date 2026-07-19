@@ -36,7 +36,7 @@ on the returned list stays O(1); no O(1)-total claim.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -51,6 +51,23 @@ from brutex.data.futures_series import (
     resolve_futures_series,
 )
 from brutex.feed.replay import ReplayFeed
+from brutex.feed_rust import (
+    MATERIALIZE_DECISION,
+    materialize_rust_enabled,
+    require_feed_kernel,
+)
+
+#: Exact epoch anchors for the microsecond/day-ordinal conversions the
+#: Rust decision kernel consumes (integer arithmetic — no float enters).
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+_EPOCH_DATE = date(1970, 1, 1)
+_ONE_US = timedelta(microseconds=1)
+
+
+def _ts_epoch_us(dt: datetime) -> int:
+    """Exact epoch microseconds of a tz-aware datetime (never float)."""
+    return (dt - _EPOCH_UTC) // _ONE_US
+
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable
@@ -107,6 +124,64 @@ def require_series_coordinates(symbol: str, *, exchange: str, segment: str) -> N
         )
 
 
+def _expected_bar_time_in_window_kernel(
+    *, interval: str, seg_start: datetime, seg_end: datetime
+) -> bool:
+    """The wheel-required arm of :func:`_expected_bar_time_in_window`
+    (DEC-FEED-RUST-MATERIALIZE-002).
+
+    Python keeps the CALENDAR I/O + both ABSTAIN arms (an out-of-coverage
+    day → ``True``; an unknown interval label → ``True`` — exactly the
+    deleted walk's abstains); the GEOMETRIC verdict comes from the Rust
+    ``expected_bar_instant`` over the sessions' exact epoch-µs instants.
+    Verdict-equivalence with the deleted early-return walk: the kernel ORs
+    the per-day geometry over the collected days, and a mid-walk coverage
+    abstain returns ``True`` outright — so every case lands on the same
+    verdict the day-by-day walk produced (if an earlier day qualified the
+    walk returned ``True``; abstain IS ``True``; a completed walk is the
+    same OR). The one disclosed delta is walk COST, not verdict: the
+    deleted walk stopped consulting the calendar at the first qualifying
+    day, this arm resolves every day of the (contract-span-bounded)
+    intersection before asking the kernel.
+    """
+    from brutex.calendars.nse import HolidayDataUnavailableError, get_session_checked
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
+
+    if seg_end < seg_start:  # a degenerate intersection holds no instants
+        return False
+    step: timedelta | None = None
+    if interval != "1day":
+        try:
+            step = timedelta(minutes=trading_minutes_for_lake_interval(interval))
+        except ValueError:
+            return True  # unknown TF label → cannot model its grid → keep the loud refusal
+    now = _now_utc()
+    sessions: list[tuple[int, int, int]] = []
+    day = seg_start.astimezone(IST).date()
+    last_day = seg_end.astimezone(IST).date()
+    while day <= last_day:
+        try:
+            session = get_session_checked(day)
+        except HolidayDataUnavailableError:
+            return True  # cannot prove bar-less → keep the loud refusal
+        if session is not None:
+            stamp = datetime.combine(day, time.min, tzinfo=IST)
+            open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
+            close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
+            sessions.append((_ts_epoch_us(stamp), _ts_epoch_us(open_dt), _ts_epoch_us(close_dt)))
+        day += timedelta(days=1)
+    step_us = 0 if step is None else step // _ONE_US
+    return bool(
+        require_feed_kernel().expected_bar_instant(  # type: ignore[attr-defined]
+            _ts_epoch_us(seg_start),
+            _ts_epoch_us(seg_end),
+            step_us,
+            _ts_epoch_us(now),
+            sessions,
+        )
+    )
+
+
 def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end: datetime) -> bool:
     """True iff ``[seg_start, seg_end]`` can contain ANY stored bar timestamp.
 
@@ -149,6 +224,10 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     that is not a known lake TF label (its grid cannot be modelled). O(days in
     the window intersection), bounded by one contract's ownership span.
     """
+    if materialize_rust_enabled():
+        return _expected_bar_time_in_window_kernel(
+            interval=interval, seg_start=seg_start, seg_end=seg_end
+        )
     from brutex.calendars.nse import HolidayDataUnavailableError, get_session_checked
     from brutex.data.timeframes import trading_minutes_for_lake_interval
 
@@ -269,6 +348,61 @@ def _read_symbol(
         end=end,
     )
     return [event.bar for event in feed]
+
+
+def _cut_owned_bars(
+    raw: list[CandleBar],
+    *,
+    own_start: date,
+    own_end: date,
+    contract: str,
+) -> list[CandleBar]:
+    """The exact IST-date ownership cut over one contract segment's bars.
+
+    Kernel arm (DEC-FEED-RUST-MATERIALIZE-002): the decision runs in Rust
+    as the fixed +05:30 civil-day-ordinal law over exact epoch-µs
+    timestamps — provably ``astimezone(IST).date()`` inside the envelope
+    ``[epoch 0, 9999-12-31T00:00:00Z)``; an out-of-envelope timestamp
+    ABSTAINS and this wrapper raises a LOUD
+    :class:`~brutex.data.futures_series.FuturesSeriesError` (real FNO
+    lake bars are post-2020 by the ``GROWW_HISTORY_FLOOR`` law — only
+    planted/out-of-band data can reach the refusal, and a possibly-wrong
+    civil date must never silently re-own a bar). The development-stage
+    Python arm keeps the verbatim ``astimezone`` comprehension.
+    """
+    if not materialize_rust_enabled():
+        return [bar for bar in raw if own_start <= bar.timestamp.astimezone(IST).date() <= own_end]
+    kept = require_feed_kernel().ownership_cut(  # type: ignore[attr-defined]
+        [_ts_epoch_us(bar.timestamp) for bar in raw],
+        (own_start - _EPOCH_DATE).days,
+        (own_end - _EPOCH_DATE).days,
+    )
+    if kept is None:
+        raise FuturesSeriesError(
+            f"stored partition {contract!r} holds a timestamp outside the "
+            f"fixed-IST envelope [epoch 0, 9999-12-31T00:00:00Z) — refusing "
+            f"the ownership cut on a possibly-wrong civil date (real FNO "
+            f"bars are post-2020; this is planted/out-of-band data — "
+            f"{MATERIALIZE_DECISION})"
+        )
+    return [raw[i] for i in kept]
+
+
+def _boundary_break(*, prev_last: datetime, first: datetime) -> bool:
+    """The boundary-monotonicity verdict between stitched segments.
+
+    Kernel arm: the Rust ``boundary_monotonic_break`` over exact epoch-µs
+    (`first <= prev_last`); development-stage Python arm: the verbatim
+    datetime comparison. The caller raises the unchanged
+    :class:`~brutex.data.futures_series.FuturesSeriesError` message.
+    """
+    if not materialize_rust_enabled():
+        return first <= prev_last
+    return bool(
+        require_feed_kernel().boundary_monotonic_break(  # type: ignore[attr-defined]
+            _ts_epoch_us(prev_last), _ts_epoch_us(first)
+        )
+    )
 
 
 def load_sweep_slice(
@@ -422,10 +556,11 @@ def load_sweep_slice(
             seg_bars: list[CandleBar] = []
         else:
             # …then the EXACT authoritative IST-date ownership cut — the SAME
-            # ``astimezone(IST).date()`` conversion ``stage1a.push`` keys on.
-            seg_bars = [
-                bar
-                for bar in _read_symbol(
+            # civil-date law ``stage1a.push`` keys on (``astimezone(IST)
+            # .date()``; the kernel arm runs it as the fixed +05:30
+            # day-ordinal law, provably identical inside the envelope).
+            seg_bars = _cut_owned_bars(
+                _read_symbol(
                     cat=cat,
                     lake_root=lake_root,
                     exchange=exchange,
@@ -434,9 +569,11 @@ def load_sweep_slice(
                     interval=interval,
                     start=seg_start,
                     end=seg_end,
-                )
-                if seg.own_start <= bar.timestamp.astimezone(IST).date() <= seg.own_end
-            ]
+                ),
+                own_start=seg.own_start,
+                own_end=seg.own_end,
+                contract=seg.contract_symbol,
+            )
         if not seg_bars:
             if not _expected_bar_time_in_window(
                 interval=interval, seg_start=seg_start, seg_end=seg_end
@@ -479,7 +616,7 @@ def load_sweep_slice(
                 f"{seg.own_end.isoformat()}] — re-pull the contract / run the "
                 f"pipeline prebuild (dashboard ▶ Pull · full pipeline){hint}"
             )
-        if bars and seg_bars[0].timestamp <= bars[-1].timestamp:
+        if bars and _boundary_break(prev_last=bars[-1].timestamp, first=seg_bars[0].timestamp):
             raise FuturesSeriesError(
                 f"boundary monotonicity broken: first bar of {seg.contract_symbol!r} "
                 f"({seg_bars[0].timestamp.isoformat()}) is not after the previous "
