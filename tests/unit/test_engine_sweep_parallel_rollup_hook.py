@@ -16,6 +16,7 @@ the sibling suite's REAL fixtures (the house cross-test-import precedent
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,20 @@ pytest.importorskip("polars", reason="the drivers persist ResultsStore Parquet f
 
 import brutex.engine.sweep_parallel as parallel_mod
 from brutex.engine.sweep_orchestrator import SweepTuple, iter_sweep_tuples
+from brutex.observability.logging import reset_configuration
 from brutex.orchestrator.audit import AuditWriter
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_state() -> Generator[None, None, None]:
+    """``_worker_init`` binds process logging (DEC-SWEEP-LOG-VOLUME-GUARD-001
+    R4 fold) — the imported ``_FakePool`` calls ``_worker_init`` IN-PROCESS,
+    which configures GLOBAL structlog state (cached loggers included), so
+    reset after each test to keep the suite leak-free. Fixtures do NOT travel
+    with helper imports from the sibling suite, hence this file-local twin of
+    ``test_engine_sweep_parallel._reset_logging_state``."""
+    yield
+    reset_configuration()
 
 
 class TestParallelApplyHook:
