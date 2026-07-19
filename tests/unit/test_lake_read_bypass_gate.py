@@ -71,6 +71,14 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/catalog_reconcile.py": (
         "physical row-count audit — MUST see raw (possibly duplicated) rows to reconcile"
     ),
+    "brutex/data/lake_heal.py": (
+        "the Wave-D W-2 option-stats replay re-read (DEC-RUST-LAKE-WAVED-001, "
+        "deviation D-12): after the Rust heal REWRITES an options file "
+        "keep-first, the shell re-reads THAT freshly-deduped file once to "
+        "drive the verbatim _record_option_stats — a stats-manifest hook "
+        "over just-written bytes (no dups by construction; never a "
+        "bar-serving read), so the dedup gate has nothing to collapse"
+    ),
     "brutex/data/lake_invariants.py": (
         "invariant scanner (_read_key_columns) — MUST see raw rows to DETECT "
         "intra-file duplicates; a dedup-gated read would hide the very defect "
