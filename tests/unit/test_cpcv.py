@@ -291,6 +291,60 @@ class TestPassRate:
         assert cpcv_pass_rate(returns) == cpcv_pass_rate(returns)
 
 
+class TestEmbargoInvariance:
+    """DEC-CASCADE-STAT-TIER-WIRE-001: ``cpcv_pass_rate``'s ``label_span``/
+    ``embargo`` kwargs are validated + declared but PROVABLY rate-inert —
+    the model-free metric evaluates TEST folds only, and purge/embargo govern
+    the training set it never constructs. This class is the honesty PIN:
+    threading the Stage-4 embargo through CPCV is not a tightening."""
+
+    @pytest.mark.parametrize("embargo", [0, 1, 7, 375, 10_000])
+    def test_rate_is_identical_for_every_valid_embargo(self, embargo: int) -> None:
+        rng = np.random.default_rng(19)
+        returns = rng.normal(0.001, 0.01, 96)
+        baseline = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4)
+        assert cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, embargo=embargo) == baseline
+
+    @pytest.mark.parametrize("label_span", [0, 1, 5, 500])
+    def test_rate_is_identical_for_every_valid_label_span(self, label_span: int) -> None:
+        rng = np.random.default_rng(23)
+        returns = rng.normal(0.001, 0.01, 96)
+        baseline = cpcv_pass_rate(returns, n_groups=8, n_test_groups=4)
+        assert (
+            cpcv_pass_rate(returns, n_groups=8, n_test_groups=4, label_span=label_span) == baseline
+        )
+
+    def test_huge_embargo_never_makes_a_valid_call_raise(self) -> None:
+        # _validate_params bounds label_span/embargo at >= 0 ONLY — a large
+        # embargo can never turn a previously-valid call into a ValueError
+        # (the Stage-4 driver's resolved embargo must never crash the cascade).
+        rate = cpcv_pass_rate([1.0, 2.0, -3.0, -4.0], n_groups=4, n_test_groups=2, embargo=10**9)
+        assert rate == 1.0 / 6.0
+
+    def test_negative_embargo_raises(self) -> None:
+        with pytest.raises(ValueError, match="embargo must be >= 0"):
+            cpcv_pass_rate([1.0, 2.0, 3.0, 4.0], n_groups=4, n_test_groups=2, embargo=-1)
+
+    def test_negative_label_span_raises(self) -> None:
+        with pytest.raises(ValueError, match="label_span must be >= 0"):
+            cpcv_pass_rate([1.0, 2.0, 3.0, 4.0], n_groups=4, n_test_groups=2, label_span=-1)
+
+    def test_kernel_arm_parity_unaffected_by_embargo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both dispatch arms are test-fold-only, so the embargo cannot desync
+        the Rust kernel from the Python oracle: the flag-ON rate with a
+        non-zero embargo equals the flag-OFF zero-embargo rate."""
+        from brutex.metrics import rust_stats
+
+        returns = [1.0, 2.0, -3.0, -4.0]
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+        off = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2)
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        rust_stats.reset_self_check_for_tests("cpcv")
+        rust_stats.reset_observability_memo_for_tests()
+        on = cpcv_pass_rate(returns, n_groups=4, n_test_groups=2, embargo=375)
+        assert on == off == 1.0 / 6.0
+
+
 class TestParameterValidation:
     @pytest.mark.parametrize(
         ("kwargs", "match"),

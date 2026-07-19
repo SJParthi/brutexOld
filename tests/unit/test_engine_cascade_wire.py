@@ -981,6 +981,7 @@ class TestFuturesRollScheduleCarriage:
             lockbox_default_window_days: int,
             lockbox_min_trades: int,
             roll_schedule: tuple[int, ...] | None = None,
+            family_cap: int | None = None,
         ) -> list[Any]:
             calls.append((spec.instrument, roll_schedule))
             return []
@@ -2453,3 +2454,391 @@ class TestWriteReportAtomic:
         first = path.read_bytes()
         cw.write_report(tmp_path, _manual_report())
         assert path.read_bytes() == first  # deterministic bytes, atomically re-landed
+
+
+# ── DEC-CASCADE-STAT-TIER-WIRE-001: the embargo resolver / the Stage-3 ──
+# search-family carriage / the per-candidate CSCV wiring.
+
+
+class TestResolveCascadeEmbargoBars:
+    """AUTO = one trading day in decision-TF bars (the DEC-STAT-001 floor)."""
+
+    @pytest.mark.parametrize(
+        ("tf_minutes", "expected"),
+        [
+            (1, 375),
+            (2, 188),
+            (3, 125),
+            (5, 75),
+            (15, 25),
+            (25, 15),
+            (375, 1),  # the 1day engine TF (minutes == the 375-min session)
+            (1440, 1),  # a wall-clock-day representation still floors at 1
+        ],
+    )
+    def test_auto_formula_table(self, tf_minutes: int, expected: int) -> None:
+        assert cw.resolve_cascade_embargo_bars(tf_minutes, None) == expected
+
+    def test_auto_reads_the_canonical_daily_constant(self) -> None:
+        # CLAUDE.md §11 COMMON: the session length comes from the ONE
+        # data-layer constant, never a re-typed 375 literal.
+        from brutex.data.timeframes import DAILY_TF_MINUTES
+
+        assert cw.resolve_cascade_embargo_bars(1, None) == DAILY_TF_MINUTES
+
+    @pytest.mark.parametrize("override", [0, 1, 7, 500])
+    def test_override_wins_uniformly(self, override: int) -> None:
+        assert cw.resolve_cascade_embargo_bars(1, override) == override
+        assert cw.resolve_cascade_embargo_bars(375, override) == override
+
+    def test_negative_override_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="wfo_embargo must be >= 0"):
+            cw.resolve_cascade_embargo_bars(1, -1)
+
+    def test_tf_minutes_below_one_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="tf_minutes must be >= 1"):
+            cw.resolve_cascade_embargo_bars(0, None)
+
+
+_FAMILY = ((50, 80), (60, 90), (70, 100))
+
+
+def _family_spec(**overrides: object) -> cw.CascadeTupleSpec:
+    """A spec carrying a valid 3-pair search family (own pair = (50, 80))."""
+    base: dict[str, object] = {
+        "sl_paisa": 50,
+        "tp_paisa": 80,
+        "family_sl_tp": _FAMILY,
+    }
+    base.update(overrides)
+    return _spec(**base)
+
+
+class TestFamilySpecValidation:
+    def test_valid_family_constructs(self) -> None:
+        assert _family_spec().family_sl_tp == _FAMILY
+
+    def test_default_is_none(self) -> None:
+        assert _spec().family_sl_tp is None
+
+    def test_empty_family_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="non-empty or None"):
+            _family_spec(family_sl_tp=())
+
+    def test_family_with_disabled_leg_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="requires concrete sl_paisa/tp_paisa"):
+            _family_spec(sl_paisa=None)
+
+    @pytest.mark.parametrize("pair", [(0, 80), (50, -1), (50,), (50, 80, 90)])
+    def test_malformed_pair_refused(self, pair: tuple[int, ...]) -> None:
+        with pytest.raises(cw.CascadeWireError, match="positive .* 2-tuples"):
+            _family_spec(family_sl_tp=((50, 80), pair))
+
+    def test_duplicate_pairs_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="must be unique"):
+            _family_spec(family_sl_tp=((50, 80), (50, 80)))
+
+    def test_unsorted_family_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="sorted ascending"):
+            _family_spec(family_sl_tp=((60, 90), (50, 80)))
+
+    def test_family_missing_the_own_pair_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="include the spec's own"):
+            _family_spec(family_sl_tp=((60, 90), (70, 100)))
+
+
+class TestFamilyManifestSerialisation:
+    def test_family_less_spec_omits_the_key(self) -> None:
+        # EMIT-ON-PRESENT: a family-less manifest spec serialises
+        # byte-identically to the pre-family era.
+        assert "family_sl_tp" not in cw._spec_to_dict(_spec())
+
+    def test_family_round_trips(self) -> None:
+        spec = _family_spec()
+        payload = cw._spec_to_dict(spec)
+        assert payload["family_sl_tp"] == [[50, 80], [60, 90], [70, 100]]
+        assert cw._spec_from_dict(payload) == spec
+
+    def test_absent_key_parses_to_none(self) -> None:
+        payload = cw._spec_to_dict(_spec(sl_paisa=50, tp_paisa=80))
+        assert "family_sl_tp" not in payload
+        assert cw._spec_from_dict(payload).family_sl_tp is None
+
+    def test_null_key_parses_to_none(self) -> None:
+        payload = cw._spec_to_dict(_spec(sl_paisa=50, tp_paisa=80))
+        payload["family_sl_tp"] = None
+        assert cw._spec_from_dict(payload).family_sl_tp is None
+
+    @pytest.mark.parametrize("bad", [[["x", "y"]], [[1]], "junk", [None]])
+    def test_malformed_family_refused_by_the_existing_law(self, bad: object) -> None:
+        payload = cw._spec_to_dict(_family_spec())
+        payload["family_sl_tp"] = bad
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw._spec_from_dict(payload)
+
+    def test_manifest_with_family_is_byte_stable(self) -> None:
+        manifest = cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="deadbeef" * 8,
+            cascade_config=cw.cascade_config_for_sweep("deadbeef" * 8),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-06-01"
+            ),
+            specs=(_family_spec(),),
+        )
+        first = cw.manifest_to_json(manifest)
+        second = cw.manifest_to_json(cw.manifest_from_json(first))
+        assert first == second
+        assert cw.manifest_from_json(first).specs[0].family_sl_tp == _FAMILY
+
+
+class TestCascadeConfigNewKeys:
+    def test_new_keys_round_trip(self) -> None:
+        config = cw.cascade_config_for_sweep(
+            "a" * 64, overrides={"wfo_embargo": 7, "candidate_pbo_family_cap": 32}
+        )
+        payload = cw.cascade_config_to_dict(config)
+        assert payload["wfo_embargo"] == 7
+        assert payload["candidate_pbo_family_cap"] == 32
+        assert cw.cascade_config_from_dict(payload) == config
+
+    def test_old_manifest_dict_without_the_keys_rebuilds_with_defaults(self) -> None:
+        # An OLD (pre-DEC-CASCADE-STAT-TIER-WIRE-001) manifest config dict
+        # lacks the appended keys — presence-tolerant for exactly those two.
+        payload = cw.cascade_config_to_dict(cw.cascade_config_for_sweep("a" * 64))
+        del payload["wfo_embargo"]
+        del payload["candidate_pbo_family_cap"]
+        rebuilt = cw.cascade_config_from_dict(payload)
+        assert rebuilt.wfo_embargo is None
+        assert rebuilt.candidate_pbo_family_cap == 256
+
+    def test_unknown_key_still_refused(self) -> None:
+        # The drift-refusal law is NOT loosened by the new tolerance.
+        payload = cw.cascade_config_to_dict(cw.cascade_config_for_sweep("a" * 64))
+        payload["junk_threshold"] = 1
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade_config"):
+            cw.cascade_config_from_dict(payload)
+
+
+class TestBuildCandidateInputFamily:
+    def _candidate_with_family(
+        self, family: tuple[tuple[int, int], ...] | None
+    ) -> tuple[Any, list[CandleBar]]:
+        bars = _session_bars()
+        spec = _spec(sl_paisa=50, tp_paisa=80, family_sl_tp=family)
+        (cand,) = cw.candidates_for_spec(spec, bars)
+        return cand, bars
+
+    def test_family_columns_are_aligned_and_include_the_finalist(self) -> None:
+        family = ((50, 80), (60, 90), (70, 100))
+        cand, bars = self._candidate_with_family(family)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(family)
+        for column in cand.family_returns:
+            assert len(column) == len(bars)
+        # The finalist's own pair (50, 80) is family position 0 — its column
+        # IS the candidate's own return series (reused, never re-simulated).
+        assert cand.family_returns[0] == cand.returns
+
+    def test_sibling_column_matches_an_independent_resim(self) -> None:
+        # The family column for (60, 90) equals an INDEPENDENT re-simulation
+        # with ONLY the legs swapped — same bars / signals / direction / tf.
+        family = ((50, 80), (60, 90))
+        cand, bars = self._candidate_with_family(family)
+        bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
+        signals = mask_to_entry_signals(bar_bits, 0)
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=60,
+            take_profit_paisa=90,
+        )
+        equity = build_equity_curve(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
+        expected = cw._per_bar_returns(equity.equity_paisa, 10_000_000)
+        assert cand.family_returns is not None
+        assert cand.family_returns[1] == expected
+
+    def test_no_family_builds_none(self) -> None:
+        cand, _ = self._candidate_with_family(None)
+        assert cand.family_returns is None
+
+    def test_single_pair_family_builds_none(self) -> None:
+        # CSCV needs >= 2 columns — a 1-pair family is honestly skipped.
+        cand, _ = self._candidate_with_family(((50, 80),))
+        assert cand.family_returns is None
+
+
+class TestFamilyCap:
+    _WIDE = tuple((10 * i, 10 * i + 5) for i in range(1, 9))  # 8 pairs, own first
+
+    def test_uncapped_by_default(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        (cand,) = cw.candidates_for_spec(spec, _session_bars())
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+
+    def test_cap_truncates_first_n_with_one_loud_warning(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=3)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == 3
+        # Deterministic FIRST-cap truncation of the sorted persisted order.
+        assert cand.family_returns[0] == cand.returns  # own pair kept (first)
+        capped = [e for e in logs if e["event"] == "cascade_wire.family_capped"]
+        assert len(capped) == 1
+        assert capped[0]["dropped"] == len(self._WIDE) - 3
+        assert capped[0]["cap"] == 3
+
+    def test_cap_dropping_the_own_pair_skips_the_family_loudly(self) -> None:
+        # Own pair (80, 85) sorts LAST — a cap of 2 would exclude the
+        # finalist from its own family, so the family is dropped wholesale.
+        spec = _spec(sl_paisa=80, tp_paisa=85, family_sl_tp=self._WIDE)
+        with capture_logs() as logs:
+            (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=2)
+        assert cand.family_returns is None
+        dropped = [e for e in logs if e["event"] == "cascade_wire.family_cap_dropped_own_pair"]
+        assert len(dropped) == 1
+        assert dropped[0]["cap"] == 2
+
+    def test_cap_wider_than_the_family_is_inert(self) -> None:
+        spec = _spec(sl_paisa=10, tp_paisa=15, family_sl_tp=self._WIDE)
+        (cand,) = cw.candidates_for_spec(spec, _session_bars(), family_cap=100)
+        assert cand.family_returns is not None
+        assert len(cand.family_returns) == len(self._WIDE)
+
+
+class TestRunCascadeOverSpecsEmbargo:
+    def _spy_run(self, seen: list[dict[str, object]]) -> Callable[..., CascadeReport]:
+        def spy(
+            candidates: Sequence[Any],
+            config: Any,
+            *,
+            trial_stats: Any = None,
+            embargo_bars: int | None = None,
+        ) -> CascadeReport:
+            seen.append({"embargo_bars": embargo_bars, "n": len(candidates)})
+            return CascadeReport(
+                verdicts=(), survivor_ids=(), n_input=0, n_survived=0, stage_survivors={}
+            )
+
+        return spy
+
+    def test_auto_embargo_resolves_per_pool_tf(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.metrics.cascade as cascade_module
+
+        seen: list[dict[str, object]] = []
+        monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))
+        cw.run_cascade_over_specs(
+            [_spec()],  # tf 1minute
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64),
+            sweep_id="a" * 64,
+        )
+        assert [entry["embargo_bars"] for entry in seen] == [375]
+
+    def test_wfo_embargo_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.metrics.cascade as cascade_module
+
+        seen: list[dict[str, object]] = []
+        monkeypatch.setattr(cascade_module, "run_stage4_cascade", self._spy_run(seen))
+        cw.run_cascade_over_specs(
+            [_spec()],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64, overrides={"wfo_embargo": 5}),
+            sweep_id="a" * 64,
+        )
+        assert [entry["embargo_bars"] for entry in seen] == [5]
+
+    def test_mixed_tf_minutes_in_one_pool_refused(self) -> None:
+        # tf_label <-> tf_minutes is 1:1 by construction; a manifest carrying
+        # two different tf_minutes under ONE label is corrupt — refused, never
+        # embargoed under an arbitrary pick.
+        with pytest.raises(cw.CascadeWireError, match="disagree on tf_minutes"):
+            cw.run_cascade_over_specs(
+                [_spec(), _spec(tf_minutes=5, winners=((_rid(9), 0),))],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+            )
+
+    def test_family_cap_below_one_refused(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="candidate_pbo_family_cap must be >= 1"):
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep(
+                    "a" * 64, overrides={"candidate_pbo_family_cap": 0}
+                ),
+                sweep_id="a" * 64,
+            )
+
+    def test_family_cap_threads_from_the_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[int | None] = []
+        real = cw.candidates_for_spec
+
+        def spy(spec: Any, bars: Any, **kwargs: Any) -> list[Any]:
+            seen.append(kwargs.get("family_cap"))
+            return real(spec, bars, **kwargs)
+
+        monkeypatch.setattr(cw, "candidates_for_spec", spy)
+        cw.run_cascade_over_specs(
+            [_spec()],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep(
+                "a" * 64, overrides={"candidate_pbo_family_cap": 17}
+            ),
+            sweep_id="a" * 64,
+        )
+        assert seen == [17]
+
+
+class TestNewReportKeysSerialised:
+    def test_report_dict_carries_the_additive_stat_keys(self) -> None:
+        report = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id="c1",
+                    passed=True,
+                    rejected_at=None,
+                    detail="survived all Stage-4 filters",
+                    composite_score=0.5,
+                    cpcv_pass_rate=0.75,
+                    candidate_pbo=0.125,
+                ),
+            ),
+            survivor_ids=("c1",),
+            n_input=1,
+            n_survived=1,
+            stage_survivors={"hard_gates": 1},
+            pool_pbo=0.25,
+            pool_rc_pvalue=0.01,
+            pool_spa_pvalue=0.02,
+        )
+        payload = cw._report_to_dict(report)
+        assert payload["pool_rc_pvalue"] == 0.01
+        assert payload["pool_spa_pvalue"] == 0.02
+        verdicts = payload["verdicts"]
+        assert isinstance(verdicts, list)
+        assert verdicts[0]["candidate_pbo"] == 0.125
+
+    def test_skipped_states_serialise_null(self) -> None:
+        report = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id="c1", passed=False, rejected_at=FilterStage.HARD_GATES, detail="d"
+                ),
+            ),
+            survivor_ids=(),
+            n_input=1,
+            n_survived=0,
+            stage_survivors={"hard_gates": 0},
+        )
+        payload = cw._report_to_dict(report)
+        assert payload["pool_rc_pvalue"] is None
+        assert payload["pool_spa_pvalue"] is None
+        verdicts = payload["verdicts"]
+        assert isinstance(verdicts, list)
+        assert verdicts[0]["candidate_pbo"] is None

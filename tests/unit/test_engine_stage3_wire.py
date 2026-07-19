@@ -1508,3 +1508,105 @@ class TestEvaluatorOneLawWorstCase:
         assert worst.net_pnl_paisa == 855
         assert worst.gross_profit_paisa == 1_200
         assert worst.gross_loss_paisa == 345
+
+
+class TestCascadeSpecsFamilyCarriage:
+    """DEC-CASCADE-STAT-TIER-WIRE-001: each refined cell's spec carries its
+    winner masks' Stage-3 search family — the (sl, tp) cell coordinates the
+    SAME mask was persisted at across the (instrument, tf, direction) group
+    (condition 6: every stage-3 eval is a ResultRow in one cell store per
+    distinct quantized pair)."""
+
+    @staticmethod
+    def _cell(
+        path: Path,
+        rows: list[ResultRow],
+        *,
+        sl: int,
+        tp: int,
+        direction: Side = Side.BUY,
+    ) -> Stage3RefinedCell:
+        store = ResultsStore(path=path)
+        for row in rows:
+            store.append(row)
+        store.flush()
+        return Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=direction,
+                k=1,
+                sl_paisa=sl,
+                tp_paisa=tp,
+                proximity=None,
+            ),
+            path=path,
+            rows=len(rows),
+        )
+
+    def test_family_spans_cells_sharing_a_mask(self, tmp_path: Path) -> None:
+        # ONE mask (5) refined into TWO quantized cells → BOTH specs carry the
+        # two-pair family, sorted ascending, each cell's own pair included.
+        cell_a = self._cell(tmp_path / "a.parquet", [_row_for("a" * 64, mask=5)], sl=80, tp=50)
+        cell_b = self._cell(tmp_path / "b.parquet", [_row_for("b" * 64, mask=5)], sl=60, tp=90)
+        spec_a, spec_b = cascade_specs_for_refined_cells([cell_a, cell_b], grid=_grid())
+        assert spec_a.family_sl_tp == ((60, 90), (80, 50))
+        assert spec_b.family_sl_tp == ((60, 90), (80, 50))
+
+    def test_single_cell_family_is_its_own_pair(self, tmp_path: Path) -> None:
+        cell = self._cell(tmp_path / "solo.parquet", [_row_for("c" * 64, mask=3)], sl=80, tp=50)
+        (spec,) = cascade_specs_for_refined_cells([cell], grid=_grid())
+        # A 1-pair family is recorded honestly; the cascade skips K < 2.
+        assert spec.family_sl_tp == ((80, 50),)
+
+    def test_direction_isolates_the_family(self, tmp_path: Path) -> None:
+        # The SAME mask in a BEAR cell never joins the BULL family — the
+        # grouping key is (instrument, tf, direction).
+        bull = self._cell(tmp_path / "bull.parquet", [_row_for("d" * 64, mask=5)], sl=80, tp=50)
+        bear = self._cell(
+            tmp_path / "bear.parquet",
+            [_row_for("e" * 64, mask=5, direction="bear")],
+            sl=60,
+            tp=90,
+            direction=Side.SELL,
+        )
+        spec_bull, spec_bear = cascade_specs_for_refined_cells([bull, bear], grid=_grid())
+        assert spec_bull.family_sl_tp == ((80, 50),)
+        assert spec_bear.family_sl_tp == ((60, 90),)
+
+    def test_ambiguous_multimask_cell_skips_the_family_loudly(self, tmp_path: Path) -> None:
+        # Cell X holds masks 5 AND 9; mask 5 was ALSO refined into cell Y but
+        # mask 9 only into X → the two masks' families DIFFER and the
+        # spec-level field cannot express them: family None + one loud WARN
+        # (the recorded deviation — never a fabricated union family).
+        cell_x = self._cell(
+            tmp_path / "x.parquet",
+            [_row_for("f" * 64, mask=5), _row_for("1" * 64, mask=9)],
+            sl=80,
+            tp=50,
+        )
+        cell_y = self._cell(tmp_path / "y.parquet", [_row_for("2" * 64, mask=5)], sl=60, tp=90)
+        with capture_logs() as logs:
+            spec_x, spec_y = cascade_specs_for_refined_cells([cell_x, cell_y], grid=_grid())
+        assert spec_x.family_sl_tp is None
+        # Cell Y is single-mask → its family (both cells' pairs) is expressible.
+        assert spec_y.family_sl_tp == ((60, 90), (80, 50))
+        warned = [e for e in logs if e["event"] == "stage3_wire.family_ambiguous_cell"]
+        assert len(warned) == 1
+        assert warned[0]["n_masks"] == 2
+        assert warned[0]["n_distinct_families"] == 2
+
+    def test_pipeline_cells_carry_consistent_families(
+        self, pipeline: tuple[Path, Stage3PassReport]
+    ) -> None:
+        # The REAL stage-3 pass output: every produced spec's family (when
+        # present) is sorted, unique and contains the cell's own pair.
+        _, report = pipeline
+        specs = cascade_specs_for_refined_cells(report.cells, grid=_grid())
+        assert specs, "the pipeline fixture must produce refined cells"
+        for spec in specs:
+            if spec.family_sl_tp is None:
+                continue
+            family = spec.family_sl_tp
+            assert list(family) == sorted(set(family))
+            assert (spec.sl_paisa, spec.tp_paisa) in family
