@@ -30,6 +30,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::BTreeMap;
 
+pub mod baseline;
 pub mod cascade_join;
 pub mod cascade_wire;
 pub mod combo_aggregates;
@@ -39,6 +40,7 @@ pub mod minute_path;
 pub mod pyjson;
 pub mod results_report;
 pub mod top100_artifact;
+pub mod twin_detect;
 
 use cascade_join::{GroupNode, Leaf, LeafR, ReportNode, RootView, VerdictNode};
 
@@ -727,6 +729,176 @@ fn results_show_render<'py>(
     )
 }
 
+// ─────────────────────── twin_detect (slice 2d) ─────────────────────────
+// The behavioral-twin fingerprint / grouping laws — module docs in
+// `twin_detect.rs`. The BLAKE3 digest itself stays shim-side (pyo3 is the
+// crate's only dependency): the crate builds the canonical serialization
+// BYTES and the shim hashes them.
+
+/// The `bxtwin1|…` fingerprint serialization (the prefix is threaded from
+/// the shim's `FINGERPRINT_VERSION_PREFIX` — single source stays Python).
+#[pyfunction]
+fn twin_serialize(
+    prefix: &str,
+    entry_us: Vec<i64>,
+    exit_us: Vec<i64>,
+    directions: Vec<String>,
+    pnl_paisa: Vec<i64>,
+) -> PyResult<String> {
+    let n = entry_us.len();
+    if [exit_us.len(), directions.len(), pnl_paisa.len()] != [n, n, n] {
+        return Err(PyValueError::new_err(
+            "twin_serialize: trade column lengths diverge",
+        ));
+    }
+    Ok(twin_detect::serialize(
+        prefix,
+        &entry_us,
+        &exit_us,
+        &directions,
+        &pnl_paisa,
+    ))
+}
+
+/// The `TwinCandidate.__post_init__` validation law (raises the REAL
+/// threaded `TwinDetectError`, or CPython `re`'s raw `TypeError` escapes).
+#[pyfunction]
+fn twin_validate_candidate(
+    run_id: &Bound<'_, PyAny>,
+    mask_bits: &Bound<'_, PyAny>,
+    fingerprint: &Bound<'_, PyAny>,
+    error_cls: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    twin_detect::validate_candidate(run_id, mask_bits, fingerprint, error_cls)
+}
+
+/// `_jaccard` — ONE f64 division over the entry-timestamp sets; two EMPTY
+/// sets are DEFINED identical (`1.0`).
+#[pyfunction]
+fn twin_jaccard(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<f64> {
+    twin_detect::jaccard_py(a, b)
+}
+
+/// `group_twins`' law → `(family_pairs, members)` as INDICES into the
+/// caller's candidate list (the shim maps back to the ORIGINAL run_id
+/// objects).
+#[pyfunction]
+fn twin_group(
+    py: Python<'_>,
+    candidates: &Bound<'_, PyAny>,
+    jaccard_threshold: &Bound<'_, PyAny>,
+    error_cls: &Bound<'_, PyAny>,
+) -> PyResult<twin_detect::GroupedIndices> {
+    twin_detect::group(py, candidates, jaccard_threshold, error_cls)
+}
+
+// ───────────────────────── baseline (slice 2d) ───────────────────────────
+// The buy-&-hold baseline compute / render / verdict laws — module docs in
+// `baseline.rs`. The file I/O + structlog observability + the load
+// construction funnel stay shim-side.
+
+/// `compute_baseline`'s fold over marshalled bar columns.
+#[pyfunction]
+fn baseline_compute<'py>(
+    py: Python<'py>,
+    instrument: &Bound<'py, PyAny>,
+    ts_us: Vec<i64>,
+    ts_objs: &Bound<'py, PyAny>,
+    opens: &Bound<'py, PyAny>,
+    closes: &Bound<'py, PyAny>,
+    error_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    baseline::compute(py, instrument, ts_us, ts_objs, opens, closes, error_cls)
+}
+
+/// The `BaselineSeries.__post_init__` validation matrix.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn baseline_validate_series(
+    py: Python<'_>,
+    instrument: &Bound<'_, PyAny>,
+    start: &Bound<'_, PyAny>,
+    end: &Bound<'_, PyAny>,
+    anchor_open: &Bound<'_, PyAny>,
+    sessions: &Bound<'_, PyAny>,
+    total_return_pct: &Bound<'_, PyAny>,
+    error_cls: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    baseline::validate_series(
+        py,
+        instrument,
+        start,
+        end,
+        anchor_open,
+        sessions,
+        total_return_pct,
+        error_cls,
+    )
+}
+
+/// `baseline_filename` — verbatim, no sanitization; empty refuses.
+#[pyfunction]
+fn baseline_filename<'py>(
+    py: Python<'py>,
+    instrument: &Bound<'py, PyAny>,
+    error_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    baseline::filename(py, instrument, error_cls)
+}
+
+/// `_price_str` — `str(round_money(value))` (the crate's half-up 2-dp
+/// quantize twin; non-quantizable values raise the exact CPython
+/// `decimal.InvalidOperation`).
+#[pyfunction]
+fn baseline_price_str(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    baseline::price_str(py, value)
+}
+
+/// `write_baseline`'s payload-build + B8 render law (trailing newline
+/// included; the shim owns the atomic write + log).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn baseline_render(
+    py: Python<'_>,
+    instrument: &Bound<'_, PyAny>,
+    start: &Bound<'_, PyAny>,
+    end: &Bound<'_, PyAny>,
+    anchor_open: &Bound<'_, PyAny>,
+    sessions: &Bound<'_, PyAny>,
+    total_return_pct: &Bound<'_, PyAny>,
+    source_note: &Bound<'_, PyAny>,
+    data_snapshot_hash: &Bound<'_, PyAny>,
+    schema_version: &Bound<'_, PyAny>,
+    error_cls: &Bound<'_, PyAny>,
+) -> PyResult<String> {
+    baseline::render(
+        py,
+        instrument,
+        start,
+        end,
+        anchor_open,
+        sessions,
+        total_return_pct,
+        source_note,
+        data_snapshot_hash,
+        schema_version,
+        error_cls,
+    )
+}
+
+/// `load_baseline`'s damage-verdict ladder over ALREADY-READ content.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn baseline_load_verdict<'py>(
+    py: Python<'py>,
+    raw: &Bound<'py, PyAny>,
+    schema_version: &Bound<'py, PyAny>,
+    payload_keys: &Bound<'py, PyAny>,
+    session_fields: usize,
+) -> PyResult<(Option<&'static str>, Option<Bound<'py, PyAny>>)> {
+    baseline::load_verdict(py, raw, schema_version, payload_keys, session_fields)
+}
+
 // ───────────────────────────── cascade_join ─────────────────────────────
 
 /// Classify one Python value into the law's [`Leaf`] model.
@@ -781,11 +953,68 @@ pub(crate) fn mapping_get<'py>(obj: &Bound<'py, PyAny>, key: &str) -> PyResult<B
 /// Raise a passed-in domain-error CLASS with a fully-composed message — the
 /// real Python exception instance, so `type(exc).__name__` and `str(exc)`
 /// are byte-identical to the deleted law's direct raises (the slice-2b
-/// `Top100Error` pattern, shared with slice 2c's `ResultsStoreError`).
+/// `Top100Error` pattern, shared with slice 2c's `ResultsStoreError` and
+/// slice 2d's `TwinDetectError` / `BaselineError`).
 pub(crate) fn domain_err(error_cls: &Bound<'_, PyAny>, msg: String) -> PyErr {
     match error_cls.call1((msg,)) {
         Ok(inst) => PyErr::from_value(inst),
         Err(err) => err,
+    }
+}
+
+/// [`domain_err`] over an already-assembled Python message OBJECT (a
+/// [`Frags`] join) — the arm for messages whose interpolations may carry
+/// non-UTF-8-representable strs (lone surrogates), which can never cross
+/// into a Rust `String` (slice 2d).
+pub(crate) fn domain_err_any(error_cls: &Bound<'_, PyAny>, msg: &Bound<'_, PyAny>) -> PyErr {
+    match error_cls.call1((msg,)) {
+        Ok(inst) => PyErr::from_value(inst),
+        Err(err) => err,
+    }
+}
+
+// ───────────────────── fragment assembly (crate-shared) ──────────────────
+
+/// A text under assembly: PyString fragments joined by CPython `str.join`,
+/// so surrogate-carrying parts never cross into Rust `String`s (the
+/// slice-2c decision-(iii) idiom, hoisted crate-shared at slice 2d).
+pub(crate) struct Frags<'py> {
+    py: Python<'py>,
+    parts: Bound<'py, PyList>,
+}
+
+impl<'py> Frags<'py> {
+    pub(crate) fn new(py: Python<'py>) -> Self {
+        Self {
+            py,
+            parts: PyList::empty(py),
+        }
+    }
+
+    /// Append a static ASCII/UTF-8 literal fragment.
+    pub(crate) fn lit(&self, s: &str) -> PyResult<()> {
+        self.parts.append(PyString::new(self.py, s))
+    }
+
+    /// Append a Rust-computed fragment.
+    pub(crate) fn owned(&self, s: &str) -> PyResult<()> {
+        self.parts.append(PyString::new(self.py, s))
+    }
+
+    /// Append `str(v)` — the f-string interpolation law
+    /// (`f"{x}"` ≡ `format(x, "")` ≡ `str(x)`).
+    pub(crate) fn obj(&self, v: &Bound<'py, PyAny>) -> PyResult<()> {
+        self.parts.append(v.str()?)
+    }
+
+    /// Append an already-stringified fragment object verbatim.
+    pub(crate) fn frag(&self, v: &Bound<'py, PyAny>) -> PyResult<()> {
+        self.parts.append(v)
+    }
+
+    /// `"".join(parts)` — one CPython join builds the final text.
+    pub(crate) fn join(self) -> PyResult<Bound<'py, PyAny>> {
+        PyString::new(self.py, "").call_method1("join", (self.parts,))
     }
 }
 
@@ -989,6 +1218,16 @@ fn _brutex_cascade(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(results_render_sidecar_group, m)?)?;
     m.add_function(wrap_pyfunction!(results_render_sidecar_content, m)?)?;
     m.add_function(wrap_pyfunction!(results_show_render, m)?)?;
+    m.add_function(wrap_pyfunction!(twin_serialize, m)?)?;
+    m.add_function(wrap_pyfunction!(twin_validate_candidate, m)?)?;
+    m.add_function(wrap_pyfunction!(twin_jaccard, m)?)?;
+    m.add_function(wrap_pyfunction!(twin_group, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_compute, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_validate_series, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_filename, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_price_str, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_render, m)?)?;
+    m.add_function(wrap_pyfunction!(baseline_load_verdict, m)?)?;
     // The crate's hardcoded walker exit-reason vocabulary, exposed so the
     // Python drift pin can assert set AND order equality against
     // `trade_sim.EXIT_REASONS` (DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR:

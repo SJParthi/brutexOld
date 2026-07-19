@@ -164,3 +164,65 @@ def top100_load_artifact(
 ) -> tuple[str | None, tuple[Any, ...] | None]: ...
 def per_bar_returns(equity_paisa: Sequence[int], start_equity_paisa: int) -> list[float]: ...
 def max_drawdown_return_units(returns: Sequence[float]) -> float: ...
+
+# ── twin_detect (slice 2d) ───────────────────────────────────────────────
+
+def twin_serialize(
+    prefix: str,
+    entry_us: Sequence[int],
+    exit_us: Sequence[int],
+    directions: Sequence[str],
+    pnl_paisa: Sequence[int],
+) -> str: ...
+def twin_validate_candidate(
+    run_id: object,
+    mask_bits: object,
+    fingerprint: object,
+    error_cls: type[Exception],
+) -> None: ...
+def twin_jaccard(a: frozenset[int], b: frozenset[int]) -> float: ...
+def twin_group(
+    candidates: Sequence[Any],
+    jaccard_threshold: object,
+    error_cls: type[Exception],
+) -> tuple[list[tuple[int, int]], list[tuple[int, list[int]]]]: ...
+
+# ── baseline (slice 2d) ──────────────────────────────────────────────────
+
+def baseline_compute(
+    instrument: object,
+    ts_us: Sequence[int],
+    ts_objs: Sequence[Any],
+    opens: Sequence[Any],
+    closes: Sequence[Any],
+    error_cls: type[Exception],
+) -> dict[str, Any]: ...
+def baseline_validate_series(
+    instrument: object,
+    start: object,
+    end: object,
+    anchor_open: object,
+    sessions: object,
+    total_return_pct: object,
+    error_cls: type[Exception],
+) -> None: ...
+def baseline_filename(instrument: object, error_cls: type[Exception]) -> str: ...
+def baseline_price_str(value: object) -> str: ...
+def baseline_render(
+    instrument: object,
+    start: object,
+    end: object,
+    anchor_open: object,
+    sessions: object,
+    total_return_pct: object,
+    source_note: object,
+    data_snapshot_hash: object,
+    schema_version: object,
+    error_cls: type[Exception],
+) -> str: ...
+def baseline_load_verdict(
+    raw: str,
+    schema_version: object,
+    payload_keys: frozenset[str],
+    session_fields: int,
+) -> tuple[str | None, dict[str, Any] | None]: ...

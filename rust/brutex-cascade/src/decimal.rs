@@ -14,10 +14,25 @@
 //! shims surface this as the same loud failure class (a corrupt price never
 //! silently converts).
 
-/// Parse a `Decimal.__str__` rupee string and return exact int paisa
-/// (`round_money(x) * 100`), or an error message for a malformed /
-/// non-finite token.
-pub fn rupees_str_to_paisa(s: &str) -> Result<i64, String> {
+/// The parse outcome of a `Decimal.__str__` token, in half-up paisa
+/// magnitude form (slice 2d factored the finite-digit walk out of
+/// [`rupees_str_to_paisa`] so the baseline `_price_str` quantize law can
+/// share ONE parser — CLAUDE.md §11 COMMON).
+pub enum ParsedPaisa {
+    /// A finite value: sign + `round_half_up(|value| * 100)` exactly.
+    Finite { neg: bool, magnitude: i128 },
+    /// A QUIET NaN token (`NaN` / `-NaN` / `NaN<payload>`): CPython
+    /// `quantize` propagates it silently (the baseline `_price_str` law),
+    /// while the paisa conversion refuses it.
+    QuietNan,
+    /// `sNaN` / `Infinity` (either sign): CPython `quantize` raises
+    /// `InvalidOperation`; the paisa conversion refuses too.
+    NonFinite,
+}
+
+/// Parse a `Decimal.__str__` token into [`ParsedPaisa`] (magnitude in
+/// exact half-up paisa), or an error message for a malformed token.
+pub fn parse_paisa(s: &str) -> Result<ParsedPaisa, String> {
     let t = s.trim();
     let (neg, t) = match t.as_bytes().first() {
         Some(b'-') => (true, &t[1..]),
@@ -25,8 +40,11 @@ pub fn rupees_str_to_paisa(s: &str) -> Result<i64, String> {
         _ => (false, t),
     };
     let lower = t.to_ascii_lowercase();
-    if lower.starts_with("nan") || lower.starts_with("snan") || lower.starts_with("inf") {
-        return Err(format!("non-finite decimal {s:?} cannot convert to paisa"));
+    if lower.starts_with("nan") {
+        return Ok(ParsedPaisa::QuietNan);
+    }
+    if lower.starts_with("snan") || lower.starts_with("inf") {
+        return Ok(ParsedPaisa::NonFinite);
     }
     // Split mantissa / exponent.
     let (mantissa, exp_part) = match t.find(['e', 'E']) {
@@ -63,7 +81,7 @@ pub fn rupees_str_to_paisa(s: &str) -> Result<i64, String> {
     let first_nonzero = digits.iter().position(|&d| d != 0).unwrap_or(digits.len());
     let digits = &digits[first_nonzero..];
     if digits.is_empty() {
-        return Ok(0);
+        return Ok(ParsedPaisa::Finite { neg, magnitude: 0 });
     }
     let value: i128 = if scale >= 0 {
         let mut acc: i128 = 0;
@@ -107,8 +125,61 @@ pub fn rupees_str_to_paisa(s: &str) -> Result<i64, String> {
             acc
         }
     };
-    let signed = if neg { -value } else { value };
-    i64::try_from(signed).map_err(|_| format!("decimal {s:?} overflows the int64 paisa domain"))
+    Ok(ParsedPaisa::Finite {
+        neg,
+        magnitude: value,
+    })
+}
+
+/// Parse a `Decimal.__str__` rupee string and return exact int paisa
+/// (`round_money(x) * 100`), or an error message for a malformed /
+/// non-finite token.
+pub fn rupees_str_to_paisa(s: &str) -> Result<i64, String> {
+    match parse_paisa(s)? {
+        ParsedPaisa::QuietNan | ParsedPaisa::NonFinite => {
+            Err(format!("non-finite decimal {s:?} cannot convert to paisa"))
+        }
+        ParsedPaisa::Finite { neg, magnitude } => {
+            let signed = if neg { -magnitude } else { magnitude };
+            i64::try_from(signed)
+                .map_err(|_| format!("decimal {s:?} overflows the int64 paisa domain"))
+        }
+    }
+}
+
+/// The baseline `_price_str` core — `str(round_money(value))` over the
+/// value's own `Decimal.__str__` token (DEC-RUST-CASCADE-RESULTS-001
+/// slice 2d): the 2-dp `ROUND_HALF_UP` quantize rendered exactly as
+/// CPython prints the quantized `Decimal` — always two fraction digits,
+/// no exponent form, the sign preserved on negative zero
+/// (`round_money(Decimal("-0.004"))` → `"-0.00"`, probe-verified).
+///
+/// A QUIET NaN propagates through CPython `quantize` silently, so the
+/// token passes through VERBATIM (`"NaN"` / `"-NaN"`, probe-verified);
+/// `sNaN` / `Infinity` and a quantized coefficient beyond the ambient
+/// 28-digit context precision return `Err` — the caller raises the exact
+/// CPython `decimal.InvalidOperation`.
+pub fn quantize_2dp_string(s: &str) -> Result<String, String> {
+    match parse_paisa(s)? {
+        ParsedPaisa::QuietNan => Ok(s.to_string()),
+        ParsedPaisa::NonFinite => Err(format!(
+            "non-finite decimal {s:?} cannot quantize to the 2-dp grid"
+        )),
+        ParsedPaisa::Finite { neg, magnitude } => {
+            // CPython `quantize` refuses a result coefficient longer than
+            // the context precision (28 significant digits): the quantized
+            // coefficient IS the paisa magnitude.
+            if magnitude >= 10_i128.pow(28) {
+                return Err(format!(
+                    "decimal {s:?} quantized to more than 28 digits (InvalidOperation)"
+                ));
+            }
+            let units = magnitude / 100;
+            let cents = magnitude % 100;
+            let sign = if neg { "-" } else { "" };
+            Ok(format!("{sign}{units}.{cents:02}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +229,42 @@ mod tests {
         assert!(rupees_str_to_paisa("abc").is_err());
         assert!(rupees_str_to_paisa("").is_err());
         assert!(rupees_str_to_paisa("1.2.3").is_err());
+    }
+
+    #[test]
+    fn quantize_2dp_matches_round_money_corpus() {
+        // The frozen baseline `price_str` corpus family (slice 2d).
+        assert_eq!(quantize_2dp_string("1.005").unwrap(), "1.01");
+        assert_eq!(quantize_2dp_string("-1.005").unwrap(), "-1.01");
+        assert_eq!(quantize_2dp_string("1.0049").unwrap(), "1.00");
+        assert_eq!(quantize_2dp_string("0").unwrap(), "0.00");
+        assert_eq!(quantize_2dp_string("1E+2").unwrap(), "100.00");
+        assert_eq!(quantize_2dp_string("123.4").unwrap(), "123.40");
+        assert_eq!(quantize_2dp_string("0.005").unwrap(), "0.01");
+        assert_eq!(quantize_2dp_string("2.675").unwrap(), "2.68");
+        assert_eq!(quantize_2dp_string("99999999.99").unwrap(), "99999999.99");
+    }
+
+    #[test]
+    fn quantize_2dp_zero_sign_and_non_finite() {
+        // Negative zero keeps its sign — round_money(Decimal("-0.004")) →
+        // "-0.00" (probe-verified against CPython decimal).
+        assert_eq!(quantize_2dp_string("-0.004").unwrap(), "-0.00");
+        assert_eq!(quantize_2dp_string("-0").unwrap(), "-0.00");
+        assert_eq!(quantize_2dp_string("0E+2").unwrap(), "0.00");
+        // Quiet NaN passes through verbatim; sNaN / Infinity refuse.
+        assert_eq!(quantize_2dp_string("NaN").unwrap(), "NaN");
+        assert_eq!(quantize_2dp_string("-NaN").unwrap(), "-NaN");
+        assert!(quantize_2dp_string("sNaN").is_err());
+        assert!(quantize_2dp_string("Infinity").is_err());
+        assert!(quantize_2dp_string("-Infinity").is_err());
+        // The 28-digit context-precision wall (1E+26 rupees = 29 paisa
+        // digits → CPython quantize raises InvalidOperation).
+        assert!(quantize_2dp_string("1E+26").is_err());
+        assert_eq!(
+            quantize_2dp_string("9999999999999999999999999.99").unwrap(),
+            "9999999999999999999999999.99"
+        );
     }
 
     #[test]

@@ -24,9 +24,24 @@ module owns that series:
   warning; the caller rebuilds deterministically — R42's mid-chain break
   law, the ``load_stamp`` idiom).
 
-Wheel-free stdlib leaf (design F.10): consumes already-loaded
-:class:`~brutex.data.models.CandleBar` sequences; the only sibling imports are
-the COMMON money snap, the IST session key and the atomic writer.
+**RUST-HOSTED LAWS (DEC-RUST-CASCADE-RESULTS-001, slice 2d):** the
+compute fold (sorting, the frozen refusal ORDER, the IST session key, the
+28-significant-digit ``total_return_pct`` precision law run on the ORIGINAL
+``Decimal`` objects through CPython's own operators), the
+:class:`BaselineSeries` validation matrix, :func:`baseline_filename`, the
+``_price_str`` 2-dp ROUND_HALF_UP snap, the B8 artifact BYTE render and the
+load damage-VERDICT ladder live in ``rust/brutex-cascade/src/baseline.rs``,
+verified against the FROZEN pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/baseline.json``). This module
+keeps the type face (constants, the frozen dataclass, the error class) plus
+the sanctioned I/O half — the atomic write, the ``path.read_text`` probe,
+the structlog observability and the load CONSTRUCTION funnel
+(``date.fromisoformat`` / ``Decimal`` / ``float`` marshalling under the
+``(BaselineError, InvalidOperation, ValueError)`` catch). The
+pre-conversion wheel-free posture is therefore CHANGED by design: the
+module hard-requires the brutex-cascade wheel through the
+``BRUTEX_CASCADE_RUST`` facade (absent wheel = a loud typed refusal naming
+the bootstrap remediation, never a silent degrade).
 
 ## Determinism / honesty
 
@@ -43,19 +58,16 @@ the COMMON money snap, the IST session key and the atomic writer.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from math import isfinite
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
-from brutex.engine.session_lens import ist_trade_date
+from brutex.engine.cascade_rust import EPOCH_DATE, epoch_us, require_cascade_rust
 from brutex.models import BruteXError
-from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
@@ -77,10 +89,12 @@ __all__ = [
 
 #: Baseline artifact schema version — bump on ANY shape change (a reader
 #: seeing an unknown version treats the artifact as absent → rebuild).
+#: Threaded into the Rust verdict/render laws as data (single source HERE).
 BASELINE_SCHEMA_VERSION: Final[int] = 1
 
 #: The B8 payload keys, pinned (load validates the EXACT set — an extra or
-#: missing key is damage, never silently tolerated).
+#: missing key is damage, never silently tolerated). Threaded into the Rust
+#: verdict law as data.
 _PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
     {
         "schema_version",
@@ -113,6 +127,10 @@ class BaselineSeries:
     percentage return of holding from the anchor to the LAST session's close;
     ``source_note`` states the computed source in operator English (R27
     traceability — every displayed number names where it came from).
+    Validation is RUST-HOSTED (DEC-RUST-CASCADE-RESULTS-001): the raised
+    refusals are the REAL :class:`BaselineError` with byte-identical
+    messages, and a ``Decimal("NaN")`` anchor's ``<= 0`` comparison raises
+    ``InvalidOperation`` exactly as the deleted Python compare did.
     """
 
     instrument: str
@@ -124,37 +142,36 @@ class BaselineSeries:
     source_note: str
 
     def __post_init__(self) -> None:
-        if not self.instrument:
-            raise BaselineError("BaselineSeries.instrument must be non-empty")
-        if not self.sessions:
-            raise BaselineError("BaselineSeries.sessions must be non-empty")
-        if any(
-            self.sessions[i - 1][0] >= self.sessions[i][0] for i in range(1, len(self.sessions))
-        ):
-            raise BaselineError("BaselineSeries.sessions must be strictly ascending by date")
-        if self.start != self.sessions[0][0] or self.end != self.sessions[-1][0]:
-            raise BaselineError(
-                "BaselineSeries start/end must equal the first/last session date, got "
-                f"start={self.start} end={self.end} vs sessions "
-                f"[{self.sessions[0][0]} … {self.sessions[-1][0]}]"
-            )
-        if self.anchor_open <= 0:
-            raise BaselineError(f"BaselineSeries.anchor_open must be > 0, got {self.anchor_open}")
-        if not isfinite(self.total_return_pct):
-            raise BaselineError(
-                f"BaselineSeries.total_return_pct must be finite, got {self.total_return_pct!r}"
-            )
+        require_cascade_rust().baseline_validate_series(
+            self.instrument,
+            self.start,
+            self.end,
+            self.anchor_open,
+            self.sessions,
+            self.total_return_pct,
+            BaselineError,
+        )
 
 
 def baseline_filename(instrument: str) -> str:
-    """The pinned artifact filename — ``baseline-<instrument>.json`` (design D0b)."""
-    if not instrument:
-        raise BaselineError("baseline_filename: instrument must be non-empty")
-    return f"baseline-{instrument}.json"
+    """The pinned artifact filename — ``baseline-<instrument>.json`` (design D0b).
+
+    RUST-HOSTED: NO sanitization — a hostile instrument passes VERBATIM
+    (that IS the law); only an empty instrument refuses.
+    """
+    return cast("str", require_cascade_rust().baseline_filename(instrument, BaselineError))
 
 
 def compute_baseline(bars: Sequence[CandleBar], *, instrument: str) -> BaselineSeries:
     """Compute the buy-&-hold baseline from the sweep's OWN bars (R27).
+
+    RUST-HOSTED fold (DEC-RUST-CASCADE-RESULTS-001): timestamps cross as
+    exact epoch microseconds (plus the original datetime objects, so the
+    duplicate refusal interpolates the FULL CPython repr); prices cross as
+    the ORIGINAL ``Decimal`` objects — the series carries them VERBATIM
+    (the 2-dp snap happens only at write) and the 28-significant-digit
+    ``total_return_pct`` division runs through CPython's own Decimal
+    operators at the ambient context, never plain f64 division.
 
     Parameters
     ----------
@@ -174,45 +191,42 @@ def compute_baseline(bars: Sequence[CandleBar], *, instrument: str) -> BaselineS
     BaselineError
         On empty *bars*, a duplicate timestamp, or a non-positive anchor OPEN.
     """
-    if not bars:
-        raise BaselineError(f"compute_baseline: no bars for {instrument!r} — nothing to anchor")
-    ordered = sorted(bars, key=lambda bar: bar.timestamp)
-    for i in range(1, len(ordered)):
-        if ordered[i - 1].timestamp == ordered[i].timestamp:
-            raise BaselineError(
-                f"compute_baseline: duplicate bar timestamp {ordered[i].timestamp!r} — "
-                "dedup at the lake read boundary before baselining"
-            )
-    anchor = ordered[0].open
-    if anchor <= 0:
-        raise BaselineError(
-            f"compute_baseline: first bar OPEN must be > 0, got {anchor} (corrupt stored bar)"
-        )
-    closes: dict[date, Decimal] = {}
-    for bar in ordered:
-        closes[ist_trade_date(bar.timestamp)] = bar.close
-    sessions = tuple(sorted(closes.items()))
-    last_close = sessions[-1][1]
-    total_return_pct = float((last_close - anchor) / anchor * 100)
+    pool = list(bars)
+    out = cast(
+        "dict[str, Any]",
+        require_cascade_rust().baseline_compute(
+            instrument,
+            [epoch_us(bar.timestamp) for bar in pool],
+            [bar.timestamp for bar in pool],
+            [bar.open for bar in pool],
+            [bar.close for bar in pool],
+            BaselineError,
+        ),
+    )
+    sessions: tuple[tuple[date, Decimal], ...] = tuple(
+        (EPOCH_DATE + timedelta(days=day), close)
+        for day, close in zip(out["session_days"], out["session_closes"], strict=True)
+    )
     return BaselineSeries(
         instrument=instrument,
         start=sessions[0][0],
         end=sessions[-1][0],
-        anchor_open=anchor,
+        anchor_open=out["anchor"],
         sessions=sessions,
-        total_return_pct=total_return_pct,
-        source_note=(
-            f"buy-&-hold {instrument}: anchor = first bar OPEN of the first session; "
-            f"one point per IST session = that session's LAST bar CLOSE; computed from "
-            f"the sweep's own {len(ordered)} bars over {len(sessions)} session(s) "
-            "(R27 same-bars law)"
-        ),
+        total_return_pct=out["total_return_pct"],
+        source_note=out["source_note"],
     )
 
 
 def _price_str(value: Decimal) -> str:
-    """Serialize a rupee price as its 2-dp tick-grid string (B8 law)."""
-    return str(round_money(value))
+    """Serialize a rupee price as its 2-dp tick-grid string (B8 law).
+
+    RUST-HOSTED: ``str(round_money(value))`` via the crate's half-up 2-dp
+    quantize twin (a quiet NaN passes through; ``sNaN`` / ``Infinity`` and
+    a beyond-28-digit quantize raise the exact CPython
+    ``decimal.InvalidOperation``).
+    """
+    return cast("str", require_cascade_rust().baseline_price_str(value))
 
 
 def write_baseline(path: Path, series: BaselineSeries, *, data_snapshot_hash: str) -> None:
@@ -220,35 +234,35 @@ def write_baseline(path: Path, series: BaselineSeries, *, data_snapshot_hash: st
 
     ``data_snapshot_hash`` stamps the EXACT data identity the series was
     computed from (the sweep's own ``bxsnap2`` digest) — the artifact is
-    traceable to its inputs byte-for-byte.
+    traceable to its inputs byte-for-byte. RUST-HOSTED render
+    (DEC-RUST-CASCADE-RESULTS-001): the payload build + the
+    ``json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    allow_nan=False)`` byte law live crate-side; the atomic write + the
+    ``baseline.written`` log stay here.
 
     Raises
     ------
     BaselineError
         On an empty *data_snapshot_hash* (an unstamped artifact would be
-        untraceable — refused).
+        untraceable — refused, BEFORE any payload build or write).
     OSError
         Raw from the atomic write (the engine sidecar error contract —
         never mis-escalated to a lake halt).
     """
-    if not data_snapshot_hash:
-        raise BaselineError("write_baseline: data_snapshot_hash must be non-empty")
-    payload = {
-        "schema_version": BASELINE_SCHEMA_VERSION,
-        "instrument": series.instrument,
-        "start": series.start.isoformat(),
-        "end": series.end.isoformat(),
-        "anchor_open": _price_str(series.anchor_open),
-        "sessions": [[day.isoformat(), _price_str(close)] for day, close in series.sessions],
-        "total_return_pct": series.total_return_pct,
-        "data_snapshot_hash": data_snapshot_hash,
-        "source_note": series.source_note,
-    }
-    rendered = (
-        json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-        )
-        + "\n"
+    rendered = cast(
+        "str",
+        require_cascade_rust().baseline_render(
+            series.instrument,
+            series.start,
+            series.end,
+            series.anchor_open,
+            series.sessions,
+            series.total_return_pct,
+            series.source_note,
+            data_snapshot_hash,
+            BASELINE_SCHEMA_VERSION,
+            BaselineError,
+        ),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_simple(path, lambda tmp: tmp.write_text(rendered, encoding="utf-8"))
@@ -268,7 +282,10 @@ def load_baseline(path: Path) -> BaselineSeries | None:
     must reconstruct into a valid :class:`BaselineSeries` (dates ISO, prices
     Decimal, sessions strictly ascending, start/end consistent). Each
     rejection logs ONE ``baseline.load_invalid`` warning naming the reason —
-    never silent, never a half-trusted artifact.
+    never silent, never a half-trusted artifact. RUST-HOSTED verdict ladder
+    (DEC-RUST-CASCADE-RESULTS-001): the parse + shape/type/version gates run
+    crate-side over the already-read content; the file read (``unreadable``)
+    and the construction funnel (``bad_field_values``) stay here.
     """
 
     def _invalid(reason: str) -> None:
@@ -279,42 +296,15 @@ def load_baseline(path: Path) -> BaselineSeries | None:
     except OSError:
         _invalid("unreadable")
         return None
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        _invalid("not_json")
-        return None
-    if not isinstance(payload, dict):
-        _invalid("not_object")
-        return None
-    if set(payload.keys()) != _PAYLOAD_KEYS:
-        _invalid("bad_key_set")
-        return None
-    if payload["schema_version"] != BASELINE_SCHEMA_VERSION:
-        _invalid("schema_version_mismatch")
-        return None
-    if not isinstance(payload["data_snapshot_hash"], str) or not payload["data_snapshot_hash"]:
-        _invalid("bad_data_snapshot_hash")
-        return None
-    sessions_raw = payload["sessions"]
-    if not isinstance(sessions_raw, list) or not all(
-        isinstance(entry, list)
-        and len(entry) == _SESSION_FIELDS
-        and isinstance(entry[0], str)
-        and isinstance(entry[1], str)
-        for entry in sessions_raw
-    ):
-        _invalid("bad_sessions_shape")
-        return None
-    if not all(
-        isinstance(payload[key], str) for key in ("instrument", "start", "end", "anchor_open")
-    ) or not isinstance(payload["source_note"], str):
-        _invalid("bad_field_types")
-        return None
-    if not isinstance(payload["total_return_pct"], int | float) or isinstance(
-        payload["total_return_pct"], bool
-    ):
-        _invalid("bad_total_return_pct")
+    reason, payload = cast(
+        "tuple[str | None, dict[str, Any] | None]",
+        require_cascade_rust().baseline_load_verdict(
+            raw, BASELINE_SCHEMA_VERSION, _PAYLOAD_KEYS, _SESSION_FIELDS
+        ),
+    )
+    if payload is None:
+        # The crate contract: exactly one of (reason, payload) is None.
+        _invalid(cast("str", reason))
         return None
     try:
         series = BaselineSeries(
@@ -323,7 +313,7 @@ def load_baseline(path: Path) -> BaselineSeries | None:
             end=date.fromisoformat(payload["end"]),
             anchor_open=Decimal(payload["anchor_open"]),
             sessions=tuple(
-                (date.fromisoformat(entry[0]), Decimal(entry[1])) for entry in sessions_raw
+                (date.fromisoformat(entry[0]), Decimal(entry[1])) for entry in payload["sessions"]
             ),
             total_return_pct=float(payload["total_return_pct"]),
             source_note=payload["source_note"],

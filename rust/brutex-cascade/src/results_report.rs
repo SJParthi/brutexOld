@@ -86,7 +86,7 @@ use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
-use crate::{capture_repr, domain_err, mapping_get};
+use crate::{Frags, capture_repr, domain_err, mapping_get};
 
 /// The `_format_conditions` empty-mask note (verbatim, em dash).
 const NO_CONDITIONS_NOTE: &str = "(no conditions — enters every bar)";
@@ -156,48 +156,9 @@ pub fn format_inr_paisa(paisa: i64) -> String {
 }
 
 // ───────────────────────── fragment assembly (decision iii) ──────────────
-
-/// A text under assembly: PyString fragments joined by CPython `str.join`,
-/// so surrogate-carrying parts never cross into Rust `String`s.
-struct Frags<'py> {
-    py: Python<'py>,
-    parts: Bound<'py, PyList>,
-}
-
-impl<'py> Frags<'py> {
-    fn new(py: Python<'py>) -> Self {
-        Self {
-            py,
-            parts: PyList::empty(py),
-        }
-    }
-
-    /// Append a static ASCII/UTF-8 literal fragment.
-    fn lit(&self, s: &str) -> PyResult<()> {
-        self.parts.append(PyString::new(self.py, s))
-    }
-
-    /// Append a Rust-computed fragment.
-    fn owned(&self, s: &str) -> PyResult<()> {
-        self.parts.append(PyString::new(self.py, s))
-    }
-
-    /// Append `str(v)` — the f-string interpolation law
-    /// (`f"{x}"` ≡ `format(x, "")` ≡ `str(x)`).
-    fn obj(&self, v: &Bound<'py, PyAny>) -> PyResult<()> {
-        self.parts.append(v.str()?)
-    }
-
-    /// Append an already-stringified fragment object verbatim.
-    fn frag(&self, v: &Bound<'py, PyAny>) -> PyResult<()> {
-        self.parts.append(v)
-    }
-
-    /// `"".join(parts)` — one CPython join builds the final text.
-    fn join(self) -> PyResult<Bound<'py, PyAny>> {
-        PyString::new(self.py, "").call_method1("join", (self.parts,))
-    }
-}
+// The `Frags` PyString-fragment builder was HOISTED to `lib.rs` at slice 2d
+// (the baseline / twin_detect message laws assemble via the same idiom) —
+// one crate-shared copy, zero behavior change.
 
 /// `v is True` — the strict identity law (`bool` has exactly two
 /// singletons, so `isinstance(v, bool) and v` ≡ `v is True`; int `1`

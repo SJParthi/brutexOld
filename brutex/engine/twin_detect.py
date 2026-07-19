@@ -58,21 +58,32 @@ exactly like an intra-bucket pair, with zero special-casing.
   candidates), and pairs already connected are skipped without a set
   operation. Pure and deterministic: no I/O, no globals, no wall-clock.
 
-This module is deliberately wheel-free and import-light (stdlib + ``blake3``
-+ :class:`~brutex.models.BruteXError` only); the
-:class:`~brutex.engine.trade_capture.CapturedTrade` dependency is
-type-checking-only, so the detector runs on a box with no Rust wheels.
+**RUST-HOSTED LAWS (DEC-RUST-CASCADE-RESULTS-001, slice 2d):** the
+fingerprint serialization byte law, the :class:`TwinCandidate` validation
+matrix (bool==int puns and CPython ``re``'s raw ``TypeError`` escapes
+included), the ``_jaccard`` division law and the two-tier :func:`group_twins`
+union-find partition live in ``rust/brutex-cascade/src/twin_detect.rs``,
+verified against the FROZEN pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/twin_detect.json``). This module
+keeps the type face (constants, frozen dataclasses, the error class) plus the
+boundary marshalling: datetimes cross as exact epoch microseconds through the
+ONE facade law (:func:`brutex.engine.cascade_rust.epoch_us`) and the BLAKE3
+digest itself runs HERE over the crate-built serialization bytes (the crate
+is pinned pyo3-only — the recorded slice-2d blake3 split). The pre-conversion
+wheel-free posture is therefore CHANGED by design: the detector now
+hard-requires the brutex-cascade wheel through the ``BRUTEX_CASCADE_RUST``
+facade (absent wheel = a loud typed refusal naming the bootstrap remediation,
+never a silent degrade).
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import blake3
 
+from brutex.engine.cascade_rust import epoch_us, require_cascade_rust
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -93,7 +104,8 @@ __all__ = [
 
 #: The versioned fingerprint-serialization prefix (design B6). A future
 #: serialization change bumps this to ``bxtwin2|`` so v1 and v2 digests can
-#: never silently collide.
+#: never silently collide. Threaded into the Rust serializer as data —
+#: the single source stays HERE (the slice-2c ``SORT_ALIASES`` precedent).
 FINGERPRINT_VERSION_PREFIX: Final[str] = "bxtwin1|"
 
 #: The pinned tier-2 near-identity threshold (R34 / design A.6): two
@@ -101,30 +113,9 @@ FINGERPRINT_VERSION_PREFIX: Final[str] = "bxtwin1|"
 #: this value are behavioral twins. Boundary INCLUSIVE (``>=``), test-pinned.
 TWIN_JACCARD_THRESHOLD: Final[float] = 0.90
 
-#: A fingerprint is exactly one lowercase 64-hex BLAKE3 digest — anything else
-#: in a candidate is junk data, refused loudly (Golden Rule #1).
-_FINGERPRINT_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
-
-#: Valid ``jaccard_threshold`` half-open envelope ``(0.0, 1.0]``: at 0 or
-#: below every disjoint pair would merge (nonsense); above 1 nothing can.
-_THRESHOLD_MIN_EXCLUSIVE: Final[float] = 0.0
-_THRESHOLD_MAX_INCLUSIVE: Final[float] = 1.0
-
-#: Unix epoch (UTC) — the exact-integer microsecond timestamp anchor
-#: (mirrors the private ``trade_store`` helper; re-implemented here so this
-#: leaf never imports the polars-carrying sidecar writer — design A.5 note).
-_EPOCH_UTC: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
-
-_ONE_US: Final[timedelta] = timedelta(microseconds=1)
-
 
 class TwinDetectError(BruteXError):
     """Raised on invalid twin-detector inputs (junk candidates / thresholds)."""
-
-
-def _ts_to_us(ts: datetime) -> int:
-    """Convert a tz-aware datetime to exact UTC epoch microseconds (no floats)."""
-    return (ts - _EPOCH_UTC) // _ONE_US
 
 
 def trade_fingerprint(trades: Sequence[CapturedTrade]) -> str:
@@ -138,16 +129,36 @@ def trade_fingerprint(trades: Sequence[CapturedTrade]) -> str:
     VIX stamps and 1m-path fields are deliberately NOT part of behavior
     identity. An empty trade list hashes the bare prefix — deterministic,
     shared by every zero-trade combo. ``O(trades)`` time.
+
+    RUST-HOSTED serialization (DEC-RUST-CASCADE-RESULTS-001): the crate
+    builds the canonical bytes; the BLAKE3 digest runs here (the blake3
+    split). A NAIVE timestamp escapes the µs marshalling as the raw
+    ``TypeError`` the deleted law's datetime subtraction raised — per trade,
+    in field order (entry before exit).
     """
-    body = "\n".join(
-        f"{_ts_to_us(trade.entry_ts)}|{_ts_to_us(trade.exit_ts)}"
-        f"|{trade.direction.value}|{trade.pnl_paisa}"
+    rows: list[tuple[int, int, str, int]] = [
+        (
+            epoch_us(trade.entry_ts),
+            epoch_us(trade.exit_ts),
+            trade.direction.value,
+            trade.pnl_paisa,
+        )
         for trade in trades
+    ]
+    serialized = cast(
+        "str",
+        require_cascade_rust().twin_serialize(
+            FINGERPRINT_VERSION_PREFIX,
+            [row[0] for row in rows],
+            [row[1] for row in rows],
+            [row[2] for row in rows],
+            [row[3] for row in rows],
+        ),
     )
     # str(...) keeps this typed `str` even where the blake3 wheel (and its
     # stubs) is absent and the import degrades to Any — e.g. the isolated
     # pre-commit mypy env (the stage3_wire / #575 combo.py precedent).
-    return str(blake3.blake3((FINGERPRINT_VERSION_PREFIX + body).encode("utf-8")).hexdigest())
+    return str(blake3.blake3(serialized.encode("utf-8")).hexdigest())
 
 
 def entry_ts_us_set(trades: Sequence[CapturedTrade]) -> frozenset[int]:
@@ -157,8 +168,11 @@ def entry_ts_us_set(trades: Sequence[CapturedTrade]) -> frozenset[int]:
     fires, which is what near-twin detection compares (a shared-entry pair
     whose exits differ slightly is still one behavior family candidate).
     Duplicate entry instants collapse (set semantics). ``O(trades)``.
+    Pure boundary marshalling — the µs conversion IS the facade's ONE
+    timestamp law (:func:`~brutex.engine.cascade_rust.epoch_us`) and the
+    frozenset is the Python-facing container type; no crate hop.
     """
-    return frozenset(_ts_to_us(trade.entry_ts) for trade in trades)
+    return frozenset(epoch_us(trade.entry_ts) for trade in trades)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +183,10 @@ class TwinCandidate:
     condition mask (its ``bit_count()`` is the simplicity rank);
     ``fingerprint`` the tier-1 digest; ``entry_ts_us`` the tier-2 signature.
     Build via :meth:`from_trades` to keep fingerprint and signature provably
-    consistent with ONE trade list.
+    consistent with ONE trade list. Validation is RUST-HOSTED
+    (DEC-RUST-CASCADE-RESULTS-001) — the raised refusals are the REAL
+    :class:`TwinDetectError` with byte-identical messages, and a non-string
+    fingerprint escapes as CPython ``re``'s own raw ``TypeError``.
     """
 
     run_id: str
@@ -178,18 +195,9 @@ class TwinCandidate:
     entry_ts_us: frozenset[int]
 
     def __post_init__(self) -> None:
-        if not self.run_id:
-            raise TwinDetectError("TwinCandidate.run_id must be non-empty")
-        if self.mask_bits < 0:
-            raise TwinDetectError(
-                f"TwinCandidate.mask_bits must be >= 0, got {self.mask_bits} "
-                f"(run_id {self.run_id!r})"
-            )
-        if _FINGERPRINT_RE.fullmatch(self.fingerprint) is None:
-            raise TwinDetectError(
-                "TwinCandidate.fingerprint must be a 64-char lowercase hex digest, "
-                f"got {self.fingerprint!r} (run_id {self.run_id!r})"
-            )
+        require_cascade_rust().twin_validate_candidate(
+            self.run_id, self.mask_bits, self.fingerprint, TwinDetectError
+        )
 
     @classmethod
     def from_trades(
@@ -225,42 +233,14 @@ class TwinFamilies:
     members_by_family: Mapping[str, tuple[str, ...]]
 
 
-def _find(parent: dict[str, str], run_id: str) -> str:
-    """Union-find root lookup with two-pass path compression. Amortized ~O(1)."""
-    root = run_id
-    while parent[root] != root:
-        root = parent[root]
-    while parent[run_id] != root:
-        parent[run_id], run_id = root, parent[run_id]
-    return root
-
-
-def _union(parent: dict[str, str], run_id_a: str, run_id_b: str) -> None:
-    """Merge two components, keeping the lexicographically smaller root.
-
-    Union-by-min-run_id makes the internal tree shape (and hence every
-    intermediate ``parent`` state) a pure function of the edge SET — one more
-    determinism belt on top of the sorted enumeration order. Callers only
-    union distinct components (tier 1 unions each fresh run_id once; tier 2
-    skips already-connected pairs), so no equal-roots branch exists here.
-    """
-    root_a = _find(parent, run_id_a)
-    root_b = _find(parent, run_id_b)
-    if root_b < root_a:
-        root_a, root_b = root_b, root_a
-    parent[root_b] = root_a
-
-
 def _jaccard(a: frozenset[int], b: frozenset[int]) -> float:
-    """Jaccard similarity of two entry-timestamp sets.
+    """Jaccard similarity of two entry-timestamp sets (RUST-HOSTED).
 
     Two EMPTY sets are defined identical (1.0): two zero-trade behaviors are
     the same behavior — reachable only via hand-built candidates, since
     zero-trade lists already share the empty-list fingerprint at tier 1.
     """
-    if not a and not b:
-        return 1.0
-    return len(a & b) / len(a | b)
+    return cast("float", require_cascade_rust().twin_jaccard(a, b))
 
 
 def group_twins(
@@ -274,7 +254,9 @@ def group_twins(
     entry-timestamp sets have Jaccard similarity ``>= jaccard_threshold``
     (boundary inclusive), with union-find transitivity. Deterministic and
     input-order-independent: candidates are processed and pairs enumerated in
-    sorted ``run_id`` order (property-pinned).
+    sorted ``run_id`` order (property-pinned). RUST-HOSTED
+    (DEC-RUST-CASCADE-RESULTS-001): the crate returns INDICES into the pool,
+    so the mappings below carry the caller's ORIGINAL ``run_id`` objects.
 
     Parameters
     ----------
@@ -298,59 +280,17 @@ def group_twins(
         outside ``(0.0, 1.0]`` (NaN included) — junk inputs fail loudly,
         never a silently-wrong grouping.
     """
-    if not _THRESHOLD_MIN_EXCLUSIVE < jaccard_threshold <= _THRESHOLD_MAX_INCLUSIVE:
-        raise TwinDetectError(
-            f"group_twins: jaccard_threshold must be in (0.0, 1.0], got {jaccard_threshold!r}"
-        )
-    by_run_id: dict[str, TwinCandidate] = {}
-    for candidate in candidates:
-        if candidate.run_id in by_run_id:
-            raise TwinDetectError(
-                f"group_twins: duplicate run_id {candidate.run_id!r} in the candidate pool"
-            )
-        by_run_id[candidate.run_id] = candidate
-
-    ordered_ids = sorted(by_run_id)
-    parent: dict[str, str] = {run_id: run_id for run_id in ordered_ids}
-
-    # Tier 1 — identical fingerprints: union each run_id into the FIRST
-    # (sorted-order) holder of its fingerprint.
-    anchor_by_fingerprint: dict[str, str] = {}
-    for run_id in ordered_ids:
-        anchor = anchor_by_fingerprint.setdefault(by_run_id[run_id].fingerprint, run_id)
-        if anchor != run_id:
-            _union(parent, anchor, run_id)
-
-    # Tier 2 — near-identical entry sets: pairs in sorted (run_id_a, run_id_b)
-    # order; already-connected pairs skip the set arithmetic (a redundant
-    # union could never change the components anyway).
-    for i, run_id_a in enumerate(ordered_ids):
-        set_a = by_run_id[run_id_a].entry_ts_us
-        for run_id_b in ordered_ids[i + 1 :]:
-            if _find(parent, run_id_a) == _find(parent, run_id_b):
-                continue
-            if _jaccard(set_a, by_run_id[run_id_b].entry_ts_us) >= jaccard_threshold:
-                _union(parent, run_id_a, run_id_b)
-
-    members_by_root: dict[str, list[str]] = {}
-    for run_id in ordered_ids:
-        members_by_root.setdefault(_find(parent, run_id), []).append(run_id)
-
-    representative_by_root = {
-        root: min(
-            members,
-            key=lambda run_id: (by_run_id[run_id].mask_bits.bit_count(), run_id),
-        )
-        for root, members in members_by_root.items()
+    pool = list(candidates)
+    family_pairs, members = cast(
+        "tuple[list[tuple[int, int]], list[tuple[int, list[int]]]]",
+        require_cascade_rust().twin_group(pool, jaccard_threshold, TwinDetectError),
+    )
+    family_by_run_id: dict[str, str] = {
+        pool[member].run_id: pool[rep].run_id for member, rep in family_pairs
     }
-    family_by_run_id = {
-        run_id: representative_by_root[_find(parent, run_id)] for run_id in ordered_ids
-    }
-    members_by_family = {
-        representative_by_root[root]: tuple(members)
-        for root, members in sorted(
-            members_by_root.items(), key=lambda item: representative_by_root[item[0]]
-        )
+    members_by_family: dict[str, tuple[str, ...]] = {
+        pool[rep].run_id: tuple(pool[member].run_id for member in member_ids)
+        for rep, member_ids in members
     }
     return TwinFamilies(
         family_by_run_id=family_by_run_id,

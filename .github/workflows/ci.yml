@@ -2695,13 +2695,19 @@ jobs:
           else
             echo "(brutex.engine.combo_aggregates test file not present yet — gate inactive)"
           fi
+          # DEC-RUST-CASCADE-RESULTS-001 slice 2d: the baseline type-face
+          # shim's corpus-only delegates (_price_str) are exercised by the
+          # frozen replay + seam suites — the gate names the full set.
           if compgen -G "tests/unit/test_engine_baseline.py" > /dev/null; then
-            pytest --cov=brutex.engine.baseline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_baseline.py
+            pytest --cov=brutex.engine.baseline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_baseline.py tests/unit/test_engine_baseline_rust_seam.py tests/golden/test_baseline_rust_parity_golden.py
           else
             echo "(brutex.engine.baseline test file not present yet — gate inactive)"
           fi
+          # DEC-RUST-CASCADE-RESULTS-001 slice 2d: the twin_detect type-face
+          # shim's corpus-only delegates (_jaccard) are exercised by the
+          # frozen replay + seam suites — the gate names the full set.
           if compgen -G "tests/unit/test_engine_twin_detect.py" > /dev/null; then
-            pytest --cov=brutex.engine.twin_detect --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_twin_detect.py
+            pytest --cov=brutex.engine.twin_detect --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_twin_detect.py tests/unit/test_engine_twin_detect_rust_seam.py tests/golden/test_twin_detect_rust_parity_golden.py
           else
             echo "(brutex.engine.twin_detect test file not present yet — gate inactive)"
           fi
