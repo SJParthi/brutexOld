@@ -23,6 +23,7 @@ from brutex.engine.minute_path import PathStatus
 from brutex.engine.session_lens import SessionLens
 from brutex.engine.trade_capture import CapturedTrade, ComboCapture
 from brutex.engine.trade_store import sidecar_paths_for, sweep_run_dir, write_tuple_sidecars
+from brutex.meta import annotate as annotate_mod
 from brutex.meta.abstain import ABSTAIN_REASON_ORDER, REGIME_CODES, AbstainGateConfig
 from brutex.meta.annotate import (
     META_SCHEMA_VERSION,
@@ -281,16 +282,15 @@ class TestAnnotateRun:
         # Stem 1 poisoned (unreadable trades bytes) — stem 2 still annotates.
         sweeps = seed_fixture(tmp_path, stem="tuple-aaa")
         seed_fixture(tmp_path, stem="tuple-bbb")
-        import brutex.meta.annotate as annotate_module
 
-        real = annotate_module._combo_annotation
+        real = annotate_mod._combo_annotation
 
         def poisoned(paths: Any, combo_id: str, lens: Any, scorer: Any, config: Any) -> Any:
             if "tuple-aaa" in str(paths.trades):
                 raise RuntimeError("planted stem poison")
             return real(paths, combo_id, lens, scorer, config)
 
-        monkeypatch.setattr(annotate_module, "_combo_annotation", poisoned)
+        monkeypatch.setattr(annotate_mod, "_combo_annotation", poisoned)
         report = annotate_run(sweeps, RUN_ID)
         assert report.stems_total == 2
         assert report.stems_annotated == 1
@@ -304,12 +304,11 @@ class TestAnnotateRun:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
     ) -> None:
         sweeps = seed_fixture(tmp_path)
-        import brutex.meta.annotate as annotate_module
 
         def boom(*_args: Any, **_kwargs: Any) -> Any:
             raise exc_type()
 
-        monkeypatch.setattr(annotate_module, "_combo_annotation", boom)
+        monkeypatch.setattr(annotate_mod, "_combo_annotation", boom)
         with pytest.raises(exc_type):
             annotate_run(sweeps, RUN_ID)
 
@@ -317,7 +316,6 @@ class TestAnnotateRun:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sweeps = seed_fixture(tmp_path)
-        import brutex.meta.annotate as annotate_module
         from brutex.meta.features import trade_features_from_wire as real_extract
 
         def flaky(row: Any, *, lens: Any) -> Any:
@@ -325,7 +323,7 @@ class TestAnnotateRun:
                 return None  # one malformed row
             return real_extract(row, lens=lens)
 
-        monkeypatch.setattr(annotate_module, "trade_features_from_wire", flaky)
+        monkeypatch.setattr(annotate_mod, "trade_features_from_wire", flaky)
         report = annotate_run(sweeps, RUN_ID)
         assert report.ok is True
         assert report.outcomes[0].malformed_rows == 1
@@ -534,12 +532,10 @@ class TestLensArms:
     def test_global_stops_reraise_raw(
         self, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
     ) -> None:
-        import brutex.meta.annotate as annotate_module
-
         def boom(*_args: Any, **_kwargs: Any) -> Any:
             raise exc_type()
 
-        monkeypatch.setattr(annotate_module, "build_session_lens", boom)
+        monkeypatch.setattr(annotate_mod, "build_session_lens", boom)
         with pytest.raises(exc_type):
             _lens_for("X", {}, None)
 

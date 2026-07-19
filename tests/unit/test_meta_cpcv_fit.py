@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 
 import pytest
+from brutex.meta import cpcv_fit as cpcv_fit_mod
 from brutex.meta.cpcv_fit import (
     MIN_TRADES_FOR_FIT,
     OOF_N_GROUPS,
@@ -261,9 +262,7 @@ class TestOofColumn:
     def test_failed_fits_skip_and_count_every_split(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A numerically failed solve (fit_logistic → None) skips the split —
         # its test trades read an honest None, never a stale/fabricated p.
-        import brutex.meta.cpcv_fit as cpcv_fit_module
-
-        monkeypatch.setattr(cpcv_fit_module, "fit_logistic", lambda *a, **k: None)
+        monkeypatch.setattr(cpcv_fit_mod, "fit_logistic", lambda *a, **k: None)
         trades = non_overlapping(40)
         result = oof_p_win(trades)
         assert result.n_splits_fit == 0
