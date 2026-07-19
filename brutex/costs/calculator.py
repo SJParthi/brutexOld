@@ -206,7 +206,7 @@ def _charge_stack_py(
     """CALCULATOR_SPEC §4 Steps 1, 3–13 as ONE pure integer function.
 
     The dispatchable options charge-stack core (DEC-EXEC-RUST-CORE-001,
-    MIGRATION.md #1960): everything from the moment prices are integer paisa —
+    MIGRATION.md #1963): everything from the moment prices are integer paisa —
     the worst-case bar-extreme fills (DEC-FILL-WORST-CASE-ONLY-001), notionals,
     the full charge stack under the permanent ADVERSE (ceiling) levy rounding,
     gross/net — with every RATE resolved by the caller and passed as an

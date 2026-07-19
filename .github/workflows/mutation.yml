@@ -567,7 +567,7 @@ jobs:
           # MIGRATION.md #1685) — and the golden/differential suites still run
           # on every push via ci.yml's normal test tiers.
           # masks the 10 proven modules.
-          # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960):
+          # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963):
           # exec_rust.py (final local zero-survivor runs 2026-07-11: 84/84
           # KILLED, then 94/94 KILLED after the review-round-1 seam
           # hardening) + costs/calculator.py (zero-survivor re-run: 123
@@ -598,10 +598,10 @@ jobs:
             "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
-            "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:" \
             "brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:" \
+            "brutex/data/frame_write_gate.py:tests/unit/test_frame_write_gate.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
@@ -942,7 +942,7 @@ jobs:
           #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
           #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556);
           #   + the slice-7 src/exec/ cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-          #   #1960) = 836 total measured 2026-07-11 (per-file split documented
+          #   #1963) = 836 total measured 2026-07-11 (per-file split documented
           #   in mutants.toml; the exec/ffi.rs exclusion is documented there).
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs + mask_word.rs +
           #   stats/*.rs = 692 mutants measured 2026-07-17 (`cargo mutants

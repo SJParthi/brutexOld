@@ -192,8 +192,12 @@ def load_cached_token(creds: GrowwCredentials, *, now_utc: datetime) -> CachedTo
     if stat.st_mode & 0o077:
         _LOG.debug("groww.token.cache_miss", reason="insecure_mode", mode=oct(stat.st_mode & 0o777))
         return None
+    from brutex.data.guarded_read import (
+        read_regular_text,
+    )
+
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = read_regular_text(path)
     except OSError:
         _LOG.debug("groww.token.cache_miss", reason="unreadable")
         return None

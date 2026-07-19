@@ -1,5 +1,5 @@
 {
- "_comment": "FROZEN cross-language oracle for the exec integer cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960). Generated from the Python bodies by scripts/gen_exec_costs_golden.py; regeneration refused without BRUTEX_REGEN_EXEC_GOLDEN=1. Schema v2 = the DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: bar-extreme worst-case fills, ADVERSE-CEILING levy rounding, unconditional stale gate. Money values are STRINGS (JSON doubles lose >2^53). Charge-stack wires are the pinned 17-slot ChargeStack order; futures materialize wires append [mae, mfe].",
+ "_comment": "FROZEN cross-language oracle for the exec integer cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963). Generated from the Python bodies by scripts/gen_exec_costs_golden.py; regeneration refused without BRUTEX_REGEN_EXEC_GOLDEN=1. Schema v2 = the DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: bar-extreme worst-case fills, ADVERSE-CEILING levy rounding, unconditional stale gate. Money values are STRINGS (JSON doubles lose >2^53). Charge-stack wires are the pinned 17-slot ChargeStack order; futures materialize wires append [mae, mfe].",
  "schema_version": 2,
  "seed": 20260711,
  "money": [

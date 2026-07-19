@@ -202,9 +202,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
     # the 3-file discovery-set field) cites THAT decision's entry, not this
     # one.
-    # 1960 = DEC-EXEC-RUST-CORE-001 (slice 7 / P8, club R1 fold): its exec
+    # 1963 = DEC-EXEC-RUST-CORE-001 (slice 7 / P8, club R1 fold; renumbered
+    # #1960 -> #1963 at the 2026-07-19 refresh reconcile): its exec
     # mutmut-pair rationale comment cites ITS OWN entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1960}),
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1963}),
     # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
     # docstring cites THAT decision's entry for its Rust-seam routing note,
     # not this one.

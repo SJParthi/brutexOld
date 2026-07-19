@@ -83,6 +83,7 @@ from brutex.dashboard.pull_outcome import (
     TONE_WARN,
     LastPullOutcome,
 )
+from brutex.data.guarded_read import read_capped_bytes_deadline
 from brutex.nightly.report import NIGHTLY_DIRNAME, REPORT_FILENAME
 
 _LOG = structlog.get_logger(__name__)
@@ -272,7 +273,14 @@ def _read_report_json(report_file: Path) -> Mapping[str, Any] | str:
     The read is BOUNDED (hostile-review m4 — the #1614 shard idiom): at most
     :data:`MAX_REPORT_BYTES` + 1 bytes are ever read (``read(cap)`` + a
     ONE-byte over-cap probe), so an out-of-band multi-GB file at this path
-    costs neither the read nor the memory before failing closed as oversized.
+    costs neither the read nor the memory before failing closed as oversized —
+    and carries BOTH DEC-LAKE-READ-INODE-GUARD-001 defenses via
+    :func:`read_capped_bytes_deadline` (the fix-round MINOR-1: ``/health/hub``
+    is a POLLED route and ``report.json`` can live on the wedgeable results
+    volume, so a wedged REGULAR file now degrades to this lane's named
+    ``unknown`` — ``ReadStallError`` folds into the ``OSError`` arm below —
+    instead of stalling the poll while it holds a ``_run_lake`` token; a
+    planted FIFO/device folds the same way via ``NotRegularFileError``).
     Parse defects — non-UTF-8, malformed JSON, AND the deep-nesting
     ``RecursionError`` ``json.loads`` raises on a 60k-bracket bomb
     (hostile-review M1: previously escaped this clause and 500'd the route;
@@ -280,9 +288,9 @@ def _read_report_json(report_file: Path) -> Mapping[str, Any] | str:
     reason, never raise.
     """
     try:
-        with report_file.open("rb") as handle:
-            raw = handle.read(MAX_REPORT_BYTES)
-            over = handle.read(1)
+        raw, over = read_capped_bytes_deadline(
+            report_file, cap=MAX_REPORT_BYTES, what="nightly report.json read"
+        )
     except FileNotFoundError:
         return "latest nightly dir has no report.json (run crashed before the report write?)"
     except OSError as exc:

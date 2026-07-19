@@ -1,4 +1,4 @@
-"""Flag-gated Rust execution-cores seam (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960).
+"""Flag-gated Rust execution-cores seam (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963).
 
 Slice 7 / P8 of the Rust conversion program: the Python side of the
 ``rust/fno-math/src/exec/`` integer cores — flag resolution, the i64

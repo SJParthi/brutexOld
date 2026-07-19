@@ -14,7 +14,9 @@ from fractions import Fraction
 from brutex.calendars.nse import (
     IST,
     SESSION_DURATION_MINUTES,
+    expected_bars_for_session,
     expected_bars_per_day_for_tf,
+    get_session,
     is_forced_exit_bar,
     is_holiday,
     is_special_weekend_session,
@@ -95,3 +97,76 @@ def test_trading_day_biconditional(d: date) -> None:
         assert is_trading_day(d)
     if (is_weekend(d) or is_holiday(d)) and not is_special_weekend_session(d):
         assert not is_trading_day(d)
+
+
+# ── expected_bars_for_session — the session-aware twin (DEC-SESSION-DENSITY-CENSUS-001) ──
+
+# The canonical 21-TF minute grid (1m + 19 derived intraday + the 375-min 1day law).
+_TF_MINUTES_21 = (
+    1,
+    2,
+    3,
+    4,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    45,
+    60,
+    75,
+    90,
+    120,
+    150,
+    180,
+    240,
+    300,
+    360,
+    375,
+)
+
+
+@given(tf=st.integers(min_value=1, max_value=1_000))
+@settings(deadline=None)
+def test_session_aware_twin_equals_date_blind_law_on_regular_session(tf: int) -> None:
+    """DEC-SESSION-DENSITY-CENSUS-001: for a REGULAR 375-minute session the
+    session-aware twin equals the byte-untouched date-blind law at every tf —
+    the DEC-CALENDAR-BARS-CEIL-001 resampler oracle is preserved."""
+    session = get_session(date(2024, 1, 2))  # a regular Tuesday
+    assert session is not None
+    assert expected_bars_for_session(session, tf) == expected_bars_per_day_for_tf(tf)
+
+
+def test_session_aware_twin_regular_parity_all_21_tfs() -> None:
+    """The enumerated 21-TF grid (the lake vocabulary) — exact parity."""
+    session = get_session(date(2024, 1, 2))
+    assert session is not None
+    for tf in _TF_MINUTES_21:
+        assert expected_bars_for_session(session, tf) == expected_bars_per_day_for_tf(tf)
+
+
+@given(tf=st.integers(min_value=1, max_value=1_000))
+@settings(deadline=None)
+def test_session_aware_twin_is_exact_ceiling_on_extended_session(tf: int) -> None:
+    """The ceil law over the session's OWN duration — pinned on the 465-minute
+    2021-02-24 extended day via ``Fraction`` (no float division)."""
+    session = get_session(date(2021, 2, 24))
+    assert session is not None
+    assert session.duration_minutes == 465
+    if tf < 465:
+        assert expected_bars_for_session(session, tf) == math.ceil(Fraction(465, tf))
+    else:
+        assert expected_bars_for_session(session, tf) == 1
+
+
+@given(tf=st.integers(max_value=0))
+@settings(deadline=None)
+def test_session_aware_twin_rejects_non_positive(tf: int) -> None:
+    session = get_session(date(2024, 1, 2))
+    assert session is not None
+    try:
+        expected_bars_for_session(session, tf)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for tf <= 0")

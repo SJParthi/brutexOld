@@ -52,6 +52,7 @@ from typing import Any, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.cascade_wire import manifest_path, report_path
 from brutex.engine.run_layout import run_dir
 from brutex.observability.stage_stamp import write_stage_stamp
@@ -99,7 +100,7 @@ def _read_json_tolerant(path: Path, *, what: str) -> object | None:
     if not path.is_file():
         return None
     try:
-        doc: object = json.loads(path.read_text(encoding="utf-8"))
+        doc: object = json.loads(read_regular_text(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _LOG.warning("run_verdicts.input_unreadable", what=what, path=str(path), error=str(exc))
         return None

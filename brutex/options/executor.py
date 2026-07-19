@@ -458,7 +458,7 @@ def _materialize_tail_rust(
     """The ``BRUTEX_EXEC_RUST`` tail of :func:`materialize_trade`, or ``None``.
 
     Serves the post-I/O stale/tick/cost tail from the Rust kernel via
-    :mod:`brutex.exec_rust` (default-OFF — MIGRATION.md #1960). ``None``
+    :mod:`brutex.exec_rust` (default-OFF — MIGRATION.md #1963). ``None``
     means "not served": the verbatim Python tail below reproduces the exact
     behaviour (including any raise) from its own natural site — so ANY prep
     or kernel fallback is behaviour-neutral. The stale gate is UNCONDITIONAL

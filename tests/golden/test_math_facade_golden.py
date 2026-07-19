@@ -52,7 +52,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
-        # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
+        # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
         "exec_apply_futures_fill",
         "exec_apply_slippage",
         "exec_futures_charge_stack",
