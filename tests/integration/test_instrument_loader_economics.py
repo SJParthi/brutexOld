@@ -43,6 +43,7 @@ def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     ``test_universe_index_only_scope.py`` + the scope-gate batteries."""
     monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
+
 #: The canonical 21-column Groww instrument-master header.
 _HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
 

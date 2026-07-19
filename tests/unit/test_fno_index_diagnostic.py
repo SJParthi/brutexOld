@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.adapters.groww.instruments import build_index
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.instrument_loader import (
     FNO_INDEX_ALIASES_OVERRIDE_ENV,
     _classify_option_pullable,
@@ -54,7 +55,6 @@ from brutex.universe import (
     normalize_underlying_symbol,
 )
 from structlog.testing import capture_logs
-from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +69,7 @@ def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     arms live in ``test_universe_index_only_scope.py`` + the scope-gate
     batteries (migration Law 1)."""
     monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Instrument fixtures for the pure-function layer

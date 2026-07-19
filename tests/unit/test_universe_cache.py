@@ -44,6 +44,7 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache, _Snapshot
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +58,6 @@ def _full_scope_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     full-arm — the scope law itself is pinned by
     ``test_universe_index_only_scope.py`` + the scope-gate batteries."""
     monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
-from structlog.typing import EventDict
 
 
 def _nifty(security_id: int = 13) -> Instrument:

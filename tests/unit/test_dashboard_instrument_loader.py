@@ -565,9 +565,7 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     }
 
 
-def test_private_helpers_default_scope_arm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_private_helpers_default_scope_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The ``scope=None`` DEFAULT arms of ``_ntm_admission`` / ``_lean_universe``
     resolve the acting feed's scope themselves (DEC-UNIVERSE-INDEX-ONLY-001 —
     the defensive default; production threads the resolved scope explicitly).
