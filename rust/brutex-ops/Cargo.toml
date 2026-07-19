@@ -1,0 +1,95 @@
+# brutex-ops — the ops-lane Rust conversion crate (cross-verify first cut).
+#
+# DEC-CROSSVERIFY-RUST-CORE (first cut; coordinator-directed lane): re-hosts
+# the TWO pure-law surfaces of `brutex/crossverify/` — the pinned CSV byte
+# ASSEMBLY of `csv_render.render_day_csv` and the canonical-identity mapping +
+# S3-key law of `canonical.py` — behind the default-OFF
+# `BRUTEX_CROSSVERIFY_RUST` facade (`brutex/crossverify/rust_seam.py`), with
+# the verbatim Python bodies retained as the LIVE parity oracles.
+#
+# ## The ints+pre-formatted-strings-only FFI law (the #1914/#1797 house law)
+#
+# Python pre-formats EVERY price via the existing `round_money` Decimal
+# ROUND_HALF_UP path and every timestamp via `strftime`/`isoformat` BEFORE
+# the FFI; only ints, ASCII/UTF-8 strings and bools cross. Rust owns string
+# assembly + string-level refusal belts ONLY — no Decimal, no datetime, no
+# tz math is ever re-implemented here.
+#
+# ## Lane structure (APPEND-ONLY)
+#
+# One clearly-delimited module per ops lane: `crossverify` ships in this
+# first cut; future ops lanes (backup, nightly, …) register ADDITIONAL
+# `src/<lane>.rs` modules + their own delimited pyfunction blocks in
+# `src/python.rs` — never editing an existing lane's block (the
+# rust/brutex-lake multi-wave precedent).
+#
+# Standalone crate — deliberately NOT in any Cargo workspace (the sibling
+# rust/fno-math / rust/trading-core / rust/brutex-feed / rust/brutex-lake are
+# standalone too; ci.yml's cargo jobs target crate dirs explicitly, and this
+# crate is built ONLY by its own dedicated non-required workflow,
+# .github/workflows/ops-rust-parity.yml).
+
+[package]
+name = "brutex-ops"
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 needs rustc >= 1.85; ci.yml's RUST_VERSION 1.93.1 is the
+# floor toolchain this crate is gated on (the brutex-feed posture).
+rust-version = "1.93.1"
+description = "BruteX ops-lane Rust kernels — cross-verify CSV byte assembly + canonical identity/S3-key laws (default-OFF seam)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published to crates.io (the fno-math precedent).
+publish = false
+
+[lib]
+name = "brutex_ops"
+path = "src/lib.rs"
+# cdylib so `import brutex_ops` finds the maturin-built extension; rlib so
+# `cargo test` links the pure-Rust cores with zero Python symbols.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust cores need NO Python. The PyO3 module is opt-in: `cargo
+# test` (default features) builds + links zero Python symbols; maturin turns
+# `python` on for the wheel build (see pyproject.toml) — the brutex-feed /
+# trading-core shape.
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled. abi3-py312
+# pins the stable-ABI floor to BruteX's Python 3.12 baseline (the identical
+# pin every sibling kernel carries).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], optional = true }
+
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the
+# crate-source BLAKE3 digest (FRAMING v1, rust/source_digest_core.rs) into
+# the artifact as BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` /
+# `__source_digest__`. Build-script-only: it does NOT enter the shipped
+# rlib's dependency tree.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Property-based testing — assembly/refusal invariants over the pure cores.
+# Test-only; same major as the sibling crates so the toolchains agree.
+proptest = "1.6.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# The brutex-feed profile (coordinator-directed template). The Python seam's
+# pyo3 panic belt is therefore defense-in-depth for NON-abort builds (debug /
+# future profile changes); the release-wheel discipline is that these cores
+# are written to be structurally panic-free on ANY input (no indexing without
+# a bounds check, no unwrap/expect on data).
+panic = "abort"
+strip = "symbols"
+overflow-checks = true # Finance code — an overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true
