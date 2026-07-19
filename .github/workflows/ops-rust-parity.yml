@@ -278,7 +278,10 @@ jobs:
         env:
           BRUTEX_NIGHTLY_RUST: "1"
         run: |
+          # test_nightly_report.py is deliberately ABSENT: its un-guarded
+          # sweep_audit import transitively needs fno_math (not installed in
+          # this lane); report.py's flag-ON/real-wheel parity is already
+          # covered by test_nightly_report_rust_seam.py + the golden above.
           pytest -rs -q \
             tests/unit/test_nightly_chain.py \
-            tests/unit/test_nightly_report.py \
             tests/unit/test_nightly_schedule.py
