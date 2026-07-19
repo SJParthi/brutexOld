@@ -53,10 +53,13 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"], option
 # DOCUMENT order (Python dict insertion order — the per_day walk's FIRST
 # failing key decides which message fires).
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
-# Unicode general categories for the exact CPython `str.isprintable()` law
-# inside the Python-`repr()` twin (non-printable chars escape as
-# \xXX/\uXXXX/\UXXXXXXXX exactly like CPython's unicode_repr).
-unicode-properties = "0.1"
+# NOTE: the CPython `str.isprintable()` law is decided by the GENERATED
+# `src/py_printable_15_0.rs` range table (emitted from the golden-generator
+# CPython 3.12 / Unicode 15.0.0 itself — see
+# tests/goldens/generate_printable_table.py), NOT by a third-party Unicode
+# crate: the former `unicode-properties` dependency tracked Unicode 17.0 and
+# diverged from CPython on every codepoint assigned after 15.0 (refuter
+# finding F1, DEC-RUST-CALENDAR-LEAVES-001).
 
 [build-dependencies]
 # DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258): build.rs bakes the

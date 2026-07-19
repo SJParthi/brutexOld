@@ -10,9 +10,11 @@
 //! payload-taking functions receive the RAW bytes Python already
 //! `json.loads`-decoded successfully. Where serde_json refuses what Python
 //! accepted (`NaN`/`Infinity` literals, lone-surrogate `\udXXX` escapes,
-//! >128-deep nesting), `validate_settle_evidence` returns `None` and
-//! `parse_observed_sidecar` raises `ValueError` — both loud signals the
-//! caller maps to the retained Python oracle.
+//! deep nesting — measured: from PAYLOAD depth 127, total JSON depth 128 =
+//! serde_json's recursion limit; ≤126 validates normally),
+//! `validate_settle_evidence` returns `None` and `parse_observed_sidecar`
+//! raises `ValueError` — both loud signals the caller maps to the retained
+//! Python oracle.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -43,6 +45,13 @@ fn version() -> &'static str {
 /// `flagged` items are `(day_iso, clean_success_windows)`; the Python side
 /// re-attaches `month` / `detected_at` / `zero_bar_indices` (decision-inert
 /// passthroughs).
+///
+/// FFI int width (a documented, INTENDED loud refusal — not an abstain):
+/// the counters cross as `i64` while the Python law takes unbounded ints,
+/// so a value outside i64 (e.g. `existing_year_overlay_days = 2**63`)
+/// raises `OverflowError` at the pyo3 conversion boundary — LOUD, never a
+/// silently wrong verdict. Production day-counts are tiny; a caller that
+/// somehow holds a beyond-i64 count must use the Python law directly.
 #[pyfunction]
 #[pyo3(signature = (evidence, existing_year_overlay_days, max_flags_per_month, max_overlay_days_per_year))]
 #[allow(clippy::type_complexity)]

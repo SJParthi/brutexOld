@@ -20,7 +20,9 @@
 //! and the explicit-vs-default failure tiers. Only ints/strings/bools/bytes
 //! cross the FFI ([`python`], feature-gated), and where the Rust JSON engine
 //! could disagree with Python's `json.loads` (NaN/Infinity literals, lone
-//! surrogates, >128-deep nesting) the binding ABSTAINS so the caller
+//! surrogates, deep nesting — measured: the abstain fires from PAYLOAD
+//! depth 127, i.e. total JSON depth 128 = serde_json's recursion limit;
+//! depths ≤126 validate normally) the binding ABSTAINS so the caller
 //! degrades to the retained Python oracle — never a silent divergence.
 //!
 //! ## Honest envelope (Golden Rule #10)
@@ -30,6 +32,7 @@
 //! nothing until the Python-side flip lands behind its own default-OFF seam.
 
 pub mod drift;
+mod py_printable_15_0;
 pub mod pyiso;
 pub mod pyrepr;
 pub mod settle;

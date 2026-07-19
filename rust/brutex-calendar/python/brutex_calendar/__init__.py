@@ -13,12 +13,16 @@ Exposed surface (ints/strings/bools/bytes ONLY across the FFI):
   clean_success_windows, failed_windows_touching)`` evidence rows; returns
   ``(candidates, flagged[(day, clean_success_windows)], vetoed_failed,
   no_evidence, over_month_cap, over_year_cap)`` — the caller re-attaches the
-  decision-inert ``month`` / ``detected_at`` / ``zero_bar_indices``.
+  decision-inert ``month`` / ``detected_at`` / ``zero_bar_indices``. The
+  counters cross the FFI as i64: a beyond-i64 int (e.g.
+  ``existing_year_overlay_days = 2**63``) raises ``OverflowError`` at the
+  conversion boundary — the INTENDED loud refusal, never a wrong verdict.
 * ``validate_settle_evidence(payload_json, path_repr)`` — the full
   settle-evidence truth table over the RAW artifact bytes; ``None`` =
   ABSTAIN (the Rust JSON engine refused what Python's ``json.loads``
-  accepted — NaN/Infinity literals, lone-surrogate escapes, >128-deep
-  nesting; degrade to the Python validator), else ``(valid, message,
+  accepted — NaN/Infinity literals, lone-surrogate escapes, deep nesting
+  [measured: from payload depth 127 — total JSON depth 128, serde's
+  recursion limit]; degrade to the Python validator), else ``(valid, message,
   adopted_hhmm, generated_at_raw)`` with every refusal ``message``
   BYTE-IDENTICAL to the Python ``ValueError`` text (``path_repr`` is passed
   pre-``repr()``'d by the caller).
