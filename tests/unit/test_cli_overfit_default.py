@@ -3,11 +3,15 @@
 SANCTIONED default-behavior change: every DEFAULT ``sweep-all`` /
 ``sweep-daemon`` / ``nightly run`` sweep now runs the DEC-RANKING-OVERFIT-001
 Deflated-Sharpe gate; ``--no-overfit-gate`` is the paired explicit escape.
-GUARDRAILS pinned here: the flip is CLI-SURFACE-ONLY — the library default
-``SweepRunConfig.overfit`` stays ``None`` and the dashboard runner keeps its
-own explicit ``overfit_gate: False`` — and the frozen engine sweep goldens
+GUARDRAILS pinned here: the ENGINE library default ``SweepRunConfig.overfit``
+stays ``None`` and the frozen engine sweep goldens
 (``_GOLDEN_CONTENT_HASH``/``_GOLDEN_RUN_ID``) pass UNMODIFIED (they construct
-engine configs directly; verified by the golden suite itself).
+engine configs directly; verified by the golden suite itself). The dashboard
+one-click surface rides the landed DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001
+(MIGRATION.md #1957) INSTITUTIONAL default — ``overfit_gate=True`` — per the
+operator ruling of 2026-07-19 ("everything needs to be ON", relayed via the
+steward), which SUPERSEDES this member's original dashboard gate-OFF
+carve-out (fb06ca8a); see the renamed dashboard test below for the record.
 
 Dispatch tests mirror ``test_cli_sweep_launch_wiring.py`` (the pragma-covered
 ``cmd_sweep_all`` body is mocked; the parser + ``main()`` threading is what is
@@ -91,9 +95,20 @@ def test_library_default_stays_none_guardrail() -> None:
     assert field.default is None
 
 
-def test_dashboard_runner_keeps_its_explicit_false_guardrail() -> None:
-    """GUARDRAIL: the dashboard one-click sweep pins overfit_gate False on its
-    own surface (its opt-in story is the CLI) — the flip must not leak in."""
+def test_dashboard_runner_rides_the_ruled_institutional_default_on() -> None:
+    """RULED SUPERSESSION (2026-07-19, not a make-CI-pass weakening): the
+    dashboard one-click sweep pins ``overfit_gate=True`` — the landed
+    DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001 (MIGRATION.md #1957)
+    institutional default ("the one-click button launches the institutional
+    sweep, never the retired light research one"), confirmed by the operator
+    ruling of 2026-07-19 ("everything needs to be ON", relayed via the
+    steward). This SUPERSEDES the original club-member guardrail (fb06ca8a,
+    2026-07-09: "the dashboard one-click runner keeps its own explicit
+    overfit_gate=False … the flip cannot leak onto that surface"), which went
+    red when main's #1957 flip landed via club O (184a48a4) at the S2
+    merge-forward d85c266f. NOTE: PR #1674's body/tests still record the
+    gate-OFF carve-out on this surface — that lane's debt to reconcile at
+    ITS merge-forward, not the club's."""
     request = SweepRunRequest(
         exchange="NSE",
         segment="INDEX",
@@ -109,4 +124,4 @@ def test_dashboard_runner_keeps_its_explicit_false_guardrail() -> None:
         mode="A",
     )
     kwargs = build_sweep_kwargs(request, lake_root=Path("/tmp/lake"))
-    assert kwargs["overfit_gate"] is False
+    assert kwargs["overfit_gate"] is True

@@ -1108,3 +1108,53 @@ def test_oneclick_preflight_gridded_plan_carries_no_stage3_clamp_r54(tmp_path: P
     )
     result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
     assert [c for c in result["clamps"] if c["field"] == "stage3_enable"] == []
+
+
+# ---------------------------------------------------------------------------
+# The extinction-k estimator refusal arm (sweep_runner.py `_axes_counts`) —
+# the d85c266f merge-forward composition (DEC-SWEEP-APRIORI-DEFAULT-001 ×
+# DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001) shipped this arm untested
+# (coverage restore, 2026-07-19: line 977 + its branch were the ONE
+# uncovered spot in this module — no pragma, genuinely exercised here).
+
+
+def _extinction_k_request() -> SweepRunRequest:
+    """A one-click-form-shaped request whose k is the EXPLICIT extinction
+    token — the only shape that reaches `_axes_counts`' refusal arm (the
+    one-click flow's own default k is the estimable institutional CSV)."""
+    return SweepRunRequest(
+        symbols="NIFTY",
+        intervals=DEFAULT_INTERVALS,
+        directions=DEFAULT_DIRECTIONS,
+        k=DEFAULT_K,
+        sl="50",
+        tp="100",
+        exchange="NSE",
+        segment="INDEX",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+
+
+def test_axes_counts_refuses_extinction_k_loudly() -> None:
+    """The adaptive extinction ladder cannot be enumerated ahead of time —
+    `_axes_counts` must refuse LOUDLY (never a raw int() crash on the
+    'extinction' token)."""
+    from brutex.dashboard.sweep_runner import _axes_counts
+
+    with pytest.raises(ValueError, match="not estimable ahead of time"):
+        _axes_counts(_extinction_k_request())
+
+
+def test_oneclick_preflight_for_plan_extinction_k_refuses_via_value_error(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the public plan preflight: an explicit
+    'extinction' k on the one-click form surfaces as the ValueError the
+    route's ValueError→400 lane converts — a loud refusal, never a crash
+    deeper in the estimator arithmetic."""
+    plan = OneClickSweepPlan(sweep_run_id="ext-id", requests=(_extinction_k_request(),))
+    with pytest.raises(ValueError, match="use the classic sweep form"):
+        oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
