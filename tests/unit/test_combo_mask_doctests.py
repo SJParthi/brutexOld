@@ -11,11 +11,21 @@ instead of rotting silently.
 from __future__ import annotations
 
 import doctest
+import threading
 
 from brutex.engine import combo_mask
 
 
 def test_combo_mask_module_doctests_all_pass() -> None:
+    # Flake hardening (shard-reshuffle-surfaced, deterministic fix): an earlier
+    # test in the same process can leave the lake-heal L3 startup sweep's
+    # daemon thread (brutex/data/lake_heal.py, name "brutex-lake-heal-sweep",
+    # daemon=True) still running; if it finishes WHILE doctest.testmod has
+    # sys.stdout redirected, its output pollutes the doctest capture and
+    # false-fails an unrelated example. Join any leaked sweep thread first.
+    for t in threading.enumerate():
+        if t.name == "brutex-lake-heal-sweep":
+            t.join(timeout=30.0)
     results = doctest.testmod(combo_mask, verbose=False)
     assert results.failed == 0, f"{results.failed} doctest failure(s) in combo_mask"
     # Teeth: the module genuinely carries doctests (an empty run would be a
