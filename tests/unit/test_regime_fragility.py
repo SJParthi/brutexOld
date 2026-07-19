@@ -187,8 +187,12 @@ def test_era_break_needs_supported_strata() -> None:
 
 
 def test_era_break_never_fires_on_the_trend_axis() -> None:
-    # Opposite-sign trend strata: era_break is an ERA-axis-only law.
-    pnls = (10,) * MIN_STRATUM_TRADES + (-10,) * MIN_STRATUM_TRADES
+    # Opposite-SIGN trend expectancies: era_break is an ERA-axis-only law.
+    # The losing stratum still carries positive prints so neither stratum
+    # holds > 80% of the summed positive P&L (up 300 vs down 150 — 66.7%),
+    # keeping the concentration law quiet: the sign flip ALONE decides,
+    # and on the TREND axis it must decide NOTHING.
+    pnls = (10,) * MIN_STRATUM_TRADES + (-20, 10) * (MIN_STRATUM_TRADES // 2)
     tokens = ("up",) * MIN_STRATUM_TRADES + ("down",) * MIN_STRATUM_TRADES
     v = evaluate_fragility(pnls, trend_tokens=tokens, era_labels=None)
     assert v.status == "ok"
