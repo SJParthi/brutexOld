@@ -4,7 +4,10 @@ DEC-CROSSVERIFY-PRODUCER-001 §3.8 as amended by DEC-CROSSVERIFY-SPOT-ONLY-001
 (MIGRATION.md #1788 — the operator contract amendment): the export contract
 is SPOT-ONLY, so the producer pulls exactly ONE leg — the WHOLE spot
 universe (every admitted index + every admitted stock, F&O-eligible AND
-reference-only NTM names alike) under ONE
+reference-only NTM names alike; ADMISSION itself is the per-feed SCOPE
+law's — DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934 — so under the
+shipped ``index4`` default that set is EXACTLY the 4 admitted index pairs,
+zero stocks) under ONE
 :class:`SessionRateController` (§2 Rule 6 posture; the nightly precedent).
 The #1776 metadata + futures-candle legs are REMOVED (no registry read, no
 ``pull_expiries_contracts``, no ``pull_contract_candles`` — zero F&O vendor
@@ -67,9 +70,14 @@ def whole_universe_spot_targets(store: InstrumentStore) -> list[Instrument]:
 
     The ONE COMMON classifier (`classify_instrument`) over the store's
     IDX+EQ candidates with the reference-only SECURITY_ID set threaded, so
-    the admitted NTM constituents classify ``"stock"`` too (#1788 —
-    the export must cover the ENTIRE spot universe, ~25 indices + ~751
-    stocks, never merely the F&O-eligible subset).
+    an admitted NTM constituent classifies ``"stock"`` too (#1788 — the
+    export must cover the ENTIRE ADMITTED spot universe, never merely the
+    F&O-eligible subset). The admitted universe is the per-feed SCOPE law's
+    (DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934 — the classifier
+    self-narrows): under the shipped ``index4`` default this enumeration
+    yields EXACTLY the 4 admitted index pairs (zero stocks — the
+    ``TestIndex4DefaultEnumeration`` guard arm); ``BRUTEX_FEED_SCOPE=full``
+    restores the #1788-era ~25 indices + ~751 stocks.
     """
     from brutex.dashboard.universe_query import classify_instrument
 
