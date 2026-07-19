@@ -326,6 +326,38 @@ jobs:
                 f"(libzstd {brutex_lake.linked_zstd_version()})")
           EOF
 
+      - name: Doctor lake wheel stages PASS against the real wheel
+        # DEC-BRUTEX-LAKE-BOX-WHEEL-001: the PASS-arm proof of the two lake
+        # doctor stages. The doctor-daily cron can only ever exercise their
+        # ABSENT-wheel WARN arm (the lake wheel is deliberately never
+        # installed there), so this lane — the one place CI builds + installs
+        # the REAL wheel from this checkout — asserts BOTH stages read PASS
+        # by name-and-status, not just exit code. HONEST limit: this lane is
+        # NON-required; the required-CI teeth for the stages are the unit
+        # twin suite + test_doctor.py's exact-11 pin.
+        run: |
+          python - <<'EOF'
+          import sys
+          from brutex.doctor import (
+              check_brutex_lake_wheel_freshness,
+              check_brutex_lake_wheel_source_digest,
+          )
+          failed = False
+          for check in (
+              check_brutex_lake_wheel_freshness,
+              check_brutex_lake_wheel_source_digest,
+          ):
+              result = check()
+              print(f"{result.name}: {result.status} — {result.detail}")
+              if result.status != "PASS":
+                  print(
+                      f"::error title=lake doctor stage::{result.name} expected "
+                      f"PASS against the lane-built wheel, got {result.status}"
+                  )
+                  failed = True
+          sys.exit(1 if failed else 0)
+          EOF
+
       - name: Morsel-env hygiene (assert-unset — R14)
         # POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS/_BYTES move the defaults
         # profile's row-group split on BOTH engines identically (parity

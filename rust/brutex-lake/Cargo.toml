@@ -95,6 +95,22 @@ polars-config = { git = "https://github.com/pola-rs/polars", rev = "0df0c25d4db8
 # polars-parquet links (one libzstd in the binary, cargo unifies).
 zstd = "0.13"
 
+[build-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001 (MIGRATION.md #1258; wired for this crate
+# by DEC-BRUTEX-LAKE-BOX-WHEEL-001): build.rs bakes the crate-source BLAKE3
+# digest (FRAMING v1, rust/source_digest_core.rs) into the artifact as
+# BRUTEX_SOURCE_DIGEST → `SOURCE_DIGEST` / `__source_digest__`.
+# Build-script-only: it does NOT enter the shipped rlib's dependency tree.
+# blake3 1.8.x is ALREADY in the committed Cargo.lock (polars-io/polars-plan
+# pull it), so this adds a dependency EDGE only — zero new package versions,
+# the byte pin (zstd trio + polars rev) unmoved.
+blake3 = "1.5"
+
+[dev-dependencies]
+# DEC-RUST-SOURCE-DIGEST-TWIN-001: tests/source_digest_parity.rs re-includes
+# the shared framing core to pin the golden parity vector. Test-only.
+blake3 = "1.5"
+
 # Replicate the polars workspace [patch.crates-io] (polars Cargo.toml @
 # py-1.42.1), pinned to the exact revs the wheel's Cargo.lock resolved —
 # cargo patches do NOT propagate through git dependencies, so this crate
