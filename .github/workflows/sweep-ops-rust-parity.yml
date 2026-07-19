@@ -1,6 +1,6 @@
 # sweep-ops-rust-parity.yml — the brutex-sweep-ops crate build + parity lane.
 #
-# DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #1957; ADR-0020 slice T15).
+# DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #1960; ADR-0020 slice T15).
 # The sweep-ops Rust seams are DEFAULT-OFF behind BRUTEX_SWEEP_OPS_RUST and
 # the main CI test job deliberately never installs the crate (the facade
 # degrades loudly to the Python oracles when it is absent), so this

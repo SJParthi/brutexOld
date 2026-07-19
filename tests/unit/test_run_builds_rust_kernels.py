@@ -190,7 +190,7 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
-    # DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #1957): brutex_sweep_ops is the
+    # DEC-RUST-SWEEP-OPS-001 (MIGRATION.md #1960): brutex_sweep_ops is the
     # default-OFF sweep-ops decision-law crate. It is consumed ONLY through
     # the import-guarded facade brutex/engine/sweep_ops_rust.py
     # (`importlib.import_module("brutex_sweep_ops")` inside the guard — an
