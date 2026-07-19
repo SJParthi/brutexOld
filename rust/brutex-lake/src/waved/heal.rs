@@ -2118,6 +2118,62 @@ mod tests {
     }
 
     #[test]
+    fn content_token_unstattable_entry_skipped_deterministically() {
+        // R2 fix-round (DEC-RUST-LAKE-WAVED-001): the walk-stat fault
+        // subclass on a REAL on-disk fault — a listable-but-unsearchable
+        // directory (mode 0o444: `read_dir` still lists names, the child
+        // `symlink_metadata` is EACCES). Root (CAP_DAC_OVERRIDE) makes any
+        // chmod fault ineffective — the CI runner executes this as a
+        // regular user; under root the fault cannot be planted on-disk
+        // (a dangling symlink is NOT a substitute: lstat SUCCEEDS on it —
+        // the R11 lstat law), so return early with a loud note.
+        #[allow(unsafe_code)] // SAFETY: `libc::geteuid` takes no arguments
+        // and only reads process credentials — no memory/fd ownership.
+        fn effective_uid() -> libc::uid_t {
+            unsafe { libc::geteuid() }
+        }
+        if effective_uid() == 0 {
+            eprintln!("skipped: chmod-based lstat fault is ineffective as root");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-lake-heal-token-fault-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let blocked = dir.join("bars/NSE/INDEX/NIFTY/1minute/2024");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("06.parquet"), b"x").unwrap();
+        let healthy = dir.join("bars/NSE/INDEX/BANKNIFTY/1minute/2024");
+        std::fs::create_dir_all(&healthy).unwrap();
+        std::fs::write(healthy.join("06.parquet"), b"y").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let (token_a, skips_a) = content_token_impl(&dir.to_string_lossy());
+        let (token_b, skips_b) = content_token_impl(&dir.to_string_lossy());
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A well-formed 64-hex token, the LOUD stat-skip event, and
+        // determinism across identical faulted walks.
+        assert_eq!(token_a.len(), 64);
+        assert_eq!(skips_a.len(), 1, "exactly the unstattable entry skips");
+        assert_eq!(skips_a[0].event, "lake_heal.token_stat_skipped");
+        assert!(skips_a[0].path.ends_with("2024/06.parquet"));
+        assert!(!skips_a[0].error.is_empty());
+        assert_eq!(token_a, token_b);
+        assert_eq!(skips_b.len(), 1);
+        // Token EQUALITY with the same lake genuinely LACKING the
+        // unstattable entry (the round-11 determinism law).
+        std::fs::remove_file(blocked.join("06.parquet")).unwrap();
+        let (token_c, skips_c) = content_token_impl(&dir.to_string_lossy());
+        assert!(skips_c.is_empty());
+        assert_eq!(token_a, token_c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn realpath_nonstrict_keeps_nonexistent_tail() {
         let dir = std::env::temp_dir();
         let ghost = dir.join("brutex-heal-no-such-dir/child.parquet");

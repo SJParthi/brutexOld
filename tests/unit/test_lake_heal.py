@@ -4031,6 +4031,57 @@ class TestLakeContentToken:
         assert len(token) == 64
         assert token == lake_content_token(lake)  # deterministic over identical content
 
+    def test_unstattable_entry_skipped_loudly_on_disk(self, tmp_path: Path) -> None:
+        """R2 fix-round (DEC-RUST-LAKE-WAVED-001): the walk-stat fault
+        subclass re-pinned on a REAL on-disk fault the Rust walk actually
+        hits — the deleted round-11 ``Path.lstat``/``Path.iterdir``
+        monkeypatch pins cannot reach the crate walk. A
+        listable-but-unsearchable directory (mode 0o444: ``read_dir`` still
+        lists names, the child lstat is EACCES) yields the LOUD
+        ``lake_heal.token_stat_skipped`` replay under the repr law, a
+        well-formed 64-hex token, determinism across faulted walks, and
+        token EQUALITY with the same lake genuinely LACKING the unstattable
+        entry (the round-11 determinism law). Cargo twin:
+        ``content_token_unstattable_entry_skipped_deterministically``
+        (rust/brutex-lake/src/waved/heal.rs)."""
+        import os
+
+        if os.geteuid() == 0:
+            # CAP_DAC_OVERRIDE makes any chmod fault ineffective as root,
+            # and no OTHER on-disk shape can fail lstat here — a dangling
+            # symlink is NOT a substitute (lstat SUCCEEDS on it, the R11
+            # lstat law, pinned by test_dangling_symlink_never_crashes_token
+            # + the heal differential's lstat-law test). CI runners execute
+            # this as a regular user.
+            pytest.skip("chmod-based lstat fault is ineffective as root")
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        _write_spot(lake, [_bar(_ts(0))], symbol="BANKNIFTY")
+        june = _dest(lake)
+        blocked_dir = june.parent
+        blocked_dir.chmod(0o444)  # names still list; the child lstat = EACCES
+        try:
+            with capture_logs() as logs:
+                faulted_token = lake_content_token(lake)
+            determinism_token = lake_content_token(lake)  # same fault, same token
+        finally:
+            blocked_dir.chmod(0o755)
+        assert len(faulted_token) == 64
+        assert determinism_token == faulted_token
+        (skip,) = _events(logs, "lake_heal.token_stat_skipped")
+        assert skip["path"] == repr(str(june))
+        error = skip["error"]
+        assert isinstance(error, str)
+        # The repr law (rounds 8/9 convention): the error payload is
+        # repr()-wrapped; the EACCES text is the crate walk's own io::Error.
+        assert error.startswith("'") and error.endswith("'")
+        assert "os error 13" in error  # EACCES
+        assert skip["log_level"] == "warning"
+        # Token EQUALITY with the entry genuinely absent — the faulted walk
+        # hashed exactly the surviving entries.
+        june.unlink()
+        assert lake_content_token(lake) == faulted_token
+
     def test_walk_selection_mirrors_rglob(self, tmp_path: Path) -> None:
         """The streaming walk keeps the old ``rglob("*.parquet")`` SELECTION
         (empirically pinned on the pinned 3.12 pathlib): a symlinked DIR is
