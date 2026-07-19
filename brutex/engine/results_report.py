@@ -52,6 +52,7 @@ from typing import Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.results_store import (
     ResultRow,
     ResultsStore,
@@ -496,7 +497,7 @@ def render_cascade_sidecar(root: Path) -> str:
         return ""
     header = f"Stage-4 cascade sidecar — {path}"
     try:
-        payload: object = json.loads(path.read_text(encoding="utf-8"))
+        payload: object = json.loads(read_regular_text(path))
     except (OSError, ValueError) as exc:
         return f"{header}\n  UNREADABLE: {exc}"
     if not isinstance(payload, dict) or not isinstance(payload.get("groups"), list):

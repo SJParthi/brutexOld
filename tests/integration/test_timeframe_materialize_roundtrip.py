@@ -205,7 +205,8 @@ def _write_fno_1m_bars(lake_root: Path, n: int = 30) -> list[CandleBar]:
             close=Decimal(str(105.0 + i)),
             volume=10 + i,
             # A real OI that climbs, with a deliberate null OI at minute 7 to prove
-            # the present-but-null bucket value is handled (→ 0), never a crash.
+            # a mid-bucket null never poisons the bucket (its carry-last minute 9
+            # has a REAL OI) and never crashes the materialise.
             open_interest=None if i == 7 else 1000 + 5 * i,
         )
         for i in range(n)
@@ -265,14 +266,87 @@ def test_futures_oi_preserved_through_materialize(tmp_path: Path) -> None:
     rows = page["rows"]
     # Oracle: each 5m bucket's OI = the last source minute's OI in that bucket
     # (carry-last snapshot); the null-OI minute (index 7, in bucket 1) does NOT
-    # poison its bucket — that bucket's last minute (index 9) has a real OI.
+    # poison its bucket — that bucket's last minute (index 9) has a real OI, so
+    # every bucket here reads a REAL int (the all-null bucket shape is pinned by
+    # test_futures_null_last_oi_bucket_stored_null_not_zero below).
     for bucket, row in enumerate(rows):
         group = src[bucket * 5 : bucket * 5 + 5]
         last_oi = group[-1].open_interest
-        expected = 0 if last_oi is None else last_oi
-        assert int(row[oi_idx]) == expected, f"bucket {bucket} OI not carried"
+        assert last_oi is not None  # this fixture's buckets all end on a real OI
+        assert int(row[oi_idx]) == last_oi, f"bucket {bucket} OI not carried"
     # Sanity: at least one bucket carries a real non-zero OI (proves not all-zero).
     assert any(int(r[oi_idx]) > 0 for r in rows)
+
+
+_FNO_NULL_OI_SYMBOL = "NSE-BANKNIFTY-30Jan25-FUT"
+
+
+def test_futures_null_last_oi_bucket_stored_null_not_zero(tmp_path: Path) -> None:
+    """A bucket whose carry-last OI is NULL stores ``None`` — never a fabricated 0.
+
+    DEC-PREOPEN-DAY-FRESHNESS-001 (the B-3 fold): the derived-intraday writer
+    previously mapped a present-but-null bucket OI to a stored ``0``, diverging
+    from the F&O DAILY derive (``resample_1m_to_fno_daily`` stores ``None``)
+    and from the canonical resampler's own "null OI is preserved, NEVER
+    fabricated as 0" law. Bucket 1's five source minutes (5–9) all carry a
+    null OI, so its carry-last bucket OI is null — the derived 5m partition
+    must store NULL for it (and real ints for every other bucket).
+    Fails-before: the pre-fix writer stored ``0`` for bucket 1.
+    """
+    bars = [
+        CandleBar(
+            timestamp=_SESSION_OPEN_UTC + timedelta(minutes=i),
+            open=Decimal(str(100.0 + i)),
+            high=Decimal(str(110.0 + i)),
+            low=Decimal(str(90.0 + i)),
+            close=Decimal(str(105.0 + i)),
+            volume=10 + i,
+            # The WHOLE second bucket (minutes 5-9) is null-OI, so its
+            # carry-last bucket OI is genuinely null.
+            open_interest=None if 5 <= i <= 9 else 2000 + 3 * i,
+        )
+        for i in range(15)
+    ]
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+    sink.append(
+        exchange=_FNO_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_FNO_NULL_OI_SYMBOL,
+        interval="1minute",
+        bars=bars,
+    )
+    result = materialize_lake_timeframes(
+        lake_root=tmp_path,
+        exchange=_FNO_EXCHANGE,
+        segment=_FNO_SEGMENT,
+        symbol=_FNO_NULL_OI_SYMBOL,
+        kind=PrebuildKind.FUTURES,
+        tfs=("5m",),
+    )
+    assert result.skipped == ()
+    assert result.written["5m"] == 3  # 15 / 5 buckets
+
+    conn = duckdb.connect()
+    try:
+        page = query_candles(
+            conn,
+            tmp_path,
+            exchange=_FNO_EXCHANGE,
+            segment=_FNO_SEGMENT,
+            symbol=_FNO_NULL_OI_SYMBOL,
+            interval="5minute",
+            columns=("close", "open_interest"),
+            limit=500,
+        )
+    finally:
+        conn.close()
+
+    assert page["total"] == 3
+    oi_idx = page["columns"].index("open_interest")
+    stored = [None if row[oi_idx] is None else int(row[oi_idx]) for row in page["rows"]]
+    # Bucket 0 carry-last = minute 4 (2012); bucket 1 = minute 9 (NULL — the
+    # aligned law, never 0); bucket 2 = minute 14 (2042).
+    assert stored == [2000 + 3 * 4, None, 2000 + 3 * 14]
 
 
 # ── OPTIONS materialisation + daily-in-prebuild (DEC-PIPELINE-AUTOPREBUILD-001) ──
@@ -770,14 +844,22 @@ def test_default_cutoff_is_session_close_aware(
 
 
 def _legacy_bars_from_frame(frame: pl.DataFrame) -> list[CandleBar]:
-    """Verbatim pre-change `make_lake_write_tf._write` per-row conversion."""
+    """The pre-vectorize `make_lake_write_tf._write` per-row conversion oracle.
+
+    Verbatim EXCEPT the null-OI arm (DEC-PREOPEN-DAY-FRESHNESS-001, the B-3
+    fold — a CONSCIOUS oracle update): a present-but-null bucket OI on an
+    OI-carrying frame now stores ``None`` (aligned with the F&O daily derive
+    + the canonical resampler's "null OI preserved, NEVER fabricated as 0"
+    law); the pre-fold oracle's ``0`` WAS the ledgered divergence. The
+    absent-column spot arm keeps the legacy stored-``0`` convention.
+    """
     has_oi = "open_interest" in frame.columns
 
-    def _oi(row: dict[str, object]) -> int:
+    def _oi(row: dict[str, object]) -> int | None:
         if not has_oi:
             return 0
         value = row["open_interest"]
-        return 0 if value is None else int(value)  # type: ignore[call-overload]
+        return None if value is None else int(value)  # type: ignore[call-overload]
 
     return [
         CandleBar(
@@ -1010,6 +1092,59 @@ def test_intraday_only_materialize_also_emits_one_summary(tmp_path: Path) -> Non
     assert summaries[0]["include_daily"] is False
     assert summaries[0]["timeframes_written"] == 1
     assert [e["log_level"] for e in logs if e["event"] == "lake.partition.write"] == ["debug"]
+
+
+def test_write_summary_frame_fields_engaged_vs_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-PREBUILD-FRAME-WRITE-001: the summary's ADDITIVE ``frame_*`` fields.
+
+    Flag OFF (the PR-1 default) ⇒ the summary payload carries NO ``frame_*``
+    key — byte-identical to the pre-change event (the negative pin). Flag ON
+    ⇒ the five additive counters appear, existing fields untouched.
+    """
+    from brutex.data import frame_write_gate as gate
+    from structlog.testing import capture_logs
+
+    def _run() -> None:
+        # incremental=False so the warm second run RE-DERIVES (the stamp skip
+        # would otherwise short-circuit before any write — nothing to count).
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            incremental=False,
+        )
+
+    _write_1m_bars(tmp_path, n=120)
+    monkeypatch.delenv(gate.PREBUILD_FRAME_WRITE_ENV, raising=False)
+    with capture_logs() as logs_off:
+        _run()
+    (summary_off,) = [e for e in logs_off if e["event"] == "lake.derived.write_summary"]
+    assert not any(key.startswith("frame_") for key in summary_off)
+
+    monkeypatch.setenv(gate.PREBUILD_FRAME_WRITE_ENV, "1")
+    gate.reset_gate_for_tests(fresh_remaining=0, merge_remaining=0)
+    gate.reset_observability_memo_for_tests()
+    try:
+        with capture_logs() as logs_on:
+            _run()
+    finally:
+        gate.reset_gate_for_tests()
+        gate.reset_observability_memo_for_tests()
+    (summary_on,) = [e for e in logs_on if e["event"] == "lake.derived.write_summary"]
+    # The warm re-derive no-ops on the fast merge probe — one fast admission.
+    assert summary_on["frame_fast"] == 1
+    assert summary_on["frame_degraded"] == 0
+    assert summary_on["frame_degrade_reasons"] == {}
+    assert summary_on["frame_shadow_checked"] == 0
+    assert summary_on["frame_shadow_mismatches"] == 0
+    # Existing fields untouched (C14).
+    assert summary_on["timeframes_written"] == summary_off["timeframes_written"]
+    assert summary_on["symbol"] == summary_off["symbol"]
 
 
 # ────────────────────────────────────────────────────────────────────────

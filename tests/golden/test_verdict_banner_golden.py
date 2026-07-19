@@ -82,6 +82,19 @@ _GOLDEN = {
         'tripped (suspected vendor soft-throttle or mis-addressing).", '
         '"kind": "mass_empty_halt", "pending_windows": 9, "show_retry_button": true}'
     ),
+    # The operator's cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001
+    # continuation-v3 regression golden): `cancelled` was previously NOT a
+    # verdict kind at all — a cancelled pull fell through to the GREEN `clean`
+    # "\u2705 Pull complete. / No action needed." banner. Frozen amber + retry.
+    "cancelled": (
+        '{"action": "Re-run the pull to resume the remainder \\u2014 the pull stopped at a '
+        "window boundary on the operator's Stop, so every settled window is durably in the "
+        'ledger and only the un-pulled windows are re-fetched on the next pull.", '
+        '"colour": "amber", "css_class": "verdict--amber", '
+        '"headline": "\\u23f9\\ufe0f Pull CANCELLED at operator request \\u2014 an honest '
+        'partial, stopped cleanly.", '
+        '"kind": "cancelled", "pending_windows": 6, "show_retry_button": true}'
+    ),
     # The PRE-pull credentials refusal (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001),
     # built by its one real producer `credentials_refusal_verdict`.
     "credentials_missing": (
@@ -169,6 +182,20 @@ def test_credentials_missing_golden() -> None:
     ).to_dict()
     assert (
         json.dumps(banner_for(verdict).to_dict(), sort_keys=True) == _GOLDEN["credentials_missing"]
+    )
+
+
+def test_cancelled_golden() -> None:
+    assert (
+        _banner_json(
+            auth_aborted=False,
+            still_failed_windows=6,
+            failed_pairs=0,
+            no_data=0,
+            completed=42,
+            cancelled=True,
+        )
+        == _GOLDEN["cancelled"]
     )
 
 

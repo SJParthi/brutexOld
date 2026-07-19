@@ -13,7 +13,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from brutex.backup.state import empty_backup_state, save_state
@@ -292,7 +292,14 @@ class TestNightlyLane:
         """m4 teeth: an out-of-band report FAR past the cap costs at most
         cap + 1 read bytes — the ``read(cap)`` + ONE-byte over-probe idiom
         (#1614), never a whole-file ``read_bytes()``.  Counted through a
-        read-counting handle so a revert to the unbounded read fails here."""
+        read-counting handle wrapped around the REAL guarded opener
+        (DEC-LAKE-READ-INODE-GUARD-001 fix round MINOR-1 moved the whole
+        capped read onto ``guarded_read.read_capped_bytes_deadline`` — the
+        counting seam is now the guarded_read module-level
+        ``open_regular_binary`` its worker resolves at call time), so a
+        revert to an unbounded read fails here."""
+        from brutex.data import guarded_read
+
         monkeypatch.setattr(health_hub, "MAX_REPORT_BYTES", 256)
         big = tmp_path / "report.json"
         big.write_bytes(b"x" * (256 + 4096))
@@ -314,11 +321,13 @@ class TestNightlyLane:
                 bytes_read += len(data)
                 return data
 
-        class _CountingPath:
-            def open(self, mode: str) -> _CountingHandle:
-                return _CountingHandle(big.open(mode))
+        real_open = guarded_read.open_regular_binary
 
-        verdict = _read_report_json(cast(Path, _CountingPath()))
+        def _counting_open(path: Path) -> _CountingHandle:
+            return _CountingHandle(real_open(path))
+
+        monkeypatch.setattr(guarded_read, "open_regular_binary", _counting_open)
+        verdict = _read_report_json(big)
         assert isinstance(verdict, str) and "oversized" in verdict
         assert bytes_read <= 256 + 1
 

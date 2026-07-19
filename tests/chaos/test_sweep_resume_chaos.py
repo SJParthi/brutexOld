@@ -432,3 +432,68 @@ def test_concurrent_checkpoint_reads_never_see_torn_json(tmp_path: Path) -> None
     final = SweepCheckpointStore(path=path, sweep_id="chaos-sweep", total_combos=total).load()
     assert final is not None
     assert final.last_completed_index == total - 1
+
+
+# ────── invariant: a CORRUPT resume checkpoint → quarantine + start fresh ──────
+
+
+class TestCorruptCheckpointResume:
+    """G12: a corrupt on-disk resume checkpoint never aborts a relaunched sweep.
+
+    The chaos boundary: a life completes and advances ``ckpt.json``; the file is
+    then mangled to invalid JSON (a torn/tampered/half-written resume point). The
+    relaunched sweep must NOT raise :class:`SweepCheckpointError` — it quarantines
+    the corrupt file, starts fresh, and reproduces the byte-identical golden
+    results (the durable Parquet tree + LMDB cache are the safety net).
+    """
+
+    def test_corrupt_checkpoint_relaunch_reproduces_golden(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        pytest.importorskip("polars")
+        grid = _chaos_grid()
+        bars = _trending_bars()
+
+        golden = _run_clean(tmp_path / "golden", grid, bars)
+        assert golden, "golden run produced no result files — grid too small to test"
+
+        run_dir = tmp_path / "run"
+        results = run_dir / "results"
+        # Life 1 — a clean uninterrupted run that advances the checkpoint on disk.
+        with (
+            _life(run_dir, grid, resume=False) as guards,
+            AuditWriter.open(run_dir / "ingest.jsonl") as ingest,
+        ):
+            run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results, grid),
+                dedup=_fresh_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert (run_dir / "ckpt.json").exists()
+
+        # Corrupt the resume checkpoint between lives (torn / tampered JSON).
+        (run_dir / "ckpt.json").write_text("{torn-checkpoint-bytes", encoding="utf-8")
+
+        # Life 2 — the relaunch must NOT raise; it quarantines + starts fresh and
+        # the result tree stays byte-identical to golden (idempotent redo/skip).
+        with (
+            _life(run_dir, grid, resume=True) as guards,
+            AuditWriter.open(run_dir / "ingest.jsonl", resume=True) as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results, grid),
+                dedup=_fresh_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+            assert summary.skipped_resume == 0  # the corrupt cursor did NOT resume
+
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+        assert list(run_dir.glob("ckpt.json.corrupt-*"))  # forensic quarantine kept
+        assert _snapshot_results(results) == golden

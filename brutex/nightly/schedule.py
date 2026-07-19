@@ -49,6 +49,7 @@ from typing import Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.backup import MANIFEST_NAME, PARTIAL_SUFFIX
 
 logger = structlog.get_logger(__name__)
@@ -479,7 +480,7 @@ def status(
     next_fire: str | None = None
     plist_present = plist_path.exists()
     if plist_present:
-        match = _HOUR_MIN_RE.search(plist_path.read_text(encoding="utf-8"))
+        match = _HOUR_MIN_RE.search(read_regular_text(plist_path))
         if match is not None:
             next_fire = f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
     rc, _out, _err = runner(["launchctl", "list", label])
@@ -493,7 +494,7 @@ def status(
         newest = reports[-1]
         age = int(max(0.0, now() - newest.stat().st_mtime))
         try:
-            data = json.loads(newest.read_text(encoding="utf-8"))
+            data = json.loads(read_regular_text(newest))
             last_report_line = (
                 f"{data.get('nightly_id')} exit {data.get('exit_code')} "
                 f"blocker {data.get('blocker') or 'none'} · {age}s ago"

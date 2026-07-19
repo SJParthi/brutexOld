@@ -93,6 +93,7 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, runtime_checka
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.lake_read import bars_by_ts_first
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
@@ -1030,7 +1031,7 @@ def _sentinel_resume(store_path: Path, digest: str) -> TupleCompletionSentinel |
         _unpaired("tuple digest mismatch")
         return None
     try:
-        content = store_path.read_bytes()
+        content = read_regular_bytes(store_path)
     except OSError as exc:
         _unpaired(f"store unreadable: {exc}")
         return None
@@ -1565,6 +1566,14 @@ def run_persisted_sweep(
     # raw MemoryError crash. Mode `on`'s structural refusals (legacy path /
     # top_k=None) raise ValueError from plan_rank_memory — an explicit operator
     # forcing with an impossible shape is a config error, not a tuple condition.
+    # Worker-aware budget (DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001): the division
+    # by the live eval-worker count happens INSIDE resolve_mem_budget_bytes —
+    # the pool initializer exports BRUTEX_SWEEP_BUDGET_WORKERS, so each worker's
+    # RAM-derived default is total × 1/6 ÷ pool size (N parallel eval workers
+    # share ONE budget fraction). The BRUTEX_SWEEP_MEM_BUDGET_BYTES override is
+    # PER-WORKER, never divided (the #1352 contract); T2's call-site division
+    # (DEC-SWEEP-SCALE-GUARDS-001) was DEDUPED to this landed mechanism — a
+    # second division here would double-divide the budget.
     plan = plan_rank_memory(
         n_masks=n_masks,
         top_k=cfg.top_k,

@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.observability.monitor import MonitorLoop, ReplayCheck
 from brutex.observability.sla import (
     SLADetector,
@@ -417,7 +418,7 @@ def _make_replay_check(
             return
         live_subjects = frozenset(
             line
-            for raw in live_subjects_file.read_text(encoding="utf-8").splitlines()
+            for raw in read_regular_text(live_subjects_file).splitlines()
             if (line := raw.strip())
         )
         assert_dedup_consistent(

@@ -78,6 +78,14 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
+      # G10 CONVERT — the window-ledger parquet-render seam
+      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      - "brutex/data/lake_rust_ledger_render.py"
+      - "brutex/data/window_ledger_store.py"
+      - "tests/unit/test_lake_rust_ledger_render.py"
+      - "tests/unit/test_window_ledger_store.py"
+      - "tests/integration/test_window_ledger_rust_reader_parity.py"
+      - "tests/integration/test_window_ledger_rust_state_convergence.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -95,6 +103,18 @@ on:
       - "brutex/data/lake_stats_manifest.py"
       - "tests/unit/test_lake_rust_stats.py"
       - "tests/golden/test_lake_stats_shard_rust_parity.py"
+      # SLICE T24 PR-1 — the detector pure-law facade + its three targets
+      # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948).
+      - "brutex/data/detectors_rust.py"
+      - "brutex/data/raw_integrity.py"
+      - "brutex/data/interior_gap_detect.py"
+      - "brutex/data/partial_window_detect.py"
+      - "tests/unit/test_detectors_rust.py"
+      - "tests/unit/test_raw_integrity_rust_seam.py"
+      - "tests/unit/test_interior_gap_detect_rust_seam.py"
+      - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/integration/test_detectors_rust_stored_outcome.py"
+      - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
       # lake_invariants.py + their suites. The flag-ON heal twin step is
@@ -116,6 +136,14 @@ on:
       - "brutex/data/window_ledger_rust.py"
       - "brutex/data/window_status.py"
       - "brutex/data/window_ledger.py"
+      # G10 CONVERT — the window-ledger parquet-render seam
+      # (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001, ledger #1918).
+      - "brutex/data/lake_rust_ledger_render.py"
+      - "brutex/data/window_ledger_store.py"
+      - "tests/unit/test_lake_rust_ledger_render.py"
+      - "tests/unit/test_window_ledger_store.py"
+      - "tests/integration/test_window_ledger_rust_reader_parity.py"
+      - "tests/integration/test_window_ledger_rust_state_convergence.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -132,6 +160,18 @@ on:
       - "brutex/data/lake_stats_manifest.py"
       - "tests/unit/test_lake_rust_stats.py"
       - "tests/golden/test_lake_stats_shard_rust_parity.py"
+      # SLICE T24 PR-1 — the detector pure-law facade + its three targets
+      # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, MIGRATION.md #1948).
+      - "brutex/data/detectors_rust.py"
+      - "brutex/data/raw_integrity.py"
+      - "brutex/data/interior_gap_detect.py"
+      - "brutex/data/partial_window_detect.py"
+      - "tests/unit/test_detectors_rust.py"
+      - "tests/unit/test_raw_integrity_rust_seam.py"
+      - "tests/unit/test_interior_gap_detect_rust_seam.py"
+      - "tests/unit/test_partial_window_detect_rust_seam.py"
+      - "tests/integration/test_detectors_rust_stored_outcome.py"
+      - "tests/fakes/detectors_crate.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
       # same rationale as the push block above (render-seam-scoped twin).
@@ -224,6 +264,31 @@ jobs:
             sleep 10
           done
 
+      - name: Install trading_core Rust extension (leg-3 wiring suite dep)
+        # SLICE T24 (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the flag-ON
+        # detector leg runs tests/integration/test_raw_integrity_wiring.py,
+        # whose test_cli_build_site_binds_capture imports brutex.cli →
+        # brutex/vocabulary → `import trading_core` — a HARD wheel import
+        # (DEC-SHARED-CORE-001 #441). Without it the leg fails with
+        # ModuleNotFoundError, so the lane installs the wheel exactly like
+        # ci.yml's test job does (same maturin/abi3 build; the lane's newer
+        # toolchain — LAKE_RUST_VERSION ≥ ci.yml's RUST_VERSION floor — is
+        # fine, the wheel is compiler-version independent). fno_math is
+        # deliberately NOT installed: no lane suite needs it (the one
+        # fno_math-gated mirror-pin test module-skips here by design and
+        # runs in main ci.yml). Same crates.io flake-retry idiom as above.
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Align the installed polars wheel to the crate pin
         # Review-round fold (supersedes the warn-only-drift-with-no-alignment
         # shape): `pip install -e ".[data,dev]"` resolves the HIGHEST polars
@@ -282,10 +347,56 @@ jobs:
 
       - name: Byte-parity corpora (BOTH profiles) + facade/seam suites
         # With the wheel force-aligned above, the corpus module-level
-        # version-guard skips cannot fire here — -rs still surfaces any skip
-        # reason in the log as belt-and-suspenders.
+        # version-guard skips cannot fire here — -rsfE surfaces skip reasons
+        # AND the FAILED/ERROR summary lines (the -s-only shape emitted NO
+        # `FAILED ` lines, so the annotation grep below had nothing to match)
+        # as belt-and-suspenders.
+        #
+        # FAILURE VISIBILITY (observability only — pass/fail semantics
+        # byte-identical): this lane's raw logs are auth-gated on github.com,
+        # so each pytest invocation tees its output and, on failure, the
+        # FAILED/ERROR summary lines + the output tail are appended to the
+        # PUBLIC job summary ($GITHUB_STEP_SUMMARY) before the step exits 1.
+        # A red run of the non-required flip-gating lane must be diagnosable
+        # from the run page alone.
         run: |
-          pytest -rs -q \
+          set -o pipefail
+          emit_failure_summary() {
+            # The emitter runs ONLY on the already-failed path (right before
+            # `exit 1`), so errexit is disabled for its body: under the
+            # runner's `bash -e {0}` + pipefail, a no-match grep pipeline
+            # below would otherwise abort the emitter BEFORE the tail
+            # annotation / job summary land (locally proven) — the step
+            # stays red either way, but the diagnostics must always emit.
+            set +e
+            leg="$1"; log="$2"
+            # ::error annotations FIRST — annotations are the ONE failure
+            # surface that renders on the run page without auth (the raw
+            # logs AND the job summary are auth-gated for anonymous views),
+            # so the failing test ids must land here. Cap 8 + the last
+            # output line (the 10-annotations-shown-per-step UI bound).
+            grep -E "^(FAILED|ERROR) " "$log" | head -8 | while IFS= read -r line; do
+              esc=$(printf '%s' "$line" | sed -e 's/%/%25/g')
+              echo "::error title=lake-rust-parity ${leg}::${esc}"
+            done || true
+            tail_line=$(tail -n 1 "$log" | sed -e 's/%/%25/g')
+            echo "::error title=lake-rust-parity ${leg} tail::${tail_line}"
+            {
+              echo "### lake-rust-parity FAILURE — leg: ${leg}"
+              echo ""
+              echo '```'
+              grep -E "^(FAILED|ERROR) " "$log" || true
+              echo '```'
+              echo ""
+              echo "<details><summary>last 150 output lines (${leg})</summary>"
+              echo ""
+              echo '```'
+              tail -n 150 "$log"
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          pytest -rsfE -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/golden/test_option_lake_rust_render_parity.py \
             tests/golden/test_lake_rust_merge_parity.py \
@@ -299,13 +410,68 @@ jobs:
             tests/unit/test_lake_rust_resample.py \
             tests/unit/test_tf_resampler_rust_seam.py \
             tests/integration/test_lake_rust_resample_parity.py \
-            tests/unit/test_window_ledger_rust.py
+            tests/unit/test_window_ledger_rust.py \
+            tests/unit/test_detectors_rust.py \
+            tests/unit/test_raw_integrity_rust_seam.py \
+            tests/unit/test_interior_gap_detect_rust_seam.py \
+            tests/unit/test_partial_window_detect_rust_seam.py \
+            2>&1 | tee /tmp/parity-corpora.log \
+            || { emit_failure_summary "corpora-facade-seam" /tmp/parity-corpora.log; exit 1; }
           # G8 window-ledger differential + affected suites, flag-ON arm
           # (the real wheel is installed + lockstep-aligned above).
-          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
+          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rsfE -q \
             tests/unit/test_window_ledger_rust.py \
             tests/unit/test_window_status.py \
-            tests/unit/test_window_ledger.py
+            tests/unit/test_window_ledger.py \
+            2>&1 | tee /tmp/parity-wledger-on.log \
+            || { emit_failure_summary "window-ledger-flag-on" /tmp/parity-wledger-on.log; exit 1; }
+          # SLICE T24 detector laws, flag-ON arm
+          # (DEC-DATA-RUST-INTEGRITY-DETECTORS-001): the three EXISTING
+          # detector suites run VERBATIM under all three flags with the real
+          # wheel. HONEST framing (round-1 review): this leg is a BELT — it
+          # proves no flag-ON regression in the catching suites, but burn-in
+          # autorevert means the ORACLE could be doing the catching here, so
+          # the genuine Rust-parity gates are the seam suites' remaining=0
+          # hypothesis differentials + the cargo frozen vectors — PLUS the
+          # STORED-OUTCOME leg (test_detectors_rust_stored_outcome.py): a
+          # real-writer #1031 demotion pull + the raw-integrity sidecar,
+          # driven OFF then ON at remaining=0 against the REAL wheel, with
+          # stored parquet bytes + ledger records asserted identical and the
+          # demotions proven fired in BOTH arms.
+          BRUTEX_LAKE_RUST_RAW_INTEGRITY=1 \
+          BRUTEX_LAKE_RUST_INTERIOR_GAP=1 \
+          BRUTEX_LAKE_RUST_PARTIAL_WINDOW=1 pytest -rsfE -q \
+            tests/unit/test_detectors_rust.py \
+            tests/unit/test_raw_integrity.py \
+            tests/unit/test_raw_integrity_store.py \
+            tests/integration/test_raw_integrity_wiring.py \
+            tests/unit/test_interior_gap_detect.py \
+            tests/unit/test_partial_window_detect.py \
+            tests/unit/test_raw_integrity_rust_seam.py \
+            tests/unit/test_interior_gap_detect_rust_seam.py \
+            tests/unit/test_partial_window_detect_rust_seam.py \
+            tests/integration/test_detectors_rust_stored_outcome.py \
+            2>&1 | tee /tmp/parity-t24-on.log \
+            || { emit_failure_summary "t24-detectors-flag-on" /tmp/parity-t24-on.log; exit 1; }
+
+      - name: G10 ledger render — reader-parity + state-convergence gates (flag-ON)
+        # DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (ledger #1918): the
+        # ROW-EQUIVALENCE standard's teeth on the REAL merged wheel — the
+        # twin-lake reader-parity battery over the REAL read paths
+        # (pyarrow · polars · DuckDB · the db_view fast paths) + the
+        # crash/resume/re-pull state-convergence NAMED MERGE GATE, then the
+        # store suite's flag-ON twin (byte-level VERBATIM — zero test
+        # edits — with the seam armed; a test failing ONLY under the flag
+        # is a perturbation finding: fix-or-refuse, never a test edit).
+        # The bytes-probe golden is DELIBERATELY absent here: it probes the
+        # PYARROW oracle arm and pins its own env hermetically.
+        run: |
+          pytest -rs -q \
+            tests/unit/test_lake_rust_ledger_render.py \
+            tests/integration/test_window_ledger_rust_reader_parity.py \
+            tests/integration/test_window_ledger_rust_state_convergence.py
+          BRUTEX_LAKE_RUST_LEDGER_RENDER=1 pytest -q \
+            tests/unit/test_window_ledger_store.py
 
       - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
         # The PR-2 non-perturbation leg: the 18-round

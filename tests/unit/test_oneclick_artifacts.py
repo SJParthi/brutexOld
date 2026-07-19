@@ -374,10 +374,12 @@ class TestLoadManifest:
         assert result.revision is None
 
     def test_unreadable_is_corrupt(self, tmp_path: Path) -> None:
-        (tmp_path / oc.MANIFEST_FILENAME).mkdir()  # a directory → IsADirectoryError
+        # A directory is a non-regular inode → NotRegularFileError
+        # (DEC-LAKE-READ-INODE-GUARD-001 — the fd-level S_ISREG gate).
+        (tmp_path / oc.MANIFEST_FILENAME).mkdir()
         result = oc.load_manifest(tmp_path)
         assert result.status == "corrupt"
-        assert "IsADirectoryError" in result.detail
+        assert "NotRegularFileError" in result.detail
 
     def test_invalid_utf8_is_corrupt(self, tmp_path: Path) -> None:
         (tmp_path / oc.MANIFEST_FILENAME).write_bytes(b"\xff\xfe\x00garbage")
@@ -531,7 +533,10 @@ class TestLoadTop100:
         assert f"schema_version {pun!r}" in result.detail
 
     def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        _write(
+            tmp_path / oc.TOP100_FILENAME,
+            json.dumps({"schema_version": oc.TOP100_SCHEMA_VERSION, "rows": []}),
+        )
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "no entries array" in result.detail
@@ -755,7 +760,7 @@ class TestTailEvents:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         page = oc.tail_events(tmp_path)
         assert page.status == "corrupt"
-        assert "IsADirectoryError" in page.detail
+        assert "NotRegularFileError" in page.detail
 
     def test_paging_resumes_at_next_offset(self, tmp_path: Path) -> None:
         _write_events(tmp_path, _event_bodies(10))
@@ -915,7 +920,7 @@ class TestVerifyEventsChain:
         (tmp_path / oc.EVENTS_FILENAME).mkdir()
         ok, _, _, detail = oc.verify_events_chain(tmp_path)
         assert ok is False
-        assert "IsADirectoryError" in detail
+        assert "NotRegularFileError" in detail
 
     def test_empty_file_verifies_zero_records(self, tmp_path: Path) -> None:
         _write(tmp_path / oc.EVENTS_FILENAME, "")
@@ -1738,7 +1743,7 @@ class TestFixtureTradesReader:
     def test_unreadable_file_is_corrupt(self, tmp_path: Path) -> None:
         oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1).mkdir(
             parents=True
-        )  # dir → IsADirectoryError
+        )  # dir → NotRegularFileError (inode guard)
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "corrupt"
 
