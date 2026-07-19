@@ -329,9 +329,11 @@ class TestAppendEnrichmentRule:
 
     def test_none_vs_populated_enriches_in_place_and_logs(self) -> None:
         store = ResultsStore(path=Path("/unused.parquet"))
-        assert store.append(_row(1)) is True
+        first_added = store.append(_row(1))
+        assert first_added is True
         with capture_logs() as logs:
-            assert store.append(_row(1, with_temporal=True)) is False
+            enrich_added = store.append(_row(1, with_temporal=True))
+        assert enrich_added is False
         events = [e for e in logs if e["event"] == "results_store.temporal_enriched"]
         assert len(events) == 1
         assert events[0]["run_id"] == _rid(1)
@@ -346,14 +348,16 @@ class TestAppendEnrichmentRule:
         enriched = _row(1, with_temporal=True)
         store.append(enriched)
         with capture_logs() as logs:
-            assert store.append(_row(1)) is False
+            plain_added = store.append(_row(1))
+        assert plain_added is False
         assert [e for e in logs if e["event"] == "results_store.temporal_enriched"] == []
         assert store.get(_rid(1)) == enriched
 
     def test_populated_vs_same_is_the_idempotent_no_op(self) -> None:
         store = ResultsStore(path=Path("/unused.parquet"))
         store.append(_row(1, with_temporal=True))
-        assert store.append(_row(1, with_temporal=True)) is False
+        repeat_added = store.append(_row(1, with_temporal=True))
+        assert repeat_added is False
         assert len(store) == 1
 
     def test_populated_vs_different_is_a_reproducibility_breach(self) -> None:
