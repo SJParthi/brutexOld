@@ -19,8 +19,8 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-19 (DEC-BRUTEX-LAKE-BOX-WHEEL-001, MIGRATION.md #1959
-(renumbered #1959 → #1959 at the crate-vehicle-5 fold — the #1970–#1990
-coordinator reserve band; DEC-LEDGER-RENUMBER-001), branch `claude/brutex-lake-box-wheel` —
+(renumbered #1986 → #1959 at the crate-vehicle-5 fold — #1986 sat in the
+#1970–#1990 coordinator reserve band; DEC-LEDGER-RENUMBER-001), branch `claude/brutex-lake-box-wheel` —
 the brutex-lake wheel joins the operator BOX build path BEST-EFFORT (warn-only
 `make run-raw` + `bootstrap.sh` blocks; `box_update.WHEEL_SET` gains the
 optional lake entry so the nightly auto-deploy lane rebuilds it on rust/
@@ -3591,11 +3591,10 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001 —
-  renumbered #1986 → #1959 at the crate-vehicle-5 fold (the #1970–#1990
-  coordinator reserve band; DEC-LEDGER-RENUMBER-001) —,
-  MIGRATION.md #1959 (provisional — renumber-at-landing; DEC-IDs are the stable handles
-  per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
+- **Active branch:** `claude/brutex-lake-box-wheel` (**DEC-BRUTEX-LAKE-BOX-WHEEL-001,
+  MIGRATION.md #1959 — renumbered #1986 → #1959 at the 2026-07-19
+  crate-vehicle-5 fold (#1986 sat in the #1970–#1990 coordinator reserve
+  band; DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)** — the brutex-lake wheel joins the operator BOX build
   path + the doctor watch set; build-config + doctor ONLY, zero engine/data behavior
   change: (1) BUILD — `make run-raw` + `scripts/setup/bootstrap.sh` gain the brutex_feed
   template's BEST-EFFORT block for `rust/brutex-lake` (warn-only `|| echo`/`_warn` arm —
