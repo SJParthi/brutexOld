@@ -31,6 +31,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::BTreeMap;
 
 pub mod cascade_join;
+pub mod cascade_wire;
 pub mod combo_aggregates;
 pub mod decimal;
 pub mod ist;
@@ -333,6 +334,157 @@ fn aggregate_fold<'py>(
     Ok(d)
 }
 
+// ───────────────────────────── cascade_wire ─────────────────────────────
+// Slice 2a (DEC-RUST-CASCADE-RESULTS-001 phase B): the cascade-manifest /
+// wire-report serialisation + parse laws. Thin wrappers — the law bodies
+// live in `cascade_wire.rs` (structural walks need `py`).
+
+/// `wire_report_to_dict` — the aggregate-report JSON-native projection.
+#[pyfunction]
+fn wire_report_to_dict<'py>(
+    py: Python<'py>,
+    report: &Bound<'py, PyAny>,
+    report_version: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::wire_report_to_dict(py, report, report_version)
+}
+
+/// `serialize_wire_report` — the deterministic report JSON bytes.
+#[pyfunction]
+fn serialize_wire_report<'py>(
+    py: Python<'py>,
+    report: &Bound<'py, PyAny>,
+    report_version: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    cascade_wire::serialize_wire_report(py, report, report_version)
+}
+
+/// `_spec_to_dict` — one spec's JSON-native projection (fragment shim-passed).
+#[pyfunction]
+fn spec_to_dict<'py>(
+    py: Python<'py>,
+    spec: &Bound<'py, PyAny>,
+    fill_mode_token: &Bound<'py, PyAny>,
+    fragment: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::spec_to_dict(py, spec, fill_mode_token, fragment)
+}
+
+/// `_stage3_to_dict` — one Stage-3 record's JSON-native projection.
+#[pyfunction]
+fn stage3_to_dict<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyAny>,
+    cell_fragments: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::stage3_to_dict(py, record, cell_fragments)
+}
+
+/// `_lbt_to_dict` — one leaderboard-trials record's JSON-native projection.
+#[pyfunction]
+fn lbt_to_dict<'py>(py: Python<'py>, record: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::lbt_to_dict(py, record)
+}
+
+/// `manifest_to_json` — the full manifest projection + deterministic render.
+#[pyfunction]
+fn manifest_to_json<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyAny>,
+    config_dict: &Bound<'py, PyAny>,
+    fill_mode_token: &Bound<'py, PyAny>,
+    spec_fragments: &Bound<'py, PyAny>,
+    cell_fragments: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    cascade_wire::manifest_to_json(
+        py,
+        manifest,
+        config_dict,
+        fill_mode_token,
+        spec_fragments,
+        cell_fragments,
+    )
+}
+
+/// The DEC-FILL-WORST-CASE-ONLY-001 precise-era refusal gate.
+#[pyfunction]
+fn spec_fill_mode_gate(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    worst_case_token: &str,
+) -> PyResult<()> {
+    cascade_wire::spec_fill_mode_gate(py, data, worst_case_token)
+}
+
+/// `_spec_from_dict`'s coercion walk (construction is the shim's).
+#[pyfunction]
+fn spec_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::spec_coerce(py, data)
+}
+
+/// `_stage3_from_dict`'s coercion walk (construction is the shim's).
+#[pyfunction]
+fn stage3_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::stage3_coerce(py, data)
+}
+
+/// `_lbt_from_dict`'s coercion walk (construction is the shim's).
+#[pyfunction]
+fn lbt_coerce<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::lbt_coerce(py, data)
+}
+
+/// The FULL `_roll_schedules_from_payload` law (complete messages).
+#[pyfunction]
+fn roll_schedules_parse(
+    py: Python<'_>,
+    raw: &Bound<'_, PyAny>,
+    futures_alias: &str,
+) -> PyResult<Py<PyAny>> {
+    cascade_wire::roll_schedules_parse(py, raw, futures_alias)
+}
+
+/// The manifest version gate (Python rich-compare `!=` — the bool pun law).
+#[pyfunction]
+fn manifest_version_gate(
+    payload: &Bound<'_, PyAny>,
+    manifest_version: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    cascade_wire::manifest_version_gate(payload, manifest_version)
+}
+
+/// The `bars_context` field coercion (real KeyError/TypeError propagate).
+#[pyfunction]
+fn bars_context_coerce<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    cascade_wire::bars_context_coerce(py, payload)
+}
+
+/// `_finite` — None / non-finite → 0.0.
+#[pyfunction]
+fn finite_or_zero(value: Option<f64>) -> f64 {
+    cascade_wire::finite_or_zero(value)
+}
+
+/// `_per_bar_returns` — per-bar equity change ÷ the notional base
+/// (CPython-exact int true-division).
+#[pyfunction]
+fn per_bar_returns(
+    py: Python<'_>,
+    equity_paisa: Vec<i64>,
+    start_equity_paisa: i64,
+) -> PyResult<Vec<f64>> {
+    cascade_wire::per_bar_returns(py, &equity_paisa, start_equity_paisa)
+}
+
+/// `_max_drawdown_return_units` — the peak/cum fold (Python NaN max law).
+#[pyfunction]
+fn max_drawdown_return_units(returns: Vec<f64>) -> f64 {
+    cascade_wire::max_drawdown_return_units(&returns)
+}
+
 // ───────────────────────────── cascade_join ─────────────────────────────
 
 /// Classify one Python value into the law's [`Leaf`] model.
@@ -371,7 +523,7 @@ fn classify(py: Python<'_>, v: &Bound<'_, PyAny>) -> Leaf {
 /// Capture a value's real CPython `repr()` (lossy only if the repr itself
 /// is unrepresentable — CPython escapes unprintables, so this is total in
 /// practice).
-fn capture_repr(v: &Bound<'_, PyAny>) -> String {
+pub(crate) fn capture_repr(v: &Bound<'_, PyAny>) -> String {
     match v.repr() {
         Ok(r) => r.to_string_lossy().into_owned(),
         Err(_) => "<unrepresentable>".to_string(),
@@ -380,7 +532,7 @@ fn capture_repr(v: &Bound<'_, PyAny>) -> String {
 
 /// `mapping.get(key)` via the bound method (subclass overrides honored,
 /// exactly as the Python law's `payload.get(...)` calls).
-fn mapping_get<'py>(obj: &Bound<'py, PyAny>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn mapping_get<'py>(obj: &Bound<'py, PyAny>, key: &str) -> PyResult<Bound<'py, PyAny>> {
     obj.call_method1("get", (key,))
 }
 
@@ -553,6 +705,22 @@ fn _brutex_cascade(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(float_stats, m)?)?;
     m.add_function(wrap_pyfunction!(aggregate_fold, m)?)?;
     m.add_function(wrap_pyfunction!(build_cascade_join, m)?)?;
+    m.add_function(wrap_pyfunction!(wire_report_to_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_wire_report, m)?)?;
+    m.add_function(wrap_pyfunction!(spec_to_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(stage3_to_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(lbt_to_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_to_json, m)?)?;
+    m.add_function(wrap_pyfunction!(spec_fill_mode_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(spec_coerce, m)?)?;
+    m.add_function(wrap_pyfunction!(stage3_coerce, m)?)?;
+    m.add_function(wrap_pyfunction!(lbt_coerce, m)?)?;
+    m.add_function(wrap_pyfunction!(roll_schedules_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_version_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(bars_context_coerce, m)?)?;
+    m.add_function(wrap_pyfunction!(finite_or_zero, m)?)?;
+    m.add_function(wrap_pyfunction!(per_bar_returns, m)?)?;
+    m.add_function(wrap_pyfunction!(max_drawdown_return_units, m)?)?;
     // The crate's hardcoded walker exit-reason vocabulary, exposed so the
     // Python drift pin can assert set AND order equality against
     // `trade_sim.EXIT_REASONS` (DEC-RUST-CASCADE-RESULTS-001 round-2 MINOR:

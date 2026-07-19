@@ -89,20 +89,40 @@ and the :class:`~brutex.metrics.cascade.CandidateInput` is filled as:
 
 This is offline Stage-4 batch work, ``O(K)`` re-simulations over the top-K
 winners — never an ``O(1)`` per-bar hot path; no O(1)-total claim is made.
+
+**RUST-HOSTED LAW (DEC-RUST-CASCADE-RESULTS-001, slice 2a):** the
+serialisation + parse LAW family — the deterministic manifest/report JSON
+renders (:func:`manifest_to_json` / :func:`serialize_wire_report` /
+:func:`wire_report_to_dict`), the marshalling walks behind
+:func:`manifest_from_json` (spec / stage-3 / leaderboard-trials coercions
+via CPython's OWN builtins, the DEC-FILL-WORST-CASE-ONLY-001 precise-era
+refusal, the version gate with its bool==int pun, the FULL
+``roll_schedules`` shape law) and the math trio (``_finite`` /
+``_per_bar_returns`` / ``_max_drawdown_return_units``) — lives in
+``rust/brutex-cascade/src/cascade_wire.rs``, verified against the FROZEN
+pre-conversion parity corpus
+(``tests/golden/fixtures/cascade_rust_parity/cascade_wire.json``). This
+module is the type face: the frozen dataclasses (whose ``__post_init__``
+validation raises stay Python-side), the per-family
+:class:`CascadeWireError` prefix guards VERBATIM (the raw
+``IndexError``/``AttributeError`` escapes of the frozen law pass through
+them untouched), the §11-COMMON inputs computed at their one homes (the
+fill-mode token, the price-source fragments, ``dataclasses.asdict``) and
+ALL orchestration (candidate rebuild / trade-sim / lake I/O — not law).
 """
 
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.engine.cascade_rust import require_cascade_rust
 from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -116,6 +136,7 @@ from brutex.strategies.types import (
     PriceSource,
     price_source_params_fragment,
 )
+from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -591,9 +612,7 @@ def _finite(value: float | None) -> float:
     :func:`brutex.engine.sweep_run.ranked_combo_to_result_row`. Real finite values
     pass through unchanged.
     """
-    if value is None or not math.isfinite(value):
-        return 0.0
-    return value
+    return cast(float, require_cascade_rust().finite_or_zero(value))
 
 
 def _per_bar_returns(equity_paisa: Sequence[int], start_equity_paisa: int) -> tuple[float, ...]:
@@ -602,13 +621,11 @@ def _per_bar_returns(equity_paisa: Sequence[int], start_equity_paisa: int) -> tu
     The first bar's return is measured against ``start_equity_paisa`` (the curve's
     implicit pre-window equity); every subsequent bar against the prior bar. The
     series is the equal-length pool axis the cascade's matrix filters require.
+    The Rust law delegates each division to CPython int true-division, so
+    beyond-2^53 numerators round exactly as before (module docstring).
     """
-    out: list[float] = []
-    prev = start_equity_paisa
-    for value in equity_paisa:
-        out.append((value - prev) / start_equity_paisa)
-        prev = value
-    return tuple(out)
+    rs = require_cascade_rust()
+    return tuple(rs.per_bar_returns(list(equity_paisa), start_equity_paisa))
 
 
 def _max_drawdown_return_units(returns: Sequence[float]) -> float:
@@ -617,16 +634,10 @@ def _max_drawdown_return_units(returns: Sequence[float]) -> float:
     Matches :func:`brutex.metrics.lockbox._max_drawdown`'s convention so the
     in-sample ``training_max_drawdown`` reference is in the SAME units the lockbox
     re-measures, keeping the drawdown gate apples-to-apples. ``0.0`` for an empty
-    or monotonically non-decreasing path.
+    or monotonically non-decreasing path (Python's ``max`` first-arg NaN
+    semantics replicated in the Rust fold).
     """
-    peak = float("-inf")
-    cum = 0.0
-    max_dd = 0.0
-    for r in returns:
-        cum += r
-        peak = max(peak, cum)
-        max_dd = max(max_dd, peak - cum)
-    return max_dd
+    return cast(float, require_cascade_rust().max_drawdown_return_units(list(returns)))
 
 
 def _make_mc_evaluate(
@@ -1092,55 +1103,25 @@ def run_cascade_over_specs(
 # ── Report serialisation (deterministic) ──────────────────────────────────────
 
 
-def _report_to_dict(report: CascadeReport) -> dict[str, object]:
-    """Serialise one :class:`CascadeReport` into a JSON-native dict.
+def wire_report_to_dict(report: CascadeWireReport) -> dict[str, object]:
+    """Serialise a :class:`CascadeWireReport` into a JSON-native dict.
 
-    ``pool_pbo`` (DEC-PBO-SIDECAR-001) is the slice's measured CSCV pool PBO —
-    the RAW float (round-trippable ``repr``, never rounded) or ``null`` when
-    filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
-    The per-verdict ``provisional`` key (R2-SR-F4) is ADDITIVE at
-    ``REPORT_VERSION`` 1 — the same precedent as ``pool_pbo``; a pre-change
-    report simply lacks the key. The per-verdict ``cpcv_pass_rate`` key
+    Per group, ``pool_pbo`` (DEC-PBO-SIDECAR-001) is the slice's measured CSCV
+    pool PBO — the RAW float (round-trippable ``repr``, never rounded) or
+    ``null`` when filter #5 was skipped (see
+    :class:`~brutex.metrics.cascade.CascadeReport`). The per-verdict
+    ``provisional`` key (R2-SR-F4) is ADDITIVE at ``REPORT_VERSION`` 1 — the
+    same precedent as ``pool_pbo``; a pre-change report simply lacks the key.
+    The per-verdict ``cpcv_pass_rate`` key
     (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) rides the SAME additive-at-1
     precedent: the RAW full-precision stage-3 fraction or ``null`` (a
-    pre-change report simply lacks the key — readers None-fill).
+    pre-change report simply lacks the key — readers None-fill). The
+    projection law lives in the Rust crate (module docstring).
     """
-    return {
-        "n_input": report.n_input,
-        "n_survived": report.n_survived,
-        "dsr_n_source": report.dsr_n_source,
-        "dsr_n_trials": report.dsr_n_trials,
-        "dsr_trial_variance": report.dsr_trial_variance,
-        "pool_pbo": report.pool_pbo,
-        "survivor_ids": list(report.survivor_ids),
-        "stage_survivors": dict(report.stage_survivors),
-        "verdicts": [
-            {
-                "candidate_id": verdict.candidate_id,
-                "passed": verdict.passed,
-                "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
-                "detail": verdict.detail,
-                "composite_score": verdict.composite_score,
-                "provisional": verdict.provisional,
-                "cpcv_pass_rate": verdict.cpcv_pass_rate,
-            }
-            for verdict in report.verdicts
-        ],
-    }
-
-
-def wire_report_to_dict(report: CascadeWireReport) -> dict[str, object]:
-    """Serialise a :class:`CascadeWireReport` into a JSON-native dict."""
-    return {
-        "version": REPORT_VERSION,
-        "sweep_id": report.sweep_id,
-        "n_input": report.n_input,
-        "n_survived": report.n_survived,
-        "groups": [
-            {"instrument": instrument, "tf": tf_label, "report": _report_to_dict(group_report)}
-            for instrument, tf_label, group_report in report.groups
-        ],
-    }
+    return cast(
+        "dict[str, object]",
+        require_cascade_rust().wire_report_to_dict(report, REPORT_VERSION),
+    )
 
 
 def serialize_wire_report(report: CascadeWireReport) -> bytes:
@@ -1152,9 +1133,10 @@ def serialize_wire_report(report: CascadeWireReport) -> bytes:
     than emitting non-standard ``NaN``/``Infinity`` (the composite z-scores are
     clamped finite, so this never triggers in practice).
     """
-    return json.dumps(
-        wire_report_to_dict(report), sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
+    return cast(
+        bytes,
+        require_cascade_rust().serialize_wire_report(report, REPORT_VERSION),
+    )
 
 
 # ── Per-leaderboard trial-stats freeze (DEC-TRIAL-STATS-FREEZE-001) ──────────
@@ -1379,87 +1361,66 @@ def build_leaderboard_trials(
 
 
 def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
-    """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict."""
-    payload: dict[str, object] = {
-        "instrument": spec.instrument,
-        "tf_label": spec.tf_label,
-        "tf_minutes": spec.tf_minutes,
-        "direction_label": spec.direction_label,
-        "sl_paisa": spec.sl_paisa,
-        "tp_paisa": spec.tp_paisa,
-        "prior_n": spec.prior_n,
-        "proximity_bps": None if spec.proximity_bps is None else list(spec.proximity_bps),
-        "start_equity_paisa": spec.start_equity_paisa,
-        "winners": [[run_id, mask] for run_id, mask in spec.winners],
-        "fib_anchor": spec.fib_anchor.value,
-        # DEC-FILL-WORST-CASE-ONLY-001: the manifest carries the UNCONDITIONAL
-        # "fill_mode": "worst_case" key (the canonical-params law's manifest
-        # twin) — the reader REFUSES a manifest without it (precise-era) so a
-        # manual replay can never re-score precise-priced winners.
-        "fill_mode": FillMode.WORST_CASE.value,
-        # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
-        # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
-        # when non-default, so a baseline manifest is byte-identical to a pre-axis one
-        # (modulo the unconditional fill_mode key above — the two laws compose).
-        **price_source_params_fragment(spec.vwap_source, spec.ema_source),
-    }
-    return payload
+    """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict.
+
+    §11-COMMON delegation: the UNCONDITIONAL ``"fill_mode": "worst_case"``
+    token (DEC-FILL-WORST-CASE-ONLY-001 — the reader REFUSES a manifest
+    without it, so a manual replay can never re-score precise-priced winners;
+    the ONE literal home is :mod:`brutex.execution.fill_mode`) and the
+    DEFAULT-OMITTED price-source fragment (DEC-NIFTY-PRICE-SOURCE-AXIS-001,
+    Override 1 — the ONE COMMON :func:`price_source_params_fragment` law) are
+    computed HERE and passed to the Rust projection, never re-minted in the
+    crate.
+    """
+    fragment = price_source_params_fragment(spec.vwap_source, spec.ema_source)
+    return cast(
+        "dict[str, object]",
+        require_cascade_rust().spec_to_dict(spec, FillMode.WORST_CASE.value, fragment),
+    )
 
 
 def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     """Rebuild a :class:`CascadeTupleSpec` from :func:`_spec_to_dict` output."""
-    # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
-    # scalar coercions below read cleanly. Every malformed value is caught by the
-    # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
-    raw = cast(dict[str, Any], data)
-    if raw.get("fill_mode") is None or str(raw["fill_mode"]) != FillMode.WORST_CASE.value:
-        # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal: worst-case is
-        # the ONLY fill model and every post-DEC manifest carries the
-        # unconditional "fill_mode": "worst_case" key. An ABSENT key or a
-        # literal "precise" token identifies a PRECISE-era manifest whose
-        # winners were ranked under fills the deleted mode produced —
-        # re-scoring them here would silently launder precise-priced results
-        # as worst-case. Refuse LOUDLY; the remediation is a fresh sweep.
-        raise CascadeWireError(
-            "precise-era cascade manifest refused (DEC-FILL-WORST-CASE-ONLY-001): "
-            f"fill_mode={raw.get('fill_mode')!r} — worst_case is the only fill "
-            "model; re-run the sweep to produce a worst-case manifest"
-        )
+    rs = require_cascade_rust()
+    # DEC-FILL-WORST-CASE-ONLY-001 legacy-artifact refusal FIRST (the law's
+    # original statement order): an ABSENT key or a non-"worst_case" token
+    # identifies a PRECISE-era manifest — refused LOUDLY with the
+    # crate-composed message, re-raised verbatim (no prefix — the original
+    # was a direct raise). A NON-dict spec entry raises the REAL
+    # AttributeError from `.get` (the frozen law) — it passes this guard raw.
     try:
-        proximity = raw["proximity_bps"]
-        proximity_bps = (
-            None if proximity is None else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
-        )
-        winners = tuple((str(run_id), int(mask)) for run_id, mask in raw["winners"])
+        rs.spec_fill_mode_gate(data, FillMode.WORST_CASE.value)
+    except ValueError as exc:
+        raise CascadeWireError(str(exc)) from None
+    # The Rust walk coerces every field with CPython's own builtins (a raw
+    # IndexError from a short proximity list escapes — the frozen law); the
+    # additive-parse enum defaulting (absent → PREV_DAY / HLC3 / CLOSE, the
+    # only cells pre-axis sweeps ran) + the dataclass construction (whose
+    # __post_init__ CascadeWireError raises pass the guard untouched) stay
+    # HERE, inside the verbatim prefix guard.
+    try:
+        raw = rs.spec_coerce(data)
         return CascadeTupleSpec(
-            instrument=str(raw["instrument"]),
-            tf_label=str(raw["tf_label"]),
-            tf_minutes=int(raw["tf_minutes"]),
-            direction_label=str(raw["direction_label"]),
-            sl_paisa=None if raw["sl_paisa"] is None else int(raw["sl_paisa"]),
-            tp_paisa=None if raw["tp_paisa"] is None else int(raw["tp_paisa"]),
-            prior_n=int(raw["prior_n"]),
-            proximity_bps=proximity_bps,
-            start_equity_paisa=int(raw["start_equity_paisa"]),
-            winners=winners,
-            # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive parse):
-            # default to prev-day, the only anchor those sweeps ran.
+            instrument=raw["instrument"],
+            tf_label=raw["tf_label"],
+            tf_minutes=raw["tf_minutes"],
+            direction_label=raw["direction_label"],
+            sl_paisa=raw["sl_paisa"],
+            tp_paisa=raw["tp_paisa"],
+            prior_n=raw["prior_n"],
+            proximity_bps=raw["proximity_bps"],
+            start_equity_paisa=raw["start_equity_paisa"],
+            winners=raw["winners"],
             fib_anchor=(
                 FibAnchorKind.PREV_DAY
-                if raw.get("fib_anchor") is None
-                else FibAnchorKind(str(raw["fib_anchor"]))
+                if raw["fib_anchor"] is None
+                else FibAnchorKind(raw["fib_anchor"])
             ),
-            # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001): absent ⟺ the
-            # baseline (HLC3, CLOSE), the only source pre-axis / baseline sweeps ran.
             vwap_source=(
-                PriceSource.HLC3
-                if raw.get("vwap_source") is None
-                else PriceSource(str(raw["vwap_source"]))
+                PriceSource.HLC3 if raw["vwap_source"] is None else PriceSource(raw["vwap_source"])
             ),
             ema_source=(
-                PriceSource.CLOSE
-                if raw.get("ema_source") is None
-                else PriceSource(str(raw["ema_source"]))
+                PriceSource.CLOSE if raw["ema_source"] is None else PriceSource(raw["ema_source"])
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -1467,80 +1428,65 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
 
 
 def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
-    """Serialise one :class:`Stage3ManifestRecord` into a JSON-native dict."""
-    return {
-        "enabled": record.enabled,
-        "train_snapshot_hash": record.train_snapshot_hash,
-        "refined_cells": [
-            {
-                "instrument": cell.instrument,
-                "tf_label": cell.tf_label,
-                "direction_label": cell.direction_label,
-                "k": cell.k,
-                "sl_paisa": cell.sl_paisa,
-                "tp_paisa": cell.tp_paisa,
-                "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
-                "rel_path": cell.rel_path,
-                "fib_anchor": cell.fib_anchor.value,
-                # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via
-                # the ONE COMMON fragment: a baseline refined cell's manifest entry
-                # is byte-identical to a pre-axis one.
-                **price_source_params_fragment(cell.vwap_source, cell.ema_source),
-            }
-            for cell in record.refined_cells
-        ],
-    }
+    """Serialise one :class:`Stage3ManifestRecord` into a JSON-native dict.
+
+    §11-COMMON delegation: the per-cell DEFAULT-OMITTED price-source
+    fragments (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1 — a baseline
+    refined cell's manifest entry is byte-identical to a pre-axis one) are
+    computed HERE via the ONE :func:`price_source_params_fragment` law and
+    passed to the Rust projection.
+    """
+    fragments = [
+        price_source_params_fragment(cell.vwap_source, cell.ema_source)
+        for cell in record.refined_cells
+    ]
+    return cast(
+        "dict[str, object]",
+        require_cascade_rust().stage3_to_dict(record, fragments),
+    )
 
 
 def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
     """Rebuild a :class:`Stage3ManifestRecord` from :func:`_stage3_to_dict` output."""
-    raw = cast(dict[str, Any], data)
+    # The Rust walk coerces every cell field in the original token order; the
+    # additive-parse defaulting (rel_path None passthrough, absent enum tokens
+    # → prev-day / (HLC3, CLOSE)) + the dataclass construction (whose
+    # __post_init__ CascadeWireError raises pass the guard untouched) stay
+    # HERE, inside the verbatim prefix guard.
     try:
-        cells: list[Stage3CellRecord] = []
-        for cell in raw["refined_cells"]:
-            proximity = cell["proximity_bps"]
-            cells.append(
-                Stage3CellRecord(
-                    instrument=str(cell["instrument"]),
-                    tf_label=str(cell["tf_label"]),
-                    direction_label=str(cell["direction_label"]),
-                    k=int(cell["k"]),
-                    sl_paisa=int(cell["sl_paisa"]),
-                    tp_paisa=int(cell["tp_paisa"]),
-                    proximity_bps=(
-                        None
-                        if proximity is None
-                        else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
-                    ),
-                    # Absent on pre-DEC-ROW-PROVENANCE-001 manifests (additive parse).
-                    rel_path=(None if cell.get("rel_path") is None else str(cell["rel_path"])),
-                    # Absent on pre-DEC-NIFTY-FIB-AXIS-001 manifests (additive
-                    # parse): default to prev-day, the only anchor those sweeps ran.
-                    fib_anchor=(
-                        FibAnchorKind.PREV_DAY
-                        if cell.get("fib_anchor") is None
-                        else FibAnchorKind(str(cell["fib_anchor"]))
-                    ),
-                    # Absent on pre-DEC-NIFTY-PRICE-SOURCE-AXIS-001 / baseline
-                    # manifests (additive parse): default to (HLC3, CLOSE), the only
-                    # source those sweeps ran.
-                    vwap_source=(
-                        PriceSource.HLC3
-                        if cell.get("vwap_source") is None
-                        else PriceSource(str(cell["vwap_source"]))
-                    ),
-                    ema_source=(
-                        PriceSource.CLOSE
-                        if cell.get("ema_source") is None
-                        else PriceSource(str(cell["ema_source"]))
-                    ),
-                )
+        raw = require_cascade_rust().stage3_coerce(data)
+        cells = tuple(
+            Stage3CellRecord(
+                instrument=cell["instrument"],
+                tf_label=cell["tf_label"],
+                direction_label=cell["direction_label"],
+                k=cell["k"],
+                sl_paisa=cell["sl_paisa"],
+                tp_paisa=cell["tp_paisa"],
+                proximity_bps=cell["proximity_bps"],
+                rel_path=cell["rel_path"],
+                fib_anchor=(
+                    FibAnchorKind.PREV_DAY
+                    if cell["fib_anchor"] is None
+                    else FibAnchorKind(cell["fib_anchor"])
+                ),
+                vwap_source=(
+                    PriceSource.HLC3
+                    if cell["vwap_source"] is None
+                    else PriceSource(cell["vwap_source"])
+                ),
+                ema_source=(
+                    PriceSource.CLOSE
+                    if cell["ema_source"] is None
+                    else PriceSource(cell["ema_source"])
+                ),
             )
-        hash_raw = raw["train_snapshot_hash"]
+            for cell in raw["cells"]
+        )
         return Stage3ManifestRecord(
-            enabled=bool(raw["enabled"]),
-            train_snapshot_hash=None if hash_raw is None else str(hash_raw),
-            refined_cells=tuple(cells),
+            enabled=raw["enabled"],
+            train_snapshot_hash=raw["train_snapshot_hash"],
+            refined_cells=cells,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid stage3 record in manifest: {exc}") from exc
@@ -1548,29 +1494,25 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
 
 def _lbt_to_dict(record: LeaderboardTrialsRecord) -> dict[str, object]:
     """Serialise one :class:`LeaderboardTrialsRecord` into a JSON-native dict."""
-    return {
-        "instrument": record.instrument,
-        "tf_label": record.tf_label,
-        "n_trials": record.n_trials,
-        "n_finite": record.n_finite,
-        "sum_sharpe": record.sum_sharpe,
-        "sum_sharpe_sq": record.sum_sharpe_sq,
-        "complete": record.complete,
-    }
+    return cast("dict[str, object]", require_cascade_rust().lbt_to_dict(record))
 
 
 def _lbt_from_dict(data: dict[str, object]) -> LeaderboardTrialsRecord:
     """Rebuild a :class:`LeaderboardTrialsRecord` from :func:`_lbt_to_dict` output."""
-    raw = cast(dict[str, Any], data)
+    # The Rust walk coerces every field with CPython's own builtins; the
+    # dataclass construction (whose __post_init__ CascadeWireError raises —
+    # incl. the delegated trial-stats invariants — pass the guard untouched)
+    # stays HERE, inside the verbatim prefix guard.
     try:
+        raw = require_cascade_rust().lbt_coerce(data)
         return LeaderboardTrialsRecord(
-            instrument=str(raw["instrument"]),
-            tf_label=str(raw["tf_label"]),
-            n_trials=int(raw["n_trials"]),
-            n_finite=int(raw["n_finite"]),
-            sum_sharpe=float(raw["sum_sharpe"]),
-            sum_sharpe_sq=float(raw["sum_sharpe_sq"]),
-            complete=bool(raw["complete"]),
+            instrument=raw["instrument"],
+            tf_label=raw["tf_label"],
+            n_trials=raw["n_trials"],
+            n_finite=raw["n_finite"],
+            sum_sharpe=raw["sum_sharpe"],
+            sum_sharpe_sq=raw["sum_sharpe_sq"],
+            complete=raw["complete"],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid leaderboard_trials record in manifest: {exc}") from exc
@@ -1598,85 +1540,50 @@ def _roll_schedules_from_payload(
         instrument is not the NIFTY-futures series alias, or a schedule
         violating the shape law.
     """
-    if raw is None:
-        return None
-
-    def _strict_ordinal(ordinal: object) -> int:
-        # Strict int-not-bool (review round-4 finding 2, mirroring the audit
-        # reader `_schedules_from_entries`): a bare `int()` silently accepted
-        # `true` (→1) and truncated `739000.9` (→739000) — a malformed
-        # hand-edited manifest must REFUSE, never coerce.
-        if not isinstance(ordinal, int) or isinstance(ordinal, bool):
-            raise ValueError(f"non-int roll_schedule ordinal {ordinal!r}")
-        return ordinal
-
+    # The FULL law (strict int-not-bool ordinals, the pair-unpack emulation,
+    # the duplicate-instrument / alias / shape refusals) lives in the Rust
+    # crate, which composes each COMPLETE `invalid roll_schedules in
+    # manifest: …` message; the shim re-raises it as CascadeWireError
+    # verbatim. The alias is passed by import-identity
+    # (`brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL` — no second literal;
+    # the `is_futures_series_symbol` law is `symbol == alias`, exact-case).
     try:
-        parsed = tuple(
-            (str(instrument), tuple(_strict_ordinal(ordinal) for ordinal in schedule))
-            for instrument, schedule in cast("Sequence[Any]", raw)
-        )
-    except (TypeError, ValueError) as exc:
-        raise CascadeWireError(f"invalid roll_schedules in manifest: {exc}") from exc
-    seen: set[str] = set()
-    for instrument, schedule in parsed:
-        # Duplicate-instrument refusal (review round-7 finding 8): both
-        # `dict(manifest.roll_schedules)` consumers silently adopt the LAST
-        # entry, so an internally contradictory hand-edited manifest carrying
-        # two schedules for one instrument replayed under whichever sorted
-        # last — while the audit twin `_schedules_from_entries` refuses the
-        # same per-instrument disagreement. Refuse identically HERE, at the
-        # parse boundary this docstring claims owns the enforcement.
-        if instrument in seen:
-            raise CascadeWireError(
-                f"invalid roll_schedules in manifest: duplicate entry for instrument "
-                f"{instrument!r} — an internally contradictory manifest cannot pick a "
-                "schedule (dict() would silently adopt the last); the manifest is "
-                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
-            )
-        seen.add(instrument)
-        if not is_futures_series_symbol(instrument):
-            raise CascadeWireError(
-                f"invalid roll_schedules in manifest: instrument {instrument!r} is not "
-                "the NIFTY-futures series alias — a roll schedule may exist for (and "
-                "only for) the futures alias (presence ⟺ alias); the manifest is "
-                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
-            )
-        if not schedule or list(schedule) != sorted(set(schedule)) or schedule[0] < 0:
-            raise CascadeWireError(
-                f"invalid roll_schedules in manifest: schedule for {instrument!r} must "
-                "be a non-empty strictly increasing tuple of non-negative day "
-                f"ordinals, got {list(schedule)}"
-            )
-    return parsed
+        parsed = require_cascade_rust().roll_schedules_parse(raw, NIFTY_FUTURES_SERIES_SYMBOL)
+    except ValueError as exc:
+        raise CascadeWireError(str(exc)) from None
+    return cast("tuple[tuple[str, tuple[int, ...]], ...] | None", parsed)
 
 
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
-    """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
-    payload = {
-        "version": manifest.version,
-        "sweep_id": manifest.sweep_id,
-        "cascade_config": cascade_config_to_dict(manifest.cascade_config),
-        "bars_context": {
-            "exchange": manifest.bars_context.exchange,
-            "segment": manifest.bars_context.segment,
-            "start": manifest.bars_context.start,
-            "end": manifest.bars_context.end,
-        },
-        "specs": [_spec_to_dict(spec) for spec in manifest.specs],
-        "stage3": None if manifest.stage3 is None else _stage3_to_dict(manifest.stage3),
-        "leaderboard_trials": (
-            None
-            if manifest.leaderboard_trials is None
-            else [_lbt_to_dict(record) for record in manifest.leaderboard_trials]
+    """Return the deterministic JSON bytes of *manifest* (sorted keys).
+
+    §11-COMMON delegation: the ``dataclasses.asdict`` config projection
+    (:func:`cascade_config_to_dict` — ``CascadeConfig`` is out-of-lane
+    :mod:`brutex.metrics.cascade`), the fill-mode token and the per-spec /
+    per-cell price-source fragments are computed HERE at their laws' one
+    homes and passed to the Rust projection + render.
+    """
+    config_dict = cascade_config_to_dict(manifest.cascade_config)
+    spec_fragments = [
+        price_source_params_fragment(spec.vwap_source, spec.ema_source) for spec in manifest.specs
+    ]
+    cell_fragments = (
+        None
+        if manifest.stage3 is None
+        else [
+            price_source_params_fragment(cell.vwap_source, cell.ema_source)
+            for cell in manifest.stage3.refined_cells
+        ]
+    )
+    return cast(
+        bytes,
+        require_cascade_rust().manifest_to_json(
+            manifest,
+            config_dict,
+            FillMode.WORST_CASE.value,
+            spec_fragments,
+            cell_fragments,
         ),
-        "roll_schedules": (
-            None
-            if manifest.roll_schedules is None
-            else [[instrument, list(schedule)] for instrument, schedule in manifest.roll_schedules]
-        ),
-    }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
-        "utf-8"
     )
 
 
@@ -1694,18 +1601,21 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
         raise CascadeWireError(f"cascade manifest is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise CascadeWireError("cascade manifest must be a JSON object")
-    version = payload.get("version")
-    if version != MANIFEST_VERSION:
-        raise CascadeWireError(
-            f"unsupported cascade manifest version {version!r} (expected {MANIFEST_VERSION})"
-        )
+    rs = require_cascade_rust()
+    # The version gate runs in the crate under Python rich-compare `!=`
+    # semantics (`version: true` == 1 PARSES — the frozen bool-pun law); a
+    # mismatch's complete message is re-raised verbatim.
     try:
-        bars_raw = payload["bars_context"]
+        rs.manifest_version_gate(payload, MANIFEST_VERSION)
+    except ValueError as exc:
+        raise CascadeWireError(str(exc)) from None
+    try:
+        bars_raw = rs.bars_context_coerce(payload)
         bars_context = BarsContext(
-            exchange=str(bars_raw["exchange"]),
-            segment=str(bars_raw["segment"]),
-            start=str(bars_raw["start"]),
-            end=str(bars_raw["end"]),
+            exchange=bars_raw["exchange"],
+            segment=bars_raw["segment"],
+            start=bars_raw["start"],
+            end=bars_raw["end"],
         )
         specs = tuple(_spec_from_dict(spec) for spec in payload["specs"])
         # `stage3` is absent from pre-DEC-STAGE3-WIRE-001 manifests → None
