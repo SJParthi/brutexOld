@@ -5257,6 +5257,9 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutex-feed:${{ needs.rust-brutex-feed.result }}"
+          echo "  rust-brutex-strategies:${{ needs.rust-brutex-strategies.result }}"
+          echo "  rust-brutex-calendar:${{ needs.rust-brutex-calendar.result }}"
           echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
@@ -5299,6 +5302,9 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutex-feed.result }}" \
+            "${{ needs.rust-brutex-strategies.result }}" \
+            "${{ needs.rust-brutex-calendar.result }}" \
             "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
