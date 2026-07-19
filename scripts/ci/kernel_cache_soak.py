@@ -859,6 +859,18 @@ def build_deltas(off: dict[str, Any], on: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Fix-round-7 NIT-2 (refuter-A): the maximum nesting depth `find_nonfinite`
+#: walks before refusing the report as too deeply nested. A legitimately
+#: produced soak-report nests ~5 levels; the bound exists solely so a
+#: hostile/corrupt deep report reads the NAMED structural rc 2 instead of a
+#: raw ``RecursionError`` traceback at rc 1 (the judged-FAIL code).
+MAX_REPORT_DEPTH: Final[int] = 1000
+
+
+class ReportTooDeepError(ValueError):
+    """A verdict report nested beyond MAX_REPORT_DEPTH (fix-round-7 NIT-2)."""
+
+
 def find_nonfinite(node: object, path: str = "report") -> str | None:
     """Return the dotted path of the FIRST non-finite float in *node*, else None.
 
@@ -872,19 +884,34 @@ def find_nonfinite(node: object, path: str = "report") -> str | None:
     walls are monotonic-clock diffs, RSS figures are ints, and the wall ratio
     is division-guarded in :func:`build_deltas`). Bools are not floats; ints
     are always finite in Python — only ``float`` needs the probe.
+
+    Fix-round-7 NIT-2 (refuter-A): the walk is ITERATIVE (explicit stack —
+    never recursion-limited, the round-6 recursive descent crashed with a raw
+    ``RecursionError`` at ~depth 1000) AND depth-bounded: nesting beyond
+    ``MAX_REPORT_DEPTH`` raises :class:`ReportTooDeepError` for the caller's
+    named structural refusal. (``json.loads``'s own C-scanner ``RecursionError``
+    — which bites only at far deeper nesting — is caught in the read net.)
+    The stack pushes children in reverse so pop order preserves the recursive
+    version's document-order FIRST-match semantics.
     """
-    if isinstance(node, float) and not math.isfinite(node):
-        return path
-    if isinstance(node, dict):
-        for key, value in node.items():
-            found = find_nonfinite(value, f"{path}.{key}")
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            found = find_nonfinite(value, f"{path}[{index}]")
-            if found is not None:
-                return found
+    stack: list[tuple[object, str, int]] = [(node, path, 0)]
+    while stack:
+        current, current_path, depth = stack.pop()
+        if depth > MAX_REPORT_DEPTH:
+            # The offending path is itself O(depth) long — quote a bounded
+            # prefix so the refusal stays one readable line.
+            shown = current_path if len(current_path) <= 120 else current_path[:120] + "…"
+            raise ReportTooDeepError(
+                f"report too deeply nested at {shown} (depth > {MAX_REPORT_DEPTH})"
+            )
+        if isinstance(current, float) and not math.isfinite(current):
+            return current_path
+        if isinstance(current, dict):
+            for key, value in reversed(list(current.items())):
+                stack.append((value, f"{current_path}.{key}", depth + 1))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current[index], f"{current_path}[{index}]", depth + 1))
     return None
 
 
@@ -1967,8 +1994,14 @@ def cmd_verdict(args: argparse.Namespace) -> int:
     path = Path(args.report)
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return _fail_structural(f"cannot read report {path}: {exc}")
+    except (OSError, RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Fix-round-7 NITs (refuter-A): the report-LOAD boundary joins the
+        # named structural rc 2 tier — invalid-UTF-8 report bytes raise
+        # UnicodeDecodeError INSIDE read_text (a ValueError subclass the old
+        # net missed), and json.loads's C scanner raises RecursionError on an
+        # absurdly deep report; both previously escaped with a raw traceback
+        # at rc 1 (the judged-FAIL code, conflated with a real regression).
+        return _fail_structural(f"cannot read report {path}: {exc!r}")
     if not isinstance(report, dict):
         # Fix-round-5 companion to the AttributeError net below: a top-level
         # JSON array/scalar would crash `.get` before the shape net.
@@ -1978,7 +2011,13 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             f"not a {REPORT_KIND} v{REPORT_SCHEMA_VERSION} report: "
             f"kind={report.get('kind')!r} schema={report.get('schema_version')!r}"
         )
-    nonfinite = find_nonfinite(report)
+    try:
+        nonfinite = find_nonfinite(report)
+    except ReportTooDeepError as exc:
+        # Fix-round-7 NIT-2 (refuter-A): the round-6 recursive walk crashed
+        # with a raw RecursionError at rc 1 on a valid-but-deep report; the
+        # iterative walk's depth bound refuses it NAMED at rc 2 instead.
+        return _fail_structural(f"report shape invalid: {exc}")
     if nonfinite is not None:
         # Fix-round-6 NIT (refuter-A): json.loads accepts Infinity/NaN, and a
         # keys_fan_out of Infinity crashed int() with a raw OverflowError

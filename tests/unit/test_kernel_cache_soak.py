@@ -1341,6 +1341,26 @@ class TestFindNonfinite:
         # None and finite floats all pass.
         assert SOAK.find_nonfinite({"a": [1, 2.5, "x", None, True], "b": {"c": 0.0}}) is None
 
+    def test_depth_bound_named_refusal_and_iterative_walk(self) -> None:
+        # Fix-round-7 NIT-2 (refuter-A): the round-6 recursive walk crashed
+        # with a raw RecursionError at ~depth 1000. The iterative walk handles
+        # ANY in-bound depth (incl. depths a recursive walk could not) and
+        # refuses beyond MAX_REPORT_DEPTH with the NAMED ReportTooDeepError.
+        def nested(depth: int) -> object:
+            node: object = 1.5
+            for _ in range(depth):
+                node = [node]
+            return node
+
+        # Exactly AT the bound: walked cleanly (finite leaf → None) — a
+        # recursive implementation would blow the interpreter limit here.
+        assert SOAK.find_nonfinite(nested(SOAK.MAX_REPORT_DEPTH)) is None
+        # A non-finite leaf at legitimate depth is still found + path-named.
+        assert SOAK.find_nonfinite([[float("inf")]]) == "report[0][0]"
+        # ONE past the bound: the named refusal, never a RecursionError.
+        with pytest.raises(SOAK.ReportTooDeepError, match="too deeply nested"):
+            SOAK.find_nonfinite(nested(SOAK.MAX_REPORT_DEPTH + 1))
+
 
 class TestVerdictSubcommand:
     def _write_report(self, tmp_path: Path, **mutations: Any) -> Path:
@@ -1454,6 +1474,38 @@ class TestVerdictSubcommand:
         proc = self._run("verdict", "--report", str(path))
         assert proc.returncode == 2
         assert "non-finite number at report.deltas.wall_ratio_on_over_off" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_invalid_utf8_report_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-7 NIT-1 (refuter-A): invalid-UTF-8 report bytes raise
+        # UnicodeDecodeError INSIDE read_text — a ValueError subclass the old
+        # (OSError, json.JSONDecodeError) net missed — escaping with a raw
+        # traceback at rc 1 (the judged-FAIL code). Now the named structural
+        # rc 2 at the report-LOAD boundary.
+        path = tmp_path / "bad-utf8.json"
+        path.write_bytes(b'{"kind": "\xff\xfe invalid utf8"}')
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "cannot read report" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_deeply_nested_report_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-7 NIT-2 (refuter-A): a VALID-but-deep report (kind/schema
+        # intact, depth > MAX_REPORT_DEPTH) crashed the round-6 recursive
+        # find_nonfinite with a raw RecursionError traceback at rc 1. The
+        # iterative depth-bounded walk refuses it NAMED at rc 2. Depth 1200
+        # is built as raw text — json.dumps would itself recurse.
+        depth = SOAK.MAX_REPORT_DEPTH + 200
+        deep_array = "[" * depth + "]" * depth
+        path = tmp_path / "deep.json"
+        path.write_text(
+            f'{{"kind": "{SOAK.REPORT_KIND}", '
+            f'"schema_version": {SOAK.REPORT_SCHEMA_VERSION}, "extra": {deep_array}}}',
+            encoding="utf-8",
+        )
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "too deeply nested" in proc.stderr
         assert "Traceback" not in proc.stderr
 
     def test_usage_error(self) -> None:
