@@ -15,11 +15,13 @@ heal seam's real-wheel verification in the endgame shape:
    while the W-2..W-5 Python-parity differential was still green (the
    pre-delete parity record); the crate must keep matching it forever,
    by name, per case.
-3. **The isolated-error posture** — the two formerly-degrading envelope
-   shapes (a beyond-2^53-paisa price; a 17-column Greeks-overlay dup)
-   are now PER-FINDING ISOLATED errors: counted, byte-untouched, the
-   batch CONTINUES, the finding stays loud on re-scan. (The overlay-dup
-   heal is a ruled functional narrowing recorded for W-6b.)
+3. **The preserve arm + the isolated-error posture** — since W-6b the
+   17-column Greeks-overlay dup and the finite big-price dup HEAL through
+   the crate's frame-level verbatim keep-first arm (value-oracle-pinned
+   in-test); every remaining out-of-envelope shape (non-finite prices,
+   drifted schemas) is a PER-FINDING ISOLATED error: counted,
+   byte-untouched, the batch CONTINUES, the finding stays loud on
+   re-scan.
 4. **Shell-policy pins** — mass-rail refusal + observe mode short-circuit
    BEFORE the seam; crash-safe leg ordering (copy-forward before
    removal); catalog rotation/deletion; the content-token twin's
@@ -325,13 +327,23 @@ class TestHealEndgame:
 
 
 class TestEnvelopeIsolatedErrors:
-    """The W-6a isolation posture — batches OUTSIDE the crate's byte-parity
-    envelope are PER-FINDING ISOLATED errors: counted, byte-untouched, the
-    batch CONTINUES (there is no Python core to degrade to).
+    """The out-of-envelope posture, W-6b shape.
 
-    The 17-column overlay-dup heal the deleted Python core performed is a
-    RULED functional narrowing — recorded as the W-6b crate-widening
-    residual; until then the finding stays LOUD every sweep, never silent.
+    Since W-6b the two formerly-refused single-file dedup shapes — the
+    17-column Greeks-overlay dup (the production-reachable shape Greeks
+    enrichment writes) and the finite beyond-2^53-paisa big-price dup —
+    HEAL through the crate's frame-level PRESERVE arm: keep-FIRST unique
+    on ``timestamp``, every kept row's stored values preserved VERBATIM
+    (strictly row-removing — never value-editing), rendered through the
+    PR-1 bars profile. The value-level oracle is computed IN-TEST with
+    polars keep-first (the deleted Python core's `_read_existing_bars`
+    dict law, confirmed against ``git show 9aa3db8`` — never resurrected
+    in-repo).
+
+    Shapes still OUTSIDE every native arm (non-finite prices, drifted
+    schemas, law-violating rows) stay PER-FINDING ISOLATED errors:
+    counted, byte-untouched, the batch CONTINUES, the finding stays loud
+    on re-scan (there is no Python core to degrade to).
     """
 
     @staticmethod
@@ -383,15 +395,114 @@ class TestEnvelopeIsolatedErrors:
             [_ts(3), _ts(2, month=7, day=1)],
         )
 
+    @staticmethod
+    def _build_nan_price_dup(lake: Path) -> None:
+        # A dup file with a NON-finite price — corrupt values are never
+        # silently blessed, so the preserve arm refuses (isolated error).
+        from tests.fakes.poison_corpus import _dest, _plant_raw, _ts
+
+        _plant_raw(_dest(lake), [_ts(1), _ts(1), _ts(2)], price=float("nan"))
+
+    @staticmethod
+    def _build_drifted_overlay_dup(lake: Path) -> None:
+        # 17 columns but a DRIFTED overlay name — alien, refused.
+        import pyarrow.parquet as pq
+
+        TestEnvelopeIsolatedErrors._build_overlay_dup(lake)
+        from tests.fakes.poison_corpus import _dest
+
+        dest = _dest(lake, segment="FNO", symbol="NSE-NIFTY-26Jun25-25000-CE")
+        table = pq.read_table(dest)
+        table = table.rename_columns(
+            ["implied_vol" if name == "iv" else name for name in table.column_names]
+        )
+        pq.write_table(table, dest)
+
     @pytest.mark.parametrize(
-        ("name", "builder", "envelope_token"),
+        ("name", "builder", "dest_kwargs"),
         [
-            ("big_price_dup", "_build_big_price_dup", "2dp snap envelope"),
-            ("overlay_dup", "_build_overlay_dup", "schema not canonical"),
+            ("big_price_dup", "_build_big_price_dup", {}),
+            (
+                "overlay_dup",
+                "_build_overlay_dup",
+                {"segment": "FNO", "symbol": "NSE-NIFTY-26Jun25-25000-CE"},
+            ),
+        ],
+    )
+    def test_preserve_shape_heals_verbatim_keep_first(
+        self, tmp_path: Path, name: str, builder: str, dest_kwargs: dict[str, Any]
+    ) -> None:
+        """W-6b (conscious pin FLIP — this shape was an isolated error until
+        the crate widened): the preserve-class dup HEALS — keep-first on
+        ``timestamp`` with every column's stored values verbatim, the
+        forensic before-image quarantined, the rewritten file readable and
+        value-equal to the in-test polars keep-first oracle."""
+        import polars as pl
+        from polars.testing import assert_frame_equal
+
+        from tests.fakes.poison_corpus import _dest
+
+        case = PoisonCase(name, getattr(self, builder), frozenset({"IntraFileDup"}))
+        pre = tmp_path / "pre"
+        pre.mkdir()
+        case.build(pre)
+        rel = _dest(pre, **dest_kwargs).relative_to(pre)
+        planted_bytes = (pre / rel).read_bytes()
+        # The value-level oracle: the deleted Python core's keep-FIRST dict
+        # law (first physical row wins) + the ascending-timestamp render.
+        planted = pl.read_parquet(pre / rel)
+        expected = planted.unique(subset=["timestamp"], keep="first", maintain_order=True).sort(
+            "timestamp"
+        )
+        assert expected.height < planted.height  # the plant genuinely dups
+
+        build_a = _run_build(tmp_path, case, label="a")
+        build_b = _run_build(tmp_path, case, label="b")
+        _assert_builds_equal(build_a, build_b)
+        assert build_b.raw_report.healed == 1
+        assert build_b.raw_report.errors == 0
+        assert build_b.rescan_types == ()
+        # The roundtrip read + the value/dtype-exact keep-first oracle.
+        healed = pl.read_parquet(tmp_path / "b" / rel)
+        assert_frame_equal(healed, expected)
+        # The forensic before-image is the EXACT planted bytes.
+        quarantined = [
+            p
+            for p in (tmp_path / "b").rglob("*.parquet")
+            if ".quarantine" in p.parts and p.name == rel.name
+        ]
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == planted_bytes
+        # The audit chain carries the dedup line.
+        assert "LAKE_HEAL_DEDUP" in [line[0] for line in build_b.audit]
+
+    @pytest.mark.parametrize(
+        ("name", "builder", "envelope_token", "rescan"),
+        [
+            # NaN prices ALSO carry the observe-only PriceSanityRows finding
+            # (the #1897 `~is_finite` arm) — filtered by the heal, re-found
+            # on the re-scan beside the still-unhealed dup.
+            (
+                "nan_price_dup",
+                "_build_nan_price_dup",
+                "not finite",
+                ("IntraFileDup", "PriceSanityRows"),
+            ),
+            (
+                "drifted_overlay_dup",
+                "_build_drifted_overlay_dup",
+                "schema not canonical",
+                ("IntraFileDup",),
+            ),
         ],
     )
     def test_envelope_shape_is_an_isolated_error(
-        self, tmp_path: Path, name: str, builder: str, envelope_token: str
+        self,
+        tmp_path: Path,
+        name: str,
+        builder: str,
+        envelope_token: str,
+        rescan: tuple[str, ...],
     ) -> None:
         case = PoisonCase(name, getattr(self, builder), frozenset({"IntraFileDup"}))
         pre = tmp_path / "pre"
@@ -405,7 +516,7 @@ class TestEnvelopeIsolatedErrors:
         assert build_b.raw_report.errors == 1
         # Byte-untouched + the finding persists loudly on re-scan.
         assert build_b.tree == before
-        assert build_b.rescan_types == ("IntraFileDup",)
+        assert build_b.rescan_types == rescan
         errs = [e for e in build_b.logs if e.get("event") == "lake_heal.partition_error"]
         assert len(errs) == 1 and envelope_token in str(errs[0].get("error"))
 

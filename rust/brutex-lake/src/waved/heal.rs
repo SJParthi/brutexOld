@@ -23,26 +23,39 @@
 //! (options reassignment through the canonical-sibling keep-first merge) and
 //! `LegacyKeyDrift` (the drifted-dir keep-first merge + quarantine move).
 //! Plus the `lake_content_token` walk (§C-5). EVERY production finding kind
-//! now engages; a batch containing any file shape outside the byte-parity
-//! envelope below — or, for the multi-file kinds, any shape whose Python
-//! heal would produce an exception-MESSAGE-bearing isolated error (an
-//! unreadable/symlinked source or destination, a schema-incompatible merge
-//! sibling, an int()-ambiguous drifted dir name — the D-22 posture) —
-//! DEGRADES WHOLE-BATCH, PRE-MUTATION: [`heal_batch_core`] returns a
-//! `{"degrade": reason}` verdict without touching a single byte and the
-//! facade runs the verbatim Python core (§B2's sanctioned pre-mutation
-//! degrade arm).
+//! now engages. Since the W-6a endgame there is NO whole-batch degrade and
+//! no Python core to degrade to: a finding on a file shape outside the
+//! native envelope below — or, for the multi-file kinds, any shape whose
+//! deleted Python heal would have produced an exception-MESSAGE-bearing
+//! isolated error (an unreadable/symlinked source or destination, a
+//! schema-incompatible merge sibling, an int()-ambiguous drifted dir name —
+//! the D-22 posture) — is a PER-FINDING ISOLATED ERROR: counted, logged,
+//! byte-untouched, the batch CONTINUES (see [`preflight_one`]).
 //!
-//! ## The byte-parity envelope (preflight-enforced, read-only)
+//! ## The native heal envelope (preflight-enforced, read-only)
 //!
-//! * bars files: EXACTLY the canonical 7-column schema in canonical order
-//!   (`timestamp[us, UTC] · open/high/low/close f64 · volume i64 ·
-//!   open_interest i64?`), every timestamp inside Python's `datetime` range,
-//!   every price 2dp-snappable without the Python per-row fallback
-//!   (`|paisa| < 2^53`), and every snapped row satisfying the `CandleBar`
-//!   validation laws (`_validate_price_bar`) — anything else would route the
-//!   Python arm through the Greeks-overlay / per-row-Decimal / corrupt-bar
-//!   classification branches this slice does not reproduce, so it degrades.
+//! * bars files, single-file DEDUP ([`heal_bars_dup`]): the canonical
+//!   7-column schema heals through the byte-locked `BarRow` render (every
+//!   timestamp inside Python's `datetime` range, every price 2dp-snappable
+//!   with `|paisa| < 2^53`, every snapped row satisfying the `CandleBar`
+//!   validation laws). Since W-6b two further shapes heal through the
+//!   frame-level PRESERVE arm ([`Envelope::Preserve`] —
+//!   `heal_bars_dup_preserve`): the EXACT 17-column Greeks-overlay schema
+//!   the enriched F&O writer mints ([`BARS_OVERLAY_COLUMNS`] — the
+//!   production-reachable shape Greeks enrichment writes) and a canonical
+//!   7-column file whose only envelope violation is FINITE prices beyond
+//!   the 2dp snap band (`|paisa| >= 2^53`). The preserve arm is STRICTLY
+//!   row-removing — keep-FIRST unique on `timestamp`, every kept row's
+//!   stored values VERBATIM (never value-editing, the #1594 law) — and
+//!   renders through the same PR-1 bars render profile. Non-finite prices,
+//!   nulls in required columns, law-violating rows, out-of-range
+//!   timestamps and every OTHER schema stay per-finding isolated errors.
+//! * bars files, MULTI-FILE heals (`heal_multi.rs`): the canonical
+//!   7-column snap envelope ONLY — a preserve-class file (overlay /
+//!   big-price) in a foreign/drift reassignment is a per-finding isolated
+//!   error ([`PRESERVE_MULTI_REASON`] — the recorded W-6b residual; the
+//!   merge legs rebuild values through `BarRow`, which cannot preserve
+//!   overlay columns).
 //! * options files: `side` dtype `String`, `timestamp` dtype `Datetime`
 //!   (any unit, aware or naive — naive routes as-if-UTC, the `utc_aware`
 //!   law) with in-`datetime`-range values. Row payloads move VERBATIM
@@ -92,6 +105,38 @@ const BARS_COLUMNS: [&str; 7] = [
     "volume",
     "open_interest",
 ];
+
+/// The Greeks-ENRICHED bars schema (`ParquetWriter._render_bytes`'s overlay
+/// branch — the 7 base columns + `GREEKS_OVERLAY_FIELDS` in canonical order).
+/// W-6b: files carrying EXACTLY this schema heal through the frame-level
+/// preserve arm ([`Envelope::Preserve`]) instead of refusing.
+const BARS_OVERLAY_COLUMNS: [&str; 17] = [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "open_interest",
+    "iv",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "spot_at_bar",
+    "t_years_used",
+    "rate_used",
+    "greeks_provenance_id",
+];
+
+/// The multi-file heals' isolated-error reason for a preserve-class bars
+/// file (W-6b): only the SINGLE-FILE dedup arm preserves overlay/big-price
+/// rows — the foreign/drift merge legs rebuild values through [`BarRow`]
+/// and would drop overlay columns, so they refuse loudly instead.
+pub(super) const PRESERVE_MULTI_REASON: &str = "preserve-class bars file (Greeks overlay schema \
+     or beyond-2^53-paisa prices) — only the single-file dedup heal preserves it; \
+     the multi-file reassignment/merge heals refuse rather than drop columns";
 
 // ── error plumbing ───────────────────────────────────────────────────────────
 
@@ -482,10 +527,33 @@ pub(super) struct BarRow {
     pub oi: Option<i64>,
 }
 
-/// Why a file is OUTSIDE the W-2 byte-parity envelope (whole-batch degrade).
+/// A bars file's native-heal envelope verdict.
 pub(super) enum Envelope {
+    /// The canonical 7-column snap envelope — every heal arm engages.
     Ok,
+    /// W-6b: a PRESERVE-class file — the exact 17-column Greeks-overlay
+    /// schema, or a canonical file whose only violation is finite prices
+    /// beyond the 2dp snap band. The single-file dedup heals it via the
+    /// verbatim frame-level arm; the multi-file heals refuse
+    /// ([`PRESERVE_MULTI_REASON`]).
+    Preserve,
+    /// Outside every native arm — a per-finding isolated error (the W-6a
+    /// endgame posture; there is no Python core to degrade to).
     Degrade(String),
+}
+
+/// The pure schema-mode classifier (W-6b): `Some(false)` = the canonical
+/// 7-column schema, `Some(true)` = the EXACT 17-column Greeks-overlay
+/// schema (the frame-level preserve arm), `None` = alien (isolated error).
+/// Name ORDER is part of the law — both writers render in canonical order.
+fn bars_schema_mode(names: &[String]) -> Option<bool> {
+    if names == BARS_COLUMNS {
+        Some(false)
+    } else if names == BARS_OVERLAY_COLUMNS {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// Read + decode one canonical bars partition file: raw bytes, sha256, and
@@ -509,14 +577,14 @@ pub(super) fn read_bars_file(
         .iter()
         .map(|n| n.to_string())
         .collect();
-    if names != BARS_COLUMNS {
+    let Some(overlay) = bars_schema_mode(&names) else {
         return Ok((
             bytes,
             hash,
             Vec::new(),
             Envelope::Degrade(format!("bars schema not canonical: {names:?}")),
         ));
-    }
+    };
     let ts = df.column("timestamp")?;
     let DataType::Datetime(unit, tz) = ts.dtype() else {
         return Ok((
@@ -569,6 +637,12 @@ pub(super) fn read_bars_file(
             Envelope::Degrade(format!("bars timestamp dtype {:?} not us/UTC", ts.dtype())),
         ));
     }
+    if overlay {
+        // W-6b: the overlay schema never parses into `BarRow`s — the heal
+        // preserves the stored rows verbatim (frame-level keep-first).
+        let verdict = validate_preserve_rows(&df);
+        return Ok((bytes, hash, Vec::new(), verdict));
+    }
     let ts_phys_col = ts.to_physical_repr();
     let ts_phys = ts_phys_col.i64()?;
     let opens = df.column("open")?.f64()?.clone();
@@ -610,11 +684,20 @@ pub(super) fn read_bars_file(
             Some((_, close)),
         ] = snapped
         else {
+            // W-6b: a FINITE price beyond the 2dp snap band (>= 2^53 paisa)
+            // routes the whole file to the frame-level preserve arm — the
+            // stored values are kept verbatim, so no snap is needed. A
+            // NON-finite price stays an isolated error (corrupt values are
+            // never silently blessed — the loud posture).
+            if [op, hi, lo, cl].iter().all(|v| v.is_finite()) {
+                let verdict = validate_preserve_rows(&df);
+                return Ok((bytes, hash, Vec::new(), verdict));
+            }
             return Ok((
                 bytes,
                 hash,
                 Vec::new(),
-                Envelope::Degrade("bars price outside the 2dp snap envelope".to_string()),
+                Envelope::Degrade("bars price not finite".to_string()),
             ));
         };
         let oi = ois.get(idx);
@@ -647,6 +730,73 @@ pub(super) fn read_bars_file(
     Ok((bytes, hash, rows, Envelope::Ok))
 }
 
+/// W-6b: validate a PRESERVE-candidate frame's base columns row by row.
+/// The caller has already verified the schema (canonical 7-col or the exact
+/// 17-col overlay) and the `timestamp` dtype (`Datetime[us, UTC]`). Rows
+/// are preserved VERBATIM by the heal, so no snap is applied — but corrupt
+/// VALUES (nulls in required columns, non-finite prices, law-violating
+/// rows, out-of-range timestamps) still refuse as isolated errors (the
+/// loud posture; the price-bar laws run on the RAW stored values). The
+/// overlay columns themselves are nullable by design and never validated.
+fn validate_preserve_rows(df: &DataFrame) -> Envelope {
+    macro_rules! base_col {
+        ($name:literal, $cast:ident) => {
+            match df.column($name).and_then(|c| Ok(c.$cast()?.clone())) {
+                Ok(col) => col,
+                Err(err) => {
+                    return Envelope::Degrade(format!(
+                        "bars base column {} dtype outside the envelope: {err}",
+                        $name
+                    ));
+                }
+            }
+        };
+    }
+    let ts_phys_col = match df.column("timestamp") {
+        Ok(col) => col.to_physical_repr(),
+        Err(err) => return Envelope::Degrade(format!("bars timestamp column missing: {err}")),
+    };
+    let Ok(ts_phys) = ts_phys_col.i64() else {
+        return Envelope::Degrade("bars timestamp physical repr not i64".to_string());
+    };
+    let opens = base_col!("open", f64);
+    let highs = base_col!("high", f64);
+    let lows = base_col!("low", f64);
+    let closes = base_col!("close", f64);
+    let volumes = base_col!("volume", i64);
+    let ois = base_col!("open_interest", i64);
+    for idx in 0..df.height() {
+        let (Some(ts_us), Some(op), Some(hi), Some(lo), Some(cl), Some(vol)) = (
+            ts_phys.get(idx),
+            opens.get(idx),
+            highs.get(idx),
+            lows.get(idx),
+            closes.get(idx),
+            volumes.get(idx),
+        ) else {
+            return Envelope::Degrade("bars row carries a null in a required column".to_string());
+        };
+        if !(DATETIME_MIN_US..=DATETIME_MAX_US).contains(&ts_us) {
+            return Envelope::Degrade("bars timestamp outside the datetime range".to_string());
+        }
+        if ![op, hi, lo, cl].iter().all(|v| v.is_finite()) {
+            return Envelope::Degrade("bars price not finite".to_string());
+        }
+        let oi = ois.get(idx);
+        if vol < 0
+            || oi.is_some_and(|v| v < 0)
+            || hi < lo
+            || !(lo <= op && op <= hi)
+            || !(lo <= cl && cl <= hi)
+        {
+            return Envelope::Degrade(
+                "bars row violates the CandleBar validation laws".to_string(),
+            );
+        }
+    }
+    Envelope::Preserve
+}
+
 /// Keep-FIRST collapse by timestamp, preserving first-physical order — the
 /// `_read_existing_bars` dict law.
 pub(super) fn collapse_keep_first(rows: Vec<BarRow>) -> Vec<BarRow> {
@@ -661,8 +811,9 @@ pub(super) fn collapse_keep_first(rows: Vec<BarRow>) -> Vec<BarRow> {
 }
 
 /// Render sorted bars rows through the byte-locked bars render core — the
-/// `_render_bytes` twin (7-column frame; heal rows are never overlay-bearing
-/// by the preflight envelope).
+/// `_render_bytes` twin (7-column frame; overlay-bearing files never reach
+/// this — the single-file dedup routes them through the frame-level
+/// preserve arm, and the multi-file heals refuse them upfront, W-6b).
 pub(super) fn render_bars(rows: &[BarRow]) -> Result<Vec<u8>, HealErr> {
     let ts: Vec<i64> = rows.iter().map(|r| r.ts_us).collect();
     let timestamp = Series::new("timestamp".into(), ts)
@@ -1183,12 +1334,22 @@ fn heal_bars_dup(
     }
     let _flock = acquire_partition_flock(&ctx.lake_root, dest, sink)?;
     let (bytes, hash_before, rows, envelope) = read_bars_file(dest)?;
-    if let Envelope::Degrade(reason) = envelope {
-        // Defensive: preflight verified the envelope; a mid-batch swap lands
-        // here as an isolated error (the loud posture, never a guess).
-        return Err(HealErr::Isolated(format!(
-            "bars envelope violated mid-batch: {reason}"
-        )));
+    match envelope {
+        Envelope::Ok => {}
+        // W-6b: the frame-level verbatim arm (17-col Greeks overlay /
+        // finite big-price files) — keep-first on `timestamp`, all columns
+        // preserved, rendered through the same PR-1 bars profile.
+        Envelope::Preserve => {
+            return heal_bars_dup_preserve(ctx, finding, sink, &bytes, &hash_before);
+        }
+        Envelope::Degrade(reason) => {
+            // Defensive: preflight verified the envelope; a mid-batch swap
+            // lands here as an isolated error (the loud posture, never a
+            // guess).
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {reason}"
+            )));
+        }
     }
     let physical = rows.len() as i64;
     let unique = collapse_keep_first(rows);
@@ -1218,6 +1379,117 @@ fn heal_bars_dup(
     let rendered = render_bars(&sorted)?;
     atomic_write_bytes(dest, &rendered)?;
     let hash_after = sha256_hex(&rendered);
+    finish_bars_dedup(
+        ctx,
+        finding,
+        sink,
+        dest,
+        &quarantine,
+        &hash_before,
+        &hash_after,
+        stored_unique,
+        dropped_duplicates,
+        sorted.first().map(|r| r.ts_us),
+        sorted.last().map(|r| r.ts_us),
+    )
+}
+
+/// W-6b: the frame-level PRESERVE dedup arm ([`Envelope::Preserve`]) — the
+/// exact 17-column Greeks-overlay schema Greeks enrichment writes, or a
+/// canonical file whose only violation is finite beyond-2^53-paisa prices.
+/// Keep-FIRST unique on `timestamp` (first physical row wins — the
+/// `_read_existing_bars` dict law), EVERY column preserved with its stored
+/// values VERBATIM (strictly row-removing, never value-editing — the #1594
+/// law), sorted by timestamp and rendered through the SAME PR-1 bars render
+/// profile the canonical arm uses.
+fn heal_bars_dup_preserve(
+    ctx: &mut BatchCtx,
+    finding: &Finding,
+    sink: &EventSink<'_, '_>,
+    bytes: &[u8],
+    hash_before: &str,
+) -> Result<bool, HealErr> {
+    let dest = &finding.path;
+    let df = ParquetReader::new(std::io::Cursor::new(bytes))
+        .finish()
+        .map_err(|err| HealErr::Isolated(format!("corrupt existing partition: {err}")))?;
+    let physical = df.height() as i64;
+    let subset: Vec<String> = vec!["timestamp".into()];
+    let deduped = df
+        .unique_stable(Some(&subset), UniqueKeepStrategy::First, None)
+        .map_err(HealErr::from)?
+        .sort(["timestamp"], SortMultipleOptions::default())
+        .map_err(HealErr::from)?;
+    let kept = deduped.height() as i64;
+    let dropped = physical - kept;
+    if dropped > 0 {
+        sink.log(
+            "lake.partition.duplicate_collapsed",
+            &[
+                ("partition", obj(sink.py, dest.to_string_lossy().as_ref())),
+                ("physical_rows", obj(sink.py, physical)),
+                ("unique_timestamps", obj(sink.py, kept)),
+                ("collapsed", obj(sink.py, dropped)),
+            ],
+        )?;
+    }
+    if dropped == 0 {
+        return Ok(false);
+    }
+    let quarantine = ctx.quarantine_path(dest)?;
+    if let Some(parent) = quarantine.parent() {
+        std::fs::create_dir_all(parent).map_err(classify_io)?;
+    }
+    atomic_write_bytes(&quarantine, bytes)?;
+    let mut render_frame = deduped.clone();
+    let ipc = frame_to_ipc(&mut render_frame).map_err(HealErr::from)?;
+    let rendered = crate::render_parquet_from_ipc_impl(&ipc).map_err(HealErr::from)?;
+    atomic_write_bytes(dest, &rendered)?;
+    let hash_after = sha256_hex(&rendered);
+    // Stats bounds from the sorted frame (ts is envelope-checked us/UTC).
+    let ts_phys_col = deduped
+        .column("timestamp")
+        .map_err(HealErr::from)?
+        .to_physical_repr();
+    let ts_phys = ts_phys_col.i64().map_err(HealErr::from)?;
+    let first_us = ts_phys.get(0);
+    let last_us = if deduped.height() == 0 {
+        None
+    } else {
+        ts_phys.get(deduped.height() - 1)
+    };
+    finish_bars_dedup(
+        ctx,
+        finding,
+        sink,
+        dest,
+        &quarantine,
+        hash_before,
+        &hash_after,
+        kept,
+        dropped,
+        first_us,
+        last_us,
+    )
+}
+
+/// The shared bars-dedup completion tail (both arms): dedup logs, stats
+/// re-stamp, forensic action, audit line, catalog rotation + the derived-TF
+/// touch — all replayed shell-side through the ONE `on_event` channel.
+#[allow(clippy::too_many_arguments)]
+fn finish_bars_dedup(
+    ctx: &mut BatchCtx,
+    finding: &Finding,
+    sink: &EventSink<'_, '_>,
+    dest: &Path,
+    quarantine: &Path,
+    hash_before: &str,
+    hash_after: &str,
+    stored_unique: i64,
+    dropped_duplicates: i64,
+    first_us: Option<i64>,
+    last_us: Option<i64>,
+) -> Result<bool, HealErr> {
     sink.log(
         "lake.partition.dedup_healed",
         &[
@@ -1230,9 +1502,9 @@ fn heal_bars_dup(
     let stats = sink.dict();
     stats.set_item("path", dest.to_string_lossy().as_ref())?;
     stats.set_item("rows", stored_unique)?;
-    stats.set_item("first_ts_us", sorted.first().map(|r| r.ts_us))?;
-    stats.set_item("last_ts_us", sorted.last().map(|r| r.ts_us))?;
-    stats.set_item("raw_hash", hash_after.as_str())?;
+    stats.set_item("first_ts_us", first_us)?;
+    stats.set_item("last_ts_us", last_us)?;
+    stats.set_item("raw_hash", hash_after)?;
     sink.emit("bars_stats_record", &stats)?;
     ctx.quarantined_files += 1;
     let partition = format!(
@@ -1263,16 +1535,16 @@ fn heal_bars_dup(
         dropped_duplicates,
         0,
         0,
-        Some(&hash_before),
-        Some(&hash_after),
+        Some(hash_before),
+        Some(hash_after),
         Some(&quarantine_str),
     )?;
     let audit_payload = sink.dict();
     audit_payload.set_item("kept", stored_unique)?;
     audit_payload.set_item("dropped_duplicates", dropped_duplicates)?;
     audit_payload.set_item("dropped_removed", 0)?;
-    audit_payload.set_item("raw_hash_before", hash_before.as_str())?;
-    audit_payload.set_item("raw_hash_after", hash_after.as_str())?;
+    audit_payload.set_item("raw_hash_before", hash_before)?;
+    audit_payload.set_item("raw_hash_after", hash_after)?;
     audit_payload.set_item("quarantine_path", quarantine_str.as_str())?;
     sink.audit("LAKE_HEAL_DEDUP", &partition, &audit_payload)?;
     // Catalog rotation (Golden Rule #4) — the shell upserts off this event.
@@ -1283,10 +1555,10 @@ fn heal_bars_dup(
     catalog.set_item("interval", finding.interval.as_str())?;
     catalog.set_item("year", finding.year)?;
     catalog.set_item("month", finding.month)?;
-    catalog.set_item("raw_hash", hash_after.as_str())?;
+    catalog.set_item("raw_hash", hash_after)?;
     catalog.set_item("row_count", stored_unique)?;
-    catalog.set_item("first_ts_us", sorted.first().map(|r| r.ts_us))?;
-    catalog.set_item("last_ts_us", sorted.last().map(|r| r.ts_us))?;
+    catalog.set_item("first_ts_us", first_us)?;
+    catalog.set_item("last_ts_us", last_us)?;
     sink.emit("catalog_upsert", &catalog)?;
     if finding.interval == "1minute" {
         ctx.touch(
@@ -1851,5 +2123,158 @@ mod tests {
         let ghost = dir.join("brutex-heal-no-such-dir/child.parquet");
         let resolved = realpath_nonstrict(&ghost);
         assert!(resolved.ends_with("brutex-heal-no-such-dir/child.parquet"));
+    }
+
+    // ── W-6b: the preserve-arm envelope classification ───────────────────────
+    //
+    // `read_bars_file` itself cannot link in the no-libpython cargo test
+    // binary (`HealErr` carries a `PyErr` — the ScanFail law), so the cargo
+    // pins live on the PURE pieces: `bars_schema_mode` (the schema dispatch)
+    // and `validate_preserve_rows` (the preserve-arm row laws). The
+    // end-to-end routing + heal gate is the real-wheel Python differential
+    // (`tests/integration/test_waved_heal_differential.py`).
+
+    /// 2024-06-03 04:01 UTC + 2024-06-03 04:02 UTC, epoch µs.
+    const T1_US: i64 = 1_717_387_260_000_000;
+    const T2_US: i64 = 1_717_387_320_000_000;
+
+    /// Build a bars frame (`timestamp[us, UTC]` + prices), optionally with
+    /// the ten Greeks-overlay columns appended in canonical order.
+    fn bars_df(ts_us: &[i64], price: f64, overlay: bool) -> DataFrame {
+        let dtype = DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC));
+        let ts = Series::new("timestamp".into(), ts_us.to_vec())
+            .cast(&dtype)
+            .unwrap();
+        let n = ts_us.len();
+        let prices: Vec<f64> = vec![price; n];
+        let mut cols: Vec<Column> = vec![
+            ts.into(),
+            Column::new("open".into(), prices.clone()),
+            Column::new("high".into(), prices.clone()),
+            Column::new("low".into(), prices.clone()),
+            Column::new("close".into(), prices),
+            Column::new("volume".into(), vec![10i64; n]),
+            Column::new("open_interest".into(), vec![5i64; n]),
+        ];
+        if overlay {
+            for name in &BARS_OVERLAY_COLUMNS[7..] {
+                if *name == "greeks_provenance_id" {
+                    let vals: Vec<Option<i32>> = (0..n).map(|i| Some(i as i32)).collect();
+                    cols.push(Column::new((*name).into(), vals));
+                } else {
+                    let vals: Vec<Option<f64>> = (0..n)
+                        .map(|i| if i == 0 { None } else { Some(0.5) })
+                        .collect();
+                    cols.push(Column::new((*name).into(), vals));
+                }
+            }
+        }
+        DataFrame::new_infer_height(cols).unwrap()
+    }
+
+    fn names_of(df: &DataFrame) -> Vec<String> {
+        df.get_column_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn schema_mode_classifies_canonical_overlay_and_alien() {
+        let canonical = bars_df(&[T1_US], 100.0, false);
+        assert_eq!(bars_schema_mode(&names_of(&canonical)), Some(false));
+        let overlay = bars_df(&[T1_US], 100.0, true);
+        assert_eq!(bars_schema_mode(&names_of(&overlay)), Some(true));
+        // A drifted overlay NAME is alien — refused, never guessed.
+        let mut drifted = names_of(&overlay);
+        drifted[7] = "implied_vol".to_string();
+        assert_eq!(bars_schema_mode(&drifted), None);
+        // Name ORDER is part of the law.
+        let mut reordered = names_of(&canonical);
+        reordered.swap(1, 2);
+        assert_eq!(bars_schema_mode(&reordered), None);
+    }
+
+    #[test]
+    fn preserve_rows_accept_overlay_and_big_price_frames() {
+        // Overlay frame (nullable overlay values ignored by the validator).
+        assert!(matches!(
+            validate_preserve_rows(&bars_df(&[T1_US, T1_US, T2_US], 100.25, true)),
+            Envelope::Preserve
+        ));
+        // Finite big-price frame (1e17 rupees -> 1e19 paisa >= 2^53).
+        assert!(matches!(
+            validate_preserve_rows(&bars_df(&[T1_US, T1_US], 1.0e17, false)),
+            Envelope::Preserve
+        ));
+    }
+
+    #[test]
+    fn preserve_rows_refuse_non_finite_prices() {
+        match validate_preserve_rows(&bars_df(&[T1_US, T1_US], f64::NAN, false)) {
+            Envelope::Degrade(reason) => assert!(reason.contains("not finite"), "{reason}"),
+            _ => panic!("expected Degrade"),
+        }
+    }
+
+    #[test]
+    fn preserve_rows_refuse_law_violations_on_raw_values() {
+        // high < low on the RAW stored values (the preserve arm never edits
+        // values, so corrupt values refuse loudly instead).
+        let mut df = bars_df(&[T1_US, T1_US], 100.0, true);
+        df.replace(
+            "high",
+            Series::new("high".into(), vec![99.0f64, 99.0]).into(),
+        )
+        .unwrap();
+        match validate_preserve_rows(&df) {
+            Envelope::Degrade(reason) => {
+                assert!(reason.contains("CandleBar validation laws"), "{reason}");
+            }
+            _ => panic!("expected Degrade"),
+        }
+    }
+
+    #[test]
+    fn preserve_rows_refuse_null_required_cells_and_oor_timestamps() {
+        // A null timestamp cell.
+        let dtype = DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC));
+        let ts = Series::new("timestamp".into(), vec![Some(T1_US), None])
+            .cast(&dtype)
+            .unwrap();
+        let mut df = bars_df(&[T1_US, T2_US], 100.0, true);
+        df.replace("timestamp", ts.into()).unwrap();
+        match validate_preserve_rows(&df) {
+            Envelope::Degrade(reason) => {
+                assert!(reason.contains("null in a required column"), "{reason}");
+            }
+            _ => panic!("expected Degrade"),
+        }
+        // An out-of-datetime-range stamp (2^62 µs — the #1919 class).
+        let oor = Series::new("timestamp".into(), vec![1i64 << 62, T2_US])
+            .cast(&dtype)
+            .unwrap();
+        let mut df2 = bars_df(&[T1_US, T2_US], 100.0, false);
+        df2.replace("timestamp", oor.into()).unwrap();
+        match validate_preserve_rows(&df2) {
+            Envelope::Degrade(reason) => {
+                assert!(reason.contains("outside the datetime range"), "{reason}");
+            }
+            _ => panic!("expected Degrade"),
+        }
+    }
+
+    #[test]
+    fn preserve_rows_refuse_wrong_base_column_dtypes() {
+        // Overlay NAMES with a String `open` — dtype outside the envelope.
+        let mut df = bars_df(&[T1_US, T2_US], 100.0, true);
+        df.replace("open", Series::new("open".into(), vec!["a", "b"]).into())
+            .unwrap();
+        match validate_preserve_rows(&df) {
+            Envelope::Degrade(reason) => {
+                assert!(reason.contains("dtype outside the envelope"), "{reason}");
+            }
+            _ => panic!("expected Degrade"),
+        }
     }
 }

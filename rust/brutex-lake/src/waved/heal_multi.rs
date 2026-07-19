@@ -57,9 +57,10 @@ use pyo3::prelude::*;
 
 use super::civil_from_days;
 use super::heal::{
-    BarRow, BatchCtx, Envelope, EventSink, Finding, HealErr, acquire_partition_flock,
-    assert_options_containment, atomic_write_bytes, classify_io, collapse_keep_first, obj,
-    push_action, quarantine_move, read_bars_file, render_bars, sha256_hex, to_us,
+    BarRow, BatchCtx, Envelope, EventSink, Finding, HealErr, PRESERVE_MULTI_REASON,
+    acquire_partition_flock, assert_options_containment, atomic_write_bytes, classify_io,
+    collapse_keep_first, obj, push_action, quarantine_move, read_bars_file, render_bars,
+    sha256_hex, to_us,
 };
 use super::read::frame_to_ipc;
 use super::scan::{IntParse, int_twin};
@@ -144,6 +145,12 @@ fn preflight_bars_dest(dest: &Path) -> Option<String> {
     }
     match read_bars_file(dest) {
         Ok((_, _, _, Envelope::Ok)) => None,
+        // W-6b: a preserve-class DESTINATION (overlay / big-price) refuses —
+        // the merge legs rebuild values through `BarRow` and would drop the
+        // overlay columns (the recorded residual; single-file dedup only).
+        Ok((_, _, _, Envelope::Preserve)) => {
+            Some(format!("bars_envelope: {}", PRESERVE_MULTI_REASON))
+        }
         Ok((_, _, _, Envelope::Degrade(reason))) => Some(format!("bars_envelope: {reason}")),
         // A naive-ts DESTINATION is NOT crate-owned (W-5 phase A): the
         // Python arm errors MID-copy-forward — after earlier months may
@@ -166,6 +173,10 @@ pub(super) fn preflight_bars_foreign(lake_root: &Path, finding: &Finding) -> Opt
     }
     let rows = match read_bars_file(&finding.path) {
         Ok((_, _, rows, Envelope::Ok)) => rows,
+        // W-6b: a preserve-class SOURCE refuses (see `preflight_bars_dest`).
+        Ok((_, _, _, Envelope::Preserve)) => {
+            return Some(format!("bars_envelope: {}", PRESERVE_MULTI_REASON));
+        }
         Ok((_, _, _, Envelope::Degrade(reason))) => {
             return Some(format!("bars_envelope: {reason}"));
         }
@@ -383,6 +394,12 @@ pub(super) fn preflight_drift(lake_root: &Path, finding: &Finding) -> Option<Str
             if MERGE_INTERVALS.contains(&interval.as_str()) {
                 let rows = match read_bars_file(&file) {
                     Ok((_, _, rows, Envelope::Ok)) => rows,
+                    // W-6b: a preserve-class LEGACY file refuses (see
+                    // `preflight_bars_dest` — the drift merge is `BarRow`-
+                    // rebuilt and cannot preserve overlay columns).
+                    Ok((_, _, _, Envelope::Preserve)) => {
+                        return Some(format!("bars_envelope: {}", PRESERVE_MULTI_REASON));
+                    }
                     Ok((_, _, _, Envelope::Degrade(reason))) => {
                         return Some(format!("bars_envelope: {reason}"));
                     }
@@ -520,10 +537,22 @@ pub(super) fn read_partition_bars_locked(
 ) -> Result<Vec<BarRow>, HealErr> {
     let _flock = acquire_partition_flock(&ctx.lake_root, dest, sink)?;
     let (_bytes, _hash, rows, envelope) = read_bars_file(dest)?;
-    if let Envelope::Degrade(reason) = envelope {
-        return Err(HealErr::Isolated(format!(
-            "bars envelope violated mid-batch: {reason}"
-        )));
+    match envelope {
+        Envelope::Ok => {}
+        // W-6b defensive: a preserve-class file slipping past the preflight
+        // (mid-batch swap) is the same isolated posture — `rows` would be
+        // EMPTY here, so silently continuing would fabricate an empty file.
+        Envelope::Preserve => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {}",
+                PRESERVE_MULTI_REASON
+            )));
+        }
+        Envelope::Degrade(reason) => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {reason}"
+            )));
+        }
     }
     let physical = rows.len() as i64;
     let collapsed = collapse_keep_first(rows);
@@ -606,10 +635,22 @@ fn merge_write_bars(
     batch: &[BarRow],
 ) -> Result<BarsWriteOutcome, HealErr> {
     let (existing_bytes, _existing_hash, rows, envelope) = read_bars_file(dest)?;
-    if let Envelope::Degrade(reason) = envelope {
-        return Err(HealErr::Isolated(format!(
-            "bars envelope violated mid-batch: {reason}"
-        )));
+    match envelope {
+        Envelope::Ok => {}
+        // W-6b defensive: a preserve-class file slipping past the preflight
+        // (mid-batch swap) is the same isolated posture — `rows` would be
+        // EMPTY here, so silently continuing would fabricate an empty file.
+        Envelope::Preserve => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {}",
+                PRESERVE_MULTI_REASON
+            )));
+        }
+        Envelope::Degrade(reason) => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {reason}"
+            )));
+        }
     }
     let physical = rows.len() as i64;
     let mut merged = collapse_keep_first(rows);
@@ -850,10 +891,22 @@ fn heal_partition_bars(
 ) -> Result<BarsHealOutcome, HealErr> {
     let _flock = acquire_partition_flock(&ctx.lake_root, dest, sink)?;
     let (existing_bytes, raw_hash_before, rows, envelope) = read_bars_file(dest)?;
-    if let Envelope::Degrade(reason) = envelope {
-        return Err(HealErr::Isolated(format!(
-            "bars envelope violated mid-batch: {reason}"
-        )));
+    match envelope {
+        Envelope::Ok => {}
+        // W-6b defensive: a preserve-class file slipping past the preflight
+        // (mid-batch swap) is the same isolated posture — `rows` would be
+        // EMPTY here, so silently continuing would fabricate an empty file.
+        Envelope::Preserve => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {}",
+                PRESERVE_MULTI_REASON
+            )));
+        }
+        Envelope::Degrade(reason) => {
+            return Err(HealErr::Isolated(format!(
+                "bars envelope violated mid-batch: {reason}"
+            )));
+        }
     }
     let physical = rows.len() as i64;
     let mut merged = collapse_keep_first(rows);
