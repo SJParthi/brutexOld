@@ -143,6 +143,14 @@ DEFAULT_TOP: Final[int] = 1000
 #: Default run-mode identity label stamped on the run hash — distinguishes
 #: an institutional launch from the retired light "A"-moded research runs.
 DEFAULT_MODE: Final[str] = "INSTITUTIONAL"
+#: The ONE-CLICK flow's own k default — merge-forward composition
+#: (DEC-SWEEP-APRIORI-DEFAULT-001 × DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001):
+#: the dashboard-wide :data:`DEFAULT_K` is the extinction token (the CLI-law
+#: drift pin), but the one-click preflight/estimator REQUIRES an enumerable
+#: numeric k CSV — so the institutional k<=3 default (O-f) lives on the
+#: one-click surface, where the estimator's tuple grid stays exactly
+#: computable ahead of launch.
+ONECLICK_K: Final[str] = "1,2,3"
 #: Default lake exchange / segment partition for the index sweep.
 DEFAULT_EXCHANGE: Final[str] = "NSE"
 DEFAULT_SEGMENT: Final[str] = "INDEX"
@@ -901,12 +909,17 @@ def resolve_oneclick_sweep_plan(
     raw_symbols = _clean_csv(symbols, DEFAULT_ONECLICK_SYMBOLS)
     groups = group_symbols_by_exchange(raw_symbols)
     run_id = run_id_factory()
+    # The one-click surface's OWN k default (merge-forward composition — see
+    # :data:`ONECLICK_K`): a blank/absent k resolves to the estimable
+    # institutional CSV HERE, never to the dashboard-wide extinction token
+    # (whose adaptive ladder the preflight estimator refuses by design).
+    resolved_k = k if k is not None and k.strip() else ONECLICK_K
     requests = tuple(
         resolve_sweep_request(
             symbols=",".join(groups[exchange]),
             intervals=intervals,
             directions=directions,
-            k=k,
+            k=resolved_k,
             sl=sl,
             tp=tp,
             top=top,
@@ -952,6 +965,20 @@ def _axes_counts(request: SweepRunRequest) -> tuple[list[int], int, int]:
     first (:func:`_dedup_axis`) so a repeated CSV token never inflates the
     estimate beyond what the engine will actually grid.
     """
+    if request.k.strip().lower() == DEFAULT_K:
+        # Merge-forward composition (DEC-SWEEP-APRIORI-DEFAULT-001 ×
+        # DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001): the extinction ladder is
+        # ADAPTIVE (k=1,2,3,… until no combo survives min-hits), so a preflight
+        # cannot enumerate its tuple grid ahead of time — refuse LOUDLY (the
+        # route's ValueError→400 lane) instead of a raw int() crash. The
+        # one-click flow's own default is the estimable institutional CSV
+        # (:data:`ONECLICK_K`), so this arm is reachable only by an EXPLICIT
+        # 'extinction' entry on the one-click form.
+        raise ValueError(
+            "the one-click preflight estimator needs a numeric k CSV — the "
+            "'extinction' ladder is adaptive and not estimable ahead of time; "
+            "use the classic sweep form (or the CLI) for an extinction run"
+        )
     k_values = [int(tok) for tok in _dedup_axis(request.k)]
     other_axes_product = (
         len(_dedup_axis(request.symbols))
@@ -1156,6 +1183,7 @@ __all__ = [
     "DEFAULT_SYMBOLS",
     "DEFAULT_TOP",
     "DEFAULT_TP",
+    "ONECLICK_K",
     "OneClickSweepPlan",
     "SweepRunRequest",
     "build_sweep_kwargs",

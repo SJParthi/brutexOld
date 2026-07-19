@@ -1769,6 +1769,7 @@ class TestCooperativeCancel:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert actions == ["SUPERVISOR_START", "TUPLE_FAILED", "SUPERVISOR_CANCELLED"]
 
+
 # ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
 # The supervised driver's apriori wiring: EMIT-ON-apriori START/COMPLETE
 # payload keys, the DISTINCT tuples_failed_apriori_budget counter, and the

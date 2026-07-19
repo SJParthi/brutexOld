@@ -985,6 +985,10 @@ class TestBenchmarkJoin:
             aggs=weird.with_suffix(".aggs.parquet"),
             equity=weird.with_suffix(".equity.parquet"),
             stamp=weird,
+            # Merge-forward reconcile: main's DEC-RESILIENCE-STREAKS-001
+            # extended SidecarPaths with the resilience sibling pair.
+            resilience=weird.with_suffix(".resilience.parquet"),
+            resilience_stamp=weird.with_suffix(".resilience.stamp.json"),
         )
         monkeypatch.setattr(srv, "build_sidecar_index", lambda _lake: {row.run_id: paths})
         assert srv._benchmark_facts(tmp_path, [row]) == {}

@@ -216,6 +216,12 @@ def _paths_from_stamp(stamp: Path) -> SidecarPaths:
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=stamp,
+        # Merge-forward reconcile: main's DEC-RESILIENCE-STREAKS-001 extended
+        # SidecarPaths with the resilience sibling pair — mirrored here on the
+        # ONE sidecar_paths_for naming law (<stem>.resilience.parquet +
+        # <stem>.resilience.stamp.json).
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 

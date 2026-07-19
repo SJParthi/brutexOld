@@ -264,6 +264,10 @@ class TestSidecarIndex:
             aggs=tmp_path / "x.aggs.parquet",
             equity=tmp_path / "x.equity.parquet",
             stamp=tmp_path / "x.stamp.json",
+            # Merge-forward reconcile: main's DEC-RESILIENCE-STREAKS-001
+            # extended SidecarPaths with the resilience sibling pair.
+            resilience=tmp_path / "x.resilience.parquet",
+            resilience_stamp=tmp_path / "x.resilience.stamp.json",
         )
         assert stamp_stat_token(missing) == "absent"
 
