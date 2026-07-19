@@ -97,7 +97,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.execution.fill_mode import FillMode
-from brutex.ranking import MIN_TRADES, OverfitGateConfig
+from brutex.ranking import MIN_TRADES, CvarGateConfig, OverfitGateConfig
 from brutex.strategies.types import (
     DEFAULT_PRICE_SOURCE_CELL,
     FibAnchorKind,
@@ -324,6 +324,17 @@ class SweepGridConfig:
     #: enumerations) — digests, checkpoints, cache keys and store paths stay
     #: byte-identical for in-scope grids (regression-pinned).
     unsafe_allow_out_of_scope_instruments: bool = False
+    #: Opt-in CVaR tail-risk rejection gate (DEC-RANK-CVAR-TAIL-GATE-001) —
+    #: DEFAULT-OFF (``None`` = byte-identical to the pre-gate sweep). When set,
+    #: every kept mask's per-trade P&L list is judged at the eval spine
+    #: (:func:`brutex.engine.sweep_run._iter_mask_metrics`) and a fat-tail
+    #: candidate is rejected BEFORE ranking (counted, ``sweep.cvar_gate``
+    #: INFO). The ACTIVE config folds into ``grid_identity`` /
+    #: ``tuple_cache_key`` / ``_tuple_digest`` via the shared
+    #: :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    #: (default-elided — the DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 law).
+    #: Appended LAST so every positional construction stays valid.
+    cvar_gate: CvarGateConfig | None = None
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -597,6 +608,7 @@ class SweepTuple:
             min_hits=grid.min_hits,
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
+            cvar_gate=grid.cvar_gate,
         )
 
 

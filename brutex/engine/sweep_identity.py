@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from brutex.ranking import OverfitGateConfig
+from brutex.ranking import CvarGateConfig, OverfitGateConfig
 
 
 class _GateConfigInput(Protocol):
@@ -48,6 +48,11 @@ class _GateConfigInput(Protocol):
     @property
     def overfit(self) -> OverfitGateConfig | None:
         """The overfit gate config, or ``None`` when the gate is off."""
+        raise NotImplementedError
+
+    @property
+    def cvar_gate(self) -> CvarGateConfig | None:
+        """The CVaR tail-risk gate config, or ``None`` when the gate is off."""
         raise NotImplementedError
 
     @property
@@ -100,6 +105,13 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
             overfit.default_skew,
             overfit.default_excess_kurtosis,
         ]
+    cvar = grid.cvar_gate
+    if cvar is not None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR tail gate changes which
+        # masks survive to ranking/persistence, so it re-keys exactly like the
+        # overfit gate; ``None`` (the default — the gate OFF) contributes
+        # NOTHING, keeping the default digest byte-stable.
+        fragment["cvar"] = [cvar.alpha_bps, cvar.threshold_paisa]
     if grid.stage3_enable:
         # The Stage-3 knobs matter to the result ONLY when the pass runs; a
         # disabled pass leaves them inert, so they never re-key a light grid.

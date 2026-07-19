@@ -36,6 +36,7 @@ __all__ = [
     "count_supermasks_u128s",
     "popcount_bytes",
     "stats_cpcv_pass_count",
+    "stats_cvar_tail_fold",
 ]
 
 __version__: str
@@ -155,6 +156,23 @@ def stats_cpcv_pass_count(
     input (length mismatch, `n_groups < 2`, `n_test_groups` out of
     `[1, n_groups - 1]`, any `count < 1`, total count beyond i64); the
     `brutex.metrics.rust_stats` seam routes any error to the Python oracle.
+    """
+    ...
+
+def stats_cvar_tail_fold(
+    pnls: list[int],
+    alpha_bps: int,
+) -> tuple[int, int, int]:
+    """CVaR worst-k tail fold over one candidate's per-trade P&L list (DEC-RANK-CVAR-TAIL-GATE-001).
+
+    `pnls` is int paisa per closed trade; `alpha_bps` the tail fraction in
+    basis points (500 = the worst 5%). Returns `(k, var_paisa,
+    tail_sum_paisa)` — `k = max(1, ceil(n * alpha_bps / 10_000))`, the k-th
+    smallest P&L (the VaR bound) and the exact integer sum of the worst k
+    (an i128 crossing as an exact Python int). All-integer, bit-identical
+    to the `brutex.ranking.cvar_gate` Python oracle by construction. Raises
+    `ValueError` on an empty list or `alpha_bps` outside `[1, 10_000]`; the
+    seam routes any error to the Python oracle.
     """
     ...
 

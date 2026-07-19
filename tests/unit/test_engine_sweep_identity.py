@@ -12,7 +12,7 @@ from __future__ import annotations
 from brutex.engine import sweep_identity, sweep_orchestrator, sweep_supervisor
 from brutex.engine.sweep_identity import _gate_config_fragment
 from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
-from brutex.ranking import OverfitGateConfig
+from brutex.ranking import CvarGateConfig, OverfitGateConfig
 from brutex.strategies.types import Side
 
 
@@ -66,6 +66,24 @@ class TestGateConfigFragment:
         frag = _gate_config_fragment(_grid(overfit=cfg, stage3_enable=True))
         assert frag is not None
         assert set(frag) == {"overfit", "stage3"}
+
+    def test_cvar_only(self) -> None:
+        # DEC-RANK-CVAR-TAIL-GATE-001: an ACTIVE CVaR gate contributes its
+        # [alpha_bps, threshold_paisa] leg; None (the default) is elided —
+        # the default-is-None pin above already covers the OFF arm.
+        gate = CvarGateConfig(threshold_paisa=50_000, alpha_bps=250)
+        assert _gate_config_fragment(_grid(cvar_gate=gate)) == {"cvar": [250, 50_000]}
+
+    def test_all_three_active(self) -> None:
+        frag = _gate_config_fragment(
+            _grid(
+                overfit=OverfitGateConfig(dsr_min=0.90),
+                stage3_enable=True,
+                cvar_gate=CvarGateConfig(threshold_paisa=1),
+            )
+        )
+        assert frag is not None
+        assert set(frag) == {"overfit", "cvar", "stage3"}
 
 
 class TestReExportShim:

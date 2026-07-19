@@ -52,6 +52,9 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
         "stats_cpcv_pass_count",
+        # DEC-RANK-CVAR-TAIL-GATE-001 — the integer-exact CVaR worst-k tail
+        # fold (a deliberate, reviewed surface addition).
+        "stats_cvar_tail_fold",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",

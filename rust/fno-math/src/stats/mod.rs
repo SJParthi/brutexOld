@@ -31,6 +31,10 @@
 //! compiled); claiming otherwise is FORBIDDEN. Per-call FFI copies are
 //! disclosed on each `#[pyfunction]`.
 //!
-//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1).
+//! Modules: [`cpcv`] — the C(S, k) Chan/Pébay fold pass-count (PR-1);
+//! [`cvar`] — the integer-exact CVaR worst-k tail fold
+//! (DEC-RANK-CVAR-TAIL-GATE-001; claim class STRUCTURAL — all-integer, no
+//! float ever participates).
 
 pub mod cpcv;
+pub mod cvar;

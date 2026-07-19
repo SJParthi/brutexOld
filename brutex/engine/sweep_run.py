@@ -145,7 +145,15 @@ from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
-from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
+from brutex.ranking import (
+    GATE_CVAR_TAIL,
+    MIN_TRADES,
+    CvarGateConfig,
+    OverfitGateConfig,
+    RankedCombo,
+    cvar_rejects,
+    rank_combos,
+)
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import (
     FibAnchorKind,
@@ -592,6 +600,19 @@ class SweepRunConfig:
     #: contained). ``None`` — every spot config — emits NO params key, so spot
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
+    #: Opt-in CVaR tail-risk rejection gate (DEC-RANK-CVAR-TAIL-GATE-001) —
+    #: DEFAULT-OFF (``None`` = the pre-gate sweep, byte-identical). When set,
+    #: each kept mask's per-trade P&L list is judged at the ONE eval spine
+    #: (:func:`_iter_mask_metrics`) — the only point the trades exist — and a
+    #: fat-tail mask is dropped BEFORE metrics/ranking (counted on
+    #: :attr:`SweepRunSummary.cvar_rejected` + one ``sweep.cvar_gate`` INFO
+    #: per tuple). DISCLOSED interaction: a rejected mask is thereby EXCLUDED
+    #: from the overfit gate's trial pool ``N`` and the trial-stats sidecar
+    #: population (both become post-CVaR when both gates are active) — an
+    #: activation-time consideration recorded in the DEC. The active config
+    #: re-keys the store address via the shared identity fragment
+    #: (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 law); ``None`` is elided.
+    cvar_gate: CvarGateConfig | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -699,6 +720,12 @@ class SweepRunSummary:
     trial_n_finite: int = 0
     trial_sum_sharpe: float = 0.0
     trial_sum_sharpe_sq: float = 0.0
+    #: Masks the opt-in CVaR tail gate rejected at the eval spine
+    #: (DEC-RANK-CVAR-TAIL-GATE-001); always 0 when ``cfg.cvar_gate`` is
+    #: ``None`` (the default). NOT folded into the supervisor/parallel grid
+    #: tallies (the per-tuple ``sweep.cvar_gate`` INFO carries it) — a named
+    #: activation-time follow-up.
+    cvar_rejected: int = 0
     #: ``True`` iff this run wrote/overwrote the tuple's trial-stats sidecar.
     #: With a digest supplied this is every non-short-circuited run: the
     #: sentinel-authoritative redo BYPASSES dedup probes, so the population is
@@ -1222,6 +1249,9 @@ def _iter_mask_metrics(
     cfg: SweepRunConfig,
     direction_label: str,
     run_id_of: Callable[[int], str],
+    *,
+    cvar_gate: CvarGateConfig | None = None,
+    on_cvar_reject: Callable[[int], None] | None = None,
 ) -> Iterator[tuple[int, ResultMetrics]]:
     """Yield ``(mask, metrics)`` for *masks* in order — THE one chunked eval spine.
 
@@ -1288,6 +1318,25 @@ def _iter_mask_metrics(
                 reference_stamper=sim.reference_stamper,
             )
         for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
+            if cvar_gate is not None:
+                # DEC-RANK-CVAR-TAIL-GATE-001: the CVaR tail gate judges the
+                # mask's per-trade P&L list HERE — the one point the trades
+                # exist — and a fat-tail mask is dropped before the metrics
+                # tail (never yielded, so it reaches neither ranking nor the
+                # overfit trial pool — the disclosed post-CVaR-N interaction).
+                # An empty trade list ABSTAINS inside cvar_rejects. A raise is
+                # a per-combo fault (the metrics-tail error contract);
+                # MemoryError re-raises BARE (OOM = GLOBAL stop).
+                try:
+                    rejected = cvar_rejects([t.pnl_paisa for t in trades], cvar_gate)
+                except MemoryError:
+                    raise
+                except Exception as exc:
+                    raise _combo_error(mask, run_id_of(mask), cfg, direction_label, exc) from exc
+                if rejected:
+                    if on_cvar_reject is not None:
+                        on_cvar_reject(mask)
+                    continue
             try:
                 metrics = metrics_from_trades(
                     bars,
@@ -1820,6 +1869,15 @@ def run_persisted_sweep(
     # columnar payload (~80-105 B/kept) instead of O(kept) rich objects — under
     # an EXACT owned-bytes watermark that degrades gracefully to a
     # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
+    # DEC-RANK-CVAR-TAIL-GATE-001: per-tuple tally of eval-spine CVaR
+    # rejections (always 0 when cfg.cvar_gate is None — the callback is then
+    # never invoked, byte-identical to the pre-gate loop).
+    cvar_rejected = 0
+
+    def _count_cvar_reject(_mask: int) -> None:
+        nonlocal cvar_rejected
+        cvar_rejected += 1
+
     pairs: list[tuple[int, ResultMetrics]] = []
     columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
     sim: ResidentTradeSim | None = None
@@ -1853,7 +1911,15 @@ def run_persisted_sweep(
             kernel_columns=kernel.kernel_columns if kernel is not None else None,
         )
         for mask, metrics in _iter_mask_metrics(
-            sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
+            sim,
+            kept,
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            run_id_of,
+            cvar_gate=cfg.cvar_gate,
+            on_cvar_reject=_count_cvar_reject,
         ):
             if columns is None:
                 pairs.append((mask, metrics))
@@ -2000,6 +2066,21 @@ def run_persisted_sweep(
     )
     audit.append(action=_ACTION_COMPLETE, subject=subject, payload=tallies)
     _LOG.info("sweep_run.complete", subject=subject, **tallies)
+    if cfg.cvar_gate is not None:
+        # EMIT-ON-ACTIVE (DEC-RANK-CVAR-TAIL-GATE-001): one INFO per tuple
+        # naming the gate's config + rejection tally under the stable
+        # ``cvar_tail`` wire token. A default (gate-off) sweep emits NOTHING —
+        # zero log delta on the byte-identical default arm. Deliberately NOT
+        # folded into the audit ``tallies`` payload (the frozen per-tuple
+        # audit contract stays byte-untouched).
+        _LOG.info(
+            "sweep.cvar_gate",
+            subject=subject,
+            reason=GATE_CVAR_TAIL,
+            rejected=cvar_rejected,
+            alpha_bps=cfg.cvar_gate.alpha_bps,
+            threshold_paisa=cfg.cvar_gate.threshold_paisa,
+        )
 
     return SweepRunSummary(
         enumerated=enumerated,
@@ -2016,6 +2097,7 @@ def run_persisted_sweep(
         trial_sum_sharpe_sq=trial_sum_sharpe_sq,
         trial_sidecar_written=sidecar_written,
         sentinel_written=sentinel_written,
+        cvar_rejected=cvar_rejected,
     )
 
 

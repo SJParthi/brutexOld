@@ -167,6 +167,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // statistics kernels. Additive registration only; existing registrations
     // above are untouched. Later slice-6 PRs append inside this fence.
     m.add_function(wrap_pyfunction!(stats::cpcv::stats_cpcv_pass_count, m)?)?;
+    // DEC-RANK-CVAR-TAIL-GATE-001: the integer-exact CVaR worst-k tail fold
+    // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
+    // (`brutex.ranking.cvar_gate`).
+    m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
     // ---- end stats module ----
     Ok(())
 }

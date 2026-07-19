@@ -66,6 +66,17 @@
 # mutation.yml's shard arithmetic — ≥ ~20 min margin at +20% on the worst
 # end); the #1597 pre-decided +1-shard dial stands if a scheduled run
 # approaches the cap.
+# DEC-RANK-CVAR-TAIL-GATE-001 (2026-07-18): src/stats/cvar.rs (the
+# integer-exact CVaR worst-k tail fold) lands INSIDE the existing
+# src/stats/*.rs glob — no scope edit needed (the slice-6 comment above
+# pre-decided that later stats modules ride the same glob). Re-measured on
+# this tree: `cargo mutants --list | wc -l` = 778 total (+86 cvar mutants
+# over the 692 baseline, +12.4%); 778/6 ≈ 130 mutants/shard — inside the
+# 6-shard matrix band per the shard arithmetic in mutation.yml (the #1597
+# pre-decided +1-shard dial stands if a scheduled run approaches the cap).
+# In-session evidence: the 86 cvar mutants were run locally the CI way
+# (--in-place, --test-tool cargo, -- --release) — verdict recorded in
+# MIGRATION.md #1957.
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
@@ -74,4 +85,3 @@ examine_globs = [
     "src/mask_word.rs",
     "src/stats/*.rs",
 ]
-

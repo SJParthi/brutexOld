@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-18 (DEC-RANK-CVAR-TAIL-GATE-001, MIGRATION.md #1957
+(provisional — renumber-at-landing per DEC-LEDGER-RENUMBER-001), branch
+`claude/cvar-tail-gate` — the CVaR (expected-shortfall) TAIL-RISK rejection
+gate for the ranking/rejection layer, DEFAULT-OFF (ships INERT): the
+integer-exact worst-k tail law (`k = max(1, ceil(n·alpha_bps/10_000))`;
+REJECT iff `tail_sum_paisa < -threshold_paisa·k` — no float in the decision)
+applied at the ONE eval spine `sweep_run._iter_mask_metrics` (the only point
+the per-trade P&L list exists) via the appended-defaulted
+`SweepGridConfig.cvar_gate`/`SweepRunConfig.cvar_gate` (`None` = OFF =
+byte-identical, frozen goldens UNMODIFIED); the ACTIVE config folds into the
+shared identity fragment DEFAULT-ELIDED (the #1715 law — the pinned default
+digest `7a0120c1123b44c6` byte-stable); + the optional integer-exact Rust
+fold kernel `fno_math.stats_cvar_tail_fold` behind the default-OFF
+`BRUTEX_RANK_CVAR_RUST` seam (`brutex/ranking/cvar_gate.py` — verbatim
+Python oracle retained, burn-in + ship-the-oracle autorevert, bit-identical
+by construction); activation needs its own DEC + operator sign-off on
+`docs/measurements/cvar_gate_measurement.md`. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run identity
+untouched. This header carries the pointer, never the story — the full
+record lives in the §1 Active-branch blurb + MIGRATION.md #1957.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -3523,7 +3543,60 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/cvar-tail-gate` (**DEC-RANK-CVAR-TAIL-GATE-001,
+  MIGRATION.md #1957 (provisional — renumber-at-landing per
+  DEC-LEDGER-RENUMBER-001)** — the CVaR (expected-shortfall) TAIL-RISK
+  rejection gate, DEFAULT-OFF (ships INERT). THE LAW (integer-exact — no
+  float in the decision, Rust↔Python bit-identical by construction): per
+  candidate over the per-trade `pnl_paisa` ints, `n == 0` abstains;
+  `k = max(1, ceil(n · alpha_bps / 10_000))` (alpha default 500 = the worst
+  5%); `var_paisa` = the k-th smallest P&L, `tail_sum_paisa` = the exact sum
+  of the worst k; REJECT iff `tail_sum_paisa < -threshold_paisa · k` (mean
+  tail loss STRICTLY worse than the threshold — exact cross-product). THE
+  SEAM (disclosed): the trade list never reaches `passes_gates` (aggregate
+  ResultMetrics only), so the gate runs at the ONE chunked eval spine
+  `sweep_run._iter_mask_metrics` via `SweepGridConfig.cvar_gate` /
+  `SweepRunConfig.cvar_gate` (appended, default `None` = OFF); a rejected
+  mask is dropped BEFORE the metrics tail (counted on the NEW
+  `SweepRunSummary.cvar_rejected` + ONE emit-on-active `sweep.cvar_gate`
+  INFO under the `cvar_tail` token — deliberately OUT of `GATE_REASON_ORDER`
+  per the overfit-gate precedent); the ACTIVE config folds into
+  `sweep_identity._gate_config_fragment` DEFAULT-ELIDED (grid_identity /
+  tuple_cache_key / `_tuple_digest` re-key value-sensitively; the pinned
+  default digest `7a0120c1123b44c6` byte-stable; run_id/
+  `canonical_trade_params` untouched — the gate selects, never changes a
+  trade). RUST: NEW `rust/fno-math/src/stats/cvar.rs`
+  (`stats_cvar_tail_fold` — O(n) quickselect + i128 tail sum crossing as an
+  exact Python int; additive registration across the shim/pyi/
+  EXPECTED_BUILD/facade-golden surfaces; crate stays 0.3.0, Cargo.lock
+  untouched; cargo-mutants 27/28 caught, 1 unviable, 0 missed) behind the
+  default-OFF `BRUTEX_RANK_CVAR_RUST` seam in NEW
+  `brutex/ranking/cvar_gate.py` (the rust_stats template: lazy tristate
+  flag, wheel/fault/shape-refusal warn-once degrades to the retained
+  verbatim Python oracle, 16-fold burn-in bit-compare + ship-the-oracle
+  autorevert, MemoryError bare). DISCLOSED interactions (activation-time):
+  a cvar-rejected mask is excluded from the overfit DSR trial pool N + the
+  trial-stats sidecar (post-CVaR populations); grid-level `cvar_rejected`
+  aggregation is a named follow-up; the finalist recompute + the
+  legacy/research `rank_sweep` + the cascade re-simulation are deliberately
+  ungated; no CLI knob ships. PROOF: the ranking package gate 100.00%
+  line+branch (265 tests incl. the new 66-test matrix); the whole-engine
+  glob gate green; the wiring suite proves gate-ON rejects fat-tail masks
+  at the spine while a lenient ACTIVE gate is store-content-hash-IDENTICAL
+  to OFF; frozen sweep/run-identity/vocab goldens UNMODIFIED on the default
+  arm; hypothesis parity + invariant properties; bench pins (flat in
+  candidate count; O(n_trades) per candidate MEASURED, never claimed flat);
+  the three named mutants hand-applied + verified killed; the mutation.yml
+  ranking-math pass extended + wiring-pinned. MEASUREMENT
+  (`docs/measurements/cvar_gate_measurement.md` — SYNTHETIC + small,
+  disclosed): 240 seeded candidates, 3 tail regimes — benign passes 80/80
+  at every threshold ≥ ₹40/trade while fat-tail stays 78-80/80 rejected;
+  at ₹60 the rejected population's mean tail loss is 6.4× worse. SHIPS
+  INERT — activation needs its own DEC + operator sign-off on the
+  measurement. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes;
+  run identity untouched.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -10769,7 +10842,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/cvar-tail-gate`
+  (DEC-RANK-CVAR-TAIL-GATE-001, MIGRATION.md #1957 (provisional) — the CVaR
+  expected-shortfall TAIL-RISK rejection gate, DEFAULT-OFF (ships INERT):
+  the integer-exact worst-k tail law at the ONE eval spine
+  `sweep_run._iter_mask_metrics` behind `SweepGridConfig.cvar_gate` /
+  `SweepRunConfig.cvar_gate` (`None` = OFF = byte-identical; frozen goldens
+  UNMODIFIED; the active config folds into the shared identity fragment
+  default-elided — the pinned default digest byte-stable) + the optional
+  integer-exact Rust fold kernel `fno_math.stats_cvar_tail_fold` behind the
+  default-OFF `BRUTEX_RANK_CVAR_RUST` seam in `brutex/ranking/cvar_gate.py`
+  (verbatim Python oracle retained; burn-in + autorevert); activation needs
+  its own DEC + operator sign-off on
+  `docs/measurements/cvar_gate_measurement.md`; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1957 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
