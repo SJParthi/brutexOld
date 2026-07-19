@@ -353,3 +353,119 @@ def test_deflated_sharpe_result_uses_slots() -> None:
     )
     assert not hasattr(result, "__dict__")
     assert hasattr(DeflatedSharpeResult, "__slots__")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# DEC-METRICS-RUST-STATS-002 — the Rust dispatch arms (flag ON / fallback /
+# flag-OFF byte-identity with a bomb kernel). The kernel-vs-oracle
+# equivalence over hostile corpora lives in
+# tests/property/test_rust_stats_tails_equivalence.py; the frozen goldens in
+# tests/golden/test_stats_tails_golden.py.
+# ═════════════════════════════════════════════════════════════════════════
+
+import struct  # noqa: E402  (appended PR-2 section)
+
+import fno_math  # noqa: E402
+from brutex.metrics import rust_stats  # noqa: E402
+from brutex.metrics.deflated_sharpe import (  # noqa: E402
+    _expected_max_tail,  # pyright: ignore[reportPrivateUsage]
+    _psr_tail,  # pyright: ignore[reportPrivateUsage]
+)
+from structlog.testing import capture_logs  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stats_seam() -> None:
+    """Fresh burn-in budgets, latches and log memo per test (the
+    rust_stats-documented test-isolation seams)."""
+    rust_stats.reset_self_check_for_tests()
+    rust_stats.reset_observability_memo_for_tests()
+
+
+def _bits(value: float) -> bytes:
+    return struct.pack("<d", value)
+
+
+def test_flag_on_psr_engages_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = probabilistic_sharpe_ratio(0.15, 0.05, 250, -0.6, 5.5)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = probabilistic_sharpe_ratio(0.15, 0.05, 250, -0.6, 5.5)
+    assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "psr" for e in logs), (
+        "the ON arm must engage the Rust kernel (anti-vacuous-pass law)"
+    )
+    assert _bits(on) == _bits(off)
+
+
+def test_flag_on_expected_max_engages_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = expected_max_sharpe_ratio(5000, 0.02)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with capture_logs() as logs:
+        on = expected_max_sharpe_ratio(5000, 0.02)
+    assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "sr_max" for e in logs)
+    assert _bits(on) == _bits(off)
+
+
+def test_flag_on_dsr_full_chain_bit_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs: dict[str, float | int] = {
+        "n_trials": 800,
+        "trial_sharpe_variance": 0.05,
+        "sample_length": 120,
+        "skew": -0.3,
+        "kurtosis": 4.5,
+    }
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    off = deflated_sharpe_ratio(0.2, **kwargs)  # type: ignore[arg-type]
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    on = deflated_sharpe_ratio(0.2, **kwargs)  # type: ignore[arg-type]
+    for field in ("expected_max_sharpe", "deflated_sharpe_ratio", "probabilistic_sharpe_ratio"):
+        assert _bits(getattr(on, field)) == _bits(getattr(off, field)), field
+
+
+def test_flag_on_latched_kernel_falls_through_to_the_tails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A latched kernel returns None from the binding — the retained tails
+    serve, bit-identical (the fallthrough dispatch arm)."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    rust_stats.disable_kernel("psr", "self_check_mismatch")
+    rust_stats.disable_kernel("sr_max", "self_check_mismatch")
+    on = probabilistic_sharpe_ratio(0.15, 0.0, 250, -0.6, 5.5)
+    assert _bits(on) == _bits(
+        _psr_tail(0.15, 0.0, 250, 1.0 - (-0.6) * 0.15 + 4.5 / 4.0 * 0.15 * 0.15)
+    )
+    sr0 = expected_max_sharpe_ratio(5000, 0.02)
+    assert _bits(sr0) == _bits(_expected_max_tail(5000, 0.02))
+
+
+def test_flag_on_astronomical_n_trials_raises_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exception parity on the AS241 raise domain: the kernel's ValueError
+    refuses to the oracle, which raises the SAME StatisticsError as OFF."""
+    from statistics import StatisticsError
+
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+    with pytest.raises(StatisticsError) as off_exc:
+        expected_max_sharpe_ratio(2**62, 0.02)
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with pytest.raises(StatisticsError) as on_exc:
+        expected_max_sharpe_ratio(2**62, 0.02)
+    assert str(on_exc.value) == str(off_exc.value)
+
+
+def test_flag_off_never_touches_the_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bomb-kernel spy: flag OFF is byte-identical AND crate-untouched."""
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+
+    def _bomb(*args: object) -> float:
+        raise AssertionError("flag-OFF must never call the Rust kernel")
+
+    monkeypatch.setattr(fno_math, "stats_psr", _bomb)
+    monkeypatch.setattr(fno_math, "stats_expected_max_sharpe", _bomb)
+    result = deflated_sharpe_ratio(
+        0.12, n_trials=100, trial_sharpe_variance=0.01, sample_length=50, skew=0.1, kurtosis=3.5
+    )
+    assert 0.0 <= result.deflated_sharpe_ratio <= 1.0

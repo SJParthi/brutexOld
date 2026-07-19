@@ -190,8 +190,20 @@ def test_flag_env_name_and_default_pinned() -> None:
 
 
 def test_self_check_budgets_pinned() -> None:
-    """The R8 per-function burn-in budgets (call cadence × oracle cost)."""
-    assert dict(SELF_CHECK_SAMPLES) == {"cpcv": 16, "mc": 8, "pbo": 4, "spa": 2, "wfo": 16}
+    """The R8 per-function burn-in budgets (call cadence × oracle cost).
+
+    PR-2 (DEC-METRICS-RUST-STATS-002) adds the DSR pair — cheap ~µs scalar
+    oracles at per-candidate cadence, the cpcv-class K=16 budget.
+    """
+    assert dict(SELF_CHECK_SAMPLES) == {
+        "cpcv": 16,
+        "mc": 8,
+        "pbo": 4,
+        "spa": 2,
+        "wfo": 16,
+        "psr": 16,
+        "sr_max": 16,
+    }
 
 
 # ── latch + observability primitives ───────────────────────────────────
@@ -1472,7 +1484,11 @@ class TestLogContextStructuralPin:
     #: themselves plus the C-level-slot ``_type_name`` (total by design).
     _TOTAL_ARG_CALLS = _SANCTIONED_HELPERS | frozenset({"_type_name"})
     _REPR_OWNERS = frozenset({"_safe_context", "_inexact_threshold_context"})
-    _ALLOWED_CONTEXT_NAMES = frozenset({"fn", "reason", "attr"})
+    # "arg" (PR-2, DEC-METRICS-RUST-STATS-002): the seam-controlled
+    # argument-name routing string the shared input gates thread — every
+    # call site passes a str CONSTANT into the ``arg`` parameter, so the
+    # name load runs no foreign code (same class as fn/reason/attr).
+    _ALLOWED_CONTEXT_NAMES = frozenset({"fn", "reason", "attr", "arg"})
     _CHOKEPOINTS = frozenset({"warn_fallback_once", "disable_kernel"})
 
     @classmethod
@@ -1542,7 +1558,7 @@ class TestLogContextStructuralPin:
 
     def test_every_log_context_value_is_total_by_construction(self) -> None:
         context_calls = [(o, c) for o, c in self._calls_with_owner() if self._is_context_call(c)]
-        assert len(context_calls) >= 12  # anti-vacuity: the module's real call census (15)
+        assert len(context_calls) >= 12  # anti-vacuity: the real call census (37 post-PR-2)
         helper_call_values = 0
         for owner, call in context_calls:
             where = f"{owner or '<module>'}:{call.lineno}"
@@ -1662,3 +1678,682 @@ class TestMutationWorkflowWiring:
         assert '"brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:"' in text, (
             "rust_stats.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# DEC-METRICS-RUST-STATS-002 (slice 6, PR-2) — the stats-tail bindings.
+# Every arm of psr / sr_max / pbo / wfo + the shared PR-2 gate helpers,
+# for the strict 100% line+branch gate driven by THIS file alone.
+# ═════════════════════════════════════════════════════════════════════════
+
+from decimal import Decimal as _Dec  # noqa: E402  (appended PR-2 section)
+
+from brutex.metrics.deflated_sharpe import (  # noqa: E402
+    _expected_max_tail,  # pyright: ignore[reportPrivateUsage]
+    _psr_tail,  # pyright: ignore[reportPrivateUsage]
+)
+from brutex.metrics.rust_stats import (  # noqa: E402
+    _count_as_i64,  # pyright: ignore[reportPrivateUsage]
+    _f64_bits,  # pyright: ignore[reportPrivateUsage]
+    _flat_exact_floats,  # pyright: ignore[reportPrivateUsage]
+    _numeric_as_f64,  # pyright: ignore[reportPrivateUsage]
+    _valid_float_result,  # pyright: ignore[reportPrivateUsage]
+    _valid_pbo_result,  # pyright: ignore[reportPrivateUsage]
+    expected_max_sharpe_via_kernel,
+    pbo_cscv_via_kernel,
+    psr_via_kernel,
+    wfo_pass_count_via_kernel,
+)
+
+# The fixed PSR fixture's radicand (finite, > 0) — the fixture args
+# (0.15, 0.0, 250, -0.6, 5.5) live inline as ``_call_psr``'s defaults.
+_PSR_RADICAND = 1.0 - (-0.6) * 0.15 + (5.5 - 1.0) / 4.0 * 0.15 * 0.15
+
+
+def _psr_true() -> float:
+    return _psr_tail(0.15, 0.0, 250, _PSR_RADICAND)
+
+
+def _call_psr(
+    *,
+    oracle_value: float | None = None,
+    oracle_calls: list[int] | None = None,
+    observed: float = 0.15,
+    benchmark: float = 0.0,
+    n: int = 250,
+    skew: float = -0.6,
+    kurt: float = 5.5,
+) -> float | None:
+    value = _psr_true() if oracle_value is None else oracle_value
+
+    def _oracle() -> float:
+        if oracle_calls is not None:
+            oracle_calls.append(1)
+        return value
+
+    return psr_via_kernel(observed, benchmark, n, skew, kurt, oracle=_oracle)
+
+
+def _call_sr_max(
+    *,
+    oracle_value: float | None = None,
+    oracle_calls: list[int] | None = None,
+    n_trials: int = 1000,
+    variance: float = 0.04,
+) -> float | None:
+    value = _expected_max_tail(1000, 0.04) if oracle_value is None else oracle_value
+
+    def _oracle() -> float:
+        if oracle_calls is not None:
+            oracle_calls.append(1)
+        return value
+
+    return expected_max_sharpe_via_kernel(n_trials, variance, oracle=_oracle)
+
+
+# The fixed PBO fixture: S=2 blocks × N=2 strategies, is_count=1 →
+# C(2, 1) = 2 splits, both logit 0.0 → overfit 2 (pinned by the Rust
+# in-crate `known_two_split_case` twin).
+_PBO_SUM = [[1.0, 0.5], [-1.0, 0.5]]
+_PBO_SUMSQ = [[1.0, 0.25], [1.0, 0.25]]
+_PBO_TRUE = (2, [0.0, 0.0])
+
+
+def _call_pbo(
+    *,
+    oracle_value: tuple[int, list[float]] | None = None,
+    oracle_calls: list[int] | None = None,
+    n_total: int = 2,
+    evaluator_is_default: bool = True,
+    block_sum: list[list[float]] | None = None,
+    n_splits: int = 2,
+    n_strat: int = 2,
+    is_count: int = 1,
+) -> tuple[int, list[float]] | None:
+    value = _PBO_TRUE if oracle_value is None else oracle_value
+
+    def _oracle() -> tuple[int, list[float]]:
+        if oracle_calls is not None:
+            oracle_calls.append(1)
+        return (value[0], list(value[1]))
+
+    return pbo_cscv_via_kernel(
+        _PBO_SUM if block_sum is None else block_sum,
+        _PBO_SUMSQ,
+        n_splits=n_splits,
+        n_strat=n_strat,
+        is_count=is_count,
+        n_total=n_total,
+        evaluator_is_default=evaluator_is_default,
+        oracle=_oracle,
+    )
+
+
+# The fixed WFO fixture: one walk over [1, 2, 3, 4] → sharpe > 0 → 1 pass.
+_WFO_RETURNS = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+
+
+def _call_wfo(
+    *,
+    oracle_value: int = 1,
+    oracle_calls: list[int] | None = None,
+    min_sharpe: float = 0.0,
+    n_walks: int = 1,
+) -> int | None:
+    def _oracle() -> int:
+        if oracle_calls is not None:
+            oracle_calls.append(1)
+        return oracle_value
+
+    return wfo_pass_count_via_kernel(
+        _WFO_RETURNS, [0], [4], min_sharpe, n_walks=n_walks, oracle=_oracle
+    )
+
+
+# ── the shared PR-2 gate helpers ────────────────────────────────────────
+
+
+def test_f64_bits_distinguishes_signed_zero_and_nan_payloads() -> None:
+    assert _f64_bits(0.0) != _f64_bits(-0.0)
+    assert _f64_bits(float("nan")) == _f64_bits(float("nan"))
+    assert _f64_bits(1.0) == struct.pack("<d", 1.0)
+
+
+def test_numeric_as_f64_exact_float_engages() -> None:
+    assert _numeric_as_f64("psr", 1.5, arg="x") == 1.5
+
+
+def test_numeric_as_f64_nan_refuses_with_one_warning() -> None:
+    with capture_logs() as logs:
+        assert _numeric_as_f64("psr", float("nan"), arg="x") is None
+        assert _numeric_as_f64("psr", float("nan"), arg="x") is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_inexact"]
+    assert events[0]["arg"] == "x"
+
+
+@pytest.mark.parametrize("exact_int", [0, 1, -7, 2**53, -(2**53)])
+def test_numeric_as_f64_value_exact_int_engages(exact_int: int) -> None:
+    got = _numeric_as_f64("psr", exact_int, arg="x")
+    assert got == float(exact_int)
+    assert type(got) is float
+
+
+def test_numeric_as_f64_bool_engages_as_exact_int() -> None:
+    assert _numeric_as_f64("psr", True, arg="x") == 1.0
+    assert _numeric_as_f64("psr", False, arg="x") == 0.0
+
+
+@pytest.mark.parametrize("bad_int", [2**53 + 1, 10**400])
+def test_numeric_as_f64_inexact_or_overflowing_int_refuses(bad_int: int) -> None:
+    with capture_logs() as logs:
+        assert _numeric_as_f64("psr", bad_int, arg="x") is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_inexact"]
+
+
+@pytest.mark.parametrize("foreign", [_Dec("1.5"), "1.5", None, np.float64(1.5)])
+def test_numeric_as_f64_foreign_type_refuses(foreign: object) -> None:
+    with capture_logs() as logs:
+        assert _numeric_as_f64("psr", foreign, arg="x") is None  # type: ignore[arg-type]
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_foreign_type"]
+    assert "value_type" in events[0]
+
+
+def test_count_as_i64_exact_int_and_bool() -> None:
+    assert _count_as_i64("psr", 5, arg="n", minimum=2) == 5
+    assert _count_as_i64("psr", 2**63 - 1, arg="n", minimum=2) == 2**63 - 1
+    assert _count_as_i64("wfo", True, arg="n", minimum=1) == 1
+
+
+@pytest.mark.parametrize("bad", [1, 0, -5, 2**63])
+def test_count_as_i64_out_of_range_refuses(bad: int) -> None:
+    with capture_logs() as logs:
+        assert _count_as_i64("psr", bad, arg="n", minimum=2) is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_unsupported"]
+
+
+@pytest.mark.parametrize("foreign", [2.0, _Dec(2), "2", None])
+def test_count_as_i64_foreign_type_refuses(foreign: object) -> None:
+    with capture_logs() as logs:
+        assert _count_as_i64("psr", foreign, arg="n", minimum=2) is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_foreign_type"]
+
+
+def test_flat_exact_floats_happy_row_major() -> None:
+    assert _flat_exact_floats("pbo", [[1.0, 2.0], [3.0, 4.0]], arg="m") == [1.0, 2.0, 3.0, 4.0]
+
+
+class _SubFloat(float):
+    """A float subclass — the reflected-op poisoning class the gate refuses."""
+
+
+@pytest.mark.parametrize("bad", [1, _SubFloat(1.0), "1.0", None])
+def test_flat_exact_floats_foreign_entry_refuses(bad: object) -> None:
+    with capture_logs() as logs:
+        assert _flat_exact_floats("pbo", [[1.0, bad]], arg="m") is None  # type: ignore[list-item]
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["arg_foreign_type"]
+
+
+def test_valid_float_result_exact_type_only() -> None:
+    assert _valid_float_result(1.5) is True
+    assert _valid_float_result(float("nan")) is True  # NaN flows (SR_0 law)
+    assert _valid_float_result(_SubFloat(1.5)) is False
+    assert _valid_float_result(1) is False
+    assert _valid_float_result("1.5") is False
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "x",  # not a tuple
+        (1,),  # wrong arity
+        (1, [0.0], 2),  # wrong arity
+        [1, [0.0]],  # list, not tuple
+        (True, [0.0]),  # bool count (exact-int law)
+        (-1, [0.0]),  # count below 0
+        (2, [0.0]),  # count beyond n_total (n_total=1)
+        (1.0, [0.0]),  # float count
+        (1, (0.0,)),  # tuple logits, not list
+        (1, [0.0, 0.0]),  # wrong logits length
+        (1, [1]),  # non-float logit
+        (0, [_SubFloat(0.0)]),  # float-subclass logit
+    ],
+)
+def test_valid_pbo_result_rejects_non_domain(bad: object) -> None:
+    assert _valid_pbo_result(bad, 1) is False
+
+
+def test_valid_pbo_result_accepts_domain() -> None:
+    assert _valid_pbo_result((1, [0.5]), 1) is True
+    assert _valid_pbo_result((0, [0.5, -0.5]), 2) is True
+
+
+# ── psr binding ─────────────────────────────────────────────────────────
+
+
+def test_psr_happy_path_burn_in_match_and_engaged_once() -> None:
+    calls: list[int] = []
+    with capture_logs() as logs:
+        got = _call_psr(oracle_calls=calls)
+        again = _call_psr(oracle_calls=calls)
+    assert got is not None and again is not None
+    assert _f64_bits(got) == _f64_bits(_psr_true())
+    assert len(calls) == 2  # burn-in ran the oracle on both calls
+    engaged = [e for e in logs if e["event"] == "rust_stats.engaged"]
+    assert len(engaged) == 1 and engaged[0]["fn"] == "psr"
+
+
+def test_psr_burn_in_mismatch_ships_oracle_value_and_latches() -> None:
+    with capture_logs() as logs:
+        got = _call_psr(oracle_value=0.123456)
+    assert got == 0.123456  # the ORACLE value shipped, never the kernel's
+    assert kernel_disabled("psr") is True
+    events = [e for e in logs if e["event"] == "rust_stats.kernel_autoreverted"]
+    assert len(events) == 1 and events[0]["fn"] == "psr"
+    # Later calls short-circuit with one warn.
+    with capture_logs() as logs:
+        assert _call_psr() is None
+    fallbacks = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in fallbacks] == ["kernel_disabled"]
+
+
+def test_psr_steady_state_skips_the_oracle() -> None:
+    reset_self_check_for_tests("psr", remaining=0)
+    calls: list[int] = []
+    got = _call_psr(oracle_calls=calls)
+    assert got is not None and _f64_bits(got) == _f64_bits(_psr_true())
+    assert calls == []  # no oracle run post-burn-in
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"observed": float("nan")}, "arg_inexact"),  # NaN float
+        ({"benchmark": 10**400}, "arg_inexact"),  # int past float range
+        ({"skew": _Dec("0.5")}, "arg_foreign_type"),
+        ({"kurt": 2**53 + 1}, "arg_inexact"),  # inexact int
+        ({"n": 2.0}, "arg_foreign_type"),  # float-typed count
+        ({"n": 1}, "arg_unsupported"),  # below minimum
+    ],
+)
+def test_psr_gate_refusals_run_before_burn_in(kwargs: dict[str, object], reason: str) -> None:
+    """Every gate refusal is pre-burn-in: no sample consumed, no latch."""
+    with capture_logs() as logs:
+        assert _call_psr(**kwargs) is None  # type: ignore[arg-type]
+    assert kernel_disabled("psr") is False
+    assert rust_stats._SELF_CHECK_REMAINING["psr"] == SELF_CHECK_SAMPLES["psr"]  # pyright: ignore[reportPrivateUsage]
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == [reason]
+
+
+def test_psr_exact_int_args_engage_bit_equal() -> None:
+    """Value-exact int arguments engage and match the oracle's mixed-type
+    arithmetic bitwise (int→f64 conversion is correctly rounded on both)."""
+    radicand = 1.0 - 0 * 0.15 + (3 - 1.0) / 4.0 * 0.15 * 0.15
+    true_value = _psr_tail(0.15, 0.0, 250, radicand)
+    got = psr_via_kernel(0.15, 0, 250, 0, 3, oracle=lambda: true_value)
+    assert got is not None and _f64_bits(got) == _f64_bits(true_value)
+
+
+def test_psr_wheel_missing_and_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "fno_math", None)
+    with capture_logs() as logs:
+        assert _call_psr() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["wheel_missing"]
+    monkeypatch.undo()
+    reset_observability_memo_for_tests()
+    monkeypatch.delattr(fno_math, "stats_psr")
+    with capture_logs() as logs:
+        assert _call_psr() is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["wheel_stale"]
+    assert events[0]["attr"] == "stats_psr"
+
+
+def test_psr_kernel_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*args: object) -> float:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(fno_math, "stats_psr", _raise)
+    with capture_logs() as logs:
+        assert _call_psr() is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["kernel_error"]
+
+
+def test_psr_memory_error_propagates_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _oom(*args: object) -> float:
+        raise MemoryError
+
+    monkeypatch.setattr(fno_math, "stats_psr", _oom)
+    with pytest.raises(MemoryError):
+        _call_psr()
+
+
+@pytest.mark.parametrize("poison", ["0.5", 1, _SubFloat(0.5), None])
+def test_psr_poisoned_result_refused_loudly_once(
+    monkeypatch: pytest.MonkeyPatch, poison: object
+) -> None:
+    monkeypatch.setattr(fno_math, "stats_psr", lambda *a: poison)
+    with capture_logs() as logs:
+        assert _call_psr() is None
+        assert _call_psr() is None
+    events = [e for e in logs if e["event"] == "rust_stats.kernel_result_refused"]
+    assert len(events) == 1 and events[0]["fn"] == "psr"
+
+
+# ── sr_max binding ──────────────────────────────────────────────────────
+
+
+def test_sr_max_happy_path_burn_in_match_and_engaged_once() -> None:
+    calls: list[int] = []
+    with capture_logs() as logs:
+        got = _call_sr_max(oracle_calls=calls)
+    assert got is not None
+    assert _f64_bits(got) == _f64_bits(_expected_max_tail(1000, 0.04))
+    assert len(calls) == 1
+    engaged = [e for e in logs if e["event"] == "rust_stats.engaged"]
+    assert len(engaged) == 1 and engaged[0]["fn"] == "sr_max"
+
+
+def test_sr_max_burn_in_mismatch_ships_oracle_value_and_latches() -> None:
+    got = _call_sr_max(oracle_value=42.0)
+    assert got == 42.0
+    assert kernel_disabled("sr_max") is True
+    assert kernel_disabled("psr") is False  # per-function latch
+    with capture_logs() as logs:
+        assert _call_sr_max() is None  # the latch short-circuits
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_disabled"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"n_trials": 1}, "arg_unsupported"),  # below the dispatch minimum
+        ({"n_trials": 2**63}, "arg_unsupported"),  # past i64
+        ({"n_trials": 2.0}, "arg_foreign_type"),
+        ({"variance": float("nan")}, "arg_inexact"),  # conservative NaN refusal
+        ({"variance": _Dec("0.5")}, "arg_foreign_type"),
+    ],
+)
+def test_sr_max_gate_refusals(kwargs: dict[str, object], reason: str) -> None:
+    with capture_logs() as logs:
+        assert _call_sr_max(**kwargs) is None  # type: ignore[arg-type]
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == [reason]
+
+
+def test_sr_max_astronomical_n_trials_kernel_error_refuses_to_oracle() -> None:
+    """The AS241 raise domain (1 - 1/N rounds to 1.0): the kernel raises
+    ValueError → warn-once → None, so the caller's oracle raises the
+    identical StatisticsError — exception parity by construction."""
+    with capture_logs() as logs:
+        got = _call_sr_max(n_trials=2**62)
+    assert got is None
+    events = [e for e in logs if e["event"] == "rust_stats.fallback"]
+    assert [e["reason"] for e in events] == ["kernel_error"]
+
+
+def test_sr_max_wheel_stale_and_poisoned_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(fno_math, "stats_expected_max_sharpe")
+    with capture_logs() as logs:
+        assert _call_sr_max() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["wheel_stale"]
+    monkeypatch.undo()
+    reset_observability_memo_for_tests()
+    monkeypatch.setattr(fno_math, "stats_expected_max_sharpe", lambda *a: "nope")
+    with capture_logs() as logs:
+        assert _call_sr_max() is None
+    assert [e["event"] for e in logs if "refused" in e["event"]] == [
+        "rust_stats.kernel_result_refused"
+    ]
+
+
+def test_sr_max_kernel_error_and_memory_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*args: object) -> float:
+        raise OverflowError("boom")
+
+    monkeypatch.setattr(fno_math, "stats_expected_max_sharpe", _raise)
+    with capture_logs() as logs:
+        assert _call_sr_max() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_error"]
+
+    def _oom(*args: object) -> float:
+        raise MemoryError
+
+    monkeypatch.setattr(fno_math, "stats_expected_max_sharpe", _oom)
+    with pytest.raises(MemoryError):
+        _call_sr_max()
+
+
+def test_sr_max_steady_state_skips_the_oracle() -> None:
+    reset_self_check_for_tests("sr_max", remaining=0)
+    calls: list[int] = []
+    got = _call_sr_max(oracle_calls=calls)
+    assert got is not None and calls == []
+
+
+# ── pbo binding ─────────────────────────────────────────────────────────
+
+
+def test_pbo_happy_path_burn_in_match_and_engaged_once() -> None:
+    calls: list[int] = []
+    with capture_logs() as logs:
+        got = _call_pbo(oracle_calls=calls)
+    assert got is not None
+    count, logits = got
+    assert count == 2 and [_f64_bits(v) for v in logits] == [_f64_bits(0.0)] * 2
+    assert len(calls) == 1
+    engaged = [e for e in logs if e["event"] == "rust_stats.engaged"]
+    assert len(engaged) == 1 and engaged[0]["fn"] == "pbo"
+
+
+def test_pbo_burn_in_count_mismatch_ships_oracle_and_latches() -> None:
+    got = _call_pbo(oracle_value=(1, [0.0, 0.0]))
+    assert got == (1, [0.0, 0.0])  # the oracle tuple shipped verbatim
+    assert kernel_disabled("pbo") is True
+
+
+def test_pbo_burn_in_logit_bit_mismatch_latches() -> None:
+    got = _call_pbo(oracle_value=(2, [0.0, -0.0]))  # -0.0 ≠ 0.0 bitwise
+    assert got == (2, [0.0, -0.0])
+    assert kernel_disabled("pbo") is True
+
+
+def test_pbo_burn_in_oracle_length_mismatch_latches() -> None:
+    """A wrong-length oracle (a seam bug, never healthy) latches instead of
+    raising ON-only out of the strict zip."""
+    got = _call_pbo(oracle_value=(2, [0.0]))
+    assert got == (2, [0.0])
+    assert kernel_disabled("pbo") is True
+
+
+def test_pbo_custom_evaluator_and_cap_refuse() -> None:
+    with capture_logs() as logs:
+        assert _call_pbo(evaluator_is_default=False) is None
+        assert _call_pbo(n_total=2_000_001) is None
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == ["custom_evaluator", "combination_cap"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"n_splits": 1}, "arg_unsupported"),  # below minimum
+        ({"n_strat": 2.0}, "arg_foreign_type"),
+        ({"is_count": 0}, "arg_unsupported"),  # below minimum
+        ({"block_sum": [[1.0, _Dec(2)]]}, "arg_foreign_type"),
+    ],
+)
+def test_pbo_gate_refusals(kwargs: dict[str, object], reason: str) -> None:
+    with capture_logs() as logs:
+        assert _call_pbo(**kwargs) is None  # type: ignore[arg-type]
+    reasons = [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"]
+    assert reasons == [reason]
+
+
+def test_pbo_sumsq_foreign_entry_refuses() -> None:
+    """The SECOND matrix rides the same exact-float scan."""
+    got = pbo_cscv_via_kernel(
+        [[1.0, 2.0]],
+        [[1.0, "x"]],  # type: ignore[list-item]
+        n_splits=2,
+        n_strat=2,
+        is_count=1,
+        n_total=2,
+        evaluator_is_default=True,
+        oracle=lambda: (0, [0.0, 0.0]),
+    )
+    assert got is None
+
+
+def test_pbo_latched_short_circuits() -> None:
+    disable_kernel("pbo", "self_check_mismatch")
+    with capture_logs() as logs:
+        assert _call_pbo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_disabled"]
+
+
+def test_pbo_wheel_stale_kernel_error_poisoned_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(fno_math, "stats_pbo_cscv")
+    with capture_logs() as logs:
+        assert _call_pbo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["wheel_stale"]
+    monkeypatch.undo()
+    reset_observability_memo_for_tests()
+
+    def _raise(*args: object) -> tuple[int, list[float]]:
+        raise TypeError("boom")
+
+    monkeypatch.setattr(fno_math, "stats_pbo_cscv", _raise)
+    with capture_logs() as logs:
+        assert _call_pbo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_error"]
+    monkeypatch.setattr(fno_math, "stats_pbo_cscv", lambda *a: (3, [0.0, 0.0]))
+    with capture_logs() as logs:
+        assert _call_pbo() is None  # count beyond n_total refused
+    assert [e["event"] for e in logs if "refused" in e["event"]] == [
+        "rust_stats.kernel_result_refused"
+    ]
+
+    def _oom(*args: object) -> tuple[int, list[float]]:
+        raise MemoryError
+
+    monkeypatch.setattr(fno_math, "stats_pbo_cscv", _oom)
+    with pytest.raises(MemoryError):
+        _call_pbo()
+
+
+def test_pbo_steady_state_skips_the_oracle() -> None:
+    reset_self_check_for_tests("pbo", remaining=0)
+    calls: list[int] = []
+    got = _call_pbo(oracle_calls=calls)
+    assert got == (2, [0.0, 0.0]) and calls == []
+
+
+# ── wfo binding ─────────────────────────────────────────────────────────
+
+
+def test_wfo_happy_path_burn_in_match_and_engaged_once() -> None:
+    calls: list[int] = []
+    with capture_logs() as logs:
+        got = _call_wfo(oracle_calls=calls)
+    assert got == 1
+    assert len(calls) == 1
+    engaged = [e for e in logs if e["event"] == "rust_stats.engaged"]
+    assert len(engaged) == 1 and engaged[0]["fn"] == "wfo"
+
+
+def test_wfo_burn_in_mismatch_ships_oracle_and_latches() -> None:
+    got = _call_wfo(oracle_value=0)
+    assert got == 0
+    assert kernel_disabled("wfo") is True
+
+
+def test_wfo_latched_short_circuits() -> None:
+    disable_kernel("wfo", "self_check_mismatch")
+    with capture_logs() as logs:
+        assert _call_wfo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_disabled"]
+
+
+def test_wfo_min_sharpe_gate_mirrors_the_cpcv_law() -> None:
+    """The cross-pin: the shared _numeric_as_f64 law agrees with the cpcv
+    binding's inline min_sharpe gate on the hostile threshold matrix."""
+    for hostile in (float("nan"), 2**53 + 1, 10**400, _Dec("0.5"), np.float64(0.5)):
+        with capture_logs() as logs:
+            assert _call_wfo(min_sharpe=hostile) is None  # type: ignore[arg-type]
+        wfo_reasons = {e["reason"] for e in logs if e["event"] == "rust_stats.fallback"}
+        reset_observability_memo_for_tests()
+        counts, means, m2s = _golden_moments()
+        with capture_logs() as logs:
+            assert (
+                cpcv_pass_count_via_kernel(
+                    counts,
+                    means,
+                    m2s,
+                    2,
+                    hostile,  # type: ignore[arg-type]  # the hostile-threshold matrix
+                    n_total=6,
+                    oracle=lambda: 0,  # type: ignore[arg-type]
+                )
+                is None
+            )
+        cpcv_reasons = {
+            e["reason"].replace("min_sharpe_", "arg_")
+            for e in logs
+            if e["event"] == "rust_stats.fallback"
+        }
+        assert wfo_reasons == cpcv_reasons, f"gate drift at {hostile!r}"
+        reset_observability_memo_for_tests()
+
+
+def test_wfo_exact_int_min_sharpe_engages() -> None:
+    got = _call_wfo(min_sharpe=100, oracle_value=0)  # type: ignore[arg-type]
+    assert got == 0  # sharpe ≈ 2.236 not > 100 — kernel serves the 0
+
+
+def test_wfo_wheel_stale_kernel_error_poisoned_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(fno_math, "stats_wfo_pass_count")
+    with capture_logs() as logs:
+        assert _call_wfo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["wheel_stale"]
+    monkeypatch.undo()
+    reset_observability_memo_for_tests()
+
+    def _raise(*args: object) -> int:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(fno_math, "stats_wfo_pass_count", _raise)
+    with capture_logs() as logs:
+        assert _call_wfo() is None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == ["kernel_error"]
+    monkeypatch.setattr(fno_math, "stats_wfo_pass_count", lambda *a: 2)
+    with capture_logs() as logs:
+        assert _call_wfo(n_walks=1) is None  # beyond n_walks — _valid_pass_count reused
+    assert [e["event"] for e in logs if "refused" in e["event"]] == [
+        "rust_stats.kernel_result_refused"
+    ]
+
+    def _oom(*args: object) -> int:
+        raise MemoryError
+
+    monkeypatch.setattr(fno_math, "stats_wfo_pass_count", _oom)
+    with pytest.raises(MemoryError):
+        _call_wfo()
+
+
+def test_wfo_steady_state_skips_the_oracle() -> None:
+    reset_self_check_for_tests("wfo", remaining=0)
+    calls: list[int] = []
+    got = _call_wfo(oracle_calls=calls)
+    assert got == 1 and calls == []

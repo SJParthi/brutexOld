@@ -52,6 +52,12 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",
         "stats_cpcv_pass_count",
+        # DEC-METRICS-RUST-STATS-002 — the stats-tail kernels (a deliberate,
+        # reviewed surface addition; fenced additive entries).
+        "stats_expected_max_sharpe",
+        "stats_pbo_cscv",
+        "stats_psr",
+        "stats_wfo_pass_count",
         "sweep_drawdown_stats",
         # trading_core (rust/trading-core)
         "FIB_LEVELS_LEN",
