@@ -123,6 +123,14 @@ _ALLOWED_LITERAL_NONE: Final[dict[tuple[str, str], int]] = {
     # `brutex sweep`'s text leaderboard — report bytes are pinned identical
     # stamped-vs-unstamped and nothing is persisted.
     ("brutex/cli.py", "sweep_report"): 1,
+    # The low-support rescue lane's quarantined re-simulation — the SIXTH
+    # sanctioned discarded stream (DEC-STAGE1B-LOW-SUPPORT-RESCUE-001,
+    # MIGRATION.md #1977; sanctioned by the round-1 hostile review as a
+    # CONSCIOUS extension): rescued rows surface ONLY in the
+    # provisional-specialists ARTIFACT section — never main-ranked, never
+    # persisted to a ResultsStore — so their trades are unobservable to
+    # every VIX display/redo surface.
+    ("brutex/engine/rescue_lane.py", "metrics_for_mask"): 1,
 }
 
 #: Seam calls sanctioned to OMIT the stamper kwarg entirely — EMPTY by design:

@@ -25,9 +25,11 @@ fold Sharpes are undefined or pure noise. Running them would manufacture
 fake statistical authority. The rescue lane substitutes a battery that IS
 valid at small n:
 
-1. **Exact binomial sign-test tail** (``ln P(X >= wins)`` under fair-coin
-   null, the BORN-RUST ``fno_math.stats_binom_tail_log_sf`` kernel — exact
-   at any n, no asymptotics; gate ``p < 1e-4``).
+1. **Exact binomial upper-tail test** (``ln P(X >= wins)`` under the
+   BARRIER-IMPLIED random-entry null — the BORN-RUST
+   ``fno_math.stats_binom_tail_log_sf`` kernel, exact at any n, no
+   asymptotics; gate ``p < 1e-4``; the round-1 hostile-review
+   respecification of the original fair-coin null, see the section below).
 2. **Monte-Carlo permutation test** (the EXISTING
    :func:`brutex.metrics.monte_carlo.monte_carlo_permutation_test`, B=1000,
    deterministically seeded from the candidate id via BLAKE3 — exact
@@ -38,6 +40,48 @@ valid at small n:
    MAIN-lane law; the rescue floor default is
    :data:`RESCUE_LOCKBOX_MIN_TRADES_DEFAULT`, a W3-default constant standing
    in for an un-ruled operator value, disclosed in MIGRATION.md #1977).
+
+The barrier-implied binomial null (round-1 hostile-review respecification)
+--------------------------------------------------------------------------
+The original gate tested win FREQUENCY against a fair coin (``p = 0.5``) —
+refuted by the round-1 hostile review with a falsifying case: 3 wins of
++300 against 7 losses of −20 (a genuinely profitable low-win-rate
+specialist) read a 0.945 tail and auto-failed, while at ``p = 0.5`` the
+smallest attainable tail is ``2^-n``, so NO n < 14 record — even a perfect
+one — could ever pass ``alpha = 1e-4``. The respecified null (keeping the
+operator brief's exact-binomial-tail ``p < 1e-4`` mandate):
+
+* **Null win probability** ``p0 = SL / (SL + TP)``
+  (:func:`barrier_null_win_probability`) — the gambler's-ruin probability
+  that a DRIFTLESS symmetric walk hits the TP barrier before the SL
+  barrier, i.e. the win rate a RANDOM entry would earn under the cell's
+  own SL/TP geometry. A tight-SL/wide-TP cell has a small p0 (random
+  entries rarely win), so wins carry real evidence; a wide-SL/tight-TP
+  cell has a large p0 (random entries usually win), so wins carry little.
+  The run's ACTUAL ``stop_loss_paisa``/``take_profit_paisa`` — the same
+  values :func:`~brutex.engine.sweep_driver.metrics_for_mask` simulates
+  under — are REQUIRED positive ints (fail-loud otherwise).
+* **n counts DECIDED trades only** — ``n = winning_trades +
+  losing_trades``; scratch trades (``pnl == 0``, neither win nor loss per
+  the strict :class:`~brutex.metrics.types.ClosedTrade` predicates) are
+  DISCARDED from the sign test instead of inflating n.
+
+**Achievability (honest disclosure, Golden Rule #10):** the smallest
+attainable tail at n decided trades is ``p0^n`` (an all-win record), so a
+candidate can pass at all only when ``n · ln(p0) < ln(alpha)`` — i.e.
+``n >= ceil(ln(alpha) / ln(p0))`` all-win trades. With a small p0 (tight
+SL, wide TP) small-n perfect records genuinely can pass; with a large p0
+they cannot — BY DESIGN: that is "insufficient evidence at this n", never
+a defect, and alpha is never relaxed to compensate.
+
+**Null-approximation honesty:** p0 is an APPROXIMATION of the true
+random-entry win rate — it models a driftless walk decided ONLY by the two
+barriers, while real trades also exit at the forced 15:20 close, at
+``end_of_data`` and at ``session_gap`` boundaries (exits that bypass both
+barriers), and real price paths carry drift. A candidate whose trades
+mostly time-exit is therefore judged against a barrier-only null that does
+not model its exit mix — stated plainly, not overclaimed; the MC
+permutation + lockbox stages are the battery's path-aware complements.
 
 Apriori interaction (conscious supersession)
 --------------------------------------------
@@ -56,10 +100,13 @@ is OFF the floor is byte-identical at 30 (the caller's ``min_hits``).
 Default-OFF law
 ---------------
 The lane arms ONLY via an explicit config (:class:`RescueConfig`) or the
-fail-loud env knob :data:`RESCUE_MIN_HITS_ENV` (``BRUTEX_RESCUE_MIN_HITS``;
+env knob :data:`RESCUE_MIN_HITS_ENV` (``BRUTEX_RESCUE_MIN_HITS``;
 unset/blank/``0`` = OFF, an int in ``[1, MIN_TRADES)`` = armed, junk = a
-loud ``ValueError`` — never a silent fallback). OFF ⇒ no rescue code runs
-(bomb-spy pinned) and the whole sweep is byte-identical.
+loud ``ValueError`` — never a silent fallback). HONEST (Golden Rule #10):
+the resolver is fail-loud ONCE BOUND, but NO production code reads the
+knob until the deferred club-fold binding lands (the structural OFF pin) —
+setting it today is a clean silent no-op, not an armed lane. OFF ⇒ no
+rescue code runs (bomb-spy pinned) and the whole sweep is byte-identical.
 
 Honest compute envelope (STAGED-COMPUTE safeguard)
 --------------------------------------------------
@@ -99,6 +146,7 @@ __all__ = [
     "RescueLaneResult",
     "RescueValidation",
     "RescuedCandidate",
+    "barrier_null_win_probability",
     "binomial_tail_log_pvalue",
     "effective_apriori_min_hits",
     "provisional_specialists_section",
@@ -112,8 +160,10 @@ __all__ = [
 #: ``[RESCUE_MIN_HITS_DEFAULT, MIN_TRADES)`` are rescue-eligible.
 RESCUE_MIN_HITS_DEFAULT: Final[int] = 8
 
-#: The fail-loud arming knob — unset/blank/``0`` = OFF; ``1..MIN_TRADES-1`` =
-#: armed at that floor; anything else = a loud ``ValueError`` (never silent).
+#: The arming knob — unset/blank/``0`` = OFF; ``1..MIN_TRADES-1`` = armed at
+#: that floor; anything else = a loud ``ValueError`` (never silent). Honest:
+#: fail-loud ONCE BOUND — no production code reads it until the club-fold
+#: binding lands, so setting it today is a clean silent no-op.
 RESCUE_MIN_HITS_ENV: Final[str] = "BRUTEX_RESCUE_MIN_HITS"
 
 #: Exact-binomial gate level (the ruling's "exact binomial tail p < 1e-4").
@@ -210,7 +260,10 @@ class RescueConfig:
 
     ``rescue_min_hits`` is the quarantined floor (must sit strictly below
     :data:`~brutex.ranking.MIN_TRADES`); the rest parameterise the
-    small-sample validation battery (module docstring). ``mc_skip_if_failed``
+    small-sample validation battery (module docstring). The binomial null
+    probability is NOT a knob — it is the barrier-implied
+    :func:`barrier_null_win_probability` of the run's own SL/TP (the
+    round-1 hostile-review respecification). ``mc_skip_if_failed``
     stages the expensive B×O(n_bars) permutation cost behind the two cheap
     gates (the STAGED-COMPUTE safeguard) — set ``False`` for full
     observability on every candidate.
@@ -218,7 +271,6 @@ class RescueConfig:
 
     rescue_min_hits: int = RESCUE_MIN_HITS_DEFAULT
     binom_alpha: float = RESCUE_BINOM_ALPHA_DEFAULT
-    binom_null_p: float = 0.5
     mc_permutations: int = 1000
     mc_alpha: float = 0.01
     lockbox_min_trades: int = RESCUE_LOCKBOX_MIN_TRADES_DEFAULT
@@ -233,10 +285,6 @@ class RescueConfig:
             )
         if not 0.0 < self.binom_alpha < 1.0:
             raise ValueError(f"RescueConfig.binom_alpha must be in (0, 1), got {self.binom_alpha}")
-        if not 0.0 < self.binom_null_p < 1.0:
-            raise ValueError(
-                f"RescueConfig.binom_null_p must be in (0, 1), got {self.binom_null_p}"
-            )
         if self.mc_permutations < 1:
             raise ValueError(
                 f"RescueConfig.mc_permutations must be >= 1, got {self.mc_permutations}"
@@ -265,16 +313,53 @@ def rescue_mc_seed(candidate_id: str) -> int:
     return int.from_bytes(digest[:8], "big") % _SEED_MODULUS
 
 
-def binomial_tail_log_pvalue(n_trades: int, n_wins: int, *, null_p: float = 0.5) -> float:
-    """``ln P(X >= n_wins)`` under the fair-coin null — the BORN-RUST kernel.
+def barrier_null_win_probability(
+    stop_loss_paisa: int | None, take_profit_paisa: int | None
+) -> float:
+    """The barrier-implied random-entry win probability ``p0 = SL/(SL+TP)``.
+
+    Gambler's ruin under a driftless symmetric walk with the cell's own
+    SL/TP barriers: a random entry hits the TP barrier before the SL
+    barrier with probability ``SL / (SL + TP)`` — the honest null win rate
+    the binomial gate tests against (the round-1 hostile-review
+    respecification; module docstring carries the achievability and
+    null-approximation disclosures). Exact int division, correctly rounded
+    to the nearest float.
+
+    Raises
+    ------
+    ValueError
+        If either barrier is ``None`` or non-positive — the rescue gate is
+        undefined without both barriers (fail-loud, never a fabricated 0.5).
+    """
+    if stop_loss_paisa is None or take_profit_paisa is None:
+        raise ValueError(
+            "barrier_null_win_probability: the rescue lane requires BOTH "
+            "stop_loss_paisa and take_profit_paisa (the binomial null is "
+            f"barrier-implied p0 = SL/(SL+TP)); got sl={stop_loss_paisa!r} "
+            f"tp={take_profit_paisa!r}"
+        )
+    if stop_loss_paisa <= 0 or take_profit_paisa <= 0:
+        raise ValueError(
+            "barrier_null_win_probability: stop_loss_paisa and "
+            f"take_profit_paisa must both be > 0, got sl={stop_loss_paisa} "
+            f"tp={take_profit_paisa}"
+        )
+    return stop_loss_paisa / (stop_loss_paisa + take_profit_paisa)
+
+
+def binomial_tail_log_pvalue(n_trades: int, n_wins: int, *, null_p: float) -> float:
+    """``ln P(X >= n_wins)`` under the *null_p* null — the BORN-RUST kernel.
 
     A thin conduit to the compiled ``fno_math.stats_binom_tail_log_sf``
     kernel (typed direct import — the combo_mask idiom; the ``brutex.math``
     facade re-exports the SAME object); Python carries NO production copy of
     the math (the transcription + exact-``Fraction`` oracles live
-    tests-side). O(n_trades) per call, log-space (a deep tail never
-    underflows). Raises ``ValueError`` on invalid ``n``/``k``/``p`` (the
-    kernel's own validation, verbatim).
+    tests-side). ``null_p`` is deliberately REQUIRED — the production null
+    is the barrier-implied :func:`barrier_null_win_probability`, never a
+    silent 0.5 default (the round-1 respecification). O(n_trades) per call,
+    log-space (a deep tail never underflows). Raises ``ValueError`` on
+    invalid ``n``/``k``/``p`` (the kernel's own validation, verbatim).
     """
     from fno_math import stats_binom_tail_log_sf
 
@@ -328,10 +413,14 @@ class RescueLaneResult:
     ``band_count`` (masks whose hits landed in ``[rescue_floor, MIN_TRADES)``)
     over ``candidate_count`` (all masks screened) is the measured band
     fraction of the compute disclosure; ``simulated_count`` == ``band_count``
-    (every band mask is simulated exactly once).
+    (every band mask is simulated exactly once). ``binom_null_p`` is the
+    run's barrier-implied null (:func:`barrier_null_win_probability` of the
+    run's SL/TP — constant across the run's candidates, carried for the
+    artifact's provenance).
     """
 
     config: RescueConfig
+    binom_null_p: float
     candidate_count: int
     band_count: int
     simulated_count: int
@@ -343,24 +432,28 @@ def _validate_candidate(
     *,
     n_trades: int,
     n_wins: int,
+    null_p: float,
     config: RescueConfig,
 ) -> RescueValidation:
     """Run the small-sample battery over one reconstructed candidate.
 
-    Order: exact binomial (cheap, O(n)) → lockbox (cheap, O(bars)) →
-    Monte-Carlo (B × O(bars) — staged behind the cheap gates when
-    ``mc_skip_if_failed``). A stage that cannot be evaluated (a ``ValueError``
-    out of the reused machinery) is a FAIL with a named reason — never a
-    crash, never a silent pass (the cascade's reject idiom).
+    ``n_trades`` counts DECIDED trades only (winners + losers — the caller
+    discards scratch trades) and ``null_p`` is the run's barrier-implied
+    null (:func:`barrier_null_win_probability`). Order: exact binomial
+    (cheap, O(n)) → lockbox (cheap, O(bars)) → Monte-Carlo (B × O(bars) —
+    staged behind the cheap gates when ``mc_skip_if_failed``). A stage that
+    cannot be evaluated (a ``ValueError`` out of the reused machinery) is a
+    FAIL with a named reason — never a crash, never a silent pass (the
+    cascade's reject idiom).
     """
     from brutex.metrics.lockbox import lockbox_evaluation
     from brutex.metrics.monte_carlo import monte_carlo_permutation_test
 
     reasons: list[str] = []
 
-    # 1 — exact binomial sign-test tail (the BORN-RUST kernel).
+    # 1 — exact binomial upper tail vs the barrier-implied null (BORN-RUST).
     log_alpha = math.log(config.binom_alpha)
-    binom_log_p = binomial_tail_log_pvalue(n_trades, n_wins, null_p=config.binom_null_p)
+    binom_log_p = binomial_tail_log_pvalue(n_trades, n_wins, null_p=null_p)
     binom_passed = binom_log_p < log_alpha
     if not binom_passed:
         reasons.append(f"binomial tail ln(p) {binom_log_p:.4f} >= ln(alpha) {log_alpha:.4f}")
@@ -455,7 +548,12 @@ def run_rescue_lane(
     Raises
     ------
     ValueError
-        If *bars* is empty (mirrors ``sweep_masks``).
+        If *bars* is empty (mirrors ``sweep_masks``), or if either barrier
+        (``stop_loss_paisa``/``take_profit_paisa``) is ``None``/non-positive
+        — the binomial gate's null is the barrier-implied
+        :func:`barrier_null_win_probability` of the run's OWN SL/TP (the
+        same values :func:`~brutex.engine.sweep_driver.metrics_for_mask`
+        simulates under), so the lane is undefined without both barriers.
     """
     from brutex.engine.cascade_wire import build_candidate_input
     from brutex.engine.combo_mask import count_supermasks
@@ -465,6 +563,7 @@ def run_rescue_lane(
 
     if not bars:
         raise ValueError("run_rescue_lane: bars must be non-empty")
+    null_p = barrier_null_win_probability(stop_loss_paisa, take_profit_paisa)
     cfg = RescueConfig() if config is None else config
     equity = DEFAULT_START_EQUITY_PAISA if start_equity_paisa is None else start_equity_paisa
 
@@ -487,6 +586,13 @@ def run_rescue_lane(
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=equity,
+            # Honest-envelope literal None (the SIXTH sanctioned discarded
+            # stream — DEC-STAGE1B-LOW-SUPPORT-RESCUE-001, round-1 hostile
+            # review; enumerated in test_vix_stamper_binding_pin.py): rescued
+            # rows are provisional-specialists ARTIFACT rows only — never
+            # main-ranked, never persisted to a ResultsStore — so their
+            # trades are unobservable to every VIX display/redo surface and
+            # a stamper bind here would be a dead lake read.
             reference_stamper=None,
         )
         if metrics.total_trades < 1:
@@ -507,8 +613,12 @@ def run_rescue_lane(
         )
         validation = _validate_candidate(
             candidate,
-            n_trades=metrics.total_trades,
+            # DECIDED trades only: scratch (pnl == 0) trades are neither
+            # wins nor losses (the strict ClosedTrade predicates) and are
+            # DISCARDED from the sign test — never an inflated n.
+            n_trades=metrics.winning_trades + metrics.losing_trades,
             n_wins=metrics.winning_trades,
+            null_p=null_p,
             config=cfg,
         )
         rescued.append(
@@ -524,6 +634,7 @@ def run_rescue_lane(
 
     return RescueLaneResult(
         config=cfg,
+        binom_null_p=null_p,
         candidate_count=len(masks),
         band_count=len(band),
         simulated_count=len(band),
@@ -559,6 +670,7 @@ def provisional_specialists_section(result: RescueLaneResult) -> dict[str, Any]:
                 "hits": row.hits,
                 "total_trades": row.total_trades,
                 "winning_trades": row.winning_trades,
+                "losing_trades": row.metrics.losing_trades,
                 "sharpe": _finite_or_none(row.metrics.sharpe_ratio),
                 "net_pnl_paisa": row.metrics.net_pnl_paisa,
                 "binom_log_pvalue": _finite_or_none(validation.binom_log_pvalue),
@@ -577,6 +689,7 @@ def provisional_specialists_section(result: RescueLaneResult) -> dict[str, Any]:
         "rescue_min_hits": result.config.rescue_min_hits,
         "main_min_hits": MIN_TRADES,
         "binom_alpha": result.config.binom_alpha,
+        "binom_null_p": result.binom_null_p,
         "counts": {
             "candidates_screened": result.candidate_count,
             "band": result.band_count,

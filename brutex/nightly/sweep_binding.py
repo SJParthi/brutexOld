@@ -173,8 +173,10 @@ def nightly_sweep_kwargs(
 
     ``sltp_scale_cells`` is the DEFAULT-OFF coarse instrument-scaled SL/TP
     axis hook (DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, LANE W3): ``None`` (the
-    default — and whenever the fail-loud
-    :data:`brutex.engine.stage3_scale.NIGHTLY_SCALE_ENV` knob is unset)
+    default — and whenever the
+    :data:`brutex.engine.stage3_scale.NIGHTLY_SCALE_ENV` knob is unset;
+    that knob's resolver is fail-loud ONCE BOUND, and nothing reads it
+    until the club-fold binding lands — the CALLER decides the plan here)
     forwards the parsed ``sl``/``tp`` args BYTE-IDENTICALLY; a derived cell
     plan (:func:`brutex.engine.stage3_scale.coarse_sltp_cells` — ~5
     log-spaced (SL, TP) values off the instrument's median daily range)

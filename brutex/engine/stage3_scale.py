@@ -54,9 +54,12 @@ Coarse per-instrument default sweep axis (default-OFF)
 cells for an instrument (base SL = r/4 per cell scale, TP = 2·SL — the 2:1
 reward:risk W3-default, disclosed in MIGRATION.md #1978). The nightly key
 list consumes them via ``nightly_sweep_kwargs(..., sltp_scale_cells=…)``
-(``brutex/nightly/sweep_binding.py``) behind the fail-loud
+(``brutex/nightly/sweep_binding.py``) behind the
 :data:`NIGHTLY_SCALE_ENV` knob — default unset = OFF = the forwarded
-``sl``/``tp`` args byte-identical. Per-instrument staging follows the
+``sl``/``tp`` args byte-identical. HONEST (Golden Rule #10): both of this
+module's knob resolvers are fail-loud ONCE BOUND, but NO production code
+reads either knob until the deferred club-fold binding lands — setting them
+today is a clean silent no-op. Per-instrument staging follows the
 DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged-invocation precedent: one armed
 invocation per instrument (a single ``cmd_sweep_all`` call has one sl/tp
 list for all instruments), each ×5 cells — the compute disclosure.
@@ -154,16 +157,22 @@ def _resolve_flag(env_name: str, value: str | None) -> bool:
 
 
 def resolve_instrument_scale_env(value: str | None = None) -> bool:
-    """Resolve :data:`INSTRUMENT_SCALE_ENV` — fail-loud, default OFF.
+    """Resolve :data:`INSTRUMENT_SCALE_ENV` — fail-loud once bound, default OFF.
 
     ``value=None`` (default) reads ``os.environ`` at call time; the sweep
     resolves ONCE per launch. Junk raises ``ValueError`` (never silent).
+    Honest: no production code calls this resolver until the club-fold
+    binding lands (module docstring) — arming the knob today is a no-op.
     """
     return _resolve_flag(INSTRUMENT_SCALE_ENV, value)
 
 
 def resolve_nightly_scale_env(value: str | None = None) -> bool:
-    """Resolve :data:`NIGHTLY_SCALE_ENV` — fail-loud, default OFF."""
+    """Resolve :data:`NIGHTLY_SCALE_ENV` — fail-loud once bound, default OFF.
+
+    Honest: no production code calls this resolver until the club-fold
+    binding lands (module docstring) — arming the knob today is a no-op.
+    """
     return _resolve_flag(NIGHTLY_SCALE_ENV, value)
 
 

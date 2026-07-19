@@ -5,11 +5,15 @@ Rust kernel (``fno_math.stats_binom_tail_log_sf``); Python keeps NO
 production copy — these tests carry the two ORACLES that bound it:
 
 1. an op-for-op Python TRANSCRIPTION of the kernel's log-space recurrence
-   (general ``p`` — the hostile-input differential; tolerance 1e-9 log-units
-   because ``ln``/``exp`` are libm calls whose last-ULP rounding is not
-   cross-language pinned, the disclosed parity envelope), and
-2. an EXACT ``fractions.Fraction`` oracle at the production ``p = 0.5``
-   (dyadic — the tail is an exact rational; tolerance 1e-10 log-units).
+   (general ``p`` — the hostile-input differential, the arm that covers the
+   production null: the rescue lane's barrier-implied
+   ``p0 = SL/(SL+TP)``, the round-1 hostile-review respecification;
+   tolerance 1e-9 log-units because ``ln``/``exp`` are libm calls whose
+   last-ULP rounding is not cross-language pinned, the disclosed parity
+   envelope), and
+2. an EXACT ``fractions.Fraction`` oracle at the dyadic ``p = 0.5`` (an
+   exactness anchor — the tail is an exact rational there; NOT the
+   production null; tolerance 1e-10 log-units).
 """
 
 from __future__ import annotations

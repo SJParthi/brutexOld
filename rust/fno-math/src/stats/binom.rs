@@ -6,13 +6,16 @@
 //! day one — Python carries NO production copy (the transcription oracle
 //! lives tests-side only, `tests/property/test_binom_tail_parity.py`).
 //!
-//! The statistic: for a rescued candidate with `n` observable trades of
-//! which `k` were wins, the one-sided upper-tail p-value under the null
-//! "win/loss are fair coin flips" is `P(X >= k)` for `X ~ Binomial(n, p)`
-//! (production `p = 0.5` — the exact sign test; the kernel is general in
-//! `p` for the hostile-input differential). Returned in LOG space
-//! (`ln P(X >= k)`) so a deep tail (`n = 29, k = 29` → `p ≈ 1.9e-9`)
-//! never underflows through an intermediate.
+//! The statistic: for a rescued candidate with `n` DECIDED trades (winners
+//! plus losers — scratch trades discarded lane-side) of which `k` were
+//! wins, the one-sided upper-tail p-value is `P(X >= k)` for
+//! `X ~ Binomial(n, p)`. The kernel is general in `p`; the production null
+//! is the rescue lane's BARRIER-IMPLIED `p0 = SL/(SL+TP)`
+//! (`rescue_lane.barrier_null_win_probability` — the round-1
+//! hostile-review respecification of the original fair-coin `p = 0.5`,
+//! which auto-rejected profitable low-win-rate specialists). Returned in
+//! LOG space (`ln P(X >= k)`) so a deep tail (`n = 29, k = 29` →
+//! `p ≈ 1.9e-9`) never underflows through an intermediate.
 //!
 //! ## Algorithm (log-space, numerically stable, sequential)
 //!
@@ -35,9 +38,11 @@
 //! CPython's — exactly why the cpcv sibling keeps Python's libm calls
 //! Python-side. This kernel is the PRODUCTION value (the gate consumes it
 //! directly); the tests-side oracles bound it instead of bit-pinning it:
-//! an exact `fractions.Fraction` oracle at the production `p = 0.5`
-//! (dyadic — the tail is an exact rational) plus an op-for-op Python
-//! transcription for general `p`, both within 1e-9 log-units (hypothesis
+//! an exact `fractions.Fraction` oracle at the dyadic `p = 0.5` (an
+//! exactness anchor — the tail is an exact rational there; NOT the
+//! production null, which is the lane's barrier-implied `p0`) plus an
+//! op-for-op Python transcription for general `p` — the arm that covers
+//! the production `p0` — both within 1e-9 log-units (hypothesis
 //! differential over hostile `n`/`k`/`p`). A candidate within 1e-9
 //! log-units of the `ln(1e-4)` gate threshold could verdict-differ between
 //! kernel and oracle — a measure-zero disclosed band, never silent.
@@ -172,6 +177,9 @@ mod tests {
 
     #[test]
     fn rescue_band_reference_value() {
+        // A MATH reference value, not a production-gate example: at the
+        // rescue alpha 1e-4 this tail (≈ 1.62e-4) sits ABOVE the gate, and
+        // the production null is the lane's barrier-implied p0, not 0.5.
         // n=30, k=25, p=0.5: tail = (142506+27405+4060+435+30+1)/2^30
         //                          = 174437 / 1073741824 ≈ 1.6245e-4.
         let exact = (174437.0_f64 / 1073741824.0).ln();

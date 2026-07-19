@@ -3,7 +3,11 @@
 DEC-STAGE1B-LOW-SUPPORT-RESCUE-001 (LANE W3). Covers: the fail-loud env
 knob's full truth table, the effective-Apriori-floor law, config validation,
 the deterministic BLAKE3 MC seed, the BORN-RUST binomial conduit against an
-EXACT ``fractions.Fraction`` oracle, every validation-battery arm
+EXACT ``fractions.Fraction`` oracle, the barrier-implied null law
+``p0 = SL/(SL+TP)`` (the round-1 hostile-review respecification —
+Fraction-checked derivation exactness, threading into the gate, the
+ties-discard ``n = winners + losers``, the R1 falsifying case measured
+honestly, the achievability boundary), every validation-battery arm
 (binom/lockbox/MC pass·fail·error·staged-skip), the real-machinery
 ``run_rescue_lane`` pass over a synthetic lake slice (band classification
 through the REAL popcount kernel + trade sim + reused cascade candidate
@@ -33,6 +37,7 @@ from brutex.engine.rescue_lane import (
     RescuedCandidate,
     RescueLaneResult,
     RescueValidation,
+    barrier_null_win_probability,
     binomial_tail_log_pvalue,
     effective_apriori_min_hits,
     provisional_specialists_section,
@@ -122,8 +127,6 @@ class TestRescueConfig:
             ("rescue_min_hits", MIN_TRADES),
             ("binom_alpha", 0.0),
             ("binom_alpha", 1.0),
-            ("binom_null_p", 0.0),
-            ("binom_null_p", 1.0),
             ("mc_permutations", 0),
             ("mc_alpha", 0.0),
             ("mc_alpha", 1.5),
@@ -158,21 +161,30 @@ def _exact_tail_log_half(n: int, k: int) -> float:
     return math.log(tail)
 
 
+def _exact_tail_log(n: int, k: int, p: Fraction) -> float:
+    """EXACT ln P(X >= k | Binomial(n, p)) via ``Fraction`` arithmetic."""
+    if k > n:
+        return float("-inf")
+    q = 1 - p
+    tail = sum(math.comb(n, i) * p**i * q ** (n - i) for i in range(k, n + 1))
+    return math.log(tail) if tail < 1 else 0.0
+
+
 class TestBinomialTailConduit:
     @pytest.mark.parametrize(
         ("n", "k"), [(1, 1), (5, 3), (10, 10), (20, 20), (29, 22), (29, 29), (30, 25)]
     )
     def test_matches_exact_fraction_oracle_at_half(self, n: int, k: int) -> None:
-        got = binomial_tail_log_pvalue(n, k)
+        got = binomial_tail_log_pvalue(n, k, null_p=0.5)
         assert got == pytest.approx(_exact_tail_log_half(n, k), abs=1e-10)
 
     def test_certain_and_empty_tails(self) -> None:
-        assert binomial_tail_log_pvalue(10, 0) == 0.0
-        assert binomial_tail_log_pvalue(10, 11) == float("-inf")
+        assert binomial_tail_log_pvalue(10, 0, null_p=0.5) == 0.0
+        assert binomial_tail_log_pvalue(10, 11, null_p=0.5) == float("-inf")
 
     def test_kernel_validation_propagates(self) -> None:
         with pytest.raises(ValueError):
-            binomial_tail_log_pvalue(-1, 0)
+            binomial_tail_log_pvalue(-1, 0, null_p=0.5)
         with pytest.raises(ValueError):
             binomial_tail_log_pvalue(5, 2, null_p=float("nan"))
 
@@ -181,6 +193,35 @@ class TestBinomialTailConduit:
         assert binomial_tail_log_pvalue(3, 2, null_p=0.25) == pytest.approx(
             math.log(10 / 64), abs=1e-12
         )
+
+
+# ── The barrier-implied null p0 = SL/(SL+TP) (round-1 respecification) ───────
+
+
+class TestBarrierNullWinProbability:
+    @pytest.mark.parametrize(
+        ("sl", "tp", "expect"),
+        [
+            (20, 300, Fraction(20, 320)),  # tight SL / wide TP ⇒ small p0
+            (80, 50, Fraction(80, 130)),  # the synthetic-lake fixture's cell
+            (100, 100, Fraction(1, 2)),  # symmetric barriers ⇒ the fair coin
+            (5, 500, Fraction(5, 505)),  # Mode-A extreme corner
+        ],
+    )
+    def test_derivation_exactness_fraction_checked(
+        self, sl: int, tp: int, expect: Fraction
+    ) -> None:
+        # int/int true division is correctly rounded — EXACTLY float(Fraction).
+        assert barrier_null_win_probability(sl, tp) == float(expect)
+
+    @pytest.mark.parametrize(
+        ("sl", "tp"), [(None, 50), (80, None), (None, None), (0, 50), (80, 0), (-5, 50), (80, -1)]
+    )
+    def test_missing_or_nonpositive_barriers_fail_loud(
+        self, sl: int | None, tp: int | None
+    ) -> None:
+        with pytest.raises(ValueError, match="barrier_null_win_probability"):
+            barrier_null_win_probability(sl, tp)
 
 
 # ── Validation battery arms (hand-built candidates) ──────────────────────────
@@ -243,7 +284,7 @@ class TestValidateCandidate:
     def test_all_gates_pass(self) -> None:
         # binom: 20/20 wins at p=.5 → p = 2^-20 ≈ 9.5e-7 < 1e-4.
         verdict = rescue_lane._validate_candidate(
-            _candidate(), n_trades=20, n_wins=20, config=_cfg()
+            _candidate(), n_trades=20, n_wins=20, null_p=0.5, config=_cfg()
         )
         assert verdict.binom_passed is True
         assert verdict.lockbox_passed is True, verdict.fail_reasons
@@ -255,7 +296,7 @@ class TestValidateCandidate:
 
     def test_binom_fail_stages_out_mc(self) -> None:
         verdict = rescue_lane._validate_candidate(
-            _candidate(), n_trades=10, n_wins=5, config=_cfg()
+            _candidate(), n_trades=10, n_wins=5, null_p=0.5, config=_cfg()
         )
         assert verdict.binom_passed is False
         assert verdict.mc_pvalue is None
@@ -269,6 +310,7 @@ class TestValidateCandidate:
             _candidate(),
             n_trades=10,
             n_wins=5,
+            null_p=0.5,
             config=_cfg(mc_skip_if_failed=False),
         )
         assert verdict.binom_passed is False
@@ -280,6 +322,7 @@ class TestValidateCandidate:
             _candidate(mc_value=99.0),  # every permutation beats the observed
             n_trades=20,
             n_wins=20,
+            null_p=0.5,
             config=_cfg(),
         )
         assert verdict.mc_passed is False
@@ -291,6 +334,7 @@ class TestValidateCandidate:
             _candidate(n_entries=0),  # invalid → monte_carlo raises ValueError
             n_trades=20,
             n_wins=20,
+            null_p=0.5,
             config=_cfg(),
         )
         assert verdict.mc_passed is False
@@ -303,6 +347,7 @@ class TestValidateCandidate:
             _candidate(training_sharpe=50.0),
             n_trades=20,
             n_wins=20,
+            null_p=0.5,
             config=_cfg(),
         )
         assert verdict.lockbox_passed is False
@@ -315,6 +360,7 @@ class TestValidateCandidate:
             _candidate(returns=(), days=(), trade_days=()),
             n_trades=20,
             n_wins=20,
+            null_p=0.5,
             config=_cfg(),
         )
         assert verdict.lockbox_status == "error"
@@ -326,6 +372,7 @@ class TestValidateCandidate:
             _candidate(trade_days=()),  # zero holdout trades vs floor 5
             n_trades=20,
             n_wins=20,
+            null_p=0.5,
             config=_cfg(),
         )
         assert verdict.lockbox_passed is False
@@ -333,9 +380,69 @@ class TestValidateCandidate:
 
     def test_seed_is_the_candidate_law(self) -> None:
         verdict = rescue_lane._validate_candidate(
-            _candidate(), n_trades=20, n_wins=20, config=_cfg()
+            _candidate(), n_trades=20, n_wins=20, null_p=0.5, config=_cfg()
         )
         assert verdict.mc_seed == rescue_mc_seed("rescue-0000000000000001")
+
+
+# ── The barrier-implied null's gate behaviour (round-1 respecification) ──────
+
+
+class TestBarrierNullGateBehaviour:
+    """The R1 falsifying case + the achievability boundary — pinned honestly."""
+
+    def test_r1_falsifying_case_measured_honestly(self) -> None:
+        """The round-1 falsifier: 3 wins of +300 vs 7 losses of −20 (a
+        genuinely profitable low-win-rate specialist). Under the REFUTED
+        p=0.5 frequency null the tail read 0.9453 — an auto-reject blind to
+        the edge. Under the barrier-implied null p0 = 20/(20+300) = 1/16 the
+        SAME record measures tail ≈ 0.0210 (ln ≈ −3.863): still >= alpha at
+        n=10 — HONESTLY "insufficient evidence at this n", never a relaxed
+        alpha — but the measured p now reflects the real edge, and a
+        stronger record of the same profile (7 wins / 3 losses, tail
+        ≈ 3.78e-7) genuinely PASSES, which p=0.5 made impossible below n=14."""
+        p0 = barrier_null_win_probability(20, 300)
+        assert p0 == float(Fraction(1, 16))
+        verdict = rescue_lane._validate_candidate(
+            _candidate(), n_trades=10, n_wins=3, null_p=p0, config=_cfg()
+        )
+        assert verdict.binom_log_pvalue == pytest.approx(
+            _exact_tail_log(10, 3, Fraction(1, 16)), abs=1e-9
+        )
+        assert math.exp(verdict.binom_log_pvalue) == pytest.approx(0.0210071, abs=1e-6)
+        assert verdict.binom_passed is False  # n=10 with 3 wins: not enough evidence
+        # The refuted null read 0.9453 for the SAME record — pinned so the
+        # respec can never silently regress to the frequency null.
+        assert math.exp(_exact_tail_log_half(10, 3)) == pytest.approx(0.9453125, abs=1e-12)
+        # A strong small-n record of the same barrier profile PASSES.
+        strong = rescue_lane._validate_candidate(
+            _candidate(), n_trades=10, n_wins=7, null_p=p0, config=_cfg()
+        )
+        assert strong.binom_log_pvalue == pytest.approx(
+            _exact_tail_log(10, 7, Fraction(1, 16)), abs=1e-9
+        )
+        assert strong.binom_passed is True
+
+    def test_achievability_boundary_at_small_p0(self) -> None:
+        """min attainable tail = p0^n (all wins) ⇒ passable iff
+        n >= ceil(ln(alpha)/ln(p0)); at p0 = 1/16, alpha = 1e-4 that is
+        n >= 4: an all-win n=4 record passes (1/16⁴ ≈ 1.53e-5), an all-win
+        n=3 record cannot (1/4096 ≈ 2.44e-4) — by design (insufficient
+        evidence), never a defect."""
+        p0 = float(Fraction(1, 16))
+        log_alpha = math.log(1e-4)
+        assert binomial_tail_log_pvalue(4, 4, null_p=p0) < log_alpha
+        assert binomial_tail_log_pvalue(3, 3, null_p=p0) >= log_alpha
+
+    def test_high_p0_perfect_records_stay_unpassable_by_design(self) -> None:
+        """The historical p=0.5 defect (no n<14 record could pass) is now a
+        DESIGN property of high-p0 cells only: at symmetric barriers
+        (p0=0.5) an all-win n=13 record still cannot pass (2^-13 ≈ 1.22e-4)
+        while n=14 can — with a wide-SL/tight-TP cell (large p0) wins carry
+        little evidence and that is the honest verdict."""
+        log_alpha = math.log(1e-4)
+        assert binomial_tail_log_pvalue(13, 13, null_p=0.5) >= log_alpha
+        assert binomial_tail_log_pvalue(14, 14, null_p=0.5) < log_alpha
 
 
 # ── run_rescue_lane over a real synthetic slice ──────────────────────────────
@@ -506,9 +613,87 @@ class TestRunRescueLane:
             [_NEVER_MASK],  # empty band ⇒ the cheap default-path walk
             direction=Side.BUY,
             tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
         )
         assert result.config == RescueConfig()
         assert result.band_count == 0
+
+    @pytest.mark.parametrize(
+        ("sl", "tp"), [(None, 50), (80, None), (None, None), (0, 50), (80, -1)]
+    )
+    def test_missing_or_nonpositive_barriers_refused(self, sl: int | None, tp: int | None) -> None:
+        """The lane is undefined without both barriers (the binomial null is
+        barrier-implied) — fail-loud BEFORE any counting/simulation."""
+        with pytest.raises(ValueError, match="barrier_null_win_probability"):
+            run_rescue_lane(
+                _bars(1, 10),
+                [0],
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=sl,
+                take_profit_paisa=tp,
+            )
+
+    def test_null_p_is_barrier_implied_and_threaded(self) -> None:
+        """The M-a mutant killer: the gate's null is p0 = SL/(SL+TP) of the
+        run's OWN barriers (80/130 here), never a 0.5 constant — the rescued
+        row's binom log-p equals the EXACT Fraction oracle at p0 and differs
+        from the 0.5-null value."""
+        bars = _bars(2, 10)
+        result = run_rescue_lane(
+            bars,
+            [0, _NEVER_MASK],
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+            config=_cfg(mc_permutations=25),
+        )
+        p0 = Fraction(80, 130)
+        assert result.binom_null_p == float(p0)
+        row = result.rescued[0]
+        n = row.winning_trades + row.metrics.losing_trades
+        k = row.winning_trades
+        assert n >= 1 and k >= 1  # anti-vacuous: a real decided record
+        want = _exact_tail_log(n, k, p0)
+        assert row.validation.binom_log_pvalue == pytest.approx(want, abs=1e-9)
+        # The 0.5-constant mutant produces a materially different value.
+        assert row.validation.binom_log_pvalue != pytest.approx(
+            _exact_tail_log_half(n, k), abs=1e-6
+        )
+
+    def test_scratch_trades_discarded_from_sign_test(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The M-b mutant killer: n = winners + losers — a scratch
+        (pnl == 0) trade changes NOTHING in the binomial gate. Plant metrics
+        with total=5, wins=3, losses=1 (one scratch): the gate must compute
+        at (n=4, k=3), never (n=5, k=3)."""
+        bars = _bars(2, 10)
+        from brutex.engine import sweep_driver
+
+        real = sweep_driver.metrics_for_mask
+
+        def with_scratch(*args: Any, **kwargs: Any) -> Any:
+            from dataclasses import replace
+
+            metrics = real(*args, **kwargs)
+            return replace(metrics, total_trades=5, winning_trades=3, losing_trades=1)
+
+        monkeypatch.setattr(sweep_driver, "metrics_for_mask", with_scratch)
+        result = run_rescue_lane(
+            bars,
+            [0],
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+            config=_cfg(mc_permutations=5),
+        )
+        p0 = Fraction(80, 130)
+        row = result.rescued[0]
+        assert row.validation.binom_log_pvalue == pytest.approx(_exact_tail_log(4, 3, p0), abs=1e-9)
+        # The ties-inflated mutant (n = total_trades = 5) reads differently.
+        assert row.validation.binom_log_pvalue != pytest.approx(_exact_tail_log(5, 3, p0), abs=1e-6)
 
 
 # ── Provisional-specialists section (the artifact payload) ───────────────────
@@ -534,6 +719,8 @@ class TestProvisionalSpecialistsSection:
         assert section["schema_version"] == 1
         assert section["rescue_min_hits"] == 8
         assert section["main_min_hits"] == MIN_TRADES
+        # The barrier-implied null provenance (round-1 respecification).
+        assert section["binom_null_p"] == float(Fraction(80, 130))
         counts = section["counts"]
         assert counts["candidates_screened"] == 2
         assert counts["band"] == 1
@@ -544,6 +731,11 @@ class TestProvisionalSpecialistsSection:
         assert entry["low_support"] is True
         assert entry["mask"] == "0x0"
         assert isinstance(entry["fail_reasons"], list)
+        # Decided-trade transparency: wins AND losses surface, so the reader
+        # can recompute the gate's n = wins + losses (scratch trades are the
+        # difference to total_trades).
+        assert entry["losing_trades"] >= 0
+        assert entry["winning_trades"] + entry["losing_trades"] <= entry["total_trades"]
 
     def test_section_is_json_safe_allow_nan_false(self) -> None:
         section = provisional_specialists_section(_result_for_section())
@@ -558,6 +750,7 @@ class TestProvisionalSpecialistsSection:
         row = result.rescued[0]
         poisoned = RescueLaneResult(
             config=result.config,
+            binom_null_p=result.binom_null_p,
             candidate_count=1,
             band_count=1,
             simulated_count=1,
