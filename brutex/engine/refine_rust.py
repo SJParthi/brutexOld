@@ -22,6 +22,15 @@ is NO Python fallback —
 Everything here is O(1) per call: one env read + one ``sys.modules``-cached
 import. Deliberately NOT memoized — tests monkeypatch the env per case and a
 cached verdict would leak across them.
+
+MAINTAINER NOTE (hostile-review round 1, NIT-2): the wheel is built with the
+house ``panic = "abort"`` profile, so an UNGUARDED crate panic does not
+surface as a catchable exception — it SIGABRTs the whole Python process. The
+crate-side FFI input validation (``RefineDriver::new``/``tell``,
+``SelectCore::push`` — every verdict mapped to ``ValueError`` before any core
+``assert!`` can fire) is therefore PROCESS-SURVIVAL load-bearing: a
+validation regression in the crate is fatal, not degradable, so never treat
+those checks as redundant with Python-side guards.
 """
 
 from __future__ import annotations

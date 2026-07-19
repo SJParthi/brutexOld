@@ -10,7 +10,7 @@ of the three engine run-identity joins:
 * ``brutex.engine.stage1a._walk_forward_schedule_hash``.
 
 Every corpus case ALSO hand-assembles the documented payload BYTES (field
-order, the ``stage3-refine-v1`` / ``walk_forward`` labels, the
+order, the ``stage3-refine-v2`` / ``walk_forward`` labels, the
 ``RefineBudget.canonical()`` encoding, the canonical-JSON key order +
 ``(",", ":")`` separators, the ``\\x1f`` join) and asserts the SAME frozen
 digest through THREE independent routes:

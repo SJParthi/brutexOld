@@ -8,6 +8,15 @@
 //! BEFORE any core code could panic. No `unwrap` on a caller-reachable
 //! path — a poisoned call degrades to a typed Python exception, never a
 //! `PanicException` (the #1919 BaseException-escape lesson).
+//!
+//! MAINTAINER NOTE (hostile-review round 1, NIT-2): this crate builds with
+//! the house `panic = "abort"` profile, so an UNGUARDED panic does not raise
+//! a catchable `PanicException` — it SIGABRTs the whole Python process. The
+//! FFI input validation in `RefineDriver::new`/`tell` and `SelectCore::push`
+//! is therefore PROCESS-SURVIVAL load-bearing, not mere exception hygiene: a
+//! future regression that lets unvalidated input reach a core `assert!` is
+//! fatal to the host process, never a degradable error. Keep every
+//! caller-reachable path validated BEFORE it enters `cmaes`/`linalg`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

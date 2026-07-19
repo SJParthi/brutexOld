@@ -3625,7 +3625,7 @@ hostile-review pass._
   build; nightly `WHEEL_SET` gains brutex_refine required=True;
   OPTIONAL_KERNELS registers it with the honest optional-FOR-BOOT-only
   distinction. GATES (executed): cargo fmt/clippy(--locked -D
-  warnings)/test --release --locked 57 green; per-module 100.00%
+  warnings)/test --release --locked 58 green; per-module 100.00%
   line+branch — refine_rust 43/6 (20) · stage3_refine 94/18 (18) ·
   stage3_grid 44/8 (46) · stage3_select 36/12 (28) · stage3_wire 218/64
   (59) · box_update 711/274 (151); golden/property/caller battery 271
