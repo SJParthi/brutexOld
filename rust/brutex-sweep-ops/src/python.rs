@@ -17,6 +17,7 @@ use crate::artifacts;
 use crate::audit_chain;
 use crate::leaves;
 use crate::ops;
+use crate::run_core;
 use crate::verify;
 
 // ───────────────────────── slice 1 — leaves ─────────────────────────
@@ -453,6 +454,32 @@ fn apriori_join_prune(
     Ok((out, tripped))
 }
 
+// ───────────────────── slice 6 — run-core/orchestrator ─────────────────────
+
+/// `sweep_run_core.tuple_record_stride`'s D-9 decimation fold (see
+/// [`run_core::tuple_record_stride`]). f64-mirrored CPython true-division
+/// arithmetic; the facade gates inputs to the exact band |v| <= 2^52.
+#[pyfunction]
+fn tuple_record_stride(total_tuples: i64) -> u64 {
+    run_core::tuple_record_stride(total_tuples)
+}
+
+/// `sweep_run_core.per_tuple_diffcheck_budget`'s R45 K-distribution fold
+/// (see [`run_core::per_tuple_diffcheck_budget`]).
+#[pyfunction]
+fn per_tuple_diffcheck_budget(k_per_run: i64, total_tuples: i64) -> u64 {
+    run_core::per_tuple_diffcheck_budget(k_per_run, total_tuples)
+}
+
+/// `sweep_orchestrator.count_sweep_tuples`'s outer-product fold over
+/// PRE-EXTRACTED axis cardinalities (see [`run_core::grid_tuple_count`]).
+/// A product past u64 raises `ValueError` — the facade degrades to the
+/// Python bigint oracle (never a panic, never a truncation).
+#[pyfunction]
+fn grid_tuple_count(axes: Vec<u64>) -> PyResult<u64> {
+    run_core::grid_tuple_count(&axes).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
 // ──────────────────────── module registration ────────────────────────
 
 #[pymodule]
@@ -493,7 +520,11 @@ fn _brutex_sweep_ops(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("RECOUNT_VERDICT_TOKENS", verify::RECOUNT_VERDICT_TOKENS)?;
     m.add_function(wrap_pyfunction!(recount_verdict, m)?)?;
     m.add_function(wrap_pyfunction!(apriori_join_prune, m)?)?;
-    // slice 6 registration blocks append below this line, one fenced
+    // slice 6 — run-core/orchestrator
+    m.add_function(wrap_pyfunction!(tuple_record_stride, m)?)?;
+    m.add_function(wrap_pyfunction!(per_tuple_diffcheck_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(grid_tuple_count, m)?)?;
+    // slice 7+ registration blocks append below this line, one fenced
     // block per slice (see the module docstring's registration law).
     Ok(())
 }

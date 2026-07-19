@@ -94,9 +94,11 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
+    "grid_tuple_count",
     "heal_mismatch_decision",
     "join_path_segments",
     "liveness_tail",
+    "per_tuple_diffcheck_budget",
     "preflight_missing",
     "progress_derived",
     "quarantine_next_ordinal",
@@ -107,6 +109,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "sla_decision",
     "stall_scaled_timeout",
     "stamp_verdict",
+    "tuple_record_stride",
 )
 
 
@@ -151,9 +154,11 @@ from ._brutex_sweep_ops import (  # noqa: E402
     exit_status_resolution,
     freshness_stale,
     gate_config_fragment,
+    grid_tuple_count,
     heal_mismatch_decision,
     join_path_segments,
     liveness_tail,
+    per_tuple_diffcheck_budget,
     preflight_missing,
     progress_derived,
     quarantine_next_ordinal,
@@ -164,6 +169,7 @@ from ._brutex_sweep_ops import (  # noqa: E402
     sla_decision,
     stall_scaled_timeout,
     stamp_verdict,
+    tuple_record_stride,
 )
 
 #: Crate version of the INSTALLED compiled kernel — derived at import from the
@@ -188,9 +194,11 @@ __all__ = [
     "exit_status_resolution",
     "freshness_stale",
     "gate_config_fragment",
+    "grid_tuple_count",
     "heal_mismatch_decision",
     "join_path_segments",
     "liveness_tail",
+    "per_tuple_diffcheck_budget",
     "preflight_missing",
     "progress_derived",
     "quarantine_next_ordinal",
@@ -201,4 +209,5 @@ __all__ = [
     "sla_decision",
     "stall_scaled_timeout",
     "stamp_verdict",
+    "tuple_record_stride",
 ]
