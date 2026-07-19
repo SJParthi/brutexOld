@@ -473,7 +473,8 @@ class TestCombinedEnrichmentBackfillSeam:
     ) -> None:
         path = tmp_path / "a.parquet"
         store = ResultsStore(path=path)
-        assert store.append(_row(1)) is True  # quartet + W2 fields all None
+        seeded = store.append(_row(1))
+        assert seeded is True  # quartet + W2 fields all None
         with capture_logs() as logs:
             upgraded = store.append(_row(1, with_temporal=True, kelly_fraction=0.25))
         # (c) the combined return law: True — a backfillable upgrade occurred
