@@ -14,9 +14,12 @@ runs separately:
     seconds-denominated ``.wait`` smuggles;
 (b) ci.yml wiring pins — the ``browser`` job exists, is wired into the
     ``ci-ok`` aggregate in ALL THREE places (``needs:`` + the echo block + the
-    for-loop enumeration), carries NO job-level ``if:`` escape (the aggregate
-    treats skipped==pass, so a conditional browser job could merge green with
-    a broken DOM), runs cov-free, and is runtime-bounded; the pytest STEP
+    for-loop enumeration), carries EXACTLY ONE job-level ``if:`` — the
+    DEC-CI-DOCS-PATHS-FILTER-001 docs-only paths-filter gate, whose skip is
+    NOT a silent merge-green escape because ci-ok's skipped-only-when-proven
+    law accepts a skipped browser job ONLY when detect-changes proved
+    docs_only=true (any other conditional could merge green with a broken
+    DOM), runs cov-free, and is runtime-bounded; the pytest STEP
     itself is shape-pinned (round-2 review): its run line must equal
     ``run: pytest tests/browser -q`` verbatim (a narrowed sentinel-only path
     would green the job with zero Chromium proofs), the opt-in env var must
@@ -280,15 +283,36 @@ def test_browser_job_exists_with_required_pins() -> None:
     )
 
 
-def test_browser_job_has_no_job_level_if_escape() -> None:
-    """(b) No job-level `if:` — skipped==pass in ci-ok would merge green."""
+def test_browser_job_job_level_if_is_exactly_the_docs_only_gate() -> None:
+    """(b) The ONLY job-level `if:` is the docs-only paths-filter gate.
+
+    DEC-CI-DOCS-PATHS-FILTER-001: the browser job may skip ONLY on a PROVEN
+    docs-only diff. Any OTHER conditional would be a silent merge-green
+    escape hatch (the ci-ok loop treats skipped as pass) — so the job-level
+    `if:` list is pinned to EXACTLY the one gate expression, and the
+    fail-closed net is pinned too: ci-ok's skipped-only-when-proven law must
+    enumerate the browser job, turning any skip that detect-changes did not
+    prove docs-only into a RED aggregate.
+    """
     text = _CI_YML.read_text(encoding="utf-8")
     block = _job_block(text, _guards.CI_BROWSER_JOB)
     job_level_ifs = [line for line in block.splitlines() if re.match(r"^    if\s*:", line)]
-    assert job_level_ifs == [], (
-        "the browser job carries a job-level `if:` — a conditional browser job is a "
-        "silent merge-green escape hatch because the ci-ok loop treats skipped as pass: "
-        f"{job_level_ifs}"
+    assert job_level_ifs == [
+        "    if: needs.detect-changes.outputs.docs_only != 'true'"
+    ], (
+        "the browser job's job-level `if:` must be EXACTLY the docs-only "
+        "paths-filter gate (DEC-CI-DOCS-PATHS-FILTER-001) — any other "
+        "conditional is a silent merge-green escape hatch because the ci-ok "
+        f"loop treats skipped as pass: {job_level_ifs}"
+    )
+    ci_ok = _job_block(text, "ci-ok")
+    assert '"browser:${{ needs.browser.result }}" \\' in ci_ok, (
+        "ci-ok lost the skipped-only-when-proven enumeration entry for the "
+        "browser job — a docs-only-gated browser skip would be silently green"
+    )
+    assert "detect-changes" in ci_ok.split("steps:", 1)[0], (
+        "ci-ok `needs:` lost detect-changes — the skipped-only-when-proven "
+        "law cannot read the docs_only output"
     )
 
 
