@@ -363,7 +363,7 @@ mod tests {
         // The AMBUJACEM shape: two expiries (groups 0/1) of ONE underlying
         // (under 0) with lots 1050 → 1200 — no group mismatch, one revision.
         let got = economics_lot_fold_impl(&[0, 1], &[0, 0], &[1050, 1200]).unwrap();
-        assert_eq!(got.0, vec![]);
+        assert_eq!(got.0, Vec::<i64>::new());
         assert_eq!(got.1, Vec::<Vec<i64>>::new());
         assert_eq!(got.2, vec![0]);
         assert_eq!(got.3, vec![vec![1050, 1200]]);
@@ -414,9 +414,8 @@ mod tests {
         // Spot 0: sym 0, identity 0, NO token; spot 1: sym 1, identity 1,
         // token 5. Leg A: symbol 0 only → symbol_only; leg B: unseen symbol
         // 9 + token 5 → token_only.
-        let got =
-            master_integrity_fold_impl(&[0, 1], &[0, 1], &[NO_KEY, 5], &[0, 9], &[NO_KEY, 5])
-                .unwrap();
+        let got = master_integrity_fold_impl(&[0, 1], &[0, 1], &[NO_KEY, 5], &[0, 9], &[NO_KEY, 5])
+            .unwrap();
         assert_eq!(got.0, vec![BUCKET_SYMBOL_ONLY, BUCKET_TOKEN_ONLY]);
         assert_eq!(got.1, 0);
     }
@@ -443,14 +442,7 @@ mod tests {
         // naming sym 0 + token 3 (→ identity 0, AGREEING with the stored
         // first identity) is STILL ambiguous — sym_ambiguous wins the
         // classification (the highest-fidelity precedence).
-        let got = master_integrity_fold_impl(
-            &[0, 0],
-            &[0, 1],
-            &[3, NO_KEY],
-            &[0],
-            &[3],
-        )
-        .unwrap();
+        let got = master_integrity_fold_impl(&[0, 0], &[0, 1], &[3, NO_KEY], &[0], &[3]).unwrap();
         assert_eq!(got.0, vec![BUCKET_AMBIGUOUS]);
         // NOTHING referenced — both identities are spots with no legs.
         assert_eq!(got.1, 2);
@@ -485,8 +477,7 @@ mod tests {
     fn disagreement_when_symbol_and_token_name_distinct_spots() {
         // Spot A: sym 0 / identity 0 / token 10; spot B: sym 1 / identity 1
         // / token 11. A leg naming sym 0 (→ A) + token 11 (→ B) disagrees.
-        let got =
-            master_integrity_fold_impl(&[0, 1], &[0, 1], &[10, 11], &[0], &[11]).unwrap();
+        let got = master_integrity_fold_impl(&[0, 1], &[0, 1], &[10, 11], &[0], &[11]).unwrap();
         assert_eq!(got.0, vec![BUCKET_DISAGREEMENT]);
         // A disagreement references NEITHER spot.
         assert_eq!(got.1, 2);
