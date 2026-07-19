@@ -23,19 +23,41 @@ production writers ingest uses) by driving the REAL ``cli.cmd_sweep_all`` shim,
 
 Runtime is measured and printed per leg (``rehearsal.<leg>.seconds`` lines in
 the pytest output) so the CI job's budget claim stays evidence-backed.
+
+DETERMINISM (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md #1798): the
+measured wall time is made COMMIT-INVARIANT. The Golden-Rule-#4 run identity
+deliberately folds ``code_commit_sha``, and the Stage-3 optimizer seeds derive
+from that identity (``stage3_refine.seed_from_mask_run_id``; the cascade seed
+is ``int(sweep_id[:16], 16)``) — so before the pin, EVERY commit reshuffled the
+Stage-3 refined rows, flipping whether any candidate survived the DSR gate into
+the Stage-4 1000-permutation Monte-Carlo filter: a per-commit seed LOTTERY that
+made this file's wall time bimodal (~5 s vs ~200 s+ locally; ~33 s vs
+310–321 s under coverage on CI) with ZERO code change. The fix: (a)
+``_sweep_all`` pins a constant ``code_commit_sha`` (the identity input, not the
+seeds, so the WHOLE seeded chain stays production-shaped), and (b) the
+``_log_volume_guard`` fixture extends the DEC-SWEEP-LOG-VOLUME-GUARD-001
+(#1630) INFO bound to this in-process chain (the CLI dispatch guard never
+engages under pytest). This is a test-DETERMINISM/CORRECTNESS fix, NOT a gate
+weakening: the runtime assertion previously measured a commit-hash seed lottery
+plus DEBUG-render overhead, not chain feasibility (its stated purpose); pinned,
+it measures the actual chain on the SAME workload every commit, and a REAL
+chain regression on that workload still fails at 300 s (teeth proven by
+``test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds``).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 from brutex.audit_verify import auto_verify
@@ -59,6 +81,7 @@ pytest.importorskip("cma")
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r38_full_chain_completes_clean": ("R38", "R7"),
     "test_r38_rehearsal_runtime_is_ci_feasible": ("R38",),
+    "test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds": ("R38",),
     "test_r38_stage3_cells_genuinely_written": ("R38",),
     "test_r38_cascade_genuinely_ran": ("R38",),
     "test_r28_manifest_contract_shape_and_funnel": ("R28",),
@@ -85,6 +108,53 @@ _N_DAYS = 190
 _PER_DAY = 12
 #: The design's rehearsal-sized diffcheck budget (CI_K_SAMPLES, D-10/graft C).
 _CI_K_SAMPLES = 8
+#: The PINNED run-identity commit sha (DEC-R38-REHEARSAL-DETERMINISM-001
+#: #1798) — a deliberately synthetic 40-hex constant, chosen by MEASURING the
+#: rehearsal so ONE candidate rides the DSR gate and exercises the ENTIRE
+#: statistical cascade (the R38 "full chain in miniature"). CONSCIOUS RE-PIN
+#: (club O #1545, ``trading_core`` 0.3.1 → 0.3.2): the original pin
+#: ``"deadbeef"*5`` was measured against the crate at 0.3.1; merging main
+#: forward bumped the shared ``trading_core`` crate to 0.3.2, which folds into
+#: ``cli._indicator_version()`` (``brutex-<v>+trading_core-<v>``) and thus into
+#: the Golden-Rule-#4 run identity — re-keying the Stage-3/cascade seeds so
+#: ``"deadbeef"*5`` reverted to a DSR-KILLED fast path (the statistical legs
+#: never run), EXACTLY the identity-re-key rot ``test_r38_cascade_genuinely_
+#: ran`` was built to fail LOUD on (NOT a cascade regression — club O touched
+#: no cascade/stage3/DSR/metrics math; the run-identity engine goldens are
+#: byte-unchanged vs main). Re-measured under 0.3.2 (same 4-vCPU sandbox, INFO
+#: log guard active): ``"deadbeef"*5`` → 3.46 s and ``"abad1dea"*5`` → 2.80 s
+#: both now draw a DSR-KILLED pool, while THIS constant (``"feedface"*5``) →
+#: 18.56 s draws ONE candidate through the DSR gate and exercises the ENTIRE
+#: statistical cascade — walk-forward, CPCV, PBO, SPA/reality-check,
+#: Romano-Wolf, lockbox AND the 1000-permutation Monte-Carlo filter (which
+#: kills it: ``stage_survivors.deflated_sharpe == 1``, ``monte_carlo == 0`` —
+#: the SAME full-cascade shape the prior 0.3.1 pin produced, so the guard's
+#: expected dict is byte-UNCHANGED, its teeth fully armed). Margin to the
+#: 300 s budget, both measured on the same 4-vCPU sandbox (Golden Rule #10):
+#: ~16× WITHOUT coverage (18.56 s) and ~4.5× UNDER ``--cov=brutex --cov-branch``
+#: (67.25 s — ≈ the WITH-COVERAGE unit job's context). The MC leg is BOUNDED
+#: because the pinned seed's candidate is signal-LIGHT and the
+#: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered.
+#:
+#: RE-MEASURED at the 2026-07-18 club-O merge-forward onto main 3ee742b3
+#: (DEC-FILL-WORST-CASE-ONLY-001 #1825 landed between the club's base and the
+#: fold — the fill law itself changed, not merely a seed re-key): under
+#: worst-case fills the OLD fixture's DSR pool was unpassable for EVERY
+#: measured sha (28 candidates, all deflated_sharpe=0 — leaderboard Sharpe
+#: variance 2.5-39.9 vs candidate Sharpes <= 3.3), so the FIXTURE was
+#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: this SAME
+#: constant (``"feedface"*5``) now draws TWO candidates through the DSR gate
+#: over the re-derived 9-candidate pool (variance 0.788 measured) and
+#: exercises the ENTIRE statistical cascade — walk-forward, CPCV, PBO,
+#: SPA/reality-check, Romano-Wolf, the LOCKBOX (which filters one — a real
+#: filter event) and the 1000-permutation Monte-Carlo leg (which runs on the
+#: survivor and passes it). Measured ~20 s per uninstrumented pass on the
+#: 4-vCPU sandbox (~15x margin to the 300 s strict budget); alternates
+#: measured DSR-killed on the OLD fixture this session: deadbeef/abad1dea/
+#: cafebabe/deadc0de/baddcafe/feedc0de/d15ea5e0/ba5eba11/5ca1ab1e/ca11ab1e/
+#: b01dface/f005ba11/0ddba11d/deadfa11/fee1dead x5 + 10 repeated-hex-word
+#: constants (transcript in the club-O PR body).
+_PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
 
 
 def _trading_days(start: date, n: int) -> list[date]:
@@ -99,31 +169,60 @@ def _trading_days(start: date, n: int) -> list[date]:
 
 
 def _bars() -> list[CandleBar]:
-    """The worst-case-rankable gap-up drift: BUY masks pass the 5 hard gates.
+    """The worst-case-rankable CONTINUOUS gap-up drift (club-O re-derivation).
 
-    DEC-FILL-WORST-CASE-ONLY-001 re-craft (the old wide-range zigzag SL'd
-    every worst-case entry on its own bar): narrow gap-up bars (range 0.50 <
-    the SL 0.80; the next gap-up's low clears the TP level → +50 wins), a
-    shallow bearish bar each 7-bar cycle, and a DEEP bearish bar (range
-    0.85) every 4th cycle whose stop-out keeps profit_factor finite.
+    Hand-derivation (2026-07-18 club-O merge-forward — the #1825 worst-case
+    law is now the REAL engine law, and under it the old per-day-resetting
+    zigzag produced a DSR-unpassable pool; every term below was chosen
+    against the measured DSR arithmetic, transcript in the club-O PR body):
+
+    * CONTINUOUS trend (no per-day price reset): the two bearish-bit combos
+      (close_below_ema20/ema200 — bits 1/3) then never fire outside warm-up,
+      so they min-hits-drop out of the store instead of contributing
+      degenerate near-zero-trade Sharpes to the DSR trial population.
+    * Bearish bars SUPPRESSED for the first 40 cycles (~23 trading days —
+      the EMA200 warm-up): during warm-up the lagging EMAs sit close enough
+      to price that a bearish close could dip below them and hand bits 1/3 a
+      handful of terrible-Sharpe trades (measured: trial variance 5.2 with
+      warm-up bears vs 3.2 without, before the other terms landed).
+    * Narrow gap-up win bars (o=+3.0 gap, h=o+0.34, lo=o-0.02, c=o+0.3):
+      the worst-case BUY entry is the fill bar's HIGH; a fill-bar range of
+      0.36 keeps every stage-3-explorable SL (CMA samples around the 80
+      seed) from stopping out ON the fill bar — the old 0.50-range bar let
+      small refined SLs stop same-bar at the bar LOW uniformly, minting
+      identical-loss series with Sharpe -11.4 that blew the trial variance
+      to ~40 (measured).
+    * The next gap-up's low (o+3.0-0.02) clears every explorable TP level →
+      clean +TP wins at the with-the-level clamp.
+    * A shallow bearish bar each 7-bar cycle (c=o-0.3, lo=o-0.4: never
+      reaches the SL-80 level) + a DEEP bearish loss carrier every 16th
+      cycle whose low (o-0.72) barely crosses the SL level — the stop-out
+      keeps profit_factor finite without the old every-4th-cycle loss rate
+      that held the top candidate's Sharpe at 0.54 (measured; rare + barely
+      overshooting losses lift it to ~1.6-3.3 across the pool).
+    * A deterministic 7-slot price jitter de-degenerates every return
+      series (identical-value runs otherwise produce near-zero-variance
+      Sharpe outliers — measured trial variance 17.6 without jitter).
     """
     out: list[CandleBar] = []
     cycle = 0
+    price = 100.0
     for day in _trading_days(date(2024, 1, 1), _N_DAYS):
-        price = 100.0
         for m in range(_PER_DAY):
             k = m % 7
             if k == 0:
                 cycle += 1
-            if k == 3:  # shallow bearish bar
+            if k == 3 and cycle > 40:  # shallow bearish bar (post EMA warm-up)
                 o = price
                 c, h, lo = o - 0.3, o + 0.1, o - 0.4
-            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+            elif k == 4 and cycle % 16 == 0 and cycle > 40:  # deep bearish loss carrier
                 o = price
-                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+                c, h, lo = o - 0.65, o + 0.1, o - 0.72
             else:  # narrow gap-up win bar
                 o = price + 3.0
-                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+                c, h, lo = o + 0.3, o + 0.34, o - 0.02
+            j = (0.0, 0.02, 0.05, -0.03, 0.04, -0.02, 0.03)[(cycle + m) % 7]
+            o, c, h, lo = o + j, c + j, h + j, lo + j
             ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
             out.append(
                 CandleBar(
@@ -162,35 +261,54 @@ def _seed_lake(root: Path) -> tuple[Path, Path]:
 
 
 def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
-    """One full-chain ``cmd_sweep_all`` pass — stage-3 + cascade + diffcheck ON."""
+    """One full-chain ``cmd_sweep_all`` pass — stage-3 + cascade + diffcheck ON.
+
+    ``code_commit_sha`` is PINNED to :data:`_PINNED_CODE_COMMIT_SHA`
+    (DEC-R38-REHEARSAL-DETERMINISM-001 #1798) by patching
+    ``cli._resolve_code_commit_sha`` — the ONE site feeding the grid's
+    ``code_commit_sha`` (``cmd_sweep_all`` exposes no kwarg for it; the
+    ``--code-commit-sha`` CLI seam belongs to ``sweep-verify``, and adding a
+    kwarg would be an engine-side change outside this fix's ruled test-only
+    scope). One frozen sha ⇒ one frozen run identity ⇒ frozen Stage-3/cascade
+    seeds ⇒ the wall-time gate measures the SAME work on every commit.
+
+    stage3_top_k=1 / stage3_fevals=4 (club-O re-derivation, 2026-07-18): the
+    old 2/8 breadth minted ~22 unique refined (sl, tp) cells whose Sharpe
+    dispersion alone held the DSR trial variance >= 2.5 over N=27 — the
+    deflation benchmark sqrt(V)*E[max-z] sat above every candidate. 1/4
+    yields a 9-candidate pool (variance 0.788 measured) while stage-3 still
+    genuinely refines (cells_written > 0 — the sibling test's teeth).
+    """
     from brutex import cli
 
-    return cli.cmd_sweep_all(
-        lake_root=lake_root,
-        catalog_path=catalog_path,
-        results_root=results_root,
-        exchange="NSE",
-        segment="INDEX",
-        symbols=_SYMBOL,
-        intervals="1minute",
-        start="2024-01-01",
-        end="2024-10-15",
-        directions="BUY",
-        k="1",
-        conditions="0,1,2,3,4",
-        sl="80",
-        tp="50",
-        top=10,
-        mode="A",
-        max_tuples=None,
-        max_combos=None,
-        data_snapshot_hash=None,
-        options_sim=False,
-        stage3_enable=True,
-        stage3_top_k=2,
-        stage3_fevals=8,
-        stage3_restarts=1,
-    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cli, "_resolve_code_commit_sha", lambda: _PINNED_CODE_COMMIT_SHA)
+        return cli.cmd_sweep_all(
+            lake_root=lake_root,
+            catalog_path=catalog_path,
+            results_root=results_root,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=_SYMBOL,
+            intervals="1minute",
+            start="2024-01-01",
+            end="2024-10-15",
+            directions="BUY",
+            k="1",
+            conditions="0,1,2,3,4",
+            sl="80",
+            tp="50",
+            top=10,
+            mode="A",
+            max_tuples=None,
+            max_combos=None,
+            data_snapshot_hash=None,
+            options_sim=False,
+            stage3_enable=True,
+            stage3_top_k=1,
+            stage3_fevals=4,
+            stage3_restarts=1,
+        )
 
 
 def _result_store_hashes(results_root: Path) -> dict[str, str]:
@@ -238,6 +356,47 @@ class _Rehearsal:
         self.seconds_second = time.monotonic() - t0
         self.hashes_second = _result_store_hashes(self.results_root)
         self.manifest_second = json.loads((self.run_dir / "manifest.json").read_text())
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _log_volume_guard() -> Iterator[None]:
+    """Bound the in-process chain's structlog volume at INFO — the #1630 law.
+
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 (#1630) bounds a REAL sweep process at INFO
+    via the ``main()`` dispatch guard (``cli._configure_sweep_logging``) — but
+    this rehearsal drives ``cmd_sweep_all`` IN-PROCESS under pytest, where that
+    guard never engages and structlog's default wrapper filters at NOTSET, so
+    the engine's per-trade DEBUG events (``trade_sim.entry``/``trade_sim.exit``)
+    rendered unfiltered INSIDE the measured wall time
+    (DEC-R38-REHEARSAL-DETERMINISM-001 #1798: 2.78 M such renders cost ~256 s
+    on an MC-surviving seed). This fixture extends the #1630 law to the
+    rehearsal by installing the CLI guard's EXACT sink-level threshold —
+    ``structlog.make_filtering_bound_logger(INFO)`` as the wrapper class — and
+    NOTHING else: the full ``configure_logging`` seam is deliberately NOT
+    called in-process, because it closes + replaces the root logger's handlers
+    (pytest's own logging-plugin capture handlers included) — a suite-wide
+    hazard the real CLI process never has. Snapshot/restore plus first-use
+    cache clears (both directions — an EARLIER in-process configure may have
+    frozen module loggers, and ours must not freeze later ``capture_logs``)
+    keep the rest of the suite's logging state as found. Per the #1630 pin,
+    the audit / flight-recorder hash chains are direct file appends, NOT
+    structlog events — byte-untouched at any level.
+    """
+    import structlog
+    from brutex.observability.logging import _clear_structlog_first_use_cache
+
+    saved_config = structlog.get_config()
+    saved_is_configured = structlog.is_configured()
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    _clear_structlog_first_use_cache()
+    try:
+        yield
+    finally:
+        if saved_is_configured:  # a prior test left structlog configured — restore it
+            structlog.configure(**saved_config)
+        else:
+            structlog.reset_defaults()
+        _clear_structlog_first_use_cache()
 
 
 @pytest.fixture(scope="module")
@@ -302,10 +461,27 @@ _RUNTIME_CEILING_COVERAGE_S = 3 * _RUNTIME_CEILING_S
 def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
     """The chain-in-miniature stays MINUTES not hours (measured, not assumed).
 
-    Two-tier ceiling (the CLAUDE.md §2 Rule 5 two-tier philosophy): strict
-    300 s where uninstrumented (the dedicated rehearsal job); the documented
-    3x instrumentation allowance where coverage.py is actively tracing (the
-    unit job's whole-package branch tracing).
+    DETERMINISM + HONESTY (DEC-R38-REHEARSAL-DETERMINISM-001 #1798): before
+    the ``_sweep_all`` sha pin + the ``_log_volume_guard`` INFO bound, this
+    assertion measured a commit-hash SEED LOTTERY plus DEBUG-render overhead,
+    NOT chain feasibility (its stated purpose) — the Stage-3 seeds derive from
+    the run identity, which folds ``code_commit_sha``, so per commit the DSR
+    gate either killed the candidate pool (~5 s locally / ~33 s CI) or let one
+    candidate into the 1000-permutation Monte-Carlo (~200 s+ locally /
+    310-321 s under coverage — measured FAILURES of this very assert with zero
+    code change, and a zero-diff empty commit removed them). Pinned, the
+    assertion measures the ACTUAL chain on the SAME workload every commit
+    (pinned-path measurements in the #1798 ledger entry); a REAL chain
+    regression on that workload still fails here at the strict ceiling —
+    teeth proven by
+    ``test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds``.
+
+    Two-tier ceiling (the CLAUDE.md §2 Rule 5 two-tier philosophy — main's
+    in-flight shape, kept at the club-O merge-forward): strict 300 s where
+    uninstrumented (the dedicated rehearsal job); the documented 3x
+    instrumentation allowance where coverage.py is actively tracing (the
+    unit job's whole-package branch tracing). The 300.0 strict budget itself
+    is UNCHANGED (never weakened).
     """
     ceiling = _RUNTIME_CEILING_COVERAGE_S if _coverage_instrumented() else _RUNTIME_CEILING_S
     assert rehearsal.seconds_first < ceiling, (
@@ -320,14 +496,94 @@ def test_r38_stage3_cells_genuinely_written(rehearsal: _Rehearsal) -> None:
     lines = [json.loads(line) for line in raw.splitlines() if line]
     complete = [e for e in lines if e["action"] == "STAGE_3_PASS_COMPLETE"]
     assert len(complete) >= 1
-    assert complete[0]["payload"]["masks_refined"] == 2
+    # 1 mask refined since the club-O re-derivation set stage3_top_k=1 (the
+    # DSR-pool-breadth fix — see _sweep_all's re-derivation note).
+    assert complete[0]["payload"]["masks_refined"] == 1
     assert complete[0]["payload"]["cells_written"] > 0
     assert complete[0]["payload"]["skipped_empty_train"] == 0
 
 
 def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
+    """The cascade report exists AND every statistical cascade leg genuinely ran.
+
+    CASCADE-SHAPE DRIFT PIN (DEC-R38-REHEARSAL-DETERMINISM-001 #1798): the
+    "full chain in miniature" claim rests on the PINNED seed drawing at least
+    ONE candidate through the DSR gate so every statistical cascade leg —
+    walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox and the
+    1000-permutation Monte-Carlo filter — genuinely EXECUTES. That coverage is
+    a property of the seed choice, not of the code, so a future
+    ``indicator_version`` / wheel / engine change that re-keys the pinned seed
+    could silently revert the rehearsal to a DSR-KILLED fast path (legs never
+    run) while the runtime gate stays green. These assertions make that rot
+    fail LOUD and force a conscious re-derivation (re-measure candidate
+    constants per the #1798 matrix; never a silent coverage drop).
+    """
     report = json.loads((rehearsal.results_root / "cascade" / "cascade-report.json").read_text())
     assert report["sweep_id"] == rehearsal.run_id
+    # ONE (instrument, tf) group in the rehearsal grid — its per-group report
+    # carries the stage_survivors funnel (cascade_wire.wire_report_to_dict).
+    assert len(report["groups"]) == 1
+    # RE-LOCK AUDIT (2026-07-18, club-O merge-forward onto main 3ee742b3 —
+    # DEC-FILL-WORST-CASE-ONLY-001 #1825 landed BETWEEN the club's base
+    # (1ad31acd, precise-era) and this fold, changing every fill price and so
+    # the whole pool): under the worst-case law the OLD fixture produced a
+    # 10-20-candidate hard-gate pool whose leaderboard Sharpe variance
+    # (measured 2.5-39.9 across 28 candidate shas) put the DSR deflation
+    # benchmark ~sqrt(V)*2 far above every candidate's Sharpe — DSR killed the
+    # WHOLE pool for EVERY measured sha (28/28), i.e. the statistical legs
+    # never ran and no seed could fix it. The fixture + stage-3 breadth were
+    # re-derived (see _bars + _sweep_all notes) and the shape re-measured
+    # under the re-measured pin: 5 enumerated combos; the 2 bearish-bit combos
+    # (close_below_ema20/ema200) never fire on the continuous uptrend so only
+    # 3 survive min-hits into the store; + 6 unique stage-3 refined cells = a
+    # 9-candidate pool (N=9, leaderboard Sharpe variance 0.788 measured);
+    # DSR passes 2, walk-forward/CPCV/PBO/SPA/Romano-Wolf keep both, the
+    # LOCKBOX filters one (a real filter event the old shape never had), and
+    # the 1000-permutation Monte-Carlo leg runs on the survivor and PASSES it
+    # — every statistical leg genuinely EXECUTES (the R38 law; the old
+    # "MC kills it" tail was a property of the old fixture, not of the law).
+    #
+    # SHAPE PIN → LAW PIN (2026-07-19, the shard-5 red on club-O head
+    # 4dd18c24): the EXACT stage_survivors dict proved RUNNER-SENSITIVE —
+    # on the SAME commit the dedicated `sweep-rehearsal` CI job measured the
+    # re-lock shape (DSR passes 2 of 9, lockbox 2→1, MC passes 1; pool
+    # trial variance 0.788) while unit shard 5 AND a local 4-vCPU sandbox
+    # both measured a SECOND stable shape (DSR passes 6 of 9, mid legs keep
+    # all 6, lockbox keeps 6, MC kills one → 5; trial variance 0.5307 —
+    # reproduced 3/3 locally, so deterministic PER MACHINE, bimodal ACROSS
+    # machines). Root: the stage-3 BIPOP-CMA-ES trajectory (pycma + numpy,
+    # deterministically seeded) is floating-point-sensitive to the host
+    # CPU's runtime BLAS/SIMD kernel dispatch, so the 6 refined CELLS —
+    # count-stable, identity-drifting — differ across heterogeneous CI
+    # runners and re-shape the DSR pool's Sharpes. An exact dict therefore
+    # cannot hold fleet-wide; the pin below asserts the R38 LAW itself —
+    # the pool is NOT DSR-killed and every leg receives + processes >= 1
+    # candidate — which BOTH measured shapes satisfy while a DSR-KILLED
+    # fast path (the #1798 rot) still fails loud.
+    surv = report["groups"][0]["report"]["stage_survivors"]
+    _msg = "the pinned seed's full-cascade coverage broke — re-derive consciously (#1798)"
+    assert set(surv) == {
+        "hard_gates",
+        "deflated_sharpe",
+        "cpcv",
+        "reality_check_spa",
+        "pbo",
+        "romano_wolf",
+        "walk_forward",
+        "lockbox",
+        "monte_carlo",
+    }, _msg
+    # The pool SIZE is trajectory-count-stable (3 min-hits survivors + 6
+    # unique refined cells — 9 in every measured env, both attractors).
+    assert surv["hard_gates"] == 9, _msg
+    dsr = surv["deflated_sharpe"]
+    assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
+    for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):
+        assert 1 <= surv[leg] <= dsr, _msg  # each mid leg ran on >= 1 candidate
+    assert 1 <= surv["lockbox"] <= dsr, _msg  # lockbox ran AND fed the MC leg
+    # MC genuinely executed (lockbox >= 1 candidates reached it); an
+    # executed-and-killed MC (monte_carlo == 0) is legal under the law.
+    assert 0 <= surv["monte_carlo"] <= surv["lockbox"], _msg
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
 
@@ -353,7 +609,12 @@ def test_r28_manifest_contract_shape_and_funnel(rehearsal: _Rehearsal) -> None:
     assert set(doc["per_stage_timings"]) == {"preflight", "sweep", "stage3", "cascade", "artifacts"}
     doors = {row["door"]: row["killed"] for row in doc["per_door_kills"]}
     # Sourceable doors populated (D-8); the cascade's dsr door genuinely judged.
-    assert doors["min_hits"] == 0
+    # min_hits kills EXACTLY the two bearish-bit combos (close_below_ema20 /
+    # close_below_ema200) — on the club-O re-derived continuous-uptrend bars
+    # they never fire, so they die at the min-hits door (the trials sidecar's
+    # n_minhits_dropped=2 twin) instead of polluting the DSR pool with
+    # degenerate near-zero-trade Sharpes (the re-derivation's whole point).
+    assert doors["min_hits"] == 2
     assert doors["dsr"] > 0
     assert doc["dedup_skips"] == 0
     assert doc["selection"]["symbols"] == [_SYMBOL]
@@ -462,6 +723,65 @@ def test_r40_diagnostic_bundle_packages_the_run(rehearsal: _Rehearsal) -> None:
 def test_g15_progress_beats_reach_the_pull_jobs_channel(rehearsal: _Rehearsal) -> None:
     """The composed on_progress emits on the EXACT channel pull_jobs consumes."""
     assert rehearsal.beats > 0
+
+
+def test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds(
+    rehearsal: _Rehearsal, tmp_path: Path
+) -> None:
+    """The 300 s gate keeps its TEETH under the sha pin (noise out, teeth intact).
+
+    DEC-R38-REHEARSAL-DETERMINISM-001 (#1798) teeth proof: pinning
+    ``code_commit_sha`` removed the per-commit SEED lottery from the measured
+    quantity — this test proves it removed ONLY the noise, never the gate's
+    bite. The SAME pinned chain re-runs against a FRESH results root (the
+    rehearsal's own tree is untouched — its ``attempt`` counter and store
+    bytes stay exactly what the resume-leg tests assert) with a controlled
+    per-mask delay injected into ``TradeSimWalker.run`` — the per-mask
+    trade-sim step every sweep/cascade/results-depth evaluation walks
+    (class-method patch, so every import style of ``simulate_trades`` is
+    covered). HONEST framing of what each half proves (Golden Rule #10): the
+    PERMANENT load-bearing teeth here is ``calls > 0`` — SEAM LIVENESS, so a
+    refactor that moves per-mask trade-sim off ``TradeSimWalker.run`` (e.g.
+    onto a Rust kernel) fails LOUD instead of leaving this proof vacuous —
+    plus the time-RESPONSE check that the measured wall time contains the
+    injected delay ≥ 1:1 (near-mechanical for serial in-process sleeps inside
+    the timed window; it is a structural proxy, not a magnitude proof). The
+    actual BUDGET-MAGNITUDE bite — that a budget-scale chain regression blows
+    the unchanged ``< 300.0`` assert — is proven by the ONE-TIME executed
+    wedge recorded in the #1798 ledger entry (one wedged-chain-step 301 s
+    sleep → ``test_r38_rehearsal_runtime_is_ci_feasible`` FAILED at 315.8 s
+    on the pinned sha); this companion alone does not prove it — it keeps that
+    recorded proof's premises (seam fires; wall time responds) permanently
+    pinned at CI speed.
+    """
+    from brutex.engine.trade_sim import TradeSimWalker
+
+    delay_s = 0.01  # ~1,044 walker calls on the pinned workload ⇒ ~10 s injected
+    calls = {"n": 0}
+    real_run = TradeSimWalker.run
+
+    def slowed_run(self: TradeSimWalker, *args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        time.sleep(delay_s)
+        return real_run(self, *args, **kwargs)
+
+    results_root = tmp_path / "sweeps-slowed"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("BRUTEX_SWEEP_DIFFCHECK_K", str(_CI_K_SAMPLES))
+        mp.setattr(TradeSimWalker, "run", slowed_run)
+        t0 = time.monotonic()
+        assert _sweep_all(rehearsal.lake_root, rehearsal.catalog_path, results_root) == 0
+        slowed_seconds = time.monotonic() - t0
+
+    total_injected = delay_s * calls["n"]
+    assert calls["n"] > 0, "the per-mask trade-sim seam never fired — no teeth proven"
+    # The timed window contains the chain's per-mask work >= 1:1 — a genuinely
+    # slowed chain step inflates EXACTLY the number the 300 s assert gates.
+    assert slowed_seconds >= total_injected
+    print(
+        f"\nrehearsal.teeth.slowed_seconds={slowed_seconds:.2f} "
+        f"injected={total_injected:.2f} calls={calls['n']}"
+    )
 
 
 # ────── resume leg ──────

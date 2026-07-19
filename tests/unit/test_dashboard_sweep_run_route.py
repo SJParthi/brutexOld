@@ -172,6 +172,55 @@ def test_failed_tuples_surface_in_the_finish_detail(
     assert "1 tuple(s) quarantined from a prior run" in snap["detail"]
 
 
+def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 adversarial-refuter finding: this route's ``_work`` used to
+    return ``cmd_sweep_all``'s bare exit code with no check —
+    ``BackgroundPullJob`` silently discards a non-zero int, so a genuine
+    internal ``cmd_sweep_all`` failure (e.g. the engine's own construction
+    guards) reported the SAME "done" finish detail as full success. Must
+    now surface a named failure in the finish detail instead."""
+
+    def _fails(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    final = _wait_for_job(client)
+    assert final["state"] == "done"  # the job thread itself never raises
+    assert "FAILED" in final["detail"]
+    assert "exit 1" in final["detail"]
+
+
+def test_nonzero_exit_code_does_not_mark_cache_dirty(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same finding: ``on_success``/``mark_dirty`` must not fire on a run
+    that did nothing — only a REAL success invalidates the results cache."""
+    from brutex.dashboard.summary_cache import SummaryCache
+
+    mark_dirty_calls: list[int] = []
+    cache = SummaryCache()
+    monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
+
+    def _fails(
+        request: Any, *, lake_root: Path, results_root: Path, on_summary: Any = None
+    ) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    with TestClient(build_app(DashboardState(), instrument_store=store, summary_cache=cache)) as c:
+        resp = c.post("/api/v1/sweep/run")
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert mark_dirty_calls == []
+
+
 def test_custom_params_are_echoed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
     resp = client.post(
@@ -380,3 +429,63 @@ def test_operator_page_carries_sweep_button(client: TestClient) -> None:
     assert reports.status_code == 200
     assert 'id="run-sweep"' not in reports.text
     assert 'id="run-cascade"' not in reports.text
+
+
+# ── R54 none-leg launches on the production HTTP surface (operator ruling ────
+# 2026-07-08: none cells are first-class RUNNABLE — warn/disclose, never a
+# hard refusal; pinned at the ROUTE so a future route-side re-validation
+# cannot silently re-violate R54 without failing here).
+
+
+def test_none_leg_launch_accepted_with_stage3_disclosure_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/v1/sweep/run with an explicit ``sl=none`` leg must be
+    launch-ACCEPTED (the pre-R54 behavior was a 400 hard refusal) and the
+    response payload must DISCLOSE the launch's effective Stage-3 downgrade
+    (``stage3_enable: false``) — operator-visible, never server-log-only."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run", params={"sl": "none"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none"
+
+
+def test_mixed_csv_none_leg_launch_accepted_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's REAL mixed grid shape (a ``none`` cell among gridded
+    values — PR #1297's default grid string, the only single-sweep shape
+    covering BOTH SL/TP arms AND no-SL/TP arms in one run) must be
+    launch-accepted on this surface too — the R54 review round 2 BLOCKER."""
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post(
+        "/api/v1/sweep/run",
+        params={"sl": "none,5,100,200", "tp": "100,200,300"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is True
+    assert body["sl"] == "none,5,100,200"
+    assert body["stage3_enable"] is False
+    assert _wait_for_job(client)["state"] == "done"
+    assert _CAPTURED["request"].sl == "none,5,100,200"
+
+
+def test_gridded_launch_payload_reports_stage3_true_r54(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complement pin: the institutional (fully-gridded) default launch's
+    payload reports ``stage3_enable: true`` — the disclosure key is always
+    present, so its absence can never be mistaken for "not downgraded"."""
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    assert resp.json()["stage3_enable"] is True
+    assert _wait_for_job(client)["state"] == "done"
