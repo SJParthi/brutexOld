@@ -190,6 +190,23 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-CROSSVERIFY-RUST-CORE-001 (MIGRATION.md #2115): brutex_ops is the
+    # default-OFF cross-verify pure-law crate (the pinned CSV byte assembly +
+    # the canonical identity/S3-key law). It is consumed ONLY through the
+    # import-guarded facade brutex/crossverify/rust_seam.py
+    # (`importlib.import_module("brutex_ops")` inside the guard — an absent
+    # or broken install latches the `BRUTEX_CROSSVERIFY_RUST` flag OFF with
+    # one loud WARN and the verbatim Python oracle serves, byte-identical).
+    # It is deliberately NOT a turnkey build prerequisite: in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/ops-rust-parity.yml — behind a HARD wheel-health
+    # gate so a broken wheel can never green-vacuous-skip). A module-top
+    # `import brutex_ops` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_ops": (
+        "brutex/crossverify/rust_seam.py",
+        ".github/workflows/ops-rust-parity.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {
