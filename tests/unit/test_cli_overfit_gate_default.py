@@ -82,6 +82,22 @@ class TestOverfitGateDefaultOn:
         args = cli.build_parser().parse_args(["nightly", "run"])
         assert args.overfit_gate is True
 
+    @pytest.mark.parametrize(
+        ("tail", "expected"),
+        [
+            (["--overfit-gate", "--no-overfit-gate"], False),
+            (["--no-overfit-gate", "--overfit-gate"], True),
+        ],
+    )
+    def test_conflicting_gate_flags_last_wins(self, tail: list[str], expected: bool) -> None:
+        """argparse LAST-WINS for the conflicting flag pair, both orders.
+
+        Frozen CONSCIOUSLY (the ``--options-sim``/``--no-options-sim`` idiom):
+        the later spelling on the command line wins, never an error.
+        """
+        args = cli.build_parser().parse_args([*_SWEEP_ALL_MINIMAL, *tail])
+        assert args.overfit_gate is expected
+
 
 class TestGateIdentityConsequence:
     """The flip's run-identity consequence, pinned at the digest layer."""
@@ -126,13 +142,55 @@ class TestGateIdentityConsequence:
     def test_gated_and_ungated_never_share_a_store(self) -> None:
         assert self._GATED_DEFAULT_DIGEST != self._UNGATED_DIGEST
 
-    def test_default_cli_grid_carries_the_default_gate_config(self) -> None:
-        """The default invocation constructs OverfitGateConfig() exactly."""
-        cfg = OverfitGateConfig(dsr_min=0.95)
+    def test_default_gate_config_equals_explicit_dsr_min(self) -> None:
+        """Default CLI parse → the cmd_sweep_all construction law → config.
+
+        Genuinely parses the DEFAULT args and applies the CLI's own law
+        (``OverfitGateConfig(dsr_min=args.dsr_min)`` when ``args.overfit_gate``)
+        — the built config equals ``OverfitGateConfig()`` field-for-field.
+        (Renamed from ``test_default_cli_grid_carries_the_default_gate_config``,
+        which asserted only the config equality without the CLI parse.)
+        """
+        args = cli.build_parser().parse_args(_SWEEP_ALL_MINIMAL)
+        assert args.overfit_gate is True
+        cfg = OverfitGateConfig(dsr_min=args.dsr_min)
         assert cfg == OverfitGateConfig()
-        assert (cfg.dsr_min, cfg.weight, cfg.default_skew, cfg.default_excess_kurtosis) == (
-            0.95,
-            0.05,
-            0.0,
-            0.0,
-        )
+        assert (
+            cfg.dsr_min,
+            cfg.weight,
+            cfg.default_skew,
+            cfg.default_excess_kurtosis,
+        ) == (0.95, 0.05, 0.0, 0.0)
+
+    def test_sweep_verify_old_tree_requires_no_overfit_gate_optout(self) -> None:
+        """A PRE-flip (ungated) tree recount requires the ``--no-overfit-gate``
+        opt-out — pinned at the DIGEST layer, avoiding the pragma'd CLI shim.
+
+        sweep-verify's DEFAULT parse (overfit_gate True, dsr_min 0.95) now
+        constructs the GATED grid, addressing the gated store
+        ``78ea140f9fa4906a``; only ``--no-overfit-gate`` reconstructs the
+        pre-flip UNGATED address ``7a0120c1123b44c6`` — both directions
+        through the same ``_tuple_digest`` helper the sibling pins use.
+        """
+        import argparse
+
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        from tests.unit.test_engine_sweep_orchestrator import _grid, _tuple
+
+        argv = ["sweep-verify", "--start", "2024-01-01", "--end", "2024-01-31"]
+        default_args = cli.build_parser().parse_args(argv)
+        assert (default_args.overfit_gate, default_args.dsr_min) == (True, 0.95)
+        optout_args = cli.build_parser().parse_args([*argv, "--no-overfit-gate"])
+        assert optout_args.overfit_gate is False
+
+        def grid_for(args: argparse.Namespace) -> SweepGridConfig:
+            # The cmd_sweep_verify construction law: gate flag ON builds the
+            # OverfitGateConfig from --dsr-min; OFF leaves overfit None.
+            if args.overfit_gate:
+                return _grid(overfit=OverfitGateConfig(dsr_min=args.dsr_min))
+            return _grid()
+
+        tuple_ = _tuple()
+        assert _tuple_digest(tuple_, grid_for(default_args)) == self._GATED_DEFAULT_DIGEST
+        assert _tuple_digest(tuple_, grid_for(optout_args)) == self._UNGATED_DIGEST

@@ -7346,8 +7346,12 @@ cascade kills it (red-flagged FAIL @ deflated_sharpe — ranked, never
 hidden); defaulting the in-sweep gate ON refuses the SAME statistic at rank
 time, so the fluke never persists at all (catch-earlier). HONESTY NOTE: the
 original verification session's scratchpad evidence dir was ABSENT at build
-time — the repro was REBUILT from the repo (stated, never fabricated).
-MEASURED EFFECT (the rebuilt repro, `rank_combos` over a 38-candidate
+time — the repro was REBUILT from the repo (stated, never fabricated); the
+rebuilt repro is COMMITTED at `tests/scratch/overfit_gate_fluke_repro.py`
+(an executable evidence script, NOT pytest-collected — no `test_` prefix)
+and was RE-EXECUTED on this tree at the hostile-review round, reproducing
+the headline numbers verbatim.
+MEASURED EFFECT (the committed repro, `rank_combos` over a 38-candidate
 deflatable pool — 1 fluke + 37 synthetic multi-event strategies; fluke:
 trades=30 · PF=95.1538 · max_dd_paisa=1060 · sharpe=0.1853 · skew=5.199 ·
 kurt=25.031): gate OFF (old default) — the fluke persists RANKED #1 of 38
@@ -7377,7 +7381,12 @@ gated-at-defaults successor `78ea140f9fa4906a` (the identity fragment
 sweep fully RE-COMPUTES (no resume of pre-flip stores — Parquet + completion
 sentinel + trial-stats sidecar all re-address), and a default `sweep-verify
 --recount` on a PRE-flip (ungated) tree must pass `--no-overfit-gate`
-explicitly. ENGINE-LEVEL IDENTITY UNTOUCHED: `SweepGridConfig.overfit`
+explicitly (the addressing law test-pinned BOTH directions at the digest
+layer — `test_sweep_verify_old_tree_requires_no_overfit_gate_optout`).
+Existing PRE-flip stores are LEFT INTACT: a new address never overwrites
+them — the gated and ungated trees simply COEXIST on disk, and deleting the
+old tree is an optional operator cleanup, never automatic. ENGINE-LEVEL
+IDENTITY UNTOUCHED: `SweepGridConfig.overfit`
 stays `None`, so the ungated digest + the frozen
 `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` engine goldens pass UNMODIFIED and
 ZERO golden fixtures were regenerated (the 400-case
@@ -7394,4 +7403,9 @@ SIBLING LANES (not duplicated here): the docs honesty pack
 (`claude/single-event-sensitivity-gate`). ENGINE math UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the change
 is WHICH results a default CLI sweep persists (rank-time selection), plus
-the store re-address above.**
+the store re-address above. HOSTILE-REVIEW ROUND folded (verdict
+SHIP-as-proposal — fixed before landing: the rebuilt fluke repro COMMITTED
+at tests/scratch/overfit_gate_fluke_repro.py + re-executed on this tree;
+the sweep-verify old-tree opt-out addressing law test-pinned both
+directions; the misnamed default-config test corrected; the argparse
+last-wins order pinned; the stores-left-intact clause stated plainly).**
