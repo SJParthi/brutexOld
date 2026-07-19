@@ -180,6 +180,11 @@ extend-exclude = [
     "tests/redteam/fixtures/*.stripped.py",
     "tests/redteam/fixtures/planted_*.py",
     "docs/groww/probe/postclose_settle_probe.py",
+    # The sweep-core design measurement scripts landed on main outside the
+    # CI lint scope (`ruff check brutex tests`); force-excluded so the
+    # pre-commit ruff hooks (--force-exclude) match it (the #1775 probe
+    # precedent — see .pre-commit-config.yaml's scoped exclude note).
+    "docs/design/sweep_core",
 ]
 
 [tool.ruff.lint]

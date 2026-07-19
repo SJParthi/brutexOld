@@ -15,6 +15,15 @@
 # Philosophy: fast hooks only (<10 seconds total). Slow things like
 # pytest with full coverage, cargo test, bandit etc. are CI-only.
 
+# Scoped exclude (2026-07-19, the Wave-D merge-forward): the
+# docs/design/sweep_core/ measurement artifacts landed on main AS-IS via the
+# GitHub merge path (no local hooks) and sit OUTSIDE every CI lint gate
+# (`ruff check brutex tests`) BY DESIGN — the local hygiene/ruff hooks must
+# not rewrite main-committed bytes on every later merge-forward (the #1775
+# probe-file force-exclude precedent, made global here because the hygiene
+# hooks have no per-hook pyproject scope).
+exclude: '^docs/design/sweep_core/'
+
 repos:
   # ── Generic file hygiene ───────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -82,6 +91,12 @@ repos:
           # blake3.blake3(...).hexdigest() to Any → phantom no-any-return on
           # files like sweep_supervisor.py (the same class as polars above).
           - blake3>=1.0
+          # starlette ships py.typed; without it the hook env degrades
+          # TrustedHostMiddleware to Any → a phantom [misc]
+          # cannot-subclass-Any on dashboard/trusted_host.py (the same
+          # wheel-less-env class as polars/blake3 above; the venv-faithful
+          # `mypy --strict brutex` is clean on the file).
+          - starlette>=0.40
 
   # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
   - repo: https://github.com/doublify/pre-commit-rust
