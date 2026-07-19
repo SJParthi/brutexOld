@@ -49,6 +49,9 @@ _SUMMARY_LINE = (
     "\x1b[36mrun_id\x1b[0m=\x1b[35m2b53752ea646\x1b[0m "
     "\x1b[36mworkers\x1b[0m=\x1b[35m1\x1b[0m"
 )
+#: The clean structural exit-status shape (compare_arms input in tree tests).
+_CLEAN_STATUS = {"state": "complete", "exit_code": 0, "suspect": False}
+
 _BUILT_LINE = (
     "\x1b[2m2026-07-19T11:41:12.000000Z\x1b[0m [\x1b[32m\x1b[1minfo     \x1b[0m] "
     "\x1b[1msweep_parallel.worker_kernel_built\x1b[0m "
@@ -159,6 +162,53 @@ class TestIdentityLaw:
         other["extra.parquet"] = "cafe"
         assert SOAK.tree_diff(tree, other) == ["NIFTY/1minute/store.parquet", "extra.parquet"]
         assert SOAK.tree_diff(tree, dict(tree)) == []
+
+    def _arm_dir(self, root: Path, name: str, top100: bytes) -> Path:
+        """A minimal arm dir: results/ store + a results-depth sweep_runs/ tree."""
+        arm = root / name
+        (arm / "results" / "NIFTY" / "1minute").mkdir(parents=True)
+        (arm / "results" / "NIFTY" / "1minute" / "store.parquet").write_bytes(b"result-bytes")
+        run_dir = arm / "sweep_runs" / "cafe1234"
+        (run_dir / "results-depth").mkdir(parents=True)
+        (run_dir / "top100.json").write_bytes(top100)
+        (run_dir / "results-depth" / "trades.parquet").write_bytes(b"sidecar-bytes")
+        # Wall-stamped sidecars differ per arm BY DESIGN — masked by the law.
+        (run_dir / "results-depth" / "trades.parquet.stamp.json").write_text(
+            f"stamp-{name}", encoding="utf-8"
+        )
+        return arm
+
+    def test_arm_identity_tree_covers_sweep_runs(self, tmp_path: Path) -> None:
+        # Fix-round-2 MAJOR (refuter-2): the results-depth sweep_runs/ sibling
+        # root is INSIDE the identity compare — identical trees (modulo
+        # .stamp.json) pass, a real top100.json divergence is a named diff.
+        off = self._arm_dir(tmp_path, "arm-off", b'{"entries": []}')
+        on = self._arm_dir(tmp_path, "arm-on", b'{"entries": []}')
+        off_tree = SOAK.arm_identity_tree(off)
+        assert set(off_tree) == {
+            "results/NIFTY/1minute/store.parquet",
+            "sweep_runs/cafe1234/top100.json",
+            "sweep_runs/cafe1234/results-depth/trades.parquet",
+        }
+        assert SOAK.tree_diff(off_tree, SOAK.arm_identity_tree(on)) == []
+
+        compare = SOAK.compare_arms(
+            off, on, {"exit_status": _CLEAN_STATUS}, {"exit_status": _CLEAN_STATUS}
+        )
+        assert compare["identity_ok"] is True
+        assert compare["sweep_runs_files_compared"] == 2
+
+        # A REAL divergence in the flip-facing artifact is caught + named.
+        (on / "sweep_runs" / "cafe1234" / "top100.json").write_bytes(b'{"entries": [1]}')
+        compare = SOAK.compare_arms(
+            off, on, {"exit_status": _CLEAN_STATUS}, {"exit_status": _CLEAN_STATUS}
+        )
+        assert compare["identity_ok"] is False
+        assert "sweep_runs/cafe1234/top100.json" in compare["diff_paths"]
+
+    def test_sweep_runs_tree_absent_dir_is_empty(self, tmp_path: Path) -> None:
+        # Smoke runs results-depth OFF → no sweep_runs/ dir → honest {}.
+        assert SOAK.sweep_runs_tree(tmp_path) == {}
 
     def test_scrub_manifest_drops_volatile_keys_only(self) -> None:
         manifest = {
@@ -292,6 +342,7 @@ def _evaluate(
     keys: int = 6,
     smoke: bool = False,
     hardware_key: str | None = _M4PRO_KEY,
+    hardware_key_source: str | None = "probed",
 ) -> dict[str, str]:
     off = _off_arm() if off is None else off
     on = _arm() if on is None else on
@@ -304,6 +355,7 @@ def _evaluate(
         keys=keys,
         smoke=smoke,
         hardware_key=hardware_key,
+        hardware_key_source=hardware_key_source,
     )
     return result
 
@@ -417,6 +469,21 @@ class TestDeltasAndAcceptance:
         # A big win also just PASSes — the VALUE section carries the figure.
         assert _evaluate(on=_arm(wall_s=50.0))["wall_neutral"] == "PASS"
 
+    def test_env_override_hardware_key_is_never_flip_ready(self) -> None:
+        # Fix-round-2 (refuter-1 spoof): a forged BRUTEX_BENCH_BASELINE_KEY
+        # carries the M4 signature on ANY box — an override-sourced key must
+        # refuse even when the key text matches.
+        acceptance = _evaluate(
+            hardware_key=_M4PRO_KEY,
+            hardware_key_source=f"env-override:{SOAK.BENCH_BASELINE_KEY_ENV}",
+        )
+        assert acceptance["provenance"].startswith("NOT-DECISION-GRADE")
+        assert SOAK.BENCH_BASELINE_KEY_ENV in acceptance["provenance"]
+        assert acceptance["verdict"].startswith("NOT-DECISION-GRADE")
+        assert SOAK.judged_failures(acceptance) == []  # honest lab evidence, rc 0
+        # A probed key with the signature stays PASS (the happy path).
+        assert _evaluate()["provenance"] == "PASS"
+
     def test_telemetry_off_arm_must_be_silent(self) -> None:
         acceptance = _evaluate(off=_off_arm(kernel_reuse_summaries=1))
         assert acceptance["telemetry"].startswith("FAIL")
@@ -498,26 +565,99 @@ class TestGridHelpers:
         assert argv[-1] == "--no-options-sim"
 
     def test_arm_env(self) -> None:
-        env = SOAK.arm_env({"PATH": "/bin"}, cache_on=True, workers=8, results_depth_off=True)
+        env = SOAK.arm_env(
+            {"PATH": "/bin"}, cache_on=True, workers=8, results_depth_off=True, capacity=1
+        )
         assert env[SOAK.KERNEL_CACHE_ENV] == "1"
         assert env[SOAK.SWEEP_WORKERS_ENV] == "8"
         assert env[SOAK.LOG_LEVEL_ENV] == "INFO"  # telemetry must reach stderr
         assert env["PYTHONHASHSEED"] == "0"
         assert env[SOAK.RESULTS_DEPTH_ENV] == "0"
         assert env["PATH"] == "/bin"
-        off = SOAK.arm_env({}, cache_on=False, workers=None, results_depth_off=False)
+        off = SOAK.arm_env({}, cache_on=False, workers=None, results_depth_off=False, capacity=1)
         assert off[SOAK.KERNEL_CACHE_ENV] == "0"
         assert SOAK.SWEEP_WORKERS_ENV not in off
-        assert SOAK.RESULTS_DEPTH_ENV not in off
+        # Fix-round-2 MAJOR-1: non-smoke EXPLICITLY sets =1 — absence would
+        # let a dotenv BRUTEX_RESULTS_DEPTH=0 silently skip the results-depth
+        # artifacts the identity compare covers.
+        assert off[SOAK.RESULTS_DEPTH_ENV] == "1"
 
-    def test_arm_env_pops_ambient_capacity_override(self) -> None:
-        # R2 MAJOR-1: an operator daemon's capacity override must NOT bleed
-        # into either arm — the soak measures the DEFAULT sizing law.
+    def test_arm_env_pins_capacity_over_ambient(self) -> None:
+        # Fix-round-2 MAJOR-1: the capacity is explicitly PINNED (never
+        # popped) — an ambient operator override is overridden by the pin,
+        # and the pin survives the child's dotenv re-read (see the dotenv
+        # regressions below). The soak measures the DEFAULT sizing law.
         base = {"PATH": "/bin", SOAK.KERNEL_CAPACITY_ENV: "4"}
         for cache_on in (False, True):
-            env = SOAK.arm_env(base, cache_on=cache_on, workers=None, results_depth_off=False)
-            assert SOAK.KERNEL_CAPACITY_ENV not in env
+            env = SOAK.arm_env(
+                base, cache_on=cache_on, workers=None, results_depth_off=False, capacity=2
+            )
+            assert env[SOAK.KERNEL_CAPACITY_ENV] == "2"
         assert base[SOAK.KERNEL_CAPACITY_ENV] == "4"  # caller's map untouched
+
+    def test_arm_env_dotenv_cannot_override_pinned_envs(self) -> None:
+        # Fix-round-2 MAJOR-1 (refuter-1): the child `brutex sweep-all` runs
+        # bootstrap_env(), whose apply_dotenv sets a .env key ONLY when it is
+        # not already present — so every arm-identity env must be SET, never
+        # merely absent. Drive the REAL apply_dotenv over an arm env with a
+        # hostile .env payload: nothing may change.
+        from brutex.config.dotenv import apply_dotenv
+
+        env = SOAK.arm_env(
+            {"PATH": "/bin"}, cache_on=False, workers=None, results_depth_off=False, capacity=1
+        )
+        hostile = {
+            SOAK.KERNEL_CAPACITY_ENV: "9",
+            SOAK.KERNEL_CACHE_ENV: "1",  # would silently flip the OFF arm
+            SOAK.RESULTS_DEPTH_ENV: "0",
+            SOAK.LOG_LEVEL_ENV: "ERROR",  # would silence the telemetry
+        }
+        applied = apply_dotenv(hostile, env=env)
+        assert applied == ()  # every pinned var already set → dotenv inert
+        assert env[SOAK.KERNEL_CAPACITY_ENV] == "1"
+        assert env[SOAK.KERNEL_CACHE_ENV] == "0"
+        assert env[SOAK.RESULTS_DEPTH_ENV] == "1"
+        assert env[SOAK.LOG_LEVEL_ENV] == "INFO"
+
+    def test_child_bootstrap_env_cannot_flip_arm_envs(self, tmp_path: Path) -> None:
+        # The refuter-1 repro shape, end-to-end: a child process runs the
+        # REAL bootstrap_env() with BOTH dotenv roots planted hostile — a
+        # cwd .env AND a $HOME/.brutex/.env (capacity 9 + cache flip) — and
+        # must still resolve the pinned arm values.
+        import os as _os
+
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        (cwd / ".env").write_text(
+            f"{SOAK.KERNEL_CAPACITY_ENV}=9\n{SOAK.KERNEL_CACHE_ENV}=1\n", encoding="utf-8"
+        )
+        home = tmp_path / "home"
+        (home / ".brutex").mkdir(parents=True)
+        (home / ".brutex" / ".env").write_text(
+            f"{SOAK.KERNEL_CAPACITY_ENV}=9\n{SOAK.RESULTS_DEPTH_ENV}=0\n", encoding="utf-8"
+        )
+        env = SOAK.arm_env(
+            dict(_os.environ), cache_on=False, workers=None, results_depth_off=False, capacity=1
+        )
+        env["HOME"] = str(home)  # bootstrap_env resolves ~ via Path.home()
+        code = (
+            "from brutex.config.dotenv import bootstrap_env\n"
+            "import os\n"
+            "bootstrap_env()\n"
+            f"print(os.environ['{SOAK.KERNEL_CAPACITY_ENV}'],"
+            f" os.environ['{SOAK.KERNEL_CACHE_ENV}'],"
+            f" os.environ['{SOAK.RESULTS_DEPTH_ENV}'])\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=cwd,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.split() == ["1", "0", "1"]  # pinned values survive dotenv
 
     def test_effective_worker_kernel_capacity(self) -> None:
         assert SOAK.effective_worker_kernel_capacity("prev_day", "hlc3:close") == 1
@@ -577,6 +717,38 @@ class TestEngineDriftPins:
         assert SOAK.KERNEL_CAPACITY_ENV == sweep_parallel.WORKER_KERNEL_CAPACITY_ENV
         assert SOAK.WORKER_KERNEL_CAPACITY_MAX == sweep_parallel.WORKER_KERNEL_CAPACITY_MAX
 
+    def test_pinned_capacity_resolves_verbatim_in_engine(self) -> None:
+        # Fix-round-2 MAJOR-1: the pin is behavior-identical to unset — the
+        # engine resolves a set in-range value verbatim, so pinning the
+        # grid-derived default measures exactly the default sizing law.
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_parallel
+
+        grid = SimpleNamespace(
+            proximities=[None], fib_anchors=["prev_day"], price_source_cells=["hlc3:close"]
+        )
+        default = sweep_parallel.worker_kernel_capacity_default(grid)  # type: ignore[arg-type]
+        pinned = sweep_parallel.resolve_worker_kernel_capacity(
+            grid,  # type: ignore[arg-type]
+            env={sweep_parallel.WORKER_KERNEL_CAPACITY_ENV: str(default)},
+        )
+        assert pinned == default
+
+    def test_sweep_runs_dirname_matches_engine(self) -> None:
+        from brutex.engine import trade_store
+
+        assert SOAK.SWEEP_RUNS_DIRNAME == trade_store.SWEEP_RUNS_DIRNAME
+        # The results-depth root really is the SIBLING of the results root
+        # (the Ruling-4 law the compare relies on).
+        run_dir = trade_store.sweep_run_dir(Path("/arm/results"), "cafe")
+        assert run_dir == Path("/arm") / SOAK.SWEEP_RUNS_DIRNAME / "cafe"
+
+    def test_bench_baseline_key_env_matches_engine(self) -> None:
+        from brutex.config import hardware_envelope
+
+        assert SOAK.BENCH_BASELINE_KEY_ENV == hardware_envelope.BENCH_BASELINE_KEY_ENV
+
     @pytest.mark.parametrize(
         ("fib_csv", "ps_csv"),
         [
@@ -633,7 +805,7 @@ class TestProvenanceCollection:
             "price_source_cells": None,
         }
 
-    def test_capacity_echo_and_ambient_pop_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_capacity_echo_and_pin_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(SOAK.KERNEL_CAPACITY_ENV, "4")
         prov = SOAK.collect_provenance(
             lake_root=Path("/srv/lake"),
@@ -641,9 +813,14 @@ class TestProvenanceCollection:
             budget_minutes=600,
             sample_interval_s=5.0,
             smoke=False,
+            min_free_gib=30,
         )
         assert prov["worker_kernel_capacity_effective"] == 2  # 2 anchors × default cell
-        assert prov["capacity_env_ambient_popped"] is True
+        # Fix-round-2 MAJOR-1: the child env PINS the value (mechanism flag)
+        # and the parent-ambient presence is echoed informationally.
+        assert prov["capacity_env_child_pinned"] is True
+        assert prov["capacity_env_ambient_present"] is True
+        assert prov["min_free_gib"] == 30
         monkeypatch.delenv(SOAK.KERNEL_CAPACITY_ENV)
         prov = SOAK.collect_provenance(
             lake_root=Path("/srv/lake"),
@@ -652,7 +829,32 @@ class TestProvenanceCollection:
             sample_interval_s=5.0,
             smoke=False,
         )
-        assert prov["capacity_env_ambient_popped"] is False
+        assert prov["capacity_env_ambient_present"] is False
+        assert prov["capacity_env_child_pinned"] is True
+
+    def test_hardware_key_source_probed_vs_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fix-round-2 (refuter-1 spoof): the report records WHERE the key
+        # came from — the documented override env taints it.
+        monkeypatch.delenv(SOAK.BENCH_BASELINE_KEY_ENV, raising=False)
+        prov = SOAK.collect_provenance(
+            lake_root=Path("/srv/lake"),
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        assert prov["hardware_key_source"] in ("probed", "unavailable")
+        monkeypatch.setenv(SOAK.BENCH_BASELINE_KEY_ENV, "mac16-8-14c10p4e-48g-arm64")
+        prov = SOAK.collect_provenance(
+            lake_root=Path("/srv/lake"),
+            grid=self._grid(),
+            budget_minutes=600,
+            sample_interval_s=5.0,
+            smoke=False,
+        )
+        assert prov["hardware_key_source"] == f"env-override:{SOAK.BENCH_BASELINE_KEY_ENV}"
 
     def test_lake_root_home_redacted_and_uname_hostname_free(self) -> None:
         # R1 MINOR-1: the uploaded report must not leak the local username
@@ -706,7 +908,9 @@ class TestReportRendering:
                 "smoke": False,
                 "grid": {"keys_fan_out": 6},
                 "worker_kernel_capacity_effective": 1,
-                "capacity_env_ambient_popped": False,
+                "capacity_env_child_pinned": True,
+                "capacity_env_ambient_present": False,
+                "hardware_key_source": "probed",
             },
             off=off,
             on=on,
@@ -737,9 +941,13 @@ class TestReportRendering:
         assert "YELLOW FLAG" in text
         assert "NOT pre-approved" in text  # the flip-boundary honesty language
         assert "verdict: FLIP-READY" in text
-        # R2 MAJOR-2: the RSS capacity scoping is stated on the summary.
+        # R2 MAJOR-2: the RSS capacity scoping is stated on the summary;
+        # fix-round-2 MAJOR-1: the summary states the PIN (dotenv-immune),
+        # never the defeated pop claim.
         assert "RSS bar evaluated at kernel-cache capacity=1" in text
         assert SOAK.KERNEL_CAPACITY_ENV in text
+        assert "PINNED explicitly" in text
+        assert "popped" not in text.lower()
 
     def test_render_summary_smoke_banner(self) -> None:
         report = self._report()
@@ -823,6 +1031,58 @@ class TestVerdictSubcommand:
         assert "NOT-DECISION-GRADE" in proc.stdout
         assert "FLIP-READY" not in proc.stdout
 
+    def test_verdict_env_override_key_source_reads_not_decision_grade(self, tmp_path: Path) -> None:
+        # Fix-round-2 (refuter-1 spoof): a report whose recorded key SOURCE is
+        # the BRUTEX_BENCH_BASELINE_KEY override — even with a perfect M4 key
+        # text — can never read FLIP-READY.
+        path = self._write_report(
+            tmp_path,
+            provenance={
+                "grid": {"keys_fan_out": 6},
+                "smoke": False,
+                "hardware_key": _M4PRO_KEY,
+                "hardware_key_source": f"env-override:{SOAK.BENCH_BASELINE_KEY_ENV}",
+            },
+        )
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 0
+        assert "NOT-DECISION-GRADE" in proc.stdout
+        assert SOAK.BENCH_BASELINE_KEY_ENV in proc.stdout
+        assert "FLIP-READY" not in proc.stdout
+
+    def test_verdict_live_env_override_taints_even_a_probed_report(self, tmp_path: Path) -> None:
+        # Belt-check: the override set AT VERDICT TIME taints the run — the
+        # report itself claims a probed M4 key, but the live env is forged.
+        import os as _os
+
+        path = self._write_report(
+            tmp_path,
+            provenance={
+                "grid": {"keys_fan_out": 6},
+                "smoke": False,
+                "hardware_key": _M4PRO_KEY,
+                "hardware_key_source": "probed",
+            },
+        )
+        env = dict(_os.environ)
+        env[SOAK.BENCH_BASELINE_KEY_ENV] = _M4PRO_KEY
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "verdict", "--report", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert proc.returncode == 0
+        assert "NOT-DECISION-GRADE" in proc.stdout
+        assert "set at verdict time" in proc.stdout
+        assert "FLIP-READY" not in proc.stdout
+
+    def test_verdict_prints_trusted_input_disclosure(self, tmp_path: Path) -> None:
+        proc = self._run("verdict", "--report", str(self._write_report(tmp_path)))
+        assert "TRUSTED INPUT" in proc.stdout
+        assert "not a" in proc.stdout and "tamper-proof" in proc.stdout
+
 
 class TestRunGuards:
     """cmd_run's structural refusals (R2 MAJOR-3 fresh-out + MINOR-5 fence).
@@ -860,3 +1120,45 @@ class TestRunGuards:
         )
         assert proc.returncode == 2
         assert "1..1195" in proc.stderr
+
+    @pytest.mark.parametrize("gib", ["0", "-1", "1025"])
+    def test_run_refuses_out_of_fence_min_free_gib(self, tmp_path: Path, gib: str) -> None:
+        # Fix-round-2 NIT: the disk-need override is bounded — never a zero /
+        # negative / absurd requirement.
+        proc = self._run("run", "--smoke", "--out", str(tmp_path / "fresh"), "--min-free-gib", gib)
+        assert proc.returncode == 2
+        assert "1..1024" in proc.stderr
+
+    def test_refused_lake_preflight_leaves_out_reusable(self, tmp_path: Path) -> None:
+        # Fix-round-2 MINOR (refuter-2): a preflight-REFUSED non-smoke run
+        # must write NOTHING into --out — the documented retry (same --out,
+        # corrected --lake-root) would otherwise trip the fresh-out guard.
+        out = tmp_path / "out"
+        proc = self._run(
+            "run",
+            "--out",
+            str(out),
+            "--lake-root",
+            str(tmp_path / "no-such-lake"),
+            "--min-free-gib",
+            "1",
+        )
+        assert proc.returncode == 2
+        assert "lake preflight refused" in proc.stderr
+        assert "still fresh" in proc.stderr  # the remediation names the retry
+        # NOTHING written: out absent (or empty) → the retry passes the guard.
+        assert not out.exists() or not any(out.iterdir())
+        # The guard itself agrees: a second refusal is again the LAKE refusal,
+        # never the fresh-out refusal.
+        proc2 = self._run(
+            "run",
+            "--out",
+            str(out),
+            "--lake-root",
+            str(tmp_path / "no-such-lake"),
+            "--min-free-gib",
+            "1",
+        )
+        assert proc2.returncode == 2
+        assert "lake preflight refused" in proc2.stderr
+        assert "NOT empty" not in proc2.stderr

@@ -30,12 +30,12 @@
 # -----------------------------------------------------------------
 # GHA expressions have NO arithmetic, so the duration-derived job timeout is
 # computed in POSIX shell inside a cheap GitHub-hosted `plan` job and consumed
-# via `fromJSON()`. budget_minutes is fenced 1..1200 (20 h): on self-hosted
+# via `fromJSON()`. budget_minutes is fenced 1..1195: on self-hosted
 # runners the job's GITHUB_TOKEN dies at 24 h, so the derived timeout
 # (m + 45 + m/6) must stay under 1440 min or the failure watchdog could never
-# authenticate (SEC9-1; m <= 1195 → ceiling kept at the soak-selfhosted 1200
-# is NOT possible here because the fixed slack is 45 not 30 — two wheel
-# builds + two preloads — so the fence is 1195; the default 600 derives 745).
+# authenticate (SEC9-1; m <= 1195 — the soak-selfhosted 1200 ceiling is NOT
+# possible here because the fixed slack is 45 not 30 — two wheel
+# builds + two preloads; the default 600 derives 745).
 #
 # HONEST ENVELOPE (Golden Rule #10)
 # ---------------------------------
@@ -43,9 +43,11 @@
 # sweep twice — structurally impossible under the token fence); RSS evidence
 # keeps FULL bar depth (RSS is bar-DEPTH-driven, not tuple-count-driven) but
 # is SCOPED to the MEASURED kernel-cache capacity — the report echoes
-# provenance.worker_kernel_capacity_effective (any ambient
-# BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY is POPPED from both arm envs so the
-# DEFAULT sizing law is measured); widen the fib_anchors /
+# provenance.worker_kernel_capacity_effective (the grid-derived default is
+# explicitly PINNED as BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY in both arm envs,
+# so neither an ambient var nor a .env-file value the child's dotenv re-read
+# would inject can re-scope it — the DEFAULT sizing law is what gets
+# measured); widen the fib_anchors /
 # price_source_cells inputs to soak capacity > 1 — the flip DEC must weigh
 # whether the measured capacity covers the operator's grids. The full-grid
 # wall saving stays MODELED in the report. Per-PID RSS via ps

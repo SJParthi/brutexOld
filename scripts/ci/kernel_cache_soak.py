@@ -42,16 +42,24 @@ HONEST LIMITS (Golden Rule #10)
 * The full-grid wall saving stays MODELED (extrapolated off the bounded soak
   grid); the RSS evidence keeps FULL bar depth (RSS is bar-DEPTH-driven, not
   tuple-count-driven) but is SCOPED to the MEASURED kernel-cache capacity —
-  ``provenance.worker_kernel_capacity_effective`` (the grid-derived default;
-  any ambient ``BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY`` is POPPED from both arm
-  envs so the flip's default sizing law is what gets measured). The default
+  ``provenance.worker_kernel_capacity_effective`` (the grid-derived default,
+  EXPLICITLY PINNED into both arm envs: ``arm_env`` SETS
+  ``BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY=<default>`` because the child's own
+  ``bootstrap_env()`` dotenv re-read (repo ``.env`` / cwd ``.env`` /
+  ``~/.brutex/.env``) re-injects any file value into an UNSET var — popping
+  only covered inheritance; ``apply_dotenv`` never overrides a SET var, so
+  the explicit pin is dotenv-immune — fix-round-2 MAJOR-1). The default
   grid measures capacity=1; widen ``--fib-anchors`` / ``--price-source-cells``
   to soak a higher capacity — the flip DEC must weigh whether the measured
   capacity covers the operator's grids (R2 MAJOR-2 honesty scoping).
 * A non-smoke report whose ``hardware_key`` is not the registered §8 M4-Pro
-  envelope can never read FLIP-READY — the verdict reads NOT-DECISION-GRADE
-  (numbers from any other machine are UNVERIFIED lab evidence, the
-  DEC-SWEEP-CAP-BENCH-001 clause).
+  envelope — or whose key came from the ``BRUTEX_BENCH_BASELINE_KEY`` env
+  OVERRIDE rather than real hardware probes — can never read FLIP-READY: the
+  verdict reads NOT-DECISION-GRADE (numbers from any other machine are
+  UNVERIFIED lab evidence, the DEC-SWEEP-CAP-BENCH-001 clause). TRUSTED-INPUT
+  BOUNDARY: ``soak-report.json`` is evidence for the flip DEC, not a
+  tamper-proof artifact — the operator runs the harness on their own box;
+  the ``verdict`` subcommand re-derives from the report it is handed.
 """
 
 from __future__ import annotations
@@ -82,13 +90,30 @@ SWEEP_WORKERS_ENV: Final[str] = "BRUTEX_SWEEP_WORKERS"
 LOG_LEVEL_ENV: Final[str] = "BRUTEX_LOG_LEVEL"
 RESULTS_DEPTH_ENV: Final[str] = "BRUTEX_RESULTS_DEPTH"
 #: The per-box capacity override lever (sweep_parallel.WORKER_KERNEL_CAPACITY_ENV).
-#: POPPED from both arm envs (R2 MAJOR-1): the flip ships the DEFAULT sizing
-#: law, so the evidence must measure it — an ambient operator override would
-#: silently re-scope the RSS bar. Drift-pinned against the engine constant in
-#: tests/unit/test_kernel_cache_soak.py (TestEngineDriftPins).
+#: EXPLICITLY PINNED to the grid-derived default in both arm envs (R2 MAJOR-1,
+#: fix-round-2 MAJOR-1): the flip ships the DEFAULT sizing law, so the
+#: evidence must measure it — an ambient operator override OR a ``.env``-file
+#: value (the child ``brutex sweep-all`` runs ``bootstrap_env()``, which
+#: re-injects a dotenv value into any UNSET var) would silently re-scope the
+#: RSS bar. ``apply_dotenv`` never overrides a SET var, so the explicit pin
+#: is dotenv-immune where a pop was not. Drift-pinned against the engine
+#: constant in tests/unit/test_kernel_cache_soak.py (TestEngineDriftPins).
 KERNEL_CAPACITY_ENV: Final[str] = "BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY"
 #: Mirror of sweep_parallel.WORKER_KERNEL_CAPACITY_MAX (drift-pinned).
 WORKER_KERNEL_CAPACITY_MAX: Final[int] = 64
+#: The hardware-key env override (hardware_envelope.BENCH_BASELINE_KEY_ENV,
+#: drift-pinned): when set, ``hardware_key()`` returns it VERBATIM — a forged
+#: M4-Pro key would flip the provenance bar on any box, so a non-smoke report
+#: whose key came from this override reads NOT-DECISION-GRADE (fix-round-2
+#: MINOR — the refuter-1 spoof).
+BENCH_BASELINE_KEY_ENV: Final[str] = "BRUTEX_BENCH_BASELINE_KEY"
+#: The results-depth sibling root dirname (trade_store.SWEEP_RUNS_DIRNAME,
+#: drift-pinned): in NON-smoke mode the #1617 results-depth pass writes its
+#: flip-facing artifacts (top100.json, per-tuple trade/equity sidecars,
+#: baselines) to ``<results_root>/../sweep_runs/<run_id>/`` — a SIBLING of
+#: the compared results root (the Ruling-4 sibling-root law), so the identity
+#: compare walks it too (fix-round-2 MAJOR — the refuter-2 coverage hole).
+SWEEP_RUNS_DIRNAME: Final[str] = "sweep_runs"
 
 #: Telemetry tokens harvested from each arm's stderr (structlog console lines).
 SUMMARY_EVENT: Final[str] = "sweep_parallel.kernel_reuse_summary"
@@ -122,6 +147,16 @@ M4PRO_KEY_SUFFIX: Final[str] = "-14c10p4e-48g-arm64"
 #: a zero/negative budget would SIGTERM both arms instantly).
 BUDGET_MINUTES_MIN: Final[int] = 1
 BUDGET_MINUTES_MAX: Final[int] = 1195
+#: The NON-smoke free-disk requirement (GiB) + its operator-override fence
+#: (fix-round-2 NIT): the fixed 30 GiB default is right-sized for the M4-Pro
+#: default grid and the WORKFLOW never passes the override — lowering it via
+#: ``--min-free-gib`` is an operator judgment for a deliberately tiny bounded
+#: non-smoke grid (or sandbox validation), fenced 1..1024 and echoed into
+#: ``provenance.min_free_gib`` so the report discloses it. Smoke keeps its own
+#: fixed 2 GiB need (the fixture lake is tiny).
+MIN_FREE_GIB_DEFAULT: Final[int] = 30
+MIN_FREE_GIB_MIN: Final[int] = 1
+MIN_FREE_GIB_MAX: Final[int] = 1024
 
 # ── The ts-masked identity-compare law (the PR-A T3 / runcore-byte-identity
 #    exclusion set, extended with the CLI-layout state dirs) ─────────────────
@@ -149,7 +184,8 @@ STRUCTURAL_SIDECARS: Final[tuple[str, ...]] = (
     "runs/<run_id>/manifest.json (via the RUN_MANIFEST audit payload, volatile keys scrubbed)",
     "runs/<run_id>/flight-recorder.jsonl + chain-map.json + diagnostic-bundle.zip (wall-clock-bearing run-core forensics — outside the result-identity law)",
     "audit/*.jsonl (compared ts-masked: seq/action/subject/payload)",
-    "*.stamp.json + stage2 (wall-stamped content-hash sidecars)",
+    "*.stamp.json + stage2 (wall-stamped content-hash sidecars — masked under "
+    "BOTH compared roots: results/ AND the results-depth sweep_runs/ sibling)",
     "checkpoint/ + progress/ + dedup-cache/ + .locks/ (run state, pid/mtime-bearing)",
 )
 
@@ -317,6 +353,47 @@ def result_tree(root: Path) -> dict[str, str]:
     return out
 
 
+def sweep_runs_tree(arm_dir: Path) -> dict[str, str]:
+    """SHA-256 per file under ``<arm>/sweep_runs/`` — the results-depth root.
+
+    Fix-round-2 MAJOR (refuter-2): the #1617 results-depth pass writes its
+    flip-facing artifacts (top100.json, per-tuple trade/equity sidecars,
+    baselines) to the ``sweep_runs/`` SIBLING of the compared results root —
+    previously never audited. Only the wall-stamped ``.stamp.json`` sidecars
+    (+ the ``stage2`` name) are masked, exactly the suffix/name arm of the
+    existing exclusion law — empirically the ONLY cross-arm diffs in that
+    tree. Keys are ``sweep_runs/<run_id>/…`` rel-paths; ``{}`` when the dir
+    is absent (smoke runs results-depth OFF).
+    """
+    root = arm_dir / SWEEP_RUNS_DIRNAME
+    out: dict[str, str] = {}
+    if not root.is_dir():
+        return out
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(arm_dir).as_posix()
+        if any(rel.endswith(suffix) for suffix in RESULT_TREE_EXCLUDE_SUFFIXES):
+            continue
+        if Path(rel).name in RESULT_TREE_EXCLUDE_NAMES:
+            continue
+        out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
+def arm_identity_tree(arm_dir: Path) -> dict[str, str]:
+    """The FULL per-arm identity tree: ``results/`` + ``sweep_runs/``.
+
+    ``results/<rel>`` keys ride :func:`result_tree`'s full exclusion law;
+    ``sweep_runs/<rel>`` keys ride :func:`sweep_runs_tree`'s suffix/name law.
+    ONE map so :func:`tree_diff` covers both roots — nothing is silently
+    outside the compare.
+    """
+    out = {f"results/{rel}": digest for rel, digest in result_tree(arm_dir / "results").items()}
+    out.update(sweep_runs_tree(arm_dir))
+    return out
+
+
 def tree_diff(off: dict[str, str], on: dict[str, str]) -> list[str]:
     """Sorted rel-paths that are missing on one side or hash-different."""
     return sorted(rel for rel in set(off) | set(on) if off.get(rel) != on.get(rel))
@@ -392,13 +469,16 @@ def keys_fan_out(symbols: str, intervals: str, fib_anchors: str, price_source_ce
 def effective_worker_kernel_capacity(fib_anchors: str, price_source_cells: str) -> int:
     """The EFFECTIVE per-worker kernel-cache capacity both arms run at.
 
-    The arms run with :data:`KERNEL_CAPACITY_ENV` POPPED (R2 MAJOR-1), so the
-    engine resolves its grid-derived default —
-    ``min(max(1, proximities × fib_anchors × price_source_cells),
-    WORKER_KERNEL_CAPACITY_MAX)`` with proximity the CLI singleton ``[None]``
-    (``sweep_parallel.worker_kernel_capacity_default``; drift-pinned in
-    TestEngineDriftPins). Echoed into ``provenance`` so every report states
-    the capacity its RSS bar was evaluated at.
+    The grid-derived default — ``min(max(1, proximities × fib_anchors ×
+    price_source_cells), WORKER_KERNEL_CAPACITY_MAX)`` with proximity the CLI
+    singleton ``[None]`` (``sweep_parallel.worker_kernel_capacity_default``;
+    drift-pinned in TestEngineDriftPins). :func:`arm_env` PINS this exact
+    value into :data:`KERNEL_CAPACITY_ENV` for BOTH arms (fix-round-2
+    MAJOR-1: the child re-reads dotenv, so absence is not a guarantee — an
+    explicitly SET var is, because ``apply_dotenv`` never overrides one; the
+    engine resolves a set in-range value verbatim, identical to its own
+    default here). Echoed into ``provenance`` so every report states the
+    capacity its RSS bar was evaluated at.
     """
     return min(
         max(1, _csv_count(fib_anchors) * _csv_count(price_source_cells)),
@@ -461,23 +541,42 @@ def arm_env(
     cache_on: bool,
     workers: int | None,
     results_depth_off: bool,
+    capacity: int,
 ) -> dict[str, str]:
-    """One arm's spawn environment — the flag + determinism/visibility pins.
+    """One arm's spawn environment — every arm-identity env EXPLICITLY SET.
 
-    Any ambient :data:`KERNEL_CAPACITY_ENV` is POPPED (R2 MAJOR-1): the flip
-    ships the DEFAULT capacity sizing law, so both arms must measure it — an
-    operator daemon's per-box override would silently re-scope the RSS bar.
-    The pop is echoed in ``provenance.capacity_env_ambient_popped``.
+    Fix-round-2 MAJOR-1 (refuter-1): the child ``brutex sweep-all`` runs
+    ``bootstrap_env()`` at startup, which loads ``.env`` (repo root → cwd →
+    ``~/.brutex/.env``) and applies any key that is NOT already set — so
+    POPPING an env var only covers inheritance, not the child's own dotenv
+    re-read (proven: a popped capacity var resolved a ``.env``-planted ``9``
+    in the child). ``apply_dotenv`` NEVER overrides a set var (the dotenv
+    module's own law), so every env this harness depends on for ARM IDENTITY
+    is explicitly SET, never left absent:
+
+    * :data:`KERNEL_CACHE_ENV` — ``0``/``1`` per arm (a dotenv ``=1`` can no
+      longer flip the OFF arm; was already set, kept),
+    * :data:`KERNEL_CAPACITY_ENV` — PINNED to *capacity* (the grid-derived
+      default the flip ships; a set in-range value resolves verbatim in the
+      engine, byte-identical to its own default),
+    * :data:`RESULTS_DEPTH_ENV` — ``0`` (smoke) / ``1`` (non-smoke; a dotenv
+      ``=0`` would silently skip the results-depth artifacts the identity
+      compare now covers),
+    * :data:`LOG_LEVEL_ENV` ``INFO`` + ``PYTHONHASHSEED=0`` (already set).
+
+    ``BRUTEX_SWEEP_WORKERS`` is set only when the operator passed
+    ``--workers`` — a dotenv value applies to BOTH arms symmetrically and the
+    ACTUAL worker count is measured from the ON summary, so it cannot skew
+    arm identity silently.
     """
     env = dict(base)
-    env.pop(KERNEL_CAPACITY_ENV, None)
     env[KERNEL_CACHE_ENV] = "1" if cache_on else "0"
+    env[KERNEL_CAPACITY_ENV] = str(capacity)
     env[LOG_LEVEL_ENV] = "INFO"  # the telemetry MUST reach stderr (#1630 guard)
     env["PYTHONHASHSEED"] = "0"
     if workers is not None:
         env[SWEEP_WORKERS_ENV] = str(workers)
-    if results_depth_off:
-        env[RESULTS_DEPTH_ENV] = "0"
+    env[RESULTS_DEPTH_ENV] = "0" if results_depth_off else "1"
     return env
 
 
@@ -573,6 +672,7 @@ def evaluate_acceptance(
     keys: int,
     smoke: bool,
     hardware_key: str | None = None,
+    hardware_key_source: str | None = None,
 ) -> dict[str, str]:
     """The acceptance block: PASS/FAIL per bar + an ADVISORY verdict.
 
@@ -581,11 +681,16 @@ def evaluate_acceptance(
     never read FLIP-READY; the mechanics bars (identity / clean exits /
     telemetry) are always judged. A NON-smoke run whose *hardware_key* does
     not carry the registered §8 M4-Pro signature
-    (:data:`M4PRO_KEY_SUFFIX`) reads a ``provenance`` bar of
-    NOT-DECISION-GRADE and the verdict can never read FLIP-READY either
-    (R2 MINOR-4 / runbook §5 bar 6 — UNVERIFIED lab evidence is not a
-    harness FAILURE, so it does not drive the exit code). The flip DEC
-    quotes the RAW figures — this block is advisory, never the decision.
+    (:data:`M4PRO_KEY_SUFFIX`) — or whose *hardware_key_source* says the key
+    came from the :data:`BENCH_BASELINE_KEY_ENV` env OVERRIDE rather than
+    real hardware probes (fix-round-2: a forged override key reads the M4
+    signature on ANY box) — reads a ``provenance`` bar of NOT-DECISION-GRADE
+    and the verdict can never read FLIP-READY either (R2 MINOR-4 / runbook
+    §5 bar 6 — UNVERIFIED lab evidence is not a harness FAILURE, so it does
+    not drive the exit code). TRUSTED-INPUT BOUNDARY: this block judges the
+    report it is handed — the report is evidence for the flip DEC, not a
+    tamper-proof artifact. The flip DEC quotes the RAW figures — this block
+    is advisory, never the decision.
     """
     identity = (
         "PASS"
@@ -638,6 +743,13 @@ def evaluate_acceptance(
 
     if smoke:
         provenance_bar = "SMOKE-UNJUDGED"
+    elif isinstance(hardware_key_source, str) and hardware_key_source.startswith("env-override"):
+        provenance_bar = (
+            f"NOT-DECISION-GRADE(hardware_key {hardware_key!r} comes from the "
+            f"{BENCH_BASELINE_KEY_ENV} env OVERRIDE ({hardware_key_source}), not real "
+            "hardware probes — a spoofable key cannot feed the flip DEC; unset the "
+            "override and re-run on the registered M4-Pro)"
+        )
     elif isinstance(hardware_key, str) and hardware_key.endswith(M4PRO_KEY_SUFFIX):
         provenance_bar = "PASS"
     else:
@@ -744,16 +856,24 @@ def render_summary(report: dict[str, Any]) -> str:
         "- full-grid wall saving: MODELED only (extrapolated off this bounded grid; the "
         "2-4-day full sweep is never run twice in one job — SEC9-1 token fence)",
         f"- RSS bar evaluated at kernel-cache capacity="
-        f"{prov.get('worker_kernel_capacity_effective')} (the grid-derived default; any "
-        f"ambient {KERNEL_CAPACITY_ENV} is POPPED from both arm envs"
-        + (" — one WAS set and popped" if prov.get("capacity_env_ambient_popped") else "")
+        f"{prov.get('worker_kernel_capacity_effective')} (the grid-derived default, "
+        f"PINNED explicitly as {KERNEL_CAPACITY_ENV} in both arm envs — an ambient var "
+        "or a .env-file value can never re-scope it: the child's dotenv loader never "
+        "overrides a set var"
+        + (
+            " — an ambient one WAS set and overridden by the pin"
+            if prov.get("capacity_env_ambient_present")
+            else ""
+        )
         + ") — the flip DEC must weigh whether this capacity covers the operator's grids "
         "(widen via --fib-anchors / --price-source-cells)",
         "",
         "## Identity (MEASURED)",
         "",
-        f"- result trees ts-masked identical: {compare.get('identity_ok')} "
-        f"({len(compare.get('diff_paths', []))} diffs)",
+        f"- result + sweep_runs trees ts-masked identical: {compare.get('identity_ok')} "
+        f"({len(compare.get('diff_paths', []))} diffs; "
+        f"{compare.get('result_files_compared')} files incl. "
+        f"{compare.get('sweep_runs_files_compared', 0)} results-depth sweep_runs/ files)",
         f"- audit chains ts-masked equal: {compare.get('audit_ts_masked_ok')}",
         f"- exit-status structural: {compare.get('exit_status_detail')}",
         "",
@@ -790,6 +910,7 @@ def build_report(
         keys=keys,
         smoke=smoke,
         hardware_key=provenance.get("hardware_key"),
+        hardware_key_source=provenance.get("hardware_key_source"),
     )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -865,6 +986,7 @@ def collect_provenance(
     budget_minutes: int,
     sample_interval_s: float,
     smoke: bool,
+    min_free_gib: int | None = None,
 ) -> dict[str, Any]:
     """Environment echo for the report — every probe guarded, never fatal."""
 
@@ -886,12 +1008,23 @@ def collect_provenance(
         hw_key = hardware_key()
     except Exception:  # provenance echo only, never fatal
         hw_key = "unavailable"
+    # Fix-round-2 (refuter-1 spoof): record WHERE the key came from — the
+    # documented BENCH_BASELINE_KEY_ENV override wins verbatim inside
+    # hardware_key(), so an override-sourced key is spoofable and the
+    # acceptance provenance bar refuses it on a non-smoke report.
+    if os.environ.get(BENCH_BASELINE_KEY_ENV, "").strip():
+        hw_key_source = f"env-override:{BENCH_BASELINE_KEY_ENV}"
+    elif hw_key == "unavailable":
+        hw_key_source = "unavailable"
+    else:
+        hw_key_source = "probed"
     # sweep-all's own defaults when the axes are unset (cli.py cmd_sweep_all).
     fib_csv = grid.get("fib_anchors") or "prev_day"
     ps_csv = grid.get("price_source_cells") or "hlc3:close"
     return {
         "commit": guarded(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]),
         "hardware_key": hw_key,
+        "hardware_key_source": hw_key_source,
         # uname -sm (kernel + arch ONLY — never `-a`'s hostname/build string;
         # the report is a public-repo artifact, R1 MINOR-1 / the
         # bench_baseline posture).
@@ -910,10 +1043,19 @@ def collect_provenance(
                 ps_csv,
             ),
         },
-        # The EFFECTIVE capacity both arms measure (R2 MAJOR-1: the ambient
-        # override is popped by arm_env, so the grid-derived default rules).
+        # The EFFECTIVE capacity both arms measure (fix-round-2 MAJOR-1: this
+        # exact value is explicitly PINNED into each arm's KERNEL_CAPACITY_ENV
+        # by arm_env — a dotenv/ambient override can never re-scope it because
+        # the child's dotenv loader never overrides a set var).
         "worker_kernel_capacity_effective": effective_worker_kernel_capacity(fib_csv, ps_csv),
-        "capacity_env_ambient_popped": KERNEL_CAPACITY_ENV in os.environ,
+        "capacity_env_child_pinned": True,
+        # Informational only: whether the PARENT's environ carried the
+        # override (a .env-sourced value is invisible here — and irrelevant,
+        # the child value is pinned either way; renamed from the R1
+        # `capacity_env_ambient_popped`, whose parent-only view the refuter
+        # proved blind to the child's dotenv re-read).
+        "capacity_env_ambient_present": KERNEL_CAPACITY_ENV in os.environ,
+        "min_free_gib": min_free_gib,
         "budget_minutes": budget_minutes,
         "sample_interval_s": sample_interval_s,
         "rss_method": RSS_METHOD_TEMPLATE.format(interval=sample_interval_s),
@@ -1044,16 +1186,22 @@ def run_arm(
 
 
 def compare_arms(
-    off_root: Path, on_root: Path, off_arm: dict[str, Any], on_arm: dict[str, Any]
+    off_arm_dir: Path, on_arm_dir: Path, off_arm: dict[str, Any], on_arm: dict[str, Any]
 ) -> dict[str, Any]:
-    """The ts-masked identity compare (result trees + audit chains + status)."""
-    off_tree = result_tree(off_root)
-    on_tree = result_tree(on_root)
+    """The ts-masked identity compare over each arm's FULL identity tree.
+
+    Covers ``<arm>/results/`` (the per-tuple store tree, full exclusion law)
+    AND ``<arm>/sweep_runs/`` (the results-depth sibling root, ``.stamp.json``
+    masked — fix-round-2 MAJOR: previously silently outside the compare) plus
+    the audit chains (ts-masked) and the structural exit-status.
+    """
+    off_tree = arm_identity_tree(off_arm_dir)
+    on_tree = arm_identity_tree(on_arm_dir)
     diffs = tree_diff(off_tree, on_tree)
     audit_ok = False
     audit_detail = "audit chain missing on one side"
-    off_chain = off_root / "audit" / "sweep-all.jsonl"
-    on_chain = on_root / "audit" / "sweep-all.jsonl"
+    off_chain = off_arm_dir / "results" / "audit" / "sweep-all.jsonl"
+    on_chain = on_arm_dir / "results" / "audit" / "sweep-all.jsonl"
     if off_chain.is_file() and on_chain.is_file():
         try:
             off_entries = masked_audit_entries(off_chain)
@@ -1070,9 +1218,13 @@ def compare_arms(
     status_ok, status_detail = exit_status_structural(
         off_arm.get("exit_status", {}), on_arm.get("exit_status", {})
     )
+    all_rels = set(off_tree) | set(on_tree)
     return {
         "identity_ok": not diffs and bool(off_tree),
-        "result_files_compared": len(set(off_tree) | set(on_tree)),
+        "result_files_compared": len(all_rels),
+        "sweep_runs_files_compared": len(
+            [rel for rel in all_rels if rel.startswith(SWEEP_RUNS_DIRNAME + "/")]
+        ),
         "diff_paths": diffs[:50],
         "audit_ts_masked_ok": audit_ok,
         "audit_detail": audit_detail,
@@ -1171,6 +1323,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             "arms instantly)"
         )
 
+    if not MIN_FREE_GIB_MIN <= args.min_free_gib <= MIN_FREE_GIB_MAX:
+        # Fix-round-2 NIT: the override exists for deliberately tiny bounded
+        # non-smoke grids (and sandbox validation) but stays fenced — the
+        # M4-Pro workflow never passes it, so its default 30 GiB stands.
+        return _fail_structural(
+            f"--min-free-gib {args.min_free_gib} outside {MIN_FREE_GIB_MIN}..{MIN_FREE_GIB_MAX}"
+        )
+
     if args.workers is not None and args.workers < 2:
         return _fail_structural(
             "--workers must be >= 2: the kernel-cache telemetry lives in the parallel "
@@ -1191,11 +1351,18 @@ def cmd_run(args: argparse.Namespace) -> int:
             "timestamp). Use a FRESH --out per run: delete the old dir "
             f"(`rm -rf {out_dir}`) or pass a new path"
         )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = out_dir / "report"
-    report_dir.mkdir(parents=True, exist_ok=True)
-
+    # Fix-round-2 MINOR (refuter-2): NO artifacts before the preflights pass.
+    # A refused preflight must leave --out reusable for the documented
+    # retry-with---lake-root flow, so report/ is created only AFTER every
+    # preflight and a refusal leaves out_dir absent-or-EMPTY (an empty dir
+    # passes the fresh-out guard above).
     if smoke:
+        # The smoke fixture lake is written INTO out_dir, so the disk
+        # preflight runs first (out_dir still empty on refusal).
+        out_dir.mkdir(parents=True, exist_ok=True)
+        disk_err = preflight_disk(out_dir, need_kib=2 * 1024 * 1024)
+        if disk_err is not None:
+            return _fail_structural(disk_err)
         lake_root = build_smoke_lake(out_dir)
         grid = dict(SMOKE_GRID)
         workers: int | None = args.workers if args.workers is not None else 2
@@ -1241,15 +1408,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         grid["segment"] or "INDEX",
     )
     if missing:
+        # Non-smoke: NOTHING has been written yet — the same --out retries
+        # cleanly with --lake-root (runbook §4's documented remediation).
         return _fail_structural(
             "lake preflight refused (never soak blind):\n  "
             + "\n  ".join(missing)
             + "\n  remediation: pass --lake-root (or the workflow lake_root input) "
-            "pointing at the real lake"
+            "pointing at the real lake and RETRY — the refusal wrote nothing, so "
+            "the same --out is still fresh"
         )
-    disk_err = preflight_disk(out_dir, need_kib=2 * 1024 * 1024 if smoke else 30 * 1024 * 1024)
-    if disk_err is not None:
-        return _fail_structural(disk_err)
+    if not smoke:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        disk_err = preflight_disk(out_dir, need_kib=args.min_free_gib * 1024 * 1024)
+        if disk_err is not None:
+            return _fail_structural(disk_err)  # out_dir left EMPTY → retry passes the guard
+    report_dir = out_dir / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     provenance = collect_provenance(
         lake_root=lake_root,
@@ -1257,6 +1431,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         budget_minutes=args.budget_minutes,
         sample_interval_s=sample_interval,
         smoke=smoke,
+        min_free_gib=None if smoke else args.min_free_gib,
     )
     keys = int(provenance["grid"]["keys_fan_out"])
     # Full path in the LOCAL run log ONLY — the uploaded report carries the
@@ -1264,13 +1439,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"kernel-cache-soak: lake_root={lake_root}")
     print(
         "kernel-cache-soak: effective worker kernel capacity="
-        f"{provenance['worker_kernel_capacity_effective']} (grid-derived default)"
+        f"{provenance['worker_kernel_capacity_effective']} (grid-derived default, "
+        f"PINNED as {KERNEL_CAPACITY_ENV} in both arm envs — dotenv-immune)"
     )
-    if provenance["capacity_env_ambient_popped"]:
+    if provenance["capacity_env_ambient_present"]:
         print(
-            f"kernel-cache-soak: ambient {KERNEL_CAPACITY_ENV} detected — POPPED from "
-            "both arm envs: the soak measures the DEFAULT capacity sizing law "
-            "(R2 MAJOR-1)",
+            f"kernel-cache-soak: ambient {KERNEL_CAPACITY_ENV} detected — the arm envs "
+            "PIN the grid-derived default over it (and over any .env-file value the "
+            "child's dotenv re-read would inject): the soak measures the DEFAULT "
+            "capacity sizing law (fix-round-2 MAJOR-1)",
             file=sys.stderr,
         )
     deadline = time.monotonic() + args.budget_minutes * 60.0
@@ -1291,6 +1468,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             cache_on=cache_on,
             workers=workers,
             results_depth_off=results_depth_off,
+            capacity=int(provenance["worker_kernel_capacity_effective"]),
         )
         print(f"kernel-cache-soak: arm {arm_name.upper()} starting ({' '.join(argv[3:])})")
         arms[arm_name] = run_arm(
@@ -1308,8 +1486,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     compare = compare_arms(
-        out_dir / "arm-off" / "results",
-        out_dir / "arm-on" / "results",
+        out_dir / "arm-off",
+        out_dir / "arm-on",
         arms["off"],
         arms["on"],
     )
@@ -1352,6 +1530,12 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             f"kind={report.get('kind')!r} schema={report.get('schema_version')!r}"
         )
     try:
+        # Fix-round-2 (refuter-1 spoof): trust the report's recorded key
+        # source AND belt-check the LIVE environment — a verdict run under
+        # the BENCH_BASELINE_KEY_ENV override is itself override-tainted.
+        key_source = report["provenance"].get("hardware_key_source")
+        if os.environ.get(BENCH_BASELINE_KEY_ENV, "").strip():
+            key_source = f"env-override:{BENCH_BASELINE_KEY_ENV} (set at verdict time)"
         acceptance = evaluate_acceptance(
             off=report["arms"]["off"],
             on=report["arms"]["on"],
@@ -1360,11 +1544,17 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             keys=int(report["provenance"]["grid"]["keys_fan_out"]),
             smoke=bool(report["provenance"].get("smoke")),
             hardware_key=report["provenance"].get("hardware_key"),
+            hardware_key_source=key_source if isinstance(key_source, str) else None,
         )
     except (KeyError, TypeError, ValueError) as exc:
         return _fail_structural(f"report shape invalid: {exc!r}")
     for name, status in acceptance.items():
         print(f"{name}: {status}")
+    print(
+        "NOTE: soak-report.json is TRUSTED INPUT — evidence for the flip DEC, not a "
+        "tamper-proof artifact; the operator runs the harness on their own box and "
+        "this verdict re-derives from the report it is handed."
+    )
     return 1 if judged_failures(acceptance) else 0
 
 
@@ -1433,6 +1623,17 @@ def build_parser() -> argparse.ArgumentParser:
         "(the workflow plan-job SEC9-1 law, enforced script-side too)",
     )
     run.add_argument("--sample-interval-s", type=float, default=5.0)
+    run.add_argument(
+        "--min-free-gib",
+        type=int,
+        default=MIN_FREE_GIB_DEFAULT,
+        help=f"NON-smoke free-disk requirement in GiB, fenced {MIN_FREE_GIB_MIN}.."
+        f"{MIN_FREE_GIB_MAX} (default {MIN_FREE_GIB_DEFAULT} — right-sized for the "
+        "M4-Pro default grid; the workflow never passes this, so lowering it is an "
+        "operator judgment for a deliberately tiny bounded grid / sandbox "
+        "validation, echoed into provenance.min_free_gib; smoke keeps its own "
+        "fixed 2 GiB need)",
+    )
     run.add_argument(
         "--smoke",
         action="store_true",

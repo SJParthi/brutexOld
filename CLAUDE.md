@@ -3900,13 +3900,27 @@ hostile-review pass._
   sign-off; the sandbox `--smoke` run proves MECHANICS only (verdict can
   never read FLIP-READY). REVIEW-FIX ROUND folded (pre-open — the 3-lens
   R1-security/R2-correctness/R3-docs session review): the ambient
-  `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` pop + effective-capacity echo, the
-  `--fib-anchors`/`--price-source-cells` capacity-widening knobs with the
-  RSS claim SCOPED to the measured capacity, the mechanical fresh-`--out`
-  refusal, the NOT-DECISION-GRADE provenance bar on non-M4-Pro hardware,
-  the script-side 1..1195 budget fence, the engine drift pins, the
-  `uname -sm` + home-redacted report provenance, and the directory-wide
-  no-fork-trigger-on-self-hosted redteam sweep; the per-finding record
+  `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` handling + effective-capacity echo,
+  the `--fib-anchors`/`--price-source-cells` capacity-widening knobs with
+  the RSS claim SCOPED to the measured capacity, the mechanical
+  fresh-`--out` refusal, the NOT-DECISION-GRADE provenance bar on
+  non-M4-Pro hardware, the script-side 1..1195 budget fence, the engine
+  drift pins, the `uname -sm` + home-redacted report provenance, and the
+  directory-wide no-fork-trigger-on-self-hosted redteam sweep. FIX ROUND 2
+  folded (pre-open — the 2-refuter round): every arm-identity env is
+  EXPLICITLY PINNED, never left absent (the R1 capacity POP was DEFEATED by
+  the child's own dotenv re-read — `apply_dotenv` never overrides a SET
+  var, so the pin is dotenv-immune; cache flag + capacity + results-depth
+  all set; provenance renamed honestly `capacity_env_child_pinned` +
+  `capacity_env_ambient_present`); the identity compare now COVERS the
+  results-depth `sweep_runs/` sibling root (previously silently outside it
+  — the "never silent" claim made true, proven by the FIRST non-smoke
+  end-to-end CI execution); a `BRUTEX_BENCH_BASELINE_KEY`-override-sourced
+  hardware key reads NOT-DECISION-GRADE (the spoof closed) with the
+  trusted-input boundary disclosed; a preflight-refused run writes NOTHING
+  into `--out` (the documented retry works); the workflow-header
+  1..1200→1195 comment fix + the bounded `--min-free-gib` override
+  (default 30, never passed by the workflow); the per-finding record
   lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives

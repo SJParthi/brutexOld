@@ -40,19 +40,31 @@
   depth (RSS is depth-driven, not tuple-count-driven) but bounds tuple
   count; the full-grid wall saving stays MODELED in the report.
 - **The RSS evidence is scoped to the MEASURED kernel-cache capacity.** The
-  report echoes `provenance.worker_kernel_capacity_effective` (the
-  grid-derived default; any ambient `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY`
-  is POPPED from both arm envs and the pop is echoed as
-  `capacity_env_ambient_popped`) — the default grid measures capacity=1;
-  widen `--fib-anchors` / `--price-source-cells` (dispatch inputs
-  `fib_anchors` / `price_source_cells`) to soak a higher capacity. **The
-  flip DEC must weigh whether the measured capacity covers the operator's
-  grids** — a green RSS bar at capacity=1 does not validate a
+  report echoes `provenance.worker_kernel_capacity_effective` — the
+  grid-derived default, explicitly PINNED as
+  `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` in BOTH arm envs (fix-round-2: the
+  child `sweep-all` re-reads dotenv at startup, so an unset var would adopt
+  a `~/.brutex/.env` value; the dotenv loader never overrides a SET var, so
+  the explicit pin is dotenv-immune; `capacity_env_child_pinned` +
+  `capacity_env_ambient_present` echo it) — the default grid measures
+  capacity=1; widen `--fib-anchors` / `--price-source-cells` (dispatch
+  inputs `fib_anchors` / `price_source_cells`) to soak a higher capacity.
+  **The flip DEC must weigh whether the measured capacity covers the
+  operator's grids** — a green RSS bar at capacity=1 does not validate a
   wide-anchor×source production sweep.
-- **A non-M4-Pro report can never read FLIP-READY** — the acceptance block
-  mechanically stamps a `provenance` bar: a non-smoke report whose
-  `hardware_key` lacks the registered §8 signature (`…-14c10p4e-48g-arm64`)
-  reads `NOT-DECISION-GRADE`, never `FLIP-READY`.
+- **A non-M4-Pro report can never read FLIP-READY through the MECHANICAL
+  bar** — the acceptance block stamps a `provenance` bar: a non-smoke report
+  whose `hardware_key` lacks the registered §8 signature
+  (`…-14c10p4e-48g-arm64`) — or whose key came from the documented
+  `BRUTEX_BENCH_BASELINE_KEY` env OVERRIDE rather than real hardware probes
+  (`provenance.hardware_key_source`; the `verdict` subcommand also
+  belt-checks the live env) — reads `NOT-DECISION-GRADE`, never
+  `FLIP-READY`. **Trusted-input boundary (Golden Rule #10):**
+  `soak-report.json` is EVIDENCE for the flip DEC, not a tamper-proof
+  artifact — it is hand-editable, and `verdict` re-derives from the report
+  it is handed; the real provenance anchor is that the operator dispatches
+  the workflow on their own registered runner (or runs the fallback on
+  their own box) and signs off on the DEC.
 - **Arms run sequentially on a live Mac** — thermal/background drift between
   arms is uncontrolled; soak an idle machine (the bench-m4pro quiet-runner
   assumption) and outside the nightly pull window (the sweep takes the G10
@@ -73,20 +85,25 @@
    `ps -eo pid=,ppid=,rss=` and folds per-PID running maxima + the
    pool-wide sum over the arm's process tree.
 3. **Arm ON** — identical with `=1` and a fresh `<out>/arm-on/results`.
-   Default cache capacity is ENFORCED: any ambient
-   `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` is popped from both arm envs (the
-   flip ships the default sizing law, so the evidence measures it) and the
-   effective capacity + the pop are echoed into the report's provenance.
+   Default cache capacity is ENFORCED: the grid-derived default is
+   explicitly SET as `BRUTEX_SWEEP_WORKER_KERNEL_CAPACITY` in both arm envs
+   (the flip ships the default sizing law, so the evidence measures it;
+   pinning — not popping — because the child's dotenv re-read would refill
+   an unset var from `~/.brutex/.env`) and the effective capacity + the pin
+   are echoed into the report's provenance.
 4. **Telemetry harvest** — the ON arm must emit exactly one
    `sweep_parallel.kernel_reuse_summary` (builds/hits/workers) and the OFF
    arm none; `exit-status.json` must read `complete`, no
    `.sweep_quarantine.json`, no SUSPECT, no pool-broken/stall tokens.
 5. **Byte-identity compare** — SHA-256 of every file under each arm's
-   per-tuple store tree (run-state dirs + wall-stamped sidecars excluded —
-   each exclusion listed in `compare.excluded_sidecars`, never silently
-   skipped); audit chains compared ts-masked (seq/action/subject/payload,
-   the RUN_MANIFEST payload's volatile manifest keys scrubbed);
-   exit-status compared structurally.
+   per-tuple store tree (`<arm>/results/`, run-state dirs + wall-stamped
+   sidecars excluded) AND the results-depth sibling root
+   (`<arm>/sweep_runs/` — top100.json + trade/equity sidecars + baselines,
+   only `.stamp.json` masked; fix-round-2 — previously silently outside the
+   compare). Each exclusion is listed in `compare.excluded_sidecars`, never
+   silently skipped; audit chains compared ts-masked
+   (seq/action/subject/payload, the RUN_MANIFEST payload's volatile
+   manifest keys scrubbed); exit-status compared structurally.
 6. **Report** — `<out>/report/soak-report.json` (machine-readable) +
    `summary.md` (every figure tagged MEASURED vs MODELED, plus the VALUE
    section surfacing the actual wall + RSS deltas and real headroom) +
@@ -134,8 +151,15 @@ to the flip PR. **`--out` must be a FRESH (nonexistent or empty) dir per
 run** — the script refuses a non-empty `--out` (exit 2): a prior run's
 artifacts would resume/cache-skip both arms into fake instant walls
 (`run_id` carries no timestamp), so `rm -rf ~/kernel-cache-soak` first (or
-pass a new path). `--budget-minutes` is fenced 1..1195 script-side (the
-same SEC9-1 law as the workflow). Grid knobs (`--symbols/--intervals/
+pass a new path). A PREFLIGHT-refused run (bad/absent lake, disk short)
+writes NOTHING into `--out` (fix-round-2), so the documented remediation —
+re-run the same command with `--lake-root` pointing at the real lake —
+works on the SAME `--out` without an extra `rm -rf`. `--budget-minutes` is
+fenced 1..1195 script-side (the same SEC9-1 law as the workflow).
+`--min-free-gib` (fenced 1..1024, default 30) lowers the NON-smoke
+free-disk requirement for a deliberately tiny bounded grid — an operator
+judgment, echoed into `provenance.min_free_gib`; the workflow never passes
+it, so the M4-Pro default stands. Grid knobs (`--symbols/--intervals/
 --start/--end/--k/--conditions/--sl/--tp/--top/--fib-anchors/
 --price-source-cells/--workers`) mirror `brutex sweep-all`; the
 defaults keep FULL bar depth (2020-01-01 → previous day, NIFTY+BANKNIFTY,
@@ -154,8 +178,10 @@ of (the `acceptance` block pre-evaluates these; the DEC quotes the RAW
 figures — and must quote the ACTUAL peaks/headroom, not just PASS/FAIL):
 
 1. **Byte identity (hard):** `compare.identity_ok == true` — zero ts-masked
-   diffs between the OFF and ON result trees; audit chains ts-masked-equal;
-   exit-status structurally equal. Any diff = BLOCK, no flip.
+   diffs between the OFF and ON result trees INCLUDING the results-depth
+   `sweep_runs/` sibling root (`compare.sweep_runs_files_compared` counts
+   its coverage); audit chains ts-masked-equal; exit-status structurally
+   equal. Any diff = BLOCK, no flip.
 2. **Clean exits (hard):** both arms rc 0 + `exit_state == "complete"`, no
    quarantine sidecar, no SUSPECT, no `SweepWorkerPoolBrokenError` /
    `SweepStallError` in either log, no budget timeout.
@@ -180,12 +206,16 @@ figures — and must quote the ACTUAL peaks/headroom, not just PASS/FAIL):
    symbols × intervals × fib-anchors × price-source-cells kernel-key
    fan-out); OFF arm silent. Exact builds/hits splits are NEVER asserted
    (worker-split-dependent — the emission's own honesty law).
-6. **Provenance (hard):** `hardware_key` matches the registered M4-Pro;
-   `commit` is the flip PR's base or a main ancestor; `smoke == false`.
-   MECHANICALLY encoded: the acceptance block's `provenance` bar checks the
-   §8 signature (`…-14c10p4e-48g-arm64`) and a non-matching non-smoke
-   report's verdict reads `NOT-DECISION-GRADE`, never `FLIP-READY` (the
-   commit-ancestry half stays a human/DEC check).
+6. **Provenance (hard):** `hardware_key` matches the registered M4-Pro AND
+   `hardware_key_source == "probed"` (not the `BRUTEX_BENCH_BASELINE_KEY`
+   env override — a forged override key would carry the M4 signature on any
+   box; the bar + the `verdict` subcommand's live-env belt-check refuse it
+   as `NOT-DECISION-GRADE`); `commit` is the flip PR's base or a main
+   ancestor; `smoke == false`. The mechanical bar judges the report it is
+   HANDED — `soak-report.json` is trusted input, evidence for the flip DEC
+   rather than a tamper-proof artifact (§1); the commit-ancestry half and
+   the report's own integrity stay a human/DEC check (the operator ran it
+   on their own box).
 
 `acceptance.verdict` (`FLIP-READY` / `NOT-READY(...)`) is ADVISORY — the
 DEC text quotes the raw figures, and the operator signs off. Re-evaluate a
