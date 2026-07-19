@@ -277,6 +277,22 @@ BUDGET_MINUTES_MAX: Final[int] = 1195
 MIN_FREE_GIB_DEFAULT: Final[int] = 30
 MIN_FREE_GIB_MIN: Final[int] = 1
 MIN_FREE_GIB_MAX: Final[int] = 1024
+#: The ``--sample-interval-s`` fence (fix-round-6 MINOR, refuter-A): this was
+#: the ONE plan-job-fenced input with NO script-side twin — the workflow plan
+#: job fences it to integer 1..300, but the CLI fallback accepted anything
+#: ``float()`` parses. Executed repros: 0/negative/nan/1e-9 make
+#: ``Event.wait`` return immediately, so the sampler forks ``ps``
+#: continuously beside the measured arms (a CPU/fork storm — 323k spawns/s
+#: measured — inflating the ABSOLUTE walls/RSS the flip DEC quotes); ``inf``
+#: raises ``OverflowError`` inside ``Event.wait`` and KILLS the daemon
+#: sampler after exactly ONE sample (near-empty sampling presented as
+#: MEASURED). Same law as the ``--budget-minutes`` R2 MINOR-5 precedent:
+#: enforce script-side what the workflow plan job fences. The script floor is
+#: 0.05 (below the workflow's 1) ONLY so the documented smoke sub-second
+#: cadence (``min(interval, 0.5)``) stays a legal value an operator may also
+#: pass explicitly.
+SAMPLE_INTERVAL_S_MIN: Final[float] = 0.05
+SAMPLE_INTERVAL_S_MAX: Final[float] = 300.0
 
 # ── The ts-masked identity-compare law (the PR-A T3 / runcore-byte-identity
 #    exclusion set, extended with the CLI-layout state dirs) ─────────────────
@@ -841,6 +857,35 @@ def build_deltas(off: dict[str, Any], on: dict[str, Any]) -> dict[str, Any]:
         ),
         "wall_ratio_on_over_off": ratio,
     }
+
+
+def find_nonfinite(node: object, path: str = "report") -> str | None:
+    """Return the dotted path of the FIRST non-finite float in *node*, else None.
+
+    Fix-round-6 NIT (refuter-A): ``json.loads`` accepts the ``Infinity``/``NaN``
+    constants by default (and any ``1e400``-style literal parses to ``inf``), so
+    a hand-mangled report can carry non-finite numerics into the verdict's
+    arithmetic — ``int(inf)`` raises ``OverflowError`` (the #1558 precedent
+    class), while an ``inf`` that SURVIVES arithmetic would silently poison the
+    judged bars. The verdict refuses non-finite numerics at INGESTION with a
+    NAMED structural path (a legitimately-produced report never carries one:
+    walls are monotonic-clock diffs, RSS figures are ints, and the wall ratio
+    is division-guarded in :func:`build_deltas`). Bools are not floats; ints
+    are always finite in Python — only ``float`` needs the probe.
+    """
+    if isinstance(node, float) and not math.isfinite(node):
+        return path
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found = find_nonfinite(value, f"{path}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found = find_nonfinite(value, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
 
 
 def _check_clean_exit(off: dict[str, Any], on: dict[str, Any]) -> str:
@@ -1669,6 +1714,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             "arms instantly)"
         )
 
+    if not math.isfinite(args.sample_interval_s) or not (
+        SAMPLE_INTERVAL_S_MIN <= args.sample_interval_s <= SAMPLE_INTERVAL_S_MAX
+    ):
+        # Fix-round-6 MINOR (refuter-A): mirror the workflow plan-job fence
+        # script-side (the --budget-minutes R2 MINOR-5 precedent). Executed
+        # repros: 0/negative/nan fork a continuous `ps` storm beside the
+        # measured arms (Event.wait(<=0|nan) returns immediately); inf kills
+        # the daemon sampler after ONE sample (Event.wait(inf) raises
+        # OverflowError). The explicit isfinite() belt is deliberate: nan
+        # also fails the range compare, but the finiteness law is the
+        # load-bearing property and must not depend on comparison semantics.
+        return _fail_structural(
+            f"--sample-interval-s {args.sample_interval_s} outside "
+            f"{SAMPLE_INTERVAL_S_MIN}..{SAMPLE_INTERVAL_S_MAX} (must be a finite "
+            "float; the workflow plan job fences 1..300 — 0/negative/nan fork a "
+            "ps storm beside the measured arms, inf kills the sampler after one "
+            "sample)"
+        )
+
     if not MIN_FREE_GIB_MIN <= args.min_free_gib <= MIN_FREE_GIB_MAX:
         # Fix-round-2 NIT: the override exists for deliberately tiny bounded
         # non-smoke grids (and sandbox validation) but stays fenced — the
@@ -1914,6 +1978,14 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             f"not a {REPORT_KIND} v{REPORT_SCHEMA_VERSION} report: "
             f"kind={report.get('kind')!r} schema={report.get('schema_version')!r}"
         )
+    nonfinite = find_nonfinite(report)
+    if nonfinite is not None:
+        # Fix-round-6 NIT (refuter-A): json.loads accepts Infinity/NaN, and a
+        # keys_fan_out of Infinity crashed int() with a raw OverflowError
+        # traceback at rc 1 (the #1558 int(inf) class) while a nested-metric
+        # Infinity could survive arithmetic and silently poison a judged bar
+        # — refuse non-finite numerics at ingestion, NAMED.
+        return _fail_structural(f"report shape invalid: non-finite number at {nonfinite}")
     try:
         # Fix-round-2 (refuter-1 spoof): trust the report's recorded key
         # source AND belt-check the LIVE environment — a verdict run under
@@ -1938,12 +2010,16 @@ def cmd_verdict(args: argparse.Namespace) -> int:
             hardware_key=report["provenance"].get("hardware_key"),
             hardware_key_source=key_source if isinstance(key_source, str) else None,
         )
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError) as exc:
         # AttributeError joined the net in fix-round-5 (refuter-A NIT-2): a
         # hand-mangled report whose "provenance" is a JSON string or whose
         # "arms" members are lists crashed `.get(...)` with a raw traceback
         # at rc 1 (the judged-FAIL code) instead of the structural rc 2
-        # every sibling malformed shape gets.
+        # every sibling malformed shape gets. OverflowError joined in
+        # fix-round-6 (refuter-A NIT-2, the #1558 int(inf) precedent) as the
+        # defense-in-depth belt BEHIND the find_nonfinite ingestion scan
+        # above — e.g. a finite-but-astronomical INT reaching a float
+        # conversion is not a non-finite float the scan can see.
         return _fail_structural(f"report shape invalid: {exc!r}")
     for name, status in acceptance.items():
         print(f"{name}: {status}")
@@ -2019,7 +2095,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"both-arms wall budget, fenced {BUDGET_MINUTES_MIN}..{BUDGET_MINUTES_MAX} "
         "(the workflow plan-job SEC9-1 law, enforced script-side too)",
     )
-    run.add_argument("--sample-interval-s", type=float, default=5.0)
+    run.add_argument(
+        "--sample-interval-s",
+        type=float,
+        default=5.0,
+        help=f"RSS sampler cadence in seconds, fenced finite {SAMPLE_INTERVAL_S_MIN}.."
+        f"{SAMPLE_INTERVAL_S_MAX:g} script-side (fix-round-6; the workflow plan job "
+        "fences 1..300 — smoke additionally caps the effective cadence at 0.5)",
+    )
     run.add_argument(
         "--arm-order",
         choices=("off-first", "on-first"),

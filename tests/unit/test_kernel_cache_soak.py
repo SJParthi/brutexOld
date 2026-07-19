@@ -1330,6 +1330,18 @@ class TestReportRendering:
         assert "NOT decision-grade" in SOAK.render_summary(report)
 
 
+class TestFindNonfinite:
+    """Fix-round-6: the verdict's ingestion finiteness scan (pure helper)."""
+
+    def test_paths_named_and_finite_trees_pass(self) -> None:
+        assert SOAK.find_nonfinite({"a": {"b": float("inf")}}) == "report.a.b"
+        assert SOAK.find_nonfinite({"a": [1.0, float("nan")]}) == "report.a[1]"
+        assert SOAK.find_nonfinite(float("-inf"), "x") == "x"
+        # Finite trees — ints (always finite), bools (not floats), strings,
+        # None and finite floats all pass.
+        assert SOAK.find_nonfinite({"a": [1, 2.5, "x", None, True], "b": {"c": 0.0}}) is None
+
+
 class TestVerdictSubcommand:
     def _write_report(self, tmp_path: Path, **mutations: Any) -> Path:
         off, on = _off_arm(), _arm()
@@ -1400,6 +1412,48 @@ class TestVerdictSubcommand:
         proc = self._run("verdict", "--report", str(path))
         assert proc.returncode == 2
         assert "report shape invalid" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_top_level_array_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-6 NIT (refuter-A NIT-3 / refuter-B NIT-A): the round-5
+        # top-level non-dict guard was UNPINNED — its removal mutant survived
+        # the full suite. _write_report structurally cannot produce this
+        # shape, so the report is written raw.
+        path = tmp_path / "soak-report.json"
+        path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "report shape invalid: top-level list" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_keys_fan_out_infinity_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-6 NIT (refuter-A NIT-2): json.loads accepts the Infinity
+        # constant (and 1e400 parses to inf), and int(inf) raised a raw
+        # OverflowError traceback at rc 1 (the #1558 int(inf) class) — now
+        # the NAMED structural rc 2 at ingestion, path included.
+        path = self._write_report(
+            tmp_path,
+            provenance={
+                "grid": {"keys_fan_out": float("inf")},
+                "smoke": False,
+                "hardware_key": _M4PRO_KEY,
+            },
+        )
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "non-finite number at report.provenance.grid.keys_fan_out" in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_verdict_nested_metric_infinity_is_structural(self, tmp_path: Path) -> None:
+        # Fix-round-6 NIT (refuter-A NIT-2, the nested-metric arm): an inf
+        # that SURVIVES the verdict's arithmetic (the wall-ratio isfinite
+        # guard would read it as a judged rc-1 "unmeasurable" — a poisoned
+        # bar, not a crash) must ALSO read the named structural rc 2: a
+        # legitimately-produced report never carries a non-finite numeric.
+        path = self._write_report(tmp_path, deltas={"wall_ratio_on_over_off": float("inf")})
+        proc = self._run("verdict", "--report", str(path))
+        assert proc.returncode == 2
+        assert "non-finite number at report.deltas.wall_ratio_on_over_off" in proc.stderr
         assert "Traceback" not in proc.stderr
 
     def test_usage_error(self) -> None:
@@ -1570,6 +1624,43 @@ class TestRunGuards:
         proc = self._run("run", "--smoke", "--out", str(tmp_path / "fresh"), "--min-free-gib", gib)
         assert proc.returncode == 2
         assert "1..1024" in proc.stderr
+
+    @pytest.mark.parametrize("interval", ["0", "-3", "nan", "inf", "1e-9", "0.049", "300.1"])
+    def test_run_refuses_out_of_fence_sample_interval(self, tmp_path: Path, interval: str) -> None:
+        # Fix-round-6 MINOR (refuter-A): the ONE plan-job-fenced input with no
+        # script-side twin. The executed repros — interval 0 forked 323k `ps`
+        # subprocesses/s beside the measured arms (Event.wait(0) returns
+        # immediately); inf killed the daemon sampler after ONE sample
+        # (Event.wait(inf) raises OverflowError) — must both now REFUSE
+        # structurally, alongside negative/nan/sub-floor/over-ceiling values.
+        proc = self._run(
+            "run", "--smoke", "--out", str(tmp_path / "fresh"), "--sample-interval-s", interval
+        )
+        assert proc.returncode == 2
+        assert "--sample-interval-s" in proc.stderr
+        assert "0.05..300" in proc.stderr
+        assert not (tmp_path / "fresh").exists()  # refused BEFORE any artifact
+
+    @pytest.mark.parametrize("interval", ["0.05", "300", "0.5", "5.0"])
+    def test_run_accepts_in_fence_sample_interval(self, tmp_path: Path, interval: str) -> None:
+        # Boundary values + the smoke sub-second cadence + the default are all
+        # IN-fence: the run proceeds PAST the sample fence and refuses at the
+        # LATER lake preflight instead (a cheap deterministic later refusal —
+        # no arm ever spawns), proving the fence admits the legal range.
+        proc = self._run(
+            "run",
+            "--out",
+            str(tmp_path / "out"),
+            "--lake-root",
+            str(tmp_path / "no-such-lake"),
+            "--min-free-gib",
+            "1",
+            "--sample-interval-s",
+            interval,
+        )
+        assert proc.returncode == 2
+        assert "--sample-interval-s" not in proc.stderr
+        assert "lake preflight refused" in proc.stderr
 
     def test_refused_lake_preflight_leaves_out_reusable(self, tmp_path: Path) -> None:
         # Fix-round-2 MINOR (refuter-2): a preflight-REFUSED non-smoke run

@@ -3946,7 +3946,19 @@ hostile-review pass._
   shipped thresholds), the two sweep-path rust toggles join the symmetric
   echo (25 names), the cmd_run wiring mutants (arm-order + guarded
   compare/summary call sites) are killed by seam-level pins, and
-  `arm_order` is a fenced workflow dispatch input; the per-finding record
+  `arm_order` is a fenced workflow dispatch input. FIX ROUNDS 5+6 folded
+  (pre-open — the round-4/round-5 refuter pairs): the symmetric echo audit
+  grows 25 → 30 with the completeness wording honestly HEDGED to the
+  enumerated-audit truth (symmetry-by-construction is the load-bearing
+  property, not enumeration); the verdict's shape/numeric refusal net
+  hardened — AttributeError + a top-level non-dict guard (round 5; the
+  guard's missing pin added in round 6, its removal mutant verified
+  killed), plus the round-6 named non-finite-numeric INGESTION refusal +
+  the OverflowError belt (json.loads accepts Infinity/NaN — the #1558
+  int(inf) precedent); `--sample-interval-s` fenced finite 0.05..300
+  script-side (the budget-fence precedent — the executed fork-storm-at-0 /
+  sampler-death-at-inf repros both now refuse); runbook §7 reworded to the
+  sandbox-mechanics truth; the per-finding record
   lives ONLY in MIGRATION.md #1962. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; zero
   `brutex/` source edits; no scope/vocab/rate change; the full record lives
