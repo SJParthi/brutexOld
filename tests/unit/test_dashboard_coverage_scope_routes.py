@@ -282,3 +282,62 @@ class TestCoverageGridRouteScope:
         payload = index_client.get("/api/v1/coverage").json()
         assert "scope_excluded" not in payload
         assert "NIFTY" in str(payload)
+
+
+# ── r4 BLOCKER — /coverage/missing-sessions (the merge-window census drill) ──
+
+
+class TestMissingSessionsRouteScope:
+    """The post-merge r4 BLOCKER fold: the re-pull drill census narrows like R2.
+
+    The drill (DEC-COVERAGE-MISSING-SESSIONS-001) landed on main INSIDE the
+    #1934 merge window calling the RAW ``summarize_spot_datasets`` unscoped —
+    a stock-bearing lake enumerated every stored stock on a /coverage census
+    surface and told the operator to re-pull sessions the P7 gates refuse.
+    """
+
+    def test_stock_datasets_excluded_and_counted(
+        self, index_client: TestClient, tmp_path: Path
+    ) -> None:
+        """[FB] planted stock spot datasets never reach the re-pull drill."""
+        _write_spot(tmp_path, "NSE-NIFTY", "1minute")
+        _write_spot(tmp_path, "RELIANCE", "1minute")
+        resp = index_client.get("/api/v1/coverage/missing-sessions")
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        # [FB] merge-base serves a RELIANCE drill row + carries NO echo key.
+        assert _row_symbols(payload) == {"NSE-NIFTY"}
+        assert payload["scope_excluded"] == 1
+
+    def test_index_only_lake_payload_carries_no_echo(
+        self, index_client: TestClient, tmp_path: Path
+    ) -> None:
+        """Emit-on-nonzero: an index-only lake stays byte-identical (no key)."""
+        _write_spot(tmp_path, "NSE-NIFTY", "1minute")
+        payload = index_client.get("/api/v1/coverage/missing-sessions").json()
+        assert _row_symbols(payload) == {"NSE-NIFTY"}
+        assert "scope_excluded" not in payload
+
+    def test_full_arm_serves_stock_rows_and_memo_key_moves(
+        self, index_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The widen pin + the scope-token memo fold in ONE arm.
+
+        index4 first (RELIANCE excluded), then ``full`` WITHIN the same client
+        and the same write generation: the second request must serve the stock
+        row — a memo key that failed to fold the scope token would re-serve
+        the cached FILTERED rows (the Rev-4/Rev-5 every-scope-bound-memo law)
+        — and the full arm restores the merge-base admission with NO echo key.
+        """
+        _write_spot(tmp_path, "NSE-NIFTY", "1minute")
+        _write_spot(tmp_path, "RELIANCE", "1minute")
+        narrow = index_client.get("/api/v1/coverage/missing-sessions").json()
+        assert _row_symbols(narrow) == {"NSE-NIFTY"}
+        # The LITERAL env name BY DESIGN (merge-base importability — the
+        # pull-scope FB battery precedent; ``FEED_SCOPE_ENV`` does not exist
+        # in a merge-base worktree, so importing it would turn every [FB]
+        # arm in this module into an ImportError instead of a behavioral fail).
+        monkeypatch.setenv("BRUTEX_FEED_SCOPE", "full")
+        wide = index_client.get("/api/v1/coverage/missing-sessions").json()
+        assert _row_symbols(wide) == {"NSE-NIFTY", "RELIANCE"}
+        assert "scope_excluded" not in wide

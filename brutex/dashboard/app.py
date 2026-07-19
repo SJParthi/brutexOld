@@ -108,7 +108,6 @@ from brutex.dashboard.coverage_view import (
 from brutex.dashboard.db_view import (
     REGISTRY_CONTRACT_COLUMNS,
     REGISTRY_EXPIRY_COLUMNS,
-    SPOT_VERDICT_INTERVALS,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -126,7 +125,6 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
-    summarize_spot_datasets,
     summarize_spot_verdict_datasets,
     summary_rows_scope_excluded,
     table_summary,
@@ -7178,6 +7176,14 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         span), an out-of-coverage
         range or missing stored dates. No filesystem-backed store → a well-shaped empty
         payload, never a 500.
+
+        Universe scope (DEC-UNIVERSE-INDEX-ONLY-001, the post-merge r4 BLOCKER
+        fold): the drill is a /coverage CENSUS surface, so under a bounded
+        read scope stored-only stock datasets are EXCLUDED at the walk (their
+        would-be "re-pull these dates" guidance points at symbols the P7 pull
+        gates refuse) and COUNTED via the emit-on-nonzero ``scope_excluded``
+        echo; the memo key folds the scope token so a widening re-serves
+        without a generation bump.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -7185,26 +7191,40 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             return JSONResponse(build_missing_sessions_payload([]))
         lake = lake_root.parent
 
-        def _recompute() -> list[dict[str, Any]]:
-            """The session_dates-enriched spot scan (cache-miss / dirty path only).
-
-            Runs on a threadpool worker, building ``store.connection`` here so the store
-            RLock stays on one thread. FNO-pruned + bounded to the spot verdict intervals
-            (the ~10⁵-10⁶ F&O contract partitions never carry a spot gap audit); the
-            ``session_date_segments`` opt-in adds the DISTINCT-ist-date ``array_agg`` to the
-            existing single per-session CTE — no second lake pass.
-            """
-            return summarize_spot_datasets(
-                store.connection,
-                lake,
-                exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
-                intervals=SPOT_VERDICT_INTERVALS,
-                session_date_segments=frozenset(SPOT_PROBE_SEGMENTS),
-            )
-
         def _work() -> dict[str, Any]:
+            # Read-scope binding (DEC-UNIVERSE-INDEX-ONLY-001, the post-merge
+            # hostile-review r4 BLOCKER fold): this merge-window census surface
+            # (DEC-COVERAGE-MISSING-SESSIONS-001, landed on main INSIDE the
+            # #1934 merge window) called the RAW summarize_spot_datasets
+            # unscoped — under the shipped index4 default it enumerated every
+            # stored stock, told the operator to "re-pull" sessions the P7
+            # gates refuse, and paid the per-dataset aggregate the R2
+            # walk-level skip exists to avoid. It now rides the SAME R2
+            # verdict wrapper as its /coverage/spot + completeness siblings,
+            # with the ONE coherent (scope, token) snapshot folded into the
+            # memo key (the §2.5 law — a registration widening reaches a
+            # primed drill cache with no generation movement).
+            read_scope, scope_token = read_scope_snapshot()
+
+            def _recompute() -> list[dict[str, Any]]:
+                """The session_dates-enriched spot scan (cache-miss / dirty path only).
+
+                Runs on a threadpool worker, building ``store.connection`` here so the
+                store RLock stays on one thread. FNO-pruned + bounded to the spot verdict
+                intervals via the R2 wrapper (the ~10⁵-10⁶ F&O contract partitions never
+                carry a spot gap audit; an excluded stock dataset skips its aggregate at
+                the walk); the ``session_date_segments`` opt-in adds the DISTINCT-ist-date
+                ``array_agg`` to the existing single per-session CTE — no second lake pass.
+                """
+                return summarize_spot_verdict_datasets(
+                    store.connection,
+                    lake,
+                    scope=read_scope,
+                    session_date_segments=frozenset(SPOT_PROBE_SEGMENTS),
+                )
+
             rows = _missing_sessions_cache.get_or_compute(
-                "coverage_missing_sessions",
+                f"coverage_missing_sessions|s={scope_token}",
                 generation=_summary_cache.generation,
                 compute=_recompute,
             )
@@ -7221,6 +7241,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # un-pullable one reads as a re-pullable hole; the pure module
                 # takes it injected.
                 today=now_ist().date(),
+                # The R2 exclusion census rides the SAME cached rows object
+                # (emit-on-nonzero — an index-only lake stays byte-identical).
+                scope_excluded=summary_rows_scope_excluded(rows),
             )
 
         return JSONResponse(await _run_lake(_work))

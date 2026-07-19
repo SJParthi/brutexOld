@@ -312,3 +312,55 @@ class TestVerdictScanReadScope:
         finally:
             conn.close()
         assert "RELIANCE" in {r["symbol"] for r in rows}
+
+
+class TestVerdictScanSessionDateSegments:
+    """The r4 BLOCKER fold: the wrapper forwards ``session_date_segments``.
+
+    The /coverage/missing-sessions drill (a merge-window census surface that
+    landed calling the RAW scan unscoped) now rides the ONE R2 wrapper — its
+    ``session_dates`` enrichment must thread through BOTH wrapper arms
+    verbatim, or the drill's audit silently loses every gap row (every row
+    would carry no ``session_dates`` and the audit would abstain).
+    """
+
+    def test_bounded_arm_forwards_session_dates(self, stock_lake: Path) -> None:
+        """The bounded arm: admitted 1minute rows carry the enrichment AND the
+        stock dataset is still excluded + counted (the drill's exact shape)."""
+        conn = duckdb.connect()
+        try:
+            rows = summarize_spot_verdict_datasets(
+                conn,
+                stock_lake,
+                scope=resolve_feed_scope("groww"),
+                session_date_segments=frozenset({"CASH"}),
+            )
+        finally:
+            conn.close()
+        assert {r["symbol"] for r in rows} == {"NSE-NIFTY"}
+        assert summary_rows_scope_excluded(rows) == 1
+        minute = next(r for r in rows if r["interval"] == "1minute")
+        assert isinstance(minute["session_dates"], frozenset)
+        assert len(minute["session_dates"]) == 2
+
+    def test_unbounded_arm_forwards_session_dates(self, stock_lake: Path) -> None:
+        """The pass-through arm equals the raw scan with the same opt-in."""
+        conn = duckdb.connect()
+        try:
+            wrapped = summarize_spot_verdict_datasets(
+                conn,
+                stock_lake,
+                scope=_FULL_SCOPE,
+                session_date_segments=frozenset({"CASH"}),
+            )
+            raw = summarize_spot_datasets(
+                conn,
+                stock_lake,
+                exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+                intervals=SPOT_VERDICT_INTERVALS,
+                session_date_segments=frozenset({"CASH"}),
+            )
+        finally:
+            conn.close()
+        assert wrapped == raw
+        assert any("session_dates" in r for r in wrapped)

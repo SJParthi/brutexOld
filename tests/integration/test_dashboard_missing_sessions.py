@@ -261,13 +261,15 @@ class TestMissingSessionsMemoisation:
         _write_nifty(tmp_path, [date(2024, 1, 2), date(2024, 1, 4)])
 
         calls = {"n": 0}
-        real = app_module.summarize_spot_datasets
+        # The drill rides the R2 verdict wrapper since the #1934 r4 BLOCKER
+        # fold (scope-screened at the walk) — spy the wrapper, not the raw scan.
+        real = app_module.summarize_spot_verdict_datasets
 
         def _counting(*args: object, **kwargs: object) -> object:
             calls["n"] += 1
             return real(*args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(app_module, "summarize_spot_datasets", _counting)
+        monkeypatch.setattr(app_module, "summarize_spot_verdict_datasets", _counting)
 
         cache = SummaryCache()
         client = TestClient(

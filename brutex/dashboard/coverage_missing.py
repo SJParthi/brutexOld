@@ -69,6 +69,7 @@ from brutex.calendars import (
     HOLIDAY_COVERAGE_LAST_YEAR,
     trading_days_between,
 )
+from brutex.data.scope_filter import scope_excluded_echo
 
 #: The exchanges :func:`~brutex.calendars.trading_days_between` accepts (its holiday-set
 #: selector). Any other dataset ``exchange`` (there is none in the spot lake today) falls
@@ -444,6 +445,7 @@ def build_missing_sessions_payload(
     range_start: str | None = None,
     range_end: str | None = None,
     today: date | None = None,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Project ``summarize_spot_datasets`` rows into the missing-sessions drill payload.
 
@@ -469,6 +471,16 @@ def build_missing_sessions_payload(
     expected-session calendar walk per distinct ``(start, end, exchange)`` range, so the
     common unfiltered many-datasets-one-range case pays the O(span-days) walk once — not
     once per dataset.
+
+    *scope_excluded* (DEC-UNIVERSE-INDEX-ONLY-001, the post-merge hostile-review
+    r4 BLOCKER fold): the census scan's read-scope exclusion count
+    (:func:`~brutex.dashboard.db_view.summary_rows_scope_excluded` over the
+    route's R2-wrapper rows) — EMIT-ON-NONZERO via
+    :func:`~brutex.data.scope_filter.scope_excluded_echo`, so the default ``0``
+    (an unfiltered caller / an index-only lake) keeps the payload
+    byte-identical; a nonzero count names how many stored-only symbols the
+    bounded scope excluded from the drill (their re-pull guidance would point
+    at symbols the P7 pull gates refuse).
     """
     expected_cache: dict[tuple[date, date, str | None], tuple[date, ...]] = {}
     entries: list[MissingSessions] = []
@@ -503,7 +515,7 @@ def build_missing_sessions_payload(
     entries.sort(key=lambda e: (e.symbol, e.exchange, e.interval))
     total_missing = sum(e.missing_count or 0 for e in entries)
     total_missing_before = sum(e.missing_before_first_stored or 0 for e in entries)
-    return {
+    payload: dict[str, Any] = {
         "datasets": len(entries),
         "total_missing": total_missing,
         "total_missing_before_first_stored": total_missing_before,
@@ -512,6 +524,8 @@ def build_missing_sessions_payload(
         "range_end": range_end,
         "rows": [e.to_dict() for e in entries],
     }
+    payload.update(scope_excluded_echo(scope_excluded))
+    return payload
 
 
 def _iso_or_none(value: Any) -> str | None:

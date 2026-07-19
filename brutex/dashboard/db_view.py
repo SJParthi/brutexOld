@@ -1813,7 +1813,11 @@ def summary_rows_scope_excluded(rows: object) -> int:
 
 
 def summarize_spot_verdict_datasets(
-    conn: Any, lake_root: Path, *, scope: FeedScope | None = None
+    conn: Any,
+    lake_root: Path,
+    *,
+    scope: FeedScope | None = None,
+    session_date_segments: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """The FNO-pruned, verdict-interval-bounded spot summary scan — the dashboard's scan.
 
@@ -1845,6 +1849,13 @@ def summarize_spot_verdict_datasets(
     :class:`ScopedSummaryRows` carrying the distinct-symbol exclusion census for
     the payloads' emit-on-nonzero echo. ``load_lake_spans`` NEVER threads this
     seam (the twice-pinned unfiltered cold-start contract above).
+
+    *session_date_segments* (the post-merge hostile-review r4 BLOCKER fold,
+    #1934): forwarded VERBATIM to :func:`summarize_spot_datasets` so the
+    ``/coverage/missing-sessions`` drill — a merge-window census surface that
+    landed calling the RAW scan unscoped, serving one row per stored stock —
+    rides this ONE wrapper instead of a fourth raw call site. The default
+    ``None`` keeps every existing caller byte-identical.
     """
     prune = frozenset({FNO_CANDLE_LAKE_SEGMENT})
     if scope is None or not scope.bounded():
@@ -1853,6 +1864,7 @@ def summarize_spot_verdict_datasets(
             lake_root,
             exclude_segments=prune,
             intervals=SPOT_VERDICT_INTERVALS,
+            session_date_segments=session_date_segments,
         )
     bound = scope
     excluded: set[tuple[str, str, str]] = set()
@@ -1868,6 +1880,7 @@ def summarize_spot_verdict_datasets(
         lake_root,
         exclude_segments=prune,
         intervals=SPOT_VERDICT_INTERVALS,
+        session_date_segments=session_date_segments,
         admit=_admit,
     )
     return ScopedSummaryRows(rows, scope_excluded=len(excluded))

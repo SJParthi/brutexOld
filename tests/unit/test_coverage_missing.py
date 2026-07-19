@@ -598,6 +598,18 @@ class TestBuildMissingSessionsPayload:
         assert payload["range_start"] == "2024-01-01"
         assert payload["range_end"] == "2024-01-31"
 
+    def test_scope_excluded_echo_emit_on_nonzero(self) -> None:
+        """The r4 BLOCKER fold (DEC-UNIVERSE-INDEX-ONLY-001): the census
+        scan's read-scope exclusion count rides the payload emit-on-nonzero —
+        the default ``0`` keeps the wire byte-identical (no key)."""
+        rows = [_row("NIFTY", "1minute", "2024-01-02", "2024-01-05", frozenset())]
+        assert "scope_excluded" not in build_missing_sessions_payload(rows)
+        assert "scope_excluded" not in build_missing_sessions_payload(rows, scope_excluded=0)
+        counted = build_missing_sessions_payload(rows, scope_excluded=3)
+        assert counted["scope_excluded"] == 3
+        # The count never perturbs the audit itself.
+        assert counted["datasets"] == 1
+
 
 class TestExplicitRangeOverride:
     """Review fold: a typo'd EXPLICIT override abstains — never a silent stored-span
