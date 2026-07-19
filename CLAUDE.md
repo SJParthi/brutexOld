@@ -10702,10 +10702,12 @@ hostile-review pass._
   executors (the futures R15 clause consciously superseded — survivorship
   tilt recorded); the adverse-levy CEIL rounding is permanent (COSTS_VERIFIED
   §5 regenerated); every golden re-locked with in-file hand-derivations, the
-  vocab fixture byte-untouched; INTERIM: worst-case prices come from the
-  DECISION-TF bar until PR-B's 1-minute grid — conservative, never
-  optimistic; matches §1's Active branch line — see §1 + MIGRATION.md #1825
-  for the full blurb)
+  vocab fixture byte-untouched; INTERIM: worst-case prices came from the
+  DECISION-TF bar — the interim decision-TF law, since superseded by PR-B's
+  1-minute grid [SUPERSEDED by DEC-FILL-EXEC-GRID-1M-001, MIGRATION.md #1979
+  — PR-B has landed: every fill now resolves on the 1-minute execution grid;
+  the #1825 goldens survive only as frozen anti-alias pins]; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1825 for the full blurb)
   Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
   (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897 — renumbered
   #1832 → #1897 at the 2026-07-16 merge-reconcile per the steward ledger
