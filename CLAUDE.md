@@ -4042,7 +4042,19 @@ hostile-review pass._
   results_store per-family constants; pre-VIX/pre-extension attribution
   stays honest, identity-envelope divergences still abstain) — the ONE
   production-module delta beyond the lane's original set; the record
-  lives in MIGRATION.md #1976. The full record lives
+  lives in MIGRATION.md #1976. W2 RE-INTEGRATION (2026-07-19, local): the
+  #1580 collision fold — main landed the S2 temporal quartet FIRST, so the
+  lane merged main d5a29747 under the coordinator's landed-first-wins
+  RULED order (VIX → the emit-on-present temporal quartet at its landed
+  position → W2's 8 strictly after), threaded Door 6 through the temporal
+  arm via the one `passes_gates` body (batch≡bounded parity restored under
+  temporal+Door-6 ACTIVE), and closed the 5 golden/fixture reds by fresh
+  hand audits (the #1749 additive-only re-lock: the gate-golden hash
+  5d8f4384… → fdc92094… proven schema-additive against a live d5a29747
+  baseline worktree with all 8 values hand-derived; the v2 fixture pair
+  minted as a reviewed act with the v1→v2 delta machine-pinned; the
+  emit-on-present trio re-pinned to the ruled order) — the record lives in
+  MIGRATION.md #1976. The full record lives
   in MIGRATION.md #1974–#1976 — this blurb carries the shape, never the
   per-stage story.)
   Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
