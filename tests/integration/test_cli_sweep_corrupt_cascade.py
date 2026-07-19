@@ -202,7 +202,12 @@ def test_enospc_cascade_manifest_write_refuses_clean(
 
     monkeypatch.setattr(cascade_wire, "atomic_write_simple", _enospc)
 
-    rc = cmd_sweep_all(**_sweep_kwargs(lake_root, catalog_path, results_root))  # type: ignore[arg-type]
+    # Explicit gate-OFF (the operator's 2026-07-19 "everything ON" ruling flipped
+    # cmd_sweep_all's overfit_gate DEFAULT to True — under the DSR gate this
+    # fixture ranks zero cascade candidates, mark_cascade_absent() skips the
+    # manifest write, and the ENOSPC bomb sits unexercised; the refusal intent
+    # here is gate-ORTHOGONAL, and gate-ON behavior is the gate suites' job).
+    rc = cmd_sweep_all(**_sweep_kwargs(lake_root, catalog_path, results_root), overfit_gate=False)  # type: ignore[arg-type]
     assert rc == EXIT_USER_ERROR
     err = capsys.readouterr().err
     assert "[brutex] REFUSED:" in err

@@ -463,7 +463,7 @@ for Wave C per §3). Flag OFF (the default) is byte- and
 call-graph-identical, bomb-spy-pinned; the default-ON flip needs its own
 DEC.
 
-## 12. Wave-D shipped surface (2026-07-19 — appended when the Wave-D lane completed; DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1969)
+## 12. Wave-D shipped surface (2026-07-19 — appended when the Wave-D lane completed; DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1979)
 
 The four Wave-D convertible rows are **DONE — and past the roadmap's own
 end state**: `timeframe_materialize` (row 16), `lake_heal` (row 7),
