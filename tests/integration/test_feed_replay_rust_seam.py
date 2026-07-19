@@ -1,22 +1,36 @@
-"""Integration gate for the DEC-FEED-RUST-CORE-001 seam in
-:func:`brutex.feed.replay.arrow_table_to_bars`.
+"""Integration gate for the wheel-REQUIRED DEC-FEED-RUST-MATERIALIZE-002
+contract in :func:`brutex.feed.replay.arrow_table_to_bars`.
 
-Proves, end to end through the REAL public entry point:
+The Python oracle loop was DELETED — the strict ``brutex_feed`` Rust kernel
+is the ONLY decision path. Proves, end to end through the REAL public entry
+point:
 
-* the default-OFF law (a bomb kernel is NEVER consulted with the flag unset
-  — the slice-7 ``_BombKernel`` precedent);
-* every degrade token (wheel_missing / schema_mismatch / null_column /
-  ts_out_of_ist_fixed_range / kernel_invalid / kernel_error) falls back to
-  OUTPUT that is oracle-identical — including exception TYPE + message
-  parity for null / naive / int-price / ``timestamp[ms]`` / missing-column
-  tables;
-* the kill-switch interplay (``BRUTEX_BAD_TICK_SCREEN=off`` + flag ON →
-  ``ts_us=[]``, spike kept, no warn, ON ≡ OFF);
-* the emit_at_row replay-law ordering end to end, with ``capture_logs``
-  full-sequence equality against the OFF arm for the four interleaving
-  shapes (positivity-at-boundary, warned-session-then-constructor-raise,
-  clean multi-session finish, last-kept-row warn before a positivity stop);
-* the structural bit-identity pin that the ONLY ``Decimal(`` / price-``str(``
+* the wheel-REQUIRED law (a missing wheel is a typed ``FeedError`` naming
+  the rebuild remediation; an EMPTY table returns ``[]`` without ever
+  touching the wheel);
+* the retired-flag law (a SET falsy/junk ``BRUTEX_FEED_MATERIALIZE_RUST``
+  or legacy ``BRUTEX_FEED_RUST`` refuses loudly; truthy/unset proceed);
+* happy-path materialization (``Decimal(str(float))`` exact bytes, int
+  volume, ``open_interest`` ``None`` passthrough);
+* the null gate (a null in ANY consulted column is ONE typed
+  corrupt-column ``ValueError``; a null ``open_interest`` alone is legal);
+* the strict stops (non-positive → the DEC-STORED-DATA-VALIDATION-001
+  refusal; inf/NaN/-inf → the DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001
+  refusal — finiteness checked BEFORE positivity, so ``-inf`` reads
+  non-FINITE);
+* the emit_at_row warn/raise interleaving laws with ABSOLUTE
+  ``capture_logs`` expectations (one WARN per spiked session; a warned
+  session's boundary WARN escapes before a later-session positivity stop;
+  a pending same-session warn is suppressed by a non-finite raise; the
+  ``BRUTEX_BAD_TICK_SCREEN=off`` kill switch keeps the spike, emits zero
+  warns and passes ``ts_us == []`` to the kernel);
+* non-canonical-table materialization fidelity (int64 prices, ms
+  timestamps, naive/string-typed columns, missing columns);
+* the fixed-IST envelope refusal on an out-of-envelope consulted
+  timestamp (and the screen-off bypass — ts never consulted);
+* the refuse-poison law over a structurally invalid / raising kernel
+  (``MemoryError`` re-raises RAW);
+* the structural pin that the ONLY ``Decimal(`` / price-``str(``
   materialization sites in replay.py live inside ``_build_bar``.
 """
 
@@ -24,20 +38,20 @@ from __future__ import annotations
 
 import ast
 import sys
-import types
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
 from brutex import feed_rust
-from brutex.data.bad_tick import bad_tick_screen_enabled
 from brutex.feed import replay
+from brutex.feed.errors import FeedError
 from brutex.feed.replay import arrow_table_to_bars
-from brutex.feed_rust import FEED_RUST_ENV, FEED_RUST_FALLBACK_EVENT, reset_for_tests
+from brutex.feed_rust import FEED_RUST_ENV, MATERIALIZE_RUST_ENV
 from structlog.testing import capture_logs
 
 #: 09:15 IST on 2024-01-02 — the canonical session anchor.
@@ -49,10 +63,21 @@ Row = tuple[Any, float, float, float, float, Any, Any]
 _SOURCE = "NSE/INDEX/NSE-NIFTY/1minute"
 
 
+def _pylist_repr(ts: datetime) -> str:
+    """The repr of *ts* as pyarrow's ``to_pylist()`` materializes it.
+
+    pyarrow hands back ``ZoneInfo("UTC")``-tagged datetimes (not
+    ``datetime.UTC``), and the corrupt-bar messages embed THAT object's
+    repr — pin the exact bytes.
+    """
+    return repr(ts.replace(tzinfo=ZoneInfo("UTC")))
+
+
 @pytest.fixture(autouse=True)
-def _fresh_warn_registry() -> None:
-    """Isolate the feed_rust warn-once registry between tests."""
-    reset_for_tests()
+def _clean_flag_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts from the unset-flag default (the shipping arm)."""
+    monkeypatch.delenv(MATERIALIZE_RUST_ENV, raising=False)
+    monkeypatch.delenv(FEED_RUST_ENV, raising=False)
 
 
 def _table(
@@ -101,499 +126,392 @@ def _spike_rows() -> list[Row]:
     ]
 
 
-def _run_both_arms(
-    table: pa.Table,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    source: str | None = _SOURCE,
-) -> tuple[list[Any], list[Any], Sequence[Any], Sequence[Any]]:
-    """Drive OFF then ON over *table*; return (off_bars, on_bars, off_logs, on_logs)."""
-    monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-    with capture_logs() as off_logs:
-        off = arrow_table_to_bars(table, source=source)
-    reset_for_tests()
-    monkeypatch.setenv(FEED_RUST_ENV, "1")
-    with capture_logs() as on_logs:
-        on = arrow_table_to_bars(table, source=source)
-    return off, on, off_logs, on_logs
-
-
-def _assert_bars_str_identical(off: list[Any], on: list[Any]) -> None:
-    """Field-level ``str()`` equality — stricter than ``==`` (Decimal is numeric)."""
-    assert off == on
-    for a, b in zip(off, on, strict=True):
-        assert a.timestamp.isoformat() == b.timestamp.isoformat()
-        assert str(a.open) == str(b.open)
-        assert str(a.high) == str(b.high)
-        assert str(a.low) == str(b.low)
-        assert str(a.close) == str(b.close)
-        assert repr(a.volume) == repr(b.volume)
-        assert repr(a.open_interest) == repr(b.open_interest)
-
-
 def _bad_tick_events(logs: Sequence[Any]) -> list[Any]:
     return [rec for rec in logs if rec["event"] == "feed.bad_tick_skipped"]
 
 
-def _fallback_reasons(logs: Sequence[Any]) -> list[str]:
-    return [str(rec["reason"]) for rec in logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
+class _KernelSpy:
+    """Wrap the REAL wheel, recording every ``scan_bars_strict`` call."""
+
+    def __init__(self) -> None:
+        self._real = feed_rust.require_feed_kernel()
+        self.calls: list[tuple[Any, ...]] = []
+
+    def scan_bars_strict(self, *args: Any) -> Any:
+        self.calls.append(args)
+        return self._real.scan_bars_strict(*args)  # type: ignore[attr-defined]
 
 
-# ── Default-OFF proof (the bomb-kernel pin, slice-7 precedent) ──────────────
+# ── 1. The wheel-REQUIRED law ───────────────────────────────────────────────
 
 
-class TestDefaultOff:
-    """Flag unset/absent ⇒ the kernel machinery is NEVER consulted."""
+class TestWheelRequired:
+    """A missing wheel refuses LOUDLY; an empty table never consults it."""
 
-    def test_bomb_kernel_never_consulted_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _bomb() -> object:
-            raise AssertionError("resolve_feed_kernel consulted with BRUTEX_FEED_RUST unset")
+    def test_missing_wheel_raises_typed_feed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "brutex_feed", None)
+        with pytest.raises(FeedError, match="REQUIRED for feed materialization") as exc:
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert "maturin develop" in str(exc.value)
+        assert "DEC-FEED-RUST-MATERIALIZE-002" in str(exc.value)
 
-        monkeypatch.setattr(replay, "resolve_feed_kernel", _bomb)
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        bars = arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
-        assert len(bars) == 3
-        assert str(bars[0].open) == "27940.0"
-
-    def test_bomb_kernel_never_consulted_flag_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _bomb() -> object:
-            raise AssertionError("resolve_feed_kernel consulted with BRUTEX_FEED_RUST=0")
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", _bomb)
-        monkeypatch.setenv(FEED_RUST_ENV, "0")
-        assert len(arrow_table_to_bars(_table(_spike_rows()), source=_SOURCE)) == 3
-
-
-# ── Engagement + happy-path parity ──────────────────────────────────────────
-
-
-class TestKernelEngagement:
-    """Flag ON + wheel present ⇒ the kernel genuinely decides."""
-
-    def test_kernel_engaged_and_parity_on_clean_table(
+    def test_empty_table_returns_empty_without_touching_the_wheel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the engagement pin")
-        real = feed_rust.resolve_feed_kernel()
-        assert real is not None
-        calls: list[tuple[Any, ...]] = []
-
-        def _spy(*args: Any) -> Any:
-            calls.append(args)
-            return real(*args)
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _spy)
-        off, on, off_logs, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
-        assert len(calls) == 1, "the ON arm must have consulted the kernel exactly once"
-        _assert_bars_str_identical(off, on)
-        assert off_logs == on_logs == []
-
-    def test_parity_and_warn_equality_on_spike_table(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the parity pin")
-        off, on, off_logs, on_logs = _run_both_arms(_table(_spike_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _bad_tick_events(off_logs) == _bad_tick_events(on_logs)
-        assert len(_bad_tick_events(on_logs)) == 1
-        assert _fallback_reasons(on_logs) == []
-
-    def test_extra_column_is_ignored_and_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the extra-column pin")
-        base = _table(_clean_rows())
-        extra = base.append_column("extra", pa.array([1.0, 2.0, 3.0], type=pa.float64()))
-        off, on, _, on_logs = _run_both_arms(extra, monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == []
-
-    def test_empty_table_short_circuits_before_the_branch(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_feed", None)
 
         def _bomb() -> object:
-            raise AssertionError("empty table must return [] before the kernel branch")
+            raise AssertionError("an empty table must return [] before the kernel resolve")
 
-        monkeypatch.setattr(replay, "resolve_feed_kernel", _bomb)
+        monkeypatch.setattr(replay, "require_feed_kernel", _bomb)
         assert arrow_table_to_bars(_table([]), source=_SOURCE) == []
 
 
-# ── Degrade matrix — every token, oracle-identical output ───────────────────
+# ── 2. The retired-flag law ─────────────────────────────────────────────────
 
 
-class TestDegradeMatrix:
-    """Each eligibility refusal warns once and serves the oracle's exact output."""
+class TestRetiredFlagLaw:
+    """A SET falsy/junk flag refuses naming the DEC; truthy/unset proceed."""
 
-    def test_wheel_missing_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_feed", None)
-        off, on, off_logs, on_logs = _run_both_arms(_table(_spike_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == ["wheel_missing"]
-        assert _bad_tick_events(off_logs) == _bad_tick_events(on_logs)
-
-    def test_wheel_stale_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(sys.modules, "brutex_feed", types.ModuleType("brutex_feed"))
-        off, on, _, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == ["wheel_stale"]
-
-    @pytest.mark.parametrize(
-        ("kwargs", "column"),
-        [
-            ({"timestamp_type": pa.timestamp("ms", tz="UTC")}, "timestamp"),
-            ({"price_type": pa.int64()}, "open"),
-            ({"volume_type": pa.int32()}, "volume"),
-        ],
-    )
-    def test_schema_mismatch_degrades_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any], column: str
+    @pytest.mark.parametrize("env", [MATERIALIZE_RUST_ENV, FEED_RUST_ENV])
+    def test_falsy_flag_refuses_naming_the_deleted_arm(
+        self, monkeypatch: pytest.MonkeyPatch, env: str
     ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the schema gate")
-        rows = _clean_rows()
-        if "price_type" in kwargs:
-            # An int64 OPEN column: Decimal(str(27940)) == Decimal("27940"),
-            # NOT "27940.0" — the input-shape laundering class the gate
-            # refuses to let the kernel classify (risk #4). Each row keeps
-            # its OWN open (int-truncated, still inside [low, high]).
-            rows = [(r[0], int(r[1]), r[2], r[3], r[4], r[5], r[6]) for r in rows]
-        table = _table(rows, **kwargs)
-        off, on, _, on_logs = _run_both_arms(table, monkeypatch)
-        _assert_bars_str_identical(off, on)
-        events = [rec for rec in on_logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
-        assert [rec["reason"] for rec in events] == ["schema_mismatch"]
-        assert events[0]["column"] == column
+        monkeypatch.setenv(env, "0")
+        with pytest.raises(FeedError, match="DELETED Python feed-materialization arm") as exc:
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert env in str(exc.value)
 
-    def test_naive_timestamp_schema_degrades_with_exception_parity(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the schema gate")
-        naive_rows: list[Row] = [(datetime(2024, 1, 2, 9, 15), 100.0, 101.0, 99.0, 100.5, 10, None)]
-        table = _table(naive_rows, timestamp_type=pa.timestamp("us"))
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        with pytest.raises(ValueError, match="timezone-aware") as off_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        with capture_logs() as on_logs, pytest.raises(ValueError, match="timezone-aware") as on_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        assert str(off_exc.value) == str(on_exc.value)
-        assert type(off_exc.value.__cause__) is type(on_exc.value.__cause__)
-        assert _fallback_reasons(on_logs) == ["schema_mismatch"]
+    def test_junk_flag_refuses_as_unrecognised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(MATERIALIZE_RUST_ENV, "bananas")
+        with pytest.raises(FeedError, match="unrecognised"):
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
 
-    @pytest.mark.parametrize(
-        ("row", "expected_exc"),
-        [
-            # Null CLOSE: the oracle's positivity compare hits `None <= 0`.
-            ((_BASE, 100.0, 101.0, 99.0, None, 10, None), TypeError),
-            # Null VOLUME: the oracle's `int(None)` raises.
-            ((_BASE, 100.0, 101.0, 99.0, 100.5, None, None), TypeError),
-            # Null TIMESTAMP: the oracle's `.astimezone` on None raises.
-            ((None, 100.0, 101.0, 99.0, 100.5, 10, None), AttributeError),
-        ],
-    )
-    def test_null_column_degrades_with_exception_parity(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        row: Row,
-        expected_exc: type[BaseException],
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the null gate")
-        table = _table([row])
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        with pytest.raises(expected_exc) as off_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        with capture_logs() as on_logs, pytest.raises(expected_exc) as on_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        assert str(off_exc.value) == str(on_exc.value)
-        assert _fallback_reasons(on_logs) == ["null_column"]
+    @pytest.mark.parametrize("env", [MATERIALIZE_RUST_ENV, FEED_RUST_ENV])
+    def test_truthy_flag_serves_normally(self, monkeypatch: pytest.MonkeyPatch, env: str) -> None:
+        monkeypatch.setenv(env, "1")
+        bars = arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert len(bars) == 3
 
-    @pytest.mark.parametrize(("column_idx", "column"), [(2, "high"), (1, "open"), (4, "close")])
-    @pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
-    def test_nonfinite_price_column_degrades_with_exception_parity(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        column_idx: int,
-        column: str,
-        value: float,
-    ) -> None:
-        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 × DEC-FEED-RUST-CORE-001: the
-        kernel's decision plane is a bit-identity port of the PRE-guard checks
-        and is BLIND to inf/NaN (positivity holds vacuously; an inf close
-        would fold into the bad-tick ratio as a silent DROP), so a non-finite
-        price column must DEGRADE to the oracle loop — whose finiteness gate
-        raises the SAME typed corrupt-bar error on both arms (exception
-        parity), never a kernel-arm silent accept/drop."""
-        pytest.importorskip("brutex_feed", reason="wheel required for the non-finite gate")
+
+# ── 3. Happy-path materialization ───────────────────────────────────────────
+
+
+class TestHappyPath:
+    """Canonical tables materialize the deleted oracle's exact bytes."""
+
+    def test_clean_table_serves_decimal_str_exact_bars(self) -> None:
+        bars = arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert len(bars) == 3
+        assert str(bars[0].open) == "27940.0"
+        assert str(bars[0].close) == "27945.0"
+        assert bars[0].close == Decimal("27945.0")
+        assert bars[0].volume == 10
+        assert isinstance(bars[0].volume, int)
+        assert bars[0].open_interest is None
+        assert bars[1].open_interest == 5
+        assert bars[2].open_interest is None
+        assert bars[1].timestamp == _BASE + timedelta(minutes=1)
+
+    def test_no_source_serves_identically(self) -> None:
+        bars = arrow_table_to_bars(_table(_clean_rows()), source=None)
+        assert [str(b.close) for b in bars] == ["27945.0", "27955.0", "27970.0"]
+
+
+# ── 4. The null gate ────────────────────────────────────────────────────────
+
+
+_NULL_COLUMN_INDEX = {
+    "timestamp": 0,
+    "open": 1,
+    "high": 2,
+    "low": 3,
+    "close": 4,
+    "volume": 5,
+}
+
+
+class TestNullGate:
+    """A null consulted column is ONE typed corrupt-column ValueError."""
+
+    @pytest.mark.parametrize("column", sorted(_NULL_COLUMN_INDEX))
+    def test_null_consulted_column_refuses_naming_the_column(self, column: str) -> None:
         rows = [list(r) for r in _clean_rows()]
-        rows[1][column_idx] = value
-        table = _table([tuple(r) for r in rows])
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        with pytest.raises(ValueError, match="non-finite") as off_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        with capture_logs() as on_logs, pytest.raises(ValueError, match="non-finite") as on_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        assert str(off_exc.value) == str(on_exc.value)
-        assert _fallback_reasons(on_logs) == ["nonfinite_price_column"]
-        events = [rec for rec in on_logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
-        assert events[0]["column"] == column
+        rows[1][_NULL_COLUMN_INDEX[column]] = None
+        with pytest.raises(ValueError, match="corrupt stored bar column") as exc:
+            arrow_table_to_bars(_table([tuple(r) for r in rows]), source=_SOURCE)
+        message = str(exc.value)
+        assert repr(column) in message
+        assert "holds null value(s)" in message
+        assert _SOURCE in message
 
-    def test_all_finite_clean_table_passes_the_nonfinite_gate_and_serves(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The finiteness eligibility probe is a pure PASS on finite input —
-        the kernel still serves (no degrade WARN) and the arms stay
-        bar-identical (the clean-path guardrail for the new gate)."""
-        pytest.importorskip("brutex_feed", reason="wheel required for the non-finite gate")
-        off, on, _, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == []
-
-    def test_null_open_interest_is_legal_never_degrades(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the OI-null pin")
-        off, on, _, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
-        assert off[0].open_interest is None
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == []
-
-    def test_missing_column_raises_keyerror_in_both_arms(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        table = _table(_clean_rows()).drop_columns(["open_interest"])
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        with pytest.raises(KeyError) as off_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        with pytest.raises(KeyError) as on_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        # The shared to_pylist() extraction raises pyarrow's own KeyError at
-        # the IDENTICAL site in both arms — the kernel branch is never reached.
-        assert str(off_exc.value) == str(on_exc.value)
-
-    def test_pre_1970_timestamp_abstains_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the abstain gate")
-        rows: list[Row] = [
-            (datetime(1969, 12, 31, 23, 59, tzinfo=UTC), 100.0, 101.0, 99.0, 100.5, 10, None)
-        ]
-        off, on, _, on_logs = _run_both_arms(_table(rows), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == ["ts_out_of_ist_fixed_range"]
-
-    def test_kernel_error_belt_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _raising_kernel(*_args: Any) -> Any:
-            raise RuntimeError("kernel exploded")
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _raising_kernel)
-        off, on, off_logs, on_logs = _run_both_arms(_table(_spike_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        errors = [rec for rec in on_logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
-        assert [rec["reason"] for rec in errors] == ["kernel_error"]
-        assert errors[0]["log_level"] == "error"
-        assert "RuntimeError" in str(errors[0]["error"])
-        assert _bad_tick_events(off_logs) == _bad_tick_events(on_logs)
-
-    def test_kernel_invalid_poison_degrades_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def _poison_kernel(*_args: Any) -> Any:
-            return ([2, 1], [], None)  # non-ascending kept rows
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _poison_kernel)
-        off, on, _, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert _fallback_reasons(on_logs) == ["kernel_invalid"]
+    def test_null_open_interest_alone_is_legal(self) -> None:
+        rows = [list(r) for r in _clean_rows()]
+        rows[1][6] = None
+        bars = arrow_table_to_bars(_table([tuple(r) for r in rows]), source=_SOURCE)
+        assert [b.open_interest for b in bars] == [None, None, None]
+        assert str(bars[1].close) == "27955.0"
 
 
-# ── Kill-switch interplay ───────────────────────────────────────────────────
+# ── 5. Strict stops end-to-end ──────────────────────────────────────────────
 
 
-class TestBadTickKillSwitchInterplay:
-    """``BRUTEX_BAD_TICK_SCREEN=off`` + flag ON: ts never crosses, spike kept."""
+class TestStrictStops:
+    """Finiteness before positivity, both with the frozen DEC wordings."""
 
-    def test_screen_off_passes_empty_ts_and_keeps_spike(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the interplay pin")
-        real = feed_rust.resolve_feed_kernel()
-        assert real is not None
-        calls: list[tuple[Any, ...]] = []
+    def test_negative_price_raises_the_positivity_refusal(self) -> None:
+        rows = [list(r) for r in _clean_rows()]
+        rows[1][1] = -1.0
+        with pytest.raises(ValueError, match="non-positive price") as exc:
+            arrow_table_to_bars(_table([tuple(r) for r in rows]), source=_SOURCE)
+        message = str(exc.value)
+        assert "DEC-STORED-DATA-VALIDATION-001" in message
+        assert "open=-1.0" in message
+        assert _SOURCE in message
+        assert _pylist_repr(_BASE + timedelta(minutes=1)) in message
 
-        def _spy(*args: Any) -> Any:
-            calls.append(args)
-            return real(*args)
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _spy)
-        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
-        table = _table(_spike_rows())
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        with capture_logs() as off_logs:
-            off = arrow_table_to_bars(table, source=_SOURCE)
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        with capture_logs() as on_logs:
-            on = arrow_table_to_bars(table, source=_SOURCE)
-        assert calls[0][0] == []  # ts_us NEVER crosses with the screen off
-        assert calls[0][5] is False  # screen_enabled=False
-        assert len(on) == 4  # the spike is KEPT
-        _assert_bars_str_identical(off, on)
-        assert _bad_tick_events(off_logs) == _bad_tick_events(on_logs) == []
-
-
-# ── The three warn/raise interleaving laws (capture_logs sequence parity) ───
+    @pytest.mark.parametrize(
+        "value", [float("inf"), float("nan"), float("-inf")], ids=["+inf", "nan", "-inf"]
+    )
+    def test_nonfinite_price_raises_the_finiteness_refusal(self, value: float) -> None:
+        # -inf is ALSO <= 0 — the non-FINITE refusal winning proves the
+        # kernel checks finiteness BEFORE positivity.
+        rows = [list(r) for r in _clean_rows()]
+        rows[1][2] = value
+        with pytest.raises(ValueError, match="non-finite price") as exc:
+            arrow_table_to_bars(_table([tuple(r) for r in rows]), source=_SOURCE)
+        message = str(exc.value)
+        assert "DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001" in message
+        assert f"high={value}" in message
+        assert _SOURCE in message
+        assert _pylist_repr(_BASE + timedelta(minutes=1)) in message
 
 
-class TestOrderingLaws:
+# ── 6. Warn/raise interleaving (absolute capture_logs expectations) ─────────
+
+
+class TestWarnRaiseInterleaving:
     """The emit_at_row replay law reproduces the oracle's side-effect order."""
 
-    def _sequences(
-        self,
-        table: pa.Table,
-        monkeypatch: pytest.MonkeyPatch,
-        exc_type: type[BaseException],
-    ) -> tuple[Sequence[Any], Sequence[Any], str, str]:
-        """Drive OFF then ON over *table*, raising *exc_type* in both arms.
-
-        R8 diagnosability hardening (MIGRATION #1797 REFUTER ROUND 8 — the
-        R7c one-time anomaly closed unreproducible-unknown): the only state
-        consistent with that symptom is the ON arm's bad-tick screen reading
-        DISABLED, so each arm asserts the screen is enabled immediately
-        before running, and the ON arm spies the kernel (the
-        TestKernelEngagement idiom) to assert it was consulted exactly once
-        with ``screen_enabled=True`` and returned the ``(kept, warns, stop)``
-        shape — a recurrence now self-diagnoses as "screen disabled in the
-        ON arm" instead of reading as "logs differ".
-        """
-        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
-        assert bad_tick_screen_enabled() is True
-        with capture_logs() as off_logs, pytest.raises(exc_type) as off_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        reset_for_tests()
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
-        assert bad_tick_screen_enabled() is True
-        real = feed_rust.resolve_feed_kernel()
-        assert real is not None, "wheel required for the ordering pins"
-        calls: list[tuple[Any, ...]] = []
-        results: list[Any] = []
-
-        def _spy(*args: Any) -> Any:
-            calls.append(args)
-            out = real(*args)
-            results.append(out)
-            return out
-
-        monkeypatch.setattr(replay, "resolve_feed_kernel", lambda: _spy)
-        with capture_logs() as on_logs, pytest.raises(exc_type) as on_exc:
-            arrow_table_to_bars(table, source=_SOURCE)
-        assert len(calls) == 1, "the ON arm must have consulted the kernel exactly once"
-        assert calls[0][5] is True, "the ON arm's kernel must see screen_enabled=True"
-        assert results[0] is not None, "in-envelope 2024 timestamps must never abstain"
-        kept, warns, stop = results[0]  # the (kept, warns, stop) shape law
-        assert isinstance(kept, list)
-        assert isinstance(warns, list)
-        assert stop is None or isinstance(stop, tuple)
-        return off_logs, on_logs, str(off_exc.value), str(on_exc.value)
-
-    def test_positivity_at_boundary_row_suppresses_flush_and_finish(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
-        rows: list[Row] = [
-            (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
-            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
-            # The next SESSION's first row fails POSITIVITY: the owed session-1
-            # flush is suppressed (positivity precedes keep()) and no finish
-            # flush ever fires.
-            (_BASE + timedelta(days=1), -5.0, 6010.0, 5990.0, 6005.0, 10, None),
-        ]
-        off_logs, on_logs, off_msg, on_msg = self._sequences(_table(rows), monkeypatch, ValueError)
-        assert off_msg == on_msg
-        assert "non-positive price" in on_msg
-        assert _bad_tick_events(off_logs) == _bad_tick_events(on_logs) == []
-
-    def test_warned_session_then_constructor_raise_emits_boundary_warns_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
-        rows: list[Row] = [
-            (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
-            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
-            # Session 2: first bar KEPT (flushes session 1's warn), a spike
-            # (owes a session-2 warn), then a constructor violation
-            # (high < low) that raises BEFORE session 2's warn can flush.
-            (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
-            (_BASE + timedelta(days=1, minutes=1), 600.0, 601.0, 599.0, 600.5, 10, None),
-            (_BASE + timedelta(days=1, minutes=2), 6001.0, 5990.0, 6010.0, 6001.0, 10, None),
-        ]
-        off_logs, on_logs, off_msg, on_msg = self._sequences(_table(rows), monkeypatch, ValueError)
-        assert off_msg == on_msg
-        assert "corrupt stored bar" in on_msg
-        off_warns = _bad_tick_events(off_logs)
-        on_warns = _bad_tick_events(on_logs)
-        assert off_warns == on_warns
-        assert len(on_warns) == 1  # ONLY session 1's boundary warn escaped
-        assert on_warns[0]["session"] == "2024-01-02"
-
-    def test_clean_multi_session_finish_flush_sequence_parity(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
+    def test_one_warn_per_spiked_session(self) -> None:
         rows: list[Row] = [
             (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
             (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
             (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
             (_BASE + timedelta(days=1, minutes=1), 600.0, 601.0, 599.0, 600.5, 10, None),
         ]
-        off, on, off_logs, on_logs = _run_both_arms(_table(rows), monkeypatch)
-        _assert_bars_str_identical(off, on)
-        assert off_logs == on_logs  # FULL capture_logs sequence equality
-        assert [rec["session"] for rec in _bad_tick_events(on_logs)] == [
-            "2024-01-02",
-            "2024-01-03",
+        with capture_logs() as logs:
+            bars = arrow_table_to_bars(_table(rows), source=_SOURCE)
+        assert len(bars) == 2  # one kept bar per session, one skip each
+        assert logs == [
+            {
+                "source": _SOURCE,
+                "session": "2024-01-02",
+                "skipped": 1,
+                "max_ratio": 4.0,
+                "first_prev_close": 27945.0,
+                "first_close": 2794.5,
+                "event": "feed.bad_tick_skipped",
+                "log_level": "warning",
+            },
+            {
+                "source": _SOURCE,
+                "session": "2024-01-03",
+                "skipped": 1,
+                "max_ratio": 4.0,
+                "first_prev_close": 6005.0,
+                "first_close": 600.5,
+                "event": "feed.bad_tick_skipped",
+                "log_level": "warning",
+            },
         ]
 
-    def test_boundary_warn_on_last_kept_row_fires_before_positivity_stop(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """R6a regression (MIGRATION #1797 REFUTER ROUND 6): the warn-drain
-        boundary mutant ``<= i -> < i`` in ``_bars_from_scan``.
-
-        Kernel shape: ``kept=[0, 2]``, ``warns=[(2, 0, 1, 0, 1)]``,
-        ``stop=(3, 0)`` — session 1's owed bad-tick warn anchors on kept
-        row 2 (session 2's first row = the LAST kept row) and row 3 fails
-        positivity, so the trailing drain after the stop-raise is
-        unreachable.  The warn MUST fire from the in-loop drain (``<= i``)
-        before the raise; under the mutant it is silently dropped and the
-        full-sequence parity below fails.  Kill-proof recorded in the
-        impl-log: mutant applied by hand -> this test FAILS; restored ->
-        PASSES.
-        """
-        pytest.importorskip("brutex_feed", reason="wheel required for the ordering pins")
+    def test_warned_session_boundary_warn_escapes_before_positivity_stop(self) -> None:
+        # Session 1's owed warn anchors on session 2's first (kept) row —
+        # the LAST kept row, because the next row fails positivity. The
+        # in-loop drain (`<= i`) MUST emit it before the raise (the R6a
+        # boundary-mutant law, now against an absolute expectation).
         rows: list[Row] = [
             (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
             (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
-            # Session 2's first row: KEPT — session 1's owed warn anchors
-            # HERE, on what turns out to be the LAST kept row...
             (_BASE + timedelta(days=1), 6000.0, 6010.0, 5990.0, 6005.0, 10, None),
-            # ...because the very next row fails POSITIVITY (open <= 0).
             (_BASE + timedelta(days=1, minutes=1), -5.0, 6010.0, 5990.0, 6005.0, 10, None),
         ]
-        off_logs, on_logs, off_msg, on_msg = self._sequences(_table(rows), monkeypatch, ValueError)
-        assert off_msg == on_msg
-        assert "non-positive price" in on_msg
-        assert off_logs == on_logs  # FULL sequence: the WARN, THEN the raise
-        warns = _bad_tick_events(on_logs)
-        assert len(warns) == 1
-        assert warns[0]["session"] == "2024-01-02"
+        with capture_logs() as logs, pytest.raises(ValueError, match="non-positive price"):
+            arrow_table_to_bars(_table(rows), source=_SOURCE)
+        assert logs == [
+            {
+                "source": _SOURCE,
+                "session": "2024-01-02",
+                "skipped": 1,
+                "max_ratio": 4.0,
+                "first_prev_close": 27945.0,
+                "first_close": 2794.5,
+                "event": "feed.bad_tick_skipped",
+                "log_level": "warning",
+            }
+        ]
 
-    def test_source_none_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pytest.importorskip("brutex_feed", reason="wheel required for the source-None pin")
-        off, on, off_logs, on_logs = _run_both_arms(_table(_spike_rows()), monkeypatch, source=None)
-        _assert_bars_str_identical(off, on)
-        warns = _bad_tick_events(on_logs)
-        assert warns == _bad_tick_events(off_logs)
-        assert warns[0]["source"] is None
+    def test_pending_same_session_warn_suppressed_by_nonfinite_stop(self) -> None:
+        # The spike's warn is still PENDING (no session boundary yet) when
+        # the non-finite row stops the scan — the oracle raised before its
+        # flush, so NO warn is emitted.
+        rows: list[Row] = [
+            (_BASE, 27940.0, 27950.0, 27930.0, 27945.0, 10, None),
+            (_BASE + timedelta(minutes=1), 2794.5, 2795.0, 2793.0, 2794.5, 10, None),
+            (_BASE + timedelta(minutes=2), 27946.0, float("nan"), 27940.0, 27955.0, 10, None),
+        ]
+        with capture_logs() as logs, pytest.raises(ValueError, match="non-finite price"):
+            arrow_table_to_bars(_table(rows), source=_SOURCE)
+        assert logs == []
+
+    def test_screen_kill_switch_keeps_spike_and_passes_empty_ts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
+        spy = _KernelSpy()
+        monkeypatch.setattr(replay, "require_feed_kernel", lambda: spy)
+        with capture_logs() as logs:
+            bars = arrow_table_to_bars(_table(_spike_rows()), source=_SOURCE)
+        assert len(bars) == 4  # the spike is KEPT
+        assert str(bars[1].close) == "2794.5"
+        assert _bad_tick_events(logs) == []
+        assert logs == []
+        assert len(spy.calls) == 1
+        assert spy.calls[0][0] == []  # ts_us NEVER crosses with the screen off
+        assert spy.calls[0][5] is False  # screen_enabled=False
 
 
-# ── Structural bit-identity pin: materialization lives ONLY in _build_bar ───
+# ── 7. Non-canonical tables (materialization fidelity) ──────────────────────
+
+
+class TestNonCanonicalTables:
+    """Decision copies for the kernel; the ORIGINAL objects materialize."""
+
+    def test_int64_price_column_materializes_decimal_of_int(self) -> None:
+        # Decimal(str(5)) == Decimal("5"), NOT "5.0" — materialization
+        # reads the ORIGINAL int object; only the DECISION plane is
+        # float-cast.
+        rows: list[Row] = [(_BASE, 5, 27950.0, 4.0, 27945.0, 10, None)]
+        (bar,) = arrow_table_to_bars(_table(rows, price_type=pa.int64()), source=_SOURCE)
+        assert str(bar.open) == "5"
+        assert bar.open == Decimal("5")
+        assert str(bar.high) == "27950.0"
+
+    def test_timestamp_ms_column_serves_identically_to_us(self) -> None:
+        us_bars = arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        ms_bars = arrow_table_to_bars(
+            _table(_clean_rows(), timestamp_type=pa.timestamp("ms", tz="UTC")), source=_SOURCE
+        )
+        assert [b.timestamp for b in ms_bars] == [b.timestamp for b in us_bars]
+        assert [str(b.close) for b in ms_bars] == [str(b.close) for b in us_bars]
+
+    def test_naive_timestamp_with_screen_on_raises_wrapped_constructor_refusal(self) -> None:
+        # The naive object is treated as-if-UTC in the DECISION plane only;
+        # the first kept row's CandleBar constructor rejects it with the
+        # wrapped corrupt-bar ValueError before any output is visible.
+        rows: list[Row] = [(datetime(2024, 1, 2, 9, 15), 100.0, 101.0, 99.0, 100.5, 10, None)]
+        with pytest.raises(ValueError, match="corrupt stored bar") as exc:
+            arrow_table_to_bars(_table(rows, timestamp_type=pa.timestamp("us")), source=_SOURCE)
+        message = str(exc.value)
+        assert "must be timezone-aware" in message
+        assert "DEC-STORED-DATA-VALIDATION-001" in message
+
+    def test_string_price_column_raises_corrupt_column(self) -> None:
+        rows: list[tuple[Any, ...]] = [(_BASE, "abc", 101.0, 99.0, 100.5, 10, None)]
+        with pytest.raises(ValueError, match="corrupt stored bar column") as exc:
+            arrow_table_to_bars(_table(rows, price_type=pa.string()), source=_SOURCE)
+        message = str(exc.value)
+        assert repr("open") in message
+        assert "holds a non-numeric price value" in message
+
+    def test_string_timestamp_column_with_screen_on_raises_corrupt_column(self) -> None:
+        rows: list[Row] = [("2024-01-02", 100.0, 101.0, 99.0, 100.5, 10, None)]
+        with pytest.raises(ValueError, match="corrupt stored bar column") as exc:
+            arrow_table_to_bars(_table(rows, timestamp_type=pa.string()), source=_SOURCE)
+        message = str(exc.value)
+        assert repr("timestamp") in message
+        assert "holds a non-timestamp value" in message
+
+    def test_missing_column_raises_pyarrow_keyerror(self) -> None:
+        table = _table(_clean_rows()).drop_columns(["open_interest"])
+        with pytest.raises(KeyError, match="open_interest"):
+            arrow_table_to_bars(table, source=_SOURCE)
+
+
+# ── 8. The fixed-IST envelope refusal ───────────────────────────────────────
+
+
+#: One tz-aware pre-epoch row — outside the kernel's fixed-IST envelope.
+_PRE_1970_ROWS: list[Row] = [
+    (datetime(1960, 1, 1, 5, tzinfo=UTC), 100.0, 101.0, 99.0, 100.5, 10, None)
+]
+
+
+class TestEnvelopeRefusal:
+    """An out-of-envelope consulted timestamp refuses; screen off bypasses."""
+
+    def test_pre_1970_timestamp_with_screen_on_refuses(self) -> None:
+        with pytest.raises(FeedError, match="fixed-IST envelope") as exc:
+            arrow_table_to_bars(_table(_PRE_1970_ROWS), source=_SOURCE)
+        assert _SOURCE in str(exc.value)
+        assert "DEC-FEED-RUST-MATERIALIZE-002" in str(exc.value)
+
+    def test_pre_1970_timestamp_with_screen_off_serves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "off")
+        (bar,) = arrow_table_to_bars(_table(_PRE_1970_ROWS), source=_SOURCE)
+        assert str(bar.close) == "100.5"
+        assert bar.timestamp == datetime(1960, 1, 1, 5, tzinfo=UTC)
+
+
+# ── 9. The refuse-poison law over the kernel result ─────────────────────────
+
+
+class _StubKernel:
+    """A fake wheel whose ``scan_bars_strict`` is injected per test."""
+
+    def __init__(self, fn: Any) -> None:
+        self._fn = fn
+
+    def scan_bars_strict(self, *args: Any) -> Any:
+        return self._fn(*args)
+
+
+class TestPoisonedWheel:
+    """A poisoned/raising kernel refuses loudly — never serves."""
+
+    def test_structurally_invalid_result_refuses_naming_the_law(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = _StubKernel(lambda *_: ([0, 0], [], None))  # duplicate kept rows
+        monkeypatch.setattr(replay, "require_feed_kernel", lambda: stub)
+        with pytest.raises(FeedError, match="structurally invalid") as exc:
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert "kept_order" in str(exc.value)
+        assert "maturin develop" in str(exc.value)
+
+    def test_kernel_raise_wraps_into_feed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*_args: Any) -> Any:
+            raise RuntimeError("kernel exploded")
+
+        monkeypatch.setattr(replay, "require_feed_kernel", lambda: _StubKernel(_boom))
+        with pytest.raises(FeedError, match="kernel fault is a defect") as exc:
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+        assert "RuntimeError('kernel exploded')" in str(exc.value)
+        assert isinstance(exc.value.__cause__, RuntimeError)
+
+    def test_kernel_memory_error_propagates_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _oom(*_args: Any) -> Any:
+            raise MemoryError
+
+        monkeypatch.setattr(replay, "require_feed_kernel", lambda: _StubKernel(_oom))
+        with pytest.raises(MemoryError):
+            arrow_table_to_bars(_table(_clean_rows()), source=_SOURCE)
+
+
+# ── 10. Structural pin: materialization lives ONLY in _build_bar ────────────
 
 
 class TestMaterializationPin:
@@ -627,15 +545,11 @@ class TestMaterializationPin:
         _Visitor().visit(tree)
         assert offenders == [], offenders
 
-    def test_bars_from_scan_result_matches_manual_build(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Belt: the ON-arm output bar VALUES equal a hand-built expectation
-        # (not merely OFF-arm equality) — 100.5 renders "100.5", never
-        # "100.50"; integer 20000.0 renders "20000.0".
-        pytest.importorskip("brutex_feed", reason="wheel required")
+    def test_bars_from_scan_result_matches_manual_build(self) -> None:
+        # Belt: the served bar VALUES equal a hand-built expectation —
+        # 100.5 renders "100.5", never "100.50"; integer-valued 20000.0
+        # renders "20000.0".
         rows: list[Row] = [(_BASE, 20000.0, 20000.5, 19999.5, 20000.0, 7, 3)]
-        monkeypatch.setenv(FEED_RUST_ENV, "1")
         (bar,) = arrow_table_to_bars(_table(rows), source=None)
         assert str(bar.open) == "20000.0"
         assert str(bar.high) == "20000.5"

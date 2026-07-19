@@ -56,11 +56,21 @@ state, and when OFF the sweep receives its original bars object unchanged
 
 **O(1) discipline (CLAUDE.md Rule #5):** every :meth:`LookAheadBarrier.access`
 / :meth:`LookAheadBarrier.advance_to` call is **O(1) per operation** — a couple
-of integer comparisons and (optionally) one list append. This is emphatically
-*not* an "O(1)-total" claim: a full sweep touches ``Σ`` bars and is inherently
-``O(Σ)``. With ``record=False`` (the default for the always-on sweep guard) the
-barrier holds **O(1) memory**; ``record=True`` retains the touched-index trail
-and is meant only for the *bounded* manual-recheck slice and the property tests.
+of integer comparisons in the Rust core plus one constant-cost FFI hop (and, in
+record mode, one Vec push). This is emphatically *not* an "O(1)-total" claim: a
+full sweep touches ``Σ`` bars and is inherently ``O(Σ)``. With ``record=False``
+(the default for the always-on sweep guard) the barrier holds **O(1) memory**;
+``record=True`` retains the touched-index trail and is meant only for the
+*bounded* manual-recheck slice and the property tests.
+
+**DEC-FEED-RUST-MATERIALIZE-002 (the T17 zero-Python endgame):** the barrier's
+STATE MACHINE (cursor + trail + every verdict) runs EXCLUSIVELY in the
+``brutex_feed`` Rust wheel (``BarrierCore`` — verdict codes out, never
+exceptions); this class survives as the thin exception-MATERIALIZING wrapper,
+so the exception TYPE (:class:`~brutex.feed.errors.LookAheadError` /
+``ValueError``) and every pinned message byte stay Python-owned and unchanged.
+The wheel is REQUIRED: constructing a barrier on a wheel-less box raises a
+typed :class:`~brutex.feed.errors.FeedError` naming the rebuild remediation.
 
 ## No global mutable state
 
@@ -78,7 +88,7 @@ from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
 from brutex.feed.errors import LookAheadError
-from brutex.feed_rust import materialize_rust_enabled, require_feed_kernel
+from brutex.feed_rust import require_feed_kernel
 
 #: Verdict vocabulary shared with the Rust ``BarrierCore``
 #: (DEC-FEED-RUST-MATERIALIZE-002) — mirror-pinned against the crate's
@@ -132,12 +142,13 @@ class LookAheadBarrier:
     __slots__ = ("_core",)
 
     def __init__(self, *, record: bool = True) -> None:
-        if materialize_rust_enabled():
-            self._core: _BarrierCoreLike = require_feed_kernel().BarrierCore(  # type: ignore[attr-defined]
-                record
-            )
-        else:
-            self._core = _PythonBarrierCore(record)
+        # DEC-FEED-RUST-MATERIALIZE-002: the state machine lives in the
+        # REQUIRED brutex_feed wheel (a missing wheel is a loud typed
+        # FeedError at construction — never a silent Python fallback; the
+        # Python core was deleted at the flip).
+        self._core: _BarrierCoreLike = require_feed_kernel().BarrierCore(  # type: ignore[attr-defined]
+            record
+        )
 
     # ── Introspection ─────────────────────────────────────────────
 
@@ -273,52 +284,6 @@ class _BarrierCoreLike(Protocol):
     def access(self, index: int) -> int: ...  # pragma: no cover — Protocol stub
 
     def reset(self) -> None: ...  # pragma: no cover — Protocol stub
-
-
-class _PythonBarrierCore:
-    """The retained development-stage Python core (verdict protocol).
-
-    The verbatim comparison plane of the pre-T17 barrier, re-shaped onto
-    the Rust ``BarrierCore`` verdict vocabulary so BOTH arms drive the ONE
-    exception-materializing wrapper. Deleted at the flip
-    (DEC-FEED-RUST-MATERIALIZE-002).
-    """
-
-    __slots__ = ("_touched", "current_index", "records")
-
-    def __init__(self, record: bool) -> None:
-        self.records = record
-        self.current_index = -1
-        self._touched: list[int] = []
-
-    def touched(self) -> list[int]:
-        return list(self._touched)
-
-    def max_touched(self) -> int | None:
-        return max(self._touched) if self._touched else None
-
-    def advance_to(self, index: int) -> int:
-        if index < 0:
-            return _ADVANCE_NEGATIVE
-        if index < self.current_index:
-            return _ADVANCE_BACKWARDS
-        self.current_index = index
-        return _ADVANCE_OK
-
-    def access(self, index: int) -> int:
-        if self.current_index < 0:
-            return _ACCESS_NO_CURSOR
-        if index < 0:
-            return _ACCESS_NEGATIVE
-        if index > self.current_index:
-            return _ACCESS_LOOKAHEAD
-        if self.records:
-            self._touched.append(index)
-        return _ACCESS_OK
-
-    def reset(self) -> None:
-        self.current_index = -1
-        self._touched.clear()
 
 
 @dataclass(frozen=True, slots=True)

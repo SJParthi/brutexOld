@@ -47,7 +47,6 @@ previous bar and is expected to block for that duration. The default
 from __future__ import annotations
 
 import heapq
-import math
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -58,7 +57,6 @@ from typing import TYPE_CHECKING, Any
 from brutex.calendars.nse import IST
 from brutex.data.bad_tick import (
     BAD_TICK_MAX_RATIO,
-    BadTickScreen,
     bad_tick_screen_enabled,
     emit_bad_tick_warn,
 )
@@ -68,15 +66,9 @@ from brutex.feed.errors import FeedError, LookAheadError
 from brutex.feed_rust import (
     MATERIALIZE_DECISION,
     STOP_NONFINITE,
-    ScanResult,
     StrictScanResult,
-    feed_rust_enabled,
-    materialize_rust_enabled,
     require_feed_kernel,
-    resolve_feed_kernel,
-    validate_scan,
     validate_strict_scan,
-    warn_degrade_once,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -321,14 +313,27 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     No production writer emits a non-finite price (the vendor parse path
     rejects it — ``candle_fields.to_price``'s explicit ``is_finite`` guard),
     so this only ever fires on planted/out-of-band corrupt stored data.
-    Positivity is checked HERE rather than in the constructor because the bar
-    container is legitimately used to hold a non-positive price for downstream
-    corrupt-input classification (the Greeks ``BAD_INPUT`` path, the executor
-    ``require_tradeable_price`` guard, the Rust trade-sim out-of-envelope
-    fallback) — see :func:`brutex.data.models._validate_price_bar`. Cost stays
-    O(1)/bar: the finiteness probe + four fixed comparisons per row plus the
-    constructor's own; the ``try``/``except`` wrapper is zero-cost on the
-    non-raising path (CPython 3.11+ exception tables).
+    Positivity is checked at this boundary rather than in the constructor
+    because the bar container is legitimately used to hold a non-positive
+    price for downstream corrupt-input classification (the Greeks
+    ``BAD_INPUT`` path, the executor ``require_tradeable_price`` guard, the
+    Rust trade-sim out-of-envelope fallback) — see
+    :func:`brutex.data.models._validate_price_bar`. Cost stays O(1)/bar in
+    the kernel scan; the ``try``/``except`` materialization wrapper is
+    zero-cost on the non-raising path (CPython 3.11+ exception tables).
+
+    DEC-FEED-RUST-MATERIALIZE-002 (the T17 zero-Python endgame): the
+    DECISION plane — the finiteness/positivity refusal order AND the
+    bad-tick screen — runs EXCLUSIVELY in the ``brutex_feed`` Rust wheel
+    (``scan_bars_strict``); the retained Python loop was DELETED, so the
+    wheel is REQUIRED (a missing wheel raises a typed
+    :class:`~brutex.feed.errors.FeedError` naming the rebuild remediation
+    — see :func:`~brutex.feed_rust.require_feed_kernel`). Python keeps
+    ONLY materialization over the ``to_pylist()`` objects, so the served
+    bytes (``bxsnap2`` run identity, error messages, WARN records) are the
+    deleted oracle's bytes by construction — pinned by the frozen goldens
+    + the retained-in-test frozen-oracle differential
+    (``tests/property/test_feed_rust_parity.py``).
 
     Parameters
     ----------
@@ -354,88 +359,26 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     screen_on = bad_tick_screen_enabled()
 
     # ── The wheel-REQUIRED strict path (DEC-FEED-RUST-MATERIALIZE-002) ──
-    # The T17 unified arm: decisions ALWAYS come from the strict Rust scan
-    # (finiteness + positivity + the bad-tick screen in one kernel);
-    # Python keeps ONLY materialization (Decimal/CandleBar/error/WARN over
-    # the same `to_pylist()` objects — run identity byte-preserved by
-    # construction). No degrade exists on this arm: a missing wheel, an
-    # out-of-envelope timestamp, a null consulted column or a poisoned
-    # kernel result each raise LOUDLY (correct-or-absent, never a
-    # silently wrong bar).
-    if materialize_rust_enabled():
-        return _bars_via_strict_kernel(
-            table,
-            source,
-            screen_on,
-            timestamps,
-            opens,
-            highs,
-            lows,
-            closes,
-            volumes,
-            open_interests,
-        )
-
-    # ── OPTIONAL Rust decision kernel (DEC-FEED-RUST-CORE-001) ──────────
-    # Default-OFF (`BRUTEX_FEED_RUST`, Pattern A opt-in). When enabled AND
-    # the kernel serves (canonical schema, zero nulls on ts/prices/volume,
-    # timestamps inside the fixed-IST envelope, output passes the
-    # refuse-poison gate), the DECISIONS come from Rust while EVERY
-    # materialized object — Decimal/CandleBar/error/WARN — is still built
-    # HERE by the same shared helpers over the same `to_pylist()` objects,
-    # so run identity (`bxsnap2`) is byte-preserved by construction. ANY
-    # degrade condition falls through to the retained oracle loop below.
-    if feed_rust_enabled():
-        result = _scan_via_kernel_or_none(table, screen_on, opens, highs, lows, closes)
-        if result is not None:
-            return _bars_from_scan(
-                result, source, timestamps, opens, highs, lows, closes, volumes, open_interests
-            )
-
-    # ── The retained Python oracle (byte-identical legacy path) ─────────
-    # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
-    # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
-    # OHLC field ×~10 but internally ordered and positive — passes the
-    # positivity + ordering checks above yet would silently flip every
-    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT day's
-    # PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a bar (never value-edits,
-    # never fabricates) comparing each close to the previous IN-SESSION kept
-    # close; the first bar of each session is exempt (no reopen-gap false trip).
-    # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
-    screen = BadTickScreen(source=source) if screen_on else None
-
-    origin = f" in {source}" if source is not None else ""
-    bars: list[CandleBar] = []
-    for ts, o, h, lo, c, v, oi in zip(
-        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
-    ):
-        # Engine-boundary FINITENESS + POSITIVITY (DEC-STORED-DATA-VALIDATION-001
-        # + DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): checked BEFORE construction
-        # so an internally-ORDERED all-negative bar (which the ordering-only
-        # constructor would accept), a ``high = inf`` bar (which the ordering +
-        # positivity checks accept VACUOUSLY — inf compares fine) and a NaN bar
-        # (whose Decimal comparison would raise a raw ``decimal.InvalidOperation``
-        # past ``except ValueError``) are all refused with the real defect
-        # named, never laundered into Stage-1A / run identity and never an
-        # uncaught crash of the whole read. The Rust kernel arm never sees a
-        # non-finite price (the eligibility gate degrades to THIS loop), so
-        # the two arms cannot fork on this class.
-        for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
-            if not math.isfinite(price):
-                raise _nonfinite_error(origin, ts, price_name, price)
-            if price <= 0:
-                raise _positivity_error(origin, ts, price_name, price)
-        # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
-        # DROPPED (not built, not appended) and counted; the last kept good close
-        # carries forward as the comparison baseline. IST session date drives the
-        # per-session grouping (``ts`` is timezone-aware — the constructor rejects
-        # a naive datetime, so ``.astimezone`` is safe).
-        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
-            continue
-        bars.append(_build_bar(origin, ts, o, h, lo, c, v, oi))
-    if screen is not None:
-        screen.finish()
-    return bars
+    # Decisions ALWAYS come from the strict Rust scan (finiteness +
+    # positivity + the bad-tick screen in ONE kernel pass); Python keeps
+    # ONLY materialization (Decimal/CandleBar/error/WARN over the same
+    # `to_pylist()` objects — run identity byte-preserved by
+    # construction). No degrade exists: a missing wheel, a set-falsy/junk
+    # retired flag, an out-of-envelope timestamp, a null consulted column
+    # or a poisoned kernel result each raise LOUDLY (correct-or-absent,
+    # never a silently wrong bar).
+    return _bars_via_strict_kernel(
+        table,
+        source,
+        screen_on,
+        timestamps,
+        opens,
+        highs,
+        lows,
+        closes,
+        volumes,
+        open_interests,
+    )
 
 
 def _nonfinite_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
@@ -448,8 +391,8 @@ def _nonfinite_error(origin: str, ts: Any, price_name: str, price: float) -> Val
     uncaught ``decimal.InvalidOperation``). No production writer emits a
     non-finite price (``candle_fields.to_price`` rejects it at the vendor
     parse), so this only ever fires on planted/out-of-band corrupt data.
-    The Rust kernel arm never reaches this error: a non-finite price column
-    fails the kernel's eligibility gate and degrades to the oracle loop.
+    Raised from the strict kernel's ``STOP_NONFINITE`` coordinate
+    (DEC-FEED-RUST-MATERIALIZE-002) over Python's OWN float object.
     """
     return ValueError(
         f"corrupt stored bar{origin} at timestamp {ts!r}: "
@@ -463,9 +406,9 @@ def _nonfinite_error(origin: str, ts: Any, price_name: str, price: float) -> Val
 def _positivity_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
     """Build the engine-boundary positivity refusal (the ONE message source).
 
-    MOVED VERBATIM from the loop body (DEC-STORED-DATA-VALIDATION-001 wording
-    byte-untouched) so the oracle loop and the Rust-kernel replay raise the
-    IDENTICAL error from one f-string (CLAUDE.md §11 COMMON).
+    The DEC-STORED-DATA-VALIDATION-001 wording, byte-untouched — raised
+    from the strict kernel's ``STOP_NONPOSITIVE`` coordinate over Python's
+    OWN float object (CLAUDE.md §11 COMMON: one f-string source).
     """
     return ValueError(
         f"corrupt stored bar{origin} at timestamp {ts!r}: "
@@ -487,10 +430,9 @@ def _build_bar(
 ) -> CandleBar:
     """Materialize ONE ``CandleBar`` + the corrupt-bar ``ValueError`` wrap.
 
-    MOVED VERBATIM from the loop body: the ``Decimal(str(price))`` re-wrap
-    and the wrapped constructor-refusal message are the run-identity-critical
-    expressions (`bxsnap2` streams ``str(Decimal)``), kept in ONE place so
-    the oracle loop and the Rust-kernel replay can never fork. Catches
+    The ``Decimal(str(price))`` re-wrap and the wrapped constructor-refusal
+    message are the run-identity-critical expressions (`bxsnap2` streams
+    ``str(Decimal)``), kept in ONE place (CLAUDE.md §11 COMMON). Catches
     ``(ValueError, ArithmeticError)`` (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001
     — ``ArithmeticError`` covers ``decimal.InvalidOperation`` from a
     NaN/junk Decimal conversion or ordering compare, and ``OverflowError``
@@ -517,85 +459,6 @@ def _build_bar(
             f"refusing to serve corrupt data to the engine "
             f"(DEC-STORED-DATA-VALIDATION-001)"
         ) from exc
-
-
-def _scan_via_kernel_or_none(
-    table: pa.Table,
-    screen_on: bool,
-    opens: list[float],
-    highs: list[float],
-    lows: list[float],
-    closes: list[float],
-) -> ScanResult | None:
-    """Consult the Rust decision kernel; ``None`` = degrade to the oracle.
-
-    The eligibility allow-list (DEC-FEED-RUST-CORE-001 §5): the wheel must
-    resolve; the 7 canonical columns must carry EXACTLY the canonical types
-    (``timestamp[us, tz=UTC]`` + four ``float64`` + two ``int64`` — extra
-    columns are fine, ignored exactly as today; a MISSING column never
-    reaches this gate — the shared ``to_pylist()`` extractions upstream
-    raise pyarrow's own ``KeyError`` at the identical site in both arms);
-    timestamp/price/volume columns must be null-free (``open_interest``
-    nulls are legal and never cross the FFI). Each refusal emits one named
-    warn-once and returns ``None`` — the caller falls through to the
-    byte-identical oracle loop.
-    """
-    kernel = resolve_feed_kernel()
-    if kernel is None:
-        return None
-    import pyarrow as pa  # local: module-scope pyarrow stays TYPE_CHECKING-only
-
-    n_rows: int = table.num_rows
-    schema = table.schema
-    expected_types = (
-        ("timestamp", pa.timestamp("us", tz="UTC")),
-        ("open", pa.float64()),
-        ("high", pa.float64()),
-        ("low", pa.float64()),
-        ("close", pa.float64()),
-        ("volume", pa.int64()),
-        ("open_interest", pa.int64()),
-    )
-    for name, expected in expected_types:
-        if not schema.field(name).type.equals(expected):
-            warn_degrade_once("schema_mismatch", n_rows=n_rows, column=name)
-            return None
-    for name in ("timestamp", "open", "high", "low", "close", "volume"):
-        if table.column(name).null_count > 0:
-            warn_degrade_once("null_column", n_rows=n_rows, column=name)
-            return None
-    # DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001: the kernel's decision plane is
-    # a bit-identity port of the PRE-guard checks and is BLIND to inf/NaN
-    # (positivity holds vacuously; an inf close would fold into the bad-tick
-    # ratio as a silent DROP instead of the oracle's typed refusal) — so a
-    # non-finite price column DEGRADES to the oracle loop, whose finiteness
-    # gate raises the loud corrupt-bar error. The probe runs over the SAME
-    # already-materialized float lists the oracle checks (short-circuiting
-    # ``all``; one O(rows) pass per price column, kernel-path only —
-    # disclosed: the null gate above is metadata-only, this one genuinely
-    # scans).
-    for name, column in (("open", opens), ("high", highs), ("low", lows), ("close", closes)):
-        if not all(map(math.isfinite, column)):
-            warn_degrade_once("nonfinite_price_column", n_rows=n_rows, column=name)
-            return None
-    # Epoch-µs UTC ints for the kernel's IST session math — ONLY when the
-    # screen is on (the oracle never touches timestamps screen-off; the
-    # kernel contract demands [] then).
-    ts_us: list[int] = table.column("timestamp").cast(pa.int64()).to_pylist() if screen_on else []
-    try:
-        result = kernel(ts_us, opens, highs, lows, closes, screen_on, BAD_TICK_MAX_RATIO)
-    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
-        warn_degrade_once("kernel_error", n_rows=n_rows, error=repr(exc))
-        return None
-    if result is None:
-        # The kernel abstained: some timestamp lies outside the fixed-IST
-        # envelope [epoch 0, 9999-12-31T00:00:00Z) where the day-ordinal law
-        # is provably identical to `astimezone(IST).date()`.
-        warn_degrade_once("ts_out_of_ist_fixed_range", n_rows=n_rows)
-        return None
-    if not validate_scan(result, n_rows):
-        return None
-    return result
 
 
 # ── The wheel-REQUIRED strict path (DEC-FEED-RUST-MATERIALIZE-002) ──────
@@ -762,12 +625,14 @@ def _bars_via_strict_kernel(
             f"post-2020; this is planted/out-of-band data — "
             f"{MATERIALIZE_DECISION})"
         )
-    if not validate_strict_scan(result, n_rows):
+    poison = validate_strict_scan(result, n_rows)
+    if poison is not None:
         raise FeedError(
             f"the brutex_feed wheel returned a structurally invalid scan over "
-            f"{n_rows} row(s) — a poisoned/stale wheel can only refuse, never "
-            f"serve; rebuild it: run `maturin develop --release` inside "
-            f"rust/brutex-feed ({MATERIALIZE_DECISION})"
+            f"{n_rows} row(s) (violated law: {poison}) — a poisoned/stale "
+            f"wheel can only refuse, never serve; rebuild it: run "
+            f"`maturin develop --release` inside rust/brutex-feed "
+            f"({MATERIALIZE_DECISION})"
         )
     return _bars_from_scan(
         result, source, timestamps, opens, highs, lows, closes, volumes, open_interests
@@ -799,7 +664,7 @@ def _emit_warn(
 
 
 def _bars_from_scan(
-    result: ScanResult | StrictScanResult,
+    result: StrictScanResult,
     source: str | None,
     timestamps: list[Any],
     opens: list[float],
@@ -843,16 +708,11 @@ def _bars_from_scan(
             )
         )
     if stop is not None:
-        # A legacy scan stop is ``(row, field)``; the strict scan appends
-        # ``kind`` (DEC-FEED-RUST-MATERIALIZE-002) — non-finite raises the
-        # finiteness refusal, everything else the positivity refusal, both
-        # from Python's OWN float objects (the ONE message source each).
-        # The literal ``3`` (not a named constant) is load-bearing: mypy's
-        # tuple-union len() narrowing engages only on a literal comparison.
-        if len(stop) == 3:  # noqa: PLR2004 — the strict stop arity
-            row, field, kind = stop
-        else:
-            (row, field), kind = stop, None
+        # The strict stop is ``(row, field, kind)`` — a non-finite kind
+        # raises the finiteness refusal, non-positive the positivity
+        # refusal, both from Python's OWN float objects (the ONE message
+        # source each; DEC-FEED-RUST-MATERIALIZE-002).
+        row, field, kind = stop
         price_name = ("open", "high", "low", "close")[field]
         price = (opens, highs, lows, closes)[field][row]
         if kind == STOP_NONFINITE:

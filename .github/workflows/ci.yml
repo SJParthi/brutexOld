@@ -3155,18 +3155,20 @@ jobs:
         with:
           name: rust-wheels
           path: wheelhouse
-      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_strategies)
-        # EXACTLY the wheel subset this job built from source before
-        # the shared build landed — a superset install could flip
-        # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl
-      # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
-      # this job installs `.[dev]` only (no pyarrow), so the feed parity
-      # module (tests/property/test_feed_rust_parity.py) skips on its
-      # pyarrow guard regardless; installing the wheel was dead weight. The
-      # dual-arm parity gate's execution home is the `test:` job
-      # ([dev,data,ui] + the wheel), which runs tests/property in its
-      # coverage pass.
+      - name: Install prebuilt Rust wheels (fno_math + trading_core + brutex_feed + brutex_strategies)
+        # EXACTLY the wheel subset this job needs — a superset install
+        # could flip wheel-gated skip tests, so each job's subset is
+        # deliberate. DEC-FEED-RUST-MATERIALIZE-002: brutex_feed JOINS this
+        # job's subset (superseding the DEC-FEED-RUST-CORE-001 round-1
+        # "dead weight" removal): the wheel is now REQUIRED for feed
+        # materialization — tests/property/test_lookahead_properties.py,
+        # test_market_structure_lookahead.py and the suffix-independence
+        # suites construct LookAheadBarriers whose state machine lives in
+        # the wheel, so a wheel-less property job would fail loudly. The
+        # feed parity module (test_feed_rust_parity.py) still skips here on
+        # its pyarrow guard (`.[dev]` has no [data] extra); its execution
+        # home stays the `test:` job's coverage pass.
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
