@@ -42,16 +42,17 @@
 //!   counts exactly the `_read_key_columns`-equivalent attempts (design
 //!   §F2 — the counter the delete-time read-count pins rebind onto).
 //!
-//! ## Degrade-to-oracle (deviation D-2 doctrine)
+//! ## Isolation (the W-6a endgame law)
 //!
-//! Any shape outside the byte-parity envelope errors OUT as `ValueError`
-//! at the FFI and the facade re-runs the live Python oracle: non-UTF-8
-//! names, `resolve()`-divergent paths (dangling/looping bars-tree
-//! symlinks — `fs::canonicalize` fails where Python's `resolve(strict=False)`
-//! lexically succeeds), ambiguous `int()` dir names, unmappable dtype
-//! reprs, mixed-numeric-family price columns, and any filesystem fault
-//! Python would CRASH on (the oracle then crashes identically — verdict
-//! convergence by construction).
+//! Any shape the scan cannot judge — ambiguous `int()` dir names,
+//! unmappable dtype reprs, mixed-numeric-family price columns,
+//! `resolve()`-divergent paths (dangling/looping bars-tree symlinks) —
+//! refuses via `ScanFail::Degrade` and is consumed at the nearest
+//! isolation site as a loud counted `lake.invariant.scan_skip` inside the
+//! report (the scanner never raises on poison). Only a refusal ABOVE
+//! every isolation site (an unresolvable/non-UTF-8 lake root, a walk
+//! fault) errors OUT as `ValueError` at the FFI — the defensive belt the
+//! facade propagates RAW (the Python scan oracle is deleted).
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -340,7 +341,9 @@ fn degrade(reason: impl Into<String>) -> ScanFail {
 /// `is_symlink`) swallow into `False` (`pathlib._ignore_error`): ENOENT,
 /// ENOTDIR, EBADF, ELOOP — plus EINVAL (the `ValueError` arm). Any OTHER
 /// stat fault RAISES in Python at the probe sites without a guard, so the
-/// Rust twin DEGRADES there (the oracle then crashes identically).
+/// Rust twin refuses there (`ScanFail::Degrade` — a loud counted
+/// `scan_skip` at the per-file isolation sites, or the defensive FFI
+/// `ValueError` above the walk).
 fn ignorable_stat_error(err: &std::io::Error) -> bool {
     matches!(
         err.raw_os_error(),
@@ -691,7 +694,8 @@ fn python_dtype_repr(dtype: &DataType) -> Option<String> {
         // absent from the manifest) — a Decimal-typed stored column cannot
         // materialize in a crate-read frame, so no mapping is needed; any
         // OTHER unmapped dtype falls through to the honest None (the caller
-        // degrades to the oracle, never guesses a repr).
+        // converts the miss into a loud counted per-file skip — never a
+        // guessed repr).
         _ => return None,
     })
 }
@@ -2867,7 +2871,8 @@ mod tests {
             "Duration(time_unit='ns')"
         );
         // Decimal is feature-gated OFF in this crate build — no mapping
-        // exists (unmapped dtypes degrade to the oracle at the call sites).
+        // exists (unmapped dtypes become loud counted per-file skips at
+        // the call sites).
         assert!(python_dtype_repr(&DataType::List(Box::new(DataType::String))).is_none());
     }
 }

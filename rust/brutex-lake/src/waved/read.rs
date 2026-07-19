@@ -16,11 +16,11 @@
 //!   whole-tree arm). The `glob=False` metachar law
 //!   (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001) holds BY CONSTRUCTION: this
 //!   module opens exact paths, never a glob pattern.
-//! * Gate VERDICTS are value-level errors here; the exact Python exception
-//!   classes + message bytes (`ResampleInputError`, …) are produced by the
-//!   facade's degrade-to-oracle law — a crate error re-runs the live Python
-//!   oracle, which either raises the verbatim typed error (parity by
-//!   construction) or succeeds (the oracle's verdict wins — fail-safe).
+//! * Gate VERDICTS are value-level errors here; the facade wraps ANY crate
+//!   error into the ONE typed quarantining `ResampleInputError` (the W-6a
+//!   endgame law — the class already sits in the prebuild's per-symbol
+//!   quarantine set, so a poisoned symbol isolates and the run continues;
+//!   the Python read oracle is deleted).
 //! * The bad-tick WARN (`feed.bad_tick_skipped`) stays PYTHON: this module
 //!   returns per-session warn COORDINATES (`BadTickEvent` → one JSON
 //!   string) the shell replays through `bad_tick.emit_bad_tick_warn` — the
@@ -86,7 +86,8 @@ pub(super) fn frame_to_ipc(df: &mut DataFrame) -> PolarsResult<Vec<u8>> {
 /// lexicographic — the whole-tree arm's enumeration. A `*.parquet`-named
 /// DIRECTORY (the out-of-band dataset-dir plant) is descended into so its
 /// member files are read — the practical equivalent of polars' dataset-dir
-/// glob read. Walk errors surface (the facade degrades them to the oracle).
+/// glob read. Walk errors surface (the facade wraps them into the typed
+/// quarantining `ResampleInputError` — the W-6a endgame law).
 fn collect_tree_parquet_files(root: &Path) -> std::io::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -212,7 +213,8 @@ fn ts_range_gate(df: &DataFrame) -> PolarsResult<()> {
 /// `price_violation_expr` over the full float plane): any null /
 /// non-finite / non-positive price, or broken OHLC ordering, refuses the
 /// whole frame. Expects Float64 price columns (the lake's only stored
-/// price dtype; anything else errors → the facade serves the oracle).
+/// price dtype; anything else errors → the facade's typed quarantining
+/// `ResampleInputError`).
 fn price_gate(df: &DataFrame) -> PolarsResult<()> {
     if df.height() == 0 {
         return Ok(());
@@ -260,7 +262,8 @@ fn price_gate(df: &DataFrame) -> PolarsResult<()> {
 /// frame (module docs): returns the kept frame (the INPUT frame when
 /// nothing dropped) + the per-session warn events. Runs AFTER the sanity
 /// gates (closes are non-null, finite, positive by then; the defensive
-/// null/dtype arms error → the facade serves the oracle).
+/// null/dtype arms error → the facade's typed quarantining
+/// `ResampleInputError`).
 fn screen_bad_ticks(df: DataFrame) -> PolarsResult<(DataFrame, Vec<BadTickEvent>)> {
     if df.height() == 0 {
         return Ok((df, Vec::new()));
@@ -311,7 +314,16 @@ fn screen_bad_ticks(df: DataFrame) -> PolarsResult<(DataFrame, Vec<BadTickEvent>
                 ComputeError: "null ts_utc/close at row {} — cannot screen bad ticks", i
             ));
         };
-        let day = (value + ist_offset).div_euclid(per_day);
+        // `checked_add`: on the ns unit EVERY i64 is datetime-representable
+        // (the #1919 "ns vacuously representable" clause), so a stamp near
+        // i64::MAX reaches this shift — an overflow is an isolated
+        // ComputeError-style refusal, never a wrap/panic (R1 fix-round).
+        let Some(shifted) = value.checked_add(ist_offset) else {
+            return Err(polars_err!(
+                ComputeError: "ts_utc physical value {} at row {} overflows the IST shift", value, i
+            ));
+        };
+        let day = shifted.div_euclid(per_day);
         if Some(day) != session {
             // New session: flush the warn owed for the session just left,
             // then reset — the first bar of a session is always kept.
@@ -875,6 +887,47 @@ mod tests {
         assert_eq!(frame_from_ipc(&bytes).height(), 2);
         assert_eq!(events, "[]");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bad_tick_ns_ist_shift_overflow_is_an_isolated_compute_error() {
+        // R1 fix-round: on the ns unit EVERY i64 is datetime-representable
+        // (the #1919 "ns vacuously representable" clause), so a stamp near
+        // i64::MAX legitimately reaches the +05:30 shift — the checked_add
+        // refuses with a ComputeError instead of a debug panic/release wrap.
+        let ts = Series::new("ts_utc".into(), vec![i64::MAX - 1])
+            .cast(&DataType::Datetime(
+                TimeUnit::Nanoseconds,
+                Some(TimeZone::UTC),
+            ))
+            .unwrap();
+        let df = DataFrame::new_infer_height(vec![
+            ts.into(),
+            Column::new("close".into(), vec![100.0f64]),
+        ])
+        .unwrap();
+        // let-else (not `unwrap_err`): the Ok payload carries the
+        // Debug-less `BadTickEvent`.
+        let Err(err) = screen_bad_ticks(df) else {
+            panic!("expected the IST-shift overflow refusal");
+        };
+        assert!(err.to_string().contains("overflows the IST shift"), "{err}");
+        // The µs arm is untouched: an ordinary in-range µs stamp screens
+        // through the same (now-checked) shift with zero events.
+        let ts_us = Series::new("ts_utc".into(), vec![OPEN_0915_UTC_US])
+            .cast(&DataType::Datetime(
+                TimeUnit::Microseconds,
+                Some(TimeZone::UTC),
+            ))
+            .unwrap();
+        let ok = DataFrame::new_infer_height(vec![
+            ts_us.into(),
+            Column::new("close".into(), vec![100.0f64]),
+        ])
+        .unwrap();
+        let (kept, events) = screen_bad_ticks(ok).unwrap();
+        assert_eq!(kept.height(), 1);
+        assert!(events.is_empty());
     }
 
     #[test]

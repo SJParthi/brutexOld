@@ -22,14 +22,13 @@
 //!   `(physical, unique)` when duplicated, plus the foreign-month row count;
 //!   the Python facade reconstructs the `IntraFileDup` / `ForeignMonthRows`
 //!   finding objects (dataclasses stay Python — house law).
-//! * ERROR = degrade-to-oracle (deviation D-2 doctrine): any refusal —
+//! * ERROR = the per-file GAP-#9 skip (the W-6a endgame law): any refusal —
 //!   unreadable bytes, a non-`Datetime[us]` timestamp dtype, an all-null
 //!   column, an out-of-`datetime`-range value — raises a plain `ValueError`
-//!   at the FFI and the facade re-runs the live Python oracle, which raises
-//!   the REAL exception (`PolarsError` / `OverflowError` / `ValueError`)
-//!   with today's message bytes, so the shell's GAP-#9 skip verdict + its
-//!   `catalog.reconcile.parquet_skip` warn payload stay byte-identical by
-//!   construction.
+//!   at the FFI, which the facade re-labels naming the file; `ValueError`
+//!   sits in the caller's skip set, so ONE poisoned file is a loud counted
+//!   `catalog.reconcile.parquet_skip`, never a crashed reconcile (the
+//!   Python per-file oracle is deleted).
 //!
 //! ## The byte-parity envelope (everything else degrades)
 //!
@@ -85,7 +84,7 @@ pub struct FileReconcile {
 /// `timestamp` column from memory → row count / physical min-max /
 /// ts-range gate → the optional L1 classify counts. `Ok(None)` = a
 /// zero-row file (the caller's counted skip); ANY refusal is an `Err` the
-/// facade degrades to the Python oracle (module docs).
+/// facade converts into the loud per-file GAP-#9 skip (module docs).
 pub fn reconcile_file_impl(
     path: &str,
     classify_home: Option<(i32, u32)>,
@@ -418,9 +417,9 @@ mod tests {
             &ts_frame(&[None, None], Some(TimeZone::UTC)),
         );
         assert!(reconcile_file_impl(&all_null, None).is_err());
-        // A non-Datetime "timestamp" dtype (an i64 hand-plant): Python's
-        // min() would yield an int the shell's _as_utc refuses — the crate
-        // must degrade so the oracle owns that verdict.
+        // A non-Datetime "timestamp" dtype (an i64 hand-plant): the crate
+        // refuses it — the facade's ValueError becomes the loud counted
+        // per-file skip (the W-6a endgame posture).
         let mut int_ts = DataFrame::new_infer_height(vec![
             Column::new("timestamp".into(), vec![1i64, 2]),
             Column::new("close".into(), vec![100.0f64, 101.0]),
