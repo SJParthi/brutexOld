@@ -2237,6 +2237,34 @@ class TestWindowPayloadReadScope:
         default = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP)
         assert wide == default
 
+    def test_whitespace_padded_admitted_key_sql_python_parity(self, tmp_path: Path) -> None:
+        """[FB] an ASCII-whitespace-padded admitted spot key (``"NIFTY\\t"`` —
+        the #907/#911 drift family generalized past trailing spaces) is
+        ADMITTED by BOTH the Python fold and the DuckDB fast path: DuckDB's
+        one-arg ``TRIM`` strips spaces ONLY, so pre-fix the SQL path
+        excluded+counted the tab-padded key the Python ``str.strip()`` twin
+        admitted — violating the bind's one-directional (admit-side-wider)
+        envelope. The two-arg ASCII-whitespace ``TRIM`` restores parity."""
+        ledger = WindowLedger()
+        for key in ("NIFTY\t", " NIFTY \r\n", "RELIANCE"):
+            ledger.record(
+                _window_key(key), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+            )
+        save_window_ledger(ledger, tmp_path)
+        scope = resolve_feed_scope("groww")
+        python_payload = build_window_payload(tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope)
+        duck_payload = build_window_payload(
+            tmp_path, symbol_for_id=_R11_SID_MAP, scope=scope, conn=duckdb.connect()
+        )
+        for payload in (python_payload, duck_payload):
+            assert payload["count"] == 2  # both padded NIFTY forms admitted
+            assert payload["out_of_scope"] == {
+                "windows": 1,  # RELIANCE only — never a padded admitted key
+                "legacy_unresolved": 0,
+                "dec": "DEC-UNIVERSE-INDEX-ONLY-001",
+            }
+        assert duck_payload["counts"] == python_payload["counts"]
+
     def test_index_windows_byte_identical_under_scope(self, tmp_path: Path) -> None:
         """An index-only ledger under the bounded scope: payload byte-identical."""
         ledger = WindowLedger()

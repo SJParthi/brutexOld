@@ -6970,6 +6970,13 @@ def _fold_status_counts(
 #: is 1-based; the ``|`` is a literal in LIKE — no metacharacter).
 _LEGACY_SID_EXPR: Final[str] = "split_part(security_id, '|', 1)"
 
+#: The ASCII whitespace set the R11 spot arm trims (bound as a ``?`` param):
+#: DuckDB's one-arg ``TRIM`` strips SPACES only, while the Python fold twin
+#: (``scope_filter.classify_window_row``) judges ``str.strip()`` — without
+#: this set a tab/CR/LF-padded admitted key would be admitted by the Python
+#: fold yet excluded+counted by the SQL fast path (parity-pinned).
+_SQL_TRIM_WS: Final[str] = " \t\n\r\x0b\x0c"
+
 
 @dataclass(frozen=True)
 class _WindowScopeBind:
@@ -6984,7 +6991,14 @@ class _WindowScopeBind:
     from the route's ``symbol_for_id`` map. The SQL predicate may be
     admit-side WIDER than the Python §3.5 form (a pathological non-vendor
     ``NSE-NIFTY-<junk>`` name over-admits into the census — the harmless
-    direction; it NEVER excludes an in-scope row; stated + pinned). The
+    direction). Exclusion-side envelope (stated + pinned): the spot arm
+    trims the ASCII whitespace set (``TRIM(security_id, <ws>)`` —
+    tab/CR/LF/VT/FF/space, matching Python ``str.strip()`` over ASCII), so
+    an ASCII-whitespace-padded admitted key is admitted on BOTH paths; an
+    exotic UNICODE-whitespace-padded key (mintable by no producer — the
+    #907/#911 drift corpus is space-padded only) may read excluded+COUNTED
+    on the SQL path where the Python fold's ``str.strip()`` admits — a
+    counted exclusion, never a silent drop. The
     ``legacy_unresolved`` fragment names the DISTINCT sub-count: a
     legacy-shape row whose sid the map does not know at all — never silently
     dropped, never misattributed purely to the DEC.
@@ -7032,7 +7046,11 @@ def _window_scope_bind(
     arms: list[str] = []
     params: list[str] = []
     if spot_forms:
-        arms.append(f"TRIM(security_id) IN ({', '.join('?' for _ in spot_forms)})")
+        # Two-arg TRIM over the ASCII whitespace set (bound first, then the
+        # IN list — placeholder order): str.strip() parity for ASCII-padded
+        # keys, the exclusion-side envelope documented on the class.
+        arms.append(f"TRIM(security_id, ?) IN ({', '.join('?' for _ in spot_forms)})")
+        params.append(_SQL_TRIM_WS)
         params.extend(spot_forms)
     arms.extend("security_id LIKE ?" for _ in fno_prefixes)
     params.extend(fno_prefixes)
