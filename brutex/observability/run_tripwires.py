@@ -53,6 +53,21 @@ Every observation is O(1) in the run size (a fixed set of counter
 comparisons per tick; ``on_tuple_summary`` is O(keys) in its own small
 mapping) — bench-pinned flat vs ``enumerated_total`` by
 ``tests/bench/test_run_tripwires_o1.py``.
+
+## Rust-routed decision laws (DEC-RUST-OBSERVABILITY-TRIPWIRES-002)
+
+The count-reconciliation and throughput-floor/dwell DECISION laws route
+through the default-OFF :mod:`brutex.observability.observability_rust`
+facade (``BRUTEX_OBSERVABILITY_RUST``), with the module-level ``_*_python``
+oracles below as the LIVE flag-OFF implementations — flag OFF (the
+default) is byte-identical, and every fire/clear application, detail
+template, ``values`` dict, enable/interval/state-existence gate and state
+write stays Python. The facade is TOTAL over ``Exception`` (it returns a
+value — crate or oracle — for every ``Exception``-class fault), so the I-3
+blanket ``except`` above never observes a facade-internal failure; a
+``MemoryError`` re-raised RAW by the facade IS caught by the blanket and
+folds to ``observe_failed`` — the documented OOM-landing INVERSION vs the
+loop-watchdog lane, identical on both arms.
 """
 
 from __future__ import annotations
@@ -75,6 +90,7 @@ import structlog
 
 from brutex.config.hardware_envelope import detect_total_ram_bytes
 from brutex.engine.sweep_progress import STATE_DONE
+from brutex.observability import observability_rust
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.engine.sweep_progress import SweepProgressSnapshot
@@ -330,6 +346,123 @@ def _default_rss_probe() -> int:
     return normalized_ru_maxrss_bytes(ru_maxrss=raw, platform=sys.platform)
 
 
+# ── Routed decision-law oracles (DEC-RUST-OBSERVABILITY-TRIPWIRES-002) ─────
+#
+# Each ``_*_python`` function below is the VERBATIM (scalarized) decision
+# law its seam routes through the observability_rust facade — the LIVE
+# parity oracle AND the flag-OFF implementation. The comparison/arithmetic
+# expressions moved token-for-token from the pre-seam method bodies (the
+# disclosed Slice-0 composition: the ``.append(f"…")`` sites became the
+# bitmask/code vocabulary and the detail templates stayed at the fire
+# sites). The code vocabulary is the facade's ``TW_NONE``/``TW_CLEAR``/
+# ``TW_FIRE`` — defined ONCE facade-side, mirrored crate-side.
+
+#: T2 violation-bitmask bits — bit i == predicate i in the pre-seam
+#: ``_reconcile_counts`` append order (mirrored by the crate).
+_RECONCILE_BIT_NEGATIVE_IN_FLIGHT: Final[int] = 1 << 0
+_RECONCILE_BIT_ENUMERATED_DRIFT: Final[int] = 1 << 1
+_RECONCILE_BIT_SKIPPED_OVERFLOW: Final[int] = 1 << 2
+_RECONCILE_BIT_SURVIVORS_OVERFLOW: Final[int] = 1 << 3
+_RECONCILE_BIT_IN_FLIGHT_OVERFLOW: Final[int] = 1 << 4
+_RECONCILE_BIT_BACKWARDS: Final[int] = 1 << 5
+_RECONCILE_BIT_DONE_INCOMPLETE: Final[int] = 1 << 6
+
+
+def _reconcile_decide_python(
+    in_flight: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    total: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+) -> int:
+    """The T2 count-reconciliation decision — the D-9 identity predicates.
+
+    Returns the violation BITMASK (bit i == predicate i in the pre-seam
+    append order); the consumer materializes the detail templates from the
+    SAME scalars via :func:`_reconcile_details`. ``is_done`` is computed by
+    the consumer (``snapshot.state == STATE_DONE`` — the str compare stays
+    with its import).
+    """
+    mask = 0
+    if in_flight < 0:
+        mask |= _RECONCILE_BIT_NEGATIVE_IN_FLIGHT
+    if enumerated != total:
+        mask |= _RECONCILE_BIT_ENUMERATED_DRIFT
+    if skipped > evaluated:
+        mask |= _RECONCILE_BIT_SKIPPED_OVERFLOW
+    if survivors > evaluated:
+        mask |= _RECONCILE_BIT_SURVIVORS_OVERFLOW
+    if evaluated + in_flight > total:
+        mask |= _RECONCILE_BIT_IN_FLIGHT_OVERFLOW
+    if prev_evaluated is not None and evaluated < prev_evaluated:
+        mask |= _RECONCILE_BIT_BACKWARDS
+    if is_done and evaluated != total:
+        mask |= _RECONCILE_BIT_DONE_INCOMPLETE
+    return mask
+
+
+def _reconcile_details(
+    mask: int,
+    *,
+    in_flight: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    total: int,
+    prev_evaluated: int | None,
+) -> str:
+    """Materialize the fired T2 violation templates, joined in BIT order.
+
+    Bit order == the pre-seam append order, so the joined detail string is
+    byte-identical to the pre-seam ``"; ".join(violations)``. The templates
+    stay Python (CPython f-string formatting is the byte contract — the
+    exact-substring unit asserts are the pins).
+    """
+    violations: list[str] = []
+    if mask & _RECONCILE_BIT_NEGATIVE_IN_FLIGHT:
+        violations.append(f"in_flight {in_flight} < 0")
+    if mask & _RECONCILE_BIT_ENUMERATED_DRIFT:
+        violations.append(f"snapshot enumerated {enumerated} != armed total {total}")
+    if mask & _RECONCILE_BIT_SKIPPED_OVERFLOW:
+        violations.append(f"skipped {skipped} > evaluated {evaluated} (skipped ⊆ evaluated)")
+    if mask & _RECONCILE_BIT_SURVIVORS_OVERFLOW:
+        violations.append(f"survivors {survivors} > evaluated {evaluated}")
+    if mask & _RECONCILE_BIT_IN_FLIGHT_OVERFLOW:
+        violations.append(f"evaluated {evaluated} + in_flight {in_flight} > enumerated {total}")
+    if mask & _RECONCILE_BIT_BACKWARDS:
+        violations.append(f"evaluated went backwards: {evaluated} < {prev_evaluated}")
+    if mask & _RECONCILE_BIT_DONE_INCOMPLETE:
+        violations.append(f"run done but evaluated {evaluated} != enumerated {total}")
+    return "; ".join(violations)
+
+
+def _throughput_decide_python(
+    rate: float, peak: float, below: int, fraction: float, dwell: int
+) -> tuple[float, int, float, int]:
+    """The T3 throughput floor/dwell decision — ``(new_peak, new_below, floor, code)``.
+
+    Called only when ``fraction != 0`` (the consumer's Python pre-gate,
+    which also preserves the ``snapshot.combos_per_sec`` read order).
+    ``max(peak, rate)`` is the pre-seam argument-order mirror (a NaN rate
+    keeps the peak); the fire code lands on the dwell EDGE (``==`` — a
+    past-dwell sample is ``TW_NONE``, never a re-fire).
+    """
+    new_peak = max(peak, rate)
+    if new_peak <= 0.0:
+        return (new_peak, below, 0.0, observability_rust.TW_NONE)
+    floor = fraction * new_peak
+    if rate < floor:
+        new_below = below + 1
+        if new_below == dwell:
+            return (new_peak, new_below, floor, observability_rust.TW_FIRE)
+        return (new_peak, new_below, floor, observability_rust.TW_NONE)
+    return (new_peak, 0, floor, observability_rust.TW_CLEAR)
+
+
 class TripwireMonitor:
     """The R39 tripwire engine for ONE sweep run (thread-safe, fail-soft, O(1)/tick).
 
@@ -525,44 +658,54 @@ class TripwireMonitor:
     # ── Internals (called under the lock) ─────────────────────────────────
 
     def _reconcile_counts(self, snapshot: SweepProgressSnapshot, in_flight: int) -> None:
-        """Check the D-9 exact counter identities; edge-fire on any violation."""
-        violations: list[str] = []
-        if in_flight < 0:
-            violations.append(f"in_flight {in_flight} < 0")
-        if snapshot.enumerated != self._total:
-            violations.append(
-                f"snapshot enumerated {snapshot.enumerated} != armed total {self._total}"
-            )
-        if snapshot.skipped > snapshot.evaluated:
-            violations.append(
-                f"skipped {snapshot.skipped} > evaluated {snapshot.evaluated} (skipped ⊆ evaluated)"
-            )
-        if snapshot.survivors > snapshot.evaluated:
-            violations.append(f"survivors {snapshot.survivors} > evaluated {snapshot.evaluated}")
-        if snapshot.evaluated + in_flight > self._total:
-            violations.append(
-                f"evaluated {snapshot.evaluated} + in_flight {in_flight} > enumerated {self._total}"
-            )
-        if self._prev_evaluated is not None and snapshot.evaluated < self._prev_evaluated:
-            violations.append(
-                f"evaluated went backwards: {snapshot.evaluated} < {self._prev_evaluated}"
-            )
-        if snapshot.state == STATE_DONE and snapshot.evaluated != self._total:
-            violations.append(
-                f"run done but evaluated {snapshot.evaluated} != enumerated {self._total}"
-            )
-        self._prev_evaluated = snapshot.evaluated
-        if violations:
+        """Check the D-9 exact counter identities; edge-fire on any violation.
+
+        The DECISION routes through the default-OFF observability_rust
+        facade with :func:`_reconcile_decide_python` as the live oracle
+        (DEC-RUST-OBSERVABILITY-TRIPWIRES-002; branch-free here — all
+        flag/guard/burn-in branching lives facade-side). The snapshot
+        counters are extracted ONCE in the pre-seam first-read order (a
+        raising duck attribute surfaces identically); the detail templates
+        + the ``values`` dict are built from the SAME scalars.
+        """
+        enumerated = snapshot.enumerated
+        skipped = snapshot.skipped
+        evaluated = snapshot.evaluated
+        survivors = snapshot.survivors
+        prev_evaluated = self._prev_evaluated
+        is_done = snapshot.state == STATE_DONE
+        mask = observability_rust.routed_tripwire_reconcile(
+            in_flight,
+            enumerated,
+            evaluated,
+            skipped,
+            survivors,
+            self._total,
+            prev_evaluated,
+            is_done,
+            python_law=_reconcile_decide_python,
+        )
+        self._prev_evaluated = evaluated
+        if mask:
             self._edge_fire(
                 "count_reconciliation",
                 TripwireKind.COUNT_RECONCILIATION,
                 SEVERITY_CRITICAL,
-                "; ".join(violations),
+                _reconcile_details(
+                    mask,
+                    in_flight=in_flight,
+                    enumerated=enumerated,
+                    evaluated=evaluated,
+                    skipped=skipped,
+                    survivors=survivors,
+                    total=self._total,
+                    prev_evaluated=prev_evaluated,
+                ),
                 {
                     "enumerated": float(self._total),
-                    "evaluated": float(snapshot.evaluated),
-                    "skipped": float(snapshot.skipped),
-                    "survivors": float(snapshot.survivors),
+                    "evaluated": float(evaluated),
+                    "skipped": float(skipped),
+                    "survivors": float(survivors),
                     "in_flight": float(in_flight),
                 },
             )
@@ -570,29 +713,40 @@ class TripwireMonitor:
             self._clear("count_reconciliation")
 
     def _watch_throughput(self, snapshot: SweepProgressSnapshot) -> None:
-        """Dwell-gated floor watch over the snapshot's own observed rate."""
+        """Dwell-gated floor watch over the snapshot's own observed rate.
+
+        The DECISION routes through the default-OFF observability_rust
+        facade with :func:`_throughput_decide_python` as the live oracle
+        (DEC-RUST-OBSERVABILITY-TRIPWIRES-002). The ``fraction == 0``
+        pre-gate stays Python BEFORE the ``combos_per_sec`` property read
+        (the pre-seam raise surface); state writes + fire/clear + the
+        detail template stay Python, driven by the returned code.
+        """
         fraction = self._config.throughput_floor_fraction
         if fraction == 0:
             return
         rate = snapshot.combos_per_sec
-        self._peak_rate = max(self._peak_rate, rate)
-        if self._peak_rate <= 0.0:
-            return
-        floor = fraction * self._peak_rate
-        if rate < floor:
-            self._throughput_below += 1
-            if self._throughput_below == self._config.throughput_dwell:
-                self._edge_fire(
-                    "throughput_floor",
-                    TripwireKind.THROUGHPUT_FLOOR,
-                    SEVERITY_WARNING,
-                    f"throughput {rate:.3f}/s below floor {floor:.3f}/s "
-                    f"(peak {self._peak_rate:.3f}/s × {fraction}) for "
-                    f"{self._throughput_below} consecutive samples",
-                    {"rate": rate, "floor": floor, "peak": self._peak_rate},
-                )
-        else:
-            self._throughput_below = 0
+        new_peak, new_below, floor, code = observability_rust.routed_tripwire_throughput(
+            rate,
+            self._peak_rate,
+            self._throughput_below,
+            fraction,
+            self._config.throughput_dwell,
+            python_law=_throughput_decide_python,
+        )
+        self._peak_rate = new_peak
+        self._throughput_below = new_below
+        if code == observability_rust.TW_FIRE:
+            self._edge_fire(
+                "throughput_floor",
+                TripwireKind.THROUGHPUT_FLOOR,
+                SEVERITY_WARNING,
+                f"throughput {rate:.3f}/s below floor {floor:.3f}/s "
+                f"(peak {self._peak_rate:.3f}/s × {fraction}) for "
+                f"{self._throughput_below} consecutive samples",
+                {"rate": rate, "floor": floor, "peak": self._peak_rate},
+            )
+        elif code == observability_rust.TW_CLEAR:
             self._clear("throughput_floor")
 
     def _watch_memory(self, snapshot: SweepProgressSnapshot) -> None:

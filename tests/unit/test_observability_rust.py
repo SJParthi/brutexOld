@@ -43,7 +43,9 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple, NoReturn, cast
 
 import pytest
 from brutex.data import lake_rust_render
+from brutex.engine.sweep_progress import STATE_RUNNING, SweepProgressSnapshot
 from brutex.observability import observability_rust as obs
+from brutex.observability import run_tripwires
 from brutex.observability.loop_watchdog import (
     WatchdogState,
     WatchdogVerdict,
@@ -1045,6 +1047,203 @@ class TestOffArmInertness:
         assert verdict is StampVerdict.OK
         assert stamp is not None and stamp.run_id == "r1"
         assert read_stage_stamp(artifact).stage == "cascade_manifest"
+
+
+def _tw_snapshot(
+    *,
+    enumerated: int = 100,
+    evaluated: int = 0,
+    survivors: int = 0,
+    skipped: int = 0,
+    state: str = STATE_RUNNING,
+    started_at: float = 0.0,
+    updated_at: float | None = None,
+) -> SweepProgressSnapshot:
+    """A real :class:`SweepProgressSnapshot` for the seam entry-point pins."""
+    return SweepProgressSnapshot(
+        state=state,
+        enumerated=enumerated,
+        evaluated=evaluated,
+        survivors=survivors,
+        skipped=skipped,
+        current="",
+        detail="",
+        started_at=started_at,
+        updated_at=started_at + 10.0 if updated_at is None else updated_at,
+    )
+
+
+def _tw_rate_snapshot(rate: float, evaluated: int) -> SweepProgressSnapshot:
+    """A snapshot whose ``combos_per_sec`` reads exactly *rate*."""
+    return _tw_snapshot(
+        enumerated=10_000, evaluated=evaluated, started_at=0.0, updated_at=evaluated / rate
+    )
+
+
+def _tw_monitor(
+    *,
+    config: run_tripwires.TripwireConfig | None = None,
+    total: int = 100,
+) -> tuple[run_tripwires.TripwireMonitor, list[run_tripwires.TripwireEvent]]:
+    """A REAL every-tick-samples monitor with the memory watches disabled."""
+    events: list[run_tripwires.TripwireEvent] = []
+    counter = itertools.count(1)
+    monitor = run_tripwires.TripwireMonitor(
+        config=run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        if config is None
+        else config,
+        enumerated_total=total,
+        clock=lambda: float(next(counter)),
+        on_trip=events.append,
+        ram_total_bytes=2**30,
+        rss_probe=lambda: 1,
+    )
+    return monitor, events
+
+
+#: The exact pre-seam T2 overflow detail — the byte pin for the moved template.
+_TW_RECONCILE_DETAIL: Final[str] = "evaluated 90 + in_flight 11 > enumerated 100"
+
+#: The exact pre-seam T3 fire detail (rate 1.0 · peak 10.0 · fraction 0.2 · dwell 3).
+_TW_THROUGHPUT_DETAIL: Final[str] = (
+    "throughput 1.000/s below floor 2.000/s (peak 10.000/s × 0.2) for 3 consecutive samples"
+)
+
+
+def _tw_throughput_config() -> run_tripwires.TripwireConfig:
+    return run_tripwires.TripwireConfig(
+        reconcile_interval_s=1e-9,
+        throughput_floor_fraction=0.2,
+        throughput_dwell=3,
+        rss_budget_fraction=0.0,
+        memory_slope_bytes_per_tuple=0,
+    )
+
+
+def _tw_drive_throughput_fire(monitor: run_tripwires.TripwireMonitor) -> None:
+    """Peak 10.0 then three below-floor samples — the dwell FIRE edge."""
+    monitor.on_progress(_tw_rate_snapshot(10.0, 100))
+    monitor.on_progress(_tw_rate_snapshot(1.0, 200))
+    monitor.on_progress(_tw_rate_snapshot(1.0, 300))
+    monitor.on_progress(_tw_rate_snapshot(1.0, 400))
+
+
+class TestTripwireSeamEntryPoints:
+    """The T2/T3 seam pins through the REAL :class:`TripwireMonitor` entry
+    points (DEC-RUST-OBSERVABILITY-TRIPWIRES-002 S2): OFF-arm byte-identity
+    with the crate import BOMBED, ON-arm engagement with the run_tripwires
+    ORACLE bombed (a correct event proves the fake crate decided), and the
+    I-3 MemoryError-landing INVERSION pinned on BOTH arms."""
+
+    def test_off_reconcile_trip_never_imports_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monitor, events = _tw_monitor()
+        monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
+        assert [e.detail for e in events] == [_TW_RECONCILE_DETAIL]
+        assert events[0].name == "count_reconciliation"
+        assert events[0].values == {
+            "enumerated": 100.0,
+            "evaluated": 90.0,
+            "skipped": 0.0,
+            "survivors": 0.0,
+            "in_flight": 11.0,
+        }
+        assert monitor.suspect is True
+
+    def test_off_throughput_fire_never_imports_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monitor, events = _tw_monitor(config=_tw_throughput_config(), total=10_000)
+        _tw_drive_throughput_fire(monitor)
+        assert [e.detail for e in events] == [_TW_THROUGHPUT_DETAIL]
+        assert events[0].values == {"rate": 1.0, "floor": 2.0, "peak": 10.0}
+
+    def test_off_throughput_recovery_rearms_and_refires(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fire → recover (the TW_CLEAR apply arm re-arms the key) → a fresh
+        # dwell run fires AGAIN — the re-arm law the apply's CLEAR arm owns.
+        # dwell=1 keeps NONE samples out of the sequence, so ONLY the CLEAR
+        # arm can re-arm — killing the `TW_CLEAR → TW_NONE` apply-compare
+        # mutant class the protected 81-test file leaves unpinned.
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.2,
+            throughput_dwell=1,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        monitor, events = _tw_monitor(config=config, total=10_000)
+        monitor.on_progress(_tw_rate_snapshot(10.0, 100))  # peak
+        monitor.on_progress(_tw_rate_snapshot(1.0, 200))  # below #1 → fire #1
+        monitor.on_progress(_tw_rate_snapshot(9.0, 300))  # recovery → re-arm
+        monitor.on_progress(_tw_rate_snapshot(1.0, 400))  # below #1 → fire #2
+        assert [e.name for e in events] == ["throughput_floor", "throughput_floor"]
+
+    def test_on_reconcile_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_reconcile_decide_python", _oracle_bomb)
+        monitor, events = _tw_monitor()
+        monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
+        assert [e.detail for e in events] == [_TW_RECONCILE_DETAIL]
+        assert monitor.suspect is True
+
+    def test_on_throughput_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_throughput_decide_python", _oracle_bomb)
+        monitor, events = _tw_monitor(config=_tw_throughput_config(), total=10_000)
+        _tw_drive_throughput_fire(monitor)
+        assert [e.detail for e in events] == [_TW_THROUGHPUT_DETAIL]
+
+    def test_memory_error_inversion_crate_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The facade re-raises MemoryError RAW; the I-3 blanket except
+        # CATCHES it (an Exception subclass) → observe_failed — the
+        # documented OOM-landing INVERSION vs the loop-watchdog lane.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(tripwire_reconcile_counts=_raiser(MemoryError("oom"))))
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monitor, events = _tw_monitor()
+        with capture_logs() as logs:
+            monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
+        warns = [e for e in logs if e["event"] == "run_tripwires.observe_failed"]
+        assert [(w["method"], w["error_type"]) for w in warns] == [("on_progress", "MemoryError")]
+        assert events == []
+        assert monitor.suspect is False
+
+    def test_memory_error_inversion_oracle_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Flag OFF, the ORACLE OOMs — identical observable behavior.
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monkeypatch.setattr(run_tripwires, "_reconcile_decide_python", _raiser(MemoryError("oom")))
+        monitor, events = _tw_monitor()
+        with capture_logs() as logs:
+            monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
+        warns = [e for e in logs if e["event"] == "run_tripwires.observe_failed"]
+        assert [(w["method"], w["error_type"]) for w in warns] == [("on_progress", "MemoryError")]
+        assert events == []
+        assert monitor.suspect is False
+
+    def test_keyboard_interrupt_escapes_the_observation_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The escape trio propagates PAST the I-3 blanket on both arms.
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate(tripwire_reconcile_counts=_raiser(KeyboardInterrupt())))
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monitor, _events = _tw_monitor()
+        with pytest.raises(KeyboardInterrupt):
+            monitor.on_progress(_tw_snapshot(evaluated=90), in_flight=11)
 
 
 class TestInputGates:

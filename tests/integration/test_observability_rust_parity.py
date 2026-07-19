@@ -16,11 +16,20 @@ not importable (main CI never installs it — the LAKE posture; the dedicated
 
 from __future__ import annotations
 
+import itertools
 import json
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-from brutex.observability import loop_watchdog, observability_rust, sla, stage_stamp, watchdog
+from brutex.engine.sweep_progress import STATE_RUNNING, SweepProgressSnapshot
+from brutex.observability import (
+    loop_watchdog,
+    observability_rust,
+    run_tripwires,
+    sla,
+    stage_stamp,
+    watchdog,
+)
 from brutex.observability.loop_watchdog import WatchdogState
 from brutex.observability.sla import SLADetector, SLAEvent, SLAPredicate, SLARule, SLAState
 from brutex.observability.stage_stamp import (
@@ -44,6 +53,37 @@ pytest.importorskip("brutex_observability")
 def _oracle_bomb(*args: object, **kwargs: object) -> NoReturn:
     """The engagement spy — a routed call must never consult the oracle."""
     raise AssertionError("the flag-ON steady-state path consulted the Python oracle")
+
+
+def _snapshot(
+    *,
+    enumerated: int = 100,
+    evaluated: int = 0,
+    survivors: int = 0,
+    skipped: int = 0,
+    state: str = STATE_RUNNING,
+    started_at: float = 0.0,
+    updated_at: float | None = None,
+) -> SweepProgressSnapshot:
+    """A real :class:`SweepProgressSnapshot` for the tripwire entry pins."""
+    return SweepProgressSnapshot(
+        state=state,
+        enumerated=enumerated,
+        evaluated=evaluated,
+        survivors=survivors,
+        skipped=skipped,
+        current="",
+        detail="",
+        started_at=started_at,
+        updated_at=started_at + 10.0 if updated_at is None else updated_at,
+    )
+
+
+def _rate_snapshot(rate: float, evaluated: int) -> SweepProgressSnapshot:
+    """A snapshot whose ``combos_per_sec`` reads exactly *rate*."""
+    return _snapshot(
+        enumerated=10_000, evaluated=evaluated, started_at=0.0, updated_at=evaluated / rate
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -257,3 +297,56 @@ class TestBurnInLifecycleOnRealWheel:
         # Steady thereafter: the oracle is out of the path entirely.
         monkeypatch.setattr(loop_watchdog, "_check_once_python", _oracle_bomb)
         assert loop_watchdog.check_once(0.0, 0.0, WatchdogState()).lag_s == 0.0
+
+
+class TestTripwiresEntry:
+    """Minimal S2-S4 tripwire entry-point parity (DEC-RUST-OBSERVABILITY-
+    TRIPWIRES-002; S5 grows the full matrix): the REAL wheel decides while
+    the seamed run_tripwires oracles are BOMBED — a byte-exact event detail
+    proves the crate served the decision."""
+
+    @staticmethod
+    def _monitor(
+        config: run_tripwires.TripwireConfig, total: int = 100
+    ) -> tuple[run_tripwires.TripwireMonitor, list[run_tripwires.TripwireEvent]]:
+        events: list[run_tripwires.TripwireEvent] = []
+        counter = itertools.count(1)
+        monitor = run_tripwires.TripwireMonitor(
+            config=config,
+            enumerated_total=total,
+            clock=lambda: float(next(counter)),
+            on_trip=events.append,
+            ram_total_bytes=2**30,
+            rss_probe=lambda: 1,
+        )
+        return monitor, events
+
+    def test_reconcile_trip_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_reconcile_decide_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        monitor, events = self._monitor(config)
+        monitor.on_progress(_snapshot(evaluated=90), in_flight=11)
+        assert [e.detail for e in events] == ["evaluated 90 + in_flight 11 > enumerated 100"]
+        assert monitor.suspect is True
+
+    def test_throughput_fire_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_throughput_decide_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            throughput_floor_fraction=0.2,
+            throughput_dwell=3,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        monitor, events = self._monitor(config, total=10_000)
+        monitor.on_progress(_rate_snapshot(10.0, 100))
+        monitor.on_progress(_rate_snapshot(1.0, 200))
+        monitor.on_progress(_rate_snapshot(1.0, 300))
+        monitor.on_progress(_rate_snapshot(1.0, 400))
+        assert [e.detail for e in events] == [
+            "throughput 1.000/s below floor 2.000/s (peak 10.000/s × 0.2) for 3 consecutive samples"
+        ]
