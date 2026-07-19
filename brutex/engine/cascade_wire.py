@@ -719,6 +719,7 @@ def build_candidate_input(
     start_equity_paisa: int,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    compute_regime_evidence: bool = False,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
 
@@ -747,6 +748,17 @@ def build_candidate_input(
         config, so both sides share the same window; a hard-coded default
         here would re-introduce a train/holdout mismatch for any non-default
         config). Defaults are the lockbox module's own public constants.
+    compute_regime_evidence
+        Default ``False`` — the filter #11 evidence (per-trade ERA labels +
+        session-lens TREND tokens, DEC-REGIME-FRAGILITY-GATE-001) is NOT
+        computed: ``trade_trend_tokens`` / ``trade_era_labels`` stay ``None``,
+        no per-session daily fold or session lens is built, and NO
+        ``session_lens.*`` log line is emitted — the default (flag-OFF) path
+        is byte- AND log-identical to the pre-gate wire.
+        ``run_cascade_over_specs`` threads ``config.regime_fragility`` here,
+        so the evidence is computed exactly when the gate that consumes it is
+        ON (a misconfigured combination — gate ON, evidence ``None`` — takes
+        filter #11's evidence-``None`` ABSTAIN arm, never a reject).
 
     Returns
     -------
@@ -825,7 +837,12 @@ def build_candidate_input(
     extreme_flags = tuple(t.entry_ts.astimezone(IST).date() in extreme_sessions for t in trades)
     trade_pnls = tuple(t.pnl_paisa for t in trades)
 
-    # Filter #11 evidence (DEC-REGIME-FRAGILITY-GATE-001), trade order:
+    # Filter #11 evidence (DEC-REGIME-FRAGILITY-GATE-001), trade order —
+    # computed ONLY when `compute_regime_evidence` is True (threaded from
+    # `CascadeConfig.regime_fragility` by `run_cascade_over_specs`), so the
+    # default flag-OFF path pays no fold / lens build and emits no
+    # `session_lens.*` log line (byte- AND log-identical to the pre-gate
+    # wire):
     # * ERA labels — the pure taxonomy bisect over each trade's ENTRY date.
     # * TREND tokens — the session-lens vocabulary at each trade's ENTRY
     #   session, via the ONE production classifier (`build_session_lens`,
@@ -835,51 +852,54 @@ def build_candidate_input(
     #   session's FIRST timestamp keys the bar, so the folded series is
     #   strictly increasing with one bar per IST date by construction —
     #   the lens input contract). One extra O(bars) fold + one
-    #   O(sessions) lens build per candidate (disclosed cost; no lake
-    #   I/O). The lens `instrument` drives ONLY the expiry EVENT flag,
-    #   which this evidence never consumes — a sentinel token is passed
-    #   and the lens's expiry arm abstains lens-wide (one INFO per
-    #   candidate build; honest, nothing fabricated).
-    session_first_ts: dict[date, datetime] = {}
-    session_open: dict[date, Decimal] = {}
-    session_high: dict[date, Decimal] = {}
-    session_low: dict[date, Decimal] = {}
-    session_close: dict[date, Decimal] = {}
-    session_volume: dict[date, int] = {}
-    for bar in bars:
-        day = bar.timestamp.astimezone(IST).date()
-        if day not in session_first_ts:
-            session_first_ts[day] = bar.timestamp
-            session_open[day] = bar.open
-            session_high[day] = bar.high
-            session_low[day] = bar.low
-            session_volume[day] = 0
-        else:
-            session_high[day] = max(session_high[day], bar.high)
-            session_low[day] = min(session_low[day], bar.low)
-        session_close[day] = bar.close
-        session_volume[day] += bar.volume
-    # Insertion order == chronological (bars are strictly increasing).
-    session_daily = tuple(
-        CandleBar(
-            timestamp=session_first_ts[day],
-            open=session_open[day],
-            high=session_high[day],
-            low=session_low[day],
-            close=session_close[day],
-            volume=session_volume[day],
-            open_interest=None,
+    #   O(sessions) lens build per gate-ON candidate (disclosed cost; no
+    #   lake I/O). The lens `instrument` drives ONLY the expiry EVENT
+    #   flag, which this evidence never consumes — a sentinel token is
+    #   passed and the lens's expiry arm abstains lens-wide (one INFO per
+    #   gate-ON candidate build; honest, nothing fabricated).
+    trend_tokens: tuple[str, ...] | None = None
+    era_labels: tuple[str, ...] | None = None
+    if compute_regime_evidence:
+        session_first_ts: dict[date, datetime] = {}
+        session_open: dict[date, Decimal] = {}
+        session_high: dict[date, Decimal] = {}
+        session_low: dict[date, Decimal] = {}
+        session_close: dict[date, Decimal] = {}
+        session_volume: dict[date, int] = {}
+        for bar in bars:
+            day = bar.timestamp.astimezone(IST).date()
+            if day not in session_first_ts:
+                session_first_ts[day] = bar.timestamp
+                session_open[day] = bar.open
+                session_high[day] = bar.high
+                session_low[day] = bar.low
+                session_volume[day] = 0
+            else:
+                session_high[day] = max(session_high[day], bar.high)
+                session_low[day] = min(session_low[day], bar.low)
+            session_close[day] = bar.close
+            session_volume[day] += bar.volume
+        # Insertion order == chronological (bars are strictly increasing).
+        session_daily = tuple(
+            CandleBar(
+                timestamp=session_first_ts[day],
+                open=session_open[day],
+                high=session_high[day],
+                low=session_low[day],
+                close=session_close[day],
+                volume=session_volume[day],
+                open_interest=None,
+            )
+            for day in session_first_ts
         )
-        for day in session_first_ts
-    )
-    lens = build_session_lens(session_daily, instrument="CASCADE-REGIME-FRAGILITY")
-    trend_tokens = tuple(
-        TREND_UNKNOWN
-        if (regime := lens.trend_by_date.get(t.entry_ts.astimezone(IST).date())) is None
-        else regime.value
-        for t in trades
-    )
-    era_labels = tuple(era_for_date(t.entry_ts.astimezone(IST).date()).label for t in trades)
+        lens = build_session_lens(session_daily, instrument="CASCADE-REGIME-FRAGILITY")
+        trend_tokens = tuple(
+            TREND_UNKNOWN
+            if (regime := lens.trend_by_date.get(t.entry_ts.astimezone(IST).date())) is None
+            else regime.value
+            for t in trades
+        )
+        era_labels = tuple(era_for_date(t.entry_ts.astimezone(IST).date()).label for t in trades)
 
     # Train/holdout split via the ONE shared resolver (R2-SR-F1): the training
     # references are measured over the bars strictly BEFORE the lockbox window
@@ -971,6 +991,7 @@ def candidates_for_spec(
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
     roll_schedule: tuple[int, ...] | None = None,
+    compute_regime_evidence: bool = False,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
@@ -984,6 +1005,11 @@ def candidates_for_spec(
     MANUAL replay (``CascadeManifest.roll_schedules``), so a futures winner
     is re-scored under the SAME per-contract hard resets the sweep ranked it
     with (DEC-STAGE1A-ROLL-RESET-001 D11 — review round-1).
+    ``compute_regime_evidence`` gates the filter #11 evidence computation
+    (DEC-REGIME-FRAGILITY-GATE-001; threaded from
+    ``CascadeConfig.regime_fragility`` by :func:`run_cascade_over_specs` —
+    default ``False`` leaves ``trade_trend_tokens``/``trade_era_labels``
+    ``None`` and builds no session lens).
     """
     from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
@@ -1020,6 +1046,7 @@ def candidates_for_spec(
             start_equity_paisa=spec.start_equity_paisa,
             lockbox_default_window_days=lockbox_default_window_days,
             lockbox_min_trades=lockbox_min_trades,
+            compute_regime_evidence=compute_regime_evidence,
         )
         for run_id, mask in spec.winners
     ]
@@ -1169,6 +1196,10 @@ def run_cascade_over_specs(
                     lockbox_min_trades=config.lockbox_min_trades,
                     # ADR-0012: the pool's OWN roll schedule (None = spot path).
                     roll_schedule=roll_schedule,
+                    # DEC-REGIME-FRAGILITY-GATE-001: compute the filter #11
+                    # evidence exactly when the gate that consumes it is ON —
+                    # the default-OFF path stays byte- AND log-identical.
+                    compute_regime_evidence=config.regime_fragility,
                 )
             )
         if not candidates:

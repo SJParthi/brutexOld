@@ -18,6 +18,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 import brutex.engine.cascade_wire as cw
 from brutex.data.models import CandleBar
 from brutex.engine.session_lens import build_session_lens
@@ -110,7 +112,7 @@ def _folded_daily(close: str, day: int) -> CandleBar:
     )
 
 
-def _wire_candidate() -> tuple[object, list[CandleBar]]:
+def _wire_candidate(*, compute_regime_evidence: bool = True) -> tuple[object, list[CandleBar]]:
     from brutex.engine.stage1a import build_bar_bits
 
     bars = _multi_day_bars()
@@ -125,6 +127,7 @@ def _wire_candidate() -> tuple[object, list[CandleBar]]:
         sl_paisa=None,
         tp_paisa=None,
         start_equity_paisa=10_000_000,
+        compute_regime_evidence=compute_regime_evidence,
     )
     return cand, bars
 
@@ -190,3 +193,87 @@ def test_build_candidate_input_threads_trend_tokens_from_the_lens() -> None:
     # Three warm-up sessions never confirm a fractal swing (k = 2): the
     # detector honestly reads SIDEWAYS throughout — a deterministic pin.
     assert set(tokens) == {"sideways"}
+
+
+# ────── flag-OFF inertness: evidence computation is config-gated ──────
+
+
+def test_build_candidate_input_default_computes_no_evidence_and_no_lens_log() -> None:
+    """DEFAULT (flag-OFF) build: evidence stays ``None`` and NO ``session_lens.*``
+    log line fires — the pre-gate wire's log stream is byte-identical."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        cand, _bars = _wire_candidate(compute_regime_evidence=False)
+    assert cand.trade_trend_tokens is None  # type: ignore[attr-defined]
+    assert cand.trade_era_labels is None  # type: ignore[attr-defined]
+    assert not any(str(entry.get("event", "")).startswith("session_lens") for entry in logs)
+
+
+def test_build_candidate_input_gate_on_emits_only_the_sentinel_lens_info() -> None:
+    """Flag-ON build: the ONE disclosed ``session_lens.expiry_unmapped_instrument``
+    INFO fires (sentinel instrument — the lens expiry arm abstains, honest)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        cand, _bars = _wire_candidate(compute_regime_evidence=True)
+    assert cand.trade_trend_tokens is not None  # type: ignore[attr-defined]
+    lens_events = [e for e in logs if str(e.get("event", "")).startswith("session_lens")]
+    assert [e["event"] for e in lens_events] == ["session_lens.expiry_unmapped_instrument"]
+    assert lens_events[0]["instrument"] == "CASCADE-REGIME-FRAGILITY"
+
+
+def _threading_spec() -> cw.CascadeTupleSpec:
+    return cw.CascadeTupleSpec(
+        instrument="NIFTY",
+        tf_label="1minute",
+        tf_minutes=1,
+        direction_label="bull",
+        sl_paisa=None,
+        tp_paisa=None,
+        prior_n=3,
+        proximity_bps=None,
+        start_equity_paisa=10_000_000,
+        winners=((f"{1:064x}", 0),),
+    )
+
+
+def test_candidates_for_spec_default_threads_no_evidence() -> None:
+    cands = cw.candidates_for_spec(_threading_spec(), _multi_day_bars())
+    assert len(cands) == 1
+    assert cands[0].trade_trend_tokens is None
+    assert cands[0].trade_era_labels is None
+
+
+def test_candidates_for_spec_explicit_flag_threads_evidence() -> None:
+    cands = cw.candidates_for_spec(
+        _threading_spec(), _multi_day_bars(), compute_regime_evidence=True
+    )
+    assert len(cands) == 1
+    assert cands[0].trade_trend_tokens is not None
+    assert cands[0].trade_era_labels is not None
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_run_cascade_over_specs_threads_config_flag_into_evidence(
+    monkeypatch: pytest.MonkeyPatch, flag: bool
+) -> None:
+    """``run_cascade_over_specs`` threads ``config.regime_fragility`` into the
+    per-candidate evidence gate — OFF passes False, ON passes True."""
+    seen: list[bool] = []
+    real = cw.candidates_for_spec
+
+    def _spy(spec: cw.CascadeTupleSpec, bars: object, **kwargs: object) -> list[object]:
+        seen.append(bool(kwargs["compute_regime_evidence"]))
+        return real(spec, bars, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cw, "candidates_for_spec", _spy)
+    config = cw.cascade_config_for_sweep("abcd", overrides={"regime_fragility": flag})
+    report = cw.run_cascade_over_specs(
+        [_threading_spec()],
+        bars_for=lambda _instrument, _tf: _multi_day_bars(),
+        config=config,
+        sweep_id="abcd",
+    )
+    assert seen == [flag]
+    assert report is not None
