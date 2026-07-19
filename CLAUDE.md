@@ -39,6 +39,42 @@ digest VALUE-IDENTICAL (the review-fix NIT `float()` normalization on
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
 identity untouched. This header carries the pointer, never the story — the
 full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
+Earlier: 2026-07-18 (LAP-8 LAKE-GUARDS CLUB merge vehicle, branch
+`integration/club-lap8-lake-guards` — the fold of FIVE member PRs (one
+scoped) as ONE merge event off main tip 3ee742b3, in binding order:
+**#1618** DEC-DATA-PARSER-DEAD-DELETE-001 (MIGRATION.md #1941 — delete the
+dead `brutex/data/parser.py`; the delete taken OVER main's #1929 edit on a
+re-run zero-production-consumer proof; the one #1929-added orphaned test pin
+removed with it) · **#1513** the session-integrity pack
+(DEC-SESSION-DENSITY-CENSUS-001 #1744 + DEC-HALT-DAY-TREATMENT-001 #1745 +
+DEC-EXTENDED-SESSION-OUTAGE-001 #1746; the extended_session_trades golden
+REPRODUCE-ONLY re-verified on the merged tree via the member's own generator
+— byte-identical, no delta) · **#1539** DEC-PREBUILD-FRAME-WRITE-001
+(MIGRATION.md #1961, renumbered #1793 → #1795 → #1956 → #1958 → #1961 — bare #1795
+may not coexist with main's landed #1795a–#1795d suffixed block, the
+2026-07-18 merge-forward reconcile moved it after main took #1956 for
+DEC-SWEEP-COVERAGE-SHARD-001, and the 2026-07-19 club-O merge-forward
+reconcile moved it again after main took #1958 for
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001; the
+verify-or-degrade frame-direct derived-TF write, dark) · **#1399 SCOPED** —
+ONLY DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 (#1626; the bad-tick screen
+family #1625/#1687/#1688/#1683 was NOT folded — landed-differently vs the
+FOUR interlocking screen consumers main grew after the member's cut, the
+named residual lane in the vehicle PR body) · **#1358 RESIDUAL R1** —
+DEC-SWEEP-1DAY-FRESHNESS-GATE-001 (#1960, renumbered #1957 → #1960 at the
+2026-07-19 club-O merge-forward reconcile; the derived-1day sweep-preflight
+gate, re-derived onto #1932's screened base read — the member's other
+backend features are FULLY SUPERSEDED by the landed #1795a/#1931/#1932 and
+its display buckets R2-R5 stay a named residual; #1358 NOT closed) ·
+**#1579 LAST** — DEC-LAKE-READ-INODE-GUARD-001/-002 (#1896/#1898; the
+guarded lake-read wrap folded OVER every earlier edit with the #1919
+`glob=False` metachar law preserved — incl. the load-bearing
+`scan_parquet_regular` explicit-list-arm `glob=False` re-derive). #1590 is
+CLOSED-AS-SUPERSEDED (a subset of #1579). ENGINE semantics change ONLY on
+Muhurat-crossing weekly-anchor grids (#1626) — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries pointers, never
+the story; each member's full record lives in its MIGRATION.md entry + the
+vehicle PR body.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -479,6 +515,53 @@ production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the per-item record
 lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001 +
+DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1896 + #1898, branch
+`claude/lake-read-inode-guard` — ONE stacked landing vehicle: the DEC-002
+residual branch (`claude/lake-read-inode-guard-residual`, DRAFT PR #1590 —
+superseded) FOLDED IN at the 2026-07-16 owner decision. DEC-002 (#1898):
+the #1896 guard reaches the
+FOUR verifier-identified residual sites: the three LAZY `pl.scan_parquet`
+reads (spot_daily_resample window reader · spot_join window reader ·
+timeframe_materialize 1m reader, BOTH source shapes) ride the NEW
+eager-probing `guarded_read.scan_parquet_regular` (per-file fd probe at
+scan-BUILD, then polars' OWN lazy scan — lazy semantics + regular-file
+results byte-identical, pinned), and the rate_bridge byte-read rides
+`read_regular_bytes` inside its existing `except OSError → None` arm —
+closing the class where the file OPEN defers to `.collect()` (C-level
+fifo_open, unguardable at Python level) or a bare `read_bytes()` wedges the
+deadline daemon forever. Fails-before proven per site (the three LIST arms +
+rate_bridge genuinely HUNG at the pre-fix tree; the GLOB arm is a disclosed
+CORRECTNESS improvement — polars glob expansion silently IGNORES a
+non-regular inode, probed); the #1896 headline's "every … byte read"
+overclaim is SCOPE-AMENDED in the same ledger touch. READ-side lake reads
+only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries pointers, never
+the story — each member's full record lives in its §1 Active-branch blurb +
+MIGRATION.md #1896/#1898.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1896,
+branch `claude/lake-read-inode-guard` — the file-read boundaries gain the
+COMMON two-defense inode/stall guard: (a) the PLANTED-INODE fd-level
+`S_ISREG` gate (`os.open(O_RDONLY|O_NONBLOCK)` → `fstat` on the SAME
+descriptor — TOCTOU-safe; a planted FIFO / `/dev/zero` char-device symlink /
+directory raises the NEW `NotRegularFileError(OSError)` instead of hanging
+the boot / an engine sweep / a route forever) and (b) the WEDGED-VOLUME
+STALL deadline (`run_with_deadline`-wrapped reads raising the NEW
+`ReadStallError(OSError)`, tier-1 route/lock-held sites only — the #999
+abandoned-daemon stance); both errors are `OSError` subclasses folding into
+every site's EXISTING `except OSError` / `parquet_read_skip_errors()`
+degrade arm — zero per-site except-clause churn. ONE COMMON module
+`brutex/data/guarded_read.py` (primitives homed in `sidecar_read.py`,
+re-exported identity-pinned; parquet helpers hand polars the validated OPEN
+handle — glob interpretation structurally impossible, subsuming the #1594
+round-15 glob=False law) wired across the tiered site enumeration (~70
+modules); BONUS: the #1721 movers_cache byte-watermark gains the
+native-frame guard (a cached payload never holds a polars/Arrow frame —
+deep_size undercounts off-heap). HONEST severity: DoS/hang, NOT corruption;
+regular-file behavior byte-identical (pinned). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1896.)
 Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
@@ -537,7 +620,7 @@ Active-branch blurb + its MIGRATION.md entry.)
 Earlier: 2026-07-15 (CLUB R2 merge vehicle, branch
 `integration/club-r2-crates` — the crate-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1469 DEC-GREEKS-RUST-BATCH-001
-(MIGRATION.md #1892, chain #1724 → #1795 → #1892 — the last hop at the
+(MIGRATION.md #1892, chain #1724 → #1956 → #1892 — the last hop at the
 2026-07-16 club CDR2 fold, bare vs club-D's #1795a–#1795d block) · #1435
 DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1891, chain #1726 → #1796 → #1832 →
 #1891 — the last hop at the club CDR2 fold, club-D took #1832) · #1454 DEC-FEED-RUST-CORE-001 (#1797, chain #1725 → #1741 → #1797).
@@ -545,7 +628,7 @@ Three INDEPENDENT crate trees (`rust/trading-core/src/greeks/batch.rs` ·
 `rust/brutex-lake/` · `rust/brutex-feed/`), every Python seam default-OFF /
 INERT (`BRUTEX_GREEKS_RUST_BATCH` · `BRUTEX_LAKE_RUST_RENDER` ·
 `BRUTEX_FEED_RUST`); the three colliding ledger rows were renumbered to the
-free consecutive block #1795–#1797 vs the live-main tail #1794 (chains
+free consecutive block #1956–#1797 vs the live-main tail #1794 (chains
 in-entry; DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001).
 #1433 (brutexd) deliberately NOT folded — joins post-refresh. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
@@ -611,6 +694,39 @@ REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001 #1645), NO fill-mode pin.
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; this header carries pointers, never
 the story; each member's full record lives in its §1 Active-branch blurb + its
 MIGRATION.md entry.)
+Earlier: 2026-07-14 (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961
+(renumbered #1793 → #1795 → #1956 → #1958 → #1961 — the first hop at the 2026-07-14
+merge-reconcile, main took #1793 for DEC-SETTLE-EVIDENCE-ADOPTION-001 +
+#1794 for DEC-BULK-SPOT-COMPLETENESS-FLAG-001; then the
+2026-07-18 lap-8 merge-forward reconcile, main took #1956 for
+DEC-SWEEP-COVERAGE-SHARD-001; the last hop at the 2026-07-19 club-O
+merge-forward reconcile, main took #1958 for
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001; DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001), branch `claude/prebuild-frame-write` — the
+verify-or-degrade FRAME-DIRECT
+derived-TF write, shipped DARK (default OFF via the tristate+`shadow`
+`BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒ FAIL-SAFE OFF + warn-once,
+a recorded kill-must-kill deviation from the fail-loud-env law): the
+prebuild's resampled polars frame reaches the partition writer WITHOUT the
+frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+21.9–23.9% + per-bar `_tick_round` 18.3–20.1% cold, both re-paid on
+1,581/1,581 warm no-op merges; sandbox ratios) behind admission guards
+G0–G9, the CLOSED 15-reason per-partition degrade-to-VERBATIM-legacy enum
+(degrade never decides correctness), a 16-write both-lanes burn-in shipping
+LEGACY bytes + durable autorevert latch, and a shadow mode whose clean
+operator transcript (`frame_shadow_mismatches == 0`) gates the PR-2
+default-ON flip; the 2dp snap stays UNCONDITIONAL (vectorized, ROUND_HALF_UP
+— the naive-skip idempotence claim was REFUTED); ONE encoder serves both
+lanes (`_frame_from_bars` + `_render_frame_bytes`, legacy render bytes
+FROZEN as a golden BEFORE any production change); vendor `write()`/`append()`
+signatures byte-untouched — NEW siblings `write_frame`/`append_frame` + ONE
+call-site branch in `make_lake_write_tf._write`; byte-identical lake output
+proven by the 14-case whole-tree A/B corpus + op-count bench gates; NO
+speedup claimed (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³
+bars). Run identity / `data_snapshot_hash` / the 1-minute lake untouched;
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change. This header carries the pointer, never the story — the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #1961.)
 Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
@@ -1183,7 +1299,7 @@ line+branch on the ci.yml whole-engine gate; the per-fix record lives in the
 one-line summary, never the story).
 Earlier: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892
 (renumbered from the provisional #1724 at the club-R2 fold, then
-#1795 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
+#1956 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
 suffixed block per DEC-LEDGER-RENUMBER-001) — additive
 `trading_core.greeks_batch` columnar FFI face of the frozen Black-76 kernel
 (calls the SAME scalar `greeks` per element — zero math duplication; crate
@@ -3739,6 +3855,27 @@ hostile-review pass._
   clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
   identity untouched — the recording is audit-PAYLOAD only. The full record
   lives in MIGRATION.md #1851.)
+  Earlier: `integration/club-lap8-lake-guards`
+  (LAP-8 LAKE-GUARDS CLUB merge vehicle — the fold of FIVE member PRs (one
+  scoped) as ONE merge event off main tip 3ee742b3, binding order #1618 →
+  #1513 → #1539 → #1399 (scoped to #1626) → #1358 (residual R1, #1960) →
+  #1579 LAST; #1590 closed-as-superseded (a subset of #1579). Union files
+  docs/MIGRATION.md + CLAUDE.md woven per the club convention; ledger
+  renumber: #1539's #1795 → #1956 → #1958 → #1961 (bare-vs-suffixed #1795a–d at
+  assembly; then main took #1956 for DEC-SWEEP-COVERAGE-SHARD-001, so the
+  2026-07-18 merge-forward reconcile moved it to #1958; then main's club-O
+  took #1957–#1959, so the 2026-07-19 merge-forward reconcile moved it to
+  #1961 and DEC-SWEEP-1DAY-FRESHNESS-GATE-001 #1957 → #1960); every other member
+  number verified FREE on main (ceiling #1955 at assembly; gaps are legal
+  per DEC-LEDGER-RENUMBER-001). The #1513
+  extended-session trades golden re-verified REPRODUCE-ONLY on the merged
+  tree (byte-identical). ENGINE semantics change only on Muhurat-crossing
+  weekly-anchor grids (#1626); no lake/schema/scope/vocab/rate change. This
+  blurb carries pointers, never round narration — each member's full record
+  lives in its own MIGRATION.md entry (#1941 · #1744-#1746 · #1961 · #1626 ·
+  #1960 · #1896/#1898) + the vehicle PR body, which also carries the #1358
+  triage verdict, the #1618 delete-proof, and the #1399 screen-family
+  deferral record.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -5215,6 +5352,86 @@ hostile-review pass._
   --strict brutex` clean (461 files); pyright 0 errors on touched files.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/lake-read-inode-guard`
+  (**DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
+  MIGRATION.md #1896 + #1898** — ONE stacked landing vehicle: the DEC-002
+  residual branch (`claude/lake-read-inode-guard-residual`, DRAFT PR
+  #1590 — superseded) folded in at the 2026-07-16 owner decision; DEC-002
+  (#1898) = the #1896 two-defense guard reaches the FOUR
+  verifier-identified residual sites, authored off the DEC-001 branch head
+  7636bb0. THE RESIDUAL CLASS: a LAZY `pl.scan_parquet`
+  performs NO open at build time — the open happens inside `.collect()`,
+  deep in polars' native scan executor, so a non-regular inode among the
+  scanned files hung the collect in C-level `fifo_open` where neither the
+  #1896 fd gate nor a SIGALRM could fire. The four sites:
+  `spot_daily_resample.make_lake_read_1m_window` · `spot_join.
+  spot_close_by_ts_window` (both scanning `ist_span_partition_files`) ·
+  `timeframe_materialize.make_lake_read_1m` (BOTH source shapes — the
+  months-bounded `month_partition_files` LIST arm + the whole-tree
+  `**/*.parquet` GLOB-string arm) · `rate_bridge.read_rate_snapshot`'s bare
+  `path.read_bytes()` (real site `brutex/data/rate_bridge.py:313` — the
+  brief's `adapters/groww/` citation corrected in #1898). THE FIX: NEW
+  COMMON `guarded_read.scan_parquet_regular(source, *, missing_columns,
+  extra_columns)` — EAGERLY fd-probes every candidate via
+  `open_regular_binary` at scan-BUILD time, then returns polars' OWN
+  LazyFrame (lazy semantics, projection pushdown + schema-tolerant kwargs
+  preserved, pinned; a str/Path/glob source is probed over its sorted
+  recursive glob expansion and handed to polars UNTOUCHED; an explicit
+  sequence is handed over as the normalized `list[str]` in CALLER order —
+  an identity for the three production call sites); a planted
+  FIFO/device/directory raises the typed `NotRegularFileError(OSError)`
+  at scan-build into each site's EXISTING `parquet_read_skip_errors()` /
+  `except OSError` degrade arm — zero except-clause churn (the #1896
+  fold-in law); the DEC-LAKE-READ-UNIQUE-001 bypass gate is TAUGHT the new
+  spelling (`scan_parquet_regular(` joins `_RAW_READ_RE` — callers stay
+  accountable). rate_bridge swaps onto `read_regular_bytes` inside the
+  existing `try/except OSError → None` — byte-identical for a regular
+  bridge file; a planted FIFO now reads the honest `None` instantly
+  instead of wedging the `RateBridgeCache` deadline daemon forever with
+  the single-flight `_inflight` never clearing (the #1522 at-most-one-
+  zombie posture now genuinely self-heals — the daemon RETURNS).
+  FAILS-BEFORE (executed at the pre-fix tree; the per-site split is
+  HONEST, Golden Rule #10): the three LIST-shaped sites genuinely HUNG —
+  forced deterministically via the enumeration-seam monkeypatch (their
+  `is_file()` gates exclude a statically planted FIFO, so the reachable
+  class is the enumeration→collect inode-SWAP window; the monkeypatch
+  feeds the exact `list[str]` polars opened pre-fix), each bounded
+  subprocess timeout-KILLED at exit 143 (the in-test SIGALRM could not
+  interrupt the GIL-held C read — exactly the class disclosure); the
+  rate_bridge statically-planted FIFO hung with the in-test 5 s SIGALRM
+  watchdog firing. The GLOB arm is statically plantable but NOT statically
+  hangable — PROBED on polars 1.42.1: glob expansion SILENTLY IGNORES a
+  non-regular inode (the pre-fix collect served the sibling's rows, no
+  hang, no error — a silent read-set drop); the guard there is a
+  CORRECTNESS improvement (loud typed raise, correct-or-absent) plus a
+  hang belt should polars' glob semantics change; its fails-before shape
+  is "DID NOT RAISE", never a hang claim — this probe forced the #1896
+  headline's "every … byte read" SCOPE AMENDMENT, folded into the SAME
+  ledger touch. TESTS: `TestScanParquetRegular` (8 — list+glob collect
+  byte-parity vs plain `pl.scan_parquet` · kwargs pass-through ·
+  projection-pushdown survival · FIFO-in-list + FIFO-under-glob eager
+  typed raise · vanished-entry eager OSError · zero-match glob keeps
+  polars' own error contract) + NEW
+  `tests/unit/test_inode_guard_residual_sites.py` (9 — per-site
+  regular-file parity + the forced swap-class FIFO raises under the
+  SIGALRM watchdog + the glob-arm correctness pin + rate_bridge
+  FIFO→bounded honest None + absent-bridge None). GATES: `guarded_read.py`
+  100.00% line+branch standalone (82/20, 46 tests) ·
+  `timeframe_materialize.py` 100.00% (176/56) · `spot_join.py` 100.00%
+  (28/4, the 12e stanza) · `spot_daily_resample.py` 100.00% (204/54) ·
+  `rate_bridge.py` 100.00% (59/4); the bypass-gate trio green;
+  ruff/ruff-format clean; `mypy --strict` 0 new (the `stage3_refine` `cma`
+  note is the stash-verified pre-existing baseline); pyright 0 errors.
+  HONEST LIMITS: the scan sites carry defense (a) only — NO stall deadline
+  wraps the `.collect()` (the #1896 tier-2 envelope); the eager probe is
+  O(candidate files) at scan-build (one open/fstat/close per file; the
+  glob arm additionally pays one Python recursive glob — the same
+  enumeration the scan performs; disclosed); a probe→collect inode SWAP
+  window remains (the same per-read TOCTOU residual class #1896
+  discloses — the probe closes the PLANTED-inode class, not a racing
+  writer); healthy lakes byte-identical (parity-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
@@ -5451,7 +5668,7 @@ hostile-review pass._
   MIGRATION.md ledger weave and this file's header — plus ONE keep-both
   union in `rust/trading-core/src/python.rs` (main's stage1a batch block +
   #1469's greeks_batch block, both registrations kept). The three ledger
-  rows were renumbered to the free consecutive block #1795–#1797 vs the
+  rows were renumbered to the free consecutive block #1956–#1797 vs the
   live-main tail #1794 (renumber chains recorded in-entry; DEC-IDs are the
   stable handles per DEC-LEDGER-RENUMBER-001). #1433 (brutexd) is
   deliberately NOT folded — its update-branch was 422-refused; it joins
@@ -5615,6 +5832,118 @@ hostile-review pass._
   `brutex/engine/sweep_apriori.py` module ships ZERO-diff (fed, never edited); `cmd_sweep` (single-tuple
   int `--k`) deliberately untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record
   lives in MIGRATION.md #1850.)
+  Earlier: `claude/prebuild-frame-write`
+  (**DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961** — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF). THE MEASURED ROOT
+  (Phase-1 profiling, sandbox ratios — the operator M4-Pro measurement decides):
+  the derived-TF prebuild is GIL-held Python, not I/O — the polars-frame →
+  per-bar CandleBar CONVERT costs 21.9–23.9% of the cold prebuild wall, the
+  per-bar Decimal `_tick_round` another 18.3–20.1%, BOTH re-paid on every warm
+  NO-OP merge (1,581/1,581 warm merges re-converted + re-snapped bars producing
+  zero byte changes); fsync 10–12%; the resample math ~2.5%; thread scaling
+  ZERO. THE MECHANISM: the resampled frame reaches the partition writer without
+  the frame→CandleBar→frame round trip — NEW `brutex/data/frame_write_gate.py`
+  (mode resolution over the tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE`
+  kill switch [junk ⇒ FAIL-SAFE OFF + warn-once — a RECORDED kill-must-kill
+  deviation from the fail-loud-env law, the #1531 rust_metrics precedent]; the
+  8-fresh + 8-merge per-process BURN-IN running BOTH lanes, shipping LEGACY
+  bytes, bit-comparing — mismatch ⇒ durable first-writer-wins autorevert latch
+  + ONE never-throttled ERROR; the SHADOW mode — both lanes every write, ship
+  legacy, count `frame_shadow_checked`/`frame_shadow_mismatches`, non-latching;
+  the CLOSED 15-member `DegradeReason` enum, exhaustiveness-pinned —
+  `MERGE_DELTA` is the ONE NORMAL-class production reason, gate verdicts never
+  counted as degrades) + NEW sibling entries `ParquetWriter.write_frame` /
+  `ParquetBarSink.append_frame` (vendor `write()`/`append()` signatures
+  byte-UNTOUCHED; `append_frame` owns the sink contracts — empty-input early
+  return, `bars_appended` = INPUT count, vectorized UTC-month `partition_by`
+  written ascending) + ONE call-site branch in
+  `timeframe_materialize.make_lake_write_tf._write`. Admission G0–G9 (schema/
+  dtype exactness · ts_utc non-null tz-aware strictly-sorted unique · price
+  domain · the 1e12 magnitude cast-parity bound · the UNCONDITIONAL vectorized
+  2dp ROUND_HALF_UP snap [the naive-skip idempotence claim was REFUTED — a
+  pre-DEC off-grid legacy month exists in real lakes] · single-month dest
+  bound · the Tier-1 provable-NO-OP merge probe over `eq_missing` overlap
+  equality · the stored-file decode verify · the G9 belt degrading ANY
+  unexpected fast-lane exception to legacy while RE-RAISING
+  `LakeWriteHalt`/`MemoryError`); every unprovable shape degrades
+  PER-PARTITION to the VERBATIM legacy path — a degrade NEVER decides
+  correctness, legacy owns the bytes AND the failure semantics. ONE encoder
+  serves both lanes: `_render_bytes` split into `_frame_from_bars` +
+  `_render_frame_bytes` (unconditional `.rechunk()` + schema assert), with the
+  verbatim PRE-change render law FROZEN as an inline-oracle byte golden
+  COMMITTED FIRST (48ab57f) + the Decimal(38,2)→Float64 cast law its own
+  golden; the wheel-free `brutex/config/env_flags.py` leaf promotes
+  `env_flag_tristate` out of `engine/sweep_lookahead.py` (identity-pinned
+  re-export — `brutex.data` must not import `brutex.engine`). PROOF: the
+  14-case whole-tree A/B integration corpus proves ON≡OFF trees byte-identical
+  per case; hypothesis differentials (frame↔bars parity ·
+  dict-merge≡frame-merge · month grouping · OI mapping · eq_missing); op-count
+  bench gates (fsync/replace/flock/render counts EQUAL both lanes; ZERO
+  CandleBar constructions on an admitted fresh write; warm no-op 0/0/0;
+  burn-in bounded; degrade-storm within `ratio_ceiling(3.0)`); real-writer A/B
+  smoke (cold identical · warm stable · steady no-op clean · shadow 19/0).
+  HONEST: NO production speedup claimed — tiny symbols measure SLOWER flag-ON
+  (n=375 → 2.78; crossover ≈ few×10³ bars: n=7,500 → 0.63, n=30,000 → 0.30);
+  fsync/parquet-encode/resample floor UNADDRESSED; Tier-1 accelerates only the
+  provable no-op (Tier-2 columnar merge = DEC-PREBUILD-FRAME-MERGE-TIER2-001);
+  the M3 rechunk hand-mutant is EQUIVALENT-TODAY (polars 1.42.1 probe-verified;
+  kept as a belt, disclosed). PR-2 FLIP: DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON
+  opens within 3 days of a clean operator shadow transcript
+  (`frame_shadow_mismatches == 0`). Run identity / `data_snapshot_hash` / the
+  1-minute lake untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake-schema/scope/vocab/rate change; `frame_write_gate.py`
+  (117/30) + `env_flags.py` (12/4) + `parquet_writer.py` (626/222) + `sink.py`
+  (80/18) + `timeframe_materialize.py` (181/58) ALL 100.00% line+branch on
+  their gates; the new battery 202 passed + 1 env-gated skip (239 + 2 after
+  the reconcile fold); ruff/ruff-format clean; `mypy --strict` clean; pyright
+  0 new vs the origin/main baseline. CI/CODEQL RECONCILE FOLD (2026-07-15 —
+  the per-item record lives in MIGRATION.md #1961): the 16 head pyright
+  errors fixed (TypedDict `_COORDS` kwargs; the bench probe import repointed
+  to `pipeline_prebuild` + made load-bearing) and the 4 CodeQL alerts closed
+  at root cause — `frame_to_candle_bars` rehomed to the NEW leaf
+  `brutex/data/frame_bars.py` (kills the `sink ↔ spot_daily_resample`
+  py/cyclic-import; byte-compatible re-exports kept; drift-pinned by
+  `TestImportCycleDriftPin` + a NEW dedicated 100% gate 22/6 + ci.yml
+  stanza), the two dead `sweep_lookahead` literal-set aliases DELETED (the
+  classifier re-export + identity pin stand), the integration A/B suite on
+  ONE writer-module import style; entry renumbered #1793 → #1956 at the
+  merge-reconcile (→ #1958 at the 2026-07-18 lap-8 merge-forward
+  reconcile; → #1961 at the 2026-07-19 club-O merge-forward
+  reconcile). REVIEW ROUND 1 folded (2026-07-15 — the per-finding
+  record lives in MIGRATION.md #1961): the refuter-named byte-SAFE
+  degrade-DIRECTION mutant class (invisible to the A/B sha256 differential
+  by construction — a narrowed admission degrades to legacy's identical
+  bytes) closed by a 10-mutant hand-kill census (4 already killed; 6
+  survivors each now die to ONE new direction pin, fails-before verified —
+  incl. the zero-VOLUME admits pin: the production spot-INDEX shape a
+  `<0`→`<=0` mutant would have silently degraded on the whole engine trio —
+  the census is the ACCEPTED mutant-kill substitute per the #1749
+  precedent, mutation.yml wiring stays the named follow-up); the engine
+  re-export identity pin gains a wheel-free importlib file-load twin (runs
+  in EVERY environment); the ledger's burn-in event token corrected to the
+  emitted `prebuild.frame_write.autoreverted`; the G3 'positivity'
+  over-attribution corrected (upstream read-boundary guard, legacy parity);
+  the stale `_TRUTHY`/`_FALSY` docstring attributions in
+  rust_metrics/rust_stage1a reconciled to the promoted
+  `brutex.config.env_flags` home — docstring/comment-only, ENGINE
+  UNCHANGED. REVIEW ROUND 3 folded (2026-07-15 — the per-finding record
+  lives in MIGRATION.md #1961): the refuter-confirmed MAJOR — the fresh
+  fast-lane snap's `_SNAP_PARSE_SCALE=17` conflated SIGNIFICANT with
+  FRACTIONAL digits, so an 18-20-fractional-digit sub-0.1 repr just below a
+  half-paisa boundary (`0.004999999999999996`) rounded ACROSS the boundary
+  before the half-up step and `write_frame` stored `0.01` flag-ON vs the
+  legacy `0.00` (reproduced end-to-end, distinct parquet sha256) — FIXED at
+  root cause: scale 17 → 20, the proven lossless ceiling for every
+  `|x| >= 1e-4` fixed-notation repr (sub-1e-4 stays value-lossy ≤ 5e-21,
+  provably snap-exact — disclosed), the precision-38 overflow moving
+  ≳1e19 → ≳1e16 (same per-row fallback; every stale figure reconciled +
+  the inherited #1023 claim corrected in place); TEETH all fails-before
+  verified at scale 17 — the snap-parity + Decimal-cast goldens gain the
+  killing class, the hypothesis `_price` differential samples the killers
+  permanently, and the A/B corpus grows CASE 14 (the killers raw-planted
+  as a legacy off-grid 1m source, steady-mode whole-tree sha256 A/B); plus
+  the NIT: the four branch-introduced `)Earlier:` joined-line sites in
+  this file split back to the Earlier:-begins-a-new-line convention.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -7406,8 +7735,8 @@ hostile-review pass._
   the pre-change baseline; `node --check` clean on both touched JS files.)
   Earlier: `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892** —
   entry number #1892 — renumbered from the provisional #1724 (= observed live-main max #1723 + 1
-  at append) at the club-R2 integration fold, the free consecutive block #1795–#1797 vs the
-  live-main tail #1794 (the #1711 precedent, gaps are legal), then #1795 → #1892 at the
+  at append) at the club-R2 integration fold, the free consecutive block #1956–#1797 vs the
+  live-main tail #1794 (the #1711 precedent, gaps are legal), then #1956 → #1892 at the
   2026-07-16 club CDR2 fold (bare vs club-D's #1795a–#1795d suffixed block —
   DEC-LEDGER-RENUMBER-001) —
   the additive `trading_core.greeks_batch` columnar FFI face + the default-OFF
@@ -11188,6 +11517,12 @@ hostile-review pass._
   `sweep_apriori.py` byte-untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
   §1 + MIGRATION.md #1851 for the full blurb)
+  Earlier: `integration/club-lap8-lake-guards`
+  (LAP-8 LAKE-GUARDS CLUB merge vehicle — matches §1's Active branch line;
+  the fold of #1618 + #1513 + #1539 + #1399-scoped(#1626) + #1358-R1(#1960)
+  + #1579, #1590 closed-as-superseded — see §1 + the member MIGRATION.md
+  entries #1941 · #1744-#1746 · #1961 · #1626 · #1960 · #1896/#1898 for the
+  full blurbs)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -11655,6 +11990,27 @@ hostile-review pass._
   origin/main A/B); NO production caller binds the new seams — WS-C/WS-D;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
   line — see §1 + MIGRATION.md #1900 for the full blurb)
+  Earlier: `claude/lake-read-inode-guard`
+  (DEC-LAKE-READ-INODE-GUARD-001 + DEC-LAKE-READ-INODE-GUARD-002,
+  MIGRATION.md #1896 + #1898 — ONE stacked landing vehicle, the DEC-002
+  residual branch (DRAFT PR #1590 — superseded) folded in at the
+  2026-07-16 owner decision; DEC-002 (#1898) = the #1896 guard
+  reaches the FOUR verifier-identified residual sites: the three LAZY
+  `pl.scan_parquet` reads (spot_daily_resample / spot_join /
+  timeframe_materialize — the open defers to `.collect()`, C-level
+  fifo_open) ride the NEW eager-probing `guarded_read.scan_parquet_regular`
+  (fd probe per candidate at scan-BUILD, then polars' OWN lazy scan —
+  regular-file results byte-identical, pinned), and
+  `rate_bridge.read_rate_snapshot` rides `read_regular_bytes` inside its
+  existing `except OSError → None` arm (a planted FIFO reads honest None
+  instantly — the deadline daemon returns, the single-flight self-heals);
+  fails-before proven per site (the three LIST arms + rate_bridge genuinely
+  HUNG pre-fix; the GLOB arm is a disclosed correctness improvement —
+  polars glob expansion silently ignores non-regular inodes, probed); the
+  #1896 "every … byte read" overclaim SCOPE-AMENDED in the same ledger
+  touch; authored off the DEC-001 branch head 7636bb0, landing WITH #1579; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1896/#1898 for the full blurbs)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
@@ -11793,6 +12149,31 @@ hostile-review pass._
   `BRUTEX_SWEEP_APRIORI` tri-state is the loud kill switch; the frozen
   `sweep_apriori.py` module is fed, never edited; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/prebuild-frame-write`
+  (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1961 — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF via the
+  tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒
+  FAIL-SAFE OFF + warn-once, a recorded kill-must-kill deviation): the
+  resampled polars frame reaches the partition writer without the
+  frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+  21.9–23.9% + `_tick_round` 18.3–20.1% cold, re-paid on 1,581/1,581 warm
+  no-op merges; sandbox ratios) behind admission guards G0–G9 + the CLOSED
+  15-reason per-partition degrade-to-VERBATIM-legacy enum (a degrade never
+  decides correctness) + the 16-write both-lanes burn-in shipping LEGACY
+  bytes with a durable autorevert latch + the shadow mode whose clean
+  operator transcript gates the PR-2 default-ON flip
+  (DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON opens within 3 days of
+  `frame_shadow_mismatches == 0`); the 2dp snap stays UNCONDITIONAL (the
+  naive-skip idempotence claim REFUTED); ONE encoder serves both lanes with
+  the legacy render bytes FROZEN as a golden BEFORE any production change;
+  vendor `write()`/`append()` byte-untouched — NEW siblings
+  `write_frame`/`append_frame` + ONE call-site branch in
+  `make_lake_write_tf._write`; byte-identical lake output proven by the
+  14-case whole-tree A/B corpus + op-count bench gates; NO speedup claimed
+  (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³ bars); run
+  identity / `data_snapshot_hash` / the 1-minute lake untouched; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1961 for the full blurb)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
@@ -12263,7 +12644,7 @@ hostile-review pass._
   Active branch line — see §1 + MIGRATION.md #1743 for the full blurb)
   Earlier: `claude/greeks-rust-batch`
   (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892 — renumbered from the
-  provisional #1724 at the club-R2 fold, then #1795 → #1892 at the club
+  provisional #1724 at the club-R2 fold, then #1956 → #1892 at the club
   CDR2 fold — the additive
   `trading_core.greeks_batch` columnar face of the frozen Greeks kernel + the
   default-OFF `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in

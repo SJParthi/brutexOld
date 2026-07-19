@@ -70,6 +70,10 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.data.guarded_read import (
+    open_regular_binary,
+    read_regular_text_deadline,
+)
 from brutex.engine.baseline import BaselineSeries, load_baseline
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
 from brutex.engine.trade_store import (
@@ -1263,7 +1267,11 @@ def _read_artifact_text(path: Path, *, artifact: str) -> tuple[str | None, str |
     any other read/decode defect maps to a NAMED corrupt detail (logged).
     """
     try:
-        return path.read_text(encoding="utf-8"), None
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — every cached
+        # oneclick route's fresh parse lands here): a planted FIFO / wedged
+        # volume folds into the NAMED-corrupt arm below (both guard errors
+        # are OSError subclasses) instead of wedging the poll thread.
+        return read_regular_text_deadline(path, what="oneclick artifact read"), None
     except FileNotFoundError:
         return None, None
     except (OSError, UnicodeDecodeError) as exc:
@@ -1929,7 +1937,11 @@ def tail_events(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): the fd-validated open —
+        # a planted FIFO at the events path blocked the plain open() forever;
+        # NotRegularFileError folds into the OSError corrupt arm below. The
+        # window reads themselves stay bounded (the 1 MiB cap law).
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return EventsPage(
             "awaiting", (), 0, 0, False, f"{AWAITING_DETAIL} — {EVENTS_FILENAME} absent"
@@ -2097,7 +2109,10 @@ def verify_events_chain(
     """
     path = run_dir / EVENTS_FILENAME
     try:
-        fh = path.open("rb")
+        # DEC-LAKE-READ-INODE-GUARD-001 defense (a): fd-validated open — the
+        # click-only chain verify must refuse a planted FIFO loudly, never
+        # block; NotRegularFileError folds into the OSError arm below.
+        fh = open_regular_binary(path)
     except FileNotFoundError:
         return (
             False,

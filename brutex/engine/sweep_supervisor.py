@@ -112,6 +112,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import blake3
 import structlog
 
+from brutex.data.guarded_read import read_regular_text
 from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_cache import SweepCache, combo_digest
@@ -1485,7 +1486,7 @@ def read_progress(path: Path) -> dict[str, Any]:
     from brutex.engine.sweep_exit_status import enrich_progress_payload
 
     try:
-        parsed: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        parsed: dict[str, Any] = json.loads(read_regular_text(path))
     except (OSError, json.JSONDecodeError):
         return dict(_IDLE_PROGRESS)
     return enrich_progress_payload(parsed, results_root=path.parent.parent)

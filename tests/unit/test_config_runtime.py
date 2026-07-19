@@ -295,10 +295,14 @@ class TestOSErrorPaths:
         monkeypatch.setenv(ENV_RUNTIME_FILE, str(target))
         write_runtime_file(sample_info)
 
-        def fail_read_text(self, *args, **kwargs):
+        def fail_read_text(*args, **kwargs):
             raise OSError("simulated I/O failure")
 
-        monkeypatch.setattr(Path, "read_text", fail_read_text)
+        # DEC-LAKE-READ-INODE-GUARD-001: the read rides the guarded reader
+        # now — fault THAT seam (Path.read_text is no longer used).
+        from brutex.data import guarded_read
+
+        monkeypatch.setattr(guarded_read, "read_regular_text", fail_read_text)
         with pytest.raises(RuntimeFileError, match="Failed to read"):
             read_runtime_file()
 

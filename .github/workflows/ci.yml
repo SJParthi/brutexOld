@@ -1565,16 +1565,10 @@ jobs:
           # backfill ratchet — second batch of small-gap non-orchestrator
           # modules pushed to 100% via surgical tests + module-load
           # defensive-assertion pragmas. Lifts strict-100% gate count 45 → 49.
-          # 21a · brutex.data.parser (55 stmts, 14 branches, 15 tests)
-          #       Closes 92.75→100% via 3 surgical tests in
-          #       TestDecimalCoercion: Decimal-passthrough (line 145),
-          #       string-input parse (line 149), tz-aware ISO timestamp
-          #       skips IST-attach branch (82→84).
-          if compgen -G "tests/unit/test_data_parser.py" > /dev/null; then
-            pytest --cov=brutex.data.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_parser.py
-          else
-            echo "(brutex.data.parser test file not present yet — gate inactive)"
-          fi
+          # 21a · brutex.data.parser — gate REMOVED with the dead module
+          #       (DEC-DATA-PARSER-DEAD-DELETE-001, MIGRATION.md #1941;
+          #       zero production callers — only the data/__init__
+          #       re-export; git history retains the bytes).
           # 21b · brutex.data.timeframes (22 stmts post-pragma, 8 branches,
           #       34 tests). Closes 84.21→100% via 1 surgical test
           #       (`test_unsupported_tf_raises` covers line 140 ValueError)
@@ -1650,7 +1644,7 @@ jobs:
           #          integration-tested by
           #          tests/integration/test_timeframe_materialize_roundtrip.py.
           if compgen -G "tests/unit/test_timeframe_materialize.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py
+            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py tests/integration/test_timeframe_materialize_daily_range.py
           else
             echo "(brutex.data.timeframe_materialize test file not present yet — gate inactive)"
           fi
@@ -1986,6 +1980,22 @@ jobs:
           else
             echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
           fi
+          # DEC-SESSION-DENSITY-CENSUS-001: the WARN-only per-session bar-density
+          # census (pure classifier + guarded emitter, stdlib+structlog+calendars
+          # only). 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_session_density.py" > /dev/null; then
+            pytest --cov=brutex.data.session_density --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session_density.py
+          else
+            echo "(brutex.data.session_density test file not present yet — gate inactive)"
+          fi
+          # DEC-LAKE-READ-INODE-GUARD-001: the COMMON two-defense gated file
+          # reader (fd-level S_ISREG gate + deadline-wrapped stall variants).
+          # Ships at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_guarded_read.py" > /dev/null; then
+            pytest --cov=brutex.data.guarded_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_guarded_read.py
+          else
+            echo "(brutex.data.guarded_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
@@ -2133,9 +2143,39 @@ jobs:
           # dedicated test file is now strict-gated above
           # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py
+            # DEC-PREBUILD-FRAME-WRITE-001: the append_frame sibling is covered
+            # by tests/unit/test_data_sink_frame.py, which MUST run alongside
+            # the base suite for the 100% gate to hold.
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py tests/unit/test_data_sink_vendor_surface.py tests/unit/test_data_sink_frame.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the frame-direct derived-TF write's
+          # control leaf (tristate+shadow kill switch, burn-in budgets,
+          # autorevert latch, the CLOSED degrade taxonomy, FrameWriteStats).
+          # NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_frame_write_gate.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_write_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_write_gate.py
+          else
+            echo "(brutex.data.frame_write_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001: the ONE env-flag vocabulary leaf
+          # (promoted from engine/sweep_lookahead so the wheel-free data layer
+          # can consume it). NEW leaf -> its own strict 100% line+branch gate.
+          if compgen -G "tests/unit/test_config_env_flags.py" > /dev/null; then
+            pytest --cov=brutex.config.env_flags --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_config_env_flags.py
+          else
+            echo "(brutex.config.env_flags test file not present yet — gate inactive)"
+          fi
+          # DEC-PREBUILD-FRAME-WRITE-001 (review fold): the batched frame→bar
+          # converter leaf `brutex.data.frame_bars` (moved out of
+          # spot_daily_resample to break the sink↔spot_daily_resample CodeQL
+          # py/cyclic-import cycle). NEW leaf -> its own strict 100%
+          # line+branch gate.
+          if compgen -G "tests/unit/test_frame_bars.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_bars --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_bars.py
+          else
+            echo "(brutex.data.frame_bars test file not present yet — gate inactive)"
           fi
           # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
           # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk

@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -199,7 +200,7 @@ def load_derive_stamp(path: Path) -> DeriveStamp | None:
     skip on bad data (Golden Rule #1).
     """
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(read_regular_text(path))
         return DeriveStamp(
             token=str(raw["token"]),
             tfs=tuple(str(t) for t in raw["tfs"]),

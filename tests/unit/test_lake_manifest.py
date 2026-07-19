@@ -184,14 +184,17 @@ class TestRebuildAndLoad:
         token = lm.ledger_stat_token(tmp_path)
         assert token is not None
         lm.rebuild_manifest(tmp_path, [_row("NIFTY")], ledger_token=token)
-        real_read_text = Path.read_text
+        # DEC-LAKE-READ-INODE-GUARD-001: the meta read rides the module-level
+        # guarded seam (`lm.read_regular_text`), not Path.read_text — fault it
+        # there so the OSError-degrade teeth stay real.
+        real_read_text = lm.read_regular_text
 
-        def _boom(self: Path, *args: Any, **kwargs: Any) -> str:
-            if self.name == lm.MANIFEST_META_FILENAME:
+        def _boom(path: Path, *args: Any, **kwargs: Any) -> str:
+            if Path(path).name == lm.MANIFEST_META_FILENAME:
                 raise PermissionError("meta denied")
-            return real_read_text(self, *args, **kwargs)
+            return real_read_text(path, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "read_text", _boom)
+        monkeypatch.setattr(lm, "read_regular_text", _boom)
         with capture_logs() as logs:
             assert lm.load_manifest_datasets(tmp_path) is None
         assert any(e["event"] == "lake_manifest.meta_read_failed" for e in logs)

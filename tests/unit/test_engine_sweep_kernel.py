@@ -444,6 +444,97 @@ class TestGridReuseBarBits:
         assert len(seen) == 8
 
 
+class TestKernelPathMuhuratWeeklyAnchor:
+    """DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — resident-KERNEL-path coverage.
+
+    The crash-hardening completeness requirement: the Muhurat weekly-anchor
+    abstain guard must be proven on BOTH bar_bits build paths — the non-kernel
+    path (``build_bar_bits`` from ``sweep_run.py``, pinned in
+    ``tests/unit/test_engine_stage1a.py``) AND the resident-kernel path.
+    Structurally the kernel reaches anchors through the SAME seam
+    (``ResidentSweepKernel.__init__`` → :func:`build_bar_bits` →
+    ``Stage1AMatrixBuilder._compute_anchors`` — ``sweep_kernel.py``), so no
+    guard mirror is needed; these tests EXECUTE that path over a real Muhurat
+    window for both weekly anchors so the claim is proven, never inferred.
+    """
+
+    @staticmethod
+    def _muhurat_window() -> list[CandleBar]:
+        # The real 2024 boundary: a regular session (2024-10-31), the Muhurat
+        # evening session (2024-11-01, ~18:00 IST), the next regular session.
+        def day_bars(y: int, mo: int, d: int, hh: int, mm: int, base: float) -> list[CandleBar]:
+            return [
+                CandleBar(
+                    timestamp=datetime(y, mo, d, hh, mm + i, tzinfo=UTC),
+                    open=Decimal(str(base + i)),
+                    high=Decimal(str(base + i + 0.5)),
+                    low=Decimal(str(base + i - 0.5)),
+                    close=Decimal(str(base + i + 0.25)),
+                    volume=10,
+                    open_interest=None,
+                )
+                for i in range(4)
+            ]
+
+        return (
+            day_bars(2024, 10, 31, 3, 45, 100.0)  # 09:15 IST regular
+            + day_bars(2024, 11, 1, 12, 30, 104.0)  # ~18:00 IST Muhurat
+            + day_bars(2024, 11, 4, 3, 45, 105.0)  # next regular
+        )
+
+    @pytest.mark.parametrize("anchor", [FibAnchorKind.ROLLING_WEEKLY, FibAnchorKind.WEEKLY_STATIC])
+    def test_resident_kernel_builds_across_muhurat_with_weekly_anchor(
+        self, anchor: FibAnchorKind
+    ) -> None:
+        # Pre-fix this CONSTRUCTION raised the weekly resolvers' ValueError
+        # ("not a trading day") out of build_bar_bits — the kernel path was
+        # exactly as exposed as the non-kernel path. Post-fix it completes,
+        # emits the one abstain WARN, and its bar_bits are bit-identical to
+        # the non-kernel build (the kernel is a cache, never a second math).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT, build_bar_bits
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        with capture_logs() as logs:
+            kernel = ResidentSweepKernel(bars, fib_anchor=anchor)
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1
+        assert warns[0]["day"] == "2024-11-01"
+        assert kernel.bar_bits == build_bar_bits(bars, fib_anchor=anchor)
+
+    def test_resident_kernel_cache_get_across_muhurat_weekly_anchor(self) -> None:
+        # The production seam (`run_sweep_grid` threads ResidentKernelCache.get
+        # per tuple): a miss BUILDS across the Muhurat window without raising,
+        # and the subsequent hit reuses the kernel (no second Stage-1A build,
+        # no second WARN).
+        from brutex.engine.stage1a import _MUHURAT_WEEKLY_ANCHOR_EVENT
+        from structlog.testing import capture_logs
+
+        bars = self._muhurat_window()
+        cache = ResidentKernelCache(capacity=2)
+        with capture_logs() as logs:
+            first = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+            again = cache.get(
+                bars,
+                instrument="NIFTY",
+                tf_label="1minute",
+                proximity=None,
+                prior_n=3,
+                fib_anchor=FibAnchorKind.ROLLING_WEEKLY,
+            )
+        assert again is first  # hit — built exactly once
+        assert cache.builds == 1 and cache.hits == 1
+        warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+        assert len(warns) == 1  # one WARN per Muhurat session, not per lookup
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
 # ════════════════════════════════════════════════════════════════════════════

@@ -167,6 +167,7 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
@@ -719,8 +720,10 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
 
     Missing file → the empty set (the common case). ANY other unreadable /
     corrupt / non-JSON / wrong-shape state — including the OSError SHAPES a
-    hostile filesystem can present (a DIRECTORY at the sidecar path →
-    ``IsADirectoryError``, a symlink self-loop → ``ELOOP``, unreadable →
+    hostile filesystem can present (a DIRECTORY / FIFO / device at the
+    sidecar path → ``NotRegularFileError``, a wedged volume →
+    ``ReadStallError`` (both DEC-LAKE-READ-INODE-GUARD-001 ``OSError``
+    subclasses), a symlink self-loop → ``ELOOP``, unreadable →
     ``PermissionError``) — → the empty set + ONE LOUD
     ``sweep.quarantine.sidecar_corrupt`` WARNING (advisory sidecar: the worst
     outcome of ignoring a bad file is a re-dispatch of a poison tuple, which
@@ -732,11 +735,17 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
 
     path = quarantine_sidecar_path(root)
     try:
-        raw = path.read_text(encoding="utf-8")
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the resume
+        # load runs under the G6 sweep single-flight): a planted FIFO /
+        # wedged volume folds into the loud advisory arms below instead of
+        # wedging the whole resume (NotRegularFileError / ReadStallError are
+        # OSError subclasses).
+        raw = read_regular_text_deadline(path, what="sweep quarantine sidecar read")
     except FileNotFoundError:
         return set()
     except OSError as exc:
-        # IsADirectoryError / PermissionError / ELOOP / … — the advisory
+        # NotRegularFileError (directory/FIFO/device) / ReadStallError /
+        # PermissionError / ELOOP / … — the advisory
         # contract: never a wedge, never a crash; LOUD + empty.
         _LOG.warning(
             "sweep.quarantine.sidecar_corrupt",
@@ -786,7 +795,12 @@ def append_quarantine_entries(
 
     path = quarantine_sidecar_path(root)
     try:
-        existing = json.loads(path.read_text(encoding="utf-8"))["entries"]
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 — same guarded read as the
+        # resume load above (this append runs on the failure path while the
+        # G6 sweep lock is held).
+        existing = json.loads(
+            read_regular_text_deadline(path, what="sweep quarantine sidecar read")
+        )["entries"]
         if not isinstance(existing, list):
             existing = []
     except (OSError, ValueError, TypeError, KeyError):
