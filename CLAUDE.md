@@ -18,7 +18,34 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
+_Last updated: 2026-07-19 (DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934,
+branch `claude/universe-index-only-scope` — the 4-index PER-FEED universe
+SCOPE law: the LAKE/pull universe narrows from ~750 underlyings to EXACTLY
+the 4 admitted pairs — NSE-NIFTY · NSE-BANKNIFTY (+ NSE F&O chains) ·
+BSE-SENSEX (+ the BSE F&O chain) · NSE-INDIAVIX (reference-only spot) —
+runtime-dynamic by CONFIG via the ONE new env var `BRUTEX_FEED_SCOPE`
+(shipped per-feed defaults `groww=index4`, `dhan=index4`; widening back is a
+config/DEC change per the ENV_VARS.md §9 procedure, never a code edit; the
+recorded divergence from prior-art #1836: modules GATED DORMANT, never
+deleted). Operator-directed ("nifty banknfity sensex nd india vix alone …
+remove and wipe off everything", 2026-07-15; expired F&O chains KEPT per
+"entire four instruments spots expired fno", 2026-07-16; "auto-land the
+scope cut when green", 2026-07-17). Admission self-narrows (universe/
+classify/instrument-loader seams + the symmetric stale-store auto-heal
+one-shot), the P7–P10 producer gates refuse out-of-scope vendor pulls
+loudly, the R-family read filters exclude-and-COUNT (emit-on-nonzero; the
+/db raw viewer stays unfiltered), and the STORED-DATA law holds — code
+never deletes stored partitions/ledgers/registry. Supersedes DEC-P0-063
+(#200) + DEC-NTM-GROWW-REPOINT-001 (#694); narrows-in-part #160/#1788/
+#1794; absorbs the never-landed ADR-0024 package's universe half (#1835/
+#1836/#1837 — the crossverify S3 retirement re-raises as the stacked
+row #1937). Fails-before proven executed at merge-base c2208706;
+`full`-scope pinned byte-identical to merge-base on every gated surface.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX (already spot-only per #1790);
+no vocab/rate/lake-schema change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1934.)
+Earlier: 2026-07-17 (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930,
 branch `claude/preopen-day-freshness-guard` — the preopen DAY-basis (the
 DEFAULT report) gains the stored-vs-resample derived-1day FRESHNESS guard,
 the /movers #1795a verify-equality law transplanted: stored ≡ resample is a
@@ -3233,8 +3260,15 @@ hostile-review pass._
   for the full verified fact table.
 - **Out of scope (Track 1 engine):** Live feed, WebSocket, order
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
-  additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
-  the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.) The dashboard
+  additionally ingested F&O single-stock spot+options as REFERENCE_ONLY —
+  **NARROWED by DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934: under the
+  shipped default per-feed scope (`BRUTEX_FEED_SCOPE`, `groww=index4`) the
+  LAKE/pull universe is EXACTLY the 4 admitted underlyings — NSE-NIFTY ·
+  NSE-BANKNIFTY · BSE-SENSEX (spot + their expired+live F&O chains) +
+  NSE-INDIAVIX (reference-only spot); stock/NTM admission is GATED DORMANT,
+  stored stock data stays readable, widening back is a config/DEC change
+  (ENV_VARS.md §9)** — the BRUTE-FORCE ENGINE remains the 3 indexes — see
+  §2 Rule 3.) The dashboard
   + lake **LIVE-feed SURFACE that once existed** (`brutex/live/`, the `/live`
   page + `/api/v1/live/*` routes, the `live_ticks`/`live_candles_1m` tables, the
   Movers "Live" tab + /db "Live lake" section) was **REMOVED in full —
@@ -3243,7 +3277,107 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/preopen-day-freshness-guard`
+- **Active branch:** `claude/universe-index-only-scope`
+  (**DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934** — the queue-master-
+  RESERVED row for this track — the 4-index PER-FEED universe SCOPE law: the
+  fetch/lake/admission universe narrows from ~750 underlyings (4 named
+  indices + ~25 admitted indices + ~212 F&O stocks + ~540 NTM reference
+  names) to EXACTLY the 4 `V1_INDICES` pairs — NSE-NIFTY · NSE-BANKNIFTY
+  (+ NSE F&O chains) · BSE-SENSEX (+ the BSE F&O chain) · NSE-INDIAVIX
+  (reference-only spot, no chain) — runtime-dynamic by CONFIG, gated dormant
+  never deleted, stored data never deleted. OPERATOR PROVENANCE (the
+  coordinator-verified canonical citation block — the genuine operator turns
+  are the ONLY verbatim-quotable authority on this track): "nifty banknfity
+  sensex nd india vix alone … remove and wipe off everything" (operator,
+  2026-07-15 — the scope cut, spelling preserved verbatim); "entire four
+  instruments spots expired fno" (operator, 2026-07-16 — expired F&O chains
+  KEPT); "auto-land the scope cut when green" (operator, 2026-07-17 — the
+  landing authorization for THIS PR; the S3-push removal directive "even aws
+  s3 push also" grounds ONLY the stacked PR-2, row #1937). THE LAW: NEW leaf
+  `brutex/config/feed_scope.py` — `FeedScope` + `SCOPE_INDEX4`/`SCOPE_FULL`,
+  `DEFAULT_FEED_SCOPES` = {groww: index4, dhan: index4}, the fail-loud
+  `BRUTEX_FEED_SCOPE` env grammar (bare `index4`|`full` XOR a per-feed
+  `key=token` CSV; junk refuses at boot/entry via the eager-validation
+  sites — 9 CLI entrypoints + the dashboard routes — never mid-pull; the ONE
+  new env var, zero new routes), the two consumer laws (producers bind the
+  ACTING feed's `resolve_feed_scope`; display/census surfaces bind
+  `resolve_read_scope` = the UNION over ACTIVE feeds), the
+  `note_feed_registered` registration seam + `scope_revision()` cache-key
+  content token (a registration WIDENING reaches primed caches with no
+  restart); a future GDFL feed binds wider by CONFIG
+  (`BRUTEX_FEED_SCOPE=gdfl=full`, the ENV_VARS.md §9 widen procedure env →
+  master reload → verify) — never by re-architecture (the GATE-not-delete
+  divergence from the never-landed prior-art #1836's four-NTM-module
+  deletion plan, recorded). ADMISSION self-narrows
+  (`universe.is_universe_underlying`/`is_in_fetch_scope` gain the kw-only
+  `scope=` seam; `classify_instrument` threads through so every
+  classify-driven enumeration follows; `_ntm_admission` takes the DORMANT
+  GATE as its first statement; the A2 conscious `full`-arm correction ADMITS
+  BSE legs, preserving the pinned `full ⊇ index4` monotonicity) + the
+  SYMMETRIC stale-store auto-heal one-shot (`store_scope_mismatch` folded
+  into `evaluate_master_reload_trigger` — ONE boot-time master reload
+  converges the store in EITHER direction of a scope flip; a stale wide
+  store serves honestly for at most one boot, with read-time exclusion
+  covering the interim). PRODUCER GATES P7–P10 (fire only under a bounded
+  scope; `full` = structural pass-through, the widen path pinned
+  BYTE-IDENTICAL to merge-base on every gated surface): P7
+  `pull_controller.screen_pull_scope` at both raw store-resolution arms +
+  the five single-symbol/selection route arms (out-of-scope selection = a
+  loud ValueError/400 naming the ids + the DEC — the merge-base
+  bookmarked-stock-id real-vendor-pull repro closed); P8 the
+  `/pull-historical` DIRECT registry grammar screens resolved ContractRows;
+  P9 the per-pull SKIPPED-window audit stops burning its 25/pull budget on
+  the pre-cut stock population (`out_of_scope=N` counted); P10
+  `doctor_live.stage_ampersand` short-circuits under a stock-excluding
+  scope (zero vendor calls). READ-SIDE R-FAMILY (the SAME law at read time;
+  exclusions always COUNTED + emit-on-nonzero, notes name the DEC): NEW
+  leaf `brutex/data/scope_filter.py` (total + never-raising;
+  scope-AFTER-recovery on the #911 ladder; `classify_window_row`'s
+  ADMITTED/EXCLUDED/LEGACY_UNRESOLVED split — never misattributed) feeds
+  the movers three-tab discovery (R1), the spot census walk-level skip
+  (R2), preopen dataset discovery (R3), greeks enrich/backfill target
+  discovery (R4), the movers class note (R7), the option census
+  post-aggregate filter (R9), the /coverage grid (R10), the
+  /coverage/windows census + pull-progress phases on ONE scope WHERE (R11,
+  O(page) preserved), and `doctor.check_derived_freshness` (R12); NOT
+  touched by LAW (pinned): R5 — the `/db` raw viewer + pagers + both
+  options discovery surfaces keep listing stored stock datasets (the
+  operator's stored-bytes-readable words). THE STORED-DATA LAW (the #1831
+  precedent): code NEVER deletes stored partitions, ledgers, or the durable
+  F&O registry — stored stock data stays readable in /db and is excluded
+  from ENUMERATION with honest counts; disk reclaim = an optional operator
+  action; the lean instrument-MASTER store pruning rows on reload is a
+  store-row matter, distinct from lake bytes. ABSORPTION: supersedes/
+  absorbs the never-landed minimal-core scope package (PR #1562 /
+  ADR-0024) BY NAME — #1835 + #1836 (with the gate-vs-delete divergence) +
+  #1837 — while the crossverify S3 retirement + backup-local halves
+  re-raise under their own rows (#1937 = the stacked PR-2; NO ADR ships —
+  the #1790 scope-cut precedent). SUPERSESSIONS: DEC-P0-063 (#200) +
+  DEC-NTM-GROWW-REPOINT-001 (#694) superseded; DEC-INSTRUMENT-UNIVERSE-
+  FAST-001 (#160) narrowed-in-part (lean mechanics stand verbatim);
+  DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788) + DEC-BULK-SPOT-COMPLETENESS-
+  FLAG-001 (#1794) superseded-in-part (enumeration only). FAILS-BEFORE
+  PROVEN EXECUTED at merge-base c2208706 (the admission [FB] arms + the
+  P7/P8 route batteries + the R2/R9/R10 coverage-route batteries —
+  merge-base SERVED RELIANCE through the real /coverage/spot · options ·
+  /coverage · /completeness routes; all green at head); the suite forces
+  `BRUTEX_FEED_SCOPE=index4` (the shipped default is the tested default)
+  with FULL-arm suites opting in via `_full_scope_arm` fixtures. GATES
+  (executed): `feed_scope.py` (177/60) + `scope_filter.py` (87/40) BOTH
+  100.00% line+branch standalone on NEW ci.yml stanzas; window_ledger
+  (290/84) + window_ledger_store (436/118) + the db_view 23-file gate +
+  the doctor gate + the three movers modules + `pull_controller.py`
+  (618/146) ALL 100.00% on their gates; ruff/ruff-format clean; `mypy
+  --strict` 0 new. HONEST: ONE new env var, zero new routes; the R9 census
+  still reads every stored stock series' footers (output-only exclusion,
+  stated); the CLI-fetch VIX gap is pre-existing + disclosed, not fixed;
+  the /db stock-moneyness DRIFT rung degrades once a store holds zero
+  stock rows (recorded). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX
+  (already spot-only per #1790; INDIAVIX stays REFERENCE ONLY per §2
+  Rule 3); no vocab (60-bit)/rate/lake-schema change; F&O lake
+  REFERENCE_ONLY. This blurb carries the pointer, never the whole story —
+  the full record lives in MIGRATION.md #1934.)
+  Earlier: `claude/preopen-day-freshness-guard`
   (**DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930** — pool-assigned by
   the queue master above the live-main ceiling #1900 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard + the B-3 derived-intraday null-OI
@@ -9624,6 +9758,27 @@ hostile-review pass._
    as-is). DEC-P0-063 remains authoritative for the stock-options
    expansion.
 
+   **RETIREMENT (DEC-UNIVERSE-INDEX-ONLY-001, 2026-07-19, MIGRATION.md
+   #1934):** the operator has DIRECTED the LAKE/pull universe down to the
+   index-only surface ("nifty banknfity sensex nd india vix alone … remove
+   and wipe off everything", operator 2026-07-15; expired F&O chains KEPT
+   per "entire four instruments spots expired fno", operator 2026-07-16) —
+   this CONSCIOUSLY SUPERSEDES the DEC-P0-063 stock ingest scope above AND
+   the DEC-NTM-GROWW-REPOINT-001 (#694) NTM re-amendment below: the
+   admitted universe is EXACTLY the 4 underlyings **NSE-NIFTY,
+   NSE-BANKNIFTY, BSE-SENSEX (spot + their expired+live F&O chains) +
+   NSE-INDIAVIX (reference-only spot)** under the per-feed runtime-dynamic
+   scope law (`BRUTEX_FEED_SCOPE`; shipped defaults `groww=index4`,
+   `dhan=index4`; widening back is a config/DEC change via the
+   `docs/runbooks/ENV_VARS.md` §9 procedure — env → master reload →
+   verify — never a code edit). The stock/NTM admission + leg-economics
+   modules are GATED DORMANT, not deleted (the #1790 retain-below-the-gate
+   posture; divergence from prior-art #1836's delete approach is recorded
+   in #1934); already-stored out-of-scope data follows the stored-data law
+   in #1934 (read-time exclusion from scoped surfaces + the one-shot
+   stale-store auto-heal; /db raw viewer stays unfiltered). The ENGINE is
+   untouched — already spot-only per DEC-ENGINE-SPOT-ONLY-001 (#1790).**
+
    **Amended by DEC-INSTRUMENT-UNIVERSE-FAST-001 (2026-05-29, MIGRATION.md
    entry #160):** lean ingest — the `instruments` table now persists ONLY
    the ~241 unique universe underlyings (every admitted index + every
@@ -9632,7 +9787,10 @@ hostile-review pass._
    `get_contracts` (contracts inherit lot/tick/freeze from the underlying
    row). The BRUTE-FORCE ENGINE is UNAFFECTED. So "the LAKE is the expanded
    surface" is narrowed: the lake = the universe underlyings; the legs are
-   derived/recoverable, not stored.
+   derived/recoverable, not stored. **[NARROWED by DEC-UNIVERSE-INDEX-ONLY-001
+   (#1934): under the default `index4` scope the persisted universe is the 4
+   admitted underlyings, not ~241 — the lean-ingest MECHANICS above stand
+   verbatim; only the admission set shrank.]**
 
    **Leg-economics fold (DEC-GROWW-LEG-ECONOMICS-001, 2026-06-13, MIGRATION.md
    entry #696):** before the legs are discarded, each persisted underlying is
@@ -9644,7 +9802,10 @@ hostile-review pass._
    the Groww twin of the retired-vendor fold; without it every F&O equity kept
    the placeholder `lot_size = 1`, which left `has_placeholder_stock_economics`
    permanently True and made the dashboard auto-heal re-load the master on every
-   startup (a silent loop this closes).
+   startup (a silent loop this closes). **[SCOPED by DEC-UNIVERSE-INDEX-ONLY-001
+   (#1934): under the default `index4` scope ZERO EQ rows are admitted, so the
+   fold stamps only the index rows (NIFTY → 75 stands); the RELIANCE → 500
+   example is historical/full-scope.]**
 
    **Re-amended by DEC-NTM-GROWW-REPOINT-001 (2026-06-13, MIGRATION.md entry
    #694):** the lean universe ALSO persists the matched **NIFTY Total Market
@@ -9658,6 +9819,11 @@ hostile-review pass._
    scope guard; an F&O-eligible name that is ALSO an NTM constituent stays
    tradable, `reference_only=FALSE`). On a network miss with no cache the load
    degrades honestly to the F&O-eligible base set, never invents constituents.
+   **[SUPERSEDED by DEC-UNIVERSE-INDEX-ONLY-001 (#1934): under the default
+   `index4` scope the NTM admission is GATED DORMANT — zero constituents are
+   fetched or persisted (no niftyindices network call); the module is retained,
+   not deleted, and re-arms only under a widened `BRUTEX_FEED_SCOPE`
+   (ENV_VARS.md §9).]**
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
@@ -9841,7 +10007,31 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/preopen-day-freshness-guard`
+- **Active feature branch:** `claude/universe-index-only-scope`
+  (DEC-UNIVERSE-INDEX-ONLY-001, MIGRATION.md #1934 — the 4-index PER-FEED
+  universe SCOPE law: the fetch/lake/admission universe narrows from ~750
+  underlyings to EXACTLY the 4 `V1_INDICES` pairs — NSE-NIFTY ·
+  NSE-BANKNIFTY (+ NSE F&O chains) · BSE-SENSEX (+ the BSE F&O chain) ·
+  NSE-INDIAVIX (reference-only spot) — operator-directed ("nifty banknfity
+  sensex nd india vix alone … remove and wipe off everything", 2026-07-15;
+  expired F&O chains KEPT, 2026-07-16), runtime-dynamic by CONFIG via the
+  ONE new env var `BRUTEX_FEED_SCOPE` (shipped defaults `groww=index4`,
+  `dhan=index4`; widening = a config/DEC change per the ENV_VARS.md §9
+  procedure); NEW leaves `config/feed_scope.py` + `data/scope_filter.py`
+  (both 100.00% standalone on new ci.yml stanzas); admission self-narrows
+  + the symmetric stale-store auto-heal one-shot; the P7–P10 producer
+  gates refuse out-of-scope vendor pulls loudly; the R-family read filters
+  exclude-and-COUNT emit-on-nonzero (the /db raw viewer stays unfiltered —
+  pinned); GATED DORMANT never deleted (the recorded divergence from
+  prior-art #1836) + the stored-data law (code never deletes stored
+  partitions/ledgers/registry); the `full` widen path pinned byte-identical
+  to merge-base; supersedes DEC-P0-063 (#200) + #694, narrows-in-part
+  #160/#1788/#1794, absorbs the never-landed ADR-0024 package's universe
+  half (#1937 = the stacked crossverify-S3 PR-2); fails-before proven
+  executed at merge-base c2208706; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no vocab/rate/lake-schema change; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1934 for the full blurb)
+  Earlier: `claude/preopen-day-freshness-guard`
   (DEC-PREOPEN-DAY-FRESHNESS-001, MIGRATION.md #1930 — the preopen DAY-basis
   stale derived-1day FRESHNESS guard: each day-basis row's stored
   (IEP, PREV. CLOSE) pair is served only when it EQUALS the fresh resample
@@ -11175,13 +11365,13 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5158-5159` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:995,1060-1061`; `cli.py:5218-5219` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError, GrowwEmptyResponseError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name; an empty/non-JSON body `json.JSONDecodeError` → **retryable** `GrowwEmptyResponseError`, so a transient throttle is re-pulled instead of a terminal "not on Groww" quarantine — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854) | `groww/errors.py`; `groww/api-reference/05-exceptions.md:9-70` |
-| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:617-650` |
-| NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
+| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — a vendor-CENSUS constant, kept; NO LONGER the ingest surface: stock admission is scope-gated OFF under the default `index4` scope per DEC-UNIVERSE-INDEX-ONLY-001 #1934 — re-arms only under a widened `BRUTEX_FEED_SCOPE`, ENV_VARS.md §9) | `groww/constants.py:104-105`; `brutex/universe.py:617-650` |
+| NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab. **[SUPERSEDED/DORMANT per DEC-UNIVERSE-INDEX-ONLY-001 #1934: under the default `index4` scope the NTM admission is GATED OFF — zero constituents fetched or persisted; module retained, re-arms only under a widened `BRUTEX_FEED_SCOPE` (ENV_VARS.md §9)]** | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
 | NIFTY-futures series alias (LAKE tooling — NO LONGER an ENGINE series, DEC-ENGINE-SPOT-ONLY-001 #1790) | **`NSE-NIFTY-FUT`** (symbol_id 4, append-only registry row) — the ONE pinned futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolvable by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the Stage-1A machinery hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias. **ENGINE-RETIRED (DEC-ENGINE-SPOT-ONLY-001):** `is_engine_sweep_symbol` refuses it — the alias + resolver + loader survive ONLY as lake/REFERENCE_ONLY tooling below the scope gate (reachable via the loud `--allow-out-of-scope` research escape or recorded-work forensics), never a default engine series | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
