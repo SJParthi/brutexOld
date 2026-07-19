@@ -2399,6 +2399,25 @@ class TestScanScopeGate:
         assert report.scope_excluded == 1
         assert report.to_dict()["scope_excluded"] == 1
 
+    def test_wet_run_report_carries_the_scan_scope_excluded_count(self, tmp_path: Path) -> None:
+        """The WET runner's report carries ``plan.scan.scope_excluded`` — the
+
+        value the Telegram scope clause + the CLI wet summary render. Pinned
+        NONZERO through :func:`run_greeks_backfill` (the dry twin above cannot
+        kill a ``scope_excluded=0`` mutant at the wet constructor)."""
+        from brutex.config.feed_scope import resolve_read_scope
+
+        _write_month(tmp_path, "NSE-NIFTY-25Jan24-21000-CE", 2024, 1, [None])
+        _write_month(tmp_path, "NSE-RELIANCE-25Jan24-2900-CE", 2024, 1, [None])
+        scan = scan_stale_greeks_targets(tmp_path, rate_source=_RATE, scope=resolve_read_scope())
+        plan = plan_greeks_backfill(scan, rate_source=_RATE, force=False, expired_only=False)
+        report = run_greeks_backfill(
+            tmp_path, plan=plan, rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+        )
+        assert report.dry_run is False and report.enriched == 1
+        assert report.scope_excluded == 1  # the RELIANCE contract, carried wet
+        assert report.to_dict()["scope_excluded"] == 1
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Runner — cooperative operator cancel (DEC-JOB-CANCEL-CONTROL-001)
