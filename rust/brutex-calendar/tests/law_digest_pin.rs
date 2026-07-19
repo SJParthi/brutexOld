@@ -36,7 +36,13 @@ const PINNED_LAW_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "brutex/calendars/observed_sessions.py",
-        "123f9b9aa263c947b5dd4062162e89e8a37bfd4b7a217c44a5537830f2a2b9c1",
+        // Re-pinned 2026-07-19 after main's lap-8 fold (ace41c7, PR #1654 —
+        // the #1579-class overlay-loader inode/bounded-read hardening) merged
+        // forward: LOADER I/O-tier change only (bounded regular-file-only
+        // sidecar read + oversize/UTF-8/RecursionError belt); the converted
+        // parse/validation + classify laws are byte-untouched, and the
+        // regenerated corpus was BYTE-IDENTICAL (31 observed cases unchanged).
+        "7322897cab72d20c6c26b8c0f529aa9eb7c8dd09bf10c324978312808ff4b34e",
     ),
 ];
 
