@@ -296,8 +296,14 @@ class TestCheckBrutexLakeWheelSourceDigest:
         assert result.status == "SKIP"
 
     def test_warn_when_wheel_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The doctor-daily hermetic-env arm's digest twin.
+        # The doctor-daily hermetic-env arm's digest twin. BOTH keys are
+        # None-ed: the digest stage imports the compiled submodule directly,
+        # and an earlier test in the session may have cached the REAL
+        # `brutex_lake._brutex_lake` in sys.modules (importlib returns the
+        # cached entry without touching the None-ed parent — a test-order
+        # trap caught by the discovery-gate combined run).
         monkeypatch.setitem(sys.modules, "brutex_lake", None)
+        monkeypatch.setitem(sys.modules, "brutex_lake._brutex_lake", None)
         result = check_brutex_lake_wheel_source_digest(env={})
         assert result.status == "WARN"
         assert "brutex_lake wheel not importable" in result.detail
@@ -403,8 +409,10 @@ class TestBrutexLakeAggregation:
     ) -> None:
         # The doctor-daily law end-to-end: an absent OPTIONAL wheel WARNs
         # both lake stages and the doctor still exits 0 (advisory, never
-        # fatal) with the ⚠️ rows rendered.
+        # fatal) with the ⚠️ rows rendered. Both keys None-ed (the
+        # cached-submodule test-order trap — see the digest WARN test).
         monkeypatch.setitem(sys.modules, "brutex_lake", None)
+        monkeypatch.setitem(sys.modules, "brutex_lake._brutex_lake", None)
         rc = main(
             audit_dir=tmp_path / "no_audit",
             runtime_file=tmp_path / "no_runtime.json",
