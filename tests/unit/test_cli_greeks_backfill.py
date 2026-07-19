@@ -22,6 +22,7 @@ import pytest
 pytest.importorskip("trading_core", reason="the backfill module needs the trading_core wheel")
 
 from brutex.cli import EXIT_OK, EXIT_USER_ERROR, main
+from brutex.config.feed_scope import resolve_read_scope
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_backfill import (
     BACKFILL_BATCH_ENV,
@@ -231,6 +232,14 @@ class TestDryRun:
         assert ran == [] and emitted == []  # INERT: no runner, no telegram
         assert captured["scan_kwargs"]["limit"] == 2
         assert captured["scan_lake_root"] == lake
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): this production entry
+        # threads the read-union scope into the scan. The scanner's bare
+        # ``scope=None`` arm is deliberately FAIL-OPEN legacy enumeration, so
+        # a dropped kwarg here would silently re-widen the bulk backfill to
+        # re-probe every scoped-out stored stock contract — this pin is the
+        # wiring tooth (the dashboard-route / enrich-greeks / doctor siblings
+        # each carry the same one).
+        assert captured["scan_kwargs"]["scope"] == resolve_read_scope()
 
     def test_unfixable_census_is_printed_loudly(
         self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -263,6 +272,38 @@ class TestDryRun:
         assert "2 unfixable" in out  # the plan-line census
         assert "2 contract(s) UNFIXABLE" in err  # the loud stderr repair note
         assert "2 contract(s) UNFIXABLE" in out  # the dry-run note clause
+
+    def test_scope_excluded_census_is_printed_on_stderr(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): a scope-gated scan's
+
+        exclusion count reaches this entry's EMIT-ON-NONZERO stderr census —
+        dropping the ``_print_greeks_scope_excluded("greeks-backfill", …)``
+        call would leave a stock-bearing lake's bulk backfill silently
+        wordless about the contracts the scope gated out of targeting."""
+        gated_scan = BackfillScan(targets=(_TARGET,), stale_v1=1, files_probed=1, scope_excluded=3)
+        gated_plan = BackfillPlan(
+            backfill_id="d" * 64,
+            targets=(_TARGET,),
+            scan=gated_scan,
+            force=False,
+            expired_only=False,
+        )
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.scan_stale_greeks_targets",
+            lambda *a, **k: gated_scan,
+        )
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.plan_greeks_backfill",
+            lambda *a, **k: gated_plan,
+        )
+        assert main(["greeks-backfill", "--dry-run"]) == EXIT_OK
+        err = capsys.readouterr().err
+        assert (
+            "greeks-backfill — 3 stored contract(s) excluded by scope "
+            "(DEC-UNIVERSE-INDEX-ONLY-001)" in err
+        )
 
 
 class TestWetRun:
