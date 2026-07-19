@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-19 (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #1960,
+_Last updated: 2026-07-19 (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #1964,
 branch `claude/rust-sweep-ops` — ADR-0020 slice T15, the FINAL landed
 DEFAULT-OFF sweep-ops conversion MILESTONE (all 6 slices complete): the NEW
 standalone `rust/brutex-sweep-ops` crate + the default-OFF
@@ -44,7 +44,7 @@ follow-up DEC-SWEEP-OPS-RUST-FLIP-001 (a stacked PR with its own DEC).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; one new env var `BRUTEX_SWEEP_OPS_RUST` (default OFF). This header
 carries the pointer, never the story — the full record lives in the §1
-Active-branch blurb + MIGRATION.md #1960.)
+Active-branch blurb + MIGRATION.md #1964.)
 Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
@@ -3659,8 +3659,8 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-sweep-ops` (**DEC-RUST-SWEEP-OPS-001,
-  MIGRATION.md #1960** — ADR-0020 slice T15, the FINAL landed DEFAULT-OFF sweep-ops
-  conversion MILESTONE (all 6 slices complete; entry number #1960 PROVISIONAL —
+  MIGRATION.md #1964** — ADR-0020 slice T15, the FINAL landed DEFAULT-OFF sweep-ops
+  conversion MILESTONE (all 6 slices complete; entry number #1964 PROVISIONAL —
   renumber-at-landing per DEC-LEDGER-RENUMBER-001, above the live-main ceiling #1959):
   the NEW standalone `rust/brutex-sweep-ops` crate (pyo3 0.29 abi3-py312, maturin mixed
   layout, committed Cargo.lock + `--locked`, `catch_unwind` panic→`RuntimeError` at the
@@ -3708,7 +3708,7 @@ hostile-review pass._
   data-rust-parity.yml shape). Ships INERT. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes; one new env var
   `BRUTEX_SWEEP_OPS_RUST` (default OFF); the per-item record lives in this blurb +
-  MIGRATION.md #1960 — this header carries the pointer, never the story.)
+  MIGRATION.md #1964 — this header carries the pointer, never the story.)
   Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -11104,7 +11104,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-sweep-ops`
-  (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #1960 — ADR-0020 slice T15, the FINAL
+  (DEC-RUST-SWEEP-OPS-001, MIGRATION.md #1964 — ADR-0020 slice T15, the FINAL
   landed DEFAULT-OFF sweep-ops conversion MILESTONE (all 6 slices complete):
   the NEW standalone `rust/brutex-sweep-ops` crate + the default-OFF
   `BRUTEX_SWEEP_OPS_RUST` facade `brutex/engine/sweep_ops_rust.py` routing 27
@@ -11117,7 +11117,7 @@ hostile-review pass._
   rehearsal 19/19 + parity 81; ships INERT — the default flip + oracle deletion
   is the NAMED follow-up DEC-SWEEP-OPS-RUST-FLIP-001 (stacked PR, own DEC);
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1960 for the full blurb)
+  see §1 + MIGRATION.md #1964 for the full blurb)
   Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
