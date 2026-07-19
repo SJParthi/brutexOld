@@ -360,7 +360,12 @@ keep-first lake — the window defers as the streak-exempt
 `TODAY_INCOMPLETE` and lands at the NEXT nightly, whose window no longer
 covers that day (the gate is covers-today-only, so the settled shorter
 session stores then). The halt day's bars are deferred exactly one
-nightly, never lost — the disclosed correct-or-absent trade-off.
+nightly, never lost — the disclosed correct-or-absent trade-off. Two
+edges: a same-day re-pull after close but before vendor settle still
+covers-today and defers again (the nightly cadence is what bounds it to
+one deferral); and once the shorter halt session is a past date, the
+completeness-gap/trailing-truncation detectors (#1794) may flag it —
+the stored bars are kept, only the ledger status churns.
 
 ## 8. ▶ Pull F&O — the manual fno-only sibling (round-6 two-button split)
 
