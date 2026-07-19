@@ -228,7 +228,13 @@ class TestFlagOffNeverTouchesCrate:
 
         class _Bomb(types.ModuleType):
             def __getattr__(self, name: str) -> object:  # pragma: no cover
-                raise AssertionError("flag-OFF touched brutex_ops")
+                # RuntimeError, deliberately: AttributeError here would be
+                # ordinary __getattr__ fallback semantics (a silently defused
+                # bomb), and AssertionError in a special method trips CodeQL
+                # py/non-standard-exception-raised-in-special-method. Teeth
+                # are identical — the OFF path performs no crate touch, so
+                # ANY raise from here propagates and fails the test.
+                raise RuntimeError("flag-OFF touched brutex_ops")
 
         monkeypatch.setitem(sys.modules, "brutex_ops", _Bomb("brutex_ops"))
         assert render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session()) == (
