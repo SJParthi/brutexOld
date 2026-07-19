@@ -128,6 +128,26 @@ else
   fi
 fi
 
+# ────────── 6a2. brutex_lake wheel (optional) ──────────
+# DEC-BRUTEX-LAKE-BOX-WHEEL-001: the default-OFF data-lake Rust seams'
+# crate (ADR-0020). OPTIONAL — nothing imports it at module scope and every
+# BRUTEX_LAKE_RUST_* seam is default-OFF (each facade degrades to the Python
+# law without it), so a build failure WARNS but never aborts bootstrap.
+# COST: a cold build compiles the rev-pinned polars graph from source —
+# minutes of wall time and ~12 GB of rust/brutex-lake/target/ disk.
+_step "Step 6a2/7 — build + install brutex_lake Rust extension (optional; cold build compiles the pinned polars graph — minutes + ~12 GB target/)"
+if python -c "import brutex_lake" 2>/dev/null; then
+  _ok "brutex_lake already importable"
+else
+  pip install -q maturin
+  ( cd rust/brutex-lake && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import brutex_lake" 2>/dev/null; then
+    _ok "brutex_lake built + installed via maturin"
+  else
+    _warn "brutex_lake build failed — OPTIONAL kernel (the BRUTEX_LAKE_RUST_* seams are default-OFF; every lake facade degrades to the Python law)"
+  fi
+fi
+
 # ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
 # DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
 # (.pre-commit-config.yaml) actually fire — including the new pre-push

@@ -103,6 +103,12 @@ run-raw: preflight
 		{ cd rust/brutex-feed && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
 			|| echo "==> brutex_feed build failed — OPTIONAL kernel (BRUTEX_FEED_RUST is default-OFF; the feed degrades to the Python oracle)"; \
 	}
+	@$(VPY) -c "import brutex_lake" 2>/dev/null || { \
+		echo "==> brutex_lake kernel not importable — building it (optional; DEC-BRUTEX-LAKE-BOX-WHEEL-001; a cold build compiles the pinned polars graph — minutes + ~12 GB target/)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-lake && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_lake build failed — OPTIONAL kernel (the BRUTEX_LAKE_RUST_* seams are default-OFF; every lake facade degrades to the Python law)"; \
+	}
 	$(VPY) -m brutex run
 
 fmt:
