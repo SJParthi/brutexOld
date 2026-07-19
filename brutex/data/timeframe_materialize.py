@@ -1025,10 +1025,24 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     scaled 1m spike is dropped-and-counted before it can poison the derived
     bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
     object-identical (zero-copy); clean lakes stay byte-identical.
+
+    Wave-D seam (ADR-0020 §6, ``BRUTEX_LAKE_WAVED_RUST`` — DEFAULT OFF): when
+    the flag is ON, the COLLECT body (scan → rename/select/sort → the two
+    gates → the screen) routes through
+    :func:`brutex.data.lake_rust_waved.read_1m_via_rust` with the verbatim
+    Python body below as the LIVE parity oracle — every guard / degrade /
+    burn-in-mismatch path serves it, so read frames never depend on the wheel
+    being present or correct, and a genuine gate refusal keeps its exact
+    typed error + message bytes (the facade's degrade-to-oracle law). The
+    months / whole-tree / empty-partition SOURCE DECISION — with its pinned
+    raises — runs BEFORE the seam in ``_resolve_source``, shared verbatim by
+    both arms. Flag OFF (the default) never calls the facade routing
+    function and never imports the crate (spy-pinned).
     """
     import polars as pl
 
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
+    from brutex.data.lake_rust_waved import lake_rust_waved_enabled, read_1m_via_rust
     from brutex.data.price_sanity import (
         validate_frame_price_sanity,
         validate_frame_ts_datetime_range,
@@ -1038,7 +1052,7 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     if with_open_interest:
         columns = (*columns, "open_interest")
 
-    def _read() -> pl.DataFrame:
+    def _resolve_source() -> str | list[str]:
         base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         if months is not None:
             # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
@@ -1072,6 +1086,9 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
                 "returned no data for this symbol (windows settled EMPTY), "
                 "there is nothing to derive — no action needed"
             )
+        return source
+
+    def _collect(source: str | list[str]) -> pl.DataFrame:
         # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
         # OPTION contract's month files may mix the raw 7-column and the
         # Greeks-enriched 17-column shape (plan §15.3); only the base
@@ -1110,6 +1127,28 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         if bad_tick_screen_enabled():
             frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
         return frame
+
+    def _read() -> pl.DataFrame:
+        source = _resolve_source()
+        if lake_rust_waved_enabled():
+            # The Wave-D seam (ADR-0020 §6 — see the builder docstring): the
+            # collect body routes through the crate with `_collect` as the
+            # live parity oracle. The source decision above already ran (its
+            # raises are shared by both arms); the months arm passes the
+            # explicit file list, the whole-tree arm passes the partition
+            # dir (the crate walks exact paths — the glob=False law holds
+            # by construction).
+            base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
+            context = f"{exchange}/{segment}/{symbol}/1minute"
+            return read_1m_via_rust(
+                files=None if isinstance(source, str) else source,
+                tree_root=base.as_posix() if isinstance(source, str) else None,
+                with_open_interest=with_open_interest,
+                screen_enabled=bad_tick_screen_enabled(),
+                warn_source=f"prebuild:{context}",
+                oracle=lambda: _collect(source),
+            )
+        return _collect(source)
 
     return _read
 

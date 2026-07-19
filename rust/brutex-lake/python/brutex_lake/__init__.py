@@ -25,7 +25,11 @@ DEC-LAKE-RUST-STATS-MANIFEST-001) — the stats-shard canonical-JSON render
 (``render_stats_shard_json``); and ``brutex/data/window_ledger_rust.py``
 (ADR-0020 Wave C-3 / G8, DEC-LAKE-RUST-WINDOW-LEDGER-001) — the
 window-ledger status + merge-key date laws (``classify_window_status`` /
-``date_isoformat``). Nothing else in ``brutex/`` imports this package, and
+``date_isoformat``); and ``brutex/data/lake_rust_waved.py`` (ADR-0020
+Wave-D — the heal/scan/read conversion behind ``BRUTEX_LAKE_WAVED_RUST``;
+W-1 ships the timeframe_materialize read core ``waved_read_1m_ipc`` + the
+``waved_has_stored_1m_bars`` / ``waved_month_partition_files`` drift-pinned
+twins). Nothing else in ``brutex/`` imports this package, and
 every facade treats an absent/stale install as "stay on the Python law"
 (one loud WARN), so a missing wheel can never break a lake write, a derived
 resample, a stats shard, or a ledger record.
@@ -56,6 +60,9 @@ from brutex_lake._brutex_lake import (
     render_stats_shard_json,
     resample_1m_ipc,
     resample_all_ipc,
+    waved_has_stored_1m_bars,
+    waved_month_partition_files,
+    waved_read_1m_ipc,
 )
 
 __all__ = [
@@ -73,4 +80,7 @@ __all__ = [
     "render_stats_shard_json",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "waved_has_stored_1m_bars",
+    "waved_month_partition_files",
+    "waved_read_1m_ipc",
 ]

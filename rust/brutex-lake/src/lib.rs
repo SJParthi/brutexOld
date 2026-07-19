@@ -125,6 +125,10 @@ pub mod resample;
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
 pub mod stats_shard;
 pub mod window_ledger;
+// ADR-0020 Wave-D (the `BRUTEX_LAKE_WAVED_RUST` conversion — facade
+// `brutex/data/lake_rust_waved.py`): the heal/scan/read surface, one module
+// file per conversion step under src/waved/. ADDITIVE (§4.1 merge law).
+pub mod waved;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -566,6 +570,16 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // which is irrelevant to a polars-free law).
     m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
     m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
+    // ADR-0020 Wave-D W-1 (`BRUTEX_LAKE_WAVED_RUST` — the timeframe_materialize
+    // read core + drift-pinned twins). Appended AFTER every earlier wave's
+    // registrations, never reordering them (§4.1 additive merge law); the
+    // W-2..W-4 waved steps append below these in their own PRs.
+    m.add_function(wrap_pyfunction!(waved::read::waved_read_1m_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(waved::read::waved_has_stored_1m_bars, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        waved::read::waved_month_partition_files,
+        m
+    )?)?;
     Ok(())
 }
 
