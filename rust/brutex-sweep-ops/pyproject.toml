@@ -1,0 +1,41 @@
+# Maturin build config for brutex-sweep-ops (DEC-RUST-SWEEP-OPS-001).
+#
+# Mixed Python + Rust layout (the brutex-feed / trading-core shape): the
+# cdylib ships as the private submodule `brutex_sweep_ops._brutex_sweep_ops`;
+# `python/brutex_sweep_ops/__init__.py` re-exports it behind the stale-wheel
+# symbol handshake. `features = ["python"]` turns on the optional pyo3
+# dependency (extension-module + abi3-py312) so the wheel includes the
+# binding.
+#
+# DELIBERATELY not installed by the main CI test job: the Python facade
+# (`brutex/engine/sweep_ops_rust.py`) is default-OFF behind
+# `BRUTEX_SWEEP_OPS_RUST` and degrades loudly to the retained Python oracles
+# when the crate is absent (the brutex-lake / brutex-feed posture).
+#
+# https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-sweep-ops"
+version = "0.1.0"
+description = "Sweep run-core/ops conversion crate for BruteX (DEC-RUST-SWEEP-OPS-001)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "brutex_sweep_ops._brutex_sweep_ops"
+features = ["python"]
+strip = true

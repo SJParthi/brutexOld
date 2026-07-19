@@ -2084,3 +2084,59 @@ def test_g07_stamp_failure_is_fail_soft_on_both_paths(
     with capture_logs() as logs:
         cw2.run_and_write_from_manifest(tmp_path / "b", bars_for=bars_for2)
     assert [e for e in logs if e["event"] == "cascade_wire.stamp_failed"]
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the two run-core pure folds
+    (DEC-RUST-SWEEP-OPS-001 slice 6).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    behavior-identical to the flag-OFF Python oracles (which every OTHER
+    test in this file drives) — the #1712 run-core context manager, its
+    flock/keep-awake/flight-recorder/G12 composition and every durable
+    write stay Python on both arms; only the D-9 stride + R45 budget
+    folds route.
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _drive() -> list[int]:
+        strides = [tuple_record_stride(t) for t in (-1, 0, 1, 9_999, 10_001, 25_000, 100_000)]
+        budgets = [
+            per_tuple_diffcheck_budget(k, total)
+            for k, total in ((0, 10), (-3, 10), (7, 3), (2, 5), (200, 1), (9, 0))
+        ]
+        return strides + budgets
+
+    def test_flag_on_matches_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        off = self._drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert off == [1, 1, 1, 1, 2, 3, 10, 0, 0, 2, 1, 200, 9]

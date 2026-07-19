@@ -1487,3 +1487,85 @@ def test_apriori_census_k1_target_level_omits_frequent() -> None:
     assert census[0]["candidates"] == 3
     assert census[0]["cell"] == "c1"
     assert "frequent" not in census[0]
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the join+prune level fold (DEC-RUST-SWEEP-OPS-001
+    slice 5).
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by patching
+    the facade's ``importlib`` binding. Flag ON must be behavior-identical to
+    the flag-OFF Python law (which every OTHER test in this file drives) — the
+    frontier build, hit counting, census, shard filter and the SETTLED
+    ``_budget_check`` stay Python on both arms; only the pure join fold routes
+    (with the strided in-loop trip as a returned VALUE, never an Err).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _drive() -> list[list[int]]:
+        bar_bits = _synthetic_bar_bits(seed=11, n=64)
+        return [
+            generate_apriori_candidates(bar_bits, condition_bits=_BITS, k=k, min_hits=4)
+            for k in (1, 2, 3, 4)
+        ]
+
+    def test_flag_on_matches_flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        off = self._drive()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = self._drive()
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert any(off)  # anti-vacuous: at least one level emitted candidates
+
+    def test_budget_trip_message_bytes_match_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The settled breaker raises IDENTICAL ``SweepAprioriBudgetError`` bytes
+        either arm (the trip count is the routed fold's settled |C_k|)."""
+        bar_bits = _synthetic_bar_bits(seed=11, n=64)
+
+        def _message() -> str:
+            with pytest.raises(SweepAprioriBudgetError) as exc:
+                generate_apriori_candidates(
+                    bar_bits,
+                    condition_bits=_BITS,
+                    k=2,
+                    min_hits=1,
+                    max_mask_bars=1,
+                    cell_label="routing-cell",
+                )
+            return str(exc.value)
+
+        off = _message()
+        self._arm_fake_crate(monkeypatch)
+        try:
+            on = _message()
+        finally:
+            self._reset_facade()
+        assert on == off
+        assert "routing-cell" in on

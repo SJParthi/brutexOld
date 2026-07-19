@@ -24,6 +24,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+# DEC-RUST-SWEEP-OPS-001 (slice 1): the default-OFF Rust routing facade. The
+# wired fragment gates on `sweep_ops_rust_enabled()` FIRST so the flag-OFF
+# default path is byte-identical (including attribute-access order); the
+# verbatim Python law below is the live oracle. This law feeds RUN IDENTITY
+# (`grid_identity` / `tuple_cache_key` / `_tuple_digest`) — the facade's
+# burn-in + exact-type gates are the anti-drift teeth.
+from brutex.engine.sweep_ops_rust import routed_gate_fragment, sweep_ops_rust_enabled
 from brutex.ranking import OverfitGateConfig
 
 
@@ -91,6 +98,30 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     ``tuple_cache_key`` goldens are unmoved — every golden grid is at gate
     defaults). All legs flattened to JSON-native scalars.
     """
+    if not sweep_ops_rust_enabled():
+        return _gate_config_fragment_python(grid)
+    overfit = grid.overfit
+    overfit_values = (
+        None
+        if overfit is None
+        else (
+            overfit.dsr_min,
+            overfit.weight,
+            overfit.default_skew,
+            overfit.default_excess_kurtosis,
+        )
+    )
+    return routed_gate_fragment(
+        overfit_values,
+        bool(grid.stage3_enable),
+        (grid.stage3_top_k, grid.stage3_max_fevals, grid.stage3_max_restarts),
+        python_law=lambda: _gate_config_fragment_python(grid),
+    )
+
+
+def _gate_config_fragment_python(grid: _GateConfigInput) -> dict[str, Any] | None:
+    """The verbatim Python fragment law — the live parity oracle
+    (DEC-RUST-SWEEP-OPS-001; retained until the final slice's default flip)."""
     fragment: dict[str, Any] = {}
     overfit = grid.overfit
     if overfit is not None:

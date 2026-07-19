@@ -240,3 +240,104 @@ def test_c6_exit_status_running_default_probe_self_alive() -> None:
     """The default probe (unpatched) confirms our own live pid as running."""
     payload = {"exit_status": {"state": "running", "pid": os.getpid()}}
     assert exit_status_running(payload) is True
+
+
+# ────────── DEC-RUST-SWEEP-OPS-001 — slice-1b routing (wheel-free) ──────────
+
+
+class TestSweepOpsRouting:
+    """Flag-ON routing parity for the `progress_verdict` decision tail.
+
+    Wheel-free: the shared behavior-correct FAKE crate is injected by
+    patching the facade's ``importlib`` binding. Flag ON must be
+    value-identical to the flag-OFF Python law (which every OTHER test in
+    this file drives) — including the injected-probe call count (only a
+    running=True payload is ever probed) and the fail-closed UNKNOWN arm
+    (which never reaches the routed tail).
+    """
+
+    @staticmethod
+    def _arm_fake_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from brutex.engine import sweep_ops_rust
+
+        from tests.fakes.sweep_ops_crate import build_fake_sweep_ops_crate
+
+        # The shared §11-COMMON builder carries EVERY `_CRATE_API` symbol —
+        # a partial fake would latch `crate_stale` and turn this class vacuous.
+        crate = build_fake_sweep_ops_crate(version="fake")
+        monkeypatch.setattr(
+            sweep_ops_rust,
+            "importlib",
+            SimpleNamespace(import_module=lambda name: crate),
+        )
+        monkeypatch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+
+    @staticmethod
+    def _reset_facade() -> None:
+        from brutex.engine.sweep_ops_rust import reset_sweep_ops_rust_for_tests
+
+        reset_sweep_ops_rust_for_tests()
+
+    def test_flag_on_matches_python_law_all_verdicts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
+
+        payload = {"running": True, "wall_time_utc": 1000.0, "pid": 4242}
+
+        def cases() -> list[RunVerdict]:
+            return [
+                progress_verdict(payload, now_wall=1100.0, pid_alive=lambda pid: True),
+                progress_verdict(payload, now_wall=1601.0, pid_alive=lambda pid: True),
+                progress_verdict(payload, now_wall=1100.0, pid_alive=lambda pid: False),
+                progress_verdict(  # running=False — the pre-tail arm
+                    {"running": False, "wall_time_utc": 1000.0, "pid": 4242},
+                    now_wall=1100.0,
+                ),
+                progress_verdict({}, now_wall=1100.0),  # legacy → UNKNOWN, pre-tail
+            ]
+
+        off = cases()
+        assert off == [
+            RunVerdict.RUNNING,
+            RunVerdict.STALE,
+            RunVerdict.NOT_RUNNING,
+            RunVerdict.NOT_RUNNING,
+            RunVerdict.UNKNOWN,
+        ]
+        self._arm_fake_crate(monkeypatch)
+        try:
+            assert cases() == off
+        finally:
+            self._reset_facade()
+
+    def test_flag_on_probe_called_only_for_running_payloads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
+
+        self._arm_fake_crate(monkeypatch)
+        try:
+            probes: list[int] = []
+
+            def probe(pid: int) -> bool:
+                probes.append(pid)
+                return False
+
+            verdict = progress_verdict(
+                {"running": False, "wall_time_utc": 1000.0, "pid": 4242},
+                now_wall=1100.0,
+                pid_alive=probe,
+            )
+            assert verdict is RunVerdict.NOT_RUNNING
+            assert probes == []  # a non-running payload is never probed
+            verdict = progress_verdict(
+                {"running": True, "wall_time_utc": 1000.0, "pid": 4242},
+                now_wall=1100.0,
+                pid_alive=probe,
+            )
+            assert verdict is RunVerdict.NOT_RUNNING
+            assert probes == [4242]  # probed exactly once
+        finally:
+            self._reset_facade()

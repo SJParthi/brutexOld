@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.config.hardware_envelope import detect_total_ram_bytes
+from brutex.engine.sweep_ops_rust import routed_count_violations, sweep_ops_rust_enabled
 from brutex.engine.sweep_progress import STATE_DONE
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -330,6 +331,42 @@ def _default_rss_probe() -> int:
     return normalized_ru_maxrss_bytes(ru_maxrss=raw, platform=sys.platform)
 
 
+def _count_violations_python(
+    total: int,
+    enumerated: int,
+    evaluated: int,
+    skipped: int,
+    survivors: int,
+    in_flight: int,
+    prev_evaluated: int | None,
+    is_done: bool,
+) -> str:
+    """The verbatim D-9 counter-identity violations fold — the LIVE oracle.
+
+    The DEC-RUST-SWEEP-OPS-001 oracle for ``routed_count_violations``:
+    :meth:`TripwireMonitor._reconcile_counts`'s clause list in its frozen
+    order over the already-read counters (ints only — no float ever enters
+    the detail string), joined with ``"; "``. EMPTY means every identity
+    holds (the caller's clear arm).
+    """
+    violations: list[str] = []
+    if in_flight < 0:
+        violations.append(f"in_flight {in_flight} < 0")
+    if enumerated != total:
+        violations.append(f"snapshot enumerated {enumerated} != armed total {total}")
+    if skipped > evaluated:
+        violations.append(f"skipped {skipped} > evaluated {evaluated} (skipped ⊆ evaluated)")
+    if survivors > evaluated:
+        violations.append(f"survivors {survivors} > evaluated {evaluated}")
+    if evaluated + in_flight > total:
+        violations.append(f"evaluated {evaluated} + in_flight {in_flight} > enumerated {total}")
+    if prev_evaluated is not None and evaluated < prev_evaluated:
+        violations.append(f"evaluated went backwards: {evaluated} < {prev_evaluated}")
+    if is_done and evaluated != total:
+        violations.append(f"run done but evaluated {evaluated} != enumerated {total}")
+    return "; ".join(violations)
+
+
 class TripwireMonitor:
     """The R39 tripwire engine for ONE sweep run (thread-safe, fail-soft, O(1)/tick).
 
@@ -525,39 +562,38 @@ class TripwireMonitor:
     # ── Internals (called under the lock) ─────────────────────────────────
 
     def _reconcile_counts(self, snapshot: SweepProgressSnapshot, in_flight: int) -> None:
-        """Check the D-9 exact counter identities; edge-fire on any violation."""
-        violations: list[str] = []
-        if in_flight < 0:
-            violations.append(f"in_flight {in_flight} < 0")
-        if snapshot.enumerated != self._total:
-            violations.append(
-                f"snapshot enumerated {snapshot.enumerated} != armed total {self._total}"
+        """Check the D-9 exact counter identities; edge-fire on any violation.
+
+        The violations FOLD is the DEC-RUST-SWEEP-OPS-001 routed law
+        (:func:`_count_violations_python` is the LIVE oracle; flag OFF = the
+        verbatim Python fold). Runs inside :meth:`on_progress`'s fail-soft
+        envelope (I-3) — the routed seam itself degrades to the oracle, never
+        a new raise into the sweep.
+        """
+        is_done = snapshot.state == STATE_DONE
+        law_args = (
+            self._total,
+            snapshot.enumerated,
+            snapshot.evaluated,
+            snapshot.skipped,
+            snapshot.survivors,
+            in_flight,
+            self._prev_evaluated,
+            is_done,
+        )
+        if sweep_ops_rust_enabled():
+            detail = routed_count_violations(
+                *law_args, python_law=lambda: _count_violations_python(*law_args)
             )
-        if snapshot.skipped > snapshot.evaluated:
-            violations.append(
-                f"skipped {snapshot.skipped} > evaluated {snapshot.evaluated} (skipped ⊆ evaluated)"
-            )
-        if snapshot.survivors > snapshot.evaluated:
-            violations.append(f"survivors {snapshot.survivors} > evaluated {snapshot.evaluated}")
-        if snapshot.evaluated + in_flight > self._total:
-            violations.append(
-                f"evaluated {snapshot.evaluated} + in_flight {in_flight} > enumerated {self._total}"
-            )
-        if self._prev_evaluated is not None and snapshot.evaluated < self._prev_evaluated:
-            violations.append(
-                f"evaluated went backwards: {snapshot.evaluated} < {self._prev_evaluated}"
-            )
-        if snapshot.state == STATE_DONE and snapshot.evaluated != self._total:
-            violations.append(
-                f"run done but evaluated {snapshot.evaluated} != enumerated {self._total}"
-            )
+        else:
+            detail = _count_violations_python(*law_args)
         self._prev_evaluated = snapshot.evaluated
-        if violations:
+        if detail:
             self._edge_fire(
                 "count_reconciliation",
                 TripwireKind.COUNT_RECONCILIATION,
                 SEVERITY_CRITICAL,
-                "; ".join(violations),
+                detail,
                 {
                     "enumerated": float(self._total),
                     "evaluated": float(snapshot.evaluated),

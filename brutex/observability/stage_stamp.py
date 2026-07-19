@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Final
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.sweep_ops_rust import routed_stamp_verdict, sweep_ops_rust_enabled
 from brutex.models import BruteXError
 from brutex.observability.flight_recorder import FlightRecorder
 
@@ -209,6 +210,37 @@ def write_stage_stamp(
     return dest
 
 
+def _stamp_verdict_python(
+    recomputed: str,
+    content_hash: str,
+    stage: str,
+    expected_stage: str,
+    run_id: str,
+    expected_run_id: str | None,
+    stamped_snapshot: str | None,
+    expected_snapshot: str | None,
+) -> str:
+    """The verbatim validate mismatch decision — ``"ok"`` / ``"hash_mismatch"``.
+
+    The LIVE parity oracle for the DEC-RUST-SWEEP-OPS-001 routed law
+    (``routed_stamp_verdict``): :func:`validate_stage_stamp`'s mismatch
+    boolean, extracted over the already-read primitives (the artifact hash +
+    the parsed stamp fields — the I/O-derived MISSING/MALFORMED verdicts are
+    decided by the caller BEFORE this law runs).
+    """
+    mismatch = (
+        recomputed != content_hash
+        or stage != expected_stage
+        or (expected_run_id is not None and run_id != expected_run_id)
+        or (
+            expected_snapshot is not None
+            and stamped_snapshot is not None
+            and stamped_snapshot != expected_snapshot
+        )
+    )
+    return "hash_mismatch" if mismatch else "ok"
+
+
 def _parse_stamp(text: str, *, source: Path) -> StageStamp:
     """Parse stamp JSON *text* strictly — :class:`StageStampError` on any defect."""
     try:
@@ -326,17 +358,23 @@ def validate_stage_stamp(
         return (StampVerdict.MALFORMED, None)
     recomputed = content_hash_of(artifact)
     stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY)
-    mismatch = (
-        recomputed != stamp.content_hash
-        or stamp.stage != expected_stage
-        or (expected_run_id is not None and stamp.run_id != expected_run_id)
-        or (
-            expected_snapshot_hash is not None
-            and stamped_snapshot is not None
-            and stamped_snapshot != expected_snapshot_hash
-        )
+    verdict_args = (
+        recomputed,
+        stamp.content_hash,
+        stamp.stage,
+        expected_stage,
+        stamp.run_id,
+        expected_run_id,
+        stamped_snapshot,
+        expected_snapshot_hash,
     )
-    if mismatch:
+    if sweep_ops_rust_enabled():
+        token = routed_stamp_verdict(
+            *verdict_args, python_law=lambda: _stamp_verdict_python(*verdict_args)
+        )
+    else:
+        token = _stamp_verdict_python(*verdict_args)
+    if token == "hash_mismatch":  # noqa: S105 # nosec B105 — verdict, not a secret
         return (StampVerdict.HASH_MISMATCH, stamp)
     return (StampVerdict.OK, stamp)
 

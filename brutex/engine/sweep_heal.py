@@ -64,6 +64,10 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.engine.sweep_ops_rust import (
+    routed_heal_mismatch,
+    sweep_ops_rust_enabled,
+)
 from brutex.engine.sweep_verify import (
     QUARANTINE_DIRNAME,
     RecordedContext,
@@ -464,24 +468,36 @@ def assess_heal(
         if src_hashes == entry.artifact_hashes:
             actions.append(HealAction(rel_store=entry.rel_store, decision="move_trio"))
             continue
+        # MISMATCH TAIL — dest hashes are computed LAZILY (only past the
+        # happy arm); the pure decision may route through the sweep-ops
+        # crate (DEC-RUST-SWEEP-OPS-001 slice 4), the refusal MESSAGE and
+        # the destructive move stay Python.
         dest_store = qdir / entry.rel_store
         dest_hashes = {
             suffix: _sha256_or_none(dest_store.with_name(dest_store.name + suffix))
             for suffix in ARTIFACT_SUFFIXES
         }
-        if all(value is None for value in src_hashes.values()) and dest_hashes == (
-            entry.artifact_hashes
-        ):
+        src_values = [src_hashes[suffix] for suffix in ARTIFACT_SUFFIXES]
+        plan_values = [entry.artifact_hashes[suffix] for suffix in ARTIFACT_SUFFIXES]
+        dest_values = [dest_hashes[suffix] for suffix in ARTIFACT_SUFFIXES]
+        if sweep_ops_rust_enabled():
+
+            def _oracle(
+                src: list[str | None] = src_values,
+                plan: list[str | None] = plan_values,
+                dest: list[str | None] = dest_values,
+            ) -> str:
+                return _mismatch_decision_python(src, plan, dest)
+
+            decision = routed_heal_mismatch(
+                src_values, plan_values, dest_values, python_law=_oracle
+            )
+        else:
+            decision = _mismatch_decision_python(src_values, plan_values, dest_values)
+        if decision == "already_quarantined":
             actions.append(HealAction(rel_store=entry.rel_store, decision="already_quarantined"))
             continue
-        if (
-            src_hashes[""] is None
-            and all(
-                src_hashes[suffix] in (None, entry.artifact_hashes[suffix])
-                for suffix in ARTIFACT_SUFFIXES[1:]
-            )
-            and any(src_hashes[suffix] is not None for suffix in ARTIFACT_SUFFIXES[1:])
-        ):
+        if decision == "complete_partial":
             actions.append(HealAction(rel_store=entry.rel_store, decision="complete_partial"))
             continue
         refusals.append(
@@ -490,6 +506,33 @@ def assess_heal(
             f"re-run sweep-verify --recount --emit-heal-plan (C2)"
         )
     return HealAssessment(refusals=tuple(refusals), actions=tuple(actions))
+
+
+def _mismatch_decision_python(
+    src_values: list[str | None],
+    plan_values: list[str | None],
+    dest_values: list[str | None],
+) -> str:
+    """The pure mismatch-tail decision — the retained Python oracle.
+
+    The verbatim :func:`assess_heal` C2 tail over the ordered
+    :data:`ARTIFACT_SUFFIXES` hash triples (the routed twin is the crate's
+    ``heal_mismatch_decision`` — DEC-RUST-SWEEP-OPS-001 slice 4): a fully
+    moved, plan-matching quarantined trio → ``already_quarantined``; a
+    moved store with only plan-matching sidecar leftovers →
+    ``complete_partial``; anything else → ``refuse`` (the caller owns the
+    refusal message).
+    """
+    if all(value is None for value in src_values) and dest_values == plan_values:
+        return "already_quarantined"
+    sidecar_range = range(1, len(ARTIFACT_SUFFIXES))
+    if (
+        src_values[0] is None
+        and all(src_values[i] in (None, plan_values[i]) for i in sidecar_range)
+        and any(src_values[i] is not None for i in sidecar_range)
+    ):
+        return "complete_partial"
+    return "refuse"
 
 
 # ── Execution (injected FS primitives — the execute_wipe pattern) ───────────
