@@ -450,3 +450,59 @@ def test_probe_sweep_runs_sibling_root_probed(tmp_path: Path) -> None:
     probe = probe_contract_artifacts(results, since_utc=1_000.0)
     assert probe.found == ("run_manifest", "top100")
     assert probe.paths["top100"] == str(sibling_run / "top100.json")
+
+
+# ── DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001 (LANE W3): the default-OFF coarse
+# instrument-scaled SL/TP axis hook on nightly_sweep_kwargs. ──────────────────
+
+
+def test_sltp_scale_default_none_is_byte_identical(tmp_path: Path) -> None:
+    args = _namespace(sl="80", tp="50")
+    base = nightly_sweep_kwargs(
+        args, lake_root=tmp_path, start_default="2020-01-01", end_default="2026-07-17"
+    )
+    hooked = nightly_sweep_kwargs(
+        args,
+        lake_root=tmp_path,
+        start_default="2020-01-01",
+        end_default="2026-07-17",
+        sltp_scale_cells=None,
+    )
+    assert hooked == base
+    assert hooked["sl"] == "80"
+    assert hooked["tp"] == "50"
+
+
+def test_sltp_scale_armed_overrides_exactly_the_two_csvs(tmp_path: Path) -> None:
+    from brutex.engine.stage3_scale import coarse_sltp_cells
+
+    args = _namespace(sl="80", tp="50")
+    base = nightly_sweep_kwargs(
+        args, lake_root=tmp_path, start_default="2020-01-01", end_default="2026-07-17"
+    )
+    armed = nightly_sweep_kwargs(
+        args,
+        lake_root=tmp_path,
+        start_default="2020-01-01",
+        end_default="2026-07-17",
+        sltp_scale_cells=coarse_sltp_cells(15_000),
+    )
+    assert armed["sl"] == "938,1875,3750,7500,15000"
+    assert armed["tp"] == "1876,3750,7500,15000,30000"
+    for key in SWEEP_FORWARDED_KEYS:
+        if key not in ("sl", "tp"):
+            assert armed[key] == base[key]
+    assert set(armed) == set(base)
+
+
+def test_sltp_scale_junk_plan_fails_loud(tmp_path: Path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="non-empty"):
+        nightly_sweep_kwargs(
+            _namespace(sl="80", tp="50"),
+            lake_root=tmp_path,
+            start_default="2020-01-01",
+            end_default="2026-07-17",
+            sltp_scale_cells=(),
+        )

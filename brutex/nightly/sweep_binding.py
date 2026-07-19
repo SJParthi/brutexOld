@@ -46,7 +46,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -161,6 +161,7 @@ def nightly_sweep_kwargs(
     lake_root: Path | None,
     start_default: str,
     end_default: str,
+    sltp_scale_cells: Sequence[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Pure translation: parsed nightly args → the ``cmd_sweep_all`` kwargs.
 
@@ -169,6 +170,21 @@ def nightly_sweep_kwargs(
     (``[2020-01-01, previous IST day]`` — passed in as *start_default* /
     *end_default* so this stays pure). The pinned escape-flag trio is
     STRUCTURALLY absent — even a Namespace carrying them contributes nothing.
+
+    ``sltp_scale_cells`` is the DEFAULT-OFF coarse instrument-scaled SL/TP
+    axis hook (DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001, LANE W3): ``None`` (the
+    default — and whenever the fail-loud
+    :data:`brutex.engine.stage3_scale.NIGHTLY_SCALE_ENV` knob is unset)
+    forwards the parsed ``sl``/``tp`` args BYTE-IDENTICALLY; a derived cell
+    plan (:func:`brutex.engine.stage3_scale.coarse_sltp_cells` — ~5
+    log-spaced (SL, TP) values off the instrument's median daily range)
+    overrides the two CSVs via
+    :func:`brutex.engine.stage3_scale.sltp_cells_csv`. Per-instrument
+    staging = one armed invocation per instrument (the
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 staged precedent — a single
+    ``cmd_sweep_all`` call carries one sl/tp list for ALL its instruments);
+    arming the nightly runner loop itself is an operator flip with its own
+    compute disclosure (MIGRATION.md #1978).
     """
     kwargs: dict[str, Any] = {}
     for key in SWEEP_FORWARDED_KEYS:
@@ -182,6 +198,12 @@ def nightly_sweep_kwargs(
             kwargs[key] = value if value else end_default
         else:
             kwargs[key] = getattr(args, key)
+    if sltp_scale_cells is not None:
+        # Local import — the nightly binding stays wheel-light at import
+        # (stage3_scale pulls the engine grid module only when armed).
+        from brutex.engine.stage3_scale import sltp_cells_csv
+
+        kwargs["sl"], kwargs["tp"] = sltp_cells_csv(sltp_scale_cells)
     return kwargs
 
 
