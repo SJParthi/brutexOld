@@ -11,7 +11,7 @@ must be EXACTLY equal — the value/bytes on success, the SAME exception
 TYPE and FULL ``str`` on failure (the ``Decimal("NaN")`` compare's
 ``InvalidOperation``, the huge-int ``OverflowError`` from ``isfinite`` and
 the ``json.loads`` ``RecursionError`` are RAW escapes — the frozen law —
-so ``BaseException`` is caught on both sides).
+so ``Exception`` is caught on both sides).
 
 Priority targets (the S2D Phase-B divergence-risk roster):
 
@@ -78,13 +78,18 @@ from structlog.testing import capture_logs
 def _outcome(fn: Callable[[], object]) -> tuple[object, ...]:
     """Run *fn* to an outcome: ``("ok", value)`` or ``("exc", type, str)``.
 
-    ``BaseException`` is deliberate — raw-escape parity (the Decimal-NaN
+    Raw-escape parity (the Decimal-NaN
     ``InvalidOperation``, the isfinite ``OverflowError``/``TypeError``,
-    the json ``RecursionError``) IS the property.
+    the json ``RecursionError``) IS the property;
+    ``Exception`` (narrowed from ``BaseException`` at the 2026-07-19 CodeQL
+    round) still captures every frozen raw escape — all are ordinary
+    ``Exception`` subclasses — while ``KeyboardInterrupt``/``SystemExit``
+    and a pyo3 ``PanicException`` now propagate LOUDLY instead of being
+    laundered into a comparable outcome.
     """
     try:
         return ("ok", fn())
-    except BaseException as exc:  # outcome parity is the property
+    except Exception as exc:  # outcome parity is the property
         return ("exc", type(exc), str(exc))
 
 

@@ -10,7 +10,7 @@ the outcomes must be EXACTLY equal — a bit-exact canonicalised payload on
 success (bool-before-int tags + IEEE-754 bit patterns, so ``True`` never
 puns ``1`` and ``-0.0`` never puns ``0.0`` in the equality), the SAME
 exception TYPE and FULL ``str`` on failure (the raw ``JSONDecodeError``
-escapes ARE the frozen law, so ``BaseException`` is caught on both sides).
+escapes ARE the frozen law, so ``Exception`` is caught on both sides).
 
 Oracle copies are verbatim from commit 68bc463a6 (the pre-conversion
 module), adapted ONLY to reference the unchanged type faces
@@ -132,12 +132,17 @@ def _outcome(
 ) -> tuple[object, ...]:
     """Run *fn* to an outcome: ``("ok", canon(value))`` or ``("exc", type, str)``.
 
-    ``BaseException`` is deliberate — raw-escape parity (the frozen law's
-    ``JSONDecodeError`` passthroughs) IS the property.
+    Raw-escape parity (the frozen law's
+    ``JSONDecodeError`` passthroughs) IS the property;
+    ``Exception`` (narrowed from ``BaseException`` at the 2026-07-19 CodeQL
+    round) still captures every frozen raw escape — all are ordinary
+    ``Exception`` subclasses — while ``KeyboardInterrupt``/``SystemExit``
+    and a pyo3 ``PanicException`` now propagate LOUDLY instead of being
+    laundered into a comparable outcome.
     """
     try:
         return ("ok", canon(fn()))
-    except BaseException as exc:  # outcome parity is the property
+    except Exception as exc:  # outcome parity is the property
         return ("exc", type(exc), str(exc))
 
 
@@ -1200,7 +1205,6 @@ class TestMultiDefectConstructionOrder:
 
     def test_raising_rank_fn_propagates_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A raising rank callable escapes the crate pass unwrapped."""
-        import brutex.engine.top100_artifact as mod
 
         def boom(
             candidates: Sequence[Top100Candidate], *, preset: str
@@ -1209,7 +1213,7 @@ class TestMultiDefectConstructionOrder:
 
         candidate = make_candidate(1, fingerprint=fingerprint_seed(1))
         kwargs = self._base_kwargs(candidate)
-        monkeypatch.setattr(mod, "rank_candidates", boom)
+        monkeypatch.setattr("brutex.engine.top100_artifact.rank_candidates", boom)
         with capture_logs():
             got = _outcome(lambda: build_top100(**kwargs))
             want = _outcome(lambda: _oracle_build_top100(**kwargs, rank_fn=boom))

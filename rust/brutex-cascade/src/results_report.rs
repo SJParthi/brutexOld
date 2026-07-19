@@ -59,7 +59,7 @@
 //! `pool PBO=inf` exactly as the Python law did (uncaptured by the frozen
 //! corpus; pinned by a dedicated unit + cargo test instead).
 //!
-//! ## Disclosed divergence envelope (mirrors MIGRATION.md #1972)
+//! ## Disclosed divergence envelope (mirrors MIGRATION.md #1996)
 //!
 //! Each item is loud + corpus-unreachable — non-production shapes only:
 //!

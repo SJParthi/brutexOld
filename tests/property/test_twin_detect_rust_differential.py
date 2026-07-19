@@ -10,7 +10,7 @@ inputs with hostile edits, BOTH sides run to an OUTCOME, and the outcomes
 must be EXACTLY equal — the value on success, the SAME exception TYPE and
 FULL ``str`` on failure (the raw ``TypeError`` escapes — a naive
 timestamp's datetime subtraction, CPython ``re``'s non-string patterns —
-ARE the frozen law, so ``BaseException`` is caught on both sides).
+ARE the frozen law, so ``Exception`` is caught on both sides).
 
 Priority targets (the S2D Phase-B divergence-risk roster):
 
@@ -82,12 +82,17 @@ from tests.fakes.wp4_twin_fixtures import fingerprint_seed, make_captured_trade
 def _outcome(fn: Callable[[], object]) -> tuple[object, ...]:
     """Run *fn* to an outcome: ``("ok", value)`` or ``("exc", type, str)``.
 
-    ``BaseException`` is deliberate — raw-escape parity (the naive-ts
-    ``TypeError``, CPython ``re``'s pattern ``TypeError``) IS the property.
+    Raw-escape parity (the naive-ts
+    ``TypeError``, CPython ``re``'s pattern ``TypeError``) IS the property;
+    ``Exception`` (narrowed from ``BaseException`` at the 2026-07-19 CodeQL
+    round) still captures every frozen raw escape — all are ordinary
+    ``Exception`` subclasses — while ``KeyboardInterrupt``/``SystemExit``
+    and a pyo3 ``PanicException`` now propagate LOUDLY instead of being
+    laundered into a comparable outcome.
     """
     try:
         return ("ok", fn())
-    except BaseException as exc:  # outcome parity is the property
+    except Exception as exc:  # outcome parity is the property
         return ("exc", type(exc), str(exc))
 
 
@@ -234,7 +239,7 @@ def _assert_group_parity(pool: Sequence[TwinCandidate], threshold: object) -> No
         return
     assert live[0] == "ok", f"live diverged: {live!r} vs oracle ok"
     fam, members = cast("tuple[dict[str, str], dict[str, tuple[str, ...]]]", oracle[1])
-    families = cast("TwinFamilies", live[1])
+    families = cast(TwinFamilies, live[1])
     assert list(families.family_by_run_id.items()) == list(fam.items())
     assert list(families.members_by_family.items()) == list(members.items())
 
@@ -602,8 +607,8 @@ class TestGroupDifferential:
         original = _outcome(lambda: group_twins(pool, jaccard_threshold=threshold))  # type: ignore[arg-type]
         reshuffled = _outcome(lambda: group_twins(shuffled, jaccard_threshold=threshold))  # type: ignore[arg-type]
         assert original[0] == "ok" == reshuffled[0]
-        a = cast("TwinFamilies", original[1])
-        b = cast("TwinFamilies", reshuffled[1])
+        a = cast(TwinFamilies, original[1])
+        b = cast(TwinFamilies, reshuffled[1])
         assert list(a.family_by_run_id.items()) == list(b.family_by_run_id.items())
         assert list(a.members_by_family.items()) == list(b.members_by_family.items())
 

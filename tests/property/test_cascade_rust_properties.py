@@ -29,7 +29,6 @@ from brutex.strategies.types import Side
 from hypothesis import given
 from hypothesis import strategies as st
 
-_IST = timedelta(hours=5, minutes=30)
 _DAY0 = datetime(2024, 1, 2, 3, 46, tzinfo=UTC)  # 09:16 IST
 
 
@@ -244,7 +243,6 @@ class TestSessionDatesDifferential:
     def test_matches_the_astimezone_law(self, minutes: list[int]) -> None:
         from zoneinfo import ZoneInfo
 
-        bars = [_bar(0, "1.00", "1.00", "1.00", "1.00")]
         bars = []
         for m in sorted(minutes):
             bars.append(

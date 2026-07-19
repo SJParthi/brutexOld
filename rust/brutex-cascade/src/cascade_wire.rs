@@ -197,6 +197,13 @@ fn report_to_dict<'py>(
         vd.set_item("composite_score", verdict.getattr("composite_score")?)?;
         vd.set_item("provisional", verdict.getattr("provisional")?)?;
         vd.set_item("cpcv_pass_rate", verdict.getattr("cpcv_pass_rate")?)?;
+        // DEC-RESULTS-TRUST-HONESTY-001 (folded 2026-07-19 merge-forward):
+        // the cascade's OWN filter-#2 DSR, kept on pass AND reject —
+        // ADDITIVE at REPORT_VERSION 1 (a pre-change report lacks the key
+        // and loads `None`, never a fabricated 0). Attribute pass-through
+        // exactly like `cpcv_pass_rate` — None -> JSON null, floats via the
+        // object's own repr law downstream in `dumps_sorted`.
+        vd.set_item("dsr_corrected", verdict.getattr("dsr_corrected")?)?;
         verdicts.append(vd)?;
     }
     d.set_item("verdicts", verdicts)?;

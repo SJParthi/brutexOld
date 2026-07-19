@@ -186,9 +186,14 @@
       <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
       <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
       <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>
+      <!-- DEC-RESULTS-TRUST-HONESTY-001 (B1, audit BLOCKER 1): the STORED
+           buy-&-hold benchmark of THIS run (R27 baseline artifact) — served
+           verbatim, never recomputed; awaiting/corrupt reads the honest detail. -->
+      <div class="story-cell"><div class="k">Benchmark — buy &amp; hold</div><div class="v" id="stBench">—</div></div>
     </div>
     <!-- R31: the per-combo VIX regime band, rendered on the card -->
     <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
+    <div class="note" id="stBenchDetail">benchmark: awaiting stored baseline artifact (R27)</div>
     <div class="note" id="stArith"></div>
   </section>
 

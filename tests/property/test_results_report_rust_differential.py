@@ -10,7 +10,7 @@ inputs with hostile edits, BOTH sides run to an OUTCOME, and the outcomes
 must be EXACTLY equal — the rendered text on success, the SAME exception
 TYPE and FULL ``str`` on failure (raw non-``ValueError`` escapes — a
 raising ``__str__``, the ``float(10**400)`` ``OverflowError`` — ARE the
-frozen law, so ``BaseException`` is caught on both sides).
+frozen law, so ``Exception`` is caught on both sides).
 
 Priority targets (the S2C Phase-B divergence-risk roster):
 
@@ -93,12 +93,17 @@ _I64_MAX: Final[int] = 2**63 - 1
 def _outcome(fn: Callable[[], object]) -> tuple[object, ...]:
     """Run *fn* to an outcome: ``("ok", value)`` or ``("exc", type, str)``.
 
-    ``BaseException`` is deliberate — raw-escape parity (a raising
-    ``__str__``, the ``OverflowError`` float coercions) IS the property.
+    Raw-escape parity (a raising
+    ``__str__``, the ``OverflowError`` float coercions) IS the property;
+    ``Exception`` (narrowed from ``BaseException`` at the 2026-07-19 CodeQL
+    round) still captures every frozen raw escape — all are ordinary
+    ``Exception`` subclasses — while ``KeyboardInterrupt``/``SystemExit``
+    and a pyo3 ``PanicException`` now propagate LOUDLY instead of being
+    laundered into a comparable outcome.
     """
     try:
         return ("ok", fn())
-    except BaseException as exc:  # outcome parity is the property
+    except Exception as exc:  # outcome parity is the property
         return ("exc", type(exc), str(exc))
 
 

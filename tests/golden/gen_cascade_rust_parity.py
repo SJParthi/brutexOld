@@ -292,9 +292,12 @@ def capture_cascade_wire() -> dict[str, Any]:
         case: dict[str, Any] = {"name": name}
         try:
             manifest = manifest_from_json(payload)
-        except BaseException as exc:  # capture the VERBATIM law,
-            # whatever it raises (several junk shapes escape as raw
-            # AttributeError / IndexError, NOT CascadeWireError — that IS the law).
+        except Exception as exc:  # capture the VERBATIM law, whatever it
+            # raises (several junk shapes escape as raw AttributeError /
+            # IndexError, NOT CascadeWireError — that IS the law; the frozen
+            # fixture enumerates ONLY Exception subclasses, so BaseException
+            # would over-catch — KeyboardInterrupt/SystemExit and a pyo3
+            # PanicException must propagate loudly, never be recorded).
             case["expect"] = {"error_type": type(exc).__name__, "error_str": str(exc)}
         else:
             case["expect"] = {"json": manifest_to_json(manifest).decode("utf-8")}
@@ -408,7 +411,10 @@ def capture_top100_artifact() -> dict[str, Any]:
     for name, thunk in constructor_cases():
         try:
             thunk()
-        except BaseException as exc:
+        except Exception as exc:  # the frozen fixture enumerates ONLY
+            # Top100Error — ordinary Exception subclasses; BaseException would
+            # over-catch (KeyboardInterrupt/SystemExit and a pyo3
+            # PanicException must propagate loudly, never be recorded).
             constructors.append(
                 {
                     "name": name,

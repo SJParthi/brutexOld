@@ -9,7 +9,7 @@ valid serializer-shaped payload with hostile edits, BOTH sides run to an
 OUTCOME, and the outcomes must be EXACTLY equal — an equal dataclass on
 success, the SAME exception TYPE and FULL ``str`` on failure (the raw
 ``IndexError``/``ValueError``/``AttributeError`` escapes ARE the frozen
-law, so ``BaseException`` is caught on both sides and compared).
+law, so ``Exception`` is caught on both sides and compared).
 
 Oracle copies are verbatim from commit f7ea834 (the pre-conversion module),
 adapted ONLY to reference the unchanged type faces (``CascadeTupleSpec`` /
@@ -36,6 +36,7 @@ from typing import Any, cast
 import pytest
 from brutex.data.futures_series import is_futures_series_symbol
 from brutex.engine.cascade_wire import (
+    REPORT_VERSION,
     CascadeManifest,
     CascadeTupleSpec,
     CascadeWireError,
@@ -60,6 +61,7 @@ from brutex.engine.cascade_wire import (
     wire_report_to_dict,
 )
 from brutex.execution.fill_mode import FillMode
+from brutex.metrics.cascade import CascadeReport
 from brutex.strategies.types import FibAnchorKind, PriceSource, price_source_params_fragment
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 from hypothesis import given
@@ -73,6 +75,7 @@ from tests.golden._cascade_wire_parity_corpus import (
     _spec,
     _stage3_cell,
     _verdict,
+    wire_report_cases,
 )
 
 _MAX_MASK = (1 << TOTAL_CONDITIONS) - 1
@@ -84,12 +87,17 @@ _FUTURES_ALIAS = "NSE-NIFTY-FUT"
 def _outcome(fn: Callable[[], object]) -> tuple[object, ...]:
     """Run *fn* to an outcome: ``("ok", value)`` or ``("exc", type, str)``.
 
-    ``BaseException`` is deliberate — raw-escape parity (the frozen law's
-    ``IndexError``/``AttributeError`` passthroughs) IS the property.
+    Raw-escape parity (the frozen law's
+    ``IndexError``/``AttributeError`` passthroughs) IS the property;
+    ``Exception`` (narrowed from ``BaseException`` at the 2026-07-19 CodeQL
+    round) still captures every frozen raw escape — all are ordinary
+    ``Exception`` subclasses — while ``KeyboardInterrupt``/``SystemExit``
+    and a pyo3 ``PanicException`` now propagate LOUDLY instead of being
+    laundered into a comparable outcome.
     """
     try:
         return ("ok", fn())
-    except BaseException as exc:
+    except Exception as exc:
         return ("exc", type(exc), str(exc))
 
 
@@ -1003,3 +1011,146 @@ class TestDumpsFloatReprLaw:
         """Plain floats keep the exact CPython shortest-repr bytes."""
         rendered = serialize_wire_report(self._report_with_score(value))
         assert f'"composite_score":{float.__repr__(value)}'.encode() in rendered
+
+
+# ───── report projection differential (the d5a297475 dsr_corrected law fold) ──
+
+
+def _oracle_report_to_dict(report: CascadeReport) -> dict[str, object]:
+    """VERBATIM ``_report_to_dict`` law at origin/main d5a297475.
+
+    Main's DEC-RESULTS-TRUST-HONESTY-001 added the per-verdict
+    ``dsr_corrected`` key (ADDITIVE at ``REPORT_VERSION`` 1 — a pre-change
+    report simply lacks the key). The projection law lives in the Rust
+    crate, so this copy is the independent Python oracle the crate must
+    match — verbatim from d5a297475's ``cascade_wire.py``, adapted only to
+    reference the unchanged type faces by import (the merge-forward fold of
+    DEC-RUST-CASCADE-RESULTS-001).
+    """
+    return {
+        "n_input": report.n_input,
+        "n_survived": report.n_survived,
+        "dsr_n_source": report.dsr_n_source,
+        "dsr_n_trials": report.dsr_n_trials,
+        "dsr_trial_variance": report.dsr_trial_variance,
+        "pool_pbo": report.pool_pbo,
+        "survivor_ids": list(report.survivor_ids),
+        "stage_survivors": dict(report.stage_survivors),
+        "verdicts": [
+            {
+                "candidate_id": verdict.candidate_id,
+                "passed": verdict.passed,
+                "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
+                "detail": verdict.detail,
+                "composite_score": verdict.composite_score,
+                "provisional": verdict.provisional,
+                "cpcv_pass_rate": verdict.cpcv_pass_rate,
+                "dsr_corrected": verdict.dsr_corrected,
+            }
+            for verdict in report.verdicts
+        ],
+    }
+
+
+def _oracle_wire_report_to_dict(report: CascadeWireReport) -> dict[str, object]:
+    """VERBATIM ``wire_report_to_dict`` law at origin/main d5a297475."""
+    return {
+        "version": REPORT_VERSION,
+        "sweep_id": report.sweep_id,
+        "n_input": report.n_input,
+        "n_survived": report.n_survived,
+        "groups": [
+            {
+                "instrument": instrument,
+                "tf": tf_label,
+                "report": _oracle_report_to_dict(group_report),
+            }
+            for instrument, tf_label, group_report in report.groups
+        ],
+    }
+
+
+class TestReportProjectionDifferential:
+    """Crate ``wire_report_to_dict`` ≡ the d5a297475 Python law.
+
+    The dsr_corrected merge-forward fold's genuine re-verification: the
+    corpus fixture regeneration captures FROM the live (crate-delegating)
+    functions, so THIS differential — crate vs the verbatim d5a297475
+    oracle above — is what proves the regenerated expectations equal the
+    folded Python law rather than merely echoing the crate.
+    """
+
+    def _one_verdict_report(
+        self,
+        *,
+        dsr_corrected: float | None,
+        cpcv_pass_rate: float | None,
+        composite_score: float | None,
+        provisional: bool,
+    ) -> CascadeWireReport:
+        return CascadeWireReport(
+            sweep_id="d" * 64,
+            groups=(
+                (
+                    "NIFTY",
+                    "1minute",
+                    _report(
+                        verdicts=(
+                            _verdict(
+                                _rid(41),
+                                composite_score=composite_score,
+                                provisional=provisional,
+                                cpcv_pass_rate=cpcv_pass_rate,
+                                dsr_corrected=dsr_corrected,
+                            ),
+                        ),
+                        survivor_ids=(_rid(41),),
+                        n_input=1,
+                        n_survived=1,
+                    ),
+                ),
+            ),
+        )
+
+    @given(
+        dsr_corrected=st.none() | st.floats(allow_nan=False, allow_infinity=True),
+        cpcv_pass_rate=st.none() | st.floats(allow_nan=False, allow_infinity=True),
+        composite_score=st.none() | st.floats(allow_nan=False, allow_infinity=True),
+        provisional=st.booleans(),
+    )
+    def test_matches_the_folded_law(
+        self,
+        dsr_corrected: float | None,
+        cpcv_pass_rate: float | None,
+        composite_score: float | None,
+        provisional: bool,
+    ) -> None:
+        report = self._one_verdict_report(
+            dsr_corrected=dsr_corrected,
+            cpcv_pass_rate=cpcv_pass_rate,
+            composite_score=composite_score,
+            provisional=provisional,
+        )
+        assert wire_report_to_dict(report) == _oracle_wire_report_to_dict(report)
+
+    @given(dsr_corrected=st.none() | st.floats(allow_nan=False, allow_infinity=False))
+    def test_serialized_bytes_match_the_oracle_dumps(self, dsr_corrected: float | None) -> None:
+        """Byte parity: crate render ≡ ``json.dumps`` of the ORACLE dict."""
+        report = self._one_verdict_report(
+            dsr_corrected=dsr_corrected,
+            cpcv_pass_rate=0.5,
+            composite_score=1.25,
+            provisional=False,
+        )
+        expected = json.dumps(
+            _oracle_wire_report_to_dict(report),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        assert serialize_wire_report(report) == expected
+
+    def test_corpus_reports_match_the_oracle(self) -> None:
+        """Every frozen-corpus wire report projects law-identically."""
+        for name, report in wire_report_cases():
+            assert wire_report_to_dict(report) == _oracle_wire_report_to_dict(report), name
