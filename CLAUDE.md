@@ -10102,9 +10102,11 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:785` after spec growth moved it from :770
-   (earlier :760/:743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
-   :770→:785 with the DEC-FILL-WORST-CASE-ONLY-001 fill-rules rewrite) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:805` after spec growth moved it from :785
+   (earlier :770/:760/:743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001
+   precedent; :770→:785 with the DEC-FILL-WORST-CASE-ONLY-001 fill-rules
+   rewrite; :785→:805 with the DEC-STAGE3-SLTP-INSTRUMENT-SCALE-001 Mode-A
+   amendment notes) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
