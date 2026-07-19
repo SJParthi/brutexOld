@@ -159,3 +159,24 @@ tree-state equality via a `relpath → sha256` map over both healed lakes
 - `expects_skip=False` asserts nothing about skip counters (some skip
   shapes — series-dir/root symlinks, dangling links — have deliberately
   unpinned counter semantics here; the finding-set equality is the tooth).
+
+## 9. Completion note (2026-07-19 — DEC-RUST-LAKE-WAVED-001, MIGRATION.md #1954)
+
+The readiness record this runbook exists for is SATISFIED: the Wave-D
+conversion (`claude/rust-lake-waved-001`) bound the Rust scan as `impl_b`
+at this harness's own `ScannerImpl` seam and drove ALL 27 corpus cases
+differentially — 27/27 IDENTICAL and 27/27 ENGAGED (zero degrades) in both
+the Python-vs-Rust and Rust-vs-Rust directions — BEFORE any verdict path
+flipped, with the harness itself byte-UNMODIFIED (§1's law). The §6 go/no-go
+checklist then completed through the endgame: default-ON, then the Python
+scanner/heal cores DELETED in-lane (the coordinator/operator greenfield
+ruling), so **the harness now drives the Rust path natively** — its
+`test_expected_verdict` identity self-test is the standing frozen
+finding-type/skip census over the crate scan, and the per-module
+differentials pin Rust-vs-Rust determinism + frozen expectations in place
+of the retired Python arm. The §4 exception-taxonomy table's classes carry
+ruled per-class ISOLATED-error postures crate-side (per-finding heal
+isolation · the GAP-#9 reconcile skip · the loud counted scan skip · the
+typed read refusal); §5's phase-2 heal-side differential shipped as the
+twin-lake four-strength heal gate (40/40). Adding a poison class per §7
+still works unchanged — the runner and normalizer are seam-agnostic.
