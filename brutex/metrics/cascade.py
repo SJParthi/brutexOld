@@ -89,6 +89,7 @@ import numpy as np
 
 from brutex.metrics.cpcv import DEFAULT_N_GROUPS, DEFAULT_N_TEST_GROUPS, cpcv_pass_rate
 from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
+from brutex.metrics.extreme_vol_stratum import evaluate_stratum
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -165,6 +166,10 @@ class FilterStage(Enum):
     WALK_FORWARD = "walk_forward"
     LOCKBOX = "lockbox"
     MONTE_CARLO = "monte_carlo"
+    # Default-OFF filter #10 (DEC-REGIME-MUST-SURVIVE-STRATUM-001): the
+    # extreme-vol must-survive stratum — runs ONLY when
+    # ``CascadeConfig.extreme_vol_stratum`` is True.
+    EXTREME_VOL_STRATUM = "extreme_vol_stratum"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +218,20 @@ class CandidateInput:
     #: per-trade caller needs no evidence — its rows already ARE trades).
     #: May be EMPTY (a zero-trade candidate ⇒ honest ``INSUFFICIENT_N``).
     lockbox_trade_days: tuple[int, ...] | None = None
+    #: Per-trade extreme-vol stratum membership flags for filter #10
+    #: (DEC-REGIME-MUST-SURVIVE-STRATUM-001): ``flags[i]`` is True iff trade
+    #: *i*'s ENTRY session classified extreme
+    #: (:func:`brutex.metrics.extreme_vol_stratum.classify_extreme_sessions`).
+    #: Aligned index-for-index with ``trade_pnls_paisa`` (same length when
+    #: BOTH are present). ``None`` (the default) = data unavailable — the
+    #: filter records the honest ``"unproven_current_regime"`` abstain,
+    #: never a fabricated verdict and never a reject.
+    extreme_vol_entry_flags: tuple[bool, ...] | None = None
+    #: Per-trade net P&L (paisa, signed) aligned with
+    #: ``extreme_vol_entry_flags`` — the series filter #10 splits by the
+    #: flags. ``None`` (the default) keeps every existing construction
+    #: byte-identical; the filter needs BOTH fields to evaluate.
+    trade_pnls_paisa: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         """Reject a non-finite metric / series value or an empty id up front."""
@@ -237,6 +256,16 @@ class CandidateInput:
             raise ValueError(
                 f"CandidateInput.lockbox_trade_days must be non-decreasing "
                 f"(trades chronological) (candidate {self.candidate_id!r})"
+            )
+        if (
+            self.extreme_vol_entry_flags is not None
+            and self.trade_pnls_paisa is not None
+            and len(self.extreme_vol_entry_flags) != len(self.trade_pnls_paisa)
+        ):
+            raise ValueError(
+                f"CandidateInput.extreme_vol_entry_flags length "
+                f"{len(self.extreme_vol_entry_flags)} != trade_pnls_paisa length "
+                f"{len(self.trade_pnls_paisa)} (candidate {self.candidate_id!r})"
             )
 
 
@@ -283,6 +312,11 @@ class CascadeConfig:
     # #9 Monte-Carlo (spec line 472: p < 0.01)
     mc_alpha: float = 0.01
     mc_n_permutations: int = 1000
+    # #10 extreme-vol must-survive stratum (DEC-REGIME-MUST-SURVIVE-STRATUM-001)
+    # — DEFAULT-OFF: when False (the default) the filter never runs and the
+    # report is byte-identical to the pre-filter shape (no stage_survivors
+    # key, no verdict fields). Flipping the default ON is its own DEC.
+    extreme_vol_stratum: bool = False
 
     def bootstrap(self) -> BootstrapConfig:
         """The shared deterministic :class:`BootstrapConfig` for SPA / RW."""
@@ -326,6 +360,20 @@ class CandidateVerdict:
     #: every existing construction is unaffected. NEVER rounded (CLAUDE.md
     #: §4 — display projections mint their own ``rate * 100.0`` alias).
     cpcv_pass_rate: float | None = None
+    #: The extreme-vol stratum status token (filter #10,
+    #: DEC-REGIME-MUST-SURVIVE-STRATUM-001):
+    #: ``"ok"`` / ``"fail"`` / ``"unproven_current_regime"`` /
+    #: ``"insufficient_stratum_trades"``, or ``None`` when the filter never
+    #: evaluated this candidate (flag OFF, or the candidate died at an
+    #: earlier stage — scope is deliberately survivors-only). Appended +
+    #: defaulted (the ``cpcv_pass_rate`` precedent) so every existing
+    #: construction is byte-identical. An ABSTAIN status is RECORDED but
+    #: never a rejection (coordinator-confirmed semantics).
+    extreme_vol_status: str | None = None
+    #: The measured stratum numbers behind ``extreme_vol_status`` (trade
+    #: counts / expectancies / variances / ratio — full precision, never
+    #: rounded), or ``None`` whenever the status is ``None``.
+    extreme_vol_stats: dict[str, float | int | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -830,6 +878,48 @@ def run_stage4_cascade(
     survivors = kept
     stage_survivors[FilterStage.MONTE_CARLO.value] = len(survivors)
 
+    # ── #10 EXTREME-VOL MUST-SURVIVE STRATUM (per-candidate, DEFAULT-OFF —
+    # DEC-REGIME-MUST-SURVIVE-STRATUM-001). Gated on the config flag: when
+    # OFF (the default) this block does not execute AT ALL — no
+    # stage_survivors key, no verdict fields, report byte-identical. Scope is
+    # deliberately MINIMAL: only candidates surviving to #10 are evaluated
+    # (an earlier-stage reject never gains a stratum status — it was already
+    # decided). ABSTAIN statuses ("unproven_current_regime" /
+    # "insufficient_stratum_trades") are RECORDED but NEVER reject — data
+    # unavailability is visible honesty, not a failure. ──
+    extreme_vol_status_by_id: dict[str, str] = {}
+    extreme_vol_stats_by_id: dict[str, dict[str, float | int | None]] = {}
+    if config.extreme_vol_stratum:
+        kept = []
+        for c in survivors:
+            if c.extreme_vol_entry_flags is None or c.trade_pnls_paisa is None:
+                # Data unavailable (an old manifest / a hand-built caller):
+                # honest ABSTAIN — visible, never a reject (Golden Rule #1).
+                extreme_vol_status_by_id[c.candidate_id] = "unproven_current_regime"
+                kept.append(c)
+                continue
+            stratum_pnls: list[int] = []
+            calm_pnls: list[int] = []
+            for pnl, is_extreme in zip(c.trade_pnls_paisa, c.extreme_vol_entry_flags, strict=True):
+                (stratum_pnls if is_extreme else calm_pnls).append(pnl)
+            sv = evaluate_stratum(stratum_pnls, calm_pnls)
+            extreme_vol_status_by_id[c.candidate_id] = sv.status
+            extreme_vol_stats_by_id[c.candidate_id] = {
+                "stratum_trades": sv.stratum_trades,
+                "calm_trades": sv.calm_trades,
+                "stratum_expectancy_paisa": sv.stratum_expectancy_paisa,
+                "calm_expectancy_paisa": sv.calm_expectancy_paisa,
+                "stratum_variance": sv.stratum_variance,
+                "calm_variance": sv.calm_variance,
+                "variance_ratio": sv.variance_ratio,
+            }
+            if sv.status == "fail":
+                reject(c, FilterStage.EXTREME_VOL_STRATUM, sv.detail)
+            else:
+                kept.append(c)
+        survivors = kept
+        stage_survivors[FilterStage.EXTREME_VOL_STRATUM.value] = len(survivors)
+
     # ── Composite ranking of survivors (spec 686-697) ──
     scores = _composite_scores(survivors, lockbox_sharpe_by_id)
     # Deterministic TOTAL order (DEC-STATS-GATE-INTEGRITY-001 R2-SR-F6,
@@ -859,8 +949,18 @@ def run_stage4_cascade(
     # measured stage-3 rate; a candidate that never reached #3 (or hit the
     # ValueError arm) stamps the honest ``None``. ``replace`` preserves every
     # other field bit-for-bit; ordering/decisions were finalised above.
+    # The extreme-vol filter #10 fields ride the SAME recording-only stamp
+    # (DEC-REGIME-MUST-SURVIVE-STRATUM-001): both default to ``None``, so a
+    # flag-OFF run (empty maps) stamps every verdict with its own defaults —
+    # provably byte-identical to the pre-filter report.
     ordered_verdicts = tuple(
-        replace(verdicts[cid], cpcv_pass_rate=cpcv_rate_by_id.get(cid)) for cid in ids
+        replace(
+            verdicts[cid],
+            cpcv_pass_rate=cpcv_rate_by_id.get(cid),
+            extreme_vol_status=extreme_vol_status_by_id.get(cid),
+            extreme_vol_stats=extreme_vol_stats_by_id.get(cid),
+        )
+        for cid in ids
     )
     return CascadeReport(
         verdicts=ordered_verdicts,
