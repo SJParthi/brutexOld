@@ -481,13 +481,35 @@ def _add_sweep_grid_args(
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    # PROPOSAL (DEC-SWEEP-OVERFIT-GATE-DEFAULT-ON-001, MIGRATION.md #1961 —
+    # PROPOSED, pending operator ruling): the overfit gate now defaults ON.
+    # Revert lever = flip `default=True` back to `default=False` below (ONE
+    # constant) + the `cmd_sweep_all` keyword default. Defaulting the gate ON
+    # changes RUN IDENTITY: the active gate config folds into the per-tuple
+    # store address (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001,
+    # engine/sweep_identity.py), so the first post-flip default sweep
+    # recomputes fully instead of resuming pre-flip stores.
     parser.add_argument(
         "--overfit-gate",
         action="store_true",
         dest="overfit_gate",
+        default=True,
         help=(
             "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
-            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
+            "per leaderboard (DEC-RANKING-OVERFIT-001); ON by default since "
+            "DEC-SWEEP-OVERFIT-GATE-DEFAULT-ON-001 (kept as an explicit no-op "
+            "for back-compat) — opt out with --no-overfit-gate"
+        ),
+    )
+    parser.add_argument(
+        "--no-overfit-gate",
+        action="store_false",
+        dest="overfit_gate",
+        help=(
+            "Disable the Deflated-Sharpe overfit gate (the pre-"
+            "DEC-SWEEP-OVERFIT-GATE-DEFAULT-ON-001 default). NOTE: the gate "
+            "config is part of the per-tuple store address, so gated and "
+            "ungated runs never share result stores"
         ),
     )
     # ── Stage-3 BIPOP-CMA-ES refinement pass (DEC-STAGE3-WIRE-001) ──
@@ -7673,7 +7695,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
     price_source_cells: str = "hlc3:close",
-    overfit_gate: bool = False,
+    overfit_gate: bool = True,
     dsr_min: float = 0.95,
     options_sim: bool = True,
     options_expiry: str = "weekly",
@@ -9441,6 +9463,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     fib_anchors: str = "prev_day",
     price_source_cells: str = "hlc3:close",
     emit_heal_plan: bool = False,
+    overfit_gate: bool = True,
+    dsr_min: float = 0.95,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
     stage3_fevals: int | None = None,
@@ -9544,6 +9568,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
     from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
     from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.ranking import OverfitGateConfig
     from brutex.strategies.types import FibAnchorKind, Side
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
@@ -9663,6 +9688,16 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         grid_kwargs["max_tuples"] = max_tuples
     if max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
+    if overfit_gate:
+        # Mirror the cmd_sweep_all launcher law so a DEFAULT recount addresses
+        # the SAME per-tuple store digests a DEFAULT launch wrote
+        # (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001; the gate config folds into
+        # `_tuple_digest`). Pre-flip this passthrough did not exist, so a
+        # `--overfit-gate` tree was silently un-recountable (the parser accepted
+        # the flag on sweep-verify but the dispatch dropped it) — the
+        # DEC-SWEEP-OVERFIT-GATE-DEFAULT-ON-001 PROPOSAL closes that gap in the
+        # same stroke; verify a PRE-flip (ungated) tree with --no-overfit-gate.
+        grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
@@ -11519,6 +11554,8 @@ def _dispatch(argv: list[str] | None) -> int:
             scratch_root=args.scratch_root,
             allow_context_mismatch=args.allow_context_mismatch,
             emit_heal_plan=args.emit_heal_plan,
+            overfit_gate=args.overfit_gate,
+            dsr_min=args.dsr_min,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,

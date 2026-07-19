@@ -340,8 +340,13 @@ def build_sweep_kwargs(
     ``options_sim=False`` (signal-only research — no option lake required),
     ``allow_missing_slices=True`` (a one-click sweep runs on WHATEVER is in the
     lake, skipping empty ``(symbol, interval)`` slices honestly rather than hard
-    failing), and the overfit / Stage-3 gates OFF (the operator opts in via the
-    CLI for a production run).
+    failing), and the overfit / Stage-3 gates OFF — the dashboard's OWN
+    explicit pin: since DEC-SWEEP-OVERFIT-GATE-DEFAULT-ON-001 (PROPOSED,
+    MIGRATION.md #1961) the CLI default is gate-ON, so a dashboard one-click
+    sweep is now the gate-OFF light-research surface by THIS mapping's
+    explicit ``overfit_gate=False`` (deliberately unchanged here — flipping
+    the dashboard is a separate decision; gated/ungated runs never share
+    result stores per DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001).
 
     Parameters
     ----------
