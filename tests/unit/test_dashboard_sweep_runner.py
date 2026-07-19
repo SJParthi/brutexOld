@@ -633,6 +633,133 @@ def test_lowercase_in_scope_symbol_is_refused_with_a_did_you_mean_hint() -> None
     assert "'NIFTY'" in str(excinfo.value)
 
 
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The dashboard's extinction default: DEFAULT_K flips to the ONE sanctioned
+# second copy of the CLI token (drift-pinned below), _normalise_k accepts the
+# token / refuses a token+number mix, and run_sweep_from_request — the ONE
+# in-process embedder of cmd_sweep_all — snapshot-restores BRUTEX_SWEEP_APRIORI
+# (the dashboard process OUTLIVES the job, unlike a CLI run).
+
+
+def test_default_k_is_the_extinction_token() -> None:
+    assert DEFAULT_K == "extinction"
+
+
+def test_default_k_drift_pin_against_the_cli_token_and_parser_default() -> None:
+    """The CLI↔dashboard token DRIFT PIN: the dashboard's sanctioned second
+    copy must equal the CLI constant AND the shared parser's ``--k`` default
+    (introspected — the value that actually reaches every grid surface)."""
+    from brutex.cli import EXTINCTION_K_TOKEN, build_parser
+
+    assert DEFAULT_K == EXTINCTION_K_TOKEN
+    args = build_parser().parse_args(["sweep-all", "--start", "2024-01-01", "--end", "2024-01-02"])
+    assert args.k == DEFAULT_K
+
+
+def test_extinction_token_passes_through_normalisation() -> None:
+    req = resolve_sweep_request(k="extinction", today=_TODAY)
+    assert req.k == "extinction"
+
+
+def test_extinction_token_is_case_insensitive() -> None:
+    req = resolve_sweep_request(k="  EXTINCTION  ", today=_TODAY)
+    assert req.k == "extinction"
+
+
+def test_blank_k_falls_to_the_extinction_default() -> None:
+    req = resolve_sweep_request(k="   ", today=_TODAY)
+    assert req.k == "extinction"
+
+
+def test_numeric_csv_k_still_validates_as_before() -> None:
+    # The legacy byte-identical arm — the classic fixed-K sweep.
+    req = resolve_sweep_request(k="2, 3", today=_TODAY)
+    assert req.k == "2,3"
+
+
+def test_token_mixed_with_numbers_is_a_400() -> None:
+    with pytest.raises(ValueError, match="either 'extinction'"):
+        resolve_sweep_request(k="extinction,2", today=_TODAY)
+
+
+def test_number_mixed_with_token_is_a_400_regardless_of_order() -> None:
+    with pytest.raises(ValueError, match="either 'extinction'"):
+        resolve_sweep_request(k="2,extinction", today=_TODAY)
+
+
+class TestRunSweepFromRequestEnvHygiene:
+    """The snapshot-restore law (ruling 5): the flag never leaks past the job."""
+
+    @staticmethod
+    def _request() -> SweepRunRequest:
+        return resolve_sweep_request(today=_TODAY)
+
+    def test_env_set_by_the_sweep_is_restored_to_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        from brutex import cli
+        from brutex.dashboard.sweep_runner import run_sweep_from_request
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+
+        def _fake_sweep(**_kwargs: object) -> int:
+            os.environ[SWEEP_APRIORI_ENV] = "1"  # cmd_sweep_all's setdefault
+            return 0
+
+        monkeypatch.setattr(cli, "cmd_sweep_all", _fake_sweep)
+        rc = run_sweep_from_request(
+            self._request(), lake_root=tmp_path, results_root=tmp_path / "results"
+        )
+        assert rc == 0
+        assert SWEEP_APRIORI_ENV not in os.environ  # restored — no cross-job leak
+
+    def test_env_restored_even_when_the_sweep_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        from brutex import cli
+        from brutex.dashboard.sweep_runner import run_sweep_from_request
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+
+        def _boom(**_kwargs: object) -> int:
+            os.environ[SWEEP_APRIORI_ENV] = "1"
+            raise RuntimeError("sweep blew up")
+
+        monkeypatch.setattr(cli, "cmd_sweep_all", _boom)
+        with pytest.raises(RuntimeError, match="sweep blew up"):
+            run_sweep_from_request(
+                self._request(), lake_root=tmp_path, results_root=tmp_path / "results"
+            )
+        assert SWEEP_APRIORI_ENV not in os.environ
+
+    def test_operator_preset_value_is_restored_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        from brutex import cli
+        from brutex.dashboard.sweep_runner import run_sweep_from_request
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "0")  # the operator's kill switch
+
+        def _fake_sweep(**_kwargs: object) -> int:
+            os.environ[SWEEP_APRIORI_ENV] = "1"  # a hypothetical overwrite
+            return 0
+
+        monkeypatch.setattr(cli, "cmd_sweep_all", _fake_sweep)
+        run_sweep_from_request(
+            self._request(), lake_root=tmp_path, results_root=tmp_path / "results"
+        )
+        assert os.environ[SWEEP_APRIORI_ENV] == "0"  # pop-or-restore, verbatim
+
+
 # ── sweep_finish_note (G5b, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001) ────────────────
 
 
@@ -1034,3 +1161,53 @@ def test_oneclick_preflight_gridded_plan_carries_no_stage3_clamp_r54(tmp_path: P
     )
     result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
     assert [c for c in result["clamps"] if c["field"] == "stage3_enable"] == []
+
+
+# ---------------------------------------------------------------------------
+# The extinction-k estimator refusal arm (sweep_runner.py `_axes_counts`) —
+# the d85c266f merge-forward composition (DEC-SWEEP-APRIORI-DEFAULT-001 ×
+# DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001) shipped this arm untested
+# (coverage restore, 2026-07-19: line 977 + its branch were the ONE
+# uncovered spot in this module — no pragma, genuinely exercised here).
+
+
+def _extinction_k_request() -> SweepRunRequest:
+    """A one-click-form-shaped request whose k is the EXPLICIT extinction
+    token — the only shape that reaches `_axes_counts`' refusal arm (the
+    one-click flow's own default k is the estimable institutional CSV)."""
+    return SweepRunRequest(
+        symbols="NIFTY",
+        intervals=DEFAULT_INTERVALS,
+        directions=DEFAULT_DIRECTIONS,
+        k=DEFAULT_K,
+        sl="50",
+        tp="100",
+        exchange="NSE",
+        segment="INDEX",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+
+
+def test_axes_counts_refuses_extinction_k_loudly() -> None:
+    """The adaptive extinction ladder cannot be enumerated ahead of time —
+    `_axes_counts` must refuse LOUDLY (never a raw int() crash on the
+    'extinction' token)."""
+    from brutex.dashboard.sweep_runner import _axes_counts
+
+    with pytest.raises(ValueError, match="not estimable ahead of time"):
+        _axes_counts(_extinction_k_request())
+
+
+def test_oneclick_preflight_for_plan_extinction_k_refuses_via_value_error(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the public plan preflight: an explicit
+    'extinction' k on the one-click form surfaces as the ValueError the
+    route's ValueError→400 lane converts — a loud refusal, never a crash
+    deeper in the estimator arithmetic."""
+    plan = OneClickSweepPlan(sweep_run_id="ext-id", requests=(_extinction_k_request(),))
+    with pytest.raises(ValueError, match="use the classic sweep form"):
+        oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)

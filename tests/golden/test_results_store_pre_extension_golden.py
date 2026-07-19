@@ -170,6 +170,14 @@ def test_pre_extension_locked_literals() -> None:
     assert row_1.deflated_sharpe is None
     assert row_2.deflated_sharpe == 1.2345678901234567
     assert row_3.deflated_sharpe == 0.25
+    # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (the extension THIS guard exists for):
+    # the four temporal columns do not exist in this pre-extension file and
+    # MUST load as honest None — never a fabricated value, never "corrupt".
+    for row in (row_1, row_2, row_3):
+        assert row.stats_by_year_json is None
+        assert row.stats_by_quarter_json is None
+        assert row.stats_by_month_json is None
+        assert row.temporal_judged_years_json is None
 
 
 def test_pre_extension_rows_are_run_id_sorted() -> None:

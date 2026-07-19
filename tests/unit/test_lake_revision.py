@@ -322,12 +322,17 @@ class TestSweepResultsRevisionNoSignal:
     """
 
     def test_happy_composite_joins_dirs_and_chain(self, tmp_path: Path) -> None:
-        """The happy path: ``<dirs digest>|<chain stat>`` — and an audit append moves it.
+        """The happy path: ``<dirs digest>|<chain stat>|<report stat>`` — an append moves it.
 
         The standalone twin of the token behaviour proven in
         ``test_dashboard_results_revision_key.py`` (this module's stem-matched
         suite must reach the composite return on its own — the discovery-gate
         contract; the line was previously covered only by the sibling file).
+        Conscious pin update at the 2026-07-16 merge-reconcile: this test
+        arrived from main pinning the pre-#1848 TWO-component composite; on
+        this branch DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848)
+        appends the cascade report's stat as a THIRD component (``absent``
+        here — no report exists), exactly as the sibling file already pins.
         """
         _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
         chain = tmp_path / "sweeps" / "audit" / "sweep-all.jsonl"
@@ -337,7 +342,7 @@ class TestSweepResultsRevisionNoSignal:
         assert first is not None and "|" in first
         dirs = sweeps_revision(tmp_path)
         st = os.stat(chain)
-        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}"
+        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}|{ABSENT_TOKEN}"
         # An audit APPEND (no directory mtime moves) still moves the composite.
         with chain.open("ab") as handle:
             handle.write(b'{"action":"SWEEP_START"}\n')
@@ -373,6 +378,33 @@ class TestSweepResultsRevisionNoSignal:
 
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert sweep_results_revision(tmp_path) is None
+
+    def test_report_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dirs + chain probes OK but a non-missing OSError on the cascade-report
+        stat → ``None`` (the THIRD composite component —
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+        """
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path).endswith("cascade-report.json"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
+
+    def test_all_absent_composite_is_stable(self, tmp_path: Path) -> None:
+        """The happy composite path: an empty lake reads the stable
+        three-component ``absent|absent|absent`` sentinel (dirs | audit chain |
+        cascade report — DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) on every call.
+        """
+        token = sweep_results_revision(tmp_path)
+        assert token == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert token == sweep_results_revision(tmp_path)
 
 
 class TestRateBridgeRevision:

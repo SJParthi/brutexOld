@@ -1443,6 +1443,16 @@ jobs:
           else
             echo "(brutex.engine.trial_stats test file not present yet — gate inactive)"
           fi
+          # 19i1e · brutex.engine.period_stats — the per-period finalist-stats
+          # canonical JSON + key grammar + cross-sum validators + the finalist
+          # fold / segmented-dd walk (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001; ONE
+          # COMMON home consumed by sweep_run's projector, ResultRow
+          # construction/load validation, and the dashboard parse).
+          if compgen -G "tests/unit/test_engine_period_stats.py" > /dev/null; then
+            pytest --cov=brutex.engine.period_stats --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_period_stats.py
+          else
+            echo "(brutex.engine.period_stats test file not present yet — gate inactive)"
+          fi
           # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
           # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
           # recovery by run-id match, the audited refinement post-pass, the
@@ -2741,6 +2751,17 @@ jobs:
             pytest --cov=brutex.engine.sweep_run_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_run_core.py
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
+          fi
+          # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the pure /results temporal-drill
+          # serve logic — run_id validation (hostile values disk-free 400),
+          # stored quarter/month payloads + the derived half-year roll-up, the
+          # sweep_runs invalidation token, the sidecar index over real
+          # writer-produced stamps, and the day/week IST/ISO-week fold. 100%
+          # line+branch on sweep_temporal_view.py.
+          if compgen -G "tests/unit/test_sweep_temporal_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.sweep_temporal_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sweep_temporal_view.py
+          else
+            echo "(brutex.dashboard.sweep_temporal_view test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
@@ -4883,7 +4904,16 @@ jobs:
     runs-on: ubuntu-24.04
     # DEC-SWEEP-COVERAGE-SHARD-001: consumes the shared prebuilt wheels.
     needs: build-wheels
-    timeout-minutes: 20
+    # Sanctioned infra HEADROOM raise (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001
+    # reconcile-round-2 note, MIGRATION.md #1851): the S2 club's 45-file
+    # shipped-test baseline MEASURED 622.69 s wall (1 failed, 2374 passed) —
+    # over the script's prior 600 s per-run default, so the gate exited 2 on
+    # a baseline exit-124 timeout and could never reach a verdict; two full
+    # pytest runs (baseline + reverted) ≈ 1250 s, over the prior 20-min job
+    # budget once setup (checkout + pip + two Rust wheels, ~8-10 min) is
+    # added. 50 min holds 2 × the 1200 s per-run budget + setup. The check
+    # still runs the FULL reversion — no skip, no shipped-test narrowing.
+    timeout-minutes: 50
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -4916,6 +4946,12 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Per-run pytest budget raised 600 s (script default) → 1200 s:
+          # the S2 club's shipped-test baseline measured 622.69 s wall —
+          # ~1.93× headroom for slower hosted runners; the two-run total
+          # (≈ 1250 s measured-shape) fits the 50-min job budget above.
+          # Sanctioned in MIGRATION.md #1851 (reconcile-round-2 note).
+          BUGFIX_REVERSION_TIMEOUT_S: "1200"
         run: python3 scripts/ci/validate_bugfix_reversion.py
 
   # ─────────────────────────────────────────────────────────────────
