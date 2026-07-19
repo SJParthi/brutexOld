@@ -436,6 +436,38 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 }
 
 
+# DEC-EXTENDED-SESSION-OUTAGE-001 — NSE exchange outage 2021-02-24 (verified 2026-07-11):
+# NSE feeds froze 10:08 IST; F&O halted 11:40, cash 11:43 (telecom-link failure); pre-open
+# call auction 15:30-15:45; continuous trading 15:45-17:00; close EXTENDED to 17:00 IST at
+# NSE, BSE and MSEI (SEBI press releases: sebi.gov.in/media/press-releases/mar-2021/
+# trading-halt-at-nse-on-february-24-2021_49603.html + the feb-2021 sibling _49287.html).
+# One (open, close) pair models the BSE day exactly and the NSE envelope; the NSE midday
+# hole (~11:40 → 15:45, no bars) is census-annotated DATA
+# (:mod:`brutex.data.session_density`), deliberately NOT calendar-modeled.
+EXTENDED_SESSIONS: Final[dict[date, tuple[time, time]]] = {
+    date(2021, 2, 24): (SESSION_OPEN_IST, time(17, 0)),
+}
+
+# DEC-HALT-DAY-TREATMENT-001 — market-wide circuit-breaker halt days (verified 2026-07-11):
+# 2020-03-13 (10% lower-band halt 09:20 IST, 45-min halt + 15-min pre-open, continuous
+# trading resumed 10:20, normal 15:30 close — business-standard.com/article/markets/
+# nifty-hits-lower-circuit-amid-global-sell-off-trading-halted-for-45-mins-120031300188_1.html)
+# and 2020-03-23 (10% lower-band halt 09:58 IST, resumed after the standard 45+15 sequence
+# — ~10:58, DERIVED not press-printed — normal 15:30 close; business-standard.com/article/
+# markets/sensex-hits-10-lower-circuit-trading-halted-for-45-minutes-120032300237_1.html).
+# ANNOTATION ONLY: both stay full REGULAR 09:15-15:30 sessions with real bars that are
+# never dropped; consumed by the session-density census (the known-irregular INFO arm) +
+# the >9% daily-range detector (:mod:`brutex.data.spot_daily_resample`).
+CIRCUIT_HALT_SESSIONS: Final[frozenset[date]] = frozenset({date(2020, 3, 13), date(2020, 3, 23)})
+
+#: Machine reason token for a :data:`CIRCUIT_HALT_SESSIONS` date
+#: (:func:`known_irregular_reason`).
+CIRCUIT_HALT_REASON: Final[str] = "market_wide_circuit_halt"
+#: Machine reason token for an :data:`EXTENDED_SESSIONS` date
+#: (:func:`known_irregular_reason`).
+EXTENDED_SESSION_REASON: Final[str] = "exchange_outage_extended_close"
+
+
 #: The INCLUSIVE calendar-year span the hardcoded NSE/BSE holiday list above
 #: actually covers. Derived from the per-year frozensets so the two can never
 #: silently drift: the first/last keys ARE the smallest/largest holiday year.
@@ -704,6 +736,55 @@ def has_muhurat_session(d: date) -> bool:
     return d in MUHURAT_SESSIONS
 
 
+def has_extended_session(d: date) -> bool:
+    """Return True iff ``d`` has an EXTENDED (post-15:30 close) trading session.
+
+    DEC-EXTENDED-SESSION-OUTAGE-001 — membership in :data:`EXTENDED_SESSIONS`
+    (2021-02-24, the NSE exchange-outage day whose close was extended to
+    17:00 IST at NSE, BSE and MSEI per the SEBI press releases; verified
+    2026-07-11). O(1).
+    """
+    return d in EXTENDED_SESSIONS
+
+
+def is_circuit_halt_session(d: date) -> bool:
+    """Return True iff ``d`` is an annotated market-wide circuit-breaker halt day.
+
+    DEC-HALT-DAY-TREATMENT-001 — membership in :data:`CIRCUIT_HALT_SESSIONS`
+    (2020-03-13 + 2020-03-23, verified 2026-07-11). ANNOTATION only: the day
+    stays a full REGULAR 09:15-15:30 session; no bar is ever dropped. O(1).
+    """
+    return d in CIRCUIT_HALT_SESSIONS
+
+
+def is_known_irregular_session(d: date) -> bool:
+    """Return True iff ``d`` is a KNOWN-irregular session (halt day OR extended).
+
+    The union predicate the session-density census
+    (:mod:`brutex.data.session_density`) + the >9% daily-range detector
+    (:mod:`brutex.data.spot_daily_resample`) key their INFO (expected-irregular)
+    arms on — a deficit / extreme range on one of these annotated dates is a
+    documented market fact, never an unexplained lake defect. O(1).
+    """
+    return is_circuit_halt_session(d) or has_extended_session(d)
+
+
+def known_irregular_reason(d: date) -> str | None:
+    """Return the machine reason token for a known-irregular session, else ``None``.
+
+    * :data:`CIRCUIT_HALT_REASON` (``"market_wide_circuit_halt"``) for a
+      :data:`CIRCUIT_HALT_SESSIONS` date (DEC-HALT-DAY-TREATMENT-001);
+    * :data:`EXTENDED_SESSION_REASON` (``"exchange_outage_extended_close"``)
+      for an :data:`EXTENDED_SESSIONS` date (DEC-EXTENDED-SESSION-OUTAGE-001);
+    * ``None`` for every other date. O(1).
+    """
+    if is_circuit_halt_session(d):
+        return CIRCUIT_HALT_REASON
+    if has_extended_session(d):
+        return EXTENDED_SESSION_REASON
+    return None
+
+
 def get_session(d: date, *, exchange: str | None = None) -> TradingSession | None:
     """Return the trading session for the given date, or None if no trading.
 
@@ -713,11 +794,16 @@ def get_session(d: date, *, exchange: str | None = None) -> TradingSession | Non
        flag on the same calendar day.
     2. Special weekend session (e.g. Budget Day on Saturday / Sunday) —
        full 09:15-15:30 hours, classified as ``REGULAR``.
-    3. Regular weekday session if :func:`is_trading_day` is True.
-    4. ``None`` otherwise (weekend / holiday).
+    3. Extended session (:data:`EXTENDED_SESSIONS` — the 2021-02-24 NSE
+       exchange-outage day, close extended to 17:00 IST at NSE, BSE and MSEI;
+       DEC-EXTENDED-SESSION-OUTAGE-001) — classified as ``REGULAR`` (the
+       special-weekend precedent; identity is :func:`has_extended_session`).
+    4. Regular weekday session if :func:`is_trading_day` is True.
+    5. ``None`` otherwise (weekend / holiday).
 
-    Muhurat + special weekend sessions are SHARED by both exchanges (NSE + BSE
-    run the same special sessions); only the holiday set is exchange-scoped.
+    Muhurat + special weekend + extended sessions are SHARED by both exchanges
+    (NSE + BSE ran the same sessions — the 2021-02-24 17:00 extension applied
+    to NSE, BSE and MSEI alike); only the holiday set is exchange-scoped.
 
     Parameters
     ----------
@@ -750,6 +836,14 @@ def get_session(d: date, *, exchange: str | None = None) -> TradingSession | Non
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
+    if d in EXTENDED_SESSIONS:
+        open_t, close_t = EXTENDED_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.REGULAR,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
     if not is_trading_day(d, exchange=exchange):
         return None
     return TradingSession(
@@ -772,18 +866,21 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
     WITHOUT raising because their answer is data-complete regardless of the
     holiday list, mirroring :func:`is_trading_day_checked`:
 
-    * a muhurat session or a special-weekend session (data the package
-      explicitly holds) → that session;
+    * a muhurat session, a special-weekend session or an extended session
+      (:data:`EXTENDED_SESSIONS` — data the package explicitly holds;
+      DEC-EXTENDED-SESSION-OUTAGE-001) → that session;
     * a plain weekend with no special/muhurat session → ``None`` (a weekend is
       never a trading day; the holiday list cannot change that).
 
-    A weekday outside the span is the genuinely-ambiguous case: it would carry a
+    Resolution order mirrors :func:`get_session` exactly: muhurat → special
+    weekend → extended → regular (strict) → ``None``. A weekday outside the
+    span is the genuinely-ambiguous case: it would carry a
     regular session UNLESS it is an (unknown) holiday, so the strict variant
     refuses (via :func:`is_trading_day_checked`) rather than guess a REGULAR
     session. The unguarded :func:`get_session` keeps its byte-identical
     back-compat behaviour (an out-of-coverage weekday reads as a REGULAR
-    session). Muhurat + special weekend sessions are SHARED by both exchanges;
-    only the holiday set is exchange-scoped. O(1).
+    session). Muhurat + special weekend + extended sessions are SHARED by both
+    exchanges; only the holiday set is exchange-scoped. O(1).
 
     Parameters
     ----------
@@ -813,6 +910,14 @@ def get_session_checked(d: date, *, exchange: str | None = None) -> TradingSessi
         )
     if is_special_weekend_session(d):
         open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.REGULAR,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if d in EXTENDED_SESSIONS:
+        open_t, close_t = EXTENDED_SESSIONS[d]
         return TradingSession(
             date=d,
             session_type=SessionType.REGULAR,
@@ -1160,6 +1265,45 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     if tf_minutes >= SESSION_DURATION_MINUTES:
         return 1
     return -(-SESSION_DURATION_MINUTES // tf_minutes)
+
+
+def expected_bars_for_session(session: TradingSession, tf_minutes: int) -> int:
+    """Number of bars expected in ``session`` at the given timeframe — session-AWARE.
+
+    DEC-SESSION-DENSITY-CENSUS-001 — the session-aware twin of the date-blind
+    :func:`expected_bars_per_day_for_tf`: the SAME ceiling-division law
+    (DEC-CALENDAR-BARS-CEIL-001 — session-anchored left-labeled buckets
+    INCLUDING the truncated final bucket) applied to the session's OWN
+    :attr:`TradingSession.duration_minutes` instead of the hardcoded
+    375-minute regular constant, so a Muhurat hour (60 min), the 2021-02-24
+    extended 09:15-17:00 outage day (465 min — DEC-EXTENDED-SESSION-OUTAGE-001)
+    and any future short/long session all predict honestly. For every REGULAR
+    375-minute session the two functions are equal (property-pinned);
+    :func:`expected_bars_per_day_for_tf` itself is byte-UNTOUCHED.
+
+    Examples
+    --------
+    >>> from datetime import date
+    >>> regular = get_session(date(2024, 1, 2))  # a regular Tuesday
+    >>> expected_bars_for_session(regular, 1)
+    375
+    >>> expected_bars_for_session(regular, 30)
+    13
+    >>> extended = get_session(date(2021, 2, 24))  # 09:15-17:00 outage day
+    >>> expected_bars_for_session(extended, 1)
+    465
+
+    Raises
+    ------
+    ValueError
+        If ``tf_minutes < 1`` (mirrors :func:`expected_bars_per_day_for_tf`).
+    """
+    if tf_minutes < 1:
+        raise ValueError(f"expected_bars_for_session.tf_minutes must be >= 1, got {tf_minutes}")
+    duration = session.duration_minutes
+    if tf_minutes >= duration:
+        return 1
+    return -(-duration // tf_minutes)
 
 
 def is_forced_exit_bar(t: time, tf_minutes: int, forced_exit_seconds: int | None = None) -> bool:

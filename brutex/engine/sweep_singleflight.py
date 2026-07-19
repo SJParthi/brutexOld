@@ -54,6 +54,7 @@ from typing import Final
 import structlog
 
 from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock_path
+from brutex.data.guarded_read import read_regular_text
 from brutex.models import BruteXError
 
 __all__ = [
@@ -133,7 +134,7 @@ def _read_holder_pid(lock_path: Path) -> int | None:
     load-bearing (the flock itself is the mutual exclusion).
     """
     try:
-        raw = lock_path.read_text(encoding="utf-8").strip()
+        raw = read_regular_text(lock_path).strip()
         return int(raw)
     except (OSError, ValueError):
         return None

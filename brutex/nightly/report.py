@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex import __version__
+from brutex.data.guarded_read import read_regular_text
 from brutex.nightly.chain import LinkStatus, NightlyReport, first_breaker
 
 if TYPE_CHECKING:
@@ -182,17 +183,17 @@ def write_bundle(
     _write_text(bundle / REPORT_FILENAME, json.dumps(report.to_dict(), indent=2))
 
     with contextlib.suppress(OSError):
-        lines = nightly_audit_path.read_text(encoding="utf-8").splitlines()
+        lines = read_regular_text(nightly_audit_path).splitlines()
         own = [line for line in lines if report.nightly_id in line]
         _write_text(bundle / "nightly-audit-tail.jsonl", "\n".join(own) + ("\n" if own else ""))
 
     with contextlib.suppress(OSError):
-        sweep_lines = sweep_audit_path.read_text(encoding="utf-8").splitlines()
+        sweep_lines = read_regular_text(sweep_audit_path).splitlines()
         tail = sweep_lines[-_SWEEP_TAIL_LINES:]
         _write_text(bundle / "sweep-audit-tail.jsonl", "\n".join(tail) + ("\n" if tail else ""))
 
     with contextlib.suppress(OSError):
-        _write_text(bundle / "sweep-progress.json", progress_path.read_text(encoding="utf-8"))
+        _write_text(bundle / "sweep-progress.json", read_regular_text(progress_path))
 
     _write_text(bundle / "env.json", json.dumps(_allowlisted_env(env), indent=2))
     _write_text(
