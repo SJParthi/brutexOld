@@ -68,6 +68,7 @@ from brutex.calendars.nse import (
     MUHURAT_SESSIONS,
     previous_trading_session,
 )
+from brutex.config.feed_scope import FeedScope
 from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
@@ -130,6 +131,14 @@ from brutex.data.partition import (
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
+from brutex.data.scope_filter import (
+    WINDOW_ADMITTED,
+    WINDOW_LEGACY_UNRESOLVED,
+    classify_window_row,
+    scope_admits_dataset,
+    scope_admits_fno_contract,
+    scope_admitted_symbol_names,
+)
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
@@ -139,6 +148,7 @@ from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
     is_expired_window_settle_reason,
 )
+from brutex.models import Exchange
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
 
@@ -1769,7 +1779,41 @@ def _retry_candle_read_once[T](
 SPOT_VERDICT_INTERVALS: Final[tuple[str, str]] = ("1minute", "1day")
 
 
-def summarize_spot_verdict_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+class ScopedSummaryRows(list[dict[str, Any]]):
+    """Census-summary rows + the read-scope exclusion count (#1934).
+
+    A ``list`` subclass (DEC-UNIVERSE-INDEX-ONLY-001 R2/R9) so every existing
+    consumer — the SummaryCache SPOT/OPTIONS entries,
+    ``build_spot_coverage_payload`` / ``build_option_coverage_payload``, the
+    completeness inputs — keeps its exact list contract while the
+    ``scope_excluded`` census (how many stored-only symbols/underlyings the
+    read scope excluded from THIS scan) rides the SAME object the cache
+    stores: a cached serve can never pair rows with a foreign exclusion count
+    (Golden Rule #1).
+    """
+
+    scope_excluded: int
+
+    def __init__(self, rows: Iterable[dict[str, Any]], *, scope_excluded: int) -> None:
+        super().__init__(rows)
+        self.scope_excluded = scope_excluded
+
+
+def summary_rows_scope_excluded(rows: object) -> int:
+    """The scope-exclusion census carried by *rows* — ``0`` for a plain list.
+
+    The ONE reader of :class:`ScopedSummaryRows`'s census (CLAUDE.md §11
+    COMMON) so the payload sites never re-derive it: an unfiltered scan (a
+    plain ``list`` — the ``scope=None`` byte-identical arm) reads ``0``.
+    """
+    if isinstance(rows, ScopedSummaryRows):
+        return rows.scope_excluded
+    return 0
+
+
+def summarize_spot_verdict_datasets(
+    conn: Any, lake_root: Path, *, scope: FeedScope | None = None
+) -> list[dict[str, Any]]:
     """The FNO-pruned, verdict-interval-bounded spot summary scan — the dashboard's scan.
 
     DEC-COMPLETENESS-FNO-SKIP-001 (mechanization-sweep register #12,
@@ -1788,13 +1832,44 @@ def summarize_spot_verdict_datasets(conn: Any, lake_root: Path) -> list[dict[str
     tabs keep their own scans; :func:`summarize_spot_datasets` itself stays
     UNFILTERED by default — the F&O ledger⇄lake cold-start reconcile
     (``load_lake_spans``) depends on the full walk.
+
+    Universe scope (DEC-UNIVERSE-INDEX-ONLY-001 R2, #1934): a BOUNDED *scope*
+    (the routes thread ``resolve_read_scope()`` — §2.4 read-default law:
+    ``None``/unbounded = the unfiltered byte-identical legacy scan) screens
+    each discovered dataset through the §3.5
+    :func:`~brutex.data.scope_filter.scope_admits_dataset` predicate AT
+    DISCOVERY — an excluded stock dataset also skips its per-dataset DuckDB
+    aggregate (the DEC-COMPLETENESS-FNO-SKIP-001 blocked-for-minutes class,
+    never re-paid for scoped-out symbols) — and the filtered rows return as a
+    :class:`ScopedSummaryRows` carrying the distinct-symbol exclusion census for
+    the payloads' emit-on-nonzero echo. ``load_lake_spans`` NEVER threads this
+    seam (the twice-pinned unfiltered cold-start contract above).
     """
-    return summarize_spot_datasets(
+    prune = frozenset({FNO_CANDLE_LAKE_SEGMENT})
+    if scope is None or not scope.bounded():
+        return summarize_spot_datasets(
+            conn,
+            lake_root,
+            exclude_segments=prune,
+            intervals=SPOT_VERDICT_INTERVALS,
+        )
+    bound = scope
+    excluded: set[tuple[str, str, str]] = set()
+
+    def _admit(exchange: str, segment: str, symbol: str) -> bool:
+        if scope_admits_dataset(exchange, segment, symbol, bound):
+            return True
+        excluded.add((exchange, segment, symbol))
+        return False
+
+    rows = summarize_spot_datasets(
         conn,
         lake_root,
-        exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+        exclude_segments=prune,
         intervals=SPOT_VERDICT_INTERVALS,
+        admit=_admit,
     )
+    return ScopedSummaryRows(rows, scope_excluded=len(excluded))
 
 
 def summarize_spot_datasets(
@@ -1804,6 +1879,7 @@ def summarize_spot_datasets(
     session_date_segments: frozenset[str] | None = None,
     exclude_segments: frozenset[str] = frozenset(),
     intervals: Collection[str] | None = None,
+    admit: Callable[[str, str, str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
@@ -1910,6 +1986,15 @@ def summarize_spot_datasets(
         :func:`summarize_spot_verdict_datasets`). The defaults are
         byte-identical to the unfiltered scan, which the F&O ledger⇄lake
         reconcile (``load_lake_spans``) still requires.
+    admit
+        OPT-IN dataset predicate (DEC-UNIVERSE-INDEX-ONLY-001 R2, #1934):
+        called with ``(exchange, segment, symbol)`` at dataset DISCOVERY —
+        a ``False`` skips the dataset AND its per-dataset DuckDB aggregate
+        (excluded symbols cost zero Parquet I/O). The default ``None`` is the
+        unfiltered byte-identical walk; ONLY the verdict wrapper
+        (:func:`summarize_spot_verdict_datasets`) threads it —
+        ``load_lake_spans`` (the pull-path cold-start reconcile) deliberately
+        never does (the pinned unfiltered contract).
 
     Returns
     -------
@@ -1930,6 +2015,12 @@ def summarize_spot_datasets(
         segment = dataset["segment"]
         symbol = dataset["symbol"]
         interval = dataset["interval"]
+        # Universe-scope screen (DEC-UNIVERSE-INDEX-ONLY-001 R2): an excluded
+        # dataset is skipped BEFORE its aggregate — zero Parquet I/O for
+        # scoped-out symbols. ``None`` (every legacy caller + load_lake_spans'
+        # unfiltered cold-start contract) is byte-identical.
+        if admit is not None and not admit(exchange, segment, symbol):
+            continue
         is_fetched_minute = interval == TRACK1_SPOT_INTERVAL
         # Belt half of the DEC-COLDSTART-SEED-INTERIOR-GAP-001 REVISION-1 gate
         # (the braces half lives in `seed_enclosed_windows`): session dates are
@@ -2042,7 +2133,9 @@ def summarize_spot_datasets(
     return rows
 
 
-def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+def summarize_option_datasets(
+    conn: Any, lake_root: Path, *, scope: FeedScope | None = None
+) -> list[dict[str, Any]]:
     """Summarise the expired-options lake per underlying for the coverage page.
 
     The options-side analog of :func:`summarize_spot_datasets`
@@ -2061,12 +2154,28 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
     WHAT is stored, NOT whether the full ``2020 → today`` range is complete —
     partial-range detection is an explicit follow-up, mirroring the spot side.
 
+    Universe scope (DEC-UNIVERSE-INDEX-ONLY-001 R9, #1934): a BOUNDED *scope*
+    (the route threads ``resolve_read_scope()``; ``None``/unbounded = the
+    unfiltered byte-identical legacy read) applies a POST-AGGREGATE row filter
+    on :func:`~brutex.data.scope_filter.scope_admits_fno_contract` over each
+    grouped row's ``(exch_id, underlying_symbol)`` — a junk/uncoercible
+    ``exch_id`` token is excluded + counted under a bounded scope (the §3.5
+    totality law). HONEST cost envelope — NO R2-style economy exists here:
+    this is ONE whole-tree aggregate, so every stored stock series' Parquet
+    footers are still read regardless of scope; only OUTPUT rows are excluded
+    + counted (the :class:`ScopedSummaryRows` census feeds the payload's
+    emit-on-nonzero echo). The /db options DISCOVERY surfaces
+    (:func:`list_option_datasets` / :func:`list_option_series`) stay
+    deliberately UNFILTERED (the R5 raw-viewer law — negative-pinned).
+
     Parameters
     ----------
     conn
         A DuckDB connection.
     lake_root
         Top-level lake directory (the parent of ``options/``).
+    scope
+        The read-union scope, or ``None`` (default — unfiltered).
 
     Returns
     -------
@@ -2103,7 +2212,7 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
         ") GROUP BY exch_id, underlying_symbol ORDER BY exch_id, underlying_symbol",
         source="options",
     )
-    return [
+    summarised = [
         {
             "underlying": row[1],
             "exchange": row[0],
@@ -2114,6 +2223,26 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
         }
         for row in rows
     ]
+    if scope is None or not scope.bounded():
+        return summarised
+    # R9 post-aggregate scope filter (DEC-UNIVERSE-INDEX-ONLY-001, #1934):
+    # exclude + count OUTPUT rows whose (exch_id, underlying) is out of scope —
+    # the whole-tree aggregate above already ran (no discovery economy exists
+    # on this ONE-query surface; disclosed in the docstring).
+    kept = [
+        row
+        for row in summarised
+        if scope_admits_fno_contract(str(row["exchange"]), str(row["underlying"]), scope)
+    ]
+    excluded = len(summarised) - len(kept)
+    if excluded:
+        _LOG.info(
+            "coverage.options.scope_excluded",
+            excluded=excluded,
+            kept=len(kept),
+            dec="DEC-UNIVERSE-INDEX-ONLY-001",
+        )
+    return ScopedSummaryRows(kept, scope_excluded=excluded)
 
 
 def _validate_option_segment(series: str) -> None:
@@ -5930,6 +6059,28 @@ def _isolated_counts_since(
         _close_cursor(cursor, conn)
 
 
+def _isolated_counts_total_scoped(
+    conn: Any, source: _LedgerScanSource, bind: _WindowScopeBind
+) -> tuple[dict[str, dict[str, int]], int, int, int]:
+    """The R11 scoped counts fold on an isolated cursor — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_total_scoped(cursor, source, bind)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+def _isolated_counts_since_scoped(
+    conn: Any, source: _LedgerScanSource, since_iso: str, bind: _WindowScopeBind
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The scoped per-run twin on an isolated cursor — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_since_scoped(cursor, source, since_iso, bind)
+    finally:
+        _close_cursor(cursor, conn)
+
+
 #: Resident-key bound for the shared ledger read cache: 2 key families
 #: (records / spot-rollup — the ``ledger-rows`` family was RETIRED by
 #: DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the /db grid rows are now an
@@ -6769,6 +6920,169 @@ def _fold_status_counts(
     return counts, total
 
 
+#: The legacy ``sid|segment`` window key's sid extractor (DuckDB ``split_part``
+#: is 1-based; the ``|`` is a literal in LIKE — no metacharacter).
+_LEGACY_SID_EXPR: Final[str] = "split_part(security_id, '|', 1)"
+
+
+@dataclass(frozen=True)
+class _WindowScopeBind:
+    """The R11 window-census scope predicate, bound for SQL (#1934).
+
+    DEC-UNIVERSE-INDEX-ONLY-001 design §3 R11: ONE admit fragment applied
+    IDENTICALLY to the page query, ``_window_counts_total`` and
+    ``_window_counts_since`` — spot keys by the enumerated recovered forms
+    (``TRIM`` + the exact/own-prefix variants of the admitted names), modern
+    F&O contract keys by ``LIKE '<EXCH>-<U>-%'`` prefixes over the scope's
+    F&O underlyings, legacy ``sid|segment`` keys by the admitted-sid list
+    from the route's ``symbol_for_id`` map. The SQL predicate may be
+    admit-side WIDER than the Python §3.5 form (a pathological non-vendor
+    ``NSE-NIFTY-<junk>`` name over-admits into the census — the harmless
+    direction; it NEVER excludes an in-scope row; stated + pinned). The
+    ``legacy_unresolved`` fragment names the DISTINCT sub-count: a
+    legacy-shape row whose sid the map does not know at all — never silently
+    dropped, never misattributed purely to the DEC.
+    """
+
+    admit_sql: str
+    admit_params: tuple[str, ...]
+    legacy_unresolved_sql: str
+    legacy_params: tuple[str, ...]
+    #: Content-derived cache-key segment: digests the scope's admitted pairs +
+    #: the sid map, so a §2.5 registration widening (scope content moves) AND
+    #: a master reload (map content moves) both re-key the counts/page memos
+    #: with NO generation bump (the #1650 fold law — content-keyed, which
+    #: subsumes the design's master_revision+scope_revision fold: any move
+    #: that changes the bound predicate moves the token).
+    key_token: str
+
+
+def _window_scope_bind(
+    scope: FeedScope | None, symbol_for_id: Mapping[str, str] | None
+) -> _WindowScopeBind | None:
+    """Build the R11 SQL bind for a BOUNDED scope — ``None`` under unbounded.
+
+    ``None`` (a defaulted caller / a ``full`` union) composes NO WHERE: the
+    SQL text stays BYTE-identical to the pre-#1934 queries (the steady-state
+    SQL-text byte pin + every direct-call window suite pass unchanged — §6
+    Law 0).
+    """
+    if scope is None or not scope.bounded():
+        return None
+    names = scope_admitted_symbol_names(scope)
+    spot_forms: list[str] = []
+    for name in sorted(names):
+        spot_forms.append(name)
+        spot_forms.extend(f"{exchange.value}-{name}" for exchange in Exchange)
+    fno_prefixes = [
+        f"{exchange.value}-{symbol}-%"
+        for exchange, symbol in sorted(
+            scope.fno_underlyings or frozenset(), key=lambda pair: (pair[0].value, pair[1])
+        )
+    ]
+    sid_map = dict(symbol_for_id or {})
+    known_sids = sorted(sid_map)
+    admitted_sids = sorted(sid for sid, symbol in sid_map.items() if symbol in names)
+    arms: list[str] = []
+    params: list[str] = []
+    if spot_forms:
+        arms.append(f"TRIM(security_id) IN ({', '.join('?' for _ in spot_forms)})")
+        params.extend(spot_forms)
+    arms.extend("security_id LIKE ?" for _ in fno_prefixes)
+    params.extend(fno_prefixes)
+    if admitted_sids:
+        arms.append(
+            f"(security_id LIKE '%|%' AND {_LEGACY_SID_EXPR} "
+            f"IN ({', '.join('?' for _ in admitted_sids)}))"
+        )
+        params.extend(admitted_sids)
+    admit_sql = "(" + " OR ".join(arms) + ")" if arms else "(1 = 0)"
+    if known_sids:
+        legacy_sql = (
+            f"(security_id LIKE '%|%' AND {_LEGACY_SID_EXPR} "
+            f"NOT IN ({', '.join('?' for _ in known_sids)}))"
+        )
+        legacy_params = tuple(known_sids)
+    else:
+        legacy_sql = "(security_id LIKE '%|%')"
+        legacy_params = ()
+    basis = "\x1e".join(
+        (
+            ",".join(
+                sorted(f"{e.value}:{s}" for e, s in scope.admitted_underlyings or frozenset())
+            ),
+            ",".join(sorted(f"{e.value}:{s}" for e, s in scope.fno_underlyings or frozenset())),
+            _window_symbol_map_token(symbol_for_id),
+        )
+    )
+    return _WindowScopeBind(
+        admit_sql=admit_sql,
+        admit_params=tuple(params),
+        legacy_unresolved_sql=legacy_sql,
+        legacy_params=legacy_params,
+        key_token="s=" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16],
+    )
+
+
+def _window_scope_key_token(bind: _WindowScopeBind | None) -> str:
+    """The counts/page cache-key scope segment — ``"unfiltered"`` for ``None``.
+
+    A defaulted caller keys SEPARATELY from the threaded routes (Rev 5 — one
+    cache entry can never serve two divergent computes); the two production
+    routes both thread the SAME scope + map and keep sharing ONE entry (the
+    documented shared-entry economy, pinned).
+    """
+    return "unfiltered" if bind is None else bind.key_token
+
+
+def _window_counts_total_scoped(
+    conn: Any, source: _LedgerScanSource, bind: _WindowScopeBind
+) -> tuple[dict[str, dict[str, int]], int, int, int]:
+    """The SCOPED counts fold — ONE scan carrying the exclusion census.
+
+    The SAME single ``GROUP BY`` scan as :func:`_window_counts_total` with the
+    bind's predicate riding it as a classification CASE (admitted /
+    legacy-unresolved / out-of-scope) — zero extra scans, zero Python folds
+    over rows (design §3 R11: "the WHERE rides the same scan"). Returns
+    ``(counts, total, out_of_scope, legacy_unresolved)`` where ``counts`` /
+    ``total`` cover ONLY admitted windows (matched/capped derive from them)
+    and ``out_of_scope`` INCLUDES the distinct ``legacy_unresolved``
+    sub-count.
+    """
+    cursor = conn.execute(
+        f"SELECT market, status, CASE WHEN {bind.admit_sql} THEN 'a' "  # noqa: S608  # nosec B608 — from_sql + bind fragments are trusted module-built constants; all values bound
+        f"WHEN {bind.legacy_unresolved_sql} THEN 'l' ELSE 'x' END AS scope_class, "
+        f"COUNT(*) FROM {source.from_sql} GROUP BY market, status, scope_class",
+        [*bind.admit_params, *bind.legacy_params, *source.params],
+    )
+    admitted_rows: list[tuple[Any, Any, Any]] = []
+    out_of_scope = 0
+    legacy_unresolved = 0
+    for market_value, status_value, scope_class, n in cursor.fetchall():
+        if str(scope_class) == "a":
+            admitted_rows.append((market_value, status_value, n))
+            continue
+        out_of_scope += int(n)
+        if str(scope_class) == "l":
+            legacy_unresolved += int(n)
+    counts, total = _fold_status_counts(admitted_rows)
+    return counts, total, out_of_scope, legacy_unresolved
+
+
+def _window_counts_since_scoped(
+    conn: Any, source: _LedgerScanSource, since_iso: str, bind: _WindowScopeBind
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The per-run twin under a bounded scope — the SAME admit fragment as a WHERE."""
+    cursor = conn.execute(
+        f"SELECT market, status, COUNT(*) FROM {source.from_sql} "  # noqa: S608  # nosec B608 — from_sql + bind fragments are trusted module-built constants; all values bound
+        "WHERE status != 'PLANNED' AND last_attempt_at IS NOT NULL "
+        "AND last_attempt_at != '' AND last_attempt_at >= ? "
+        f"AND {bind.admit_sql} GROUP BY market, status",
+        [*source.params, since_iso, *bind.admit_params],
+    )
+    return _fold_status_counts(cursor.fetchall())
+
+
 def _window_counts_total(
     conn: Any, source: _LedgerScanSource
 ) -> tuple[dict[str, dict[str, int]], int]:
@@ -7224,6 +7538,8 @@ def phase_progress_payload(
     count_cache: WindowCountsCache | None = None,
     generation: int = 0,
     retry_sleep: Callable[[float], None] | None = None,
+    scope: FeedScope | None = None,
+    symbol_for_id: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """The Universe pull's LIVE per-phase progress rows — REUSES the cached window counts.
 
@@ -7303,13 +7619,26 @@ def phase_progress_payload(
     if not ledger_file.is_file() and not _ledger_delta_files(ledger_file):
         return []
 
+    # R11 disposition (DEC-UNIVERSE-INDEX-ONLY-001, #1934): the pull-progress
+    # route threads the SAME scope + sid-map components as /coverage/windows,
+    # so the two routes KEEP sharing one cached counts entry and the phase
+    # totals narrow WITH the census (a residual pre-cut stock PLANNED
+    # population can no longer pin the futures sub-phase via phantom pending).
+    scope_bind = _window_scope_bind(scope, symbol_for_id)
+    scope_token = _window_scope_key_token(scope_bind)
+
     def _counts() -> dict[str, dict[str, int]]:
         """ONE counts read — direct or through the injected stamp-keyed cache."""
         # Re-assembled per attempt (fresh delta listing) so the torn-read retry
         # below self-heals the save-time prune race (DEC-LEDGER-DELTA-O-PAGE-001).
         source = _ledger_scan_source(ledger_file)
         if count_cache is None:
-            counts, _total = _window_counts_total(conn, source)
+            if scope_bind is None:
+                counts, _total = _window_counts_total(conn, source)
+            else:
+                counts, _total, _out, _legacy = _window_counts_total_scoped(
+                    conn, source, scope_bind
+                )
         else:
             # STABLE key + stamp-digest generation (DEC-WINDOWS-MIDPULL-FLOOR-001):
             # the composite stamp token (base mtime + delta name set) still carries
@@ -7327,11 +7656,21 @@ def phase_progress_payload(
             # `_LockedReadConn.cursor()` (a fresh per-compute view; the shared
             # single-thread view corrupted its hold flag cross-thread and
             # leaked the store read lock — round-1 BLOCKER).
-            counts, _total = count_cache.get_or_compute(
-                f"window-counts|{ledger_file.as_posix()}",
-                generation=revision_generation(source.stamp_token),
-                compute=lambda: _isolated_counts_total(conn, source),
-            )
+            counts_key = f"window-counts|{ledger_file.as_posix()}|{scope_token}"
+            stamp_generation = revision_generation(source.stamp_token)
+            if scope_bind is None:
+                counts, _total = count_cache.get_or_compute(
+                    counts_key,
+                    generation=stamp_generation,
+                    compute=lambda: _isolated_counts_total(conn, source),
+                )
+            else:
+                bound_bind = scope_bind
+                counts, _total, _out, _legacy = count_cache.get_or_compute(
+                    counts_key,
+                    generation=stamp_generation,
+                    compute=lambda: _isolated_counts_total_scoped(conn, source, bound_bind),
+                )
         return counts
 
     sleeper = _default_sleep if retry_sleep is None else retry_sleep
@@ -7369,6 +7708,17 @@ def phase_progress_payload(
                     **_ledger_stat_fields(ledger_file),
                 )
                 records = _ledger_records_cached(ledger_file.parent.parent)
+                if scope is not None and scope.bounded():
+                    # The SAME §3.5 window predicate as the payload fold —
+                    # the degraded phases never widen past the census (R11).
+                    records = tuple(
+                        r
+                        for r in records
+                        if classify_window_row(
+                            str(r.security_id), scope, admitted_sids=symbol_for_id
+                        )
+                        == WINDOW_ADMITTED
+                    )
                 return build_phase_progress(
                     _window_counts_from_records(records), current_phase=current_phase
                 )
@@ -7421,6 +7771,7 @@ def _build_window_payload_duckdb(
     generation: int,
     since: str | None = None,
     page_cache: WindowCountsCache | None = None,
+    scope: FeedScope | None = None,
 ) -> dict[str, Any]:
     """The ``/coverage/windows`` payload via DuckDB — stamp-cached counts AND page rows.
 
@@ -7569,32 +7920,66 @@ def _build_window_payload_duckdb(
     # generation mismatch on the SAME key). A repeat click within one stamp
     # stays an O(1) hit.
     stamp_generation = revision_generation(source.stamp_token)
+    # R11 scope bind (DEC-UNIVERSE-INDEX-ONLY-001, #1934): ONE admit fragment
+    # applied identically to the counts + since + page queries; a None bind
+    # (defaulted caller / unbounded union) composes NO WHERE — SQL text
+    # byte-identical — and keys under the DISTINCT "unfiltered" token.
+    scope_bind = _window_scope_bind(scope, symbol_for_id)
+    scope_token = _window_scope_key_token(scope_bind)
+    out_of_scope = 0
+    legacy_unresolved = 0
     if count_cache is None:
-        counts, total = _window_counts_total(conn, source)
+        if scope_bind is None:
+            counts, total = _window_counts_total(conn, source)
+        else:
+            counts, total, out_of_scope, legacy_unresolved = _window_counts_total_scoped(
+                conn, source, scope_bind
+            )
         if since is not None:
-            counts_since, _since_total = _window_counts_since(conn, source, since)
+            if scope_bind is None:
+                counts_since, _since_total = _window_counts_since(conn, source, since)
+            else:
+                counts_since, _since_total = _window_counts_since_scoped(
+                    conn, source, since, scope_bind
+                )
     else:
         # Computes run on a statement-isolated cursor, closed after
         # (`_isolated_counts_total`): the flagged caches may execute them on a
         # background revalidator daemon, concurrent with this thread's own
         # statements — a production store conn isolates via
         # `_LockedReadConn.cursor()` (fresh per-compute view, round-1 BLOCKER).
-        counts, total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}",
-            generation=stamp_generation,
-            compute=lambda: _isolated_counts_total(conn, source),
-        )
+        if scope_bind is None:
+            counts, total = count_cache.get_or_compute(
+                f"window-counts|{ledger_glob}|{scope_token}",
+                generation=stamp_generation,
+                compute=lambda: _isolated_counts_total(conn, source),
+            )
+        else:
+            bound_bind = scope_bind
+            counts, total, out_of_scope, legacy_unresolved = count_cache.get_or_compute(
+                f"window-counts|{ledger_glob}|{scope_token}",
+                generation=stamp_generation,
+                compute=lambda: _isolated_counts_total_scoped(conn, source, bound_bind),
+            )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
             # DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the pull-start token joins the
             # key so a NEW pull (new journal `started`) can never be served the prior
             # run's per-run figures even across the LRU's retained stamps.
-            since_key = f"window-counts-since|{ledger_glob}|{since}"
-            counts_since, _since_total = count_cache.get_or_compute(
-                since_key,
-                generation=stamp_generation,
-                compute=lambda: _isolated_counts_since(conn, source, since),
-            )
+            since_key = f"window-counts-since|{ledger_glob}|{since}|{scope_token}"
+            if scope_bind is None:
+                counts_since, _since_total = count_cache.get_or_compute(
+                    since_key,
+                    generation=stamp_generation,
+                    compute=lambda: _isolated_counts_since(conn, source, since),
+                )
+            else:
+                since_bind = scope_bind
+                counts_since, _since_total = count_cache.get_or_compute(
+                    since_key,
+                    generation=stamp_generation,
+                    compute=lambda: _isolated_counts_since_scoped(conn, source, since, since_bind),
+                )
 
     valid_buckets = ("spot", "options", "futures")
     if market is None:
@@ -7651,6 +8036,12 @@ def _build_window_payload_duckdb(
             else:
                 where.append("status != ?")
                 where_params.append("PLANNED")
+            if scope_bind is not None:
+                # The SAME admit fragment as the counts scan (R11 — one
+                # predicate, three queries; the page can never disagree with
+                # matched/counts on which rows are in scope).
+                where.append(scope_bind.admit_sql)
+                where_params.extend(scope_bind.admit_params)
             where_sql = (" WHERE " + " AND ".join(where)) if where else ""
             order_sql = (
                 f" ORDER BY {_window_severity_order_sql()}, "
@@ -7735,6 +8126,7 @@ def _build_window_payload_duckdb(
             page_key = (
                 f"window-page|{ledger_glob}|"
                 f"{(market, wanted_status, limit, offset, _window_symbol_map_token(symbol_for_id))!r}"
+                f"|{scope_token}"
             )
             rows = page_cache.get_or_compute(
                 page_key, generation=stamp_generation, compute=_page_rows
@@ -7749,6 +8141,16 @@ def _build_window_payload_duckdb(
         "capped": matched > limit,
         "windows": rows,
     }
+    if out_of_scope:
+        # EMIT-ON-NONZERO census (DEC-UNIVERSE-INDEX-ONLY-001 R11): the
+        # excluded window count naming the DEC, with the DISTINCT
+        # legacy-unresolved sub-count (an unmapped legacy sid is never
+        # silently dropped, never misattributed purely to the DEC).
+        payload["out_of_scope"] = {
+            "windows": out_of_scope,
+            "legacy_unresolved": legacy_unresolved,
+            "dec": "DEC-UNIVERSE-INDEX-ONLY-001",
+        }
     if counts_since is not None:
         # Per-run honesty keys (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001) — present
         # ONLY when a real pull-start is known; an unknown start OMITS them entirely
@@ -7796,6 +8198,7 @@ def build_window_payload(
     since: str | None = None,
     retry_sleep: Callable[[float], None] | None = None,
     page_cache: WindowCountsCache | None = None,
+    scope: FeedScope | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -7907,6 +8310,7 @@ def build_window_payload(
                 generation=generation,
                 since=since,
                 page_cache=page_cache,
+                scope=scope,
             )
 
         try:
@@ -7964,6 +8368,27 @@ def build_window_payload(
         source = "status_log"
         records = tuple(load_window_status(lake_root).records())
 
+    # R11 Python-fold parity (DEC-UNIVERSE-INDEX-ONLY-001, #1934): the legacy
+    # pyarrow + window_status.json fallbacks share this ONE fold body — under a
+    # bounded scope the §3.5 window predicate classifies each record (the
+    # SQL≡Python equivalence pin rides the fixture corpus), excluded rows are
+    # dropped from counts AND selection, and the census mirrors the fast path.
+    fold_out_of_scope = 0
+    fold_legacy_unresolved = 0
+    if scope is not None and scope.bounded():
+        kept_records: list[Any] = []
+        for record in records:
+            verdict = classify_window_row(
+                str(record.security_id), scope, admitted_sids=symbol_for_id
+            )
+            if verdict == WINDOW_ADMITTED:
+                kept_records.append(record)
+                continue
+            fold_out_of_scope += 1
+            if verdict == WINDOW_LEGACY_UNRESOLVED:
+                fold_legacy_unresolved += 1
+        records = tuple(kept_records)
+
     counts = _window_counts_from_records(records)
 
     wanted_status = status.upper() if status else None
@@ -7986,7 +8411,7 @@ def build_window_payload(
         _window_row(r, first_seen_at=getattr(r, "first_seen_at", None), symbol_for_id=symbol_for_id)
         for r in selected[safe_offset : safe_offset + limit]
     ]
-    return {
+    fold_payload: dict[str, Any] = {
         "source": source,
         "count": len(records),
         "counts": counts,
@@ -7999,6 +8424,14 @@ def build_window_payload(
         "capped": len(selected) > limit,
         "windows": rows,
     }
+    if fold_out_of_scope:
+        # EMIT-ON-NONZERO census — the fast path's exact key shape (R11).
+        fold_payload["out_of_scope"] = {
+            "windows": fold_out_of_scope,
+            "legacy_unresolved": fold_legacy_unresolved,
+            "dec": "DEC-UNIVERSE-INDEX-ONLY-001",
+        }
+    return fold_payload
 
 
 # ── F&O expiries+contracts REGISTRY browser (DEC-DERIV-REGISTRY-DB-VIEW-001) ──
@@ -8399,6 +8832,7 @@ __all__ = [
     "SPOT_VERDICT_INTERVALS",
     "TABLE_SUMMARY_FAULT_TYPES",
     "WINDOW_PHASES",
+    "ScopedSummaryRows",
     "build_phase_progress",
     "build_window_payload",
     "clamp_limit",
@@ -8426,6 +8860,7 @@ __all__ = [
     "summarize_option_datasets",
     "summarize_spot_datasets",
     "summarize_spot_verdict_datasets",
+    "summary_rows_scope_excluded",
     "table_summary",
     "window_ledger_rows_cached",
     "window_ledger_rows_page",

@@ -2918,6 +2918,7 @@ def cmd_doctor(
     # DEC-UNIVERSE-INDEX-ONLY-001 §2.3: eager scope-env validation (the doctor
     # is a scope consumer — P10 ampersand probe; R12 derived-freshness).
     _validate_feed_scope_env_cli()
+    from brutex.config.feed_scope import resolve_read_scope
     from brutex.doctor import DEFAULT_AUDIT_DIR, DEFAULT_RUNTIME_FILE
     from brutex.doctor import main as doctor_main
 
@@ -2927,6 +2928,10 @@ def cmd_doctor(
         runtime_file=runtime_file if runtime_file is not None else DEFAULT_RUNTIME_FILE,
         live_subjects_file=live_subjects_file,
         replay_action_filter=replay_action_filter,
+        # R12 (DEC-UNIVERSE-INDEX-ONLY-001, #1934): the derived-freshness
+        # verdict is attested by an IN-scope symbol — a frozen stock
+        # partition can never red the doctor under the shipped default.
+        scope=resolve_read_scope(),
     )
 
 

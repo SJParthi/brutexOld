@@ -56,6 +56,7 @@ from brutex.dashboard.coverage_view import (
 )
 from brutex.data.lake_keys import resolve_spot_key
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.scope_filter import scope_excluded_echo
 
 _LOG = structlog.get_logger("brutex.dashboard.completeness")
 
@@ -1091,6 +1092,8 @@ def build_completeness_scoreboard(
     spot_categories: Mapping[str, str],
     option_records: Iterable[Any],
     option_categories: Mapping[str, str],
+    *,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Compose the full Data Completeness Scoreboard payload (aggregate + per-symbol).
 
@@ -1110,22 +1113,30 @@ def build_completeness_scoreboard(
         :class:`~brutex.data.coverage_ledger.CoverageRecord` rows (per underlying + year).
     option_categories
         ``underlying → {index|equity|reference}`` for every scored option underlying.
+    scope_excluded
+        The R2 read-scope exclusion census (DEC-UNIVERSE-INDEX-ONLY-001,
+        #1934): how many stored-only symbols the verdict scan excluded under
+        the bounded read scope. EMIT-ON-NONZERO — the default ``0`` (an
+        unfiltered scan / an index-only lake) keeps the payload byte-identical.
 
     Returns
     -------
     dict[str, Any]
         ``{"spot": {"by_category", "per_symbol"}, "options": {"by_category", "per_underlying"}}``
-        where ``by_category`` is the aggregate count table and the lists are the drill-down rows.
+        where ``by_category`` is the aggregate count table and the lists are the drill-down rows
+        (plus the emit-on-nonzero ``scope_excluded`` echo).
     """
     per_symbol = _per_symbol_spot(spot_rows, spot_categories)
     per_underlying = _per_underlying_options(option_records, option_categories)
-    return {
+    board: dict[str, Any] = {
         "spot": {"by_category": _aggregate_spot(per_symbol), "per_symbol": per_symbol},
         "options": {
             "by_category": _aggregate_options(per_underlying),
             "per_underlying": per_underlying,
         },
     }
+    board.update(scope_excluded_echo(scope_excluded))
+    return board
 
 
 def _csv_date(value: object) -> str:

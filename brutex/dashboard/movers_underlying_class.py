@@ -295,7 +295,9 @@ def candidate_passes_class(kind: str, wanted: str) -> bool:
 _CLASS_LABEL: Final[dict[str, str]] = {CLASS_INDICES: "Indices", CLASS_STOCKS: "Stocks"}
 
 
-def class_note_suffix(wanted: str, excluded: int) -> str:
+def class_note_suffix(
+    wanted: str, excluded: int, *, empty_stocks_out_of_scope: bool = False
+) -> str:
     """Return the note fragment for the active class filter (EMIT-ON-non-default).
 
     ``""`` for :data:`CLASS_ALL` (so the default note is byte-identical, mirroring
@@ -312,6 +314,15 @@ def class_note_suffix(wanted: str, excluded: int) -> str:
         loudly below, never a silent raw echo — review-round-1 tightening).
     excluded
         The count of :data:`KIND_UNKNOWN` candidates dropped by the filter.
+    empty_stocks_out_of_scope
+        The R7 emit-on-empty-class clause (DEC-UNIVERSE-INDEX-ONLY-001,
+        #1934): ``True`` iff the Stocks tab's filtered set is EMPTY *because*
+        the read scope admits no stock underlyings (the payload builders set
+        it only for ``wanted == "stocks"`` + an empty filtered set + a
+        stock-excluding scope — never under ``full``, where an empty Stocks
+        tab is a genuine no-data state, and never for a non-Stocks tab). The
+        filter machinery itself stands (DEC-MOVERS-UNDERLYING-CLASS-001 #1650
+        is NOT superseded — the tab serves empty honestly, with this note).
 
     Returns
     -------
@@ -320,6 +331,10 @@ def class_note_suffix(wanted: str, excluded: int) -> str:
     """
     if wanted == CLASS_ALL:
         return ""
+    if wanted == CLASS_STOCKS and empty_stocks_out_of_scope:
+        # The honest empty-Stocks-tab wording — names the DEC, never reads
+        # like "no spot pulled" (design §3 R7's exact clause).
+        return " Class: Stocks — no stock underlyings in scope (DEC-UNIVERSE-INDEX-ONLY-001)."
     # Total by precondition: past the `all` early return, a normalised token is
     # exactly indices/stocks — both keys. Fail-loud on junk (Golden Rule #1).
     label = _CLASS_LABEL[wanted]

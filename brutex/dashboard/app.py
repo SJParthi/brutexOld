@@ -124,6 +124,7 @@ from brutex.dashboard.db_view import (
     spot_window_rollup,
     summarize_option_datasets,
     summarize_spot_verdict_datasets,
+    summary_rows_scope_excluded,
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
@@ -356,6 +357,7 @@ from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
+from brutex.data.scope_filter import scope_excluded_echo
 from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
@@ -6343,12 +6345,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
         def _phases() -> list[dict[str, Any]]:
             """Read the cached per-segment window counts and project the phase rows."""
+            # R11 disposition (DEC-UNIVERSE-INDEX-ONLY-001, #1934): thread the
+            # SAME scope + sid-map components as /coverage/windows — the two
+            # routes share ONE cached counts entry and the phase totals narrow
+            # WITH the census (a stale stock PLANNED population can no longer
+            # pin the futures sub-phase via phantom pending).
             return phase_progress_payload(
                 store.connection,
                 ledger_file,
                 current_phase=current_phase,
                 count_cache=_window_counts_cache,
                 generation=_summary_cache.generation,
+                scope=resolve_read_scope(),
+                symbol_for_id={
+                    str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
+                },
             )
 
         snap["phases"] = await _run_lake(_phases)
@@ -6480,8 +6491,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         gen = _summary_cache.generation
         count, latest = master_revision(store)
         c_count, c_latest = coverage_revision(store)
+        # The read-scope identity token joins the composite (the R6/R8/R10
+        # memo law, DEC-UNIVERSE-INDEX-ONLY-001 #1934): a §2.5 registration
+        # widening moves `scope_revision()` with NO generation / master /
+        # coverage movement, so without this fold the nav trio would keep
+        # serving the pre-widening narrow payloads until an unrelated write.
         return _nav_latency_stable_key(name, *extra), revision_generation(
-            f"gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}"
+            f"gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}|s={scope_revision()}"
         )
 
     def _nav_latency_stable_key(name: str, *extra: object) -> str:
@@ -6566,15 +6582,41 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 for inst in store.list_index_equity_instruments()
                 if inst.instrument is InstrumentType.IDX or inst.exch_id is Exchange.NSE
             ]
+            # R10 expected-grid scope filter (DEC-UNIVERSE-INDEX-ONLY-001,
+            # #1934): the grid is a DIRECT store filter (classify is never
+            # consulted), so over a STALE wide store the census would keep
+            # enumerating ~772 stock/sectoral cells forever. Filter the
+            # candidates by the READ-union scope BEFORE derive_lake_underlyings
+            # (IDX by admitted pair; EQ rows only under a stock-admitting
+            # scope); stale out-of-grid `list_coverage()` ledger rows need no
+            # further treatment — the reconciler ignores rows absent from the
+            # expected side (verified + pinned).
+            read_scope = resolve_read_scope()
+            if read_scope.bounded():
+                kept = [
+                    inst
+                    for inst in candidates
+                    if (
+                        read_scope.admits_underlying(inst.exch_id, inst.symbol_name)
+                        if inst.instrument is InstrumentType.IDX
+                        else read_scope.admits_stocks()
+                    )
+                ]
+            else:
+                kept = candidates
+            grid_scope_excluded = len(candidates) - len(kept)
             # derive_lake_underlyings yields (underlying, exchange) (the order the
             # universe ingest fan-out wants); the coverage reconciler / view want
             # (exchange, underlying) — swap so the expected grid keys line up with
             # the persisted ledger's (exchange, underlying_symbol, year) PK.
             expected = [
-                (exchange, underlying)
-                for underlying, exchange in derive_lake_underlyings(candidates)
+                (exchange, underlying) for underlying, exchange in derive_lake_underlyings(kept)
             ]
-            return build_coverage_payload(store.list_coverage(), expected, years)
+            payload = build_coverage_payload(store.list_coverage(), expected, years)
+            # EMIT-ON-NONZERO census echo — an index-only store (nothing
+            # excluded) keeps the payload byte-identical.
+            payload.update(scope_excluded_echo(grid_scope_excluded))
+            return payload
 
         # Memoise behind the COMPOSITE (generation, master-revision) token
         # (DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by
@@ -6650,8 +6692,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # verdict intervals (DEC-COMPLETENESS-FNO-SKIP-001): a materialised
             # options lake holds ~10⁵-10⁶ contract datasets the spot verdicts
             # never read — the unfiltered scan blocked the first open for tens
-            # of minutes.
-            return summarize_spot_verdict_datasets(store.connection, lake)
+            # of minutes. The READ-union scope is resolved FRESH per recompute
+            # (DEC-UNIVERSE-INDEX-ONLY-001 R2 — the SummaryCache's adaptive
+            # floor bounds a widen's staleness; excluded stock datasets skip
+            # their aggregates entirely).
+            return summarize_spot_verdict_datasets(
+                store.connection, lake, scope=resolve_read_scope()
+            )
 
         def _rows_and_rollup() -> dict[str, Any]:
             """Lake rows via SummaryCache + the ledger rollup PER REQUEST.
@@ -6665,9 +6712,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             rows = _summary_cache.get_or_refresh(SPOT, recompute=_recompute)
             # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001):
             # duty_degraded + snapshot_age_s make a pull-time stale serve
-            # VISIBLE to the operator — never silent (Golden Rule #1).
+            # VISIBLE to the operator — never silent (Golden Rule #1). The R2
+            # scope census rides the SAME cached rows object (#1934), so the
+            # emit-on-nonzero echo always matches the rows it was scanned with.
             return _summary_cache.stamp_freshness(
-                SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
+                SPOT,
+                build_spot_coverage_payload(
+                    rows,
+                    spot_window_rollup(lake),
+                    scope_excluded=summary_rows_scope_excluded(rows),
+                ),
             )
 
         try:
@@ -6713,8 +6767,8 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
     def _completeness_inputs(
         store: Any, lake: Path
-    ) -> tuple[list[dict[str, Any]], dict[str, str], list[Any]]:
-        """Gather the (annotated spot rows, symbol→category map, option coverage records).
+    ) -> tuple[list[dict[str, Any]], dict[str, str], list[Any], int]:
+        """Gather the (annotated spot rows, symbol→category map, option coverage records, R2 census).
 
         The ONE lake+ledger read shared by the scoreboard, the CSV report, AND the per-symbol
         ``/universe`` map (CLAUDE.md §11 COMMON — one source, three projections). Runs on a
@@ -6743,10 +6797,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             is_index=is_index_instrument,
             is_reference=is_reference_only,
         )
-        spot_rows = build_spot_coverage_payload(
-            _summary_cache.get_or_refresh(
-                SPOT, recompute=lambda: summarize_spot_verdict_datasets(store.connection, lake)
+        # The R2 read-scope screen (DEC-UNIVERSE-INDEX-ONLY-001, #1934):
+        # resolved FRESH per recompute — the SummaryCache's adaptive floor
+        # bounds a widen's staleness; the exclusion census rides the SAME
+        # cached rows object so the scoreboard echo can never pair rows with a
+        # foreign count. The reconcile diagnostic below compares like-for-like
+        # POST-filter (both sides see only in-scope rows).
+        cached_rows = _summary_cache.get_or_refresh(
+            SPOT,
+            recompute=lambda: summarize_spot_verdict_datasets(
+                store.connection, lake, scope=resolve_read_scope()
             ),
+        )
+        scope_excluded = summary_rows_scope_excluded(cached_rows)
+        spot_rows = build_spot_coverage_payload(
+            cached_rows,
             spot_window_rollup(lake),
         )["rows"]
         # OBSERVE-ONLY reconciliation diagnostic (DEC-COMPLETENESS-RECONCILE-DIAG-001): on a
@@ -6761,7 +6826,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         # once per scoreboard build (the 953x/night storm); the benign zero-stray partial-lake
         # shape is a counts-only INFO, never the WARNING.
         log_symbol_reconcile_from_board(spot_rows, categories, gate=_reconcile_log_gate)
-        return spot_rows, categories, store.list_coverage()
+        return spot_rows, categories, store.list_coverage(), scope_excluded
 
     def _build_completeness_board(store: Any, lake: Path) -> dict[str, Any]:
         """Compose the aggregate + per-symbol scoreboard from the shared inputs.
@@ -6771,14 +6836,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         ride the SAME cached SPOT scan, so a pull-time stale serve is visible
         here too, never silent.
         """
-        spot_rows, categories, records = _completeness_inputs(store, lake)
+        spot_rows, categories, records, scope_excluded = _completeness_inputs(store, lake)
         return _summary_cache.stamp_freshness(
-            SPOT, build_completeness_scoreboard(spot_rows, categories, records, categories)
+            SPOT,
+            build_completeness_scoreboard(
+                spot_rows, categories, records, categories, scope_excluded=scope_excluded
+            ),
         )
 
     def _build_per_symbol_completeness(store: Any, lake: Path) -> dict[str, dict[str, Any]]:
         """Compose the per-symbol completeness map (with dates) from the shared inputs."""
-        spot_rows, categories, records = _completeness_inputs(store, lake)
+        spot_rows, categories, records, _scope_excluded = _completeness_inputs(store, lake)
         return per_symbol_completeness(spot_rows, categories, records, categories)
 
     def _build_completeness_csv(store: Any, lake: Path) -> str:
@@ -6789,8 +6857,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         report is never less informative than the page. One ``_completeness_inputs`` read feeds
         BOTH projections (CLAUDE.md §11 COMMON — no second lake read).
         """
-        spot_rows, categories, records = _completeness_inputs(store, lake)
-        board = build_completeness_scoreboard(spot_rows, categories, records, categories)
+        spot_rows, categories, records, scope_excluded = _completeness_inputs(store, lake)
+        board = build_completeness_scoreboard(
+            spot_rows, categories, records, categories, scope_excluded=scope_excluded
+        )
         per_symbol = per_symbol_completeness(spot_rows, categories, records, categories)
         return scoreboard_to_csv(board, per_symbol=per_symbol)
 
@@ -7436,6 +7506,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 status=status,
                 limit=limit,
                 offset=offset,
+                # R11 census scope (DEC-UNIVERSE-INDEX-ONLY-001, #1934): the
+                # READ-union scope narrows the page + counts identically; the
+                # pull-progress phases route threads the SAME components so the
+                # two routes keep sharing one cached counts entry.
+                scope=resolve_read_scope(),
                 # DEC-COVERAGE-WINDOWS-O1-001: inject the store's DuckDB connection +
                 # the generation-stamped counts cache so the payload is O(page) (DuckDB
                 # LIMIT/OFFSET + cached GROUP BY) instead of an O(N) Python scan per poll.
@@ -7486,8 +7561,11 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
             # dirty read past the 2 s TTL floor, on a threadpool worker, building
             # + using store.connection here so the store RLock stays on one
-            # thread (DEC-DASHBOARD-FASTREAD-001).
-            return summarize_option_datasets(store.connection, lake)
+            # thread (DEC-DASHBOARD-FASTREAD-001). The READ-union scope resolves
+            # FRESH per recompute (DEC-UNIVERSE-INDEX-ONLY-001 R9 — the
+            # post-aggregate row filter; the SummaryCache's adaptive floor
+            # bounds a widen's staleness).
+            return summarize_option_datasets(store.connection, lake, scope=resolve_read_scope())
 
         try:
             rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
@@ -7496,9 +7574,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
             return _summary_warming_response("options")
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
-        # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
+        # mirrors /coverage/spot: a pull-time stale serve is visible, never
+        # silent. The R9 scope census rides the SAME cached rows object
+        # (#1934) — the emit-on-nonzero echo always matches the rows served.
         return JSONResponse(
-            _summary_cache.stamp_freshness(OPTIONS, build_option_coverage_payload(rows))
+            _summary_cache.stamp_freshness(
+                OPTIONS,
+                build_option_coverage_payload(
+                    rows, scope_excluded=summary_rows_scope_excluded(rows)
+                ),
+            )
         )
 
     # ── Movers (reference-only lake screens — DEC-MOVERS-DASHBOARD-PAGE-001) ──
@@ -7894,6 +7979,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         underlying_class=underlying_class,
                         resolved_through=resolved_through,
                         scope_excluded=opt_cands.scope_excluded,
+                        stocks_in_scope=read_scope.admits_stocks(),
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -7948,6 +8034,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         underlying_class=underlying_class,
                         resolved_through=resolved_through,
                         scope_excluded=fut_cands.scope_excluded,
+                        stocks_in_scope=read_scope.admits_stocks(),
                     )
                 key = (
                     candidate_key(
@@ -7995,6 +8082,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     underlying_class=underlying_class,
                     resolved_through=resolved_through,
                     scope_excluded=spot_cands.scope_excluded,
+                    stocks_in_scope=read_scope.admits_stocks(),
                 )
 
             payload = await _run_lake(_resolve)

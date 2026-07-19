@@ -93,6 +93,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from brutex.config.feed_scope import FeedScope
+from brutex.data.scope_filter import scope_admits_dataset
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
 from brutex.wheel_digest import SourceDigestError, crate_source_digest
 
@@ -356,7 +358,7 @@ def check_runtime_file(runtime_file: Path) -> CheckResult:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def check_derived_freshness(lake_root: Path) -> CheckResult:
+def check_derived_freshness(lake_root: Path, *, scope: FeedScope | None = None) -> CheckResult:
     """Verify stored derived-TF tables still equal a fresh re-derivation.
 
     The DEC-TF-MATERIALIZE-002 freshness probe: for the FIRST symbol that
@@ -383,6 +385,17 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     reads a permanent false FAIL. A lake that STAYS stale after a prebuild
     re-run holds ghost bucket(s) with no surviving screened source — the
     FAIL detail names the escape (DEC-DERIVED-GHOST-BUCKET-PRUNE-001).
+
+    Universe scope (DEC-UNIVERSE-INDEX-ONLY-001 R12, #1934): the verdict is
+    decided by the FIRST sorted qualifying symbol dir, and sorted order puts
+    ``NSE/CASH/<stock>`` before ``NSE/INDEX/<index>`` — so post-cut a
+    scope-excluded stock whose partitions are FROZEN would attest the
+    whole-lake verdict and FAIL the doctor forever with a now-false
+    remediation. Under a BOUNDED *scope* (``cmd_doctor`` threads
+    ``resolve_read_scope()``; ``None``/unbounded = the unfiltered legacy walk
+    — every direct-call suite unchanged, §2.4 law) out-of-scope symbol dirs
+    are skipped + counted in the detail, so the verdict is attested by an
+    IN-scope symbol and the remediation wording stays true.
 
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
@@ -422,6 +435,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                 screen_bad_ticks=screen_bad_ticks,
             )
 
+        scope_skipped = 0
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
             # The path shape is bars/<exchange>/<segment>/<symbol>: exclude
             # CE/PE option contract dirs (DEC-OPTIONS-PREBUILD-RETIRE-001 —
@@ -429,6 +443,15 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             # comparing them against a fresh re-derivation is meaningless
             # and would red the doctor on a healthy lake).
             if is_option_contract_coords(symbol_dir.parent.name, symbol_dir.name):
+                continue
+            # R12 scope gate (DEC-UNIVERSE-INDEX-ONLY-001, #1934 — beside the
+            # option-contract skip, the exact precedent): a scope-excluded
+            # symbol dir is skipped + counted so a frozen stock partition can
+            # never attest — or permanently red — the whole-lake verdict.
+            if scope is not None and not scope_admits_dataset(
+                symbol_dir.parent.parent.name, symbol_dir.parent.name, symbol_dir.name, scope
+            ):
+                scope_skipped += 1
                 continue
             base = symbol_dir / "1minute"
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
@@ -448,6 +471,12 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                 if verdict != "fresh":
                     stale.append(interval)
             symbol = symbol_dir.name
+            scope_note = (
+                f" ({scope_skipped} out-of-scope symbol dir(s) skipped, "
+                "DEC-UNIVERSE-INDEX-ONLY-001)"
+                if scope_skipped
+                else ""
+            )
             if stale:
                 return CheckResult(
                     name="derived_freshness",
@@ -460,7 +489,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                         "ghost bucket(s) with no surviving screened 1-minute source "
                         "(the latest-wins derived writer never deletes — "
                         "DEC-DERIVED-GHOST-BUCKET-PRUNE-001): delete the symbol's "
-                        "derived TF partition dirs, then re-run the prebuild"
+                        "derived TF partition dirs, then re-run the prebuild" + scope_note
                     ),
                 )
             return CheckResult(
@@ -468,13 +497,19 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                 status="PASS",
                 detail=(
                     f"{symbol}: {len(stored_intervals)} stored derived TFs byte-equal "
-                    "a fresh re-derivation"
+                    "a fresh re-derivation" + scope_note
                 ),
             )
+        scope_tail = (
+            f" ({scope_skipped} out-of-scope symbol dir(s) skipped, DEC-UNIVERSE-INDEX-ONLY-001)"
+            if scope_skipped
+            else ""
+        )
         return CheckResult(
             name="derived_freshness",
             status="SKIP",
-            detail="no symbol has stored derived timeframes yet (auto-derive opt-in OFF)",
+            detail="no symbol has stored derived timeframes yet (auto-derive opt-in OFF)"
+            + scope_tail,
         )
     except Exception as exc:
         return CheckResult(
@@ -1035,6 +1070,7 @@ def run_doctor(
     fno_math_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    scope: FeedScope | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -1094,7 +1130,7 @@ def run_doctor(
     from brutex.config.paths import resolve_lake_root
 
     resolved_lake = lake_root if lake_root is not None else resolve_lake_root()
-    report.add(check_derived_freshness(resolved_lake))
+    report.add(check_derived_freshness(resolved_lake, scope=scope))
     report.add(check_lake_uniqueness(resolved_lake))
     report.add(check_wheel_freshness(fingerprint_file=wheel_fingerprint_file))
     report.add(check_fno_math_wheel_freshness(fingerprint_file=fno_math_wheel_fingerprint_file))
@@ -1114,6 +1150,7 @@ def main(
     fno_math_wheel_fingerprint_file: Path | None = None,
     wheel_source_crate_root: Path | None = None,
     fno_math_wheel_source_crate_root: Path | None = None,
+    scope: FeedScope | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -1127,6 +1164,7 @@ def main(
         fno_math_wheel_fingerprint_file=fno_math_wheel_fingerprint_file,
         wheel_source_crate_root=wheel_source_crate_root,
         fno_math_wheel_source_crate_root=fno_math_wheel_source_crate_root,
+        scope=scope,
     )
     print(report.format())
     return 0 if report.ok else 1

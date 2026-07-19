@@ -31,6 +31,7 @@ from brutex.data.coverage_ledger import (
     CoverageSummary,
     reconcile_coverage,
 )
+from brutex.data.scope_filter import scope_excluded_echo
 
 #: Status shown for an expected cell that has no persisted ledger row yet.
 STATUS_MISSING: Final[str] = "missing"
@@ -282,6 +283,8 @@ def _classify_completeness(
 def build_spot_coverage_payload(
     rows: Iterable[dict[str, Any]],
     rollup: dict[tuple[str, str], tuple[int, int, int]] | None = None,
+    *,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Return the full ``/api/v1/coverage/spot`` payload — headline + rows.
 
@@ -304,10 +307,17 @@ def build_spot_coverage_payload(
     shape) annotates fetch-interval rows ``no_ledger_record``. The headline is
     UNCHANGED (pinned by the invalidate integration suite).
 
+    *scope_excluded* (DEC-UNIVERSE-INDEX-ONLY-001 R2, #1934) is the verdict
+    scan's read-scope exclusion census
+    (:func:`~brutex.dashboard.db_view.summary_rows_scope_excluded`) —
+    EMIT-ON-NONZERO: the default ``0`` (an unfiltered scan / an index-only
+    lake) keeps the payload byte-identical.
+
     Returns
     -------
     dict[str, Any]
-        ``{"headline": {"datasets", "total_bars"}, "rows": [...]}``.
+        ``{"headline": {"datasets", "total_bars"}, "rows": [...]}`` plus the
+        emit-on-nonzero ``scope_excluded`` echo.
     """
     materialised = list(rows)
     effective = rollup if rollup is not None else {}
@@ -330,10 +340,12 @@ def build_spot_coverage_payload(
                 "windows_failed": failed,
             }
         )
-    return {
+    payload: dict[str, Any] = {
         "headline": spot_coverage_headline(materialised),
         "rows": annotated,
     }
+    payload.update(scope_excluded_echo(scope_excluded))
+    return payload
 
 
 def option_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -361,7 +373,9 @@ def option_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_option_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def build_option_coverage_payload(
+    rows: Iterable[dict[str, Any]], *, scope_excluded: int = 0
+) -> dict[str, Any]:
     """Return the full ``/api/v1/coverage/options`` payload — headline + rows.
 
     Composer mirroring :func:`build_spot_coverage_payload` for the EXPIRED
@@ -373,16 +387,24 @@ def build_option_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, A
     the rows through unchanged — so the FastAPI route stays a thin wrapper and
     this surface is 100% unit-testable offline.
 
+    *scope_excluded* (DEC-UNIVERSE-INDEX-ONLY-001 R9, #1934) is the census
+    read's post-aggregate read-scope exclusion count — EMIT-ON-NONZERO: the
+    default ``0`` (an unfiltered read / an index-only lake) keeps the payload
+    byte-identical.
+
     Returns
     -------
     dict[str, Any]
-        ``{"headline": {"underlyings", "series", "total_bars"}, "rows": [...]}``.
+        ``{"headline": {"underlyings", "series", "total_bars"}, "rows": [...]}``
+        plus the emit-on-nonzero ``scope_excluded`` echo.
     """
     materialised = list(rows)
-    return {
+    payload: dict[str, Any] = {
         "headline": option_coverage_headline(materialised),
         "rows": materialised,
     }
+    payload.update(scope_excluded_echo(scope_excluded))
+    return payload
 
 
 __all__ = [

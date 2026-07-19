@@ -72,6 +72,20 @@ def _spot_recovered_forms(symbol: str, exchange: str) -> tuple[str, ...]:
     return (symbol, *spot_key_candidates(symbol, exchange))
 
 
+def scope_admitted_symbol_names(scope: FeedScope) -> frozenset[str]:
+    """The bounded *scope*'s admitted spot symbol NAMES (exchange-folded).
+
+    The PUBLIC face of the window form's name set (R11's SQL bind + the
+    admitted-sid derivations need exactly the exchange-folded names the
+    window predicate judges by). An UNBOUNDED scope reads the empty set —
+    callers gate on :meth:`~brutex.config.feed_scope.FeedScope.bounded`
+    first (an unbounded scope never filters at all).
+    """
+    if not scope.bounded():
+        return frozenset()
+    return _admitted_symbols(scope)
+
+
 def scope_admits_dataset(exchange: str, segment: str, symbol: str, scope: FeedScope) -> bool:
     """True iff a lake dataset ``(exchange, segment, symbol)`` is in *scope*.
 
@@ -254,6 +268,7 @@ __all__ = [
     "classify_window_row",
     "scope_admits_dataset",
     "scope_admits_fno_contract",
+    "scope_admitted_symbol_names",
     "scope_excluded_echo",
     "scope_note_suffix",
     "window_scope_admit",

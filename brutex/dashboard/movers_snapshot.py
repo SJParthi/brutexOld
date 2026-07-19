@@ -54,6 +54,7 @@ from brutex.calendars.nse import has_muhurat_session, previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
 from brutex.dashboard.movers_underlying_class import (
+    CLASS_STOCKS,
     KIND_UNKNOWN,
     class_echo,
     class_note_suffix,
@@ -562,6 +563,7 @@ def build_snapshot_payload(
     underlying_class: str | None = None,
     resolved_through: str | None = None,
     scope_excluded: int = 0,
+    stocks_in_scope: bool = True,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -621,7 +623,16 @@ def build_snapshot_payload(
         ]
         for category, rank_fn in _SPOT_CATEGORIES.items()
     }
-    class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    class_note = class_note_suffix(
+        wanted_class,
+        excluded_unclassified,
+        # R7 (DEC-UNIVERSE-INDEX-ONLY-001, #1934): the honest empty-Stocks-tab
+        # clause — only when the filtered set is EMPTY *and* the read scope
+        # admits no stocks (never under full; the #1650 filter itself stands).
+        empty_stocks_out_of_scope=(
+            not stocks_in_scope and wanted_class == CLASS_STOCKS and not ranked_snapshots
+        ),
+    )
     # DEC-UNIVERSE-INDEX-ONLY-001: the honest EMIT-ON-NONZERO scope note — an
     # index-only lake (zero exclusions) keeps every note byte-identical.
     scope_note = scope_note_suffix(scope_excluded)
