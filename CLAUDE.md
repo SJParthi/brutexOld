@@ -18,7 +18,64 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
+_Last updated: 2026-07-19 (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1963,
+branch `claude/backup-rust-ops` — the backup DECISION-KERNEL first cut: the
+NEW `rust/brutex-ops` crate + the default-OFF `BRUTEX_BACKUP_RUST` facade
+(`brutex/backup/backup_rust.py`) route the pure decision laws of
+`brutex/backup/` through Rust — the dead-man verdict state machine
+(primitives-only FFI; details/datetimes/errors stay Python), the four
+template renderers (the `docs/runbooks/backup-templates/` goldens are the
+cross-language byte pin, cargo- AND pytest-pinned, fixtures BYTE-UNTOUCHED),
+and the restic `--json` parse/argv laws under the abstain-to-oracle law
+(serde-vs-CPython dialect divergences serve the Python oracle verbatim —
+byte-identical for EVERY input by construction). Per-law 16-call burn-in +
+ship-the-oracle autorevert; flag OFF byte-identical AND crate-untouched
+(bomb-spy-pinned); the retained Python implementations are the LIVE parity
+oracle (oracle retirement = a separate later lane). Honest envelope: expected
+payoff ≈ 0 — uniformity, not speed (the ADR-0020 banner); ships INERT — a
+default flip needs its own DEC. The DECISION-KERNEL shape, deliberately NOT
+the #1722 roadmap's wave-13 standalone binary. Ops tooling ONLY — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1963.)
+Earlier: 2026-07-18 (DEC-RUST-RUNID-STORES-001, MIGRATION.md #1962,
+branch `claude/rust-runid-stores` — the run-identity-CONSUMPTION + stores
+COMPUTATION PLANE re-hosted on the NEW `rust/brutex-identity` crate
+(pyo3 0.29 abi3-py312, blake3 + parquet-rs only):
+`engine/snapshot_hash.py` (the bxsnap2 `data_snapshot_hash`) ·
+`engine/results_store.py` (the append/VIX-merge/
+conflict law + run-id validation + the u128 limb codec + top-k) ·
+`data/window_ledger_store.py` (the merge-on-save law + legacy derivations
++ the ledger Parquet codec) become THIN TYPED WRAPPERS — the Python
+computation BODIES are DELETED (the hard-import fno_math posture: no dev
+flag, no retained oracle). SCOPE NARROWED at the 2026-07-18
+crate-ownership ruling: `strategies/combo.py` is NOT converted by this
+lane — combo CONSTRUCTION (canonical JSON + the `\x1f` screen +
+`combo_hash`) is OWNED by DEC-STRATEGIES-RUST-COMBO-001 (#1955,
+`rust/brutex-strategies`); the kernel's combo entry points were trimmed
+away and combo.py reverted to main's #1955 shape wholesale. The
+run-identity hashes are proven UNCHANGED
+(the frozen pre-conversion oracle fixture reproduces BYTE-IDENTICALLY —
+8 sections; canonical/combo sections drive the PUBLIC strategies path,
+the rest the Rust-backed impls); the #1917 G10 window-ledger
+byte-parity escalation is resolved IN-LANE by its priced option (iii) —
+GREENFIELD golden re-baseline: canonical ledger bytes are now parquet-rs
+(zstd-3; the `snap` feature reads legacy pyarrow-snappy files
+row-identically) with the #1917 cross-encoder ROW FIXED POINT kept as the
+correctness law (production reader ≡ pyarrow ≡ DuckDB, probe-pinned).
+The wheel is a REQUIRED install everywhere (ci.yml ×11 jobs + the
+scheduled workflows + Makefile + bootstrap Step 6b). Merged-forward onto
+main `4c11f7aa` (club-P #1547 / DEC-STREAK-PROVENANCE-001 #1512 added the
+17th window-ledger column `streak_provenance`) — the kernel codec grows
+16→17 cols (opaque nullable passthrough; legacy 16-col files decode
+None-filled), the frozen oracle regenerated HONESTLY for the grown
+schema, and the SACRED run-id goldens proven BYTE-IDENTICAL (94 passed —
+`streak_provenance` is a pull-ledger column, never run identity). ENGINE
+semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1962.)
+Earlier: 2026-07-17 (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952,
 branch `claude/rust-slice-t10-lake-keys` — ADR-0020 slice T10 PR-2: the
 three lake_keys candidate-ladder builders (stock_drift_fold ·
 spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -133,7 +190,11 @@ oracle, flag OFF is byte-identical + never-imports-crate; twin-lake
 reader-parity + the crash/resume state-convergence NAMED MERGE GATE executed
 on the real merged wheel. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1918 —
-this header carries the pointer, never the story.)
+this header carries the pointer, never the story. [RENDER-PLANE ARM
+SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954) per the coordinator
+ruling of 2026-07-18 — the option-iii re-baseline stands; premise void: zero
+recorded runs. The full record lives in MIGRATION.md #1962 + the #1918
+in-entry note.])
 Earlier: 2026-07-17 (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939,
 branch `claude/box-autodeploy-lane` — the nightly BOX AUTO-DEPLOY leg + the
 standalone `brutex box-update` mouth: `cmd_nightly_run` gains a PRE-CHAIN
@@ -419,6 +480,20 @@ lake/schema/scope/vocab/rate change. Named follow-up:
 DEC-DAILY-WINDOW-BADTICK-001 (bad-tick on the window reader). This header
 carries the pointer, never the story — the full record lives in the §1
 Active-branch blurb + MIGRATION.md #1897.)
+Earlier: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
+(a coordinator-granted released S1 spare, verified free on live main) — the Rust mirror of compute.py's
+Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
+`brutex/metrics/compute_rust.py`) behind the NEW default-OFF
+`BRUTEX_METRICS_RUST_FOLD`; the fold-in-Rust / combine-in-Python split (the
+combine tail carries libm `pow` — the MUST-STAY-PYTHON class), the returns
+column stays Python-computed (CPython correctly-rounded int/int), the
+downside Σr² mirrors CPython 3.12+'s Neumaier-compensated `sum()`
+(burn-in-caught 1-ulp class), 16-sample burn-in + autorevert per
+#1531/#1532; flag OFF (default) byte-identical, flag ON bit-identical —
+the #1685 golden + differential suites and the frozen run-identity goldens
+executed GREEN on BOTH arms. Ships INERT. The per-item record lives in the
+§1 Active-branch blurb + the MIGRATION.md entry — this header carries the
+pointer, never the story. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
 Earlier: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900,
 branch `claude/staged-sequencer-seams` — the STAGED SEQUENCER SEAMS
 (dual-vendor orchestration WS-B, per the frozen ADR-0021 design contract +
@@ -3700,7 +3775,179 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
+- **Active branch:** `claude/backup-rust-ops`
+  (**DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1963** — the backup
+  DECISION-KERNEL first cut on the DEC-FEED-RUST-CORE-001 (#1797) shape: NEW
+  crate `rust/brutex-ops` (pyo3 0.29 abi3-py312 behind the optional `python`
+  feature; serde_json core; build.rs FRAMING-v1 source digest; the
+  brutex-feed maturin mixed layout + stale-wheel handshake shim) + the NEW
+  default-OFF facade `brutex/backup/backup_rust.py` (`BRUTEX_BACKUP_RUST`;
+  local tristate flag twin equality-pinned vs `sweep_lookahead`; `_CRATE_API`
+  all-or-nothing handshake; per-LAW 16-call burn-in comparing FULL outcomes —
+  values OR the raised `BackupError` type+message, deadman floats bit-packed
+  via `struct.pack` — with ship-the-ORACLE autorevert + ONE shared latch; the
+  `USE_ORACLE` decided-degrade sentinel; refuse-poison thunks; degrade/panic
+  sets IMPORTED from `lake_rust_render`'s public stateless re-exports —
+  §11 COMMON; `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raise raw).
+  THREE law families route: (a) `deadman.evaluate_deadman` — Python
+  pre-computes the oracle's own `total_seconds()` deltas (exact integer-µs),
+  Rust returns `(arm, verdict, should_alert, hours, elapsed)`, Python
+  materialises the `DeadmanReport` through detail builders SHARED with the
+  oracle body (one source, both arms; the wrapper reads the clock ONCE —
+  spy-pinned); (b) the four `schedule_render` renderers — the
+  `docs/runbooks/backup-templates/` goldens are the CROSS-LANGUAGE byte pin
+  (cargo pins Rust == golden, the unmodified Python golden suite pins
+  Python == golden, the burn-in byte-compares Rust == Python; fixtures
+  BYTE-UNTOUCHED); (c) the `restic_runner` parse/argv twins under the
+  ABSTAIN LAW — any repr/json-message-embedding raise arm AND any
+  serde-vs-CPython dialect divergence (NaN/Infinity, lone surrogates,
+  `\x1c`-class whitespace) returns the ORACLE code and the facade serves
+  the Python oracle VERBATIM (byte-identical for EVERY input by
+  construction; ok-arm `time` strings parse Python-side via the oracle's own
+  `_parse_snapshot_time`). RECORDED DEVIATIONS: a per-facade machinery copy
+  (NOT `config.seam_core.ConfigRustSeam` — single-value-shaped +
+  `brutex_core`-hardcoded; the generalisation fold is a named follow-up) +
+  no version guard (std-Rust crate, no lockstep to attest — the money_rust
+  reasoning). PROOF (executed): cargo 43 green (36 unit + 3 golden byte pins
+  + 4 proptest) with fmt + clippy `-D warnings` clean; NEW pytest 166 passed
+  (facade standalone + three per-module seam suites + the hypothesis
+  differential vs the REAL wheel in the remaining=0 steady state); the
+  existing 422-test backup battery passes UNMODIFIED on the OFF arm AND
+  flag-ON against the real wheel (zero autoreverts); coverage 100.00%
+  line+branch the ci way — backup_rust 132/38 STANDALONE · deadman 259/92 ·
+  restic_runner 245/76 · schedule_render 33/2; ruff/ruff-format clean;
+  `mypy --strict brutex` 0 new vs the stash-verified baseline; pyright 0 new
+  on touched files. HONEST: expected payoff ≈ 0 — uniformity, not speed (the
+  ADR-0020 banner verbatim); once-per-run/tick call frequency, the engaged
+  path ADDS an env probe + FFI hop (+ the burn-in oracle recompute); ships
+  INERT — a default flip needs its own DEC. NAMED follow-ups:
+  state/plan/restore_drill pure laws NOT converted (repr-embedding error
+  strings — a lower-value seam); run/drill ORCHESTRATION stays Python (the
+  decision-kernel split); oracle deletion = a separate post-soak lane
+  (#1722 law); the seam_core fold; the doctor wheel-freshness stage; the
+  cargo CI lane + mutation.yml pair. Ops tooling ONLY — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes; ONE new env var.)
+  Earlier: `claude/rust-runid-stores`
+  (**DEC-RUST-RUNID-STORES-001, MIGRATION.md #1962** — MISSION L14: the
+  run-identity-CONSUMPTION + stores COMPUTATION PLANE re-hosted on the NEW
+  `rust/brutex-identity` crate (pyo3 0.29 abi3-py312, maturin mixed layout
+  on the brutex-lake/brutex-feed shape; deps blake3 + parquet-rs ONLY — no
+  polars/arrow/chrono). SCOPE NARROWED at the 2026-07-18 crate-ownership
+  ruling (second merge-forward, club vehicle #1640): combo CONSTRUCTION
+  (the param canonicaliser + the `\x1f` screen + the 9-field BLAKE3
+  `combo_hash`) is OWNED by DEC-STRATEGIES-RUST-COMBO-001 (#1955,
+  `brutex/strategies/combo.py` + `rust/brutex-strategies`; the identity
+  lane only CONSUMES run-id bytes) — this lane's combo.py conversion is
+  REVERTED to main's #1955 shape WHOLESALE and the kernel's combo entry
+  points (`canonicalise_params_json`/`combo_hash`/
+  `find_unit_separator_field`; `canonical.rs`/`pyjson.rs`/`pyfloat.rs`)
+  are TRIMMED away, the combo differentials retiring with them (the
+  strategies suites carry those laws — 213 passed unmodified with both
+  wheels built). The THREE remaining Python surfaces become THIN TYPED
+  WRAPPERS with their computation BODIES DELETED (the hard-import fno_math
+  posture — no dev flag, no retained Python oracle): `engine/snapshot_hash.py`
+  (11 stmts — the bxsnap2 digest streams through
+  `brutex_identity.SnapshotHasher`; `sorted()` slice iteration +
+  `str(Decimal)` stay Python deliberately — the Decimal repr law is
+  CPython's), `engine/results_store.py` (243 stmts — append = the kernel
+  `classify_result_append` verdict (insert/noop/backfill/plain_conflict/
+  gate_conflict/vix_conflict incl. the #1645 directional VIX union trio +
+  the #1715 C5 gate-conflict law) with store mutation + logging + EXACT-BYTE
+  error contracts Python-side; two defensive-totality raises guard a
+  drifted-kernel verdict loudly (drifted-kernel unit tests pin both);
+  run-id validation re-renders repr-bearing kernel verdicts with CPython
+  `repr` — ONE disclosed narrowing: `bytes.fromhex` whitespace tolerance now
+  rejected; `top_k` = the kernel `rank_top_k` exact-int ranking; the u128
+  limb codec delegates to `mask_to_limbs`/`mask_from_limbs`;
+  `_merge_vix_backfill` + `_field_getter` DELETED; ResultRow +
+  `__post_init__` + the polars Parquet render/load stay Python, disclosed),
+  and `data/window_ledger_store.py` (372 stmts — `merge_ledger_rows` +
+  the legacy `empty_streak`/`in_pull_fetches` derivations + the ledger
+  Parquet codec delegate; the NEW public `render_ledger_parquet(rows) ->
+  bytes` is the ONE render both save + delta ride; reads via
+  `read_ledger_rows` + the `LedgerStringPool` per-load intern pool threaded
+  across base+deltas; `_rows_to_records`/`_intern_cells`/
+  `_STATUS_SETTLE_RANK`/`_row_preference`/`_row_key` DELETED; pyarrow
+  imports GONE). **G10 RESOLUTION:** the #1917 window-ledger byte-parity
+  escalation is resolved IN-LANE by its priced option (iii) — GREENFIELD
+  golden re-baseline: the canonical ledger bytes are now parquet-rs (ONE
+  row group, zstd-3; the `snap` feature reads legacy pyarrow-snappy files
+  row-identically), with the #1917 cross-encoder ROW FIXED POINT kept as
+  the correctness LAW (production reader ≡ pyarrow ≡ DuckDB `read_parquet`,
+  pinned by the rebaselined `tests/golden/test_window_ledger_bytes_probe.py`
+  incl. canonical byte-determinism + the created_by divergence pin).
+  **PROOF:** the FROZEN pre-conversion oracle fixture is reproduced
+  BYTE-IDENTICALLY by the refactored golden generator
+  (`tests/golden/test_runid_stores_oracle_golden.py`, 8 sections —
+  canonical/combo through the PUBLIC strategies-owned combo path;
+  snapshot/append/top_k/merge/roundtrip/legacy derivations through the
+  Rust-backed impls); `tests/unit/test_brutex_identity_kernels.py` (18
+  post-refold) holds live-CPython differentials with VERBATIM retired-body
+  oracles + hypothesis planes (`st.timezones()` datetimes,
+  full-u128 limb codec, exact-int 2^60 vs 2^60+1 ranking; the float/text
+  planes retired with the combo differentials). SACRED CHECK executed at
+  the refold head: `_GOLDEN_RUN_ID` + `_GOLDEN_CONTENT_HASH` + the whole
+  frozen run-identity golden family byte-identical (39 golden tests green
+  incl. the flag-ON combo golden with the built brutex_strategies wheel).
+  GREENFIELD sanction: zero backtests have ever run — the ledger-bytes
+  re-baseline re-keys NO recorded run identity, and the run-identity HASHES
+  themselves are proven UNCHANGED by the oracle fixture. WIRED REQUIRED:
+  the brutex-identity maturin build+install joins every ci.yml job that
+  installs fno-math (11, run-smoke included) + doctor-daily/mutation/
+  soak-selfhosted/stress-nightly + (since the independent refuter rounds)
+  the two self-hosted M4-Pro workflows verify-m4pro/bench-m4pro + the
+  Makefile + bootstrap Step 6b (REQUIRED, exit 1);
+  NOT facade-fronted through `brutex.math` (`version` symbol collision
+  with trading_core — the brutex_feed direct-import posture followed).
+  TWO INDEPENDENT REFUTER ROUNDS folded (the inline rounds' CLEAN claim
+  stands corrected — the per-finding record lives in MIGRATION.md #1962):
+  the m4pro wheel-install MAJOR; the hostile-utcoffset overflow abort →
+  checked-arithmetic total; the BLOCKER — corrupt ledger parquet SIGABRTed
+  the process (parquet-rs panics + `panic = "abort"`) — fixed by dropping
+  `panic = "abort"` (the brutex-lake precedent) + the `catch_unwind`
+  decode boundary mapping the panic class into the typed
+  `_LEDGER_READ_ERRORS` degrade, pinned by the deterministic subprocess
+  corruption battery (fails-before executed, rc −6); the doctor
+  wheel-freshness + source-digest stages gain the brutex_identity specs;
+  ci.yml's Trivy step gains `limit-severities-for-sarif` (the gate-
+  correctness fix for its dropped CRITICAL,HIGH filter — a repo-wide
+  CI-config correction flagged to the steward).
+  GATES: snapshot_hash 100.00% (11/4) ·
+  results_store 100.00% (245/76) · window_ledger_store 100.00% (381/96)
+  line+branch (re-measured at the refuter-fold head; window_ledger_store
+  re-measured 371/94 → 381/96 at the post-merge cleanup head — the #1639
+  merge-forward's env guard added 10 stmts/2 branches, coverage genuinely
+  100.00%); cargo fmt/clippy
+  `-D warnings` clean both feature sets, 25
+  tests green under `--locked` post-trim (the 3 combo-law cargo tests
+  left with canonical.rs); ruff/ruff-format clean; `mypy --strict`
+  clean (the one stage3_refine `cma` note is merge-base-identical,
+  env-only); pyright 0 errors on touched files. HONEST gaps: the lane's
+  Python modules are not in mutation.yml's
+  mutmut loop (the brutex-lake precedent — the differential/golden suites
+  carry the load) and the crate is absent from its cargo-mutants list
+  (the per-PR `cargo test` battery is its gate — the #1892 precedent);
+  ONE known sub-threshold dependency advisory (thrift@0.17.0
+  CVE-2026-43868, MEDIUM, unfixable upstream, transitive via parquet-rs)
+  is disclosed in #1962. THIRD MERGE-FORWARD onto main `4c11f7aa` (club-P
+  #1547 / DEC-STREAK-PROVENANCE-001 #1512 added the 17th window-ledger column
+  `streak_provenance`): the kernel ledger codec grows 16→17 cols as an OPAQUE
+  nullable passthrough (never read/mutated by the merge-on-save law — it
+  round-trips verbatim; legacy 16-col parquet decodes 17th-cell-None-filled,
+  the `snap` read arm included); the frozen oracle fixture was regenerated
+  HONESTLY for the grown 17-col schema (the on-disk schema grew, NOT a
+  run-identity change) with a `streak_provenance` merge-parity net + a
+  legacy-16-col-back-compat net; the SACRED `_GOLDEN_RUN_ID`/
+  `_GOLDEN_CONTENT_HASH` sweep-run golden family reproduces BYTE-IDENTICALLY
+  (94 passed — `streak_provenance` is a pull-ledger diagnostic column, never
+  in the bxsnap2 `data_snapshot_hash` or the results-store run identity); the
+  lane's Trivy `limit-severities-for-sarif: 'true'` ci.yml fold is CARRIED
+  (verified NOT yet on `4c11f7aa`) pending extraction to a CI-config vehicle.
+  ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new
+  routes, no new env vars.)
+  Earlier: `claude/rust-slice-t10-lake-keys` (**DEC-DATA-RUST-PURELAW-002,
   MIGRATION.md #1952** — slice T10 PR-2: the three lake_keys candidate-ladder builders
   (stock_drift_fold · spot_key_candidates · spot_recovery_candidates core) join the PR-1
   `rust/brutex-data` crate behind the SAME default-OFF `BRUTEX_DATA_RUST` flag via the NEW
@@ -3901,7 +4148,7 @@ hostile-review pass._
   keep working.
   Self-test `tests/unit/test_aws_hermeticity_belt.py` (12 tests — belt
   active/loud/source-pinned-autouse + fakes-still-work); AST sweep of every
-  `BackgroundPullJob(` in tests/ recorded in #1954 (the reaching set:
+  `BackgroundPullJob(` in tests/ recorded in #1962 (the reaching set:
   the two fixed tests + the `test_pull_jobs.py` on_finally/heartbeat classes
   + `test_pull_jobs_singleflight.py`'s no-resolver block + route-driven
   starts — ALL belt-covered). HONEST: prevents FUTURE exposure from the test
@@ -4018,7 +4265,16 @@ hostile-review pass._
   not speed; ships INERT — a default flip needs its own DEC; the gate class is
   deliberately WEAKER than PR-1's byte gate for this ONE module (the ruled
   standard, disclosed). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; run identity untouched.)
+  lake/schema/scope/vocab/rate change; run identity untouched.
+  [RENDER-PLANE ARM SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954)
+  per the coordinator ruling of 2026-07-18 — the option-iii golden
+  re-baseline stands (the 2026-07-16 forbidding ruling's stored-history
+  premise is VOID: zero recorded runs); the flag seam + pyarrow oracle are
+  RETIRED (a SET `BRUTEX_LAKE_RUST_LEDGER_RENDER` now REFUSES loudly), the
+  twin-lake reader-parity + state-convergence gates are ADAPTED onto the
+  kernel render (canonical-vs-legacy twins; the row fixed point stays the
+  binding law). The full record lives in MIGRATION.md #1962 + the #1918
+  in-entry note.])
   Earlier: `claude/box-autodeploy-lane`
   (**DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939** — entry
   coordinator-reserved above the live-main ceiling #1932 at tip c220870;
@@ -5073,6 +5329,51 @@ hostile-review pass._
   hostile review verdict is SHIP with its two honesty NITs folded
   (transitive-consumer disclosure + the pre-existing null-price TypeError
   limit — both recorded in MIGRATION.md #1897).)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main** — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
+  (`fold_trades_checked` pure `Result` core + the `metrics_fold_trades`
+  pyfunction over five parallel per-trade columns; i128 integer sums →
+  exact Python ints; the Welford/Pébay recurrence transcribed line-by-line;
+  the p95/p5 percentile mirror) + the NEW seam leaf
+  `brutex/metrics/compute_rust.py` behind the default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD` (inline `_TRUTHY`/`_FALSY` mirror-pinned — the
+  `feed_rust` LEAF discipline; a metrics→engine import edge would close a
+  cycle) and ONE `compute.py` dispatch chokepoint (`_resolve_folds`; flag
+  OFF = the verbatim `_fold_trades` call, never-routes bomb-spy-pinned).
+  THE SPLIT (recorded honestly): fold-in-Rust / combine-in-Python — the
+  combine tail carries libm `pow` (CAGR `**`, skewness `math.pow`), the
+  NOT-correctly-rounded-portable MUST-STAY-PYTHON class `metrics.rs`
+  documents, so the shipped split holds bit-identity BY CONSTRUCTION; the
+  returns column stays PYTHON-computed at the seam (CPython's
+  correctly-rounded big-int `int/int` — no exactness envelope needed).
+  BURN-IN-CAUGHT FINDING: the first flag-ON corpus run autoreverted on
+  `dense_1500` — CPython 3.12+'s builtin `sum()` is NEUMAIER-COMPENSATED
+  for floats (gh-100425), so the kernel's downside Σr² now mirrors
+  `builtin_sum`'s float fast path exactly (Rust exact-bits pin + seam pin;
+  the oracle value shipped throughout — no wrong number ever served).
+  Burn-in 16-sample bit-compare + autorevert latch (#1531/#1532 pattern);
+  greeks-batch fault taxonomy (MemoryError raw; any other kernel fault →
+  warn-once → oracle; refuse-poison wire gate). PROOF executed BOTH arms:
+  the 52-test #1685 byte-parity golden + the C23 differential (56 passed
+  each arm), the non-vacuous flag-ON corpus pin (engagement spy, every
+  case burn-in cross-checked, zero autoreverts), the hypothesis dual-arm
+  property (150 examples), the frozen `_GOLDEN_CONTENT_HASH`/
+  `_GOLDEN_RUN_ID` run-identity goldens byte-identical flag-OFF AND
+  flag-ON; cargo test 586 green (7 new), fmt/clippy `-D warnings` clean;
+  `compute_rust.py` 100.00% line+branch standalone (NEW ci.yml numpy-safe
+  stanza), `compute.py` 100.00% under its stem suite; ruff/ruff-format
+  clean, `mypy --strict` clean, `pyright brutex tests` 0 errors; SIX
+  hand-applied seam mutants verified killed (ledgered — the mutmut pair
+  list deliberately not extended, the greeks-batch cheaper-honest-option
+  precedent). HONEST: both arms O(n·log n) per fold; ships INERT — a
+  default flip is its own later DEC; measured 6.08× fold-only on the
+  dense_1500 case (sandbox micro-bench, NOT an SLA — the combine tail +
+  `_drawdown_stats` are outside this seam). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched.)
   Earlier: `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900** —
   the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
   AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
@@ -11117,7 +11418,46 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-slice-t10-lake-keys`
+- **Active feature branch:** `claude/backup-rust-ops`
+  (DEC-BACKUP-RUST-OPS-001, MIGRATION.md #1963 — the backup DECISION-KERNEL
+  first cut: the NEW `rust/brutex-ops` crate + the default-OFF
+  `BRUTEX_BACKUP_RUST` facade routing the dead-man verdict state machine +
+  the four golden-pinned template renderers + the restic `--json` parse/argv
+  laws through Rust; primitives-only FFI, abstain-to-oracle on every
+  repr/dialect-divergent arm, per-law 16-call burn-in + ship-the-oracle
+  autorevert; flag OFF byte-identical AND crate-untouched (bomb-spy-pinned);
+  the retained Python implementations are the LIVE parity oracle; expected
+  payoff ≈ 0 — uniformity, not speed (ADR-0020 banner); ships INERT; ops
+  tooling ONLY — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1963 for the full blurb)
+  Earlier: `claude/rust-runid-stores`
+  (DEC-RUST-RUNID-STORES-001, MIGRATION.md #1962 — the
+  run-identity-CONSUMPTION + stores COMPUTATION PLANE re-hosted on the NEW
+  `rust/brutex-identity` crate (pyo3 0.29 abi3-py312; blake3 + parquet-rs
+  only): snapshot_hash.py / results_store.py / window_ledger_store.py
+  become thin typed wrappers with their computation bodies DELETED
+  (hard-import posture); SCOPE NARROWED at the 2026-07-18 crate-ownership
+  ruling — combo CONSTRUCTION is OWNED by DEC-STRATEGIES-RUST-COMBO-001
+  (#1955): combo.py reverted to main's shape wholesale, the kernel's combo
+  entry points trimmed away; run-identity hashes proven UNCHANGED via the
+  frozen pre-conversion oracle fixture reproduced byte-identically
+  (canonical/combo sections through the public strategies path) + the
+  sacred-check frozen sweep-run goldens; the #1917 G10
+  window-ledger byte-parity escalation resolved in-lane by option (iii)
+  greenfield golden re-baseline (canonical bytes = parquet-rs zstd-3;
+  legacy pyarrow-snappy files read row-identically; the cross-encoder ROW
+  fixed point production ≡ pyarrow ≡ DuckDB stays the correctness law,
+  probe-pinned); the wheel wired REQUIRED across ci.yml/scheduled
+  workflows/Makefile/bootstrap; the three converted modules 100.00%
+  line+branch; merged-forward onto main `4c11f7aa` (club-P #1547 /
+  DEC-STREAK-PROVENANCE-001 #1512 added the 17th window-ledger column
+  `streak_provenance`) — the kernel codec grows 16→17 cols (opaque nullable
+  passthrough; legacy 16-col decodes None-filled), the frozen oracle
+  regenerated HONESTLY for the grown schema, the SACRED run-id goldens proven
+  BYTE-IDENTICAL (94 passed — a pull-ledger column, never run identity);
+  ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1962 for the full blurb)
+  Earlier: `claude/rust-slice-t10-lake-keys`
   (DEC-DATA-RUST-PURELAW-002, MIGRATION.md #1952 — ADR-0020 slice T10 PR-2:
   the three lake_keys candidate-ladder builders (stock_drift_fold ·
   spot_key_candidates · spot_recovery_candidates core) join the PR-1
@@ -11242,8 +11582,11 @@ hostile-review pass._
   crash/resume/re-pull state-convergence NAMED MERGE GATE EXECUTED on the
   real merged wheel; the #1917 bytes-probe pins reconciled not broken; ships
   INERT — a default flip needs its own DEC; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1918 for the full blurb)
+  NIFTY/BANKNIFTY/SENSEX; see §1 + MIGRATION.md #1918 for the full blurb
+  [RENDER-PLANE ARM SUPERSEDED-IN-PART by DEC-RUST-RUNID-STORES-001 (#1962, ex-#1954)
+  per the coordinator ruling of 2026-07-18 — the option-iii re-baseline
+  stands; premise void: zero recorded runs; see the §1 blurb's supersession
+  note])
   Earlier: `claude/box-autodeploy-lane`
   (DEC-BOX-AUTODEPLOY-LANE-001, MIGRATION.md #1939 — the nightly BOX
   AUTO-DEPLOY leg + the standalone `brutex box-update` mouth: the pre-chain
@@ -11564,6 +11907,21 @@ hostile-review pass._
   goldens pinned UNMODIFIED; named follow-up DEC-DAILY-WINDOW-BADTICK-001;
   ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's
   Active branch line — see §1 + MIGRATION.md #1897 for the full blurb)
+  Earlier: `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
+  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main — the
+  Rust mirror of `compute.py`'s Slice-0
+  FOLD layer (`fno_math.metrics_fold_trades` + the seam
+  `brutex/metrics/compute_rust.py`) behind the NEW default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD`; fold-in-Rust / combine-in-Python (the combine
+  tail carries libm `pow` — MUST-STAY-PYTHON), the returns column stays
+  Python-computed, the downside Σr² mirrors CPython 3.12+'s
+  Neumaier-compensated `sum()` (burn-in-caught), 16-sample burn-in +
+  autorevert; flag OFF (default) byte-identical, flag ON bit-identical —
+  the #1685 golden + differential suites and the frozen run-identity
+  goldens executed GREEN on BOTH arms; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 + the
+  MIGRATION.md entry for the full blurb)
   Earlier: `claude/staged-sequencer-seams`
   (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900 — the staged sequencer
   seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design

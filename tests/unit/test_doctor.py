@@ -338,7 +338,7 @@ class TestRunDoctor:
     def test_all_skip_returns_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Skip the wheel-freshness stages via their shared env override so
         # this aggregate test stays hermetic (all-SKIP regardless of wheel
-        # state). ONE escape hatch covers BOTH wheels deliberately.
+        # state). ONE escape hatch covers ALL the wheels deliberately.
         monkeypatch.setenv("BRUTEX_SKIP_WHEEL_FRESHNESS", "1")
         report = run_doctor(
             audit_file=None,
@@ -347,14 +347,16 @@ class TestRunDoctor:
             lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 9 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        # 11 checks: audit_chain + runtime_file + audit_replay + derived_freshness
         # + lake_uniqueness (DEC-LAKE-HEAL-001) + wheel_freshness (R2-CC-G1)
         # + wheel_freshness_fno_math (DEC-FNOMATH-WHEEL-FRESHNESS-001)
+        # + wheel_freshness_brutex_identity (DEC-RUST-RUNID-STORES-001)
         # + wheel_source_digest + wheel_source_digest_fno_math
+        # + wheel_source_digest_brutex_identity
         #   (DEC-RUST-SOURCE-DIGEST-TWIN-001 — the ONE
-        #   BRUTEX_SKIP_WHEEL_FRESHNESS escape hatch covers all four wheel
+        #   BRUTEX_SKIP_WHEEL_FRESHNESS escape hatch covers all six wheel
         #   stages, deliberately)
-        assert len(report.checks) == 9
+        assert len(report.checks) == 11
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
@@ -364,8 +366,10 @@ class TestRunDoctor:
             "lake_uniqueness": "SKIP",
             "wheel_freshness": "SKIP",
             "wheel_freshness_fno_math": "SKIP",
+            "wheel_freshness_brutex_identity": "SKIP",
             "wheel_source_digest": "SKIP",
             "wheel_source_digest_fno_math": "SKIP",
+            "wheel_source_digest_brutex_identity": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:

@@ -1,0 +1,155 @@
+# ops-rust-parity.yml — the brutex-ops crate build + backup-seam parity lane.
+#
+# DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1963 — the hostile-review-round fold;
+# landing this lane also closed the review's MINOR-1 "no CI cargo lane /
+# wheel-gated legs skip in CI" finding and satisfies the kernel-discovery
+# guard's OPTIONAL_KERNELS built-by-its-own-lane law,
+# tests/unit/test_run_builds_rust_kernels.py). The backup Rust seam is
+# DEFAULT-OFF behind BRUTEX_BACKUP_RUST and the main CI test jobs
+# deliberately never install the crate (the facade degrades loudly to the
+# Python oracle when it is absent), so this dedicated lane is where the
+# crate has teeth:
+#
+#   1. cargo fmt / clippy -D warnings / test --release (--locked everywhere —
+#      the committed Cargo.lock is enforced; the cargo tests carry the
+#      per-arm deadman verdict matrix, the FOUR golden byte pins vs
+#      docs/runbooks/backup-templates/ — the three plists + the cron block —
+#      the restic parse matrices and the proptest invariants).
+#   2. maturin wheel build + install beside the repo's Python deps.
+#   3. The REAL-wheel seam suites: the facade matrix
+#      (tests/unit/test_backup_rust.py), the three per-module seam suites
+#      (their TestRealWheelParity legs un-skip here) and the hypothesis
+#      differential (tests/property/test_backup_rust_differential.py).
+#   4. The flag-ON verbatim leg: the UNMODIFIED law-module suites re-run
+#      byte-identically under BRUTEX_BACKUP_RUST=1 with the real wheel
+#      (the data-rust-parity heal-twin precedent).
+#
+# NOT a required gate: it gates the FUTURE default-ON flip, which must cite
+# a fresh green run of this lane as a stated precondition — a red run here
+# blocks re-engaging the flag, never an unrelated merge.
+#
+# COST HONESTY: the crate is std + serde_json (no polars graph) — a cold run
+# compiles in ~seconds, so no cargo cache is carried (the data-rust-parity
+# reasoning verbatim).
+
+name: ops-rust-parity
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "rust/brutex-ops/**"
+      - "brutex/backup/backup_rust.py"
+      - "brutex/backup/deadman.py"
+      - "brutex/backup/schedule_render.py"
+      - "brutex/backup/restic_runner.py"
+      - "docs/runbooks/backup-templates/**"
+      - "tests/unit/test_backup_rust.py"
+      - "tests/unit/test_backup_deadman_rust_seam.py"
+      - "tests/unit/test_backup_schedule_render_rust_seam.py"
+      - "tests/unit/test_backup_restic_runner_rust_seam.py"
+      - "tests/property/test_backup_rust_differential.py"
+      - ".github/workflows/ops-rust-parity.yml"
+  pull_request:
+    paths:
+      - "rust/brutex-ops/**"
+      - "brutex/backup/backup_rust.py"
+      - "brutex/backup/deadman.py"
+      - "brutex/backup/schedule_render.py"
+      - "brutex/backup/restic_runner.py"
+      - "docs/runbooks/backup-templates/**"
+      - "tests/unit/test_backup_rust.py"
+      - "tests/unit/test_backup_deadman_rust_seam.py"
+      - "tests/unit/test_backup_schedule_render_rust_seam.py"
+      - "tests/unit/test_backup_restic_runner_rust_seam.py"
+      - "tests/property/test_backup_rust_differential.py"
+      - ".github/workflows/ops-rust-parity.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # brutex-ops pins rust-version 1.93.1 (edition 2024, std + serde_json);
+  # latest stable satisfies it — no pinned toolchain (no MSRV cliff).
+  # Cargo network resilience — the ci.yml convention.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  PYTHONHASHSEED: "0"
+  HYPOTHESIS_PROFILE: "ci"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  ops-rust-parity:
+    name: brutex-ops build + backup seam parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable — the std crate has no MSRV cliff)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: cargo fmt --check
+        working-directory: rust/brutex-ops
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings (--locked)
+        working-directory: rust/brutex-ops
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test (verdict matrix + golden byte pins + proptests, --locked)
+        working-directory: rust/brutex-ops
+        run: cargo test --release --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install brutex (data extra) + the brutex-ops wheel
+        # Belt-and-suspenders crates.io flake guard on the maturin build
+        # (the cargo download point) — the ci.yml retry idiom, POSIX sh.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,dev]"
+          pip install maturin
+          n=0
+          until pip install ./rust/brutex-ops; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-ops failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-ops failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Facade matrix + seam suites + hypothesis differential (real wheel)
+        # With the wheel installed, the TestRealWheelParity legs and the
+        # differential cannot module-skip — -rs surfaces any skip reason
+        # in the log as belt-and-suspenders.
+        run: |
+          pytest -rs -q \
+            tests/unit/test_backup_rust.py \
+            tests/unit/test_backup_deadman_rust_seam.py \
+            tests/unit/test_backup_schedule_render_rust_seam.py \
+            tests/unit/test_backup_restic_runner_rust_seam.py \
+            tests/property/test_backup_rust_differential.py
+
+      - name: Flag-ON verbatim leg (the UNMODIFIED law-module suites)
+        run: |
+          BRUTEX_BACKUP_RUST=1 pytest -rs -q \
+            tests/unit/test_backup_deadman.py \
+            tests/unit/test_backup_schedule_render.py \
+            tests/unit/test_backup_restic_runner.py

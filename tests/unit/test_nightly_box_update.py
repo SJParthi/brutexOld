@@ -609,7 +609,9 @@ class TestWheelBuilds:
             assert env["VIRTUAL_ENV"] == str(deterministic_venv_bin.parent)
             assert str(Path.home() / ".cargo" / "bin") in env["PATH"]
         assert runner.pip_calls() == []
-        assert [w.result for w in out.wheels] == ["ok", "ok", "ok"]
+        # One "ok" per WHEEL_SET member (4 since the DEC-RUST-RUNID-STORES-001
+        # #1962 merge-forward added the required brutex-identity wheel).
+        assert [w.result for w in out.wheels] == ["ok"] * len(WHEEL_SET)
 
     def test_restore_porcelain_read_after_every_maturin_call(self, tmp_path: Path) -> None:
         repo = _mk_repo(tmp_path)

@@ -1,32 +1,38 @@
-"""The NAMED MERGE GATE — crash/resume/re-pull STATE CONVERGENCE, OFF vs ON.
+"""The MERGE GATE — crash/resume/re-pull STATE CONVERGENCE over the kernel render.
 
-DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001 (MIGRATION.md #1918). The coordinator's
-hard precondition for landing the G10 conversion: an EXECUTED proof that the
-REAL ledger machinery (:class:`WindowLedger` + the store's
-``save_window_ledger`` / ``append_ledger_delta`` / ``load_window_ledger``)
-converges IDENTICALLY through an incremental-pull sequence with a mid-flight
-CRASH, whether the on-disk parquet was rendered by the pyarrow oracle (flag
-OFF — the control) or by the REAL merged ``brutex_lake`` crate (flag ON,
-post-burn-in steady state — the subject).
+DEC-RUST-RUNID-STORES-001 — ADAPTED from the DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001
+(#1918) OFF-vs-ON battery per the coordinator ruling of 2026-07-18 (the #1918
+render-plane arm is SUPERSEDED-IN-PART: the ``brutex_identity`` kernel render
+is unconditionally the ONE production writer, so there is no flag arm to twin
+against). The suite's SUBSTANCE — an EXECUTED proof that the REAL ledger
+machinery (:class:`WindowLedger` + the store's ``save_window_ledger`` /
+``append_ledger_delta`` / ``load_window_ledger``) converges through an
+incremental-pull sequence with a mid-flight CRASH — is kept and re-targeted:
 
-Per scenario the SAME deterministic fixture script runs TWICE (control vs
-subject); the asserts are the spec's full set:
+Per scenario the SAME deterministic fixture script runs TWICE on two
+independent lakes (control vs subject — both through the ONE kernel-rendered
+write path); the asserts are the spec's full set:
 
-* the RELOADED-from-disk state after the crash is identical across arms
-  (full ordered 16-field row equality — every column);
+* the RELOADED-from-disk state after the crash is identical across runs
+  (full ordered 16-field row equality — every column): the write → load →
+  base+delta merge-fold chain is DETERMINISTIC, no hidden clock/randomness;
 * the FINAL state (in-memory AND re-loaded from disk) is identical across
-  arms after the resume + final flush;
+  runs after the resume + final flush, and disk == memory per run;
 * the settled (SUCCESS/SKIPPED) / PLANNED / FAILED / EMPTY window SETS are
   equal; the merge-fold over base+deltas is what the reload exercises;
 * NO lost / duplicated / reordered windows: explicit COUNT + key-MULTISET +
-  ORDER asserts.
+  ORDER asserts — and (strengthened vs #1918) the resume COMPLETES the plan:
+  zero PLANNED rows survive the resume in every crash scenario;
+* ANTI-VACUOUS: the on-disk base is genuinely kernel-authored
+  (``created_by`` "parquet-rs" — never a stray pyarrow arm).
 
 Three crash scenarios (crash-after-base-flush · crash-mid-deltas ·
 crash-after-partial-record) + the re-pull idempotence arm (a second pull
-pass over the flag-ON lake records identically to the OFF control).
+pass over the kernel-rendered lake replays deterministically).
 
-Skips cleanly when the merged wheel is absent (the lake-rust-parity lane
-installs it; main CI stays wheel-free).
+Runs wherever the hard ``brutex_identity`` wheel + pyarrow are installed
+(main CI included — no optional wheel, no flag, no skip arm beyond the plain
+dependency importorskips).
 """
 
 from __future__ import annotations
@@ -38,19 +44,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-brutex_lake = pytest.importorskip(
-    "brutex_lake", reason="the merged rust/brutex-lake wheel is not installed"
-)
-pytest.importorskip("polars")
-pytest.importorskip("pyarrow")
+pq = pytest.importorskip("pyarrow.parquet")
 
-from brutex.data import lake_rust_ledger_render  # noqa: E402
 from brutex.data import window_ledger_store as wls  # noqa: E402
 from brutex.data.fetch_coverage import WindowKey  # noqa: E402
 from brutex.data.window_ledger import EMPTY, FAILED, PLANNED, SUCCESS, WindowLedger  # noqa: E402
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    pass
 
 _T0 = datetime(2026, 7, 1, 9, 30, tzinfo=UTC)
 
@@ -90,21 +91,12 @@ def _record(ledger: WindowLedger, i: int, *, minute: int) -> None:
     )
 
 
-def _set_arm(monkeypatch: pytest.MonkeyPatch, *, rust: bool) -> None:
-    if rust:
-        monkeypatch.setenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, "1")
-        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests(remaining=0)
-    else:
-        monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
-        lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
-
-
 @pytest.fixture(autouse=True)
-def _fresh(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.delenv(lake_rust_ledger_render.LAKE_RUST_LEDGER_RENDER_ENV, raising=False)
-    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
-    yield
-    lake_rust_ledger_render.reset_lake_rust_ledger_render_for_tests()
+def _fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hermetic: the RETIRED render flag (DEC-LAKE-RUST-LEDGERSTORE-CONVERT-001,
+    # superseded-in-part) would trip the store's loud
+    # require_ledger_render_env_unset refusal (its own suite pins that law).
+    monkeypatch.delenv(wls.LEDGER_RENDER_ENV, raising=False)
 
 
 def _drive_pull_with_crash(lake: Path, scenario: str) -> dict[str, Any]:
@@ -193,18 +185,20 @@ def _status_sets(rows: list[tuple[Any, ...]]) -> dict[str, set[tuple[str, ...]]]
 
 
 def _assert_converged(control: dict[str, Any], subject: dict[str, Any]) -> None:
-    """The spec's full convergence assert set — control (OFF) vs subject (ON)."""
+    """The spec's full convergence assert set — control run vs subject run."""
     # The reloaded-from-disk state the resume starts from is identical —
     # every column of every row, in order (the merge-fold over base+deltas).
     assert control["reloaded_rows"] == subject["reloaded_rows"]
-    # Both arms judged the SAME windows still-planned.
+    # Both runs judged the SAME windows still-planned.
     assert control["resumed_keys"] == subject["resumed_keys"]
     # Final in-memory and final on-disk states are identical, and disk == memory.
     assert control["final_rows"] == subject["final_rows"]
     assert control["disk_rows"] == subject["disk_rows"]
     assert control["final_rows"] == control["disk_rows"]
-    # Status-family SETS equal (settled / planned / failed / empty).
+    # Status-family SETS equal (settled / planned / failed / empty) — and the
+    # resume genuinely COMPLETED the plan (strengthened vs the #1918 battery).
     assert _status_sets(control["disk_rows"]) == _status_sets(subject["disk_rows"])
+    assert _status_sets(control["disk_rows"])["planned"] == set()
     # NO lost / duplicated / reordered windows: count + key multiset + order.
     for rows in (control["disk_rows"], subject["disk_rows"]):
         assert len(rows) == len(_OUTCOMES)  # count — nothing lost
@@ -226,40 +220,35 @@ def _assert_converged(control: dict[str, Any], subject: dict[str, Any]) -> None:
     "scenario",
     ["crash_after_base_flush", "crash_mid_deltas", "crash_after_partial_record"],
 )
-def test_crash_resume_repull_converges_identically(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
-) -> None:
-    """The MERGE GATE: control (flag OFF) vs subject (flag ON, REAL crate wheel)."""
+def test_crash_resume_repull_converges_identically(tmp_path: Path, scenario: str) -> None:
+    """The MERGE GATE: the same deterministic crash script on two independent
+    lakes converges bit-identically through the kernel-rendered disk state."""
     control_lake = tmp_path / "control"
     subject_lake = tmp_path / "subject"
     control_lake.mkdir()
     subject_lake.mkdir()
 
-    _set_arm(monkeypatch, rust=False)
     control = _drive_pull_with_crash(control_lake, scenario)
-
-    _set_arm(monkeypatch, rust=True)
     subject = _drive_pull_with_crash(subject_lake, scenario)
-    # Anti-vacuous: the subject arm genuinely shipped CRATE bytes — a latched
-    # or autoreverted seam would have served oracle bytes and proven nothing.
-    assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
-    control_bytes = wls.ledger_path(control_lake).read_bytes()
-    subject_bytes = wls.ledger_path(subject_lake).read_bytes()
-    assert control_bytes != subject_bytes  # the #1917 divergence is REAL here
+
+    # ANTI-VACUOUS: the disk state driven through really is the kernel's
+    # canonical render (a stray pyarrow arm would falsify the subject).
+    for lake in (control_lake, subject_lake):
+        created_by = pq.read_metadata(wls.ledger_path(lake)).created_by
+        assert created_by.startswith("parquet-rs")
 
     _assert_converged(control, subject)
 
 
-def test_repull_idempotence_over_rust_rendered_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A SECOND pull pass over the flag-ON lake records identically to the OFF control.
+def test_repull_idempotence_over_kernel_rendered_file(tmp_path: Path) -> None:
+    """A SECOND pull pass over the kernel-rendered lake replays deterministically.
 
     Pass 1 settles every window (crash-free); pass 2 re-plans the same
     windows (all no-op upserts against settled rows), re-records ONLY the
     retryable FAILED ones with the same deterministic outcomes, and
-    full-saves. The resulting rows are identical across arms — the re-pull
-    is idempotent over rust-rendered parquet exactly as over pyarrow's.
+    full-saves. The resulting rows are identical across two independent
+    lakes — the re-pull is idempotent over the canonical parquet-rs bytes
+    exactly as it was over the retired pyarrow writer's.
     """
 
     def _two_pass(lake: Path) -> list[tuple[Any, ...]]:
@@ -286,18 +275,16 @@ def test_repull_idempotence_over_rust_rendered_file(
     subject_lake = tmp_path / "subject"
     control_lake.mkdir()
     subject_lake.mkdir()
-    _set_arm(monkeypatch, rust=False)
     control_rows = _two_pass(control_lake)
-    _set_arm(monkeypatch, rust=True)
     subject_rows = _two_pass(subject_lake)
-    assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
+    assert pq.read_metadata(wls.ledger_path(control_lake)).created_by.startswith("parquet-rs")
     assert control_rows == subject_rows
     assert len(control_rows) == len(_OUTCOMES)
-    # Anti-vacuous: pass 2 genuinely retried something (the FAILED set is
-    # non-empty by fixture construction) and the retries re-settled.
+    # Anti-vacuous: pass 2 genuinely retried something — the FAILED set is
+    # non-empty by fixture construction and the deterministic outcome table
+    # re-records those windows FAILED again (attempts bumped, state
+    # converged), while the settled rows stayed settled and NO row is left
+    # PLANNED (every re-plan was a no-op upsert against a settled row).
     statuses = {row[5] for row in control_rows}
-    assert FAILED in statuses or SUCCESS in statuses
-    retried = [
-        row for row in control_rows if str(row[10] or "").endswith("+00:00") and row[5] != PLANNED
-    ]
-    assert retried
+    assert FAILED in statuses
+    assert PLANNED not in statuses

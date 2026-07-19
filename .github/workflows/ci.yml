@@ -220,7 +220,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -258,13 +258,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: wheelhouse
-          key: rust-wheels-v1-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**') }}
+          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-identity/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-      - name: Build the four maturin wheels (cache miss only)
+      - name: Build the five maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -289,14 +289,18 @@ jobs:
           build_with_retry ./rust/trading-core
           build_with_retry ./rust/brutex-feed
           build_with_retry ./rust/brutex-strategies
+          # brutex_identity (DEC-RUST-RUNID-STORES-001): the run-identity +
+          # store kernel — a HARD import of brutex/engine/snapshot_hash.py,
+          # brutex/engine/results_store.py and brutex/data/window_ledger_store.py.
+          build_with_retry ./rust/brutex-identity
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 4
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies; print('all four kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 5
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_identity; print('all five kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -376,7 +380,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -487,7 +491,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -2540,6 +2544,20 @@ jobs:
           else
             echo "(brutex.metrics.cascade test file not present yet — gate inactive)"
           fi
+          # DEC-METRICS-RUST-COMPUTE-FOLD-001: the flag-gated Rust metrics-FOLD
+          # seam brutex.metrics.compute_rust (default-OFF BRUTEX_METRICS_RUST_FOLD;
+          # flag matrix + every degrade arm + burn-in/autorevert + the dual-arm
+          # bit-parity property). Same numpy-safe form as the sibling metrics
+          # gates (brutex.metrics eagerly imports numpy); the fno_math wheel is
+          # installed in this job, so the kernel-served arms genuinely execute.
+          if compgen -G "tests/unit/test_metrics_compute_rust.py" > /dev/null; then
+            pytest tests/unit/test_metrics_compute_rust.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/compute_rust.py" | grep -q "brutex/metrics/compute_rust.py" \
+              || { echo "ERROR: brutex/metrics/compute_rust.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/compute_rust.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.compute_rust test file not present yet — gate inactive)"
+          fi
           # DEC-UNIVERSE-NSE-CONSTITUENTS-001 (#445): best-effort NSE index →
           # constituent-stock helper powering the /universe "⊕ tick its
           # constituents" action. 100% line+branch on nse_constituents.py — the
@@ -2887,7 +2905,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3028,7 +3046,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3156,7 +3174,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_identity-*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3229,7 +3247,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
       # this job installs `.[dev]` only (no pyarrow), so the feed parity
       # module (tests/property/test_feed_rust_parity.py) skips on its
@@ -3339,7 +3357,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_identity-*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3404,7 +3422,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_identity-*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3808,6 +3826,10 @@ jobs:
           }
           install_with_retry ./rust/fno-math
           install_with_retry ./rust/trading-core
+          # brutex_identity is a HARD import of brutex.engine/data
+          # (DEC-RUST-RUNID-STORES-001) — run-smoke's `import brutex.engine`
+          # line below crashes without it.
+          install_with_retry ./rust/brutex-identity
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math; print('kernels OK')"
@@ -3882,7 +3904,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_identity-*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -3959,7 +3981,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_identity-*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4224,6 +4246,19 @@ jobs:
           severity: 'CRITICAL,HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # GATE-CORRECTNESS fix (DEC-RUST-RUNID-STORES-001 fold; a repo-wide
+          # CI-config correction — flagged for the steward): in `format: sarif`
+          # mode trivy-action DROPS the `severity` input unless this flag is
+          # set ("Building SARIF report with all severities" in the job log),
+          # so the exit-code gate fired on ANY-severity finding — proven by
+          # paired runs on the single sub-threshold advisory in the tree
+          # (thrift@0.17.0 CVE-2026-43868, MEDIUM, no fixed upstream release,
+          # transitive via parquet-rs in rust/brutex-identity/Cargo.lock):
+          # severity-filtered → exit 0; the unfixed invocation → exit 1. With
+          # this flag the job honors its own declared CRITICAL,HIGH gate.
+          # Re-carried after the #1651 CI-sharding merge (71fb2ee5) took main's
+          # ci.yml wholesale and dropped this input.
+          limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -4426,7 +4461,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_identity-*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -4833,7 +4868,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl
+        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_identity-*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

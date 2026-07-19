@@ -307,6 +307,24 @@ jobs:
             echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_identity Rust extension (DEC-RUST-RUNID-STORES-001)
+        # The run-identity + store kernel: a HARD import of
+        # brutex/strategies/combo.py, brutex/engine/snapshot_hash.py,
+        # brutex/engine/results_store.py and brutex/data/window_ledger_store.py
+        # (the fno_math posture — the retired Python computation bodies have no
+        # oracle to degrade to). Belt-and-suspenders crates.io flake guard (see
+        # the fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-identity; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-identity failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-identity failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
 
       - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
         # The engine stress tests import trading_core; mirror the main CI + the

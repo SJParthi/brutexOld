@@ -190,6 +190,23 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/strategies/combo_rust.py",
         ".github/workflows/ci.yml",
     ),
+    # DEC-BACKUP-RUST-OPS-001 (MIGRATION.md #1963): brutex_ops is the
+    # default-OFF backup decision kernel (deadman verdict + template renders +
+    # restic parse/argv laws). It is consumed ONLY through the import-guarded
+    # facade brutex/backup/backup_rust.py
+    # (`importlib.import_module("brutex_ops")` inside `_resolve_crate` — an
+    # absent or stale wheel latches `crate_unavailable` with one loud WARN and
+    # every call serves the Python oracle, byte-identical). Deliberately NOT a
+    # turnkey build prerequisite: never module-top imported, in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/ops-rust-parity.yml — the #1963 review-round fold,
+    # which also closed the review's MINOR-1 no-CI-lane finding). A module-top
+    # `import brutex_ops` anywhere in brutex/ would reclassify it REQUIRED —
+    # the inverse pin below forbids exactly that.
+    "brutex_ops": (
+        "brutex/backup/backup_rust.py",
+        ".github/workflows/ops-rust-parity.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {
