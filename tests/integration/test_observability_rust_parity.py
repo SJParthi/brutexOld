@@ -415,3 +415,18 @@ class TestTripwiresEntry:
             1_024_000
         )
         assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=7, platform="darwin") == 7
+
+    def test_stage_invariant_served_by_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(run_tripwires, "_stage_missing_python", _oracle_bomb)
+        config = run_tripwires.TripwireConfig(
+            reconcile_interval_s=1e-9,
+            rss_budget_fraction=0.0,
+            memory_slope_bytes_per_tuple=0,
+        )
+        monitor, events = self._monitor(config)
+        monitor.on_stage("artifacts", stamps_present=frozenset({"cascade_manifest"}))
+        assert [e.detail for e in events] == [
+            "stage 'artifacts' entered without prerequisite stamp(s): ['cascade_report']"
+        ]
+        monitor.on_stage("cascade", stamps_present=frozenset({"stage3"}))
+        assert len(events) == 1  # a satisfied stage clears — crate-decided

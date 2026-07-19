@@ -57,8 +57,8 @@ mapping) — bench-pinned flat vs ``enumerated_total`` by
 ## Rust-routed decision laws (DEC-RUST-OBSERVABILITY-TRIPWIRES-002)
 
 The count-reconciliation, throughput-floor/dwell, memory-budget,
-memory-slope, NaN/absurd summary-screen and ``ru_maxrss``-normalization
-DECISION laws route
+memory-slope, NaN/absurd summary-screen, stage-prerequisite and
+``ru_maxrss``-normalization DECISION laws route
 through the default-OFF :mod:`brutex.observability.observability_rust`
 facade (``BRUTEX_OBSERVABILITY_RUST``), with the module-level ``_*_python``
 oracles below as the LIVE flag-OFF implementations — flag OFF (the
@@ -543,6 +543,19 @@ def _summary_classify_python(
     return (nan_codes, absurd_codes)
 
 
+def _stage_missing_python(required_sorted: list[str], present: list[str]) -> list[bool]:
+    """The T6 stage-prerequisite set law — the per-token MISSING mask.
+
+    The consumer owns the :data:`STAGE_PREREQUISITES` map get + the
+    unknown-stage early return, the ``sorted(required)`` (codepoint sort ≡
+    the crate's UTF-8 byte order), the missing fold + the list-repr detail,
+    and fire/clear. Membership is str equality — a junk (non-str) member is
+    INERT exactly as in the pre-seam set diff (the facade's exact-str gate
+    routes such inputs here).
+    """
+    return [token not in present for token in required_sorted]
+
+
 def _ru_maxrss_python(ru_maxrss: int, platform: str) -> int:
     """The T9 ``ru_maxrss`` platform unit law — the verbatim pre-seam body.
 
@@ -749,7 +762,24 @@ class TripwireMonitor:
                 required = STAGE_PREREQUISITES.get(stage)
                 if required is None:
                     return
-                missing = required - stamps_present
+                # The set-law DECISION routes through the default-OFF
+                # observability_rust facade with `_stage_missing_python` as
+                # the live oracle (DEC-RUST-OBSERVABILITY-TRIPWIRES-002).
+                # required is pre-sorted Python-side, so the mask fold below
+                # IS `sorted(required - stamps_present)`; the map get, the
+                # `sorted(missing)` list-repr detail and fire/clear stay
+                # Python.
+                required_sorted = sorted(required)
+                missing_mask = observability_rust.routed_tripwire_stage(
+                    required_sorted,
+                    list(stamps_present),
+                    python_law=_stage_missing_python,
+                )
+                missing = [
+                    token
+                    for token, is_missing in zip(required_sorted, missing_mask, strict=True)
+                    if is_missing
+                ]
                 if missing:
                     self._edge_fire(
                         f"stage_invariant:{stage}",

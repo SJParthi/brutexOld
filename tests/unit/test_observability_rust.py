@@ -1369,6 +1369,34 @@ class TestTripwireSeamEntryPoints:
         )
         assert run_tripwires.normalized_ru_maxrss_bytes(ru_maxrss=1000, platform="darwin") == 1000
 
+    # ── S4 — the T6 seam ──────────────────────────────────────────────────
+
+    def test_off_stage_trip_never_imports_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(obs.importlib, "import_module", _bomb_import)
+        monitor, events = _tw_monitor()
+        monitor.on_stage("artifacts", stamps_present=frozenset({"cascade_manifest"}))
+        assert [e.detail for e in events] == [
+            "stage 'artifacts' entered without prerequisite stamp(s): ['cascade_report']"
+        ]
+        assert events[0].values == {"missing": 1.0}
+        assert monitor.suspect is True
+
+    def test_on_stage_served_by_fake_crate_oracle_bombed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        obs.reset_observability_rust_for_tests(remaining=0)
+        monkeypatch.setattr(run_tripwires, "_stage_missing_python", _oracle_bomb)
+        monitor, events = _tw_monitor()
+        monitor.on_stage("cascade", stamps_present=frozenset())
+        assert [e.detail for e in events] == [
+            "stage 'cascade' entered without prerequisite stamp(s): ['stage3']"
+        ]
+        # A satisfied stage decides an all-False mask — clear, no event.
+        monitor.on_stage("stage3", stamps_present=frozenset({"stage2"}))
+        assert len(events) == 1
+
     def test_on_ru_maxrss_served_by_fake_crate_oracle_bombed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
