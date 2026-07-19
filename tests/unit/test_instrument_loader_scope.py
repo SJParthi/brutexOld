@@ -69,7 +69,14 @@ def _eq_row(symbol: str, token: str, isin: str) -> str:
     )
 
 
-def _ce_row(underlying: str, underlying_token: str, token: str) -> str:
+def _ce_row(
+    underlying: str,
+    underlying_token: str,
+    token: str,
+    *,
+    lot_size: str = "65",
+    freeze_quantity: str = "",
+) -> str:
     return _row(
         exchange="NSE",
         exchange_token=token,
@@ -81,13 +88,16 @@ def _ce_row(underlying: str, underlying_token: str, token: str) -> str:
         underlying_exchange_token=underlying_token,
         expiry_date="2026-06-16",
         strike_price="20000",
-        lot_size="65",
+        lot_size=lot_size,
         tick_size="0.05",
+        freeze_quantity=freeze_quantity,
     )
 
 
 #: The pre-cut-shaped master: the 4 V1 indices + a sectoral index + an
-#: F&O-eligible stock (WIPRO, made eligible by its CE leg) + the leg.
+#: F&O-eligible stock (WIPRO, made eligible by its CE leg) + the leg — plus a
+#: NIFTY leg (r4 item-4 pin) so the index4-default arm genuinely exercises the
+#: leg-economics fold over an ADMITTED underlying (a non-empty intersection).
 _MASTER_ROWS = [
     _idx_row("NIFTY"),
     _idx_row("BANKNIFTY"),
@@ -96,6 +106,9 @@ _MASTER_ROWS = [
     _idx_row("NIFTYIT"),
     _eq_row("WIPRO", "3787", "INE075A01022"),
     _ce_row("WIPRO", "3787", "60007"),
+    # A numeric underlying token (the parser refuses non-numeric leg tokens);
+    # the fold keys on (exchange, underlying_symbol), never the token.
+    _ce_row("NIFTY", "13", "60009", lot_size="75", freeze_quantity="1800"),
 ]
 
 
@@ -190,6 +203,26 @@ class TestIndex4LoaderDefault:
         by_symbol = {inst.symbol_name: inst for inst in store.list_index_equity_instruments()}
         for symbol in ("NIFTY", "BANKNIFTY", "SENSEX"):
             assert by_symbol[symbol].security_id not in reference_ids, symbol
+
+    def test_admitted_index_leg_economics_folded(self, tmp_path: Path) -> None:
+        """The r4 item-4 pin — the index4-default FOLD COMPOSITION.
+
+        The loader harvests ``build_underlying_economics`` from the UNFILTERED
+        ``index.universe`` leg set and folds it onto the scope-narrowed lean
+        rows, so the admitted NIFTY row persists its leg lot + freeze under
+        the shipped default. A scope-motivated refactor that filters the leg
+        set BEFORE the harvest (the natural-looking "why build economics for
+        rows we drop" cleanup) would silently zero these while every other
+        arm stays green — ``has_placeholder_stock_economics`` checks STOCKS
+        only, so no auto-heal would fire (the silent-wrong-data class).
+        """
+        store = _store(tmp_path)
+        _load(store, tmp_path)
+        nifty = next(
+            inst for inst in store.list_index_equity_instruments() if inst.symbol_name == "NIFTY"
+        )
+        assert nifty.lot_size == 75  # the leg's tradable lot, never the IDX placeholder 0
+        assert nifty.sm_freeze_qty == 1800
 
     def test_p1_stock_selection_empty(self, tmp_path: Path) -> None:
         """P1 [FB]: select_pull_instruments("stock") == [] over the loaded store."""
